@@ -4,12 +4,16 @@ import {
   createProjectInputSchema,
   createProjectSessionFieldsSchema,
   projectDetailSchema,
+  projectFilesResponseSchema,
+  projectFileRowSchema,
   projectFileVersionRowSchema,
   projectFileVersionsResponseSchema,
   projectSessionDetailSchema,
   projectSessionEventSchema,
+  listProjectSessionsQuerySchema,
   setProjectSkillsInputSchema,
   updateProjectInputSchema,
+  updateProjectSessionInputSchema,
 } from "../src/projects";
 import { RUN_CHAT_TOOL_OUTPUT_MAX } from "../src/skillRuns";
 
@@ -63,6 +67,7 @@ describe("Cowork project contracts", () => {
       byte_size: 124,
       checksum: "a".repeat(64),
       modified_by_session_id: "00000000-0000-4000-8000-000000000002",
+      modified_by_prompt_id: "00000000-0000-4000-8000-000000000004",
       base_version: 1,
       conflict_detected: true,
       created_at: "2026-07-23T18:00:00.000Z",
@@ -79,6 +84,25 @@ describe("Cowork project contracts", () => {
     ).toThrow();
   });
 
+  it("returns direct Project uploads as ordinary creator-visible file rows", () => {
+    const file = projectFileRowSchema.parse({
+      id: "00000000-0000-4000-8000-000000000003",
+      project_id: "00000000-0000-4000-8000-000000000001",
+      path: "files/brief.txt",
+      version: 1,
+      content_type: "text/plain",
+      byte_size: 12,
+      checksum: `sha256:${"a".repeat(64)}`,
+      modified_by_session_id: null,
+      modified_by_prompt_id: null,
+      conflict_detected: false,
+      created_at: "2026-07-23T18:00:00.000Z",
+      updated_at: "2026-07-23T18:00:00.000Z",
+    });
+    expect(projectFilesResponseSchema.parse({ files: [file] })).toEqual({ files: [file] });
+    expect(JSON.stringify(file)).not.toContain("storage");
+  });
+
   it("never exposes provider sandbox identity in the reader contract", () => {
     const parsed = projectDetailSchema.parse({
       id: "00000000-0000-4000-8000-000000000001",
@@ -88,20 +112,59 @@ describe("Cowork project contracts", () => {
       status: "stopped",
       skill_count: 0,
       session_count: 0,
+      active_session_count: 0,
+      archived_session_count: 0,
+      unread_session_count: 0,
       file_count: 0,
       recent_sessions: [],
       last_activity_at: "2026-07-23T18:00:00.000Z",
       error_code: null,
       message: null,
+      archived_at: null,
       created_at: "2026-07-23T18:00:00.000Z",
       updated_at: "2026-07-23T18:00:00.000Z",
       skills: [],
       sessions: [],
       secret_count: 0,
       model_connection_count: 0,
+      access: { secrets: [], model_connections: [] },
     });
     expect(JSON.stringify(parsed)).not.toContain("sandbox");
     expect(JSON.stringify(parsed)).not.toContain("checkpoint");
+  });
+
+  it("validates durable conversation library mutations and pagination", () => {
+    expect(
+      updateProjectSessionInputSchema.parse({
+        title: "Launch review",
+        archived: true,
+        stop_active: true,
+      }),
+    ).toEqual({
+      title: "Launch review",
+      archived: true,
+      stop_active: true,
+    });
+    expect(() =>
+      updateProjectSessionInputSchema.parse({ archived: true, stop_active: false }),
+    ).not.toThrow();
+    expect(() =>
+      updateProjectSessionInputSchema.parse({ viewed: false }),
+    ).toThrow();
+    expect(() =>
+      updateProjectSessionInputSchema.parse({ stop_active: true }),
+    ).toThrow();
+    expect(
+      listProjectSessionsQuerySchema.parse({
+        q: "review",
+        view: "archived",
+        limit: "25",
+      }),
+    ).toEqual({
+      q: "review",
+      view: "archived",
+      limit: 25,
+    });
   });
 
   it("uses the bounded Run event vocabulary for durable Project events", () => {
@@ -145,6 +208,9 @@ describe("Cowork project contracts", () => {
         status: "idle",
         stop_requested_at: null,
         last_active_at: "2026-07-23T18:00:00.000Z",
+        archived_at: null,
+        last_viewed_at: "2026-07-23T18:00:00.000Z",
+        is_unread: false,
         error_code: null,
         message: null,
         created_at: "2026-07-23T18:00:00.000Z",

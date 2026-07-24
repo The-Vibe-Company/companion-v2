@@ -5,17 +5,21 @@ import {
   PROJECT_ATTACHMENT_MAX_FILES,
 } from "@companion/contracts";
 import {
+  useCallback,
   useEffect,
   useId,
   useMemo,
   useRef,
   useState,
+  type ClipboardEvent,
+  type DragEvent,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 import type {
   ProjectDetailVM,
   ProjectModelChoice,
+  ProjectSessionVM,
   ProjectSkillChoice,
 } from "@/lib/projectsModel";
 import { Icon } from "../Icon";
@@ -259,14 +263,16 @@ function ModelField({
         ) : (
           models.map((model) => (
             <option value={model.id} key={model.id}>
-              {model.id}
+              {model.name} · {model.providerName}
             </option>
           ))
         )}
       </select>
       <span className="cds-field__hint">
-        Sessions start with this model. You can override it per session.
+        New conversations start with this model. You can choose another when
+        starting one.
       </span>
+      {value && <code className="cowork-model-id">{value}</code>}
     </label>
   );
 }
@@ -292,12 +298,22 @@ function CatalogWarning({
   );
 }
 
-function SecretSummary() {
+function SecretSummary({
+  secretCount,
+  modelConnectionCount,
+}: {
+  secretCount?: number;
+  modelConnectionCount?: number;
+}) {
+  const hasCounts =
+    secretCount !== undefined && modelConnectionCount !== undefined;
   return (
     <div className="cowork-secret-summary">
       <span className="project-status-dot is-done" aria-hidden="true" />
       <span>
-        Eligible secrets are checked and synced automatically at activation.
+        {hasCounts
+          ? `${secretCount} ${secretCount === 1 ? "secret" : "secrets"} · ${modelConnectionCount} model ${modelConnectionCount === 1 ? "connection" : "connections"}`
+          : "Your available secrets and model connections sync automatically."}
       </span>
     </div>
   );
@@ -339,7 +355,7 @@ export function NewProjectDialog({
   return (
     <CoworkDialog
       title="New project"
-      description="A persistent space where sessions share files, skills and secrets."
+      description="A persistent space where conversations share files, Skills, and Access."
       onClose={onClose}
     >
       <div className="cowork-dialog__body">
@@ -437,11 +453,13 @@ function DraftFiles({
   files,
   onFiles,
   onRemove,
+  errorId,
   disabled = false,
 }: {
   files: File[];
   onFiles: (files: FileList) => void;
   onRemove: (index: number) => void;
+  errorId?: string;
   disabled?: boolean;
 }) {
   return (
@@ -477,6 +495,8 @@ function DraftFiles({
           type="file"
           multiple
           disabled={disabled}
+          aria-describedby={errorId}
+          aria-invalid={Boolean(errorId)}
           onChange={(event) => {
             if (event.target.files) onFiles(event.target.files);
             event.target.value = "";
@@ -516,13 +536,37 @@ export function NewSessionDialog({
   const [prompt, setPrompt] = useState("");
   const [model, setModel] = useState(project.defaultModel);
   const [files, setFiles] = useState<File[]>([]);
+  const [dragging, setDragging] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
+  const fileErrorId = useId();
   const idempotencyKeyRef = useRef<string | null>(null);
   const initialSkill = project.skills.find(
     (skill) => skill.slug === initialSkillSlug,
   );
   const modelAvailable = models.some((choice) => choice.id === model);
   const valid = prompt.trim().length > 0 && modelAvailable && !busy;
+  const appendFiles = useCallback(
+    (incoming: File[]) => {
+      if (incoming.length === 0) return;
+      if (
+        incoming.some(
+          (file) =>
+            file.size < 1 || file.size > PROJECT_ATTACHMENT_MAX_BYTES,
+        )
+      ) {
+        setFileError("Each file must be between 1 byte and 10 MB.");
+        return;
+      }
+      if (files.length + incoming.length > PROJECT_ATTACHMENT_MAX_FILES) {
+        setFileError(`Attach up to ${PROJECT_ATTACHMENT_MAX_FILES} files.`);
+        return;
+      }
+      setFileError(null);
+      idempotencyKeyRef.current = null;
+      setFiles((current) => [...current, ...incoming]);
+    },
+    [files.length],
+  );
   const start = () => {
     if (!valid) return;
     idempotencyKeyRef.current ??= crypto.randomUUID();
@@ -535,12 +579,36 @@ export function NewSessionDialog({
   };
   return (
     <CoworkDialog
-      title="New session"
-      description={`In ${project.name}. Its files, skills and secrets are ready.`}
+      title="New conversation"
+      description={`In ${project.name}. Its Files, Skills, and Access are ready.`}
       onClose={onClose}
       width="640px"
     >
-      <div className="cowork-session-compose">
+      <div
+        className={`cowork-session-compose${dragging ? " is-dragover" : ""}`}
+        aria-describedby={fileError ? fileErrorId : undefined}
+        onDragEnter={(event: DragEvent<HTMLDivElement>) => {
+          if (busy || !event.dataTransfer.types.includes("Files")) return;
+          event.preventDefault();
+          setDragging(true);
+        }}
+        onDragOver={(event: DragEvent<HTMLDivElement>) => {
+          if (busy || !event.dataTransfer.types.includes("Files")) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+        }}
+        onDragLeave={(event: DragEvent<HTMLDivElement>) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node | null))
+            return;
+          setDragging(false);
+        }}
+        onDrop={(event: DragEvent<HTMLDivElement>) => {
+          setDragging(false);
+          if (busy) return;
+          event.preventDefault();
+          appendFiles(Array.from(event.dataTransfer.files));
+        }}
+      >
         {initialSkill && (
           <div className="cowork-session-skill">
             <Icon name="package" size={13} />
@@ -561,6 +629,13 @@ export function NewSessionDialog({
             idempotencyKeyRef.current = null;
             setPrompt(event.target.value);
           }}
+          onPaste={(event: ClipboardEvent<HTMLTextAreaElement>) => {
+            if (busy) return;
+            const pastedFiles = Array.from(event.clipboardData.files);
+            if (pastedFiles.length === 0) return;
+            event.preventDefault();
+            appendFiles(pastedFiles);
+          }}
           onKeyDown={(event) => {
             if (
               (event.metaKey || event.ctrlKey) &&
@@ -575,21 +650,9 @@ export function NewSessionDialog({
         <DraftFiles
           files={files}
           disabled={busy}
+          errorId={fileError ? fileErrorId : undefined}
           onFiles={(incoming) => {
-            const next = Array.from(incoming);
-            if (next.some((file) => file.size > PROJECT_ATTACHMENT_MAX_BYTES)) {
-              setFileError("Each attachment must be 10 MB or smaller.");
-              return;
-            }
-            if (files.length + next.length > PROJECT_ATTACHMENT_MAX_FILES) {
-              setFileError(
-                `Attach up to ${PROJECT_ATTACHMENT_MAX_FILES} files.`,
-              );
-              return;
-            }
-            setFileError(null);
-            idempotencyKeyRef.current = null;
-            setFiles((current) => [...current, ...next]);
+            appendFiles(Array.from(incoming));
           }}
           onRemove={(index) => {
             setFileError(null);
@@ -615,7 +678,7 @@ export function NewSessionDialog({
             )}
             {models.map((choice) => (
               <option key={choice.id} value={choice.id}>
-                {choice.id}
+                {choice.name} · {choice.providerName}
               </option>
             ))}
           </select>
@@ -650,7 +713,11 @@ export function NewSessionDialog({
         )}
         <CatalogWarning message={catalogError} onRetry={onRetryCatalog} />
         {fileError && (
-          <p className="project-inline-error" role="alert">
+          <p
+            id={fileErrorId}
+            className="project-inline-error"
+            role="alert"
+          >
             {fileError}
           </p>
         )}
@@ -697,6 +764,11 @@ export function ProjectSettingsDialog({
     () => new Set(project.skills.map((skill) => skill.slug)),
   );
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteName, setDeleteName] = useState("");
+  const deleteInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (confirmDelete) deleteInputRef.current?.focus();
+  }, [confirmDelete]);
   const skillChoices = useMemo<SkillPickerChoice[]>(() => {
     const available = new Set(skills.map((skill) => skill.slug));
     return [
@@ -718,7 +790,7 @@ export function ProjectSettingsDialog({
   return (
     <CoworkDialog
       title="Project settings"
-      description="Configure the persistent space and what every session can use."
+      description="Configure the persistent space and what every conversation can use."
       onClose={onClose}
     >
       <div className="cowork-dialog__body">
@@ -758,7 +830,34 @@ export function ProjectSettingsDialog({
             Changes are applied atomically between agent turns.
           </span>
         </div>
-        <SecretSummary />
+        <SecretSummary
+          secretCount={project.secretCount}
+          modelConnectionCount={project.modelConnectionCount}
+        />
+        {confirmDelete && (
+          <div className="cowork-delete-confirm" role="group">
+            <div>
+              <Icon name="alert-triangle" size={14} />
+              <span>
+                <strong>Delete this project permanently?</strong>
+                Conversations, files and its workspace cannot be recovered.
+              </span>
+            </div>
+            <label className="cds-field">
+              <span className="cds-field__label">
+                Type <strong>{project.name}</strong> to confirm
+              </span>
+              <input
+                ref={deleteInputRef}
+                className="cds-field__control"
+                value={deleteName}
+                disabled={busy}
+                autoComplete="off"
+                onChange={(event) => setDeleteName(event.target.value)}
+              />
+            </label>
+          </div>
+        )}
         <CatalogWarning message={catalogError} onRetry={onRetryCatalog} />
         {error && (
           <p className="project-inline-error" role="alert">
@@ -771,12 +870,12 @@ export function ProjectSettingsDialog({
           type="button"
           className={`cds-btn cds-btn--md ${confirmDelete ? "cds-btn--danger" : "cds-btn--ghost"}`}
           onClick={() => {
-            if (confirmDelete) onDelete();
+            if (confirmDelete && deleteName === project.name) onDelete();
             else setConfirmDelete(true);
           }}
-          disabled={busy}
+          disabled={busy || (confirmDelete && deleteName !== project.name)}
         >
-          {confirmDelete ? "Confirm delete" : "Delete project"}
+          Delete permanently
         </button>
         <span className="cowork-dialog__spacer" />
         <button
@@ -801,6 +900,76 @@ export function ProjectSettingsDialog({
         >
           {busy && <Icon name="loader" size={14} className="ls-spin" />}
           {busy ? "Saving…" : "Save changes"}
+        </button>
+      </footer>
+    </CoworkDialog>
+  );
+}
+
+export function RenameSessionDialog({
+  session,
+  busy,
+  error,
+  onClose,
+  onRename,
+}: {
+  session: ProjectSessionVM;
+  busy: boolean;
+  error: string | null;
+  onClose: () => void;
+  onRename: (title: string) => void;
+}) {
+  const [title, setTitle] = useState(session.title);
+  const valid =
+    title.trim().length > 0 && title.trim() !== session.title && !busy;
+
+  return (
+    <CoworkDialog
+      title="Rename conversation"
+      description="Use a short title that will be easy to find later."
+      onClose={onClose}
+      width="480px"
+    >
+      <div className="cowork-dialog__body">
+        <label className="cds-field">
+          <span className="cds-field__label">Conversation title</span>
+          <input
+            data-autofocus
+            className="cds-field__control"
+            value={title}
+            maxLength={160}
+            disabled={busy}
+            onChange={(event) => setTitle(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" || !valid) return;
+              event.preventDefault();
+              onRename(title.trim());
+            }}
+          />
+        </label>
+        {error && (
+          <p className="project-inline-error" role="alert">
+            {error}
+          </p>
+        )}
+      </div>
+      <footer className="cowork-dialog__foot">
+        <button
+          type="button"
+          className="cds-btn cds-btn--secondary cds-btn--md"
+          onClick={onClose}
+          disabled={busy}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="cds-btn cds-btn--primary cds-btn--md"
+          disabled={!valid}
+          onClick={() => onRename(title.trim())}
+        >
+          {busy && <Icon name="loader" size={14} className="ls-spin" />}
+          {busy ? "Renaming…" : "Rename"}
         </button>
       </footer>
     </CoworkDialog>

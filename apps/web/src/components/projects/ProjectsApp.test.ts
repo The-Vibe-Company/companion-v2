@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ProjectDetailVM,
   ProjectRowVM,
+  ProjectRuntimeAvailability,
   ProjectSessionVM,
 } from "@/lib/projectsModel";
 import { ProjectsApp } from "./ProjectsApp";
@@ -17,11 +18,31 @@ import { ProjectsApp } from "./ProjectsApp";
 const projectRpc = vi.hoisted(() => ({
   createProject: vi.fn(),
   createProjectSession: vi.fn(),
+  deleteProject: vi.fn(),
   fetchProject: vi.fn(),
+  fetchProjectFileVersions: vi.fn(),
+  fetchProjectSessions: vi.fn(),
   fetchProjects: vi.fn(),
+  projectFileHref: vi.fn(
+    (projectId: string, fileId: string, download = false) =>
+      `/v1/projects/${projectId}/files/${fileId}${download ? "?download=1" : ""}`,
+  ),
+  projectFileVersionHref: vi.fn(
+    (
+      projectId: string,
+      fileId: string,
+      version: number,
+      download = false,
+    ) =>
+      `/v1/projects/${projectId}/files/${fileId}/versions/${version}${
+        download ? "?download=1" : ""
+      }`,
+  ),
   replaceProjectSkills: vi.fn(),
   retryProjectWorkspace: vi.fn(),
   updateProject: vi.fn(),
+  updateProjectSession: vi.fn(),
+  uploadProjectFiles: vi.fn(),
 }));
 const orgRpc = vi.hoisted(() => ({ setCurrentOrg: vi.fn() }));
 const router = vi.hoisted(() => ({
@@ -64,18 +85,28 @@ vi.mock("../org/useOrgActions", () => ({
     joinOrg: vi.fn(),
   }),
 }));
-vi.mock("./ProjectSessionView", () => ({
-  ProjectSessionView: ({
-    initialSession,
-  }: {
-    initialSession: ProjectSessionVM;
-  }) =>
-    React.createElement(
-      "div",
-      { "data-testid": "project-session" },
-      initialSession.title,
-    ),
-}));
+vi.mock("./ProjectSessionView", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("./ProjectSessionView")>();
+  return {
+    ...actual,
+    ProjectSessionView: ({
+      initialSession,
+      runtime,
+    }: {
+      initialSession: ProjectSessionVM;
+      runtime: ProjectRuntimeAvailability;
+    }) =>
+      React.createElement(
+        "div",
+        {
+          "data-testid": "project-session",
+          "data-runtime-available": String(runtime.available),
+        },
+        initialSession.title,
+      ),
+  };
+});
 
 const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_PROJECT_ID = "22222222-2222-4222-8222-222222222222";
@@ -89,10 +120,15 @@ function session(overrides: Partial<ProjectSessionVM> = {}): ProjectSessionVM {
     model: "openai/gpt-5",
     status: "working",
     history: [],
+    prompts: [],
     pendingPrompts: [],
     latestEventSequence: 0,
     createdAt: NOW,
+    updatedAt: NOW,
     lastActiveAt: NOW,
+    archivedAt: null,
+    lastViewedAt: NOW,
+    isUnread: false,
     errorMessage: null,
     ...overrides,
   };
@@ -108,8 +144,12 @@ function projectRow(overrides: Partial<ProjectRowVM> = {}): ProjectRowVM {
     statusDetail: null,
     skillCount: 1,
     sessionCount: 1,
+    activeSessionCount: 1,
+    archivedSessionCount: 0,
+    unreadSessionCount: 0,
     fileCount: 1,
     secretCount: 2,
+    archivedAt: null,
     createdAt: NOW,
     updatedAt: NOW,
     recentSessions: [session()],
@@ -142,6 +182,9 @@ function projectDetail(
         contentType: "text/markdown",
         byteSize: 1200,
         conflictDetected: false,
+        modifiedBySessionId: SESSION_ID,
+        modifiedByPromptId: null,
+        createdAt: NOW,
         updatedAt: NOW,
       },
     ],
@@ -152,6 +195,23 @@ function projectDetail(
       sleepAt: null,
     },
     modelConnectionCount: 1,
+    access: {
+      secrets: [
+        {
+          id: "77777777-7777-4777-8777-777777777777",
+          name: "CRM_API_KEY",
+          source: "personal",
+          ownerName: "Alex",
+        },
+      ],
+      modelConnections: [
+        {
+          id: "88888888-8888-4888-8888-888888888888",
+          provider: "OpenAI",
+          source: "personal",
+        },
+      ],
+    },
     ...overrides,
   };
 }
@@ -267,10 +327,19 @@ function setValue(
 beforeEach(() => {
   vi.clearAllMocks();
   orgRpc.setCurrentOrg.mockResolvedValue(undefined);
+  projectRpc.fetchProjects.mockResolvedValue({
+    projects: [],
+    runtime: { available: true, message: null },
+  });
+  projectRpc.fetchProjectSessions.mockResolvedValue({
+    sessions: [],
+    nextCursor: null,
+  });
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   act(() => roots.splice(0).forEach((root) => root.unmount()));
   document.body.innerHTML = "";
 });
@@ -311,6 +380,560 @@ describe("ProjectsApp", () => {
     ).not.toBeNull();
     expect(container.textContent).toContain("calendar.md");
     expect(container.textContent).not.toContain("Approve deliverable");
+  });
+
+  it("keeps branded model and provider labels when the model catalog is unavailable", async () => {
+    const container = await mount({
+      models: [],
+      projects: [
+        projectRow(),
+        projectRow({
+          id: SECOND_PROJECT_ID,
+          name: "Research workspace",
+          defaultModel: "zai/glm-5.2",
+          recentSessions: [],
+        }),
+      ],
+    });
+
+    expect(container.textContent).toContain("GPT-5 · OpenAI");
+    expect(container.textContent).toContain("GLM 5.2 · Z.ai");
+    expect(container.textContent).not.toContain("GPT 5 · Openai");
+    expect(container.textContent).not.toContain("GLM 5 2 · Zai");
+  });
+
+  it("keeps conversations ordered by creation and only surfaces actionable states", async () => {
+    const olderUnread = session({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      title: "Older result",
+      status: "idle",
+      createdAt: "2026-07-22T10:00:00.000Z",
+      isUnread: true,
+    });
+    const newestIdle = session({
+      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      title: "Newest idle",
+      status: "idle",
+      createdAt: "2026-07-24T10:00:00.000Z",
+    });
+    const container = await mount({
+      project: projectDetail({
+        sessions: [olderUnread, newestIdle],
+        recentSessions: [olderUnread, newestIdle],
+        sessionCount: 2,
+        unreadSessionCount: 1,
+      }),
+    });
+
+    const titles = [
+      ...container.querySelectorAll(".cowork-session-row__copy strong"),
+    ].map((node) => node.textContent);
+    expect(titles).toEqual(["Newest idle", "Older result"]);
+    expect(container.textContent).toContain("New result");
+    expect(container.textContent).not.toContain("Ready");
+    expect(container.textContent).not.toContain("Idle");
+  });
+
+  it("queues every simultaneous background result until each toast is opened or dismissed", async () => {
+    vi.useFakeTimers();
+    const firstId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const secondId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const firstBefore = session({
+      id: firstId,
+      title: "Launch brief",
+      status: "working",
+      isUnread: false,
+      updatedAt: "2026-07-23T10:00:00.000Z",
+    });
+    const secondBefore = session({
+      id: secondId,
+      title: "Research summary",
+      status: "working",
+      isUnread: false,
+      updatedAt: "2026-07-23T10:00:00.000Z",
+    });
+    const initial = projectRow({
+      recentSessions: [firstBefore, secondBefore],
+      sessionCount: 2,
+      activeSessionCount: 2,
+      unreadSessionCount: 0,
+    });
+    const firstAfter = {
+      ...firstBefore,
+      status: "completed" as const,
+      isUnread: true,
+      updatedAt: "2026-07-24T10:00:00.000Z",
+    };
+    const secondAfter = {
+      ...secondBefore,
+      status: "error" as const,
+      isUnread: true,
+      updatedAt: "2026-07-24T10:00:01.000Z",
+    };
+    const refreshed = {
+      ...initial,
+      recentSessions: [firstAfter, secondAfter],
+      activeSessionCount: 0,
+      unreadSessionCount: 2,
+    };
+    projectRpc.fetchProjects.mockImplementation(async (view?: string) => ({
+      projects: view === "archived" ? [] : [refreshed],
+      runtime: { available: true, message: null },
+    }));
+    const container = await mount({ projects: [initial] });
+
+    await act(async () => {
+      vi.advanceTimersByTime(15_000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Launch brief has a new result.");
+    expect(container.textContent).not.toContain("Research summary failed.");
+
+    await act(async () => {
+      button(container, "Open").click();
+      await Promise.resolve();
+    });
+    expect(router.push).toHaveBeenCalledWith(
+      `/projects/${PROJECT_ID}/sessions/${firstId}`,
+    );
+    expect(container.textContent).toContain("Research summary failed.");
+
+    await act(async () => {
+      button(container, "Open").click();
+      await Promise.resolve();
+    });
+    expect(router.push).toHaveBeenLastCalledWith(
+      `/projects/${PROJECT_ID}/sessions/${secondId}`,
+    );
+    expect(container.querySelector(".project-toast")).toBeNull();
+  });
+
+  it("rolls back a failed read acknowledgement and retries it only three times", async () => {
+    vi.useFakeTimers();
+    const unread = session({
+      status: "completed",
+      isUnread: true,
+      lastViewedAt: undefined,
+    });
+    projectRpc.updateProjectSession.mockRejectedValue(
+      new Error("Could not mark the conversation as viewed."),
+    );
+    const container = await mount({
+      project: projectDetail({
+        status: "stopped",
+        activeSessionCount: 0,
+        unreadSessionCount: 1,
+        sessions: [unread],
+        recentSessions: [unread],
+      }),
+      activeSession: unread,
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(projectRpc.updateProjectSession).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("New result");
+
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(projectRpc.updateProjectSession).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("New result");
+
+    await act(async () => {
+      vi.advanceTimersByTime(3_000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(projectRpc.updateProjectSession).toHaveBeenCalledTimes(3);
+    expect(container.textContent).toContain("New result");
+
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+      await Promise.resolve();
+    });
+    expect(projectRpc.updateProjectSession).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps archived Projects durably discoverable and restorable", async () => {
+    const archived = projectRow({
+      archivedAt: NOW,
+      status: "stopped",
+      recentSessions: [],
+    });
+    let restored = false;
+    projectRpc.fetchProjects.mockImplementation(async (view?: string) => ({
+      projects: view === "archived" && !restored ? [archived] : [],
+      runtime: { available: true, message: null },
+    }));
+    projectRpc.updateProject.mockImplementation(async () => {
+      restored = true;
+      return projectDetail({ archivedAt: null, status: "stopped" });
+    });
+    const container = await mount();
+
+    await act(async () => {
+      button(container, "Archived").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(projectRpc.fetchProjects).toHaveBeenCalledWith("archived");
+    expect(container.textContent).toContain("September launch");
+    expect(container.textContent).toContain("Archived");
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Restore September launch"]',
+        )!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(projectRpc.updateProject).toHaveBeenCalledWith(PROJECT_ID, {
+      revision: 1,
+      archived: false,
+    });
+    expect(container.textContent).toContain("No archived Projects");
+  });
+
+  it("refetches the open Archived view after a Project is archived from the sidebar", async () => {
+    const inactive = session({ status: "completed" });
+    const activeRow = projectRow({
+      status: "stopped",
+      activeSessionCount: 0,
+      recentSessions: [inactive],
+    });
+    const archivedRow = {
+      ...activeRow,
+      archivedAt: NOW,
+      recentSessions: [],
+    };
+    let archived = false;
+    let archivedFetches = 0;
+    projectRpc.fetchProjects.mockImplementation(async (view?: string) => {
+      if (view === "archived") {
+        archivedFetches += 1;
+        return {
+          projects: archived ? [archivedRow] : [],
+          runtime: { available: true, message: null },
+        };
+      }
+      return {
+        projects: archived ? [] : [activeRow],
+        runtime: { available: true, message: null },
+      };
+    });
+    projectRpc.updateProject.mockImplementation(async () => {
+      archived = true;
+      return projectDetail({
+        ...archivedRow,
+        status: "stopped",
+        sessions: [],
+      });
+    });
+    const container = await mount({ projects: [activeRow] });
+
+    await act(async () => {
+      button(container, "Archived").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("No archived Projects");
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '.projects-side__project button[aria-label="Actions for September launch"]',
+        )!
+        .click();
+      await Promise.resolve();
+      [
+        ...document.body.querySelectorAll<HTMLButtonElement>(
+          '[role="menuitem"]',
+        ),
+      ]
+        .find((candidate) => candidate.textContent?.includes("Archive project"))!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(archivedFetches).toBeGreaterThanOrEqual(2);
+    expect(container.textContent).toContain("September launch");
+    expect(container.textContent).toContain("Archived");
+  });
+
+  it("adds durable files directly to a Project without creating a conversation", async () => {
+    const uploaded = {
+      ...projectDetail().files[0]!,
+      id: "99999999-9999-4999-8999-999999999999",
+      path: "files/brief.md",
+      name: "brief.md",
+      byteSize: 42,
+    };
+    projectRpc.uploadProjectFiles.mockResolvedValue([uploaded]);
+    const container = await mount({ project: projectDetail() });
+    const input = container.querySelector<HTMLInputElement>(
+      ".cowork-context-panel__upload input",
+    )!;
+    const file = new File(["Launch brief"], "brief.md", {
+      type: "text/markdown",
+    });
+    Object.defineProperty(input, "files", {
+      configurable: true,
+      value: [file],
+    });
+
+    await act(async () => {
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(projectRpc.uploadProjectFiles).toHaveBeenCalledWith(PROJECT_ID, [
+      file,
+    ]);
+    expect(container.textContent).toContain("brief.md");
+    expect(container.textContent).toContain("added to the Project");
+    expect(projectRpc.createProjectSession).not.toHaveBeenCalled();
+  });
+
+  it("previews Project files in place on desktop and restores focus on close", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        media: "(min-width: 1024px)",
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    );
+    const previewFile = {
+      ...projectDetail().files[0]!,
+      path: "files/calendar.png",
+      name: "calendar.png",
+      contentType: "image/png",
+    };
+    const container = await mount({
+      project: projectDetail({ files: [previewFile] }),
+    });
+    const preview = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Preview calendar.png"]',
+    )!;
+
+    await act(async () => {
+      preview.click();
+      await Promise.resolve();
+    });
+
+    const panel = container.querySelector<HTMLElement>(
+      ".cowork-session-files-panel",
+    );
+    expect(panel).not.toBeNull();
+    expect(panel?.querySelector('[role="dialog"]')).toBeNull();
+    expect(
+      panel
+        ?.querySelector<HTMLImageElement>('img[alt="Preview of calendar.png"]')
+        ?.getAttribute("src"),
+    ).toContain(`/v1/projects/${PROJECT_ID}/files/`);
+
+    await act(async () => {
+      panel
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Close files"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(document.activeElement).toBe(preview);
+  });
+
+  it("opens Project files in an accessible mobile drawer and restores focus with Escape", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: false,
+        media: "(min-width: 1024px)",
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    );
+    const previewFile = {
+      ...projectDetail().files[0]!,
+      path: "files/calendar.png",
+      name: "calendar.png",
+      contentType: "image/png",
+    };
+    const container = await mount({
+      project: projectDetail({ files: [previewFile] }),
+    });
+    const preview = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Preview calendar.png"]',
+    )!;
+
+    await act(async () => {
+      preview.click();
+      await Promise.resolve();
+    });
+
+    const drawer = document.body.querySelector<HTMLElement>(
+      ".project-files-drawer",
+    );
+    expect(drawer).not.toBeNull();
+    expect(drawer?.getAttribute("role")).toBe("dialog");
+    expect(drawer?.getAttribute("aria-modal")).toBe("true");
+    expect(container.inert).toBe(true);
+    expect(document.activeElement).toBe(
+      drawer?.querySelector<HTMLButtonElement>(
+        'button[aria-label="Close files"]',
+      ),
+    );
+
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(document.body.querySelector(".project-files-drawer")).toBeNull();
+    expect(container.inert).toBe(false);
+    expect(document.activeElement).toBe(preview);
+  });
+
+  it("uses the exact active-conversation count for Project archiving", async () => {
+    const completed = session({ status: "completed" });
+    const container = await mount({
+      project: projectDetail({
+        status: "running",
+        activeSessionCount: 0,
+        sessions: [completed],
+        recentSessions: [completed],
+      }),
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '.cowork-project__head button[aria-label="Actions for September launch"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+
+    const archive = [
+      ...document.body.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
+    ].find((candidate) => candidate.textContent?.includes("Archive project"));
+    expect(archive?.disabled).toBe(false);
+    expect(container.textContent).toContain("Ready");
+  });
+
+  it("stops and archives an active conversation without offering an unsafe Undo", async () => {
+    const active = session();
+    const archived = {
+      ...active,
+      status: "stopped" as const,
+      archivedAt: NOW,
+    };
+    projectRpc.updateProjectSession.mockResolvedValueOnce(archived);
+    const container = await mount({ project: projectDetail() });
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(".cowork-session-row__action")!
+        .click();
+      await Promise.resolve();
+      [
+        ...document.body.querySelectorAll<HTMLButtonElement>(
+          '[role="menuitem"]',
+        ),
+      ]
+        .find((candidate) =>
+          candidate.textContent?.includes("Stop and archive"),
+        )!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(projectRpc.updateProjectSession).toHaveBeenCalledWith(
+      PROJECT_ID,
+      SESSION_ID,
+      { archived: true, stopActive: true },
+    );
+    expect(container.textContent).not.toContain("Draft the launch calendar");
+    expect(container.textContent).toContain(
+      "Conversation stopped and archived.",
+    );
+    expect(container.textContent).not.toContain("Undo");
+    expect(projectRpc.updateProjectSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("archives an inactive conversation immediately and restores it from Undo", async () => {
+    const inactive = session({ status: "completed" });
+    const archived = { ...inactive, archivedAt: NOW };
+    const restored = { ...archived, archivedAt: null };
+    projectRpc.updateProjectSession
+      .mockResolvedValueOnce(archived)
+      .mockResolvedValueOnce(restored);
+    const container = await mount({
+      project: projectDetail({
+        status: "stopped",
+        activeSessionCount: 0,
+        sessions: [inactive],
+        recentSessions: [inactive],
+      }),
+    });
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(".cowork-session-row__action")!
+        .click();
+      await Promise.resolve();
+      [
+        ...document.body.querySelectorAll<HTMLButtonElement>(
+          '[role="menuitem"]',
+        ),
+      ]
+        .find((candidate) => candidate.textContent?.trim() === "Archive")!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(projectRpc.updateProjectSession).toHaveBeenCalledWith(
+      PROJECT_ID,
+      SESSION_ID,
+      { archived: true, stopActive: false },
+    );
+    expect(container.textContent).toContain("Conversation archived.");
+
+    await act(async () => {
+      button(container, "Undo").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(projectRpc.updateProjectSession).toHaveBeenLastCalledWith(
+      PROJECT_ID,
+      SESSION_ID,
+      { archived: false },
+    );
+    expect(container.textContent).toContain("Draft the launch calendar");
   });
 
   it("retries a blocked workspace in place and refreshes its visible state", async () => {
@@ -405,7 +1028,7 @@ describe("ProjectsApp", () => {
       skillSlugs: [],
       idempotencyKey: expect.any(String),
     });
-    expect(document.body.textContent).toContain("New session");
+    expect(document.body.textContent).toContain("New conversation");
     expect(router.replace).toHaveBeenCalledWith(
       `/projects/${PROJECT_ID}?newSession=1`,
     );
@@ -635,9 +1258,21 @@ describe("ProjectsApp", () => {
         )
         .every((candidate) => candidate.disabled),
     ).toBe(true);
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Actions for September launch"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
     expect(
-      container.querySelector<HTMLButtonElement>(
-        `button[aria-label="New session unavailable in September launch"]`,
+      [
+        ...document.body.querySelectorAll<HTMLButtonElement>(
+          '[role="menuitem"]',
+        ),
+      ].find((candidate) =>
+        candidate.textContent?.includes("New conversation"),
       )?.disabled,
     ).toBe(true);
   });
@@ -660,12 +1295,14 @@ describe("ProjectsApp", () => {
       project: projectDetail(),
     });
 
-    act(() => {
+    await act(async () => {
       container
         .querySelector<HTMLButtonElement>(
-          'button[aria-label="Project settings for Customer research"]',
+          'button[aria-label="Actions for Customer research"]',
         )!
         .click();
+      await Promise.resolve();
+      button(document.body, "Project settings").click();
     });
     expect(
       document.body.querySelector('[role="dialog"]')?.textContent,
@@ -713,7 +1350,17 @@ describe("ProjectsApp", () => {
     await act(async () => {
       container
         .querySelector<HTMLButtonElement>(
-          'button[aria-label="New session in Customer research"]',
+          'button[aria-label="Actions for Customer research"]',
+        )!
+        .click();
+      await Promise.resolve();
+      [
+        ...document.body.querySelectorAll<HTMLButtonElement>(
+          '[role="menuitem"]',
+        ),
+      ]
+        .find((candidate) =>
+          candidate.textContent?.includes("New conversation"),
         )!
         .click();
       await Promise.resolve();
@@ -728,7 +1375,7 @@ describe("ProjectsApp", () => {
       await Promise.resolve();
     });
     dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
-    expect(dialog.textContent).toContain("New session");
+    expect(dialog.textContent).toContain("New conversation");
     expect(dialog.querySelector("textarea")).not.toBeNull();
   });
 
@@ -761,6 +1408,7 @@ describe("ProjectsApp", () => {
       await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
     expect(projectRpc.updateProject).toHaveBeenCalledWith(PROJECT_ID, {
@@ -877,6 +1525,308 @@ describe("ProjectsApp", () => {
     ).toBe(activeSession.title);
   });
 
+  it("passes live runtime admission to an open conversation", async () => {
+    const activeSession = session({ status: "completed" });
+    const container = await mount({
+      project: projectDetail({ sessions: [activeSession] }),
+      activeSession,
+      runtimeAvailable: false,
+    });
+
+    expect(
+      container
+        .querySelector('[data-testid="project-session"]')
+        ?.getAttribute("data-runtime-available"),
+    ).toBe("false");
+  });
+
+  it("refreshes Project detail while an idle conversation remains selected", async () => {
+    vi.useFakeTimers();
+    const idle = session({ status: "idle" });
+    projectRpc.fetchProjects.mockResolvedValue({
+      projects: [projectRow({ recentSessions: [idle] })],
+      runtime: { available: true, message: null },
+    });
+    projectRpc.fetchProject.mockResolvedValue(
+      projectDetail({
+        name: "Externally renamed Project",
+        sessions: [{ ...idle, title: "Externally renamed conversation" }],
+      }),
+    );
+
+    await mount({
+      project: projectDetail({ sessions: [idle] }),
+      activeSession: idle,
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+
+    expect(projectRpc.fetchProject).toHaveBeenCalledWith(PROJECT_ID);
+  });
+
+  it("leaves a Project deleted in another tab once both list and detail confirm it is gone", async () => {
+    vi.useFakeTimers();
+    const activeSession = session({ status: "idle" });
+    projectRpc.fetchProjects.mockResolvedValue({
+      projects: [],
+      runtime: { available: true, message: null },
+    });
+    projectRpc.fetchProject.mockRejectedValue(
+      Object.assign(new Error("Project not found"), { status: 404 }),
+    );
+    const container = await mount({
+      project: projectDetail({ sessions: [activeSession] }),
+      activeSession,
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+
+    expect(projectRpc.fetchProject).toHaveBeenCalledWith(PROJECT_ID);
+    expect(router.replace).toHaveBeenCalledWith("/projects");
+    expect(
+      container.querySelector('[data-testid="project-session"]'),
+    ).toBeNull();
+    expect(container.textContent).toContain("This Project was deleted.");
+  });
+
+  it("closes an open Project dialog when another tab permanently deletes its Project", async () => {
+    vi.useFakeTimers();
+    const activeSession = session({ status: "idle" });
+    projectRpc.fetchProjects.mockResolvedValue({
+      projects: [],
+      runtime: { available: true, message: null },
+    });
+    projectRpc.fetchProject.mockRejectedValue(
+      Object.assign(new Error("Project not found"), { status: 404 }),
+    );
+    const container = await mount({
+      project: projectDetail({ sessions: [activeSession] }),
+      activeSession,
+      dialog: { kind: "settings", projectId: PROJECT_ID },
+    });
+    expect(document.body.querySelector('[role="dialog"]')).not.toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+
+    expect(projectRpc.fetchProject).toHaveBeenCalledWith(PROJECT_ID);
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="project-session"]'),
+    ).toBeNull();
+    expect(router.replace).toHaveBeenCalledWith("/projects");
+  });
+
+  it("ignores a late conversation creation after another tab permanently deletes its Project", async () => {
+    vi.useFakeTimers();
+    let resolveSession!: (value: ProjectSessionVM) => void;
+    const pending = new Promise<ProjectSessionVM>((resolve) => {
+      resolveSession = resolve;
+    });
+    projectRpc.createProjectSession.mockReturnValue(pending);
+    projectRpc.fetchProjects.mockResolvedValue({
+      projects: [],
+      runtime: { available: true, message: null },
+    });
+    projectRpc.fetchProject.mockRejectedValue(
+      Object.assign(new Error("Project not found"), { status: 404 }),
+    );
+    const container = await mount({
+      project: projectDetail({
+        sessions: [],
+        recentSessions: [],
+        sessionCount: 0,
+        activeSessionCount: 0,
+      }),
+      dialog: {
+        kind: "new-session",
+        projectId: PROJECT_ID,
+        initialSkillSlug: null,
+      },
+    });
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+    setValue(dialog.querySelector("textarea")!, "Prepare the calendar");
+
+    await act(async () => {
+      button(dialog, "Start").click();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    await act(async () => {
+      resolveSession(session({ status: "queued" }));
+      await pending;
+      await Promise.resolve();
+    });
+
+    expect(router.push).not.toHaveBeenCalledWith(
+      `/projects/${PROJECT_ID}/sessions/${SESSION_ID}`,
+    );
+    expect(
+      container.querySelector('[data-testid="project-session"]'),
+    ).toBeNull();
+    expect(container.textContent).toContain("This Project was deleted.");
+  });
+
+  it("ignores a late settings save after another tab permanently deletes its Project", async () => {
+    vi.useFakeTimers();
+    let resolveUpdate!: (value: ProjectDetailVM) => void;
+    const pending = new Promise<ProjectDetailVM>((resolve) => {
+      resolveUpdate = resolve;
+    });
+    projectRpc.updateProject.mockReturnValue(pending);
+    projectRpc.fetchProjects.mockResolvedValue({
+      projects: [],
+      runtime: { available: true, message: null },
+    });
+    projectRpc.fetchProject.mockRejectedValue(
+      Object.assign(new Error("Project not found"), { status: 404 }),
+    );
+    const container = await mount({
+      project: projectDetail(),
+      dialog: { kind: "settings", projectId: PROJECT_ID },
+    });
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+    setValue(
+      dialog.querySelector<HTMLInputElement>("input[data-autofocus]")!,
+      "Renamed project",
+    );
+
+    await act(async () => {
+      button(dialog, "Save changes").click();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    await act(async () => {
+      resolveUpdate(projectDetail({ name: "Renamed project", revision: 2 }));
+      await pending;
+      await Promise.resolve();
+    });
+
+    expect(projectRpc.replaceProjectSkills).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain("Renamed project");
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    expect(router.replace).toHaveBeenCalledWith("/projects");
+  });
+
+  it("does not leak a late settings recovery error into a new dialog after deletion", async () => {
+    vi.useFakeTimers();
+    let rejectRecovery!: (cause: Error) => void;
+    const pendingRecovery = new Promise<ProjectDetailVM>((_resolve, reject) => {
+      rejectRecovery = reject;
+    });
+    projectRpc.updateProject.mockRejectedValue(new Error("Save rejected"));
+    projectRpc.fetchProjects.mockResolvedValue({
+      projects: [
+        projectRow({
+          id: SECOND_PROJECT_ID,
+          name: "Customer research",
+          recentSessions: [],
+        }),
+      ],
+      runtime: { available: true, message: null },
+    });
+    projectRpc.fetchProject
+      .mockReturnValueOnce(pendingRecovery)
+      .mockRejectedValueOnce(
+        Object.assign(new Error("Project not found"), { status: 404 }),
+      );
+    const container = await mount({
+      projects: [
+        projectRow(),
+        projectRow({
+          id: SECOND_PROJECT_ID,
+          name: "Customer research",
+          recentSessions: [],
+        }),
+      ],
+      project: projectDetail(),
+      dialog: { kind: "settings", projectId: PROJECT_ID },
+    });
+    const settings = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+    setValue(
+      settings.querySelector<HTMLInputElement>("input[data-autofocus]")!,
+      "Renamed project",
+    );
+
+    await act(async () => {
+      button(settings, "Save changes").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(projectRpc.fetchProject).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+
+    act(() => button(container, "New project").click());
+    let dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("New project");
+
+    await act(async () => {
+      rejectRecovery(new Error("Recovery failed"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("New project");
+    expect(dialog.textContent).not.toContain(
+      "Close and reopen settings before retrying",
+    );
+    expect(dialog.textContent).not.toContain("Save rejected");
+  });
+
+  it("keeps an unlisted selected Project through a transient error or archival", async () => {
+    vi.useFakeTimers();
+    const activeSession = session({ status: "idle" });
+    const archived = projectDetail({
+      archivedAt: NOW,
+      status: "stopped",
+      sessions: [activeSession],
+    });
+    projectRpc.fetchProjects.mockResolvedValue({
+      projects: [],
+      runtime: { available: true, message: null },
+    });
+    projectRpc.fetchProject
+      .mockRejectedValueOnce(
+        Object.assign(new Error("Connection interrupted"), { status: 503 }),
+      )
+      .mockResolvedValueOnce(archived);
+    const container = await mount({
+      project: projectDetail({ sessions: [activeSession] }),
+      activeSession,
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(
+      container.querySelector('[data-testid="project-session"]'),
+    ).not.toBeNull();
+    expect(router.replace).not.toHaveBeenCalledWith("/projects");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(projectRpc.fetchProject).toHaveBeenCalledTimes(2);
+    expect(
+      container.querySelector('[data-testid="project-session"]'),
+    ).not.toBeNull();
+    expect(router.replace).not.toHaveBeenCalledWith("/projects");
+  });
+
   it("makes project content inert while the mobile navigation is open", async () => {
     const container = await mount({ project: projectDetail() });
     act(() =>
@@ -914,6 +1864,41 @@ describe("ProjectsApp", () => {
     );
     expect(container.querySelector("main")?.hasAttribute("inert")).toBe(false);
     expect(document.activeElement).toBe(toggle);
+  });
+
+  it("keeps mobile navigation focus stable during background refreshes", async () => {
+    vi.useFakeTimers();
+    projectRpc.fetchProjects.mockResolvedValue({
+      projects: [projectRow()],
+      runtime: { available: true, message: null },
+    });
+    projectRpc.fetchProject.mockResolvedValue(projectDetail());
+    const container = await mount({ project: projectDetail() });
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Open navigation"]',
+        )!
+        .click(),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const searchToggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search projects"]',
+    )!;
+    act(() => searchToggle.focus());
+    expect(document.activeElement).toBe(searchToggle);
+
+    await act(async () => {
+      vi.advanceTimersByTime(15_000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(projectRpc.fetchProjects).toHaveBeenCalled();
+    expect(document.activeElement).toBe(searchToggle);
   });
 
   it("returns focus to the project-search toggle when Escape closes search", async () => {

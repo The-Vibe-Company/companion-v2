@@ -10,9 +10,12 @@ import {
   useCallback,
   useEffect,
   useId,
+  useMemo,
   useReducer,
   useRef,
   useState,
+  type ClipboardEvent,
+  type DragEvent,
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
@@ -30,11 +33,16 @@ import type {
   ProjectDetailVM,
   ProjectFileVM,
   ProjectFileVersionVM,
+  ProjectPromptAttachmentVM,
+  ProjectRuntimeAvailability,
   ProjectSessionStatus,
   ProjectSessionVM,
 } from "@/lib/projectsModel";
 import { Icon } from "../Icon";
-import { ChatTranscript } from "../runs/ChatTranscript";
+import {
+  ChatTranscript,
+  type GeneratedProjectFile,
+} from "../runs/ChatTranscript";
 import {
   chatReducer,
   initChatState,
@@ -57,7 +65,52 @@ const PREVIEWABLE_FILE_TYPES = new Set([
   "image/avif",
   "video/mp4",
   "video/webm",
+  "application/pdf",
+  "application/json",
+  "text/csv",
+  "text/markdown",
+  "text/plain",
 ]);
+
+type ProjectFilePreviewKind = "image" | "video" | "document";
+type ProjectAttachmentPreview = {
+  attachment: ProjectPromptAttachmentVM;
+  href: string;
+  downloadHref: string;
+};
+
+export type ProjectFilePreviewTarget = {
+  id: string;
+  path: string;
+  name: string;
+  version: number;
+  contentType: string | null;
+  byteSize: number;
+  exactVersion: boolean;
+};
+
+function currentFilePreviewTarget(
+  file: ProjectFileVM,
+): ProjectFilePreviewTarget {
+  return {
+    id: file.id,
+    path: file.path,
+    name: file.name,
+    version: file.version,
+    contentType: file.contentType,
+    byteSize: file.byteSize,
+    exactVersion: false,
+  };
+}
+
+function filePreviewKind(
+  contentType: string | null,
+): ProjectFilePreviewKind | null {
+  if (!contentType || !PREVIEWABLE_FILE_TYPES.has(contentType)) return null;
+  if (contentType.startsWith("image/")) return "image";
+  if (contentType.startsWith("video/")) return "video";
+  return "document";
+}
 
 function statusLabel(status: ProjectSessionStatus): string {
   switch (status) {
@@ -74,7 +127,7 @@ function statusLabel(status: ProjectSessionStatus): string {
     case "completed":
       return "Done";
     case "error":
-      return "Needs attention";
+      return "Task stopped";
   }
 }
 
@@ -83,19 +136,27 @@ function statusTone(
 ): "working" | "waiting" | "done" | "error" {
   if (status === "working") return "working";
   if (status === "queued" || status === "stopping") return "waiting";
-  if (status === "error") return "error";
+  if (status === "error") return "waiting";
   return "done";
 }
 
 export function SessionComposer({
+  draftKey = "companion:project-draft:standalone",
   disabled,
   disabledReason,
+  focusRequest = 0,
+  projectFileCount = 0,
   working,
+  onOpenProjectFiles = () => undefined,
   onSend,
 }: {
+  draftKey?: string;
   disabled: boolean;
   disabledReason?: string;
+  focusRequest?: number;
+  projectFileCount?: number;
   working: boolean;
+  onOpenProjectFiles?: () => void;
   onSend: (input: {
     prompt: string;
     files: File[];
@@ -105,9 +166,64 @@ export function SessionComposer({
   const [text, setText] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const idempotencyKeyRef = useRef<string | null>(null);
+  const loadedDraftKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let saved = "";
+    try {
+      saved = window.sessionStorage.getItem(draftKey) ?? "";
+    } catch {
+      // Storage can be unavailable in locked-down browser contexts. The in-memory
+      // draft still works for the current page lifetime.
+    }
+    loadedDraftKeyRef.current = draftKey;
+    setText(saved);
+    setFiles([]);
+    setError(null);
+    idempotencyKeyRef.current = null;
+  }, [draftKey]);
+
+  useEffect(() => {
+    if (loadedDraftKeyRef.current !== draftKey) return;
+    try {
+      if (text) window.sessionStorage.setItem(draftKey, text);
+      else window.sessionStorage.removeItem(draftKey);
+    } catch {
+      // See the read fallback above.
+    }
+  }, [draftKey, text]);
+
+  useEffect(() => {
+    if (focusRequest < 1 || disabled) return;
+    textareaRef.current?.focus();
+  }, [disabled, focusRequest]);
+
+  const appendFiles = useCallback(
+    (incoming: File[]) => {
+      if (incoming.length === 0) return;
+      if (
+        incoming.some(
+          (file) =>
+            file.size < 1 || file.size > PROJECT_ATTACHMENT_MAX_BYTES,
+        )
+      ) {
+        setError("Each file must be between 1 byte and 10 MB.");
+        return;
+      }
+      if (files.length + incoming.length > PROJECT_ATTACHMENT_MAX_FILES) {
+        setError(`Attach up to ${PROJECT_ATTACHMENT_MAX_FILES} files.`);
+        return;
+      }
+      setError(null);
+      idempotencyKeyRef.current = null;
+      setFiles((current) => [...current, ...incoming]);
+    },
+    [files.length],
+  );
 
   const send = async () => {
     if (sending || disabled || !text.trim()) return;
@@ -122,6 +238,11 @@ export function SessionComposer({
       });
       setText("");
       setFiles([]);
+      try {
+        window.sessionStorage.removeItem(draftKey);
+      } catch {
+        // The draft is already cleared from component state.
+      }
       idempotencyKeyRef.current = null;
       textareaRef.current?.focus();
     } catch (cause) {
@@ -134,7 +255,32 @@ export function SessionComposer({
   };
 
   return (
-    <div className="cowork-session-composer">
+    <div
+      className={`cowork-session-composer${dragging ? " is-dragover" : ""}`}
+      onDragEnter={(event: DragEvent<HTMLDivElement>) => {
+        if (disabled || sending || !event.dataTransfer.types.includes("Files"))
+          return;
+        event.preventDefault();
+        setDragging(true);
+      }}
+      onDragOver={(event: DragEvent<HTMLDivElement>) => {
+        if (disabled || sending || !event.dataTransfer.types.includes("Files"))
+          return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+      }}
+      onDragLeave={(event: DragEvent<HTMLDivElement>) => {
+        if (event.currentTarget.contains(event.relatedTarget as Node | null))
+          return;
+        setDragging(false);
+      }}
+      onDrop={(event: DragEvent<HTMLDivElement>) => {
+        setDragging(false);
+        if (disabled || sending) return;
+        event.preventDefault();
+        appendFiles(Array.from(event.dataTransfer.files));
+      }}
+    >
       {files.length > 0 && (
         <div className="cowork-draft-files">
           {files.map((file, index) => (
@@ -173,12 +319,20 @@ export function SessionComposer({
           disabled={disabled || sending}
           placeholder={
             disabled
-              ? disabledReason ?? "This session is no longer accepting messages."
+              ? disabledReason ??
+                "This conversation is no longer accepting messages."
               : "Message the agent…"
           }
           onChange={(event) => {
             idempotencyKeyRef.current = null;
             setText(event.target.value);
+          }}
+          onPaste={(event: ClipboardEvent<HTMLTextAreaElement>) => {
+            if (disabled || sending) return;
+            const pastedFiles = Array.from(event.clipboardData.files);
+            if (pastedFiles.length === 0) return;
+            event.preventDefault();
+            appendFiles(pastedFiles);
           }}
           onKeyDown={(event) => {
             if (
@@ -205,29 +359,22 @@ export function SessionComposer({
                   ? Array.from(event.target.files)
                   : [];
                 event.target.value = "";
-                if (
-                  incoming.some(
-                    (file) => file.size > PROJECT_ATTACHMENT_MAX_BYTES,
-                  )
-                ) {
-                  setError("Each attachment must be 10 MB or smaller.");
-                  return;
-                }
-                if (
-                  files.length + incoming.length >
-                  PROJECT_ATTACHMENT_MAX_FILES
-                ) {
-                  setError(
-                    `Attach up to ${PROJECT_ATTACHMENT_MAX_FILES} files.`,
-                  );
-                  return;
-                }
-                setError(null);
-                idempotencyKeyRef.current = null;
-                setFiles((current) => [...current, ...incoming]);
+                appendFiles(incoming);
               }}
             />
           </label>
+          <button
+            type="button"
+            className="cowork-session-composer__project-files"
+            disabled={sending}
+            onClick={onOpenProjectFiles}
+          >
+            <Icon name="folder-open" size={13} />
+            From project
+            {projectFileCount > 0 && (
+              <span className="tnum">{projectFileCount}</span>
+            )}
+          </button>
           {working && (
             <span className="cowork-session-composer__working">
               <Icon name="loader" size={12} className="ls-spin" />
@@ -262,21 +409,119 @@ export function SessionComposer({
   );
 }
 
+function projectPromptAttachmentHref(
+  projectId: string,
+  sessionId: string,
+  attachmentId: string,
+  download = false,
+): string {
+  const path =
+    `/v1/projects/${encodeURIComponent(projectId)}` +
+    `/sessions/${encodeURIComponent(sessionId)}` +
+    `/attachments/${encodeURIComponent(attachmentId)}`;
+  return download ? `${path}?download=1` : path;
+}
+
+function ProjectPromptAttachmentList({
+  projectId,
+  sessionId,
+  attachments,
+  onPreview,
+}: {
+  projectId: string;
+  sessionId: string;
+  attachments: ProjectPromptAttachmentVM[];
+  onPreview: (preview: ProjectAttachmentPreview) => void;
+}) {
+  if (attachments.length === 0) return null;
+  return (
+    <div className="cowork-prompt-attachments" aria-label="Attached files">
+      {attachments.map((attachment) => {
+        const previewable =
+          attachment.status !== "failed" &&
+          filePreviewKind(attachment.contentType) !== null;
+        return (
+          <article key={attachment.id}>
+            <span className="cowork-prompt-attachments__icon">
+              <Icon name="file" size={14} />
+            </span>
+            <span>
+              <strong title={attachment.workspacePath}>
+                {attachment.fileName}
+              </strong>
+              <small>
+                {attachment.status === "failed"
+                  ? "Upload failed"
+                  : formatBytes(attachment.byteSize)}
+              </small>
+            </span>
+            {attachment.status !== "failed" && (
+              <span className="cowork-prompt-attachments__actions">
+                {previewable && (
+                  <button
+                    type="button"
+                    className="cds-iconbtn cds-iconbtn--sm"
+                    aria-label={`Preview ${attachment.fileName}`}
+                    onClick={() =>
+                      onPreview({
+                        attachment,
+                        href: projectPromptAttachmentHref(
+                          projectId,
+                          sessionId,
+                          attachment.id,
+                        ),
+                        downloadHref: projectPromptAttachmentHref(
+                          projectId,
+                          sessionId,
+                          attachment.id,
+                          true,
+                        ),
+                      })
+                    }
+                  >
+                    <Icon name="eye" size={13} />
+                  </button>
+                )}
+                <a
+                  className="cds-iconbtn cds-iconbtn--sm"
+                  href={projectPromptAttachmentHref(
+                    projectId,
+                    sessionId,
+                    attachment.id,
+                    true,
+                  )}
+                  aria-label={`Download ${attachment.fileName}`}
+                >
+                  <Icon name="download" size={13} />
+                </a>
+              </span>
+            )}
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
 export function ProjectFileCard({
   projectId,
   file,
+  selected = false,
+  onPreview,
 }: {
   projectId: string;
   file: ProjectFileVM;
+  selected?: boolean;
+  onPreview?: (file: ProjectFileVM) => void;
 }) {
   const historyId = useId();
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [versions, setVersions] = useState<ProjectFileVersionVM[] | null>(null);
-  const previewable = file.contentType
-    ? PREVIEWABLE_FILE_TYPES.has(file.contentType)
-    : false;
+  const previewKind = filePreviewKind(file.contentType);
+  const previewable = previewKind !== null;
+  const canPreview = previewable && onPreview !== undefined;
 
   useEffect(() => {
     setHistoryOpen(false);
@@ -305,7 +550,9 @@ export function ProjectFileCard({
   };
 
   return (
-    <article className="project-file-card">
+    <article
+      className={`project-file-card${selected ? " is-selected" : ""}`}
+    >
       <span className="project-file-card__icon">
         <Icon name="file" size={15} />
       </span>
@@ -340,19 +587,19 @@ export function ProjectFileCard({
             History
           </button>
         )}
-        {previewable && (
-          <a
+        {canPreview && (
+          <button
+            type="button"
             className="cds-btn cds-btn--ghost cds-btn--sm"
-            href={projectFileHref(projectId, file.id)}
-            target="_blank"
-            rel="noreferrer"
+            aria-pressed={selected}
+            onClick={() => onPreview(file)}
           >
-            Preview
-          </a>
+            {selected ? "Open" : "Preview"}
+          </button>
         )}
         <a
           className={
-            previewable
+            canPreview
               ? "cds-iconbtn cds-iconbtn--sm"
               : "cds-btn cds-btn--ghost cds-btn--sm"
           }
@@ -360,7 +607,7 @@ export function ProjectFileCard({
           aria-label={`Download ${file.name}`}
         >
           <Icon name="download" size={13} />
-          {!previewable && "Download"}
+          {!canPreview && "Download"}
         </a>
       </div>
       {historyOpen && (
@@ -442,17 +689,256 @@ export function ProjectFileCard({
   );
 }
 
-function ProjectFilesDrawer({
+function ProjectFilePreview({
+  projectId,
+  target,
+}: {
+  projectId: string;
+  target: ProjectFilePreviewTarget;
+}) {
+  const kind = filePreviewKind(target.contentType);
+  const src = target.exactVersion
+    ? projectFileVersionHref(projectId, target.id, target.version)
+    : projectFileHref(projectId, target.id);
+  const downloadHref = target.exactVersion
+    ? projectFileVersionHref(projectId, target.id, target.version, true)
+    : projectFileHref(projectId, target.id, true);
+  return (
+    <section
+      className="cowork-file-preview"
+      aria-label={`Preview ${target.name}`}
+    >
+      <header>
+        <span>
+          <strong title={target.path}>{target.name}</strong>
+          <small>
+            v{target.version}
+            {target.exactVersion && " · saved version"}
+            {` · ${formatBytes(target.byteSize)}`}
+          </small>
+        </span>
+        <a
+          className="cds-iconbtn cds-iconbtn--sm"
+          href={downloadHref}
+          aria-label={`Download ${target.name} version ${target.version}`}
+        >
+          <Icon name="download" size={13} />
+        </a>
+      </header>
+      <div className="cowork-file-preview__canvas">
+        {kind === null ? (
+          <div className="project-files-drawer__empty">
+            <Icon name="file" size={18} />
+            <strong>Preview not available</strong>
+            <span>Download this saved version to open it.</span>
+          </div>
+        ) : kind === "image" ? (
+          // eslint-disable-next-line @next/next/no-img-element -- authenticated project file URL
+          <img src={src} alt={`Preview of ${target.name}`} />
+        ) : kind === "video" ? (
+          <video
+            src={src}
+            controls
+            preload="metadata"
+            aria-label={`Preview of ${target.name}`}
+          />
+        ) : (
+          <iframe
+            src={src}
+            title={`Preview ${target.name}`}
+            sandbox=""
+            loading="lazy"
+          />
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ProjectPromptAttachmentPreview({
+  preview,
+}: {
+  preview: ProjectAttachmentPreview;
+}) {
+  const kind = filePreviewKind(preview.attachment.contentType);
+  if (!kind) return null;
+  return (
+    <section
+      className="cowork-file-preview"
+      aria-label={`Preview ${preview.attachment.fileName}`}
+    >
+      <header>
+        <span>
+          <strong title={preview.attachment.workspacePath}>
+            {preview.attachment.fileName}
+          </strong>
+          <small>Message attachment · {formatBytes(preview.attachment.byteSize)}</small>
+        </span>
+        <a
+          className="cds-iconbtn cds-iconbtn--sm"
+          href={preview.downloadHref}
+          aria-label={`Download ${preview.attachment.fileName}`}
+        >
+          <Icon name="download" size={13} />
+        </a>
+      </header>
+      <div className="cowork-file-preview__canvas">
+        {kind === "image" ? (
+          // eslint-disable-next-line @next/next/no-img-element -- authenticated Project attachment URL
+          <img
+            src={preview.href}
+            alt={`Preview of ${preview.attachment.fileName}`}
+          />
+        ) : kind === "video" ? (
+          <video
+            src={preview.href}
+            controls
+            preload="metadata"
+            aria-label={`Preview of ${preview.attachment.fileName}`}
+          />
+        ) : (
+          <iframe
+            src={preview.href}
+            title={`Preview ${preview.attachment.fileName}`}
+            sandbox=""
+            loading="lazy"
+          />
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ProjectFilesContent({
+  projectId,
+  files,
+  selection,
+  attachmentPreview,
+  onSelectionChange,
+}: {
+  projectId: string;
+  files: ProjectFileVM[];
+  selection: ProjectFilePreviewTarget | null;
+  attachmentPreview: ProjectAttachmentPreview | null;
+  onSelectionChange: (target: ProjectFilePreviewTarget | null) => void;
+}) {
+  return (
+    <div className="run-files-drawer__body project-files-drawer__body">
+      <p className="project-files-drawer__note">
+        Every conversation can use these files. Previous versions stay
+        available from History.
+      </p>
+      {files.length === 0 && !selection && !attachmentPreview ? (
+        <div className="project-files-drawer__empty">
+          <Icon name="folder-open" size={18} />
+          <strong>No files yet</strong>
+          <span>Attach a file to a message or ask the agent to create one.</span>
+        </div>
+      ) : (
+        <div
+          className={`project-files-layout${
+            selection || attachmentPreview ? " has-preview" : ""
+          }`}
+        >
+          <div className="project-files-drawer__list">
+            {files.map((file) => (
+              <ProjectFileCard
+                key={file.id}
+                projectId={projectId}
+                file={file}
+                selected={file.id === selection?.id}
+                onPreview={(nextFile) =>
+                  onSelectionChange(
+                    selection?.id === nextFile.id && !selection.exactVersion
+                      ? null
+                      : currentFilePreviewTarget(nextFile),
+                  )
+                }
+              />
+            ))}
+          </div>
+          {selection && (
+            <ProjectFilePreview
+              projectId={projectId}
+              target={selection}
+            />
+          )}
+          {!selection && attachmentPreview && (
+            <ProjectPromptAttachmentPreview preview={attachmentPreview} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function ProjectFilesPanel({
+  projectId,
+  files,
+  selection,
+  attachmentPreview,
+  returnFocusRef,
+  onSelectionChange,
+  onClose,
+}: {
+  projectId: string;
+  files: ProjectFileVM[];
+  selection: ProjectFilePreviewTarget | null;
+  attachmentPreview: ProjectAttachmentPreview | null;
+  returnFocusRef: RefObject<HTMLElement | null>;
+  onSelectionChange: (target: ProjectFilePreviewTarget | null) => void;
+  onClose: () => void;
+}) {
+  useEffect(
+    () => () => {
+      returnFocusRef.current?.focus();
+    },
+    [returnFocusRef],
+  );
+  return (
+    <aside className="cowork-session-files-panel" aria-label="Project files">
+      <header className="run-files-drawer__head">
+        <div>
+          <span>Project files</span>
+          <h2>Files · {files.length}</h2>
+        </div>
+        <button
+          type="button"
+          className="cds-iconbtn cds-iconbtn--md"
+          onClick={onClose}
+          aria-label="Close files"
+        >
+          <Icon name="x" size={16} />
+        </button>
+      </header>
+      <ProjectFilesContent
+        projectId={projectId}
+        files={files}
+        selection={selection}
+        attachmentPreview={attachmentPreview}
+        onSelectionChange={onSelectionChange}
+      />
+    </aside>
+  );
+}
+
+export function ProjectFilesDrawer({
   open,
   projectId,
   files,
+  selection,
+  attachmentPreview,
   returnFocusRef,
+  onSelectionChange,
   onClose,
 }: {
   open: boolean;
   projectId: string;
   files: ProjectFileVM[];
-  returnFocusRef: RefObject<HTMLButtonElement | null>;
+  selection: ProjectFilePreviewTarget | null;
+  attachmentPreview: ProjectAttachmentPreview | null;
+  returnFocusRef: RefObject<HTMLElement | null>;
+  onSelectionChange: (target: ProjectFilePreviewTarget | null) => void;
   onClose: () => void;
 }) {
   const panelRef = useRef<HTMLElement>(null);
@@ -550,32 +1036,30 @@ function ProjectFilesDrawer({
             <Icon name="x" size={16} />
           </button>
         </header>
-        <div className="run-files-drawer__body">
-          <p className="project-files-drawer__note">
-            Sessions share this folder. The latest saved version appears here.
-          </p>
-          {files.length === 0 ? (
-            <div className="project-files-drawer__empty">
-              <Icon name="folder-open" size={18} />
-              <strong>No files yet</strong>
-              <span>Uploaded and generated files appear here.</span>
-            </div>
-          ) : (
-            <div className="project-files-drawer__list">
-              {files.map((file) => (
-                <ProjectFileCard
-                  key={file.id}
-                  projectId={projectId}
-                  file={file}
-                />
-              ))}
-            </div>
-          )}
-        </div>
+        <ProjectFilesContent
+          projectId={projectId}
+          files={files}
+          selection={selection}
+          attachmentPreview={attachmentPreview}
+          onSelectionChange={onSelectionChange}
+        />
       </aside>
     </div>,
     document.body,
   );
+}
+
+export function useDesktopFilesPanel(): boolean {
+  const [desktop, setDesktop] = useState(false);
+  useEffect(() => {
+    if (!window.matchMedia) return;
+    const media = window.matchMedia("(min-width: 1024px)");
+    const update = () => setDesktop(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  return desktop;
 }
 
 function historySignature(session: ProjectSessionVM): string {
@@ -586,8 +1070,14 @@ export function ProjectSessionView({
   project,
   initialSession,
   onOpenNavigation,
+  onNewSession,
+  onRenameSession,
+  onArchiveSession,
   onProjectSettings,
   onRetryWorkspace,
+  runtime,
+  onRetryRuntime,
+  modelLabel,
   retryBusy,
   retryError,
   onSessionChange,
@@ -595,8 +1085,14 @@ export function ProjectSessionView({
   project: ProjectDetailVM;
   initialSession: ProjectSessionVM;
   onOpenNavigation: () => void;
+  onNewSession?: () => void;
+  onRenameSession?: () => void;
+  onArchiveSession?: () => Promise<void> | void;
   onProjectSettings: () => void;
   onRetryWorkspace: () => void;
+  runtime: ProjectRuntimeAvailability;
+  onRetryRuntime?: () => Promise<void> | void;
+  modelLabel?: string;
   retryBusy: boolean;
   retryError: string | null;
   onSessionChange: (session: ProjectSessionVM) => void;
@@ -608,17 +1104,26 @@ export function ProjectSessionView({
   const [streamDead, setStreamDead] = useState(false);
   const [streamNonce, setStreamNonce] = useState(0);
   const [stopBusy, setStopBusy] = useState(false);
+  const [archiveBusy, setArchiveBusy] = useState(false);
+  const [runtimeRetryBusy, setRuntimeRetryBusy] = useState(false);
+  const [composerFocusRequest, setComposerFocusRequest] = useState(0);
   const [files, setFiles] = useState(project.files);
   const [filesOpen, setFilesOpen] = useState(false);
+  const [fileSelection, setFileSelection] =
+    useState<ProjectFilePreviewTarget | null>(null);
+  const [attachmentPreview, setAttachmentPreview] =
+    useState<ProjectAttachmentPreview | null>(null);
   const [rowOverride, setRowOverride] = useState<Map<string, boolean>>(
     () => new Map(),
   );
   const filesButtonRef = useRef<HTMLButtonElement>(null);
+  const filesReturnFocusRef = useRef<HTMLElement>(null);
   const refreshBusyRef = useRef(false);
   const lastEventIdRef = useRef<string | null>(null);
   const appliedHistoryRef = useRef<string | null>(null);
   const initialSessionRef = useRef(initialSession);
   const onSessionChangeRef = useRef(onSessionChange);
+  const desktopFilesPanel = useDesktopFilesPanel();
   initialSessionRef.current = initialSession;
   onSessionChangeRef.current = onSessionChange;
 
@@ -641,7 +1146,11 @@ export function ProjectSessionView({
         resolveToolLabel,
       });
       for (const prompt of next.pendingPrompts) {
-        dispatch({ kind: "user", text: prompt.text, messageId: prompt.id });
+        dispatch({
+          kind: "user",
+          text: prompt.text,
+          messageId: prompt.messageId,
+        });
       }
     },
     [resolveToolLabel],
@@ -668,7 +1177,7 @@ export function ProjectSessionView({
       setLoadError(
         cause instanceof Error
           ? cause.message
-          : "Could not refresh this session.",
+          : "Could not refresh this conversation.",
       );
       return null;
     } finally {
@@ -684,10 +1193,60 @@ export function ProjectSessionView({
     }
   }, [project.id]);
 
+  const openFiles = useCallback(
+    (
+      fileId?: string,
+      version?: number,
+      generatedFile?: GeneratedProjectFile,
+    ) => {
+      filesReturnFocusRef.current =
+        document.activeElement instanceof HTMLElement &&
+        document.activeElement !== document.body
+          ? document.activeElement
+          : filesButtonRef.current;
+      const currentFile = fileId
+        ? files.find((candidate) => candidate.id === fileId)
+        : null;
+      setFileSelection(
+        generatedFile
+          ? {
+              id: generatedFile.id,
+              path: generatedFile.path,
+              name: generatedFile.name,
+              version: generatedFile.version,
+              contentType: generatedFile.contentType,
+              byteSize: generatedFile.byteSize,
+              exactVersion: true,
+            }
+          : currentFile
+            ? {
+                ...currentFilePreviewTarget(currentFile),
+                version: version ?? currentFile.version,
+                exactVersion: version !== undefined,
+              }
+            : null,
+      );
+      setAttachmentPreview(null);
+      setFilesOpen(true);
+      void refreshFiles();
+    },
+    [files, refreshFiles],
+  );
+
+  const openAttachment = useCallback((preview: ProjectAttachmentPreview) => {
+    filesReturnFocusRef.current =
+      document.activeElement instanceof HTMLElement &&
+      document.activeElement !== document.body
+        ? document.activeElement
+        : filesButtonRef.current;
+    setFileSelection(null);
+    setAttachmentPreview(preview);
+    setFilesOpen(true);
+  }, []);
+
   useEffect(() => {
     const nextSession = initialSessionRef.current;
     setSession(nextSession);
-    setFiles(project.files);
     dispatch({ kind: "reset" });
     appliedHistoryRef.current = null;
     reconcileHistory(nextSession, true);
@@ -699,8 +1258,15 @@ export function ProjectSessionView({
     setStreamDead(false);
     setStreamConnected(false);
     setFilesOpen(false);
+    setFileSelection(null);
+    setAttachmentPreview(null);
+    setComposerFocusRequest(0);
     setRowOverride(new Map());
-  }, [initialSession.id, project.id, project.files, reconcileHistory]);
+  }, [initialSession.id, project.id, reconcileHistory]);
+
+  useEffect(() => {
+    setFiles(project.files);
+  }, [project.files]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -754,8 +1320,10 @@ export function ProjectSessionView({
   ]);
 
   useEffect(() => {
-    if (!ACTIVE_SESSION_STATUSES.has(session.status)) return;
-    const timer = window.setInterval(() => void refresh(), 2_500);
+    const interval = ACTIVE_SESSION_STATUSES.has(session.status)
+      ? 2_500
+      : 5_000;
+    const timer = window.setInterval(() => void refresh(), interval);
     return () => window.clearInterval(timer);
   }, [refresh, session.status]);
 
@@ -763,17 +1331,102 @@ export function ProjectSessionView({
     project.status,
     project.workspace.status,
   ].some((status) => status === "needs_attention" || status === "error");
+  const projectArchived = project.archivedAt !== null;
+  const sessionArchived = session.archivedAt !== null;
   const working =
     !workspaceBlocked &&
+    !projectArchived &&
+    !sessionArchived &&
     (session.status === "queued" || session.status === "working");
   const composerDisabled =
     workspaceBlocked ||
+    projectArchived ||
     session.status === "stopping" ||
-    session.status === "completed";
-  const workspaceErrorDetail =
+    sessionArchived ||
+    !runtime.available;
+  const composerDisabledReason = workspaceBlocked
+    ? "Messages are paused while this project needs attention."
+    : projectArchived
+      ? "Restore this project to continue the conversation."
+      : sessionArchived
+        ? "Restore this conversation from the Project archive to continue."
+        : session.status === "stopping"
+          ? "This conversation is stopping."
+          : !runtime.available
+            ? "Messages are paused while Projects reconnects."
+            : undefined;
+  const workspaceTechnicalDetail =
     project.statusDetail ||
     project.workspace.statusDetail ||
     "The persistent workspace could not be restored.";
+  const visibleFiles = useMemo(
+    () =>
+      [...files].sort(
+        (left, right) =>
+          Date.parse(right.updatedAt) - Date.parse(left.updatedAt) ||
+          left.name.localeCompare(right.name),
+      ),
+    [files],
+  );
+  const resolvedFileSelection = useMemo(() => {
+    if (!fileSelection || fileSelection.exactVersion) return fileSelection;
+    const current = visibleFiles.find(
+      (candidate) => candidate.id === fileSelection.id,
+    );
+    return current ? currentFilePreviewTarget(current) : null;
+  }, [fileSelection, visibleFiles]);
+  const generatedFileTurns = useMemo(
+    () =>
+      session.prompts.flatMap((prompt) => {
+        if (prompt.fileChanges.length === 0) return [];
+        return [
+          {
+            messageId: prompt.messageId,
+            files: [...prompt.fileChanges]
+              .sort((left, right) =>
+                left.createdAt.localeCompare(right.createdAt),
+              )
+              .map((change) => ({
+                id: change.fileId,
+                path: change.path,
+                name: change.path.replace(/^files\//, ""),
+                version: change.version,
+                contentType: change.contentType,
+                byteSize: change.byteSize,
+                action: change.kind,
+              })),
+          },
+        ];
+      }),
+    [session.prompts],
+  );
+  const promptLookup = useMemo(() => {
+    const byId = new Map<string, ProjectSessionVM["prompts"][number]>();
+    for (const prompt of session.prompts) {
+      byId.set(prompt.id, prompt);
+      byId.set(prompt.messageId, prompt);
+    }
+    return byId;
+  }, [session.prompts]);
+  const renderPromptAttachments = useCallback(
+    (messageId: string | null, text: string) => {
+      const prompt =
+        (messageId ? promptLookup.get(messageId) : null) ??
+        session.prompts.find(
+          (candidate) =>
+            candidate.text === text && candidate.attachments.length > 0,
+        );
+      return prompt ? (
+        <ProjectPromptAttachmentList
+          projectId={project.id}
+          sessionId={session.id}
+          attachments={prompt.attachments}
+          onPreview={openAttachment}
+        />
+      ) : null;
+    },
+    [openAttachment, project.id, promptLookup, session.id, session.prompts],
+  );
 
   return (
     <div className="cowork-session">
@@ -792,31 +1445,49 @@ export function ProjectSessionView({
             {project.name}
           </Link>
           <span>/</span>
-          <strong>{session.title}</strong>
+          <h1 className="cowork-session__title">{session.title}</h1>
         </div>
         <span className="cowork-session__spacer" />
-        <span className="cds-status">
+        <span
+          className={`cds-status cowork-session__status${
+            !workspaceBlocked &&
+            !projectArchived &&
+            !sessionArchived &&
+            (session.status === "idle" || session.status === "completed")
+              ? " is-passive"
+              : ""
+          }`}
+        >
           <span
             className={`project-status-dot is-${
-              workspaceBlocked ? "error" : statusTone(session.status)
+              workspaceBlocked
+                ? "error"
+                : projectArchived || sessionArchived
+                  ? "waiting"
+                  : statusTone(session.status)
             }`}
             aria-hidden="true"
           />
-          {workspaceBlocked ? "Needs attention" : statusLabel(session.status)}
+          {workspaceBlocked
+            ? "Needs attention"
+            : projectArchived || sessionArchived
+              ? "Archived"
+              : statusLabel(session.status)}
         </span>
-        <code className="cowork-session__model">{session.model}</code>
+        <span
+          className="cowork-session__model"
+        >
+          {modelLabel ?? session.model}
+        </span>
         <button
           ref={filesButtonRef}
           type="button"
           className="cds-btn cds-btn--ghost cds-btn--sm cowork-session__files"
           aria-expanded={filesOpen}
-          onClick={() => {
-            setFilesOpen(true);
-            void refreshFiles();
-          }}
+          onClick={() => openFiles()}
         >
           <Icon name="folder-open" size={13} />
-          Files <span className="tnum">{files.length}</span>
+          Files <span className="tnum">{visibleFiles.length}</span>
         </button>
         {working && (
           <button
@@ -831,7 +1502,7 @@ export function ProjectSessionView({
                   setLoadError(
                     cause instanceof Error
                       ? cause.message
-                      : "Could not stop the session.",
+                      : "Could not stop the conversation.",
                   ),
                 )
                 .finally(() => setStopBusy(false));
@@ -841,13 +1512,76 @@ export function ProjectSessionView({
             {stopBusy ? "Stopping…" : "Stop"}
           </button>
         )}
+        {(onNewSession || onRenameSession || onArchiveSession) && (
+          <details className="cowork-session__menu">
+            <summary
+              className="cds-iconbtn cds-iconbtn--sm"
+              aria-label="Conversation actions"
+            >
+              <Icon name="more-horizontal" size={14} />
+            </summary>
+            <div role="menu">
+              {onNewSession && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={(event) => {
+                    event.currentTarget
+                      .closest("details")
+                      ?.removeAttribute("open");
+                    onNewSession();
+                  }}
+                >
+                  <Icon name="square-pen" size={13} />
+                  New conversation
+                </button>
+              )}
+              {onRenameSession && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={(event) => {
+                    event.currentTarget
+                      .closest("details")
+                      ?.removeAttribute("open");
+                    onRenameSession();
+                  }}
+                >
+                  <Icon name="pencil" size={13} />
+                  Rename
+                </button>
+              )}
+              {onArchiveSession && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={archiveBusy}
+                  onClick={(event) => {
+                    event.currentTarget
+                      .closest("details")
+                      ?.removeAttribute("open");
+                    setArchiveBusy(true);
+                    void Promise.resolve(onArchiveSession()).finally(() =>
+                      setArchiveBusy(false),
+                    );
+                  }}
+                >
+                  <Icon name="archive" size={13} />
+                  {working ? "Stop and archive" : "Archive"}
+                </button>
+              )}
+            </div>
+          </details>
+        )}
       </header>
 
-      <div className="cowork-session__body">
-        <div className="cowork-transcript cowork-transcript--live">
+      <div className="cowork-session__workspace">
+        <div className="cowork-session__body">
+          <div className="cowork-transcript cowork-transcript--live">
           <ChatTranscript
             run={null}
             chat={chat}
+            ariaLabel="Conversation transcript"
             showPromptBubble={false}
             showWorking={
               !workspaceBlocked && (working || chat.working.active)
@@ -864,7 +1598,10 @@ export function ProjectSessionView({
               })
             }
             onReconnect={() => setStreamNonce((current) => current + 1)}
-            onOpenFiles={() => setFilesOpen(true)}
+            onOpenFiles={openFiles}
+            generatedFileTurns={generatedFileTurns}
+            renderUserAttachments={renderPromptAttachments}
+            showChatError={false}
           />
           {loadError && (
             <div className="cowork-session__load-error" role="alert">
@@ -889,58 +1626,174 @@ export function ProjectSessionView({
               </button>
             </div>
           )}
-          {session.errorMessage && (
-            <div className="cowork-session__load-error" role="alert">
-              <Icon name="alert-triangle" size={14} />
-              <span>{session.errorMessage}</span>
+          </div>
+          {workspaceBlocked && (
+            <div className="cowork-session__workspace-alert" role="alert">
+              <Icon name="alert-triangle" size={15} />
+              <span className="cowork-session__workspace-alert-copy">
+                <strong>This project needs attention.</strong>
+                <span>
+                  Companion could not make this Project’s workspace available.
+                  Try again, or review its settings if the issue continues.
+                </span>
+                <small>
+                  Messages are paused until the project is available again.
+                </small>
+                <details>
+                  <summary>Technical details</summary>
+                  <code>{workspaceTechnicalDetail}</code>
+                </details>
+              </span>
+              <ProjectRecoveryActions
+                busy={retryBusy}
+                error={retryError}
+                onRetry={onRetryWorkspace}
+                onSettings={onProjectSettings}
+              />
             </div>
           )}
+          {!workspaceBlocked && session.status === "error" && (
+              <div className="cowork-session__turn-alert" role="status">
+                <Icon name="alert-triangle" size={15} />
+                <span className="cowork-session__turn-alert-copy">
+                  <strong>Previous task stopped</strong>
+                  <span>
+                    Your conversation and files are safe. Send a message to
+                    continue.
+                  </span>
+                  {session.errorMessage && (
+                    <details>
+                      <summary>Technical details</summary>
+                      <code>{session.errorMessage}</code>
+                    </details>
+                  )}
+                </span>
+                <span className="cowork-session__turn-alert-actions">
+                  <button
+                    type="button"
+                    className="cds-btn cds-btn--secondary cds-btn--sm"
+                    onClick={() =>
+                      setComposerFocusRequest((current) => current + 1)
+                    }
+                  >
+                    Continue
+                  </button>
+                  {onNewSession && (
+                    <button
+                      type="button"
+                      className="cds-btn cds-btn--ghost cds-btn--sm"
+                      onClick={onNewSession}
+                    >
+                      New conversation
+                    </button>
+                  )}
+                  {onArchiveSession && (
+                    <button
+                      type="button"
+                      className="cds-btn cds-btn--ghost cds-btn--sm"
+                      disabled={archiveBusy}
+                      onClick={() => {
+                        setArchiveBusy(true);
+                        void Promise.resolve(onArchiveSession()).finally(() =>
+                          setArchiveBusy(false),
+                        );
+                      }}
+                    >
+                      {archiveBusy ? "Archiving…" : "Archive"}
+                    </button>
+                  )}
+                </span>
+              </div>
+            )}
+          {!runtime.available &&
+            !workspaceBlocked &&
+            !projectArchived &&
+            !sessionArchived && (
+              <div
+                className="cowork-session__runtime-state"
+                role="status"
+                aria-live="polite"
+              >
+                <Icon name="alert-triangle" size={14} />
+                <span>
+                  <strong>Messages are temporarily paused.</strong>
+                  <span>
+                    {runtime.message ||
+                      "Companion is reconnecting to Projects. Your conversation, files, and draft are safe."}
+                  </span>
+                </span>
+                {onRetryRuntime && (
+                  <button
+                    type="button"
+                    className="cds-btn cds-btn--secondary cds-btn--sm"
+                    disabled={runtimeRetryBusy}
+                    onClick={() => {
+                      setRuntimeRetryBusy(true);
+                      void Promise.resolve(onRetryRuntime()).finally(() =>
+                        setRuntimeRetryBusy(false),
+                      );
+                    }}
+                  >
+                    {runtimeRetryBusy ? "Checking…" : "Check again"}
+                  </button>
+                )}
+              </div>
+            )}
+          <SessionComposer
+            draftKey={`companion:project-draft:${project.id}:${session.id}`}
+            disabled={composerDisabled}
+            disabledReason={composerDisabledReason}
+            focusRequest={composerFocusRequest}
+            projectFileCount={visibleFiles.length}
+            working={working}
+            onOpenProjectFiles={() => openFiles()}
+            onSend={async ({ prompt, files: nextFiles, idempotencyKey }) => {
+              const next = await sendProjectPrompt(project.id, session.id, {
+                prompt,
+                model: session.model,
+                files: nextFiles,
+                idempotencyKey,
+              });
+              const acceptedPrompt = [...next.prompts]
+                .reverse()
+                .find((candidate) => candidate.text === prompt);
+              dispatch({
+                kind: "user",
+                text: prompt,
+                messageId: acceptedPrompt?.messageId,
+              });
+              dispatch({ kind: "send" });
+              apply(next);
+            }}
+          />
         </div>
-        {workspaceBlocked && (
-          <div className="cowork-session__workspace-alert" role="alert">
-            <Icon name="alert-triangle" size={15} />
-            <span className="cowork-session__workspace-alert-copy">
-              <strong>This project needs attention.</strong>
-              <span>{workspaceErrorDetail}</span>
-              <small>
-                Messages are paused until the workspace is available again.
-              </small>
-            </span>
-            <ProjectRecoveryActions
-              busy={retryBusy}
-              error={retryError}
-              onRetry={onRetryWorkspace}
-              onSettings={onProjectSettings}
-            />
-          </div>
+        {desktopFilesPanel && filesOpen && (
+          <ProjectFilesPanel
+            projectId={project.id}
+            files={visibleFiles}
+            selection={resolvedFileSelection}
+            attachmentPreview={attachmentPreview}
+            returnFocusRef={filesReturnFocusRef}
+            onSelectionChange={(next) => {
+              setFileSelection(next);
+              setAttachmentPreview(null);
+            }}
+            onClose={() => setFilesOpen(false)}
+          />
         )}
-        <SessionComposer
-          disabled={composerDisabled}
-          disabledReason={
-            workspaceBlocked
-              ? "Messages are paused while this project needs attention."
-              : undefined
-          }
-          working={working}
-          onSend={async ({ prompt, files: nextFiles, idempotencyKey }) => {
-            const next = await sendProjectPrompt(project.id, session.id, {
-              prompt,
-              model: session.model,
-              files: nextFiles,
-              idempotencyKey,
-            });
-            dispatch({ kind: "user", text: prompt });
-            dispatch({ kind: "send" });
-            apply(next);
-          }}
-        />
       </div>
 
       <ProjectFilesDrawer
-        open={filesOpen}
+        open={!desktopFilesPanel && filesOpen}
         projectId={project.id}
-        files={files}
-        returnFocusRef={filesButtonRef}
+        files={visibleFiles}
+        selection={resolvedFileSelection}
+        attachmentPreview={attachmentPreview}
+        returnFocusRef={filesReturnFocusRef}
+        onSelectionChange={(next) => {
+          setFileSelection(next);
+          setAttachmentPreview(null);
+        }}
         onClose={() => setFilesOpen(false)}
       />
 

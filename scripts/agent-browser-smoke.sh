@@ -183,7 +183,7 @@ projects_desktop_smoke() {
       button.click();
       return true;
     })()" "could not open the New project dialog"
-    wait_for_body_contains "A persistent space where sessions share files, skills and secrets."
+    wait_for_body_contains "A persistent space where conversations share files, Skills, and Access."
     assert_eval_true "(() => {
       const dialog = document.querySelector('[role=\"dialog\"][aria-modal=\"true\"]');
       if (!dialog) return false;
@@ -196,7 +196,7 @@ projects_desktop_smoke() {
         !!dialog.querySelector('input[placeholder=\"e.g. Q4 planning\"]') &&
         !!dialog.querySelector('select') &&
         (dialog.textContent || '').includes(
-          'Eligible secrets are checked and synced automatically at activation.'
+          'Your available secrets and model connections sync automatically.'
         );
     })()" "New project dialog is missing name, model, skills, or secrets summary"
     agent-browser find role button click --name "Cancel"
@@ -473,7 +473,7 @@ assert_project_run_picker_common() {
     const description = dialog?.querySelector('.cowork-dialog__head p');
     return dialog?.querySelector('h2')?.textContent?.trim() === ${expected_title_js} &&
       description?.textContent?.trim() ===
-        'Choose the project whose files, skills and secrets this session should use.' &&
+        'Choose the Project whose files, Skills, and Access this conversation should use.' &&
       projectState &&
       !!cancel &&
       !!create &&

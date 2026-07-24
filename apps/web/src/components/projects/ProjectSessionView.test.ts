@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RunChatEvent } from "@companion/contracts";
 import type {
   ProjectDetailVM,
+  ProjectRuntimeAvailability,
   ProjectSessionVM,
   ProjectWorkspaceStatus,
 } from "@/lib/projectsModel";
@@ -74,7 +75,43 @@ vi.mock("../runs/chatStream", async (importOriginal) => {
 vi.mock("../runs/ChatTranscript", async () => {
   const { createElement } = await import("react");
   return {
-    ChatTranscript: ({ showWorking }: { showWorking: boolean }) =>
+    ChatTranscript: ({
+      showWorking,
+      renderUserAttachments,
+      generatedFileTurns = [],
+      onOpenFiles,
+    }: {
+      showWorking: boolean;
+      renderUserAttachments?: (
+        messageId: string | null,
+        text: string,
+      ) => React.ReactNode;
+      generatedFileTurns?: Array<{
+        messageId: string;
+        files: Array<{
+          id: string;
+          path: string;
+          name: string;
+          version: number;
+          contentType: string;
+          byteSize: number;
+          action: "created" | "updated";
+        }>;
+      }>;
+      onOpenFiles?: (
+        fileId?: string,
+        version?: number,
+        file?: {
+          id: string;
+          path: string;
+          name: string;
+          version: number;
+          contentType: string;
+          byteSize: number;
+          action: "created" | "updated";
+        },
+      ) => void;
+    }) =>
       createElement(
         "div",
         {
@@ -82,6 +119,24 @@ vi.mock("../runs/ChatTranscript", async () => {
           "data-working": String(showWorking),
         },
         "Existing transcript",
+        renderUserAttachments?.(
+          "message-with-attachment",
+          "Review the brief",
+        ),
+        ...generatedFileTurns.flatMap((turn) =>
+          turn.files.map((file) =>
+            createElement(
+              "button",
+              {
+                key: `${turn.messageId}:${file.id}:${file.version}`,
+                type: "button",
+                "data-generated-file-id": file.id,
+                onClick: () => onOpenFiles?.(file.id, file.version, file),
+              },
+              file.name,
+            ),
+          ),
+        ),
       ),
   };
 });
@@ -95,10 +150,15 @@ function session(
     model: "openai/gpt-5",
     status: "queued",
     history: [],
+    prompts: [],
     pendingPrompts: [],
     latestEventSequence: 0,
     createdAt: NOW,
+    updatedAt: NOW,
     lastActiveAt: NOW,
+    archivedAt: null,
+    lastViewedAt: NOW,
+    isUnread: false,
     errorMessage: null,
     ...overrides,
   };
@@ -125,8 +185,12 @@ function project({
     statusDetail,
     skillCount: 0,
     sessionCount: 1,
+    activeSessionCount: 1,
+    archivedSessionCount: 0,
+    unreadSessionCount: 0,
     fileCount: 0,
     secretCount: 2,
+    archivedAt: null,
     createdAt: NOW,
     updatedAt: NOW,
     recentSessions: [activeSession],
@@ -140,19 +204,33 @@ function project({
       sleepAt: null,
     },
     modelConnectionCount: 1,
+    access: {
+      secrets: [],
+      modelConnections: [],
+    },
   };
 }
 
 async function renderSessionView(
   projectDetail: ProjectDetailVM,
   {
+    onNewSession,
+    onRenameSession,
+    onArchiveSession,
     onProjectSettings = vi.fn(),
     onRetryWorkspace = vi.fn(),
+    runtime = { available: true, message: null },
+    onRetryRuntime,
     retryBusy = false,
     retryError = null,
   }: {
+    onNewSession?: () => void;
+    onRenameSession?: () => void;
+    onArchiveSession?: () => Promise<void> | void;
     onProjectSettings?: () => void;
     onRetryWorkspace?: () => void;
+    runtime?: ProjectRuntimeAvailability;
+    onRetryRuntime?: () => Promise<void> | void;
     retryBusy?: boolean;
     retryError?: string | null;
   } = {},
@@ -167,8 +245,13 @@ async function renderSessionView(
         project: projectDetail,
         initialSession: projectDetail.sessions[0]!,
         onOpenNavigation: vi.fn(),
+        onNewSession,
+        onRenameSession,
+        onArchiveSession,
         onProjectSettings,
         onRetryWorkspace,
+        runtime,
+        onRetryRuntime,
         retryBusy,
         retryError,
         onSessionChange: vi.fn(),
@@ -177,6 +260,15 @@ async function renderSessionView(
     await Promise.resolve();
   });
   return { container, onProjectSettings, onRetryWorkspace };
+}
+
+function button(scope: ParentNode, text: string): HTMLButtonElement {
+  const match = [...scope.querySelectorAll("button")].find((candidate) =>
+    candidate.textContent?.trim().includes(text),
+  );
+  if (!(match instanceof HTMLButtonElement))
+    throw new Error(`Button not found: ${text}`);
+  return match;
 }
 
 function setValue(input: HTMLTextAreaElement, value: string): void {
@@ -193,10 +285,28 @@ function setValue(input: HTMLTextAreaElement, value: string): void {
 afterEach(() => {
   vi.clearAllMocks();
   act(() => roots.splice(0).forEach((root) => root.unmount()));
+  window.sessionStorage.clear();
   document.body.innerHTML = "";
 });
 
 describe("ProjectSessionView workspace state", () => {
+  it("keeps the conversation title as the mobile header landmark and de-emphasizes passive status", async () => {
+    const available = project({
+      status: "stopped",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    available.sessions = [session({ status: "completed" })];
+    const { container } = await renderSessionView(available);
+
+    expect(container.querySelector("h1")?.textContent).toBe(
+      "Draft the launch calendar",
+    );
+    expect(
+      container.querySelector(".cowork-session__status")?.classList,
+    ).toContain("is-passive");
+  });
+
   it.each([
     {
       status: "error" as const,
@@ -263,7 +373,7 @@ describe("ProjectSessionView workspace state", () => {
       );
       expect(alert?.textContent).toContain(expectedDetail);
       expect(alert?.textContent).toContain(
-        "Messages are paused until the workspace is available again.",
+        "Messages are paused until the project is available again.",
       );
 
       const textarea = container.querySelector<HTMLTextAreaElement>("textarea");
@@ -337,9 +447,693 @@ describe("ProjectSessionView workspace state", () => {
       ["Project settings", false],
     ]);
   });
+
+  it("keeps an interrupted task recoverable without marking the Project as broken", async () => {
+    const available = project({
+      status: "running",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    available.sessions = [
+      session({
+        status: "error",
+        errorMessage:
+          "The previous agent turn was interrupted and could not be resumed safely.",
+      }),
+    ];
+    const onNewSession = vi.fn();
+    const onArchiveSession = vi.fn().mockResolvedValue(undefined);
+    const { container } = await renderSessionView(available, {
+      onNewSession,
+      onArchiveSession,
+    });
+
+    expect(
+      container.querySelector(".cowork-session__top .cds-status")
+        ?.textContent,
+    ).toContain("Task stopped");
+    expect(
+      container.querySelector(".cowork-session__workspace-alert"),
+    ).toBeNull();
+    const alert = container.querySelector<HTMLElement>(
+      ".cowork-session__turn-alert",
+    );
+    expect(alert?.getAttribute("role")).toBe("status");
+    expect(alert?.textContent).toContain("Your conversation and files are safe");
+    expect(alert?.querySelector("details")?.hasAttribute("open")).toBe(false);
+
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    expect(textarea.disabled).toBe(false);
+    act(() =>
+      [...alert!.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Continue")
+        ?.click(),
+    );
+    expect(document.activeElement).toBe(textarea);
+
+    act(() =>
+      [...alert!.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "New conversation")
+        ?.click(),
+    );
+    expect(onNewSession).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      [...alert!.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Archive")
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(onArchiveSession).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a completed conversation open for a follow-up", async () => {
+    const available = project({
+      status: "running",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    available.sessions = [session({ status: "completed" })];
+
+    const { container } = await renderSessionView(available);
+
+    expect(
+      container.querySelector<HTMLTextAreaElement>("textarea")?.disabled,
+    ).toBe(false);
+    expect(
+      container.querySelector<HTMLTextAreaElement>("textarea")?.placeholder,
+    ).toBe("Message the agent…");
+  });
+
+  it("pauses messages accessibly while the Projects runtime is unavailable", async () => {
+    const available = project({
+      status: "running",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    available.sessions = [session({ status: "completed" })];
+    const onRetryRuntime = vi.fn(async () => undefined);
+
+    const { container } = await renderSessionView(available, {
+      runtime: {
+        available: false,
+        message: "Project runtime is starting.",
+      },
+      onRetryRuntime,
+    });
+
+    const textarea =
+      container.querySelector<HTMLTextAreaElement>("textarea")!;
+    expect(textarea.disabled).toBe(true);
+    expect(textarea.placeholder).toBe(
+      "Messages are paused while Projects reconnects.",
+    );
+    const state = container.querySelector<HTMLElement>(
+      ".cowork-session__runtime-state[role='status']",
+    );
+    expect(state?.textContent).toContain("Messages are temporarily paused.");
+    expect(state?.textContent).toContain("Project runtime is starting.");
+
+    await act(async () => {
+      [...state!.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Check again")
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(onRetryRuntime).toHaveBeenCalledOnce();
+  });
+
+  it("reconciles an idle conversation rename and archive without losing its draft or focus", async () => {
+    vi.useFakeTimers();
+    const available = project({
+      status: "running",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    const idle = session({ status: "idle" });
+    const renamed = { ...idle, title: "Launch calendar with sources" };
+    const archived = { ...renamed, archivedAt: NOW };
+    available.sessions = [idle];
+    projectRpc.fetchProjectSession
+      .mockResolvedValueOnce(renamed)
+      .mockResolvedValueOnce(archived);
+
+    const { container } = await renderSessionView(available);
+    const textarea =
+      container.querySelector<HTMLTextAreaElement>("textarea")!;
+    setValue(textarea, "Keep this follow-up draft");
+    act(() => textarea.focus());
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+
+    expect(container.querySelector("h1")?.textContent).toBe(
+      "Launch calendar with sources",
+    );
+    expect(textarea.value).toBe("Keep this follow-up draft");
+    expect(document.activeElement).toBe(textarea);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+
+    expect(textarea.value).toBe("Keep this follow-up draft");
+    expect(textarea.disabled).toBe(true);
+    expect(
+      container.querySelector(".cowork-session__top .cds-status")?.textContent,
+    ).toContain("Archived");
+  });
+
+  it("keeps archived Project conversations readable but not writable", async () => {
+    const archived = project({
+      status: "stopped",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    archived.archivedAt = NOW;
+    archived.sessions = [session({ status: "completed" })];
+
+    const { container } = await renderSessionView(archived);
+
+    expect(
+      container.querySelector(".cowork-session__top .cds-status")
+        ?.textContent,
+    ).toContain("Archived");
+    expect(
+      container.querySelector<HTMLTextAreaElement>("textarea")?.disabled,
+    ).toBe(true);
+    expect(
+      container.querySelector<HTMLTextAreaElement>("textarea")?.placeholder,
+    ).toBe("Restore this project to continue the conversation.");
+  });
+
+  it("previews a durable prompt attachment beside the conversation", async () => {
+    const available = project({
+      status: "running",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    available.sessions = [
+      session({
+        status: "completed",
+        prompts: [
+          {
+            id: "33333333-3333-4333-8333-333333333333",
+            messageId: "message-with-attachment",
+            text: "Review the brief",
+            status: "completed",
+            attachments: [
+              {
+                id: "44444444-4444-4444-8444-444444444444",
+                fileName: "brief.png",
+                contentType: "image/png",
+                byteSize: 42,
+                workspacePath: "files/brief.png",
+                status: "uploaded",
+                createdAt: NOW,
+              },
+            ],
+            fileChanges: [],
+            createdAt: NOW,
+            completedAt: NOW,
+            errorCode: null,
+            errorMessage: null,
+          },
+        ],
+      }),
+    ];
+
+    const { container } = await renderSessionView(available);
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Preview brief.png"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+
+    const preview = document.body.querySelector<HTMLElement>(
+      '.cowork-file-preview[aria-label="Preview brief.png"]',
+    );
+    expect(preview).not.toBeNull();
+    expect(preview?.querySelector("img")?.getAttribute("src")).toContain(
+      "/attachments/44444444-4444-4444-8444-444444444444",
+    );
+    expect(
+      document.body.querySelector('a[target="_blank"]'),
+    ).toBeNull();
+  });
+
+  it("keeps generated file versions independently previewable and switches the controlled target atomically", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: false,
+        media: "(min-width: 1024px)",
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    );
+    const deletedFileId = "55555555-5555-4555-8555-555555555551";
+    const changedFileId = "55555555-5555-4555-8555-555555555552";
+    const officeFileId = "55555555-5555-4555-8555-555555555553";
+    const currentChangedFile = {
+      id: changedFileId,
+      path: "files/changed.pdf",
+      name: "changed.pdf",
+      version: 2,
+      contentType: "application/pdf",
+      byteSize: 900,
+      conflictDetected: false,
+      modifiedBySessionId: SESSION_ID,
+      modifiedByPromptId: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const available = project({
+      status: "running",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    available.files = [currentChangedFile];
+    available.sessions = [
+      session({
+        status: "completed",
+        prompts: [
+          {
+            id: "33333333-3333-4333-8333-333333333333",
+            messageId: "generated-files-message",
+            text: "Create two images",
+            status: "completed",
+            attachments: [],
+            fileChanges: [
+              {
+                projectId: PROJECT_ID,
+                fileId: deletedFileId,
+                path: "files/deleted.png",
+                kind: "created",
+                version: 1,
+                contentType: "image/png",
+                byteSize: 120,
+                modifiedBySessionId: SESSION_ID,
+                modifiedByPromptId:
+                  "33333333-3333-4333-8333-333333333333",
+                conflictDetected: false,
+                createdAt: NOW,
+              },
+              {
+                projectId: PROJECT_ID,
+                fileId: changedFileId,
+                path: "files/changed.png",
+                kind: "updated",
+                version: 1,
+                contentType: "image/png",
+                byteSize: 240,
+                modifiedBySessionId: SESSION_ID,
+                modifiedByPromptId:
+                  "33333333-3333-4333-8333-333333333333",
+                conflictDetected: false,
+                createdAt: NOW,
+              },
+              {
+                projectId: PROJECT_ID,
+                fileId: officeFileId,
+                path: "files/deck.pptx",
+                kind: "created",
+                version: 1,
+                contentType:
+                  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                byteSize: 1_024,
+                modifiedBySessionId: SESSION_ID,
+                modifiedByPromptId:
+                  "33333333-3333-4333-8333-333333333333",
+                conflictDetected: false,
+                createdAt: NOW,
+              },
+            ],
+            createdAt: NOW,
+            completedAt: NOW,
+            errorCode: null,
+            errorMessage: null,
+          },
+        ],
+      }),
+    ];
+    projectRpc.fetchProjectFiles.mockResolvedValue([currentChangedFile]);
+    const { container } = await renderSessionView(available);
+    const generatedButton = (fileId: string) =>
+      container.querySelector<HTMLButtonElement>(
+        `[data-generated-file-id="${fileId}"]`,
+      )!;
+
+    await act(async () => {
+      generatedButton(deletedFileId).click();
+      await Promise.resolve();
+    });
+    let preview = document.body.querySelector<HTMLElement>(
+      '.cowork-file-preview[aria-label="Preview deleted.png"]',
+    )!;
+    expect(preview.querySelector("img")?.getAttribute("src")).toBe(
+      `/v1/projects/${PROJECT_ID}/files/${deletedFileId}/versions/1`,
+    );
+
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>(
+          '.project-files-drawer button[aria-label="Close files"]',
+        )!
+        .click();
+      await Promise.resolve();
+      generatedButton(deletedFileId).click();
+      await Promise.resolve();
+    });
+    preview = document.body.querySelector<HTMLElement>(
+      '.cowork-file-preview[aria-label="Preview deleted.png"]',
+    )!;
+    expect(preview.querySelector("img")?.getAttribute("src")).toContain(
+      `/${deletedFileId}/versions/1`,
+    );
+
+    await act(async () => {
+      generatedButton(changedFileId).click();
+      await Promise.resolve();
+    });
+    preview = document.body.querySelector<HTMLElement>(
+      '.cowork-file-preview[aria-label="Preview changed.png"]',
+    )!;
+    expect(preview.querySelector("img")?.getAttribute("src")).toBe(
+      `/v1/projects/${PROJECT_ID}/files/${changedFileId}/versions/1`,
+    );
+    expect(preview.querySelector("iframe")).toBeNull();
+    expect(preview.textContent).not.toContain("900 B");
+    expect(preview.textContent).toContain("240 B");
+
+    await act(async () => {
+      generatedButton(officeFileId).click();
+      await Promise.resolve();
+    });
+    preview = document.body.querySelector<HTMLElement>(
+      '.cowork-file-preview[aria-label="Preview deck.pptx"]',
+    )!;
+    expect(preview.textContent).toContain("Preview not available");
+    expect(
+      preview
+        .querySelector<HTMLAnchorElement>(
+          'a[aria-label="Download deck.pptx version 1"]',
+        )
+        ?.getAttribute("href"),
+    ).toBe(
+      `/v1/projects/${PROJECT_ID}/files/${officeFileId}/versions/1`,
+    );
+  });
+
+  it("refreshes a selected current file from the live files projection", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        media: "(min-width: 1024px)",
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    );
+    const fileId = "55555555-5555-4555-8555-555555555554";
+    const initialFile = {
+      id: fileId,
+      path: "files/live.png",
+      name: "live.png",
+      version: 1,
+      contentType: "image/png",
+      byteSize: 120,
+      conflictDetected: false,
+      modifiedBySessionId: SESSION_ID,
+      modifiedByPromptId: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const updatedFile = {
+      ...initialFile,
+      path: "files/live.mp4",
+      name: "live.mp4",
+      version: 2,
+      contentType: "video/mp4",
+      byteSize: 900,
+      updatedAt: "2026-07-24T06:00:00.000Z",
+    };
+    const available = project({
+      status: "ready",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    available.files = [initialFile];
+    available.sessions = [session({ status: "idle" })];
+    projectRpc.fetchProjectFiles
+      .mockResolvedValueOnce([initialFile])
+      .mockResolvedValueOnce([updatedFile]);
+    const { container } = await renderSessionView(available);
+
+    await act(async () => {
+      button(container, "Files").click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      button(document.body, "Preview").click();
+      await Promise.resolve();
+    });
+    let preview = document.body.querySelector<HTMLElement>(
+      '.cowork-file-preview[aria-label="Preview live.png"]',
+    )!;
+    expect(preview.querySelector("img")).not.toBeNull();
+    expect(preview.textContent).toContain("v1");
+    const onEvent = streamRpc.openProjectStream.mock.calls.at(-1)?.[2];
+
+    await act(async () => {
+      onEvent?.({ type: "artifacts.updated", count: 1 });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    preview = document.body.querySelector<HTMLElement>(
+      '.cowork-file-preview[aria-label="Preview live.mp4"]',
+    )!;
+    expect(preview.querySelector("img")).toBeNull();
+    expect(preview.querySelector("video")).not.toBeNull();
+    expect(preview.textContent).toContain("v2");
+    expect(preview.textContent).toContain("900 B");
+  });
+
+  it("restores an exact generated target after selecting another desktop file", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        media: "(min-width: 1024px)",
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    );
+    const generatedId = "55555555-5555-4555-8555-555555555555";
+    const otherId = "55555555-5555-4555-8555-555555555556";
+    const available = project({
+      status: "ready",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    available.files = [
+      {
+        id: generatedId,
+        path: "files/result.png",
+        name: "result.png",
+        version: 2,
+        contentType: "image/png",
+        byteSize: 300,
+        conflictDetected: false,
+        modifiedBySessionId: SESSION_ID,
+        modifiedByPromptId: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+      {
+        id: otherId,
+        path: "files/other.jpg",
+        name: "other.jpg",
+        version: 1,
+        contentType: "image/jpeg",
+        byteSize: 500,
+        conflictDetected: false,
+        modifiedBySessionId: SESSION_ID,
+        modifiedByPromptId: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+    ];
+    available.sessions = [
+      session({
+        status: "completed",
+        prompts: [
+          {
+            id: "33333333-3333-4333-8333-333333333334",
+            messageId: "desktop-generated-file",
+            text: "Create the result",
+            status: "completed",
+            attachments: [],
+            fileChanges: [
+              {
+                projectId: PROJECT_ID,
+                fileId: generatedId,
+                path: "files/result.png",
+                kind: "created",
+                version: 1,
+                contentType: "image/png",
+                byteSize: 200,
+                modifiedBySessionId: SESSION_ID,
+                modifiedByPromptId:
+                  "33333333-3333-4333-8333-333333333334",
+                conflictDetected: false,
+                createdAt: NOW,
+              },
+            ],
+            createdAt: NOW,
+            completedAt: NOW,
+            errorCode: null,
+            errorMessage: null,
+          },
+        ],
+      }),
+    ];
+    projectRpc.fetchProjectFiles.mockResolvedValue(available.files);
+    const { container } = await renderSessionView(available);
+    const generatedButton = container.querySelector<HTMLButtonElement>(
+      `[data-generated-file-id="${generatedId}"]`,
+    )!;
+
+    await act(async () => {
+      generatedButton.click();
+      await Promise.resolve();
+    });
+    const otherCard = [
+      ...document.body.querySelectorAll<HTMLElement>(".project-file-card"),
+    ].find((candidate) => candidate.textContent?.includes("other.jpg"))!;
+    await act(async () => {
+      button(otherCard, "Preview").click();
+      await Promise.resolve();
+    });
+    expect(
+      document.body.querySelector(
+        '.cowork-file-preview[aria-label="Preview other.jpg"]',
+      ),
+    ).not.toBeNull();
+
+    await act(async () => {
+      generatedButton.click();
+      await Promise.resolve();
+    });
+    const preview = document.body.querySelector<HTMLElement>(
+      '.cowork-file-preview[aria-label="Preview result.png"]',
+    )!;
+    expect(preview.querySelector("img")?.getAttribute("src")).toBe(
+      `/v1/projects/${PROJECT_ID}/files/${generatedId}/versions/1`,
+    );
+    expect(preview.textContent).toContain("200 B");
+  });
+
+  it("restores focus after closing the desktop files panel", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: true,
+        media: "(min-width: 1024px)",
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    );
+    const available = project({
+      status: "running",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    projectRpc.fetchProjectFiles.mockResolvedValue([]);
+    const { container } = await renderSessionView(available);
+    const filesButton = container.querySelector<HTMLButtonElement>(
+      ".cowork-session__files",
+    )!;
+    await act(async () => {
+      filesButton.click();
+      await Promise.resolve();
+    });
+    const close = container.querySelector<HTMLButtonElement>(
+      '.cowork-session-files-panel button[aria-label="Close files"]',
+    )!;
+    await act(async () => {
+      close.focus();
+      close.click();
+      await Promise.resolve();
+    });
+
+    expect(document.activeElement).toBe(filesButton);
+  });
 });
 
 describe("Project SessionComposer", () => {
+  it("restores a draft for the same conversation", async () => {
+    const draftKey = "companion:project-draft:test-session";
+    const firstContainer = document.createElement("div");
+    document.body.appendChild(firstContainer);
+    const firstRoot = createRoot(firstContainer);
+    await act(async () => {
+      firstRoot.render(
+        React.createElement(SessionComposer, {
+          draftKey,
+          disabled: false,
+          working: false,
+          onSend: vi.fn(),
+        }),
+      );
+      await Promise.resolve();
+    });
+    setValue(firstContainer.querySelector("textarea")!, "Keep this draft");
+    expect(window.sessionStorage.getItem(draftKey)).toBe("Keep this draft");
+    act(() => firstRoot.unmount());
+
+    const secondContainer = document.createElement("div");
+    document.body.appendChild(secondContainer);
+    const secondRoot = createRoot(secondContainer);
+    roots.push(secondRoot);
+    await act(async () => {
+      secondRoot.render(
+        React.createElement(SessionComposer, {
+          draftKey,
+          disabled: false,
+          working: false,
+          onSend: vi.fn(),
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(
+      secondContainer.querySelector<HTMLTextAreaElement>("textarea")?.value,
+    ).toBe("Keep this draft");
+  });
+
   it("reuses the exact prompt idempotency key after a lost response", async () => {
     const onSend = vi
       .fn()

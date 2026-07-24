@@ -162,6 +162,7 @@ PROJECT="$(workspace_slug)"
 # Paths (all workspace state under .conductor-pg/)
 # ---------------------------------------------------------------------------
 STATE_DIR="$REPO_ROOT/.conductor-pg"
+RUN_LOCK="$STATE_DIR/run.lock"
 SECRETS_KEY_FILE="$STATE_DIR/secrets-master-key"
 PG_DATA="$STATE_DIR/postgres/data"
 # Socket lives in a short /tmp path, NOT under the (long) workspace dir: the
@@ -202,6 +203,10 @@ S3_ENDPOINT="http://127.0.0.1:${MINIO_API_PORT}"
 PG_BIN=""
 HAS_MINIO=false
 HAS_MAILPIT=false
+RUN_LOCK_HELD=false
+PG_OWNED=false
+MINIO_OWNED=false
+MAILPIT_OWNED=false
 
 # ---------------------------------------------------------------------------
 # Detection helpers
@@ -232,6 +237,55 @@ is_port_open() {
   lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
 }
 
+launcher_pid_running() {
+  local pid="$1" cwd command
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1 || true)"
+  command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  case "$cwd" in
+    "$REPO_ROOT"|"$REPO_ROOT"/*) ;;
+    *) return 1 ;;
+  esac
+  case "$command" in
+    *dev-conductor.sh*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+acquire_run_lock() {
+  local owner_pid="" attempts=0
+  mkdir -p "$STATE_DIR"
+
+  while ! ln -s "$$" "$RUN_LOCK" 2>/dev/null; do
+    owner_pid="$(readlink "$RUN_LOCK" 2>/dev/null || true)"
+    if launcher_pid_running "$owner_pid"; then
+      die "Companion dev is already starting or running for this workspace (launcher PID $owner_pid). Stop the existing Conductor run before starting it again."
+    fi
+
+    attempts=$((attempts + 1))
+    [ "$attempts" -le 3 ] \
+      || die "Could not acquire workspace launcher lock: $RUN_LOCK"
+    warn "Removing stale workspace launcher lock${owner_pid:+ (PID $owner_pid)}"
+    if [ -L "$RUN_LOCK" ] || [ -f "$RUN_LOCK" ]; then
+      rm -f "$RUN_LOCK"
+    elif [ -d "$RUN_LOCK" ]; then
+      rmdir "$RUN_LOCK" 2>/dev/null \
+        || die "Launcher lock path is a non-empty directory: $RUN_LOCK"
+    fi
+  done
+
+  RUN_LOCK_HELD=true
+}
+
+release_run_lock() {
+  [ "$RUN_LOCK_HELD" = true ] || return 0
+  if [ "$(readlink "$RUN_LOCK" 2>/dev/null || true)" = "$$" ]; then
+    rm -f "$RUN_LOCK"
+  fi
+  RUN_LOCK_HELD=false
+}
+
 # A PID is "ours" when its working directory is inside this repo — i.e. a dev
 # or native-service process this workspace started. We only ever kill our own
 # stale processes; an unrelated process on a derived port is a hard error so a
@@ -249,7 +303,7 @@ free_port() {
   local port="$1" label="$2" pids pid repo_pids="" foreign_pids="" waited=0
   local -a repo_pid_array
   is_port_open "$port" || return 0
-  pids="$(lsof -ti :"$port" 2>/dev/null || true)"
+  pids="$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
   if [ -z "$pids" ]; then
     warn "$label port $port in use but PID not found"; return 0
   fi
@@ -365,6 +419,7 @@ start_postgres() {
   fi
 
   if ! postgres_running; then
+    free_port "$PG_PORT" "postgres"
     info "pg_ctl start → port $PG_PORT"
     "$PG_BIN/pg_ctl" -D "$PG_DATA" -l "$PG_LOG" \
       -o "-p $PG_PORT -k $PG_SOCK -h 127.0.0.1" -w start >/dev/null \
@@ -379,6 +434,7 @@ start_postgres() {
   done
   "$PG_BIN/pg_isready" -h 127.0.0.1 -p "$PG_PORT" -U postgres >/dev/null 2>&1 \
     || die "Postgres not ready on 127.0.0.1:$PG_PORT after 15s. See $PG_LOG"
+  PG_OWNED=true
 
   # Idempotent: ensures role+db exist on every run (self-heals a cluster that
   # was initialised but never bootstrapped).
@@ -425,6 +481,7 @@ start_minio() {
   mkdir -p "$MINIO_DATA" "$(dirname "$MINIO_LOG")"
 
   if minio_running && is_port_open "$MINIO_API_PORT"; then
+    MINIO_OWNED=true
     ok "MinIO already running on :$MINIO_API_PORT (PID $(cat "$MINIO_PID"))"
   else
     if minio_running; then
@@ -440,6 +497,7 @@ start_minio() {
         --console-address "127.0.0.1:${MINIO_CONSOLE_PORT}" \
         >"$MINIO_LOG" 2>&1 &
     echo $! >"$MINIO_PID"
+    MINIO_OWNED=true
     ok "MinIO started (PID $(cat "$MINIO_PID"))"
   fi
 
@@ -474,6 +532,7 @@ start_mailpit() {
   step "Starting Mailpit (native, optional)"
   mkdir -p "$(dirname "$MAILPIT_LOG")"
   if mailpit_running && is_port_open "$MAILPIT_SMTP_PORT"; then
+    MAILPIT_OWNED=true
     ok "Mailpit already running on :$MAILPIT_SMTP_PORT (PID $(cat "$MAILPIT_PID"))"
     return 0
   fi
@@ -489,12 +548,30 @@ start_mailpit() {
     --listen "127.0.0.1:${MAILPIT_UI_PORT}" \
     >"$MAILPIT_LOG" 2>&1 &
   echo $! >"$MAILPIT_PID"
+  MAILPIT_OWNED=true
   ok "Mailpit started (PID $(cat "$MAILPIT_PID"))"
 }
 
 # ---------------------------------------------------------------------------
 # Cleanup trap — stop native services when concurrently exits.
 # ---------------------------------------------------------------------------
+stop_owned_services() {
+  if [ "$MAILPIT_OWNED" = true ] && mailpit_running; then
+    kill "$(cat "$MAILPIT_PID")" 2>/dev/null || true
+    rm -f "$MAILPIT_PID"
+  fi
+  if [ "$MINIO_OWNED" = true ] && minio_running; then
+    kill "$(cat "$MINIO_PID")" 2>/dev/null || true
+    rm -f "$MINIO_PID"
+  fi
+  if [ "$PG_OWNED" = true ] && [ -n "$PG_BIN" ] && postgres_running; then
+    "$PG_BIN/pg_ctl" -D "$PG_DATA" -m fast stop >/dev/null 2>&1 || true
+  fi
+  if [ "$PG_OWNED" = true ]; then
+    rm -rf "$PG_SOCK"
+  fi
+}
+
 stop_services() {
   if mailpit_running; then kill "$(cat "$MAILPIT_PID")" 2>/dev/null || true; rm -f "$MAILPIT_PID"; fi
   if minio_running;   then kill "$(cat "$MINIO_PID")"   2>/dev/null || true; rm -f "$MINIO_PID";   fi
@@ -505,9 +582,10 @@ stop_services() {
 }
 
 cleanup() {
-  trap - INT TERM EXIT
+  trap - HUP INT TERM EXIT
   printf '\n%s%sShutting down…%s\n' "$BOLD" "$YELLOW" "$RESET"
-  stop_services
+  stop_owned_services
+  release_run_lock
   ok "Native services stopped"
 }
 
@@ -624,7 +702,16 @@ launch_apps() {
 # Commands
 # ---------------------------------------------------------------------------
 cmd_run() {
-  trap cleanup INT TERM EXIT
+  # Acquire ownership before installing cleanup traps. A duplicate invocation
+  # must never tear down the services owned by the already-running launcher.
+  require_command lsof "brew install lsof (macOS) / apt-get install lsof (Debian)"
+  acquire_run_lock
+  trap cleanup EXIT
+  # Conductor stops run scripts with SIGHUP before its final SIGKILL. Exiting
+  # here routes every supported stop signal through the EXIT cleanup.
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   check_prerequisites
   ensure_secrets_master_key
   start_postgres

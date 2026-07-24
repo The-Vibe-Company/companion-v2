@@ -44,6 +44,9 @@ function file(overrides: Partial<ProjectFileVM> = {}): ProjectFileVM {
     contentType: "text/markdown",
     byteSize: 1_024,
     conflictDetected: true,
+    modifiedBySessionId: SESSION_ID,
+    modifiedByPromptId: null,
+    createdAt: NOW,
     updatedAt: NOW,
     ...overrides,
   };

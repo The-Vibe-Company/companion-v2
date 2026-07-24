@@ -11,6 +11,8 @@ import type {
 import {
   billingRuntimeConfig,
   createRunRedactor,
+  EntitlementDeniedError,
+  extendSandboxUsageReservation,
   loadSecretsMasterKey,
   OPENCODE_SERVER_USERNAME,
   redactAndBoundProjectEvents,
@@ -92,6 +94,7 @@ import {
   deleteSkillArchive,
   getSkillArchive,
   isStoragePreconditionFailure,
+  projectFileCacheKey,
   putSkillArchive,
 } from "@companion/storage";
 import { sql as drizzleSql } from "drizzle-orm";
@@ -99,11 +102,14 @@ import type { Supervisor } from "./billingSupervisor";
 import { projectWorkerConfig, type ProjectWorkerConfig } from "./config";
 import { sweepProjectAttachmentOrphans } from "./runAttachmentCleanup";
 
+export { projectFileCacheKey } from "@companion/storage";
+
 const PROJECT_FILE_MAX_COUNT = 1_000;
 const PROJECT_FILE_MAX_BYTES = 25 * 1024 * 1024;
 const PROJECT_FILE_MAX_TOTAL_BYTES = 250 * 1024 * 1024;
 const MATERIALIZATION_POLL_MS = 5_000;
 const PROMPT_STATE_POLL_MS = 500;
+const PROMPT_IDLE_CONFIRMATION_MS = 2_000;
 const RESERVED_PROJECT_FILE_ROOTS = new Set([
   ".claude",
   ".companion",
@@ -135,6 +141,8 @@ export interface ProjectSessionStopJob extends CoreProjectSessionStopJob {}
 export interface ProjectMaterializationPlan {
   desiredGeneration: number;
   appliedGeneration: number;
+  desiredFileRevision: number;
+  appliedFileRevision: number;
   checkpointGeneration: number;
   skills: SkillBundle[];
   /** Existing files that must be restored when a checkpoint did not already contain them. */
@@ -159,6 +167,7 @@ export interface ProjectCachedFile {
   storageKey: string;
   modifiedAt: Date;
   modifiedBySessionId: string | null;
+  modifiedByPromptId: string | null;
   baseVersion: number | null;
 }
 
@@ -171,6 +180,7 @@ export interface ProjectFileBaseline {
 export interface ProjectDeletedFile {
   path: string;
   modifiedBySessionId: string | null;
+  modifiedByPromptId: string | null;
   baseVersion: number;
 }
 
@@ -296,6 +306,7 @@ export interface ProjectWorkspaceStore {
     checkpointCreatedAt?: Date | null;
     checkpointGeneration?: number;
     appliedGeneration?: number;
+    appliedFileRevision?: number;
     activationRevision?: number;
     lastActivityAt?: Date;
     idleDeadlineAt?: Date | null;
@@ -431,6 +442,15 @@ export interface ProjectUsageMeter {
     job: ProjectWorkspaceJob;
     activationRevision: number;
   }): Promise<{ limitMs: number } | null>;
+  /**
+   * Idempotently admit enough total activation runtime to keep a completed turn warm through its
+   * idle deadline. Implementations extend only the missing delta and return the refreshed budget.
+   */
+  extendIdleRunway(input: {
+    job: ProjectWorkspaceJob;
+    activationRevision: number;
+    minimumRuntimeMs: number;
+  }): Promise<{ limitMs: number } | null>;
   record(input: {
     job: ProjectWorkspaceJob;
     activationRevision: number;
@@ -454,21 +474,6 @@ export interface ProjectFileStorage {
     signal?: AbortSignal;
   }): Promise<string>;
   delete(key: string, signal?: AbortSignal): Promise<void>;
-}
-
-export function projectFileCacheKey(input: {
-  orgId: string;
-  projectId: string;
-  checksum: string;
-}): string {
-  const digest = /^sha256:([0-9a-f]{64})$/.exec(input.checksum)?.[1];
-  if (!digest) throw new Error("Project file checksum must be sha256");
-  for (const value of [input.orgId, input.projectId]) {
-    if (!value || value.includes("/") || value.includes("\\") || value.includes("..")) {
-      throw new Error("Project file cache identity is invalid");
-    }
-  }
-  return `${input.orgId}/project-files/${input.projectId}/sha256/${digest}`;
 }
 
 export function createProjectFileStorage(): ProjectFileStorage {
@@ -610,6 +615,7 @@ async function mirrorProjectFiles(input: {
   redactor: RunRedactor;
   baseline: Map<string, ProjectFileBaseline>;
   modifiedBySessionId: string | null;
+  modifiedByPromptId: string | null;
   changedPaths?: ReadonlySet<string>;
   signal: AbortSignal;
 }): Promise<void> {
@@ -660,6 +666,7 @@ async function mirrorProjectFiles(input: {
       storageKey,
       modifiedAt: file.modifiedAt,
       modifiedBySessionId: input.modifiedBySessionId,
+      modifiedByPromptId: input.modifiedByPromptId,
       baseVersion: base?.version ?? null,
     });
   }
@@ -687,6 +694,7 @@ async function mirrorProjectFiles(input: {
     .map((file) => ({
       path: file.path,
       modifiedBySessionId: input.modifiedBySessionId,
+      modifiedByPromptId: input.modifiedByPromptId,
       baseVersion: file.version,
     }));
   await input.store.persistProjectFileDeletions({
@@ -790,6 +798,7 @@ async function persistCapturedTurnFiles(input: {
   ref: ProjectWorkspaceRef;
   redactor: RunRedactor;
   sessionId: string;
+  promptId: string;
   changes: ProjectFileChange[];
   turnBaseline: Map<string, Buffer>;
   versionBaseline: Map<string, ProjectFileBaseline>;
@@ -811,6 +820,7 @@ async function persistCapturedTurnFiles(input: {
       deleted.push({
         path: workspacePath,
         modifiedBySessionId: input.sessionId,
+        modifiedByPromptId: input.promptId,
         baseVersion: baseVersion ?? 0,
       });
       continue;
@@ -851,6 +861,7 @@ async function persistCapturedTurnFiles(input: {
       storageKey,
       modifiedAt: new Date(),
       modifiedBySessionId: input.sessionId,
+      modifiedByPromptId: input.promptId,
       baseVersion,
     });
   }
@@ -876,6 +887,7 @@ async function persistCapturedTurnFiles(input: {
     redactor: input.redactor,
     baseline: await loadProjectFileBaselineMap(input),
     modifiedBySessionId: null,
+    modifiedByPromptId: null,
     changedPaths,
     signal: input.signal,
   });
@@ -1120,6 +1132,7 @@ async function processProjectPrompt(input: {
             storageKey,
             modifiedAt: new Date(),
             modifiedBySessionId: input.prompt.sessionId,
+            modifiedByPromptId: input.prompt.id,
             baseVersion: baseline.get(attachment.workspacePath)?.version ?? null,
           });
         }
@@ -1235,6 +1248,7 @@ async function processProjectPrompt(input: {
     let dispatchedNow = false;
     let observedBusy = false;
     let dispatchedAt = 0;
+    let pendingIdleObservedAt: number | null = null;
     if (state === "missing") {
       if (input.prompt.sendAttemptedAt !== null) {
         throw new ProjectInterruptedPrompt();
@@ -1320,13 +1334,26 @@ async function processProjectPrompt(input: {
           nativeSessionId,
           input.signal,
         );
-        if (sessionState === "busy") observedBusy = true;
+        if (sessionState === "busy") {
+          observedBusy = true;
+          pendingIdleObservedAt = null;
+        }
         const startupGraceMs = Math.max(10_000, PROMPT_STATE_POLL_MS * 4);
-        if (
+        const interruptionCandidate =
           sessionState === "idle"
-          && (observedBusy || !dispatchedNow || Date.now() - dispatchedAt >= startupGraceMs)
-        ) {
-          throw new ProjectInterruptedPrompt();
+          && (observedBusy || !dispatchedNow || Date.now() - dispatchedAt >= startupGraceMs);
+        if (interruptionCandidate) {
+          const observedAt = Date.now();
+          if (pendingIdleObservedAt === null) {
+            // OpenCode publishes its message and session views independently. A completed answer
+            // can therefore stream, turn idle, and remain "pending" in the message endpoint for a
+            // short window. Keep polling without ever replaying the deterministic prompt.
+            pendingIdleObservedAt = observedAt;
+          } else if (observedAt - pendingIdleObservedAt >= PROMPT_IDLE_CONFIRMATION_MS) {
+            throw new ProjectInterruptedPrompt();
+          }
+        } else if (sessionState !== "idle") {
+          pendingIdleObservedAt = null;
         }
       }
     }
@@ -1346,6 +1373,7 @@ async function processProjectPrompt(input: {
       storage: input.storage,
       redactor: input.redactor,
       sessionId: input.prompt.sessionId,
+      promptId: input.prompt.id,
       changes,
       turnBaseline,
       versionBaseline: baseline,
@@ -1402,7 +1430,11 @@ async function processProjectPrompt(input: {
         ? undefined
         : new Date(Date.now() + 1_000),
     });
-    if (reason instanceof ProjectInterruptedPrompt) throw reason;
+    // An ambiguous attempted turn is terminal for this prompt only: it is unsafe to replay, but
+    // the shared workspace and other conversations remain healthy. Keeping the interruption
+    // inside this task also lets the aggregate active-prompt bookkeeping return the Project to
+    // ready and admit a deliberate follow-up.
+    if (reason instanceof ProjectInterruptedPrompt) return;
   } finally {
     if (nativeSessionId) input.promptByNativeSession.delete(nativeSessionId);
   }
@@ -1443,6 +1475,7 @@ export async function runProjectWorkspaceJob(input: {
   let activationAdmissionToken = input.job.activationAdmissionToken;
   let activationAdmissionCreatedHere = false;
   let appliedGeneration = input.job.appliedGeneration;
+  let appliedFileRevision = input.job.appliedFileRevision;
   let boundaryRecyclePending = false;
   let skillSyncFailurePending = input.job.skillSyncErrorAt !== null;
   let activationStartedAt = 0;
@@ -1471,11 +1504,10 @@ export async function runProjectWorkspaceJob(input: {
       release();
     }
   };
-  const restoreDurableFileProjection = async (boundarySignal: AbortSignal): Promise<void> => {
-    const durablePlan = await input.store.loadProjectMaterializationPlan({
-      job: input.job,
-      workerId: input.workerId,
-    });
+  const applyDurableFileProjection = async (
+    durablePlan: ProjectMaterializationPlan,
+    boundarySignal: AbortSignal,
+  ): Promise<void> => {
     await input.runtime.syncFiles({
       ref,
       files: await loadStoredFiles({
@@ -1485,12 +1517,35 @@ export async function runProjectWorkspaceJob(input: {
       }),
       signal: boundarySignal,
     });
+    if (durablePlan.desiredFileRevision !== appliedFileRevision) {
+      const applied = await input.store.updateProjectWorkspaceState({
+        job: input.job,
+        workerId: input.workerId,
+        appliedFileRevision: durablePlan.desiredFileRevision,
+      });
+      if (!applied) throw new ProjectLostLease();
+      appliedFileRevision = durablePlan.desiredFileRevision;
+    }
+  };
+  const restoreDurableFileProjection = async (boundarySignal: AbortSignal): Promise<void> => {
+    const durablePlan = await input.store.loadProjectMaterializationPlan({
+      job: input.job,
+      workerId: input.workerId,
+    });
+    await applyDurableFileProjection(durablePlan, boundarySignal);
   };
   const persistOrRestoreFileProjection = async (
     boundarySignal: AbortSignal,
   ): Promise<void> => {
-    if (!activationEnvironmentResolved) {
-      await restoreDurableFileProjection(boundarySignal);
+    const durablePlan = await input.store.loadProjectMaterializationPlan({
+      job: input.job,
+      workerId: input.workerId,
+    });
+    if (
+      !activationEnvironmentResolved
+      || durablePlan.desiredFileRevision !== appliedFileRevision
+    ) {
+      await applyDurableFileProjection(durablePlan, boundarySignal);
       return;
     }
     await mirrorProjectFiles({
@@ -1503,6 +1558,7 @@ export async function runProjectWorkspaceJob(input: {
       redactor,
       baseline: await loadProjectFileBaselineMap(input),
       modifiedBySessionId: null,
+      modifiedByPromptId: null,
       signal: boundarySignal,
     });
   };
@@ -1542,6 +1598,43 @@ export async function runProjectWorkspaceJob(input: {
       workerId: input.workerId,
     });
     if (!surfaced) throw new ProjectLostLease();
+  };
+  const checkpointAndStopIdleWorkspace = async (
+    boundarySignal: AbortSignal,
+  ): Promise<void> => {
+    const stopping = await input.store.updateProjectWorkspaceState({
+      job: input.job,
+      workerId: input.workerId,
+      status: "stopping",
+    });
+    if (!stopping) throw new ProjectLostLease();
+    await (recorder as ProjectRecorder | null)?.stop();
+    recorder = null;
+    await persistOrRestoreFileProjection(boundarySignal);
+    await input.runtime.scrubAgentState(ref, boundarySignal);
+    const checkpoint = await input.runtime.checkpointAndStop(ref, boundarySignal);
+    providerStopped = true;
+    await input.usage.record({
+      job: input.job,
+      activationRevision,
+      state: "stopped",
+      expiresAt: null,
+    });
+    const stopped = await input.store.updateProjectWorkspaceState({
+      job: input.job,
+      workerId: input.workerId,
+      status: "stopped",
+      checkpointId: checkpoint.snapshotId,
+      checkpointCreatedAt: new Date(),
+      checkpointGeneration: appliedGeneration,
+      appliedGeneration,
+      sandboxDomain: null,
+      idleDeadlineAt: null,
+      errorCode: null,
+      errorMessage: null,
+    });
+    if (!stopped) throw new ProjectLostLease();
+    await input.usage.settle({ job: input.job, activationRevision });
   };
 
   const heartbeat = (async () => {
@@ -1807,10 +1900,13 @@ export async function runProjectWorkspaceJob(input: {
       && input.job.status === "ready"
       && input.job.idleDeadlineAt !== null
       && input.job.idleDeadlineAt.getTime() <= Date.now();
+    const projectionIsCurrent =
+      plan.desiredGeneration === plan.appliedGeneration
+      && plan.desiredFileRevision === plan.appliedFileRevision;
     if (
       providerAdmission === "provider_unavailable"
       && !warmIdleStopDue
-      && plan.desiredGeneration === plan.appliedGeneration
+      && projectionIsCurrent
     ) {
       preclaimedSessionStops.push(...await input.store.claimProjectSessionStops({
         job: input.job,
@@ -1820,7 +1916,7 @@ export async function runProjectWorkspaceJob(input: {
     if (
       providerAdmission === "provider_unavailable"
       && !warmIdleStopDue
-      && plan.desiredGeneration === plan.appliedGeneration
+      && projectionIsCurrent
       && preclaimedSessionStops.length === 0
     ) {
       // Leave every prompt queued before billing or provider I/O. Provider-connect signals are the
@@ -1844,7 +1940,7 @@ export async function runProjectWorkspaceJob(input: {
       && input.job.status === "ready"
       && input.job.idleDeadlineAt !== null
       && input.job.idleDeadlineAt.getTime() <= Date.now()
-      && plan.desiredGeneration === plan.appliedGeneration
+      && projectionIsCurrent
     ) {
       preclaimedPrompts.push(...await input.store.claimProjectPromptJobs({
         job: input.job,
@@ -1878,6 +1974,7 @@ export async function runProjectWorkspaceJob(input: {
         preclaimedPrompts.length === 0
         && preclaimedSessionStops.length === 0
         && refreshedPlan.desiredGeneration === refreshedPlan.appliedGeneration
+        && refreshedPlan.desiredFileRevision === refreshedPlan.appliedFileRevision
       ) {
         const observation = await input.runtime.observe(ref, signal);
         providerRunning = observation.state === "running";
@@ -2107,15 +2204,7 @@ export async function runProjectWorkspaceJob(input: {
     }
     // S3 metadata is authoritative for the managed files projection. Replace it even when empty:
     // an older restored checkpoint may still contain a path that was durably tombstoned later.
-    await input.runtime.syncFiles({
-      ref,
-      files: await loadStoredFiles({
-        files: plan.bootstrapFiles,
-        storage: input.storage,
-        signal,
-      }),
-      signal,
-    });
+    await applyDurableFileProjection(plan, signal);
 
     const startServerForPrompts = async (): Promise<void> => {
       if (target && recorder) return;
@@ -2193,30 +2282,35 @@ export async function runProjectWorkspaceJob(input: {
     const initialized = await input.store.updateProjectWorkspaceState({
       job: input.job,
       workerId: input.workerId,
-      status: "ready",
+      // `ready` is a promise that the provider can remain warm through idleDeadlineAt. Keep the
+      // activation non-idle until the quiescent boundary has durably admitted billing runway and
+      // observed/extended the provider to that same deadline.
+      status: "provisioning",
       lastActivityAt: new Date(lastActivityAt),
-      idleDeadlineAt: input.job.idleDeadlineAt
-        ?? new Date(lastActivityAt + input.config.idleMs),
+      idleDeadlineAt: null,
     });
     if (!initialized) throw new ProjectLostLease();
-    let interactiveStatus: "ready" | "running" = "ready";
+    let interactiveStatus: "provisioning" | "running" = "provisioning";
     const syncInteractiveStatus = async (): Promise<void> => {
-      const desired = activePrompts.size > 0 ? "running" : "ready";
-      if (desired === interactiveStatus) return;
+      // A completed prompt must not publish Ready before its post-turn runway is admitted. The
+      // quiescent branch below is the sole writer of Ready for this activation.
+      if (activePrompts.size === 0 || interactiveStatus === "running") return;
       const updated = await input.store.updateProjectWorkspaceState({
         job: input.job,
         workerId: input.workerId,
-        status: desired,
+        status: "running",
         lastActivityAt: new Date(lastActivityAt),
-        idleDeadlineAt: desired === "running"
-          ? null
-          : new Date(lastActivityAt + input.config.idleMs),
+        idleDeadlineAt: null,
       });
       if (!updated) throw new ProjectLostLease();
-      interactiveStatus = desired;
+      interactiveStatus = "running";
     };
 
     while (!signal.aborted) {
+      let quiescentError: {
+        code: string;
+        message: string;
+      } | null = null;
       if (promptFailure) throw promptFailure;
       const currentRecorder = recorder as ProjectRecorder | null;
       if (currentRecorder?.error()) throw currentRecorder.error();
@@ -2287,33 +2381,47 @@ export async function runProjectWorkspaceJob(input: {
           workerId: input.workerId,
         });
         nextMaterializationCheckAt = Date.now() + MATERIALIZATION_POLL_MS;
-        if (refreshed.desiredGeneration !== appliedGeneration) {
-          // Reconcile and atomically swap the complete skill tree before claiming another prompt.
-          // Core independently fences prompt claims on desired == applied, so a Run-skill attach
-          // and its immediately-created session cannot enter the previous projection.
-          await (recorder as ProjectRecorder | null)?.stop();
-          recorder = null;
-          await input.runtime.syncSkillBundles({
-            ref,
-            generation: refreshed.desiredGeneration,
-            skills: refreshed.skills,
-            signal,
-          });
+        const skillProjectionChanged = refreshed.desiredGeneration !== appliedGeneration;
+        const fileProjectionChanged =
+          refreshed.desiredFileRevision !== appliedFileRevision;
+        if (skillProjectionChanged || fileProjectionChanged) {
+          // Both sync operations stop OpenCode in the provider adapter. Drain the one SSE recorder
+          // before either swap and restart the server afterwards if this activation had opened it.
           const restartServer = Boolean(target);
           if (restartServer) {
-            // Re-resolve the exact pinned environment at the boundary and restart the only server.
+            await (recorder as ProjectRecorder | null)?.stop();
+            recorder = null;
+          }
+          if (skillProjectionChanged) {
+            // Reconcile and atomically swap the complete skill tree before claiming another prompt.
+            // Core independently fences prompt claims on desired == applied, so a Run-skill attach
+            // and its immediately-created session cannot enter the previous projection.
+            await input.runtime.syncSkillBundles({
+              ref,
+              generation: refreshed.desiredGeneration,
+              skills: refreshed.skills,
+              signal,
+            });
+            const applied = await input.store.updateProjectWorkspaceState({
+              job: input.job,
+              workerId: input.workerId,
+              appliedGeneration: refreshed.desiredGeneration,
+            });
+            if (!applied) throw new ProjectLostLease();
+            appliedGeneration = refreshed.desiredGeneration;
+          }
+          if (fileProjectionChanged) {
+            // Creator uploads are durable desired state. Replace the whole managed files/ subtree
+            // only after every active turn has finished, then open prompt admission again.
+            await applyDurableFileProjection(refreshed, signal);
+          }
+          if (restartServer) {
+            // Re-resolve the exact pinned environment only after every desired projection is live.
             clearProjectChatTarget(target);
             target = null;
             await startServerForPrompts();
           }
           plan = refreshed;
-          const applied = await input.store.updateProjectWorkspaceState({
-            job: input.job,
-            workerId: input.workerId,
-            appliedGeneration: refreshed.desiredGeneration,
-          });
-          if (!applied) throw new ProjectLostLease();
-          appliedGeneration = refreshed.desiredGeneration;
           lastActivityAt = Date.now();
         }
       }
@@ -2413,17 +2521,13 @@ export async function runProjectWorkspaceJob(input: {
               workerId: input.workerId,
             });
           if (promptAdmission === "provider_unavailable") {
-            const blocked = await input.store.updateProjectWorkspaceState({
-              job: input.job,
-              workerId: input.workerId,
-              status: "ready",
-              lastActivityAt: new Date(lastActivityAt),
-              idleDeadlineAt: new Date(lastActivityAt + input.config.idleMs),
-              errorCode: "project_provider_unavailable",
-              errorMessage: "Reconnect this session's model provider to continue.",
-            });
-            if (!blocked) throw new ProjectLostLease();
-            return;
+            // Surface the recoverable provider gate only with the admitted Ready transition below.
+            // Writing Ready here would expose an idle deadline not yet guaranteed by billing or
+            // the provider.
+            quiescentError = {
+              code: "project_provider_unavailable",
+              message: "Reconnect this session's model provider to continue.",
+            };
           }
         }
         await syncInteractiveStatus();
@@ -2471,35 +2575,7 @@ export async function runProjectWorkspaceJob(input: {
         activePrompts.size === 0
         && Date.now() - lastActivityAt >= input.config.idleMs
       ) {
-        await input.store.updateProjectWorkspaceState({
-          job: input.job,
-          workerId: input.workerId,
-          status: "stopping",
-        });
-        await (recorder as ProjectRecorder | null)?.stop();
-        recorder = null;
-        await persistOrRestoreFileProjection(signal);
-        await input.runtime.scrubAgentState(ref, signal);
-        const checkpoint = await input.runtime.checkpointAndStop(ref, signal);
-        providerStopped = true;
-        await input.usage.record({
-          job: input.job,
-          activationRevision,
-          state: "stopped",
-          expiresAt: null,
-        });
-        await input.store.updateProjectWorkspaceState({
-          job: input.job,
-          workerId: input.workerId,
-          status: "stopped",
-          checkpointId: checkpoint.snapshotId,
-          checkpointCreatedAt: new Date(),
-          checkpointGeneration: appliedGeneration,
-          appliedGeneration,
-          sandboxDomain: null,
-          idleDeadlineAt: null,
-        });
-        await input.usage.settle({ job: input.job, activationRevision });
+        await checkpointAndStopIdleWorkspace(signal);
         return;
       }
       if (activePrompts.size === 0 && !boundaryRecyclePending) {
@@ -2512,18 +2588,80 @@ export async function runProjectWorkspaceJob(input: {
           await stopAndSurfaceSkillFailure(signal);
           return;
         }
+        let idleDeadlineAt = Math.min(
+          lastActivityAt + input.config.idleMs,
+          activationStartedAt + input.config.maxActivationMs,
+        );
+        if (idleDeadlineAt <= Date.now()) {
+          await checkpointAndStopIdleWorkspace(signal);
+          return;
+        }
+        try {
+          const budget = await input.usage.extendIdleRunway({
+            job: input.job,
+            activationRevision,
+            minimumRuntimeMs: idleDeadlineAt - activationStartedAt,
+          });
+          activationBudgetMs = budget?.limitMs ?? input.config.maxActivationMs;
+        } catch (error) {
+          if (!(error instanceof EntitlementDeniedError)) throw error;
+          // Quota refusal is a normal scale-to-zero boundary. Do not expose a warm deadline that
+          // neither billing nor the provider admitted, and do not turn it into a workspace error.
+          await checkpointAndStopIdleWorkspace(signal);
+          return;
+        }
+        idleDeadlineAt = Math.min(
+          idleDeadlineAt,
+          activationStartedAt + activationBudgetMs,
+        );
+        if (idleDeadlineAt <= Date.now()) {
+          await checkpointAndStopIdleWorkspace(signal);
+          return;
+        }
+        const observation = await input.runtime.observe(ref, signal);
+        if (observation.state !== "running") {
+          throw new RunRuntimeError(
+            "Project workspace stopped before its admitted idle deadline",
+          );
+        }
+        const observedExpiry = observation.expiresAt?.getTime() ?? provisionedUntil;
+        if (observedExpiry < idleDeadlineAt) {
+          const additionalMs = idleDeadlineAt - observedExpiry;
+          const extended = await input.runtime.extendTimeout(
+            ref,
+            additionalMs,
+            AbortSignal.timeout(Math.min(10_000, input.config.heartbeatMs)),
+          );
+          const extendedExpiry = extended.expiresAt?.getTime()
+            ?? observedExpiry + additionalMs;
+          if (extended.state !== "running" || extendedExpiry < idleDeadlineAt) {
+            throw new RunRuntimeError(
+              "Project workspace did not reach its admitted idle deadline",
+            );
+          }
+          provisionedUntil = extendedExpiry;
+          await input.usage.record({
+            job: input.job,
+            activationRevision,
+            state: extended.state,
+            expiresAt: extended.expiresAt,
+          });
+        }
         // Keep the private VM warm until its durable idle deadline, but release both the workspace
         // lease and this supervisor slot. Claim SQL wakes it only for a prompt, sync/recycle/delete
         // intent, or the deadline that performs the checkpoint.
         await (recorder as ProjectRecorder | null)?.stop();
         recorder = null;
-        await input.store.updateProjectWorkspaceState({
+        const ready = await input.store.updateProjectWorkspaceState({
           job: input.job,
           workerId: input.workerId,
           status: "ready",
           lastActivityAt: new Date(lastActivityAt),
-          idleDeadlineAt: new Date(lastActivityAt + input.config.idleMs),
+          idleDeadlineAt: new Date(idleDeadlineAt),
+          errorCode: quiescentError?.code ?? null,
+          errorMessage: quiescentError?.message ?? null,
         });
+        if (!ready) throw new ProjectLostLease();
         return;
       }
       await wait(input.config.claimIntervalMs, signal);
@@ -2786,6 +2924,8 @@ export function createCoreProjectWorkspaceStore(input: {
       return {
         desiredGeneration: plan.desiredGeneration,
         appliedGeneration: plan.appliedGeneration,
+        desiredFileRevision: plan.desiredFileRevision,
+        appliedFileRevision: plan.appliedFileRevision,
         checkpointGeneration: plan.checkpointGeneration,
         skills: [...bundleBySlug.values()],
         bootstrapFiles: plan.bootstrapFiles,
@@ -2941,6 +3081,7 @@ export function createCoreProjectWorkspaceStore(input: {
           checksum: file.checksum,
           storageKey: file.storageKey,
           modifiedBySessionId: file.modifiedBySessionId,
+          modifiedByPromptId: file.modifiedByPromptId,
           baseVersion: file.baseVersion,
           database: db,
         });
@@ -2954,6 +3095,7 @@ export function createCoreProjectWorkspaceStore(input: {
           path: file.path,
           baseVersion: file.baseVersion,
           modifiedBySessionId: file.modifiedBySessionId,
+          modifiedByPromptId: file.modifiedByPromptId,
           database: db,
         });
       }
@@ -3034,6 +3176,39 @@ export function createCoreProjectUsageMeter(
         database,
         config: billingConfig,
       })),
+    extendIdleRunway: ({ job, activationRevision, minimumRuntimeMs }) =>
+      tenant(job, async (database) => {
+        const current = await refreshSandboxUsageReservation({
+          orgId: job.orgId,
+          sandboxName: job.sandboxName,
+          activationRevision,
+          database,
+          config: billingConfig,
+        });
+        if (!current) return null;
+        const requiredMs = Math.min(
+          config.maxActivationMs,
+          Math.max(0, Math.ceil(minimumRuntimeMs)),
+        );
+        const additionalMs = Math.max(0, requiredMs - current.limitMs);
+        if (additionalMs === 0) return current;
+        await extendSandboxUsageReservation({
+          orgId: job.orgId,
+          kind: "project",
+          sourceId: job.projectId,
+          activationRevision,
+          additionalMs,
+          database,
+          config: billingConfig,
+        });
+        return refreshSandboxUsageReservation({
+          orgId: job.orgId,
+          sandboxName: job.sandboxName,
+          activationRevision,
+          database,
+          config: billingConfig,
+        });
+      }),
     record: ({ job, activationRevision, state, expiresAt }) =>
       tenant(job, (database) => recordSandboxRuntimeObservation({
         orgId: job.orgId,

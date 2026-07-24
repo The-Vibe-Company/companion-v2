@@ -108,7 +108,7 @@ export function ProjectRunPicker({
   return (
     <CoworkDialog
       title={`Run ${skillName}`}
-      description="Choose the project whose files, skills and secrets this session should use."
+      description="Choose the Project whose files, Skills, and Access this conversation should use."
       onClose={dismiss}
       width="540px"
       dismissible={busyId === null}
@@ -138,7 +138,7 @@ export function ProjectRunPicker({
             <strong>Projects are not available.</strong>
             <span>
               {runtime.message ||
-                "Configure the Projects runtime before starting a session."}
+                "Projects are not ready yet. Finish setup before starting a conversation."}
             </span>
           </div>
         ) : projects.length === 0 ? (

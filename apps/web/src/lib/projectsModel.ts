@@ -3,6 +3,7 @@ import {
   projectFileRowSchema,
   projectFileVersionsResponseSchema,
   projectSessionDetailSchema,
+  projectSessionsResponseSchema,
   projectsResponseSchema,
   runChatHistoryItemSchema,
   type ProjectDetail,
@@ -27,11 +28,59 @@ export type ProjectSessionVM = {
   model: string;
   status: ProjectSessionStatus;
   history: RunChatHistoryItem[];
-  pendingPrompts: Array<{ id: string; text: string; createdAt: string }>;
+  prompts: ProjectPromptVM[];
+  pendingPrompts: ProjectPromptVM[];
   latestEventSequence: number;
   createdAt: string;
+  updatedAt: string;
   lastActiveAt: string;
+  archivedAt: string | null;
+  lastViewedAt: string;
+  isUnread: boolean;
   errorMessage: string | null;
+};
+
+export type ProjectPromptAttachmentVM = {
+  id: string;
+  fileName: string;
+  contentType: string;
+  byteSize: number;
+  workspacePath: string;
+  status: "uploaded" | "materialized" | "failed";
+  createdAt: string;
+};
+
+export type ProjectPromptVM = {
+  id: string;
+  messageId: string;
+  text: string;
+  status:
+    | "queued"
+    | "dispatching"
+    | "running"
+    | "completed"
+    | "failed"
+    | "cancelled";
+  attachments: ProjectPromptAttachmentVM[];
+  fileChanges: ProjectPromptFileChangeVM[];
+  createdAt: string;
+  completedAt: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+};
+
+export type ProjectPromptFileChangeVM = {
+  projectId: string;
+  fileId: string;
+  path: string;
+  kind: "created" | "updated";
+  version: number;
+  contentType: string;
+  byteSize: number;
+  modifiedBySessionId: string;
+  modifiedByPromptId: string;
+  conflictDetected: boolean;
+  createdAt: string;
 };
 
 export type ProjectSkillVM = {
@@ -51,6 +100,9 @@ export type ProjectFileVM = {
   contentType: string | null;
   byteSize: number;
   conflictDetected: boolean;
+  modifiedBySessionId: string | null;
+  modifiedByPromptId: string | null;
+  createdAt: string;
   updatedAt: string;
 };
 
@@ -63,6 +115,7 @@ export type ProjectFileVersionVM = {
   byteSize: number;
   checksum: string;
   modifiedBySessionId: string | null;
+  modifiedByPromptId: string | null;
   baseVersion: number | null;
   conflictDetected: boolean;
   createdAt: string;
@@ -84,11 +137,29 @@ export type ProjectRowVM = {
   statusDetail: string | null;
   skillCount: number;
   sessionCount: number;
+  activeSessionCount: number;
+  archivedSessionCount: number;
+  unreadSessionCount: number;
   fileCount: number;
   secretCount: number;
+  archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
   recentSessions: ProjectSessionVM[];
+};
+
+export type ProjectAccessVM = {
+  secrets: Array<{
+    id: string;
+    name: string;
+    source: "personal" | "organization" | "shared";
+    ownerName: string;
+  }>;
+  modelConnections: Array<{
+    id: string;
+    provider: string;
+    source: "personal" | "organization";
+  }>;
 };
 
 export type ProjectDetailVM = ProjectRowVM & {
@@ -97,6 +168,7 @@ export type ProjectDetailVM = ProjectRowVM & {
   files: ProjectFileVM[];
   workspace: ProjectWorkspaceVM;
   modelConnectionCount: number;
+  access: ProjectAccessVM;
 };
 
 export type ProjectModelChoice = {
@@ -142,20 +214,50 @@ function normalizeProjectSession(
       (visiblePromptCounts.get(item.text) ?? 0) + 1,
     );
   }
+  const promptRows: ProjectPromptVM[] =
+    "prompts" in row
+      ? row.prompts.map((prompt) => ({
+          id: prompt.id,
+          messageId: prompt.opencode_message_id,
+          text: prompt.text,
+          status: prompt.status,
+          attachments: prompt.attachments.map((attachment) => ({
+            id: attachment.id,
+            fileName: attachment.file_name,
+            contentType: attachment.content_type,
+            byteSize: attachment.byte_size,
+            workspacePath: attachment.workspace_path,
+            status: attachment.status,
+            createdAt: attachment.created_at,
+          })),
+          fileChanges: prompt.file_changes.map((change) => ({
+            projectId: change.project_id,
+            fileId: change.file_id,
+            path: change.path,
+            kind: change.kind,
+            version: change.version,
+            contentType: change.content_type,
+            byteSize: change.byte_size,
+            modifiedBySessionId: change.modified_by_session_id,
+            modifiedByPromptId: change.modified_by_prompt_id,
+            conflictDetected: change.conflict_detected,
+            createdAt: change.created_at,
+          })),
+          createdAt: prompt.created_at,
+          completedAt: prompt.completed_at,
+          errorCode: prompt.error_code,
+          errorMessage: prompt.error_message,
+        }))
+      : [];
   const pendingPromptRows: ProjectSessionVM["pendingPrompts"] = [];
-  const prompts = "prompts" in row ? row.prompts : [];
-  for (const [index, prompt] of prompts.entries()) {
+  for (const [index, prompt] of promptRows.entries()) {
     const text = prompt.text;
     const visibleCount = visiblePromptCounts.get(text) ?? 0;
     if (visibleCount > 0) {
       visiblePromptCounts.set(text, visibleCount - 1);
       continue;
     }
-    pendingPromptRows.push({
-      id: prompt.id || `prompt-${index}`,
-      text,
-      createdAt: prompt.created_at,
-    });
+    pendingPromptRows.push({ ...prompt, id: prompt.id || `prompt-${index}` });
   }
   return {
     id: row.id,
@@ -163,11 +265,16 @@ function normalizeProjectSession(
     model: row.model,
     status: row.status,
     history,
+    prompts: promptRows,
     pendingPrompts: pendingPromptRows,
     latestEventSequence:
       "latest_event_sequence" in row ? row.latest_event_sequence : 0,
     createdAt,
+    updatedAt: row.updated_at,
     lastActiveAt: row.last_active_at,
+    archivedAt: row.archived_at,
+    lastViewedAt: row.last_viewed_at,
+    isUnread: row.is_unread,
     errorMessage:
       row.message ??
       (historyResult.success
@@ -217,6 +324,9 @@ function normalizeProjectFile(row: ProjectFileRow): ProjectFileVM {
     contentType: row.content_type,
     byteSize: row.byte_size,
     conflictDetected: row.conflict_detected,
+    modifiedBySessionId: row.modified_by_session_id,
+    modifiedByPromptId: row.modified_by_prompt_id,
+    createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
@@ -240,6 +350,7 @@ export function normalizeProjectFileVersionsResponse(
     byteSize: row.byte_size,
     checksum: row.checksum,
     modifiedBySessionId: row.modified_by_session_id,
+    modifiedByPromptId: row.modified_by_prompt_id,
     baseVersion: row.base_version,
     conflictDetected: row.conflict_detected,
     createdAt: row.created_at,
@@ -256,11 +367,17 @@ function normalizeProjectRow(row: ProjectRow): ProjectRowVM {
     statusDetail: row.message,
     skillCount: row.skill_count,
     sessionCount: row.session_count,
+    activeSessionCount: row.active_session_count,
+    archivedSessionCount: row.archived_session_count,
+    unreadSessionCount: row.unread_session_count,
     fileCount: row.file_count,
     secretCount: 0,
+    archivedAt: row.archived_at,
     createdAt: row.created_at,
     updatedAt: row.last_activity_at,
-    recentSessions: row.recent_sessions.map(normalizeProjectSession),
+    recentSessions: sortProjectSessionsByCreatedAt(
+      row.recent_sessions.map(normalizeProjectSession),
+    ),
   };
 }
 
@@ -278,7 +395,9 @@ export function normalizeProjectsResponse(value: unknown): {
 export function normalizeProjectDetail(value: unknown): ProjectDetailVM {
   const row: ProjectDetail = projectDetailSchema.parse(value);
   const base = normalizeProjectRow(row);
-  const sessions = row.sessions.map(normalizeProjectSession);
+  const sessions = sortProjectSessionsByCreatedAt(
+    row.sessions.map(normalizeProjectSession),
+  );
   return {
     ...base,
     secretCount: row.secret_count,
@@ -287,6 +406,19 @@ export function normalizeProjectDetail(value: unknown): ProjectDetailVM {
     sessions,
     files: [],
     modelConnectionCount: row.model_connection_count,
+    access: {
+      secrets: row.access.secrets.map((secret) => ({
+        id: secret.id,
+        name: secret.name,
+        source: secret.source,
+        ownerName: secret.owner_name,
+      })),
+      modelConnections: row.access.model_connections.map((connection) => ({
+        id: connection.id,
+        provider: connection.provider,
+        source: connection.source,
+      })),
+    },
     workspace: {
       status: row.status,
       statusDetail: row.message,
@@ -294,6 +426,29 @@ export function normalizeProjectDetail(value: unknown): ProjectDetailVM {
       sleepAt: null,
     },
   };
+}
+
+export function normalizeProjectSessionsResponse(value: unknown): {
+  sessions: ProjectSessionVM[];
+  nextCursor: string | null;
+} {
+  const payload = projectSessionsResponseSchema.parse(value);
+  return {
+    sessions: sortProjectSessionsByCreatedAt(
+      payload.sessions.map(normalizeProjectSession),
+    ),
+    nextCursor: payload.next_cursor,
+  };
+}
+
+/** Canonical Project conversation order: creation time descending, then id descending. */
+export function sortProjectSessionsByCreatedAt<
+  T extends Pick<ProjectSessionVM, "id" | "createdAt">,
+>(sessions: T[]): T[] {
+  return [...sessions].sort((left, right) => {
+    const byCreated = right.createdAt.localeCompare(left.createdAt);
+    return byCreated || right.id.localeCompare(left.id);
+  });
 }
 
 export function mergeProjectRow(detail: ProjectDetailVM): ProjectRowVM {

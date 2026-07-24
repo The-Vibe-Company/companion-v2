@@ -53,8 +53,9 @@ For the technical design, see [`design.md`](design.md).
 
 **Projects is the work surface across these pillars, not a fourth pillar.** A Project gives one member a
 private, durable Vercel Sandbox with synchronized Skills, automatically available Secrets, a default
-model, shared Files, and multiple OpenCode sessions. The machine suspends when idle and resumes with its
-state; members see `Sessions`, `Files`, `Skills`, and `Secrets`, not runtime or package machinery.
+model, shared Files, and multiple OpenCode conversations. The machine suspends when idle and resumes
+with its state; members see `Conversations`, `Files`, `Skills`, and read-only `Access`, not runtime,
+secret values, or package machinery.
 Sharing a Project is deferred; creator privacy has no admin override.
 
 Every skill lives in one of two **libraries**. **My Skills** is private: a member authors skills there
@@ -102,16 +103,39 @@ version never changes the public release automatically.
 
 ## 4. Core user journeys
 
-### Project — configure once → run many sessions
+### Project — configure once → run many conversations
 A Member selects **Projects** → presses `+` → chooses a name, default activated model, and accessible
 Skills. Companion prepares one private persistent sandbox. Every active generic Secret the member can
 use and every effective configured model-provider credential is injected at activation without exposing
-its value. The Member starts one or more sessions with a direct prompt, optional Files, and an optional
+its value. The Member starts one or more conversations with a direct prompt, optional Files, and an optional
 model override. OpenCode handles the work; Companion renders its real transcript and tool activity.
-Sessions may run concurrently against the same Files, so overlapping writes are last-writer-wins.
+Conversations may run concurrently against the same Files, so overlapping writes are last-writer-wins.
 After ten idle minutes the VM checkpoints and stops, while the Project remains resumable.
 If recovery needs attention, the owner can explicitly retry the same workspace. The command never
 replaces the sandbox or checkpoint with a fresh empty Project.
+
+The Project remains useful as its history grows. Conversations stay in creation order rather than
+jumping when background work completes, and the five most recent appear beneath the Project in the
+sidebar. The full Project page searches the durable history and separates active from archived
+conversations. Members can rename, archive, undo, and restore; a running conversation stops before it
+archives, and conversations are never permanently deleted in V1. A background result remains marked
+`New result` or `Failed` until the member opens it.
+
+Files stay part of the conversation. Input attachments return beside the exact message that used them,
+and each turn identifies its exact created or updated file versions. Desktop preview keeps the
+conversation and composer visible; mobile uses a full drawer. A member can add shared Files directly
+to the Project without creating a synthetic conversation, or attach them to a prompt through selection,
+drag-and-drop, or paste so they remain tied to that message. A recoverable turn failure keeps the
+conversation, Files, and composer available; only a workspace-wide failure uses `Project needs
+attention`.
+
+The context rail has only `Files`, `Skills`, and `Access`. Access lists safe Secret names and sources
+plus model connections without values. Models use member-facing names such as `GPT-5 · OpenAI`, while
+technical routes remain in details. Projects may be archived and restored; permanent deletion is a
+separate destructive action that explicitly removes conversations, Files, and workspace state.
+
+Project instructions, memory across conversations, scheduled tasks, browser control, live artifacts,
+and native Office preview are deferred product capabilities rather than hidden parts of this flow.
 
 ### Onboarding — create org → invite members → first deploy
 1. An operator self-hosts (single `docker compose up`). The **first user becomes Org Owner**.

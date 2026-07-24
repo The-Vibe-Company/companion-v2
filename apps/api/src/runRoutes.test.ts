@@ -47,11 +47,15 @@ const serviceMocks = vi.hoisted(() => ({
   setProjectSkills: vi.fn(),
   requestProjectDeletion: vi.fn(async () => undefined),
   listProjectSessions: vi.fn(),
+  updateProjectSession: vi.fn(),
   getProjectSession: vi.fn(),
+  getProjectPromptAttachment: vi.fn(),
   createProjectSession: vi.fn(),
   enqueueProjectPrompt: vi.fn(),
   hasProjectPromptIdempotencyKey: vi.fn(async () => false),
   reserveProjectAttachmentUploads: vi.fn(async () => undefined),
+  reserveProjectFileUploads: vi.fn(async () => undefined),
+  commitProjectFileUploads: vi.fn(),
   requestProjectSessionStop: vi.fn(),
   listProjectSessionEvents: vi.fn(),
   listProjectFiles: vi.fn(),
@@ -178,6 +182,8 @@ vi.mock("@companion/storage", () => ({
     runAttachmentKey: ({ orgId, attachmentId }: { orgId: string; attachmentId: string }) => `${orgId}/${attachmentId}`,
     projectAttachmentKey: ({ orgId, projectId, attachmentId }: { orgId: string; projectId: string; attachmentId: string }) =>
       `${orgId}/projects/${projectId}/attachments/${attachmentId}`,
+  projectFileCacheKey: ({ orgId, projectId, checksum }: { orgId: string; projectId: string; checksum: string }) =>
+    `${orgId}/project-files/${projectId}/sha256/${checksum.slice("sha256:".length)}`,
   putSkillArchive: storageMocks.putSkillArchive,
   deleteSkillArchive: storageMocks.deleteSkillArchive,
   getSkillArchive: storageMocks.getSkillArchive,
@@ -223,17 +229,31 @@ describe("session-only project routes", () => {
     status: "ready",
     skill_count: 0,
     session_count: 0,
+    active_session_count: 0,
+    archived_session_count: 0,
+    unread_session_count: 0,
     file_count: 0,
     recent_sessions: [],
     last_activity_at: "2026-07-23T18:00:00.000Z",
     error_code: null,
     message: null,
+    archived_at: null,
     created_at: "2026-07-23T18:00:00.000Z",
     updated_at: "2026-07-23T18:00:00.000Z",
     skills: [],
     sessions: [],
     secret_count: 0,
     model_connection_count: 1,
+    access: {
+      secrets: [],
+      model_connections: [
+        {
+          id: providerConnectionId,
+          provider: "openai",
+          source: "personal",
+        },
+      ],
+    },
   };
   const session = {
     id: "00000000-0000-4000-8000-000000000007",
@@ -242,9 +262,13 @@ describe("session-only project routes", () => {
     model: "openai/gpt-5",
     status: "queued",
     opencode_session_id: null,
+    stop_requested_at: null,
     error_code: null,
     message: null,
     last_active_at: "2026-07-23T18:01:00.000Z",
+    archived_at: null,
+    last_viewed_at: "2026-07-23T18:01:00.000Z",
+    is_unread: false,
     created_at: "2026-07-23T18:01:00.000Z",
     updated_at: "2026-07-23T18:01:00.000Z",
     prompts: [],
@@ -270,6 +294,14 @@ describe("session-only project routes", () => {
       projects: [project],
       runtime: { available: true, message: null },
     });
+    expect(serviceMocks.listProjects).toHaveBeenCalledWith(
+      expect.objectContaining({ view: "active" }),
+    );
+    const archivedList = await app.request("/v1/projects?view=archived");
+    expect(archivedList.status).toBe(200);
+    expect(serviceMocks.listProjects).toHaveBeenLastCalledWith(
+      expect.objectContaining({ view: "archived" }),
+    );
 
     const created = await app.request("/v1/projects", {
       method: "POST",
@@ -305,6 +337,18 @@ describe("session-only project routes", () => {
       expect.objectContaining({
         projectId,
         value: { revision: 1, name: "Q3 review" },
+      }),
+    );
+    const archived = await app.request(`/v1/projects/${projectId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ revision: 2, archived: true }),
+    });
+    expect(archived.status).toBe(200);
+    expect(serviceMocks.updateProject).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        projectId,
+        value: { revision: 2, archived: true },
       }),
     );
 
@@ -376,10 +420,13 @@ describe("session-only project routes", () => {
       id: "00000000-0000-4000-8000-000000000008",
       session_id: session.id,
       sequence: 2,
+      opencode_message_id: "project-message-2",
       text: "Add sources",
       status: "queued",
       error_code: null,
       error_message: null,
+      attachments: [],
+      file_changes: [],
       created_at: session.created_at,
       started_at: null,
       completed_at: null,
@@ -454,6 +501,208 @@ describe("session-only project routes", () => {
     await expect(stopped.json()).resolves.toEqual(session);
   });
 
+  it("accepts an explicit follow-up for a completed Project conversation", async () => {
+    signIn();
+    const completedSession = { ...session, status: "completed" };
+    serviceMocks.getProjectSession.mockResolvedValue(completedSession);
+    serviceMocks.enqueueProjectPrompt.mockResolvedValue({
+      id: "00000000-0000-4000-8000-000000000088",
+      session_id: session.id,
+      sequence: 2,
+      opencode_message_id: "project-message-completed-follow-up",
+      text: "Continue from the completed result",
+      status: "queued",
+      error_code: null,
+      error_message: null,
+      attachments: [],
+      file_changes: [],
+      created_at: session.created_at,
+      started_at: null,
+      completed_at: null,
+    });
+
+    const form = new FormData();
+    form.set("prompt", "Continue from the completed result");
+    const response = await app.request(
+      `/v1/projects/${projectId}/sessions/${session.id}/prompts`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": "project-completed-follow-up" },
+        body: form,
+      },
+    );
+
+    expect(response.status).toBe(202);
+    expect(serviceMocks.enqueueProjectPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId,
+        sessionId: session.id,
+        text: "Continue from the completed result",
+      }),
+    );
+  });
+
+  it("lists, renames, archives and marks conversations read through creator-scoped commands", async () => {
+    signIn();
+    serviceMocks.listProjectSessions.mockResolvedValue({
+      sessions: [session],
+      next_cursor: "next-page",
+    });
+    serviceMocks.updateProjectSession.mockResolvedValue({
+      ...session,
+      title: "Board review",
+      archived_at: session.created_at,
+    });
+    serviceMocks.getProjectSession.mockResolvedValue({
+      ...session,
+      title: "Board review",
+      archived_at: session.created_at,
+    });
+
+    const listed = await app.request(
+      `/v1/projects/${projectId}/sessions?q=review&view=archived&cursor=opaque&limit=25`,
+    );
+    expect(listed.status).toBe(200);
+    await expect(listed.json()).resolves.toEqual({
+      sessions: [session],
+      next_cursor: "next-page",
+    });
+    expect(serviceMocks.listProjectSessions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId,
+        query: {
+          q: "review",
+          view: "archived",
+          cursor: "opaque",
+          limit: 25,
+        },
+      }),
+    );
+
+    const patched = await app.request(
+      `/v1/projects/${projectId}/sessions/${session.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: "Board review",
+          archived: true,
+          viewed: true,
+          stop_active: true,
+        }),
+      },
+    );
+    expect(patched.status).toBe(202);
+    expect(serviceMocks.updateProjectSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId,
+        sessionId: session.id,
+        value: {
+          title: "Board review",
+          archived: true,
+          viewed: true,
+          stop_active: true,
+        },
+      }),
+    );
+    await expect(patched.json()).resolves.toMatchObject({
+      id: session.id,
+      title: "Board review",
+      archived_at: session.created_at,
+      prompts: session.prompts,
+      transcript: session.transcript,
+    });
+    expect(serviceMocks.getProjectSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId,
+        sessionId: session.id,
+      }),
+    );
+  });
+
+  it("streams a durable Project prompt attachment without exposing storage identity", async () => {
+    signIn();
+    serviceMocks.getProjectPromptAttachment.mockResolvedValue({
+      fileName: "brief.txt",
+      contentType: "text/plain",
+      byteSize: 8,
+      storageKey: "private-project-attachment",
+    });
+
+    const response = await app.request(
+      `/v1/projects/${projectId}/sessions/${session.id}/attachments/00000000-0000-4000-8000-000000000099?download=1`,
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-disposition")).toContain("attachment");
+    const body = await response.text();
+    expect(body).toBe("artifact");
+    expect(body).not.toContain("private-project-attachment");
+  });
+
+  it("publishes Project files as durable desired state without contacting the runtime", async () => {
+    signIn();
+    const file = {
+      id: "00000000-0000-4000-8000-000000000009",
+      project_id: projectId,
+      path: "files/brief.txt",
+      version: 1,
+      content_type: "text/plain",
+      byte_size: 11,
+      checksum: `sha256:${"a".repeat(64)}`,
+      modified_by_session_id: null,
+      modified_by_prompt_id: null,
+      conflict_detected: false,
+      created_at: "2026-07-23T18:02:00.000Z",
+      updated_at: "2026-07-23T18:02:00.000Z",
+    };
+    serviceMocks.commitProjectFileUploads.mockResolvedValue([file]);
+    const form = new FormData();
+    form.set("file", new File([Buffer.from("hello world")], "brief.txt", {
+      type: "text/plain",
+    }));
+
+    const response = await app.request(`/v1/projects/${projectId}/files`, {
+      method: "POST",
+      body: form,
+    });
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toEqual({ files: [file] });
+    expect(serviceMocks.reserveProjectFileUploads).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actor,
+        projectId,
+        storageKeys: [
+          expect.stringMatching(
+            new RegExp(`/project-files/${projectId}/sha256/[0-9a-f]{64}$`),
+          ),
+        ],
+      }),
+    );
+    expect(serviceMocks.reserveProjectFileUploads.mock.invocationCallOrder[0]).toBeLessThan(
+      storageMocks.putSkillArchive.mock.invocationCallOrder[0]!,
+    );
+    expect(storageMocks.putSkillArchive).toHaveBeenCalledWith(
+      expect.objectContaining({
+        preventOverwrite: true,
+        contentType: "text/plain",
+      }),
+    );
+    expect(serviceMocks.commitProjectFileUploads).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actor,
+        projectId,
+        files: [
+          expect.objectContaining({
+            path: "files/brief.txt",
+            byteSize: 11,
+          }),
+        ],
+      }),
+    );
+    expect(serviceMocks.isProjectWorkerReady).not.toHaveBeenCalled();
+  });
+
   it("lists and downloads creator-scoped immutable Project file versions", async () => {
     signIn();
     const fileId = "00000000-0000-4000-8000-000000000009";
@@ -466,6 +715,7 @@ describe("session-only project routes", () => {
       byte_size: 8,
       checksum: "a".repeat(64),
       modified_by_session_id: session.id,
+      modified_by_prompt_id: "00000000-0000-4000-8000-000000000008",
       base_version: 1,
       conflict_detected: true,
       created_at: "2026-07-23T18:02:00.000Z",
@@ -1037,7 +1287,7 @@ describe("session-only RunSkill routes", () => {
     expect(download.headers.get("content-disposition")).toBe('attachment; filename="fake.png"');
   });
 
-  it("keeps non-raster artifacts download-only and maps unavailable artifacts to 404", async () => {
+  it("previews safe documents inline and maps unavailable artifacts to 404", async () => {
     signIn();
     serviceMocks.getRunArtifact.mockResolvedValue({
       fileName: "report.html",
@@ -1054,7 +1304,7 @@ describe("session-only RunSkill routes", () => {
       previewable: true,
     });
     const pdf = await app.request("/v1/runs/run-1/artifacts/artifact-pdf");
-    expect(pdf.headers.get("content-disposition")).toBe('attachment; filename="report.pdf"');
+    expect(pdf.headers.get("content-disposition")).toBe('inline; filename="report.pdf"');
     serviceMocks.getRunArtifact.mockRejectedValue(new Error("artifact not found"));
     expect((await app.request("/v1/runs/run-1/artifacts/expired")).status).toBe(404);
   });

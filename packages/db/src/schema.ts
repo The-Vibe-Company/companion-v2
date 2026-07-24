@@ -1391,6 +1391,7 @@ export const projects = pgTable(
     name: text("name").notNull(),
     defaultModel: text("default_model").notNull(),
     revision: integer("revision").notNull().default(1),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
     deleteRequestedAt: timestamp("delete_requested_at", { withTimezone: true }),
     createdAt: now(),
     updatedAt: updatedAt(),
@@ -1403,7 +1404,12 @@ export const projects = pgTable(
       t.creatorId,
       t.idempotencyKey,
     ),
-    byCreator: index("projects_creator_idx").on(t.orgId, t.creatorId, t.updatedAt),
+    byCreator: index("projects_creator_idx").on(
+      t.orgId,
+      t.creatorId,
+      t.archivedAt,
+      t.updatedAt,
+    ),
     idempotencyCheck: check(
       "projects_idempotency_check",
       sql`char_length(${t.idempotencyKey}) BETWEEN 8 AND 200`,
@@ -1497,6 +1503,13 @@ export const projectWorkspaces = pgTable(
     checkpointGeneration: integer("checkpoint_generation").notNull().default(0),
     desiredGeneration: integer("desired_generation").notNull().default(1),
     appliedGeneration: integer("applied_generation").notNull().default(0),
+    /**
+     * Creator uploads are durable before they touch the provider. This independent fence lets a
+     * warm runtime swap the complete files/ projection only between turns without manufacturing a
+     * skill generation (whose closure snapshots are generation-specific).
+     */
+    desiredFileRevision: integer("desired_file_revision").notNull().default(0),
+    appliedFileRevision: integer("applied_file_revision").notNull().default(0),
     activationRevision: integer("activation_revision").notNull().default(0),
     authorityRevision: text("authority_revision"),
     /**
@@ -1551,6 +1564,12 @@ export const projectWorkspaces = pgTable(
         AND ${t.checkpointGeneration} >= 0
         AND ${t.checkpointGeneration} <= ${t.desiredGeneration}
         AND (${t.checkpointId} IS NOT NULL OR ${t.checkpointGeneration} = 0)`,
+    ),
+    fileRevisionCheck: check(
+      "project_workspaces_file_revision_check",
+      sql`${t.desiredFileRevision} >= 0
+        AND ${t.appliedFileRevision} >= 0
+        AND ${t.appliedFileRevision} <= ${t.desiredFileRevision}`,
     ),
     activationCheck: check("project_workspaces_activation_check", sql`${t.activationRevision} >= 0`),
     activationAdmissionCheck: check(
@@ -1724,6 +1743,8 @@ export const projectSessions = pgTable(
     opencodeSessionId: text("opencode_session_id"),
     stopRequestedAt: timestamp("stop_requested_at", { withTimezone: true }),
     lastActiveAt: timestamp("last_active_at", { withTimezone: true }).notNull().defaultNow(),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    lastViewedAt: timestamp("last_viewed_at", { withTimezone: true }).notNull().defaultNow(),
     errorCode: text("error_code"),
     userMessage: text("user_message"),
     transcript: jsonb("transcript").$type<unknown[]>().notNull().default([]),
@@ -1742,7 +1763,13 @@ export const projectSessions = pgTable(
       foreignColumns: [projects.orgId, projects.id, projects.creatorId],
       name: "project_sessions_project_creator_fk",
     }).onDelete("cascade"),
-    byProject: index("project_sessions_project_idx").on(t.orgId, t.projectId, t.updatedAt),
+    byProject: index("project_sessions_project_idx").on(
+      t.orgId,
+      t.projectId,
+      t.archivedAt,
+      t.createdAt,
+      t.id,
+    ),
     uniqueOpencodeSession: uniqueIndex("project_sessions_opencode_session_uq")
       .on(t.orgId, t.projectId, t.opencodeSessionId)
       .where(sql`${t.opencodeSessionId} IS NOT NULL`),
@@ -2009,6 +2036,7 @@ export const projectFiles = pgTable(
     checksum: text("checksum").notNull(),
     storageKey: text("storage_key").notNull(),
     modifiedBySessionId: uuid("modified_by_session_id"),
+    modifiedByPromptId: uuid("modified_by_prompt_id"),
     conflictDetected: boolean("conflict_detected").notNull().default(false),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
     createdAt: now(),
@@ -2040,6 +2068,24 @@ export const projectFiles = pgTable(
       ],
       name: "project_files_modified_by_session_fk",
     }),
+    // Migration 0054 sets only modified_by_prompt_id to null when a prompt is removed.
+    modifiedByPromptFk: foreignKey({
+      columns: [
+        t.orgId,
+        t.projectId,
+        t.modifiedBySessionId,
+        t.modifiedByPromptId,
+        t.creatorId,
+      ],
+      foreignColumns: [
+        projectPrompts.orgId,
+        projectPrompts.projectId,
+        projectPrompts.sessionId,
+        projectPrompts.id,
+        projectPrompts.creatorId,
+      ],
+      name: "project_files_modified_by_prompt_fk",
+    }),
     byProject: index("project_files_project_idx").on(t.orgId, t.projectId, t.updatedAt),
     pathCheck: check(
       "project_files_path_check",
@@ -2070,6 +2116,7 @@ export const projectFileVersions = pgTable(
     checksum: text("checksum").notNull(),
     storageKey: text("storage_key").notNull(),
     modifiedBySessionId: uuid("modified_by_session_id"),
+    modifiedByPromptId: uuid("modified_by_prompt_id"),
     baseVersion: integer("base_version"),
     conflictDetected: boolean("conflict_detected").notNull().default(false),
     createdAt: now(),
@@ -2097,8 +2144,32 @@ export const projectFileVersions = pgTable(
       ],
       name: "project_file_versions_modified_by_session_fk",
     }),
+    // Migration 0054 sets only modified_by_prompt_id to null when a prompt is removed.
+    modifiedByPromptFk: foreignKey({
+      columns: [
+        t.orgId,
+        t.projectId,
+        t.modifiedBySessionId,
+        t.modifiedByPromptId,
+        t.creatorId,
+      ],
+      foreignColumns: [
+        projectPrompts.orgId,
+        projectPrompts.projectId,
+        projectPrompts.sessionId,
+        projectPrompts.id,
+        projectPrompts.creatorId,
+      ],
+      name: "project_file_versions_modified_by_prompt_fk",
+    }),
     byStorageKey: index("project_file_versions_storage_key_idx").on(t.storageKey),
     byProject: index("project_file_versions_project_idx").on(t.orgId, t.projectId, t.createdAt),
+    byPrompt: index("project_file_versions_prompt_idx").on(
+      t.orgId,
+      t.projectId,
+      t.modifiedByPromptId,
+      t.createdAt,
+    ),
     versionCheck: check(
       "project_file_versions_version_check",
       sql`${t.version} >= 1 AND (${t.baseVersion} IS NULL OR ${t.baseVersion} >= 0)`,

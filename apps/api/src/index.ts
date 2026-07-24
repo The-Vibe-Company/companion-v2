@@ -116,11 +116,15 @@ import {
   setProjectSkills,
   requestProjectDeletion,
   listProjectSessions,
+  updateProjectSession,
   getProjectSession,
+  getProjectPromptAttachment,
   createProjectSession,
   enqueueProjectPrompt,
   hasProjectPromptIdempotencyKey,
   reserveProjectAttachmentUploads,
+  reserveProjectFileUploads,
+  commitProjectFileUploads,
   requestProjectSessionStop,
   listProjectSessionEvents,
   listProjectFiles,
@@ -230,6 +234,9 @@ import {
   setActivatedModelsInputSchema,
   createProjectInputSchema,
   updateProjectInputSchema,
+  updateProjectSessionInputSchema,
+  listProjectsQuerySchema,
+  listProjectSessionsQuerySchema,
   setProjectSkillsInputSchema,
   createProjectSessionFieldsSchema,
   projectPromptFieldsSchema,
@@ -265,6 +272,7 @@ import { createModelCatalog } from "@companion/sandbox";
 import {
   commentImageKey,
   projectAttachmentKey,
+  projectFileCacheKey,
   runAttachmentKey,
   deleteSkillArchive,
   getSkillArchive,
@@ -3981,6 +3989,102 @@ async function projectAttachmentsFromForm(input: {
   return attachments;
 }
 
+async function projectFilesFromForm(input: {
+  actor: ReturnType<typeof actorFromContext>;
+  orgId: string;
+  projectId: string;
+  entries: unknown[];
+}): Promise<Array<{
+  path: string;
+  contentType: string;
+  byteSize: number;
+  checksum: string;
+  storageKey: string;
+}>> {
+  const files = input.entries.filter(isRunUploadFile);
+  if (files.length < 1 || files.length > PROJECT_ATTACHMENT_MAX_FILES) {
+    throw new ProjectValidationError(
+      `Choose between 1 and ${PROJECT_ATTACHMENT_MAX_FILES} files.`,
+      "invalid_file_count",
+    );
+  }
+  const names = new Map<string, number>();
+  const uploads: Array<{
+    path: string;
+    contentType: string;
+    byteSize: number;
+    checksum: string;
+    storageKey: string;
+    body: Buffer;
+  }> = [];
+  for (const [index, file] of files.entries()) {
+    if (file.size === 0) {
+      throw new ProjectValidationError("A Project file is empty.", "empty_file");
+    }
+    if (file.size > PROJECT_ATTACHMENT_MAX_BYTES) {
+      throw new ProjectValidationError(
+        "Each Project file must be 10 MB or smaller.",
+        "file_too_large",
+      );
+    }
+    const body = Buffer.from(await file.arrayBuffer());
+    const contentType = file.type || "application/octet-stream";
+    const cleanName = sanitizeAttachmentName(file.name || `file-${index + 1}`);
+    const occurrence = (names.get(cleanName) ?? 0) + 1;
+    names.set(cleanName, occurrence);
+    const dot = cleanName.lastIndexOf(".");
+    const uniqueName =
+      occurrence === 1
+        ? cleanName
+        : dot > 0
+          ? `${cleanName.slice(0, dot)}-${occurrence}${cleanName.slice(dot)}`
+          : `${cleanName}-${occurrence}`;
+    const checksum = `sha256:${createHash("sha256").update(body).digest("hex")}`;
+    uploads.push({
+      path: `files/${uniqueName}`,
+      contentType,
+      byteSize: body.length,
+      checksum,
+      storageKey: projectFileCacheKey({
+        orgId: input.orgId,
+        projectId: input.projectId,
+        checksum,
+      }),
+      body,
+    });
+  }
+  await withTenantContext({ orgId: input.orgId, userId: input.actor.id }, (database) =>
+    reserveProjectFileUploads({
+      actor: input.actor,
+      orgId: input.orgId,
+      projectId: input.projectId,
+      storageKeys: uploads.map((upload) => upload.storageKey),
+      database,
+    }),
+  );
+  for (const upload of uploads) {
+    try {
+      await putSkillArchive({
+        key: upload.storageKey,
+        body: upload.body,
+        contentType: upload.contentType,
+        preventOverwrite: true,
+      });
+    } catch (error) {
+      if (!isStoragePreconditionFailure(error)) throw error;
+      const existing = await getSkillArchive({ key: upload.storageKey });
+      const checksum = `sha256:${createHash("sha256").update(existing).digest("hex")}`;
+      if (checksum !== upload.checksum || existing.length !== upload.body.length) {
+        throw new ProjectValidationError(
+          "The stored Project file failed its integrity check.",
+          "file_integrity_failed",
+        );
+      }
+    }
+  }
+  return uploads.map(({ body: _, ...upload }) => upload);
+}
+
 const projectEventSubscribers = new Map<string, Set<(sequence: number) => void>>();
 let projectEventListenerPromise: Promise<void> | null = null;
 
@@ -4017,8 +4121,16 @@ async function subscribeProjectEventCursor(
 app.get("/v1/projects", async (c) => {
   try {
     assertProjectSession(c);
+    const query = listProjectsQuerySchema.parse({
+      view: c.req.query("view") ?? undefined,
+    });
     const result = await withTenant(c, async ({ actor, orgId, database }) => ({
-      projects: await listProjects({ actor, orgId, database }),
+      projects: await listProjects({
+        actor,
+        orgId,
+        view: query.view,
+        database,
+      }),
       runtime: await projectRuntimeStatus(database),
     }));
     return c.json(result);
@@ -4153,15 +4265,22 @@ app.put("/v1/projects/:id/skills", async (c) => {
 app.get("/v1/projects/:id/sessions", async (c) => {
   try {
     assertProjectSession(c);
-    const sessions = await withTenant(c, ({ actor, orgId, database }) =>
+    const query = listProjectSessionsQuerySchema.parse({
+      q: c.req.query("q") ?? undefined,
+      view: c.req.query("view") ?? undefined,
+      cursor: c.req.query("cursor") ?? undefined,
+      limit: c.req.query("limit") ?? undefined,
+    });
+    const result = await withTenant(c, ({ actor, orgId, database }) =>
       listProjectSessions({
         actor,
         orgId,
         projectId: c.req.param("id"),
+        query,
         database,
       }),
     );
-    return c.json({ sessions });
+    return c.json(result);
   } catch (error) {
     return projectError(c, error);
   }
@@ -4281,6 +4400,76 @@ app.get("/v1/projects/:id/sessions/:sessionId", async (c) => {
     return projectError(c, error);
   }
 });
+
+app.patch("/v1/projects/:id/sessions/:sessionId", async (c) => {
+  try {
+    assertProjectSession(c);
+    const value = updateProjectSessionInputSchema.parse(await c.req.json());
+    const session = await withTenant(c, async ({ actor, orgId, database }) => {
+      const projectId = c.req.param("id");
+      const sessionId = c.req.param("sessionId");
+      await updateProjectSession({
+        actor,
+        orgId,
+        projectId,
+        sessionId,
+        value,
+        database,
+      });
+      return getProjectSession({
+        actor,
+        orgId,
+        projectId,
+        sessionId,
+        database,
+      });
+    });
+    return c.json(session, value.stop_active ? 202 : 200);
+  } catch (error) {
+    return projectError(c, error);
+  }
+});
+
+app.get(
+  "/v1/projects/:id/sessions/:sessionId/attachments/:attachmentId",
+  async (c) => {
+    try {
+      assertProjectSession(c);
+      const loadAttachment = async (): Promise<RunDownloadAsset> => {
+        const attachment = await withTenant(
+          c,
+          ({ actor, orgId, database }) =>
+            getProjectPromptAttachment({
+              actor,
+              orgId,
+              projectId: c.req.param("id"),
+              sessionId: c.req.param("sessionId"),
+              attachmentId: c.req.param("attachmentId"),
+              database,
+            }),
+        );
+        return {
+          fileName: attachment.fileName,
+          contentType: attachment.contentType,
+          previewContentType: RUN_INLINE_MEDIA_TYPES.has(
+            attachment.contentType,
+          )
+            ? attachment.contentType
+            : null,
+          byteSize: attachment.byteSize,
+          storageKey: attachment.storageKey,
+        };
+      };
+      return await streamRunDownload(
+        c,
+        await loadAttachment(),
+        loadAttachment,
+      );
+    } catch (error) {
+      return projectError(c, error);
+    }
+  },
+);
 
 app.post(
   "/v1/projects/:id/sessions/:sessionId/prompts",
@@ -4529,6 +4718,54 @@ app.get("/v1/projects/:id/sessions/:sessionId/events", async (c) => {
     return projectError(c, error);
   }
 });
+
+app.post(
+  "/v1/projects/:id/files",
+  async (c, next) => {
+    try {
+      assertProjectSession(c);
+    } catch (error) {
+      return projectError(c, error);
+    }
+    await next();
+  },
+  bodyLimit({
+    maxSize: 64 * 1024 * 1024,
+    onError: (c) => jsonError(c, "Project upload exceeds the 64 MB limit.", 413),
+  }),
+  async (c) => {
+    try {
+      assertProjectSession(c);
+      if (!c.req.header("content-type")?.toLowerCase().startsWith("multipart/form-data")) {
+        return jsonError(c, "Project files require multipart/form-data.", 415);
+      }
+      const actor = actorFromContext(c);
+      const orgId = await orgIdFromContext(c);
+      const projectId = c.req.param("id");
+      const form = await c.req.formData();
+      const uploads = await projectFilesFromForm({
+        actor,
+        orgId,
+        projectId,
+        entries: form.getAll("file"),
+      });
+      const files = await withTenantContext(
+        { orgId, userId: actor.id },
+        (database) =>
+          commitProjectFileUploads({
+            actor,
+            orgId,
+            projectId,
+            files: uploads,
+            database,
+          }),
+      );
+      return c.json({ files }, 201);
+    } catch (error) {
+      return projectError(c, error);
+    }
+  },
+);
 
 app.get("/v1/projects/:id/files", async (c) => {
   try {
@@ -5391,6 +5628,11 @@ const RUN_INLINE_MEDIA_TYPES = new Set([
   "image/avif",
   "video/mp4",
   "video/webm",
+  "application/pdf",
+  "application/json",
+  "text/plain",
+  "text/markdown",
+  "text/csv",
 ]);
 
 interface RunDownloadAsset {

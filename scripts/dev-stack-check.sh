@@ -168,4 +168,47 @@ if ! bash scripts/dev-conductor.sh --help >/dev/null 2>&1; then
   exit 1
 fi
 
+# A duplicate launcher must fail before installing cleanup traps; otherwise its
+# EXIT path can tear down the first launcher's native services.
+(
+  mkdir -p "$ROOT/.context"
+  lock_test_dir="$(mktemp -d "$ROOT/.context/conductor-lock-test.XXXXXX")"
+  lock_owner_pid=""
+  cleanup_lock_test() {
+    if [ -n "$lock_owner_pid" ]; then
+      kill "$lock_owner_pid" 2>/dev/null || true
+      wait "$lock_owner_pid" 2>/dev/null || true
+    fi
+    rm -rf "$lock_test_dir"
+  }
+  trap cleanup_lock_test EXIT
+
+  mkdir -p "$lock_test_dir/scripts" "$lock_test_dir/.conductor-pg"
+  cp "$ROOT/scripts/dev-conductor.sh" "$lock_test_dir/scripts/dev-conductor.sh"
+  cd "$lock_test_dir"
+  bash -c 'exec -a "bash scripts/dev-conductor.sh" sleep 30' &
+  lock_owner_pid=$!
+  ln -s "$lock_owner_pid" .conductor-pg/run.lock
+
+  if duplicate_output="$(bash scripts/dev-conductor.sh --base 55900 2>&1)"; then
+    printf '[dev-stack-check] duplicate Conductor launcher should fail\n' >&2
+    exit 1
+  fi
+  case "$duplicate_output" in
+    *"already starting or running"*) ;;
+    *)
+      printf '[dev-stack-check] duplicate launcher returned the wrong error: %s\n' \
+        "$duplicate_output" >&2
+      exit 1
+      ;;
+  esac
+  case "$duplicate_output" in
+    *"Shutting down"*)
+      printf '[dev-stack-check] duplicate launcher must not run service cleanup\n' >&2
+      exit 1
+      ;;
+  esac
+  kill -0 "$lock_owner_pid"
+)
+
 printf '[dev-stack-check] OK\n'

@@ -7,15 +7,19 @@ import {
   fetchProject,
   fetchProjectFileVersions,
   fetchProjectSession,
+  fetchProjectSessions,
   fetchProjects,
   projectFileHref,
   projectFileVersionHref,
+  projectPromptAttachmentHref,
   projectSessionEventsHref,
   replaceProjectSkills,
   retryProjectWorkspace,
   sendProjectPrompt,
   stopProjectSession,
   updateProject,
+  updateProjectSession,
+  uploadProjectFiles,
 } from "./projects";
 
 const api = vi.hoisted(() => ({ apiFetch: vi.fn() }));
@@ -32,11 +36,15 @@ const rawRow = {
   status: "running",
   skill_count: 1,
   session_count: 1,
+  active_session_count: 1,
+  archived_session_count: 0,
+  unread_session_count: 0,
   file_count: 1,
   recent_sessions: [],
   last_activity_at: NOW,
   error_code: null,
   message: null,
+  archived_at: null,
   created_at: NOW,
   updated_at: NOW,
 };
@@ -56,6 +64,9 @@ const rawSession = {
   status: "working",
   stop_requested_at: null,
   last_active_at: NOW,
+  archived_at: null,
+  last_viewed_at: NOW,
+  is_unread: false,
   error_code: null,
   message: null,
   created_at: NOW,
@@ -67,6 +78,23 @@ const rawDetail = {
   sessions: [rawSession],
   secret_count: 2,
   model_connection_count: 1,
+  access: {
+    secrets: [
+      {
+        id: "66666666-6666-4666-8666-666666666666",
+        name: "CRM_API_KEY",
+        source: "personal",
+        owner_name: "Alex",
+      },
+    ],
+    model_connections: [
+      {
+        id: "77777777-7777-4777-8777-777777777777",
+        provider: "openai",
+        source: "personal",
+      },
+    ],
+  },
 };
 const rawFile = {
   id: "44444444-4444-4444-8444-444444444444",
@@ -76,6 +104,8 @@ const rawFile = {
   content_type: "text/markdown",
   byte_size: 1200,
   checksum: "a".repeat(64),
+  modified_by_session_id: SESSION_ID,
+  modified_by_prompt_id: null,
   conflict_detected: true,
   created_at: NOW,
   updated_at: NOW,
@@ -87,10 +117,13 @@ const rawSessionDetail = {
       id: "55555555-5555-4555-8555-555555555555",
       session_id: SESSION_ID,
       sequence: 1,
+      opencode_message_id: "project-message-1",
       text: "Prepare the calendar",
       status: "queued",
       error_code: null,
       error_message: null,
+      attachments: [],
+      file_changes: [],
       created_at: NOW,
       started_at: null,
       completed_at: null,
@@ -170,6 +203,22 @@ describe("project queries", () => {
     ]);
   });
 
+  it("uploads shared Project files without creating a synthetic prompt", async () => {
+    api.apiFetch.mockResolvedValue({ files: [rawFile] });
+    const file = new File(["calendar"], "calendar.md", {
+      type: "text/markdown",
+    });
+
+    await expect(uploadProjectFiles(PROJECT_ID, [file])).resolves.toMatchObject([
+      { id: rawFile.id, path: rawFile.path, version: 1 },
+    ]);
+    const [path, options] = api.apiFetch.mock.calls[0]!;
+    expect(path).toBe(`/v1/projects/${PROJECT_ID}/files`);
+    expect(options).toMatchObject({ method: "POST" });
+    expect(options.body).toBeInstanceOf(FormData);
+    expect((options.body as FormData).getAll("file")).toEqual([file]);
+  });
+
   it("loads and links exact retained file versions", async () => {
     api.apiFetch.mockResolvedValue({
       versions: [
@@ -182,6 +231,7 @@ describe("project queries", () => {
           byte_size: rawFile.byte_size,
           checksum: rawFile.checksum,
           modified_by_session_id: SESSION_ID,
+          modified_by_prompt_id: null,
           base_version: 0,
           conflict_detected: true,
           created_at: NOW,
@@ -342,6 +392,80 @@ describe("project queries", () => {
     expect(projectFileHref(PROJECT_ID, rawFile.id, true)).toBe(
       `/v1/projects/${PROJECT_ID}/files/${rawFile.id}?download=1`,
     );
+    expect(
+      projectPromptAttachmentHref(
+        PROJECT_ID,
+        SESSION_ID,
+        "55555555-5555-4555-8555-555555555555",
+        true,
+      ),
+    ).toBe(
+      `/v1/projects/${PROJECT_ID}/sessions/${SESSION_ID}/attachments/55555555-5555-4555-8555-555555555555?download=1`,
+    );
+  });
+
+  it("searches paginated conversation history in canonical creation order", async () => {
+    const older = {
+      ...rawSession,
+      id: "88888888-8888-4888-8888-888888888888",
+      title: "Older conversation",
+      created_at: "2026-07-22T10:00:00.000Z",
+    };
+    api.apiFetch.mockResolvedValue({
+      sessions: [older, rawSession],
+      next_cursor: "next-page",
+    });
+
+    await expect(
+      fetchProjectSessions(PROJECT_ID, {
+        query: "calendar",
+        view: "archived",
+        cursor: "cursor-1",
+        limit: 25,
+      }),
+    ).resolves.toMatchObject({
+      sessions: [{ id: SESSION_ID }, { id: older.id }],
+      nextCursor: "next-page",
+    });
+    expect(api.apiFetch).toHaveBeenCalledWith(
+      `/v1/projects/${PROJECT_ID}/sessions?q=calendar&view=archived&cursor=cursor-1&limit=25`,
+      { signal: undefined },
+    );
+  });
+
+  it("renames and atomically stops active conversations while archiving", async () => {
+    api.apiFetch
+      .mockResolvedValueOnce({ ...rawSessionDetail, title: "Launch calendar" })
+      .mockResolvedValueOnce({
+        ...rawSessionDetail,
+        status: "stopped",
+        archived_at: NOW,
+      });
+
+    await updateProjectSession(PROJECT_ID, SESSION_ID, {
+      title: "Launch calendar",
+    });
+    await updateProjectSession(PROJECT_ID, SESSION_ID, {
+      archived: true,
+      stopActive: true,
+    });
+
+    expect(api.apiFetch.mock.calls).toEqual([
+      [
+        `/v1/projects/${PROJECT_ID}/sessions/${SESSION_ID}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ title: "Launch calendar" }),
+        },
+      ],
+      [
+        `/v1/projects/${PROJECT_ID}/sessions/${SESSION_ID}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ archived: true, stop_active: true }),
+        },
+      ],
+    ]);
   });
 
   it("requests durable Project deletion without touching legacy Skill Runs", async () => {

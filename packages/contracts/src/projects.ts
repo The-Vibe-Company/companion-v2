@@ -56,6 +56,9 @@ export const projectPromptStatusSchema = z.enum([
 ]);
 export type ProjectPromptStatus = z.infer<typeof projectPromptStatusSchema>;
 
+export const projectListViewSchema = z.enum(["active", "archived"]);
+export type ProjectListView = z.infer<typeof projectListViewSchema>;
+
 export const projectSkillSchema = z
   .object({
     skill_id: uuidSchema,
@@ -77,6 +80,9 @@ export const projectSessionRowSchema = z
     status: projectSessionStatusSchema,
     stop_requested_at: isoDateSchema.nullable(),
     last_active_at: isoDateSchema,
+    archived_at: isoDateSchema.nullable(),
+    last_viewed_at: isoDateSchema,
+    is_unread: z.boolean(),
     error_code: z.string().nullable(),
     message: z.string().nullable(),
     created_at: isoDateSchema,
@@ -94,23 +100,57 @@ export const projectRowSchema = z
     status: projectWorkspaceStatusSchema,
     skill_count: z.number().int().nonnegative(),
     session_count: z.number().int().nonnegative(),
+    active_session_count: z.number().int().nonnegative().default(0),
+    archived_session_count: z.number().int().nonnegative(),
+    unread_session_count: z.number().int().nonnegative(),
     file_count: z.number().int().nonnegative(),
     recent_sessions: z.array(projectSessionRowSchema).max(5),
     last_activity_at: isoDateSchema,
     error_code: z.string().nullable(),
     message: z.string().nullable(),
+    archived_at: isoDateSchema.nullable(),
     created_at: isoDateSchema,
     updated_at: isoDateSchema,
   })
   .strict();
 export type ProjectRow = z.infer<typeof projectRowSchema>;
 
+export const projectAccessSecretSchema = z
+  .object({
+    id: uuidSchema,
+    name: z.string().min(1).max(120),
+    source: z.enum(["personal", "organization", "shared"]),
+    owner_name: z.string().min(1),
+  })
+  .strict();
+export type ProjectAccessSecret = z.infer<typeof projectAccessSecretSchema>;
+
+export const projectAccessModelConnectionSchema = z
+  .object({
+    id: uuidSchema,
+    provider: z.string().min(1).max(120),
+    source: z.enum(["personal", "organization"]),
+  })
+  .strict();
+export type ProjectAccessModelConnection = z.infer<
+  typeof projectAccessModelConnectionSchema
+>;
+
+export const projectAccessSummarySchema = z
+  .object({
+    secrets: z.array(projectAccessSecretSchema),
+    model_connections: z.array(projectAccessModelConnectionSchema),
+  })
+  .strict();
+export type ProjectAccessSummary = z.infer<typeof projectAccessSummarySchema>;
+
 export const projectDetailSchema = projectRowSchema
   .extend({
     skills: z.array(projectSkillSchema),
-    sessions: z.array(projectSessionRowSchema),
+    sessions: z.array(projectSessionRowSchema).max(50),
     secret_count: z.number().int().nonnegative(),
     model_connection_count: z.number().int().nonnegative(),
+    access: projectAccessSummarySchema,
   })
   .strict();
 export type ProjectDetail = z.infer<typeof projectDetailSchema>;
@@ -131,6 +171,13 @@ export const projectsResponseSchema = z
   .strict();
 export type ProjectsResponse = z.infer<typeof projectsResponseSchema>;
 
+export const listProjectsQuerySchema = z
+  .object({
+    view: projectListViewSchema.default("active"),
+  })
+  .strict();
+export type ListProjectsQuery = z.infer<typeof listProjectsQuerySchema>;
+
 export const createProjectInputSchema = z
   .object({
     name: projectNameSchema,
@@ -145,10 +192,14 @@ export const updateProjectInputSchema = z
     revision: z.number().int().positive(),
     name: projectNameSchema.optional(),
     default_model: modelSchema.optional(),
+    archived: z.boolean().optional(),
   })
   .strict()
   .refine(
-    (value) => value.name !== undefined || value.default_model !== undefined,
+    (value) =>
+      value.name !== undefined ||
+      value.default_model !== undefined ||
+      value.archived !== undefined,
     "at least one project field is required",
   );
 export type UpdateProjectInput = z.infer<typeof updateProjectInputSchema>;
@@ -186,15 +237,52 @@ export const projectPromptFieldsSchema = z
 export const projectPromptInputSchema = projectPromptFieldsSchema;
 export type ProjectPromptInput = z.infer<typeof projectPromptInputSchema>;
 
+export const projectPromptAttachmentSchema = z
+  .object({
+    id: uuidSchema,
+    file_name: z.string().trim().min(1).max(255),
+    content_type: z.string().trim().min(1),
+    byte_size: z.number().int().positive(),
+    workspace_path: z.string().startsWith("files/"),
+    status: z.enum(["uploaded", "materialized", "failed"]),
+    created_at: isoDateSchema,
+  })
+  .strict();
+export type ProjectPromptAttachment = z.infer<
+  typeof projectPromptAttachmentSchema
+>;
+
+export const projectPromptFileChangeSchema = z
+  .object({
+    project_id: uuidSchema,
+    file_id: uuidSchema,
+    path: z.string().startsWith("files/"),
+    kind: z.enum(["created", "updated"]),
+    version: z.number().int().positive(),
+    content_type: z.string().min(1),
+    byte_size: z.number().int().nonnegative(),
+    modified_by_session_id: uuidSchema,
+    modified_by_prompt_id: uuidSchema,
+    conflict_detected: z.boolean(),
+    created_at: isoDateSchema,
+  })
+  .strict();
+export type ProjectPromptFileChange = z.infer<
+  typeof projectPromptFileChangeSchema
+>;
+
 export const projectPromptRowSchema = z
   .object({
     id: uuidSchema,
     session_id: uuidSchema,
     sequence: z.number().int().positive(),
+    opencode_message_id: z.string().min(1).max(512),
     text: promptSchema,
     status: projectPromptStatusSchema,
     error_code: z.string().nullable(),
     error_message: z.string().nullable(),
+    attachments: z.array(projectPromptAttachmentSchema),
+    file_changes: z.array(projectPromptFileChangeSchema),
     created_at: isoDateSchema,
     started_at: isoDateSchema.nullable(),
     completed_at: isoDateSchema.nullable(),
@@ -226,6 +314,66 @@ export const projectSessionDetailSchema = projectSessionRowSchema
   .strict();
 export type ProjectSessionDetail = z.infer<typeof projectSessionDetailSchema>;
 
+export const updateProjectSessionInputSchema = z
+  .object({
+    title: sessionTitleSchema.optional(),
+    archived: z.boolean().optional(),
+    viewed: z.boolean().optional(),
+    stop_active: z.boolean().optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (
+      value.title === undefined &&
+      value.archived === undefined &&
+      value.viewed === undefined
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "at least one session field is required",
+      });
+    }
+    if (value.viewed === false) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["viewed"],
+        message: "viewed can only be set to true",
+      });
+    }
+    if (value.stop_active && value.archived !== true) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["stop_active"],
+        message: "stop_active is only valid while archiving",
+      });
+    }
+  });
+export type UpdateProjectSessionInput = z.infer<
+  typeof updateProjectSessionInputSchema
+>;
+
+export const listProjectSessionsQuerySchema = z
+  .object({
+    q: z.string().trim().max(PROJECT_SESSION_TITLE_MAX).default(""),
+    view: projectListViewSchema.default("active"),
+    cursor: z.string().trim().min(1).max(1_024).optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+  })
+  .strict();
+export type ListProjectSessionsQuery = z.infer<
+  typeof listProjectSessionsQuerySchema
+>;
+
+export const projectSessionsResponseSchema = z
+  .object({
+    sessions: z.array(projectSessionRowSchema),
+    next_cursor: z.string().nullable(),
+  })
+  .strict();
+export type ProjectSessionsResponse = z.infer<
+  typeof projectSessionsResponseSchema
+>;
+
 export const projectFileRowSchema = z
   .object({
     id: uuidSchema,
@@ -235,6 +383,8 @@ export const projectFileRowSchema = z
     content_type: z.string().min(1),
     byte_size: z.number().int().nonnegative(),
     checksum: z.string().min(32).max(128),
+    modified_by_session_id: uuidSchema.nullable(),
+    modified_by_prompt_id: uuidSchema.nullable(),
     conflict_detected: z.boolean(),
     created_at: isoDateSchema,
     updated_at: isoDateSchema,
@@ -247,6 +397,11 @@ export const projectFileDownloadSchema = projectFileRowSchema
   .strict();
 export type ProjectFileDownload = z.infer<typeof projectFileDownloadSchema>;
 
+export const projectFilesResponseSchema = z
+  .object({ files: z.array(projectFileRowSchema) })
+  .strict();
+export type ProjectFilesResponse = z.infer<typeof projectFilesResponseSchema>;
+
 export const projectFileVersionRowSchema = z
   .object({
     project_id: uuidSchema,
@@ -257,6 +412,7 @@ export const projectFileVersionRowSchema = z
     byte_size: z.number().int().nonnegative(),
     checksum: z.string().min(32).max(128),
     modified_by_session_id: uuidSchema.nullable(),
+    modified_by_prompt_id: uuidSchema.nullable(),
     /** Zero identifies a file that did not exist at the start of the writer's turn. */
     base_version: z.number().int().nonnegative().nullable(),
     conflict_detected: z.boolean(),
@@ -287,6 +443,8 @@ export interface ProjectWorkspaceJob {
   checkpointGeneration: number;
   desiredGeneration: number;
   appliedGeneration: number;
+  desiredFileRevision: number;
+  appliedFileRevision: number;
   lastActivityAt: Date;
   idleDeadlineAt: Date | null;
   activationRevision: number;
@@ -336,6 +494,8 @@ export interface ProjectMaterializationPlan {
   /** Current durable generations, re-read under the exact workspace lease. */
   desiredGeneration: number;
   appliedGeneration: number;
+  desiredFileRevision: number;
+  appliedFileRevision: number;
   /** Projection generation contained by the durable checkpoint, or zero for the golden snapshot. */
   checkpointGeneration: number;
   /** @deprecated Use desiredGeneration. Kept while the worker seam migrates. */

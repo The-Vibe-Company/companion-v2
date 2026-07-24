@@ -58,6 +58,7 @@ CREATE TABLE "projects" (
   "name" text NOT NULL,
   "default_model" text NOT NULL,
   "revision" integer DEFAULT 1 NOT NULL,
+  "archived_at" timestamp with time zone,
   "delete_requested_at" timestamp with time zone,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -91,6 +92,8 @@ CREATE TABLE "project_workspaces" (
   "checkpoint_generation" integer DEFAULT 0 NOT NULL,
   "desired_generation" integer DEFAULT 1 NOT NULL,
   "applied_generation" integer DEFAULT 0 NOT NULL,
+  "desired_file_revision" integer DEFAULT 0 NOT NULL,
+  "applied_file_revision" integer DEFAULT 0 NOT NULL,
   "activation_revision" integer DEFAULT 0 NOT NULL,
   "authority_revision" text,
   "activation_admission_token" uuid,
@@ -127,6 +130,12 @@ CREATE TABLE "project_workspaces" (
       AND "checkpoint_generation" >= 0
       AND "checkpoint_generation" <= "desired_generation"
       AND ("checkpoint_id" IS NOT NULL OR "checkpoint_generation" = 0)
+    ),
+  CONSTRAINT "project_workspaces_file_revision_check"
+    CHECK (
+      "desired_file_revision" >= 0
+      AND "applied_file_revision" >= 0
+      AND "applied_file_revision" <= "desired_file_revision"
     ),
   CONSTRAINT "project_workspaces_activation_check" CHECK ("activation_revision" >= 0),
   CONSTRAINT "project_workspaces_activation_admission_check" CHECK (
@@ -243,6 +252,8 @@ CREATE TABLE "project_sessions" (
   "opencode_session_id" text,
   "stop_requested_at" timestamp with time zone,
   "last_active_at" timestamp with time zone DEFAULT now() NOT NULL,
+  "archived_at" timestamp with time zone,
+  "last_viewed_at" timestamp with time zone DEFAULT now() NOT NULL,
   "error_code" text,
   "user_message" text,
   "transcript" jsonb DEFAULT '[]'::jsonb NOT NULL,
@@ -381,6 +392,7 @@ CREATE TABLE "project_files" (
   "checksum" text NOT NULL,
   "storage_key" text NOT NULL,
   "modified_by_session_id" uuid,
+  "modified_by_prompt_id" uuid,
   "conflict_detected" boolean DEFAULT false NOT NULL,
   "deleted_at" timestamp with time zone,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -409,6 +421,7 @@ CREATE TABLE "project_file_versions" (
   "checksum" text NOT NULL,
   "storage_key" text NOT NULL,
   "modified_by_session_id" uuid,
+  "modified_by_prompt_id" uuid,
   "base_version" integer,
   "conflict_detected" boolean DEFAULT false NOT NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -528,6 +541,10 @@ ALTER TABLE "project_files" ADD CONSTRAINT "project_files_modified_by_session_fk
   FOREIGN KEY ("org_id", "project_id", "modified_by_session_id", "creator_id")
   REFERENCES "project_sessions"("org_id", "project_id", "id", "creator_id")
   ON DELETE SET NULL ("modified_by_session_id");--> statement-breakpoint
+ALTER TABLE "project_files" ADD CONSTRAINT "project_files_modified_by_prompt_fk"
+  FOREIGN KEY ("org_id", "project_id", "modified_by_session_id", "modified_by_prompt_id", "creator_id")
+  REFERENCES "project_prompts"("org_id", "project_id", "session_id", "id", "creator_id")
+  ON DELETE SET NULL ("modified_by_prompt_id");--> statement-breakpoint
 ALTER TABLE "project_file_versions" ADD CONSTRAINT "project_file_versions_org_fk"
   FOREIGN KEY ("org_id") REFERENCES "organizations"("id") ON DELETE cascade;--> statement-breakpoint
 ALTER TABLE "project_file_versions" ADD CONSTRAINT "project_file_versions_creator_fk"
@@ -539,6 +556,10 @@ ALTER TABLE "project_file_versions" ADD CONSTRAINT "project_file_versions_modifi
   FOREIGN KEY ("org_id", "project_id", "modified_by_session_id", "creator_id")
   REFERENCES "project_sessions"("org_id", "project_id", "id", "creator_id")
   ON DELETE SET NULL ("modified_by_session_id");--> statement-breakpoint
+ALTER TABLE "project_file_versions" ADD CONSTRAINT "project_file_versions_modified_by_prompt_fk"
+  FOREIGN KEY ("org_id", "project_id", "modified_by_session_id", "modified_by_prompt_id", "creator_id")
+  REFERENCES "project_prompts"("org_id", "project_id", "session_id", "id", "creator_id")
+  ON DELETE SET NULL ("modified_by_prompt_id");--> statement-breakpoint
 ALTER TABLE "project_secret_inputs" ADD CONSTRAINT "project_secret_inputs_org_fk"
   FOREIGN KEY ("org_id") REFERENCES "organizations"("id") ON DELETE cascade;--> statement-breakpoint
 ALTER TABLE "project_secret_inputs" ADD CONSTRAINT "project_secret_inputs_creator_fk"
@@ -557,13 +578,15 @@ ALTER TABLE "project_model_provider_inputs" ADD CONSTRAINT "project_model_inputs
   FOREIGN KEY ("org_id", "project_id", "creator_id")
   REFERENCES "projects"("org_id", "id", "creator_id") ON DELETE cascade;--> statement-breakpoint
 
-CREATE INDEX "projects_creator_idx" ON "projects" ("org_id", "creator_id", "updated_at" DESC);--> statement-breakpoint
+CREATE INDEX "projects_creator_idx"
+  ON "projects" ("org_id", "creator_id", "archived_at", "updated_at" DESC);--> statement-breakpoint
 CREATE INDEX "project_worker_heartbeats_expiry_idx" ON "project_worker_heartbeats" ("expires_at");--> statement-breakpoint
 CREATE INDEX "project_worker_lease_contexts_created_idx" ON "project_worker_lease_contexts" ("created_at");--> statement-breakpoint
 CREATE INDEX "project_workspaces_claim_idx" ON "project_workspaces" ("status", "available_at", "lease_expires_at");--> statement-breakpoint
 CREATE INDEX "project_workspaces_idle_idx" ON "project_workspaces" ("status", "idle_deadline_at");--> statement-breakpoint
 CREATE INDEX "project_skills_skill_idx" ON "project_skills" ("org_id", "skill_id");--> statement-breakpoint
-CREATE INDEX "project_sessions_project_idx" ON "project_sessions" ("org_id", "project_id", "updated_at" DESC);--> statement-breakpoint
+CREATE INDEX "project_sessions_project_idx"
+  ON "project_sessions" ("org_id", "project_id", "archived_at", "created_at" DESC, "id" DESC);--> statement-breakpoint
 CREATE UNIQUE INDEX "project_sessions_opencode_session_uq"
   ON "project_sessions" ("org_id", "project_id", "opencode_session_id")
   WHERE "opencode_session_id" IS NOT NULL;--> statement-breakpoint
@@ -578,6 +601,8 @@ CREATE INDEX "project_attachment_uploads_project_idx"
 CREATE INDEX "project_attachments_prompt_idx" ON "project_attachments" ("org_id", "prompt_id");--> statement-breakpoint
 CREATE INDEX "project_files_project_idx" ON "project_files" ("org_id", "project_id", "updated_at" DESC);--> statement-breakpoint
 CREATE INDEX "project_file_versions_project_idx" ON "project_file_versions" ("org_id", "project_id", "created_at" DESC);--> statement-breakpoint
+CREATE INDEX "project_file_versions_prompt_idx"
+  ON "project_file_versions" ("org_id", "project_id", "modified_by_prompt_id", "created_at" DESC);--> statement-breakpoint
 CREATE INDEX "project_file_versions_storage_key_idx" ON "project_file_versions" ("storage_key");--> statement-breakpoint
 
 -- GUCs are caller-settable and are never authority by themselves. Internal modes are accepted only
@@ -2104,6 +2129,8 @@ RETURNS TABLE (
   "checkpoint_generation" integer,
   "desired_generation" integer,
   "applied_generation" integer,
+  "desired_file_revision" integer,
+  "applied_file_revision" integer,
   "last_activity_at" timestamp with time zone,
   "idle_deadline_at" timestamp with time zone,
   "activation_revision" integer,
@@ -2188,7 +2215,11 @@ BEGIN
               AND (
                 w."recycle_requested_at" IS NOT NULL
                 OR w."skill_sync_error_at" IS NOT NULL
-                OR w."status" IN ('queued', 'provisioning', 'stopping', 'deleting')
+                -- A worker can crash after durably finishing a prompt but before it installs the
+                -- idle deadline. Reclaim every expired running lease even when no prompt remains;
+                -- the next supervisor observation is the recovery boundary for both that case and
+                -- a crash during an in-flight turn.
+                OR w."status" IN ('queued', 'provisioning', 'running', 'stopping', 'deleting')
                 -- Runtime/provider failures stay retryable. max_attempts caps retry telemetry while
                 -- available_at remains the backoff boundary; it is not a terminal lifecycle state.
                 OR (
@@ -2196,6 +2227,13 @@ BEGIN
                   AND w."last_error_code" = 'project_runtime_failed'
                 )
                 OR w."desired_generation" > w."applied_generation"
+                -- Creator uploads wake an already-running warm workspace so the authoritative
+                -- files/ projection can be swapped at the next quiescent boundary. A stopped
+                -- Project remains storage-only until its next prompt activates the provider.
+                OR (
+                  w."status" <> 'stopped'
+                  AND w."desired_file_revision" > w."applied_file_revision"
+                )
                 OR (w."idle_deadline_at" IS NOT NULL AND w."idle_deadline_at" <= clock_timestamp())
                 OR (
                   w."last_error_code" IS DISTINCT FROM 'project_provider_unavailable'
@@ -2245,6 +2283,7 @@ BEGIN
          c."sandbox_name", c."sandbox_id", c."sandbox_domain", c."checkpoint_id",
          c."checkpoint_generation",
          c."desired_generation", c."applied_generation",
+         c."desired_file_revision", c."applied_file_revision",
          c."last_activity_at", c."idle_deadline_at", c."activation_revision",
          c."authority_revision",
          c."activation_admission_token", c."activation_admission_revision",

@@ -152,6 +152,22 @@ export function projectAttachmentKey(input: {
   return `${input.orgId}/project-attachments/${input.projectId}/${input.attachmentId}`;
 }
 
+/** Content-addressed cache key shared by Project uploads and worker-captured deliverables. */
+export function projectFileCacheKey(input: {
+  orgId: string;
+  projectId: string;
+  checksum: string;
+}): string {
+  const digest = /^sha256:([0-9a-f]{64})$/.exec(input.checksum)?.[1];
+  if (!digest) throw new Error("Project file checksum must be sha256");
+  for (const value of [input.orgId, input.projectId]) {
+    if (!value || value.includes("/") || value.includes("\\") || value.includes("..")) {
+      throw new Error("Project file cache identity is invalid");
+    }
+  }
+  return `${input.orgId}/project-files/${input.projectId}/sha256/${digest}`;
+}
+
 /** Content cached from the Project's managed files/ tree for sleep-time access and recovery. */
 export function projectFileVersionKey(input: {
   orgId: string;

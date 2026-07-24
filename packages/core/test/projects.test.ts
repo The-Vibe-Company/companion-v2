@@ -10,6 +10,8 @@ import {
   assertValidProjectCreateIdempotencyKey,
   assertCompatibleProjectSkillClosure,
   deriveProjectSessionTitle,
+  isProjectSessionUnread,
+  projectFileChangeKind,
   ProjectValidationError,
   reopenedProjectSessionState,
   sandboxNameForProject,
@@ -55,6 +57,35 @@ describe("Cowork project helpers", () => {
       errorCode: null,
       userMessage: null,
     });
+  });
+
+  it("keeps terminal results unread until their transcript is actually viewed", () => {
+    const lastViewedAt = new Date("2026-07-24T08:00:00.000Z");
+    expect(
+      isProjectSessionUnread({
+        status: "completed",
+        updatedAt: new Date("2026-07-24T08:01:00.000Z"),
+        lastViewedAt,
+      }),
+    ).toBe(true);
+    expect(
+      isProjectSessionUnread({
+        status: "working",
+        updatedAt: new Date("2026-07-24T08:01:00.000Z"),
+        lastViewedAt,
+      }),
+    ).toBe(false);
+  });
+
+  it("classifies file changes from the observed base rather than the persisted version", () => {
+    expect(projectFileChangeKind({ baseVersion: 0, version: 1 })).toBe("created");
+    expect(projectFileChangeKind({ baseVersion: 1, version: 2 })).toBe("updated");
+    expect(
+      // A concurrent creator can persist version 2 while still having observed no file.
+      projectFileChangeKind({ baseVersion: 0, version: 2 }),
+    ).toBe("created");
+    expect(projectFileChangeKind({ baseVersion: null, version: 1 })).toBe("created");
+    expect(projectFileChangeKind({ baseVersion: null, version: 2 })).toBe("updated");
   });
 
   it("keeps a detected file race sticky after the final neutral LWW mirror", () => {

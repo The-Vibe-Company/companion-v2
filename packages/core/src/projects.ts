@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, desc, eq, inArray, isNull, max, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, max, or, sql } from "drizzle-orm";
 import {
   PROJECT_ATTACHMENT_MAX_BYTES,
   PROJECT_ATTACHMENT_MAX_FILES,
@@ -8,17 +8,23 @@ import {
   projectSessionEventSchema,
   projectTranscriptSchema,
   type CreateProjectInput,
+  type ListProjectSessionsQuery,
+  type ProjectAccessModelConnection,
+  type ProjectAccessSecret,
   type ProjectDetail,
   type ProjectEventEnvelope,
   type ProjectFileDownload,
   type ProjectFileRow,
+  type ProjectFileVersionRow,
   type ProjectPromptRow,
   type ProjectRow,
   type ProjectSessionDetail,
   type ProjectSessionRow,
+  type ProjectSessionsResponse,
   type ProjectSkill,
   type SetProjectSkillsInput,
   type UpdateProjectInput,
+  type UpdateProjectSessionInput,
 } from "@companion/contracts";
 import { db, schema, type Db } from "@companion/db";
 import { canAccessProject, canAccessSkill } from "./authz";
@@ -45,6 +51,14 @@ export interface CreateProjectAttachment {
   checksum: string;
   storageKey: string;
   workspacePath: string;
+}
+
+export interface CreateProjectFileUpload {
+  path: string;
+  contentType: string;
+  byteSize: number;
+  checksum: string;
+  storageKey: string;
 }
 
 export class ProjectNotFoundError extends Error {
@@ -128,6 +142,18 @@ function safeName(value: string): string {
   return Array.from(value.trim()).slice(0, PROJECT_NAME_MAX).join("");
 }
 
+function assertProjectAcceptsWork(project: ProjectRecord): void {
+  if (project.archivedAt) {
+    throw new ProjectConflictError("restore this project before starting new work");
+  }
+}
+
+function assertSessionAcceptsWork(session: ProjectSessionRecord): void {
+  if (session.archivedAt) {
+    throw new ProjectConflictError("restore this conversation before continuing");
+  }
+}
+
 function projectCreatePayloadHash(value: CreateProjectInput): string {
   return projectPayloadHash({
     name: safeName(value.name),
@@ -199,8 +225,10 @@ async function loadOwnedSession(input: {
   sessionId: string;
   database: Db;
   lock?: boolean;
+  acceptsWork?: boolean;
 }): Promise<ProjectSessionRecord> {
-  await loadOwnedProject(input);
+  const project = await loadOwnedProject(input);
+  if (input.acceptsWork) assertProjectAcceptsWork(project);
   const query = input.database
     .select()
     .from(schema.projectSessions)
@@ -213,11 +241,14 @@ async function loadOwnedSession(input: {
       ),
     );
   const rows = input.lock ? await query.for("update") : await query;
-  if (!rows[0]) throw new ProjectNotFoundError("session not found");
-  return rows[0];
+  const session = rows[0];
+  if (!session) throw new ProjectNotFoundError("session not found");
+  if (input.acceptsWork) assertSessionAcceptsWork(session);
+  return session;
 }
 
 function toSessionRow(row: ProjectSessionRecord): ProjectSessionRow {
+  const isUnread = isProjectSessionUnread(row);
   return {
     id: row.id,
     project_id: row.projectId,
@@ -226,11 +257,34 @@ function toSessionRow(row: ProjectSessionRecord): ProjectSessionRow {
     status: row.status,
     stop_requested_at: row.stopRequestedAt?.toISOString() ?? null,
     last_active_at: row.lastActiveAt.toISOString(),
+    archived_at: row.archivedAt?.toISOString() ?? null,
+    last_viewed_at: row.lastViewedAt.toISOString(),
+    is_unread: isUnread,
     error_code: row.errorCode,
     message: row.userMessage,
     created_at: row.createdAt.toISOString(),
     updated_at: row.updatedAt.toISOString(),
   };
+}
+
+export function isProjectSessionUnread(input: {
+  status: string;
+  updatedAt: Date;
+  lastViewedAt: Date;
+}): boolean {
+  return (
+    ["idle", "stopped", "completed", "error"].includes(input.status) &&
+    input.updatedAt.getTime() > input.lastViewedAt.getTime()
+  );
+}
+
+export function projectFileChangeKind(
+  input: { baseVersion: number | null; version: number },
+): "created" | "updated" {
+  return input.baseVersion === 0
+    || (input.baseVersion === null && input.version === 1)
+    ? "created"
+    : "updated";
 }
 
 async function loadProjectSkills(input: {
@@ -284,8 +338,15 @@ async function projectCounts(input: {
   projectId: string;
   creatorId: string;
   database: Db;
-}): Promise<{ skills: number; sessions: number; files: number }> {
-  const [skills, sessions, files] = await Promise.all([
+}): Promise<{
+  skills: number;
+  sessions: number;
+  activeSessions: number;
+  archivedSessions: number;
+  unreadSessions: number;
+  files: number;
+}> {
+  const [skills, sessions, activeSessions, archivedSessions, unreadSessions, files] = await Promise.all([
     input.database
       .select({ count: sql<number>`count(*)::int` })
       .from(schema.projectSkills)
@@ -304,6 +365,47 @@ async function projectCounts(input: {
           eq(schema.projectSessions.orgId, input.orgId),
           eq(schema.projectSessions.projectId, input.projectId),
           eq(schema.projectSessions.creatorId, input.creatorId),
+          isNull(schema.projectSessions.archivedAt),
+        ),
+      ),
+    input.database
+      .select({ count: sql<number>`count(*)::int` })
+      .from(schema.projectSessions)
+      .where(
+        and(
+          eq(schema.projectSessions.orgId, input.orgId),
+          eq(schema.projectSessions.projectId, input.projectId),
+          eq(schema.projectSessions.creatorId, input.creatorId),
+          isNull(schema.projectSessions.archivedAt),
+          inArray(schema.projectSessions.status, [
+            "queued",
+            "working",
+            "stopping",
+          ]),
+        ),
+      ),
+    input.database
+      .select({ count: sql<number>`count(*)::int` })
+      .from(schema.projectSessions)
+      .where(
+        and(
+          eq(schema.projectSessions.orgId, input.orgId),
+          eq(schema.projectSessions.projectId, input.projectId),
+          eq(schema.projectSessions.creatorId, input.creatorId),
+          isNotNull(schema.projectSessions.archivedAt),
+        ),
+      ),
+    input.database
+      .select({ count: sql<number>`count(*)::int` })
+      .from(schema.projectSessions)
+      .where(
+        and(
+          eq(schema.projectSessions.orgId, input.orgId),
+          eq(schema.projectSessions.projectId, input.projectId),
+          eq(schema.projectSessions.creatorId, input.creatorId),
+          isNull(schema.projectSessions.archivedAt),
+          inArray(schema.projectSessions.status, ["idle", "stopped", "completed", "error"]),
+          sql`${schema.projectSessions.updatedAt} > ${schema.projectSessions.lastViewedAt}`,
         ),
       ),
     input.database
@@ -321,6 +423,9 @@ async function projectCounts(input: {
   return {
     skills: Number(skills[0]?.count ?? 0),
     sessions: Number(sessions[0]?.count ?? 0),
+    activeSessions: Number(activeSessions[0]?.count ?? 0),
+    archivedSessions: Number(archivedSessions[0]?.count ?? 0),
+    unreadSessions: Number(unreadSessions[0]?.count ?? 0),
     files: Number(files[0]?.count ?? 0),
   };
 }
@@ -328,7 +433,14 @@ async function projectCounts(input: {
 function toProjectRow(
   project: ProjectRecord,
   workspace: ProjectWorkspaceRecord,
-  counts: { skills: number; sessions: number; files: number },
+  counts: {
+    skills: number;
+    sessions: number;
+    activeSessions: number;
+    archivedSessions: number;
+    unreadSessions: number;
+    files: number;
+  },
   recentSessions: ProjectSessionRow[] = [],
 ): ProjectRow {
   return {
@@ -339,11 +451,15 @@ function toProjectRow(
     status: workspace.status,
     skill_count: counts.skills,
     session_count: counts.sessions,
+    active_session_count: counts.activeSessions,
+    archived_session_count: counts.archivedSessions,
+    unread_session_count: counts.unreadSessions,
     file_count: counts.files,
     recent_sessions: recentSessions.slice(0, 5),
     last_activity_at: workspace.lastActivityAt.toISOString(),
     error_code: workspace.lastErrorCode,
     message: workspace.lastErrorMessage,
+    archived_at: project.archivedAt?.toISOString() ?? null,
     created_at: project.createdAt.toISOString(),
     updated_at: project.updatedAt.toISOString(),
   };
@@ -369,9 +485,14 @@ async function projectDetailFromRecords(input: {
             eq(schema.projectSessions.orgId, input.project.orgId),
             eq(schema.projectSessions.projectId, input.project.id),
             eq(schema.projectSessions.creatorId, input.project.creatorId),
+            isNull(schema.projectSessions.archivedAt),
           ),
         )
-        .orderBy(desc(schema.projectSessions.updatedAt)),
+        .orderBy(
+          desc(schema.projectSessions.createdAt),
+          desc(schema.projectSessions.id),
+        )
+        .limit(50),
       projectCounts({
         orgId: input.project.orgId,
         projectId: input.project.id,
@@ -384,7 +505,10 @@ async function projectDetailFromRecords(input: {
         database: input.database,
       }),
       input.database
-        .select({ provider: schema.modelProviderConnections.provider })
+        .select({
+          id: schema.modelProviderConnections.id,
+          provider: schema.modelProviderConnections.provider,
+        })
         .from(schema.modelProviderConnections)
         .where(
           and(
@@ -394,7 +518,10 @@ async function projectDetailFromRecords(input: {
           ),
         ),
       input.database
-        .select({ provider: schema.modelProviderConnections.provider })
+        .select({
+          id: schema.modelProviderConnections.id,
+          provider: schema.modelProviderConnections.provider,
+        })
         .from(schema.modelProviderConnections)
         .where(
           and(
@@ -403,10 +530,44 @@ async function projectDetailFromRecords(input: {
           ),
         ),
     ]);
-  const providers = new Set([
-    ...orgConnections.map((row) => row.provider),
-    ...personalConnections.map((row) => row.provider),
-  ]);
+  const eligibleSecrets = secretCount
+    .filter(
+      (secret) =>
+        secret.can_use &&
+        !secret.disabled_at &&
+        !secret.deleted_at &&
+        !isProjectControlPlaneEnvKey(secret.key),
+    )
+    .map<ProjectAccessSecret>((secret) => ({
+      id: secret.id,
+      name: secret.name,
+      source:
+        secret.audience === "organization"
+          ? "organization"
+          : secret.owner.id === input.project.creatorId
+            ? "personal"
+            : "shared",
+      owner_name: secret.owner.name,
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+  const effectiveConnections = new Map<string, ProjectAccessModelConnection>();
+  for (const connection of orgConnections) {
+    effectiveConnections.set(connection.provider, {
+      id: connection.id,
+      provider: connection.provider,
+      source: "organization",
+    });
+  }
+  for (const connection of personalConnections) {
+    effectiveConnections.set(connection.provider, {
+      id: connection.id,
+      provider: connection.provider,
+      source: "personal",
+    });
+  }
+  const modelConnections = [...effectiveConnections.values()].sort((left, right) =>
+    left.provider.localeCompare(right.provider),
+  );
   return {
     ...toProjectRow(
       input.project,
@@ -416,14 +577,12 @@ async function projectDetailFromRecords(input: {
     ),
     skills,
     sessions: sessions.map(toSessionRow),
-    secret_count: secretCount.filter(
-      (secret) =>
-        secret.can_use &&
-        !secret.disabled_at &&
-        !secret.deleted_at &&
-        !isProjectControlPlaneEnvKey(secret.key),
-    ).length,
-    model_connection_count: providers.size,
+    secret_count: eligibleSecrets.length,
+    model_connection_count: modelConnections.length,
+    access: {
+      secrets: eligibleSecrets,
+      model_connections: modelConnections,
+    },
   };
 }
 
@@ -542,6 +701,7 @@ async function resolveSelectedSkills(input: {
 export async function listProjects(input: {
   actor: ActorContext;
   orgId: string;
+  view?: "active" | "archived";
   database?: Db;
 }): Promise<ProjectRow[]> {
   const database = input.database ?? db;
@@ -562,6 +722,9 @@ export async function listProjects(input: {
         eq(schema.projects.orgId, input.orgId),
         eq(schema.projects.creatorId, input.actor.id),
         isNull(schema.projects.deleteRequestedAt),
+        input.view === "archived"
+          ? isNotNull(schema.projects.archivedAt)
+          : isNull(schema.projects.archivedAt),
       ),
     )
     .orderBy(desc(schema.projectWorkspaces.lastActivityAt), desc(schema.projects.id));
@@ -582,11 +745,12 @@ export async function listProjects(input: {
               eq(schema.projectSessions.orgId, input.orgId),
               eq(schema.projectSessions.projectId, project.id),
               eq(schema.projectSessions.creatorId, input.actor.id),
+              isNull(schema.projectSessions.archivedAt),
             ),
           )
           .orderBy(
-            sql`CASE WHEN ${schema.projectSessions.status} IN ('queued', 'working', 'stopping') THEN 0 ELSE 1 END`,
-            desc(schema.projectSessions.updatedAt),
+            desc(schema.projectSessions.createdAt),
+            desc(schema.projectSessions.id),
           )
           .limit(5),
       ]);
@@ -770,42 +934,91 @@ export async function updateProject(input: {
 }): Promise<ProjectDetail> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
-  const rows = await database
-    .update(schema.projects)
-    .set({
-      ...(input.value.name !== undefined ? { name: safeName(input.value.name) } : {}),
-      ...(input.value.default_model !== undefined
-        ? { defaultModel: input.value.default_model }
-        : {}),
-      revision: input.value.revision + 1,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(schema.projects.orgId, input.orgId),
-        eq(schema.projects.id, input.projectId),
-        eq(schema.projects.creatorId, input.actor.id),
-        eq(schema.projects.revision, input.value.revision),
-        isNull(schema.projects.deleteRequestedAt),
-      ),
-    )
-    .returning();
-  const project = rows[0];
-  if (!project) {
-    await loadOwnedProject({ ...input, database });
-    throw new ProjectConflictError();
-  }
-  const { workspace } = await ownedProjectWithWorkspace({ ...input, database });
-  await database.insert(schema.auditLog).values({
-    orgId: input.orgId,
-    actorId: input.actor.id,
-    privateToUserId: input.actor.id,
-    action: "project.updated",
-    targetType: "project",
-    targetId: input.projectId,
-    metadata: { revision: project.revision },
-  });
-  return projectDetailFromRecords({ project, workspace, database });
+  return database.transaction(async (transaction) => {
+    const tx = transaction as unknown as Db;
+    const current = await loadOwnedProject({ ...input, database: tx, lock: true });
+    if (current.revision !== input.value.revision) throw new ProjectConflictError();
+
+    if (input.value.archived === true && !current.archivedAt) {
+      const active = await tx
+        .select({ id: schema.projectSessions.id })
+        .from(schema.projectSessions)
+        .where(
+          and(
+            eq(schema.projectSessions.orgId, input.orgId),
+            eq(schema.projectSessions.projectId, input.projectId),
+            eq(schema.projectSessions.creatorId, input.actor.id),
+            isNull(schema.projectSessions.archivedAt),
+            inArray(schema.projectSessions.status, ["queued", "working", "stopping"]),
+          ),
+        )
+        .limit(1);
+      if (active[0]) {
+        throw new ProjectConflictError(
+          "stop active conversations before archiving this project",
+        );
+      }
+    }
+
+    const now = new Date();
+    const rows = await tx
+      .update(schema.projects)
+      .set({
+        ...(input.value.name !== undefined
+          ? { name: safeName(input.value.name) }
+          : {}),
+        ...(input.value.default_model !== undefined
+          ? { defaultModel: input.value.default_model }
+          : {}),
+        ...(input.value.archived !== undefined
+          ? { archivedAt: input.value.archived ? now : null }
+          : {}),
+        revision: current.revision + 1,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.projects.orgId, input.orgId),
+          eq(schema.projects.id, input.projectId),
+          eq(schema.projects.creatorId, input.actor.id),
+          eq(schema.projects.revision, current.revision),
+          isNull(schema.projects.deleteRequestedAt),
+        ),
+      )
+      .returning();
+    const project = rows[0];
+    if (!project) throw new ProjectConflictError();
+
+    const workspaces = await tx
+      .select()
+      .from(schema.projectWorkspaces)
+      .where(
+        and(
+          eq(schema.projectWorkspaces.orgId, input.orgId),
+          eq(schema.projectWorkspaces.projectId, input.projectId),
+          eq(schema.projectWorkspaces.creatorId, input.actor.id),
+        ),
+      );
+    const workspace = workspaces[0];
+    if (!workspace) throw new ProjectNotFoundError();
+    const archiveChanged =
+      input.value.archived !== undefined &&
+      input.value.archived !== Boolean(current.archivedAt);
+    await tx.insert(schema.auditLog).values({
+      orgId: input.orgId,
+      actorId: input.actor.id,
+      privateToUserId: input.actor.id,
+      action: archiveChanged
+        ? input.value.archived
+          ? "project.archived"
+          : "project.restored"
+        : "project.updated",
+      targetType: "project",
+      targetId: input.projectId,
+      metadata: { revision: project.revision },
+    });
+    return projectDetailFromRecords({ project, workspace, database: tx });
+  }) as Promise<ProjectDetail>;
 }
 
 /**
@@ -828,6 +1041,7 @@ export async function retryProjectWorkspace(input: {
   return database.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
     const project = await loadOwnedProject({ ...input, database: tx, lock: true });
+    assertProjectAcceptsWork(project);
     const workspaceRows = await tx
       .select()
       .from(schema.projectWorkspaces)
@@ -898,6 +1112,7 @@ export async function setProjectSkills(input: {
   return database.transaction(async (transaction) => {
     const tx = transaction as unknown as Db;
     const project = await loadOwnedProject({ ...input, database: tx, lock: true });
+    assertProjectAcceptsWork(project);
     if (project.revision !== input.value.revision) throw new ProjectConflictError();
     const workspaceRows = await tx
       .select()
@@ -1259,11 +1474,30 @@ export async function listProjectSessions(input: {
   actor: ActorContext;
   orgId: string;
   projectId: string;
+  query?: ListProjectSessionsQuery;
   database?: Db;
-}): Promise<ProjectSessionRow[]> {
+}): Promise<ProjectSessionsResponse> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
   await loadOwnedProject({ ...input, database });
+  const query = input.query ?? {
+    q: "",
+    view: "active",
+    limit: 50,
+  };
+  const cursor = query.cursor ? decodeProjectSessionCursor(query.cursor) : null;
+  const titleFilter = query.q
+    ? sql`position(lower(${query.q}) in lower(${schema.projectSessions.title})) > 0`
+    : undefined;
+  const cursorFilter = cursor
+    ? or(
+        lt(schema.projectSessions.createdAt, cursor.createdAt),
+        and(
+          eq(schema.projectSessions.createdAt, cursor.createdAt),
+          lt(schema.projectSessions.id, cursor.id),
+        ),
+      )
+    : undefined;
   const rows = await database
     .select()
     .from(schema.projectSessions)
@@ -1272,10 +1506,171 @@ export async function listProjectSessions(input: {
         eq(schema.projectSessions.orgId, input.orgId),
         eq(schema.projectSessions.projectId, input.projectId),
         eq(schema.projectSessions.creatorId, input.actor.id),
+        query.view === "archived"
+          ? isNotNull(schema.projectSessions.archivedAt)
+          : isNull(schema.projectSessions.archivedAt),
+        titleFilter,
+        cursorFilter,
       ),
     )
-    .orderBy(desc(schema.projectSessions.updatedAt));
-  return rows.map(toSessionRow);
+    .orderBy(
+      desc(schema.projectSessions.createdAt),
+      desc(schema.projectSessions.id),
+    )
+    .limit(query.limit + 1);
+  const hasMore = rows.length > query.limit;
+  const visible = hasMore ? rows.slice(0, query.limit) : rows;
+  const last = visible.at(-1);
+  return {
+    sessions: visible.map(toSessionRow),
+    next_cursor:
+      hasMore && last
+        ? encodeProjectSessionCursor({
+            createdAt: last.createdAt,
+            id: last.id,
+          })
+        : null,
+  };
+}
+
+const PROJECT_SESSION_CURSOR_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function encodeProjectSessionCursor(input: {
+  createdAt: Date;
+  id: string;
+}): string {
+  return Buffer.from(
+    JSON.stringify({ created_at: input.createdAt.toISOString(), id: input.id }),
+    "utf8",
+  ).toString("base64url");
+}
+
+function decodeProjectSessionCursor(value: string): {
+  createdAt: Date;
+  id: string;
+} {
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(value, "base64url").toString("utf8"),
+    ) as { created_at?: unknown; id?: unknown };
+    if (
+      typeof parsed.created_at !== "string" ||
+      typeof parsed.id !== "string" ||
+      !PROJECT_SESSION_CURSOR_UUID.test(parsed.id)
+    ) {
+      throw new Error("invalid cursor shape");
+    }
+    const createdAt = new Date(parsed.created_at);
+    if (!Number.isFinite(createdAt.getTime())) {
+      throw new Error("invalid cursor date");
+    }
+    return { createdAt, id: parsed.id };
+  } catch {
+    throw new ProjectValidationError(
+      "the conversation cursor is invalid",
+      "invalid_cursor",
+    );
+  }
+}
+
+export async function updateProjectSession(input: {
+  actor: ActorContext;
+  orgId: string;
+  projectId: string;
+  sessionId: string;
+  value: UpdateProjectSessionInput;
+  database?: Db;
+}): Promise<ProjectSessionRow> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  return database.transaction(async (transaction) => {
+    const tx = transaction as unknown as Db;
+    const session = await loadOwnedSession({
+      ...input,
+      database: tx,
+      lock: true,
+    });
+    const active = ["queued", "working", "stopping"].includes(session.status);
+    if (input.value.archived === true && active && !input.value.stop_active) {
+      throw new ProjectConflictError(
+        "stop_active is required to archive an active conversation",
+      );
+    }
+
+    const now = new Date();
+    const wasUnread = isProjectSessionUnread(session);
+    const changes: Partial<typeof schema.projectSessions.$inferInsert> = {
+      ...(input.value.title !== undefined
+        ? {
+            title: Array.from(input.value.title.trim())
+              .slice(0, PROJECT_SESSION_TITLE_MAX)
+              .join(""),
+          }
+        : {}),
+      ...(input.value.archived !== undefined
+        ? {
+            archivedAt: input.value.archived ? now : null,
+            // Archiving/restoring is an explicit acknowledgement, so stale result badges do not
+            // reappear when a conversation returns to the active library.
+            lastViewedAt: now,
+          }
+        : input.value.viewed ||
+            (input.value.title !== undefined && !wasUnread)
+          ? { lastViewedAt: now }
+          : {}),
+      ...(input.value.archived === true && active
+        ? {
+            status: "stopping" as const,
+            stopRequestedAt: session.stopRequestedAt ?? now,
+          }
+        : {}),
+      ...(input.value.title !== undefined || input.value.archived !== undefined
+        ? { updatedAt: now }
+        : {}),
+    };
+    const rows = await tx
+      .update(schema.projectSessions)
+      .set(changes)
+      .where(
+        and(
+          eq(schema.projectSessions.orgId, input.orgId),
+          eq(schema.projectSessions.projectId, input.projectId),
+          eq(schema.projectSessions.id, input.sessionId),
+          eq(schema.projectSessions.creatorId, input.actor.id),
+        ),
+      )
+      .returning();
+    const updated = rows[0];
+    if (!updated) throw new ProjectNotFoundError("session not found");
+
+    const archiveChanged =
+      input.value.archived !== undefined &&
+      input.value.archived !== Boolean(session.archivedAt);
+    const titleChanged =
+      input.value.title !== undefined && input.value.title.trim() !== session.title;
+    if (archiveChanged || titleChanged) {
+      await tx.insert(schema.auditLog).values({
+        orgId: input.orgId,
+        actorId: input.actor.id,
+        privateToUserId: input.actor.id,
+        action: archiveChanged
+          ? input.value.archived
+            ? "project.session.archived"
+            : "project.session.restored"
+          : "project.session.renamed",
+        targetType: "project_session",
+        targetId: input.sessionId,
+        metadata: {
+          project_id: input.projectId,
+          stop_requested: Boolean(
+            input.value.archived === true && active,
+          ),
+        },
+      });
+    }
+    return toSessionRow(updated);
+  }) as Promise<ProjectSessionRow>;
 }
 
 async function promptRows(input: {
@@ -1295,14 +1690,127 @@ async function promptRows(input: {
       ),
     )
     .orderBy(asc(schema.projectPrompts.sequence));
+  if (rows.length === 0) return [];
+  const promptIds = rows.map((row) => row.id);
+  const [attachments, fileChanges] = await Promise.all([
+    input.database
+      .select()
+      .from(schema.projectAttachments)
+      .where(
+        and(
+          eq(schema.projectAttachments.orgId, input.orgId),
+          eq(schema.projectAttachments.sessionId, input.sessionId),
+          eq(schema.projectAttachments.creatorId, input.creatorId),
+          inArray(schema.projectAttachments.promptId, promptIds),
+        ),
+      )
+      .orderBy(
+        asc(schema.projectAttachments.createdAt),
+        asc(schema.projectAttachments.id),
+      ),
+    input.database
+      .select({
+        promptId: schema.projectFileVersions.modifiedByPromptId,
+        projectId: schema.projectFileVersions.projectId,
+        fileId: schema.projectFileVersions.fileId,
+        path: schema.projectFiles.path,
+        version: schema.projectFileVersions.version,
+        contentType: schema.projectFileVersions.contentType,
+        byteSize: schema.projectFileVersions.byteSize,
+        checksum: schema.projectFileVersions.checksum,
+        baseVersion: schema.projectFileVersions.baseVersion,
+        sessionId: schema.projectFileVersions.modifiedBySessionId,
+        conflictDetected: schema.projectFileVersions.conflictDetected,
+        createdAt: schema.projectFileVersions.createdAt,
+      })
+      .from(schema.projectFileVersions)
+      .innerJoin(
+        schema.projectFiles,
+        and(
+          eq(schema.projectFiles.orgId, schema.projectFileVersions.orgId),
+          eq(schema.projectFiles.projectId, schema.projectFileVersions.projectId),
+          eq(schema.projectFiles.id, schema.projectFileVersions.fileId),
+          eq(schema.projectFiles.creatorId, schema.projectFileVersions.creatorId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.projectFileVersions.orgId, input.orgId),
+          eq(schema.projectFileVersions.modifiedBySessionId, input.sessionId),
+          eq(schema.projectFileVersions.creatorId, input.creatorId),
+          inArray(schema.projectFileVersions.modifiedByPromptId, promptIds),
+        ),
+      )
+      .orderBy(
+        asc(schema.projectFileVersions.createdAt),
+        asc(schema.projectFileVersions.fileId),
+        asc(schema.projectFileVersions.version),
+      ),
+  ]);
+  const attachmentsByPrompt = new Map<
+    string,
+    ProjectPromptRow["attachments"]
+  >();
+  const uploadedFileIdentities = new Set<string>();
+  for (const attachment of attachments) {
+    const group = attachmentsByPrompt.get(attachment.promptId) ?? [];
+    group.push({
+      id: attachment.id,
+      file_name: attachment.fileName,
+      content_type: attachment.contentType,
+      byte_size: attachment.byteSize,
+      workspace_path: attachment.workspacePath,
+      status: attachment.status,
+      created_at: attachment.createdAt.toISOString(),
+    });
+    attachmentsByPrompt.set(attachment.promptId, group);
+    uploadedFileIdentities.add(
+      `${attachment.promptId}\0${attachment.workspacePath}\0${attachment.checksum}`,
+    );
+  }
+  const fileChangesByPrompt = new Map<
+    string,
+    ProjectPromptRow["file_changes"]
+  >();
+  for (const change of fileChanges) {
+    if (!change.promptId || !change.sessionId) continue;
+    if (
+      uploadedFileIdentities.has(
+        `${change.promptId}\0${change.path}\0${change.checksum}`,
+      )
+    ) {
+      continue;
+    }
+    const group = fileChangesByPrompt.get(change.promptId) ?? [];
+    group.push({
+      project_id: change.projectId,
+      file_id: change.fileId,
+      path: change.path,
+      kind: projectFileChangeKind({
+        baseVersion: change.baseVersion,
+        version: change.version,
+      }),
+      version: change.version,
+      content_type: change.contentType,
+      byte_size: change.byteSize,
+      modified_by_session_id: change.sessionId,
+      modified_by_prompt_id: change.promptId,
+      conflict_detected: change.conflictDetected,
+      created_at: change.createdAt.toISOString(),
+    });
+    fileChangesByPrompt.set(change.promptId, group);
+  }
   return rows.map((row) => ({
     id: row.id,
     session_id: row.sessionId,
     sequence: row.sequence,
+    opencode_message_id: row.opencodeMessageId,
     text: row.text,
     status: row.status,
     error_code: row.errorCode,
     error_message: row.errorMessage,
+    attachments: attachmentsByPrompt.get(row.id) ?? [],
+    file_changes: fileChangesByPrompt.get(row.id) ?? [],
     created_at: row.createdAt.toISOString(),
     started_at: row.startedAt?.toISOString() ?? null,
     completed_at: row.completedAt?.toISOString() ?? null,
@@ -1331,6 +1839,45 @@ export async function getProjectSession(input: {
     // Resume after the event prefix represented by this transcript, not after the current event
     // allocator maximum. Mid-turn events appended after the last snapshot must still replay.
     latest_event_sequence: session.transcriptEventSequence,
+  };
+}
+
+export async function getProjectPromptAttachment(input: {
+  actor: ActorContext;
+  orgId: string;
+  projectId: string;
+  sessionId: string;
+  attachmentId: string;
+  database?: Db;
+}): Promise<{
+  fileName: string;
+  contentType: string;
+  byteSize: number;
+  storageKey: string;
+}> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  await loadOwnedSession({ ...input, database });
+  const rows = await database
+    .select()
+    .from(schema.projectAttachments)
+    .where(
+      and(
+        eq(schema.projectAttachments.orgId, input.orgId),
+        eq(schema.projectAttachments.projectId, input.projectId),
+        eq(schema.projectAttachments.sessionId, input.sessionId),
+        eq(schema.projectAttachments.id, input.attachmentId),
+        eq(schema.projectAttachments.creatorId, input.actor.id),
+      ),
+    )
+    .limit(1);
+  const attachment = rows[0];
+  if (!attachment) throw new ProjectNotFoundError("attachment not found");
+  return {
+    fileName: attachment.fileName,
+    contentType: attachment.contentType,
+    byteSize: attachment.byteSize,
+    storageKey: attachment.storageKey,
   };
 }
 
@@ -1531,7 +2078,8 @@ export async function reserveProjectAttachmentUploads(input: {
   if (input.storageKeys.length === 0) return;
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
-  await loadOwnedProject({ ...input, database });
+  const project = await loadOwnedProject({ ...input, database });
+  assertProjectAcceptsWork(project);
   const touchedAt = new Date();
   for (const storageKey of [...new Set(input.storageKeys)]) {
     if (!storageKey.trim()) {
@@ -1551,6 +2099,62 @@ export async function reserveProjectAttachmentUploads(input: {
         target: schema.projectAttachmentUploads.storageKey,
         set: { touchedAt },
       });
+  }
+}
+
+/**
+ * Reserve content-addressed file objects before the API writes them to S3.
+ *
+ * The API remains a desired-state publisher: it never touches the Project runtime. The durable
+ * ownership row also makes every failed upload/metadata boundary recoverable by the orphan sweep.
+ */
+export async function reserveProjectFileUploads(input: {
+  actor: ActorContext;
+  orgId: string;
+  projectId: string;
+  storageKeys: string[];
+  database?: Db;
+}): Promise<void> {
+  if (input.storageKeys.length === 0) return;
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const project = await loadOwnedProject({ ...input, database });
+  assertProjectAcceptsWork(project);
+  const touchedAt = new Date();
+  for (const storageKey of [...new Set(input.storageKeys)]) {
+    if (!storageKey.trim()) {
+      throw new ProjectValidationError("file storage key is required", "invalid_file");
+    }
+    await database
+      .insert(schema.projectAttachmentUploads)
+      .values({
+        storageKey,
+        orgId: input.orgId,
+        projectId: input.projectId,
+        creatorId: input.actor.id,
+        kind: "file",
+        touchedAt,
+      })
+      .onConflictDoUpdate({
+        target: schema.projectAttachmentUploads.storageKey,
+        set: { touchedAt },
+      });
+    const owned = await database
+      .select({ kind: schema.projectAttachmentUploads.kind })
+      .from(schema.projectAttachmentUploads)
+      .where(
+        and(
+          eq(schema.projectAttachmentUploads.storageKey, storageKey),
+          eq(schema.projectAttachmentUploads.orgId, input.orgId),
+          eq(schema.projectAttachmentUploads.projectId, input.projectId),
+          eq(schema.projectAttachmentUploads.creatorId, input.actor.id),
+          isNull(schema.projectAttachmentUploads.deleteRequestedAt),
+        ),
+      )
+      .limit(1);
+    if (owned[0]?.kind !== "file") {
+      throw new ProjectValidationError("file storage reservation is unavailable", "invalid_file");
+    }
   }
 }
 
@@ -1686,6 +2290,7 @@ export async function createProjectSession(input: {
       });
     }
     const project = await loadOwnedProject({ ...input, database: tx, lock: true });
+    assertProjectAcceptsWork(project);
     const model = input.model?.trim() || project.defaultModel;
     if (!model) throw new ProjectValidationError("a model is required", "model_required");
     if (
@@ -1814,7 +2419,11 @@ export async function enqueueProjectPrompt(input: {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
   validateAttachments(input.attachments);
-  const assertedSession = await loadOwnedSession({ ...input, database });
+  const assertedSession = await loadOwnedSession({
+    ...input,
+    database,
+    acceptsWork: true,
+  });
   if (input.model && input.model !== assertedSession.model) {
     throw new ProjectConflictError("A session's model cannot change.");
   }
@@ -1872,12 +2481,14 @@ export async function enqueueProjectPrompt(input: {
       if (!prompt) throw new ProjectNotFoundError("prompt not found");
       return prompt;
     }
-    const session = await loadOwnedSession({ ...input, database: tx, lock: true });
+    const session = await loadOwnedSession({
+      ...input,
+      database: tx,
+      lock: true,
+      acceptsWork: true,
+    });
     if (input.model && input.model !== session.model) {
       throw new ProjectConflictError("A session's model cannot change.");
-    }
-    if (session.status === "completed") {
-      throw new ProjectConflictError("this session is completed");
     }
     if (session.status === "stopping" || session.stopRequestedAt) {
       throw new ProjectConflictError("this session is stopping");
@@ -1980,10 +2591,21 @@ export async function enqueueProjectPrompt(input: {
       id: row.id,
       session_id: row.sessionId,
       sequence: row.sequence,
+      opencode_message_id: row.opencodeMessageId,
       text: row.text,
       status: row.status,
       error_code: row.errorCode,
       error_message: row.errorMessage,
+      attachments: input.attachments.map((attachment) => ({
+        id: attachment.id,
+        file_name: attachment.fileName,
+        content_type: attachment.contentType,
+        byte_size: attachment.byteSize,
+        workspace_path: attachment.workspacePath,
+        status: "uploaded" as const,
+        created_at: promptCreatedAt.toISOString(),
+      })),
+      file_changes: [],
       created_at: row.createdAt.toISOString(),
       started_at: null,
       completed_at: null,
@@ -2072,6 +2694,227 @@ export async function listProjectSessionEvents(input: {
   }));
 }
 
+function toProjectFileRow(row: typeof schema.projectFiles.$inferSelect): ProjectFileRow {
+  return {
+    id: row.id,
+    project_id: row.projectId,
+    path: row.path,
+    version: row.currentVersion,
+    content_type: row.contentType,
+    byte_size: row.byteSize,
+    checksum: row.checksum,
+    modified_by_session_id: row.modifiedBySessionId,
+    modified_by_prompt_id: row.modifiedByPromptId,
+    conflict_detected: row.conflictDetected,
+    created_at: row.createdAt.toISOString(),
+    updated_at: row.updatedAt.toISOString(),
+  };
+}
+
+function validateProjectFileUploads(files: CreateProjectFileUpload[]): void {
+  if (files.length < 1 || files.length > PROJECT_ATTACHMENT_MAX_FILES) {
+    throw new ProjectValidationError(
+      `a Project upload must contain between 1 and ${PROJECT_ATTACHMENT_MAX_FILES} files`,
+      "invalid_file_count",
+    );
+  }
+  const paths = new Set<string>();
+  for (const file of files) {
+    if (
+      !isManagedProjectFilePath(file.path)
+      || paths.has(file.path)
+      || file.byteSize < 1
+      || file.byteSize > PROJECT_ATTACHMENT_MAX_BYTES
+      || !/^sha256:[0-9a-f]{64}$/.test(file.checksum)
+      || !file.contentType.trim()
+      || !file.storageKey.trim()
+    ) {
+      throw new ProjectValidationError(
+        "Project files must be unique, non-empty, 10 MB or smaller files/ paths",
+        "invalid_file",
+      );
+    }
+    paths.add(file.path);
+  }
+}
+
+/**
+ * Publish creator-uploaded bytes as the durable last-writer-wins files/ projection.
+ *
+ * S3 writes happen before this transaction. The transaction both consumes their ownership
+ * reservations and advances the independent projection fence that a warm supervisor observes
+ * between turns. No provider or OpenCode operation is reachable from this service.
+ */
+export async function commitProjectFileUploads(input: {
+  actor: ActorContext;
+  orgId: string;
+  projectId: string;
+  files: CreateProjectFileUpload[];
+  database?: Db;
+}): Promise<ProjectFileRow[]> {
+  validateProjectFileUploads(input.files);
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  return database.transaction(async (transaction) => {
+    const tx = transaction as unknown as Db;
+    const project = await loadOwnedProject({ ...input, database: tx, lock: true });
+    assertProjectAcceptsWork(project);
+    const workspaceRows = await tx
+      .select()
+      .from(schema.projectWorkspaces)
+      .where(
+        and(
+          eq(schema.projectWorkspaces.orgId, input.orgId),
+          eq(schema.projectWorkspaces.projectId, input.projectId),
+          eq(schema.projectWorkspaces.creatorId, input.actor.id),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    const workspace = workspaceRows[0];
+    if (!workspace) throw new ProjectNotFoundError();
+
+    const output: ProjectFileRow[] = [];
+    let changed = false;
+    const now = new Date();
+    for (const file of input.files) {
+      const ownership = await tx
+        .update(schema.projectAttachmentUploads)
+        .set({ committedAt: now, touchedAt: now })
+        .where(
+          and(
+            eq(schema.projectAttachmentUploads.storageKey, file.storageKey),
+            eq(schema.projectAttachmentUploads.orgId, input.orgId),
+            eq(schema.projectAttachmentUploads.projectId, input.projectId),
+            eq(schema.projectAttachmentUploads.creatorId, input.actor.id),
+            eq(schema.projectAttachmentUploads.kind, "file"),
+            isNull(schema.projectAttachmentUploads.deleteRequestedAt),
+          ),
+        )
+        .returning({ storageKey: schema.projectAttachmentUploads.storageKey });
+      if (!ownership[0]) {
+        throw new ProjectValidationError(
+          "a Project file upload reservation is missing",
+          "invalid_file",
+        );
+      }
+
+      const existingRows = await tx
+        .select()
+        .from(schema.projectFiles)
+        .where(
+          and(
+            eq(schema.projectFiles.orgId, input.orgId),
+            eq(schema.projectFiles.projectId, input.projectId),
+            eq(schema.projectFiles.creatorId, input.actor.id),
+            eq(schema.projectFiles.path, file.path),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      const existing = existingRows[0];
+      if (existing?.checksum === file.checksum && !existing.deletedAt) {
+        output.push(toProjectFileRow(existing));
+        continue;
+      }
+
+      const version = (existing?.currentVersion ?? 0) + 1;
+      const fileId = existing?.id ?? randomUUID();
+      const baseVersion = existing?.currentVersion ?? 0;
+      const values = {
+        contentType: file.contentType,
+        byteSize: file.byteSize,
+        checksum: file.checksum,
+        storageKey: file.storageKey,
+        modifiedBySessionId: null,
+        modifiedByPromptId: null,
+        deletedAt: null,
+        updatedAt: now,
+      };
+      let current: typeof schema.projectFiles.$inferSelect;
+      if (existing) {
+        const rows = await tx
+          .update(schema.projectFiles)
+          .set({ ...values, currentVersion: version })
+          .where(
+            and(
+              eq(schema.projectFiles.orgId, input.orgId),
+              eq(schema.projectFiles.projectId, input.projectId),
+              eq(schema.projectFiles.id, existing.id),
+              eq(schema.projectFiles.creatorId, input.actor.id),
+            ),
+          )
+          .returning();
+        current = rows[0]!;
+      } else {
+        const rows = await tx
+          .insert(schema.projectFiles)
+          .values({
+            id: fileId,
+            orgId: input.orgId,
+            projectId: input.projectId,
+            creatorId: input.actor.id,
+            path: file.path,
+            currentVersion: version,
+            conflictDetected: false,
+            ...values,
+          })
+          .returning();
+        current = rows[0]!;
+      }
+      await tx.insert(schema.projectFileVersions).values({
+        orgId: input.orgId,
+        projectId: input.projectId,
+        fileId,
+        creatorId: input.actor.id,
+        version,
+        contentType: file.contentType,
+        byteSize: file.byteSize,
+        checksum: file.checksum,
+        storageKey: file.storageKey,
+        modifiedBySessionId: null,
+        modifiedByPromptId: null,
+        baseVersion,
+        conflictDetected: current.conflictDetected,
+      });
+      changed = true;
+      output.push(toProjectFileRow(current));
+    }
+
+    if (changed) {
+      await tx
+        .update(schema.projectWorkspaces)
+        .set({
+          desiredFileRevision: workspace.desiredFileRevision + 1,
+          availableAt: now,
+          lastActivityAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.projectWorkspaces.orgId, input.orgId),
+            eq(schema.projectWorkspaces.projectId, input.projectId),
+            eq(schema.projectWorkspaces.creatorId, input.actor.id),
+          ),
+        );
+      await tx.insert(schema.auditLog).values({
+        orgId: input.orgId,
+        actorId: input.actor.id,
+        privateToUserId: input.actor.id,
+        action: "project.files.upload",
+        targetType: "project",
+        targetId: input.projectId,
+        metadata: {
+          paths: input.files.map((file) => file.path),
+          file_count: input.files.length,
+          desired_file_revision: workspace.desiredFileRevision + 1,
+        },
+      });
+    }
+    return output;
+  }) as Promise<ProjectFileRow[]>;
+}
+
 export async function listProjectFiles(input: {
   actor: ActorContext;
   orgId: string;
@@ -2093,18 +2936,7 @@ export async function listProjectFiles(input: {
       ),
     )
     .orderBy(asc(schema.projectFiles.path));
-  return rows.map((row) => ({
-    id: row.id,
-    project_id: row.projectId,
-    path: row.path,
-    version: row.currentVersion,
-    content_type: row.contentType,
-    byte_size: row.byteSize,
-    checksum: row.checksum,
-    conflict_detected: row.conflictDetected,
-    created_at: row.createdAt.toISOString(),
-    updated_at: row.updatedAt.toISOString(),
-  }));
+  return rows.map(toProjectFileRow);
 }
 
 export async function getProjectFile(input: {
@@ -2139,25 +2971,13 @@ export async function getProjectFile(input: {
     content_type: row.contentType,
     byte_size: row.byteSize,
     checksum: row.checksum,
+    modified_by_session_id: row.modifiedBySessionId,
+    modified_by_prompt_id: row.modifiedByPromptId,
     conflict_detected: row.conflictDetected,
     storage_key: row.storageKey,
     created_at: row.createdAt.toISOString(),
     updated_at: row.updatedAt.toISOString(),
   };
-}
-
-export interface ProjectFileVersionRow {
-  project_id: string;
-  file_id: string;
-  path: string;
-  version: number;
-  content_type: string;
-  byte_size: number;
-  checksum: string;
-  modified_by_session_id: string | null;
-  base_version: number | null;
-  conflict_detected: boolean;
-  created_at: string;
 }
 
 export interface ProjectFileVersionDownload extends ProjectFileVersionRow {
@@ -2222,6 +3042,7 @@ export async function listProjectFileVersions(input: {
     byte_size: row.byteSize,
     checksum: row.checksum,
     modified_by_session_id: row.modifiedBySessionId,
+    modified_by_prompt_id: row.modifiedByPromptId,
     base_version: row.baseVersion,
     conflict_detected: row.conflictDetected,
     created_at: row.createdAt.toISOString(),
@@ -2270,6 +3091,7 @@ export async function getProjectFileVersion(input: {
     checksum: row.checksum,
     storage_key: row.storageKey,
     modified_by_session_id: row.modifiedBySessionId,
+    modified_by_prompt_id: row.modifiedByPromptId,
     base_version: row.baseVersion,
     conflict_detected: row.conflictDetected,
     created_at: row.createdAt.toISOString(),

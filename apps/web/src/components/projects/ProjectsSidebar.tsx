@@ -1,30 +1,199 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { ProjectRowVM, ProjectSessionStatus } from "@/lib/projectsModel";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
+import type {
+  ProjectRowVM,
+  ProjectSessionVM,
+} from "@/lib/projectsModel";
+import { sortProjectSessionsByCreatedAt } from "@/lib/projectsModel";
 import type { OrgVM } from "@/lib/types";
 import { relativeTime } from "@/lib/format";
 import { Icon } from "../Icon";
 import { OrgSwitcher } from "../org/OrgSwitcher";
 import { SpaceSwitch } from "./SpaceSwitch";
 
-function sessionTone(
-  status: ProjectSessionStatus,
-): "working" | "waiting" | "done" | "error" {
-  if (status === "working") return "working";
-  if (status === "queued" || status === "stopping") return "waiting";
-  if (status === "error") return "error";
-  return "done";
+type ActionMenuItem = {
+  label: string;
+  icon: string;
+  disabled?: boolean;
+  tone?: "default" | "danger";
+  onSelect: () => void;
+};
+
+export function ProjectsActionMenu({
+  label,
+  actions,
+  className = "projects-side__row-action",
+}: {
+  label: string;
+  actions: ActionMenuItem[];
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<{
+    left: number;
+    top: number;
+  } | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuId = useId();
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const width = 216;
+      const height = actions.length * 34 + 10;
+      const left = Math.max(
+        8,
+        Math.min(rect.right - width, window.innerWidth - width - 8),
+      );
+      const top =
+        rect.bottom + height + 8 <= window.innerHeight
+          ? rect.bottom + 4
+          : Math.max(8, rect.top - height - 4);
+      setPosition({ left, top });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [actions.length, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeFromOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (
+        !triggerRef.current?.contains(target) &&
+        !menuRef.current?.contains(target)
+      )
+        setOpen(false);
+    };
+    document.addEventListener("mousedown", closeFromOutside);
+    return () => document.removeEventListener("mousedown", closeFromOutside);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || !position) return;
+    menuRef.current
+      ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
+      ?.focus();
+  }, [open, position]);
+
+  const close = (restoreFocus = true) => {
+    setOpen(false);
+    setPosition(null);
+    if (restoreFocus)
+      window.requestAnimationFrame(() => triggerRef.current?.focus());
+  };
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        className={className}
+        aria-label={label}
+        title={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setOpen((current) => !current);
+        }}
+      >
+        <Icon name="more-horizontal" size={14} />
+      </button>
+      {open &&
+        position &&
+        createPortal(
+          <div
+            ref={menuRef}
+            id={menuId}
+            role="menu"
+            className="cowork-action-menu"
+            style={position}
+            onKeyDown={(event) => {
+              if (event.key === "Tab") {
+                event.preventDefault();
+                close();
+                return;
+              }
+              if (event.key === "Escape") {
+                event.preventDefault();
+                close();
+                return;
+              }
+              if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+              event.preventDefault();
+              const items = [
+                ...(
+                  menuRef.current?.querySelectorAll<HTMLButtonElement>(
+                    '[role="menuitem"]:not(:disabled)',
+                  ) ?? []
+                ),
+              ];
+              const current = items.indexOf(
+                document.activeElement as HTMLButtonElement,
+              );
+              const delta = event.key === "ArrowDown" ? 1 : -1;
+              items[(current + delta + items.length) % items.length]?.focus();
+            }}
+          >
+            {actions.map((action) => (
+              <button
+                key={action.label}
+                type="button"
+                role="menuitem"
+                className={
+                  action.tone === "danger" ? "is-danger" : undefined
+                }
+                disabled={action.disabled}
+                onClick={() => {
+                  close(false);
+                  // Make the trigger the hand-off target before a selected action
+                  // opens a dialog. The dialog can then capture it for focus
+                  // restoration without briefly focusing the removed portal item.
+                  triggerRef.current?.focus();
+                  action.onSelect();
+                }}
+              >
+                <Icon name={action.icon} size={14} />
+                <span>{action.label}</span>
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )}
+    </>
+  );
 }
 
-function sessionLabel(status: ProjectSessionStatus): string {
-  if (status === "working") return "Working";
-  if (status === "queued" || status === "stopping") return "Waiting";
-  if (status === "error") return "Needs attention";
-  if (status === "completed") return "Done";
-  if (status === "stopped") return "Stopped";
-  return "Idle";
+function sessionSignal(
+  session: ProjectSessionVM,
+): { label: "Working" | "New result" | "Failed"; tone: string } | null {
+  if (["queued", "working", "stopping"].includes(session.status))
+    return { label: "Working", tone: "working" };
+  if (session.status === "error") return { label: "Failed", tone: "waiting" };
+  if (session.isUnread) return { label: "New result", tone: "new" };
+  return null;
 }
 
 function projectAcceptsSessions(status: ProjectRowVM["status"]): boolean {
@@ -46,6 +215,9 @@ export function ProjectsSidebar({
   onNewProject,
   onNewSession,
   onProjectSettings,
+  onArchiveProject,
+  onRenameSession,
+  onArchiveSession,
   modalOpen = false,
 }: {
   projects: ProjectRowVM[];
@@ -62,6 +234,9 @@ export function ProjectsSidebar({
   onNewProject: () => void;
   onNewSession: (projectId: string) => void;
   onProjectSettings: (projectId: string) => void;
+  onArchiveProject: (projectId: string) => void;
+  onRenameSession: (projectId: string, session: ProjectSessionVM) => void;
+  onArchiveSession: (projectId: string, session: ProjectSessionVM) => void;
   modalOpen?: boolean;
 }) {
   const [searching, setSearching] = useState(false);
@@ -70,6 +245,7 @@ export function ProjectsSidebar({
     () => new Set(selectedProjectId ? [selectedProjectId] : []),
   );
   const toggleRef = useRef<HTMLButtonElement>(null);
+  const asideRef = useRef<HTMLElement>(null);
   const searchToggleRef = useRef<HTMLButtonElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -87,14 +263,42 @@ export function ProjectsSidebar({
 
   useEffect(() => {
     if (!mobileOpen || modalOpen) return;
+    const previous =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const fallbackRestoreTarget = toggleRef.current;
+    queueMicrotask(() => toggleRef.current?.focus());
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      onCloseMobile();
-      queueMicrotask(() => toggleRef.current?.focus());
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseMobile();
+        return;
+      }
+      if (event.key !== "Tab" || !asideRef.current) return;
+      const focusable = [
+        ...asideRef.current.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ];
+      if (focusable.length === 0) return;
+      const first = focusable[0]!;
+      const last = focusable.at(-1)!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     document.addEventListener("keydown", onKeyDown, true);
-    return () => document.removeEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      const restoreTarget =
+        previous && previous !== document.body ? previous : fallbackRestoreTarget;
+      window.requestAnimationFrame(() => restoreTarget?.focus());
+    };
   }, [mobileOpen, modalOpen, onCloseMobile]);
 
   const visibleProjects = useMemo(() => {
@@ -125,6 +329,7 @@ export function ProjectsSidebar({
   return (
     <>
       <aside
+        ref={asideRef}
         className={`side projects-side${mobileOpen ? " side--mobile-open" : ""}`}
         aria-hidden={modalOpen || undefined}
         inert={modalOpen ? true : undefined}
@@ -199,7 +404,7 @@ export function ProjectsSidebar({
           {searching && (
             <label className="projects-side__search">
               <Icon name="search" size={13} />
-              <span className="sr-only">Search projects and sessions</span>
+              <span className="sr-only">Search projects and conversations</span>
               <input
                 ref={searchRef}
                 value={query}
@@ -219,15 +424,14 @@ export function ProjectsSidebar({
             {visibleProjects.map((project) => {
               const open = expanded.has(project.id);
               const active = project.id === selectedProjectId;
-              const activeSessions = project.recentSessions.filter(
-                (session) => session.status !== "completed",
-              );
-              const completedSessions = project.recentSessions.filter(
-                (session) => session.status === "completed",
-              );
-              const sessions = [...activeSessions, ...completedSessions].slice(
+              const sessions = sortProjectSessionsByCreatedAt(
+                project.recentSessions.filter(
+                  (candidate) => (candidate.archivedAt ?? null) === null,
+                ),
+              ).slice(0, 5);
+              const hiddenSessionCount = Math.max(
                 0,
-                5,
+                project.sessionCount - sessions.length,
               );
               return (
                 <div className="projects-side__branch" key={project.id}>
@@ -258,76 +462,125 @@ export function ProjectsSidebar({
                     >
                       {project.name}
                     </Link>
-                    <button
-                      type="button"
-                      className="projects-side__row-action"
-                      aria-label={`Project settings for ${project.name}`}
-                      title="Project settings"
-                      onClick={() => onProjectSettings(project.id)}
-                    >
-                      <Icon name="settings" size={12} />
-                    </button>
-                    <button
-                      type="button"
-                      className="projects-side__row-action"
-                      aria-label={
-                        runtimeAvailable &&
-                        projectAcceptsSessions(project.status)
-                          ? `New session in ${project.name}`
-                          : `New session unavailable in ${project.name}`
-                      }
-                      title={
-                        runtimeAvailable &&
-                        projectAcceptsSessions(project.status)
-                          ? "New session"
-                          : "Project is not ready for a new session"
-                      }
-                      disabled={
-                        !runtimeAvailable ||
-                        !projectAcceptsSessions(project.status)
-                      }
-                      onClick={() => onNewSession(project.id)}
-                    >
-                      <Icon name="plus" size={13} />
-                    </button>
+                    {project.unreadSessionCount > 0 && (
+                      <span
+                        className="projects-side__unread tnum"
+                        aria-label={`${project.unreadSessionCount} unread results`}
+                      >
+                        {project.unreadSessionCount}
+                      </span>
+                    )}
+                    <ProjectsActionMenu
+                      label={`Actions for ${project.name}`}
+                      actions={[
+                        {
+                          label: "New conversation",
+                          icon: "square-pen",
+                          disabled:
+                            !runtimeAvailable ||
+                            !projectAcceptsSessions(project.status),
+                          onSelect: () => onNewSession(project.id),
+                        },
+                        {
+                          label: "Project settings",
+                          icon: "settings",
+                          onSelect: () => onProjectSettings(project.id),
+                        },
+                        {
+                          label:
+                            project.activeSessionCount > 0
+                              ? "Finish conversations to archive"
+                              : "Archive project",
+                          icon: "archive",
+                          disabled: project.activeSessionCount > 0,
+                          onSelect: () => onArchiveProject(project.id),
+                        },
+                      ]}
+                    />
                   </div>
-                  {open && sessions.length > 0 && (
+                  {open &&
+                    (sessions.length > 0 || hiddenSessionCount > 0) && (
                     <div
                       className="projects-side__sessions"
-                      aria-label={`Recent sessions in ${project.name}`}
+                      aria-label={`Recent conversations in ${project.name}`}
                     >
-                      {sessions.map((session) => (
+                      {sessions.map((session) => {
+                        const signal = sessionSignal(session);
+                        const selected = session.id === selectedSessionId;
+                        return (
+                          <div
+                            key={session.id}
+                            className={`projects-side__session${selected ? " is-active" : ""}`}
+                          >
+                            <Link
+                              href={`/projects/${project.id}/sessions/${session.id}`}
+                              className="projects-side__session-link"
+                              aria-current={selected ? "page" : undefined}
+                              onClick={closeAfterNavigation}
+                            >
+                              <span
+                                className="projects-side__session-title"
+                                title={session.title}
+                              >
+                                {session.title}
+                              </span>
+                              <span className="projects-side__session-meta">
+                                {signal && (
+                                  <span
+                                    className={`projects-side__session-status is-${signal.tone}`}
+                                  >
+                                    <span
+                                      className={`project-status-dot is-${signal.tone}`}
+                                      aria-hidden="true"
+                                    />
+                                    {signal.label}
+                                  </span>
+                                )}
+                                <time
+                                  className="projects-side__session-time tnum"
+                                  dateTime={session.createdAt}
+                                >
+                                  {relativeTime(session.createdAt)}
+                                </time>
+                              </span>
+                            </Link>
+                            <ProjectsActionMenu
+                              label={`Actions for ${session.title}`}
+                              className="projects-side__session-action"
+                              actions={[
+                                {
+                                  label: "Rename",
+                                  icon: "pencil",
+                                  onSelect: () =>
+                                    onRenameSession(project.id, session),
+                                },
+                                {
+                                  label: ["queued", "working", "stopping"].includes(
+                                    session.status,
+                                  )
+                                    ? "Stop and archive"
+                                    : "Archive",
+                                  icon: "archive",
+                                  onSelect: () =>
+                                    onArchiveSession(project.id, session),
+                                },
+                              ]}
+                            />
+                          </div>
+                        );
+                      })}
+                      {hiddenSessionCount > 0 && (
                         <Link
-                          key={session.id}
-                          href={`/projects/${project.id}/sessions/${session.id}`}
-                          className={`projects-side__session${session.id === selectedSessionId ? " is-active" : ""}`}
-                          aria-current={
-                            session.id === selectedSessionId
-                              ? "page"
-                              : undefined
-                          }
+                          href={`/projects/${project.id}`}
+                          className="projects-side__all"
                           onClick={closeAfterNavigation}
                         >
-                          <span className="projects-side__session-title">
-                            {session.title}
-                          </span>
-                          <span className="projects-side__session-status">
-                            <span
-                              className={`project-status-dot is-${sessionTone(session.status)}`}
-                              aria-hidden="true"
-                            />
-                            {sessionLabel(session.status)}
-                          </span>
-                          <span className="projects-side__session-time tnum">
-                            {relativeTime(session.lastActiveAt).replace(
-                              " ago",
-                              "",
-                            )}
-                          </span>
+                          All conversations
+                          <span className="tnum">· {project.sessionCount}</span>
                         </Link>
-                      ))}
+                      )}
                     </div>
-                  )}
+                    )}
                 </div>
               );
             })}
@@ -368,7 +621,6 @@ export function ProjectsSidebar({
           aria-label="Close navigation"
           onClick={() => {
             onCloseMobile();
-            queueMicrotask(() => toggleRef.current?.focus());
           }}
         />
       )}

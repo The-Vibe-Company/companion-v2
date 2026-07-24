@@ -6,6 +6,7 @@ import {
   normalizeProjectFileVersionsResponse,
   normalizeProjectFilesResponse,
   normalizeProjectSessionResponse,
+  normalizeProjectSessionsResponse,
   normalizeProjectsResponse,
   type ProjectDetailVM,
   type ProjectSessionVM,
@@ -22,6 +23,22 @@ export type UpdateProjectRequest = {
   revision: number;
   name?: string;
   defaultModel?: string;
+  archived?: boolean;
+};
+
+export type UpdateProjectSessionRequest = {
+  title?: string;
+  archived?: boolean;
+  viewed?: true;
+  stopActive?: boolean;
+};
+
+export type ListProjectSessionsRequest = {
+  query?: string;
+  view?: "active" | "archived";
+  cursor?: string;
+  limit?: number;
+  signal?: AbortSignal;
 };
 
 export type CreateProjectSessionRequest = {
@@ -54,8 +71,9 @@ function promptBody(input: {
   return body;
 }
 
-export async function fetchProjects() {
-  return normalizeProjectsResponse(await apiFetch<unknown>("/v1/projects"));
+export async function fetchProjects(view: "active" | "archived" = "active") {
+  const suffix = view === "active" ? "" : "?view=archived";
+  return normalizeProjectsResponse(await apiFetch<unknown>(`/v1/projects${suffix}`));
 }
 
 export async function createProject(input: CreateProjectRequest): Promise<ProjectDetailVM> {
@@ -73,6 +91,17 @@ export async function createProject(input: CreateProjectRequest): Promise<Projec
 export async function fetchProjectFiles(projectId: string) {
   return normalizeProjectFilesResponse(
     await apiFetch<unknown>(`${projectPath(projectId)}/files`),
+  );
+}
+
+export async function uploadProjectFiles(projectId: string, files: File[]) {
+  const body = new FormData();
+  for (const file of files) body.append("file", file, file.name);
+  return normalizeProjectFilesResponse(
+    await apiFetch<unknown>(`${projectPath(projectId)}/files`, {
+      method: "POST",
+      body,
+    }),
   );
 }
 
@@ -109,6 +138,7 @@ export async function updateProject(
         revision: input.revision,
         ...(input.name !== undefined ? { name: input.name } : {}),
         ...(input.defaultModel !== undefined ? { default_model: input.defaultModel } : {}),
+        ...(input.archived !== undefined ? { archived: input.archived } : {}),
       }),
     }),
     fetchProjectFiles(projectId),
@@ -175,6 +205,43 @@ export async function fetchProjectSession(
   return normalizeProjectSessionResponse(await apiFetch<unknown>(sessionPath(projectId, sessionId)));
 }
 
+export async function fetchProjectSessions(
+  projectId: string,
+  input: ListProjectSessionsRequest = {},
+): Promise<{ sessions: ProjectSessionVM[]; nextCursor: string | null }> {
+  const query = new URLSearchParams();
+  if (input.query?.trim()) query.set("q", input.query.trim());
+  query.set("view", input.view ?? "active");
+  if (input.cursor) query.set("cursor", input.cursor);
+  query.set("limit", String(input.limit ?? 50));
+  return normalizeProjectSessionsResponse(
+    await apiFetch<unknown>(
+      `${projectPath(projectId)}/sessions?${query.toString()}`,
+      { signal: input.signal },
+    ),
+  );
+}
+
+export async function updateProjectSession(
+  projectId: string,
+  sessionId: string,
+  input: UpdateProjectSessionRequest,
+): Promise<ProjectSessionVM> {
+  return normalizeProjectSessionResponse(
+    await apiFetch<unknown>(sessionPath(projectId, sessionId), {
+      method: "PATCH",
+      body: JSON.stringify({
+        ...(input.title !== undefined ? { title: input.title } : {}),
+        ...(input.archived !== undefined ? { archived: input.archived } : {}),
+        ...(input.viewed !== undefined ? { viewed: input.viewed } : {}),
+        ...(input.stopActive !== undefined
+          ? { stop_active: input.stopActive }
+          : {}),
+      }),
+    }),
+  );
+}
+
 export async function createProjectSession(
   projectId: string,
   input: CreateProjectSessionRequest,
@@ -209,6 +276,18 @@ export async function stopProjectSession(
 
 export function projectSessionEventsHref(projectId: string, sessionId: string): string {
   return `${sessionPath(projectId, sessionId)}/events`;
+}
+
+export function projectPromptAttachmentHref(
+  projectId: string,
+  sessionId: string,
+  attachmentId: string,
+  download = false,
+): string {
+  const path =
+    `${sessionPath(projectId, sessionId)}/attachments/` +
+    encodeURIComponent(attachmentId);
+  return download ? `${path}?download=1` : path;
 }
 
 export function projectFileHref(

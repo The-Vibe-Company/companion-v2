@@ -8,7 +8,7 @@ import type {
   ProjectChatRuntime,
   ProjectWorkspaceRuntime,
 } from "@companion/core";
-import { RunRuntimeError } from "@companion/core";
+import { EntitlementDeniedError, RunRuntimeError } from "@companion/core";
 import {
   ProjectAuthorityRevokedError,
   ProjectEnvironmentInvalidError,
@@ -42,6 +42,8 @@ const job: ProjectWorkspaceJob = {
   checkpointGeneration: 0,
   desiredGeneration: 1,
   appliedGeneration: 1,
+  desiredFileRevision: 0,
+  appliedFileRevision: 0,
   lastActivityAt: new Date(),
   idleDeadlineAt: null,
   activationRevision: 0,
@@ -77,6 +79,7 @@ function usage(): ProjectUsageMeter {
     reserve: vi.fn(async () => null),
     start: vi.fn(async () => undefined),
     refresh: vi.fn(async () => null),
+    extendIdleRunway: vi.fn(async () => null),
     record: vi.fn(async () => undefined),
     settle: vi.fn(async () => undefined),
   };
@@ -142,6 +145,8 @@ function baseStore(overrides: Partial<ProjectWorkspaceStore> = {}): ProjectWorks
     loadProjectMaterializationPlan: vi.fn(async () => ({
       desiredGeneration: 1,
       appliedGeneration: 1,
+      desiredFileRevision: 0,
+      appliedFileRevision: 0,
       checkpointGeneration: 0,
       skills: [],
       bootstrapFiles: [],
@@ -319,13 +324,14 @@ describe("Project workspace lifecycle", () => {
   it("provisions a warm Project without resolving secrets, starting OpenCode, or holding until idle", async () => {
     const projectRuntime = runtime();
     const store = baseStore();
+    const meter = usage();
     await runProjectWorkspaceJob({
       job: { ...job, lastActivityAt: new Date() },
       workerId: "worker",
       store,
       runtime: projectRuntime,
       chat: quietChat(),
-      usage: usage(),
+      usage: meter,
       storage: emptyStorage,
       goldenSnapshotId: "golden",
       config: { ...config, idleMs: 60_000 },
@@ -337,7 +343,195 @@ describe("Project workspace lifecycle", () => {
     expect(projectRuntime.startServer).not.toHaveBeenCalled();
     expect(store.resolveProjectActivationEnvironment).not.toHaveBeenCalled();
     expect(projectRuntime.checkpointAndStop).not.toHaveBeenCalled();
+    expect(meter.extendIdleRunway).toHaveBeenCalledOnce();
+    expect(projectRuntime.observe).toHaveBeenCalledOnce();
+    const readyCallIndex = vi.mocked(store.updateProjectWorkspaceState).mock.calls
+      .findIndex(([state]) => state.status === "ready");
+    expect(readyCallIndex).toBeGreaterThanOrEqual(0);
+    const readyCallOrder =
+      vi.mocked(store.updateProjectWorkspaceState).mock.invocationCallOrder[readyCallIndex]!;
+    expect(vi.mocked(meter.extendIdleRunway).mock.invocationCallOrder[0]!)
+      .toBeLessThan(readyCallOrder);
+    expect(vi.mocked(projectRuntime.observe).mock.invocationCallOrder[0]!)
+      .toBeLessThan(readyCallOrder);
   });
+
+  it("applies a durable creator upload to a warm workspace before prompt admission", async () => {
+    const uploaded = Buffer.from("uploaded outside a conversation");
+    const uploadedChecksum =
+      `sha256:${createHash("sha256").update(uploaded).digest("hex")}`;
+    const files = new Map([["brief.txt", Buffer.from("stale runtime bytes")]]);
+    const projectRuntime = runtime(files);
+    const store = baseStore({
+      loadProjectMaterializationPlan: vi.fn(async () => ({
+        desiredGeneration: 1,
+        appliedGeneration: 1,
+        desiredFileRevision: 1,
+        appliedFileRevision: 0,
+        checkpointGeneration: 1,
+        skills: [],
+        bootstrapFiles: [{
+          storageKey: "project-upload",
+          workspacePath: "files/brief.txt",
+          checksum: uploadedChecksum,
+        }],
+      })),
+    });
+    const storage: ProjectFileStorage = {
+      ...emptyStorage,
+      get: vi.fn(async () => uploaded),
+    };
+
+    await runProjectWorkspaceJob({
+      job: {
+        ...job,
+        status: "ready",
+        sandboxId: job.sandboxName,
+        checkpointId: "checkpoint-before-upload",
+        checkpointGeneration: 1,
+        desiredFileRevision: 1,
+        appliedFileRevision: 0,
+        activationRevision: 1,
+        authorityRevision: "authority-1",
+        lastActivityAt: new Date(),
+      },
+      workerId: "worker",
+      store,
+      runtime: projectRuntime,
+      chat: quietChat(),
+      usage: usage(),
+      storage,
+      goldenSnapshotId: "golden",
+      config: { ...config, idleMs: 60_000 },
+      signal: new AbortController().signal,
+    });
+
+    expect(files.get("brief.txt")).toEqual(uploaded);
+    expect(store.updateProjectWorkspaceState).toHaveBeenCalledWith(
+      expect.objectContaining({ appliedFileRevision: 1 }),
+    );
+    expect(
+      vi.mocked(projectRuntime.syncFiles).mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(store.claimProjectPromptJobs).mock.invocationCallOrder[0]!,
+    );
+    expect(store.persistProjectFiles).not.toHaveBeenCalled();
+  });
+
+  it("restarts a warm OpenCode server after a file upload lands between prompts", async () => {
+    const uploaded = Buffer.from("new project context");
+    const uploadedChecksum =
+      `sha256:${createHash("sha256").update(uploaded).digest("hex")}`;
+    const first: ProjectPromptJob = {
+      id: "prompt-before-upload",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-before-upload",
+      sequence: 1,
+      text: "Work while a file is uploaded",
+      model: "openai/gpt-5",
+      opencodeSessionId: null,
+      opencodeMessageId: "msg_before_upload",
+      sendAttemptedAt: null,
+      leaseOwner: "worker",
+    };
+    const second: ProjectPromptJob = {
+      ...first,
+      id: "prompt-after-upload",
+      sessionId: "session-after-upload",
+      text: "Use the newly uploaded context",
+      opencodeMessageId: "msg_after_upload",
+    };
+    let uploadCommitted = false;
+    let fileApplied = false;
+    let firstClaimed = false;
+    let secondClaimed = false;
+    let serverRunning = false;
+    let secondSent = false;
+    const sentMessages = new Set<string>();
+    const projectRuntime = runtime();
+    vi.mocked(projectRuntime.startServer).mockImplementation(async () => {
+      serverRunning = true;
+    });
+    vi.mocked(projectRuntime.syncFiles).mockImplementation(async () => {
+      // The Vercel adapter stops OpenCode before replacing the managed tree.
+      serverRunning = false;
+    });
+    const store = baseStore({
+      loadProjectMaterializationPlan: vi.fn(async () => ({
+        desiredGeneration: 1,
+        appliedGeneration: 1,
+        desiredFileRevision: uploadCommitted ? 1 : 0,
+        appliedFileRevision: fileApplied ? 1 : 0,
+        checkpointGeneration: 0,
+        skills: [],
+        bootstrapFiles: uploadCommitted
+          ? [{
+              storageKey: "direct-upload",
+              workspacePath: "files/context.txt",
+              checksum: uploadedChecksum,
+            }]
+          : [],
+      })),
+      updateProjectWorkspaceState: vi.fn(async (input) => {
+        if (input.appliedFileRevision === 1) fileApplied = true;
+        return true;
+      }),
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (!firstClaimed) {
+          firstClaimed = true;
+          return [first];
+        }
+        if (fileApplied && !secondClaimed) {
+          secondClaimed = true;
+          return [second];
+        }
+        return [];
+      }),
+    });
+    const chat = quietChat();
+    vi.mocked(chat.getMessageState).mockImplementation(
+      async (_target, _sessionId, messageId) =>
+        sentMessages.has(messageId) ? "completed" : "missing",
+    );
+    vi.mocked(chat.sendPrompt).mockImplementation(async (_target, _sessionId, _text, messageId) => {
+      if (!serverRunning) throw new Error("OpenCode server is stopped");
+      sentMessages.add(messageId);
+      if (messageId === first.opencodeMessageId) {
+        uploadCommitted = true;
+        // Keep the first turn active past the materialization poll. The upload must wait for this
+        // quiescent boundary rather than replacing files under a running turn.
+        await new Promise((resolve) => setTimeout(resolve, 5_100));
+      } else {
+        secondSent = true;
+      }
+    });
+    const storage: ProjectFileStorage = {
+      ...emptyStorage,
+      get: vi.fn(async () => uploaded),
+    };
+
+    await runProjectWorkspaceJob({
+      job: { ...job, lastActivityAt: new Date() },
+      workerId: "worker",
+      store,
+      runtime: projectRuntime,
+      chat,
+      usage: usage(),
+      storage,
+      goldenSnapshotId: "golden",
+      config: { ...config, idleMs: 60_000 },
+      signal: new AbortController().signal,
+    });
+
+    expect(fileApplied).toBe(true);
+    expect(secondSent).toBe(true);
+    expect(projectRuntime.startServer).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(projectRuntime.syncFiles).mock.invocationCallOrder[1]!).toBeLessThan(
+      vi.mocked(projectRuntime.startServer).mock.invocationCallOrder[1]!,
+    );
+  }, 15_000);
 
   it("clamps initial provider timeout to the already-admitted activation budget", async () => {
     const projectRuntime = runtime();
@@ -1032,6 +1226,8 @@ describe("Project workspace lifecycle", () => {
       loadProjectMaterializationPlan: vi.fn(async () => ({
         desiredGeneration: 1,
         appliedGeneration: 1,
+        desiredFileRevision: 0,
+        appliedFileRevision: 0,
         checkpointGeneration: 1,
         skills: [],
         // The active S3 projection excludes the durable tombstone.
@@ -1090,6 +1286,8 @@ describe("Project workspace lifecycle", () => {
       loadProjectMaterializationPlan: vi.fn(async () => ({
         desiredGeneration: 2,
         appliedGeneration: 2,
+        desiredFileRevision: 0,
+        appliedFileRevision: 0,
         checkpointGeneration: 1,
         skills: [],
         bootstrapFiles: [],
@@ -1210,6 +1408,7 @@ describe("Project workspace lifecycle", () => {
         files: [{
           path: "files/removed.txt",
           modifiedBySessionId: recovered.sessionId,
+          modifiedByPromptId: recovered.id,
           baseVersion: 3,
         }],
       }),
@@ -1276,6 +1475,7 @@ describe("Project workspace lifecycle", () => {
         files: expect.arrayContaining([{
           path: "files/draft.md",
           modifiedBySessionId: prompt.sessionId,
+          modifiedByPromptId: prompt.id,
           baseVersion: 0,
         }]),
       }),
@@ -1324,12 +1524,19 @@ describe("Project workspace lifecycle", () => {
     vi.mocked(chat.getMessageState).mockImplementation(async () =>
       dispatched ? "completed" : "missing");
     const projectRuntime = runtime();
-    vi.mocked(projectRuntime.observe).mockResolvedValue({
-      state: "stopped",
-      startedAt: null,
-      expiresAt: null,
-      currentSnapshotId: "checkpoint-before-native-session",
-    });
+    vi.mocked(projectRuntime.observe)
+      .mockResolvedValueOnce({
+        state: "stopped",
+        startedAt: null,
+        expiresAt: null,
+        currentSnapshotId: "checkpoint-before-native-session",
+      })
+      .mockResolvedValue({
+        state: "running",
+        startedAt: new Date(),
+        expiresAt: new Date(Date.now() + 600_000),
+        currentSnapshotId: null,
+      });
 
     await runProjectWorkspaceJob({
       job: {
@@ -1401,14 +1608,21 @@ describe("Project workspace lifecycle", () => {
     const chat = quietChat();
     vi.mocked(chat.getSessionState).mockResolvedValue("missing");
     const projectRuntime = runtime();
-    vi.mocked(projectRuntime.observe).mockResolvedValue({
-      state: "stopped",
-      startedAt: null,
-      expiresAt: null,
-      currentSnapshotId: "checkpoint-without-native-session",
-    });
+    vi.mocked(projectRuntime.observe)
+      .mockResolvedValueOnce({
+        state: "stopped",
+        startedAt: null,
+        expiresAt: null,
+        currentSnapshotId: "checkpoint-without-native-session",
+      })
+      .mockResolvedValue({
+        state: "running",
+        startedAt: new Date(),
+        expiresAt: new Date(Date.now() + 600_000),
+        currentSnapshotId: null,
+      });
 
-    await expect(runProjectWorkspaceJob({
+    await runProjectWorkspaceJob({
       job: {
         ...job,
         status: "stopped",
@@ -1425,7 +1639,7 @@ describe("Project workspace lifecycle", () => {
       goldenSnapshotId: "golden",
       config,
       signal: new AbortController().signal,
-    })).rejects.toBeInstanceOf(Error);
+    });
 
     expect(chat.createSession).not.toHaveBeenCalled();
     expect(chat.rehydrateSession).not.toHaveBeenCalled();
@@ -1434,6 +1648,106 @@ describe("Project workspace lifecycle", () => {
       errorCode: "project_prompt_interrupted",
       retryAt: undefined,
     }));
+  });
+
+  it("keeps the workspace usable after an interrupted turn and admits a deliberate follow-up", async () => {
+    // Product promise: an ambiguous attempted turn is never replayed, but it remains a
+    // conversation-level failure. The same Project loop must return to ready and accept the
+    // member's explicit next message without entering the workspace error path.
+    const interrupted: ProjectPromptJob = {
+      id: "interrupted-then-continued",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-interrupted-then-continued",
+      sequence: 1,
+      text: "Potential external side effect",
+      model: "openai/gpt-5",
+      opencodeSessionId: "native-lost",
+      opencodeMessageId: "msg_interrupted_then_continued",
+      sendAttemptedAt: new Date("2026-07-23T20:00:00.000Z"),
+      leaseOwner: "worker",
+    };
+    const followUp: ProjectPromptJob = {
+      ...interrupted,
+      id: "explicit-follow-up",
+      sequence: 2,
+      text: "Continue from the files that are already safe",
+      opencodeMessageId: "msg_explicit_follow_up",
+      sendAttemptedAt: null,
+    };
+    const pending = [interrupted, followUp];
+    const sentMessages = new Set<string>();
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        const next = pending.shift();
+        return next ? [next] : [];
+      }),
+    });
+    const chat = quietChat();
+    vi.mocked(chat.getSessionState).mockResolvedValue("missing");
+    vi.mocked(chat.getMessageState).mockImplementation(
+      async (_target, _sessionId, messageId) =>
+        sentMessages.has(messageId) ? "completed" : "missing",
+    );
+    vi.mocked(chat.sendPrompt).mockImplementation(
+      async (_target, _sessionId, _text, messageId) => {
+        sentMessages.add(messageId);
+      },
+    );
+    const projectRuntime = runtime();
+    vi.mocked(projectRuntime.observe)
+      .mockResolvedValueOnce({
+        state: "stopped",
+        startedAt: null,
+        expiresAt: null,
+        currentSnapshotId: "checkpoint-without-native-session",
+      })
+      .mockResolvedValue({
+        state: "running",
+        startedAt: new Date(),
+        expiresAt: new Date(Date.now() + 600_000),
+        currentSnapshotId: null,
+      });
+
+    await runProjectWorkspaceJob({
+      job: {
+        ...job,
+        status: "stopped",
+        sandboxId: job.sandboxName,
+        checkpointId: "checkpoint-without-native-session",
+        activationRevision: 1,
+      },
+      workerId: "worker",
+      store,
+      runtime: projectRuntime,
+      chat,
+      usage: usage(),
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config: { ...config, concurrency: 1 },
+      signal: new AbortController().signal,
+    });
+
+    expect(store.failProjectPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: interrupted,
+      errorCode: "project_prompt_interrupted",
+      retryAt: undefined,
+    }));
+    expect(chat.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(chat.sendPrompt).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(String),
+      followUp.text,
+      followUp.opencodeMessageId,
+      followUp.model,
+      expect.any(AbortSignal),
+    );
+    expect(store.completeProjectPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      prompt: followUp,
+    }));
+    expect(vi.mocked(store.updateProjectWorkspaceState).mock.calls
+      .some(([state]) => state.status === "error")).toBe(false);
   });
 
   it("does not send when the durable send fence was already marked by a stale attempt", async () => {
@@ -1633,7 +1947,7 @@ describe("Project workspace lifecycle", () => {
     vi.mocked(chat.getSessionState).mockResolvedValue("idle");
     vi.mocked(chat.getMessageState).mockResolvedValue("pending");
 
-    await expect(runProjectWorkspaceJob({
+    await runProjectWorkspaceJob({
       job,
       workerId: "worker",
       store,
@@ -1644,9 +1958,129 @@ describe("Project workspace lifecycle", () => {
       goldenSnapshotId: "golden",
       config,
       signal: new AbortController().signal,
-    })).rejects.toBeInstanceOf(Error);
+    });
 
     expect(chat.sendPrompt).not.toHaveBeenCalled();
+    expect(store.failProjectPrompt).toHaveBeenCalledWith(expect.objectContaining({
+      errorCode: "project_prompt_interrupted",
+      retryAt: undefined,
+    }));
+  });
+
+  it("does not interrupt a delivered reply while OpenCode message and idle views converge", async () => {
+    // Product promise: a reply already delivered to the live stream is durably completed even when
+    // OpenCode's message and session endpoints briefly disagree. This worker-level test exercises
+    // the non-atomic poll boundary; restoring immediate idle failure makes it fail sensitively.
+    const prompt: ProjectPromptJob = {
+      id: "idle-convergence",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-idle-convergence",
+      sequence: 1,
+      text: "Reply quickly",
+      model: "openai/gpt-5",
+      opencodeSessionId: null,
+      opencodeMessageId: "msg_idle_convergence",
+      sendAttemptedAt: null,
+      leaseOwner: "worker",
+    };
+    let claimed = false;
+    let sent = false;
+    let messagePoll = 0;
+    let sessionPoll = 0;
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [prompt];
+      }),
+    });
+    const chat = quietChat();
+    vi.mocked(chat.sendPrompt).mockImplementation(async () => {
+      sent = true;
+    });
+    vi.mocked(chat.getMessageState).mockImplementation(async () => {
+      if (!sent) return "missing";
+      messagePoll += 1;
+      return messagePoll >= 3 ? "completed" : "pending";
+    });
+    vi.mocked(chat.getSessionState).mockImplementation(async () => {
+      sessionPoll += 1;
+      return sessionPoll === 1 ? "busy" : "idle";
+    });
+
+    await runProjectWorkspaceJob({
+      job,
+      workerId: "worker",
+      store,
+      runtime: runtime(),
+      chat,
+      usage: usage(),
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config,
+      signal: new AbortController().signal,
+    });
+
+    expect(chat.sendPrompt).toHaveBeenCalledOnce();
+    expect(store.failProjectPrompt).not.toHaveBeenCalled();
+    expect(store.completeProjectPrompt).toHaveBeenCalledOnce();
+  });
+
+  it("still fails closed when a newly dispatched prompt remains pending and idle", async () => {
+    // The bounded convergence window must not weaken the no-replay boundary. A turn with no durable
+    // assistant reply remains ambiguous and is terminalized without a second send.
+    const prompt: ProjectPromptJob = {
+      id: "idle-interrupted",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-idle-interrupted",
+      sequence: 1,
+      text: "Potential external side effect",
+      model: "openai/gpt-5",
+      opencodeSessionId: null,
+      opencodeMessageId: "msg_idle_interrupted",
+      sendAttemptedAt: null,
+      leaseOwner: "worker",
+    };
+    let claimed = false;
+    let sent = false;
+    let sessionPoll = 0;
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [prompt];
+      }),
+    });
+    const chat = quietChat();
+    vi.mocked(chat.sendPrompt).mockImplementation(async () => {
+      sent = true;
+    });
+    vi.mocked(chat.getMessageState).mockImplementation(async () =>
+      sent ? "pending" : "missing");
+    vi.mocked(chat.getSessionState).mockImplementation(async () => {
+      sessionPoll += 1;
+      return sessionPoll === 1 ? "busy" : "idle";
+    });
+
+    await runProjectWorkspaceJob({
+      job,
+      workerId: "worker",
+      store,
+      runtime: runtime(),
+      chat,
+      usage: usage(),
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config,
+      signal: new AbortController().signal,
+    });
+
+    expect(chat.sendPrompt).toHaveBeenCalledOnce();
+    expect(store.completeProjectPrompt).not.toHaveBeenCalled();
     expect(store.failProjectPrompt).toHaveBeenCalledWith(expect.objectContaining({
       errorCode: "project_prompt_interrupted",
       retryAt: undefined,
@@ -1790,6 +2224,251 @@ describe("Project workspace lifecycle", () => {
       .toBeLessThan(vi.mocked(projectRuntime.extendTimeout).mock.invocationCallOrder[0]!);
   });
 
+  it("admits and provisions the exact idle runway after a completed turn", async () => {
+    // Product promise: Ready means the warm Project can actually survive until its advertised
+    // idle deadline. This worker-level test fixes provider expiry at the original ten-minute
+    // activation and proves the post-turn delta is reserved before Vercel is extended.
+    const prompt: ProjectPromptJob = {
+      id: "idle-runway",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-idle-runway",
+      sequence: 1,
+      text: "Create a short result",
+      model: "openai/gpt-5",
+      opencodeSessionId: null,
+      opencodeMessageId: "msg_idle_runway",
+      sendAttemptedAt: null,
+      leaseOwner: "worker",
+    };
+    let claimed = false;
+    let sent = false;
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [prompt];
+      }),
+    });
+    const meter = usage();
+    vi.mocked(meter.extendIdleRunway).mockImplementation(
+      async ({ minimumRuntimeMs }) => ({ limitMs: minimumRuntimeMs }),
+    );
+    const activatedAt = Date.now();
+    const initialExpiry = activatedAt + 10 * 60_000;
+    const projectRuntime = runtime();
+    vi.mocked(projectRuntime.observe).mockResolvedValue({
+      state: "running",
+      startedAt: new Date(activatedAt),
+      expiresAt: new Date(initialExpiry),
+      currentSnapshotId: null,
+    });
+    vi.mocked(projectRuntime.extendTimeout).mockImplementation(
+      async (_ref, additionalMs) => ({
+        state: "running",
+        startedAt: new Date(activatedAt),
+        expiresAt: new Date(initialExpiry + additionalMs),
+        currentSnapshotId: null,
+      }),
+    );
+    const chat = quietChat();
+    vi.mocked(chat.sendPrompt).mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      sent = true;
+    });
+    vi.mocked(chat.getMessageState).mockImplementation(async () =>
+      sent ? "completed" : "missing");
+
+    await runProjectWorkspaceJob({
+      job,
+      workerId: "worker",
+      store,
+      runtime: projectRuntime,
+      chat,
+      usage: meter,
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config: {
+        ...config,
+        idleMs: 10 * 60_000,
+        sandboxTimeoutMs: 10 * 60_000,
+        maxActivationMs: 30 * 60_000,
+      },
+      signal: new AbortController().signal,
+    });
+
+    const runway = vi.mocked(meter.extendIdleRunway).mock.calls[0]?.[0];
+    expect(runway?.minimumRuntimeMs).toBeGreaterThan(10 * 60_000);
+    expect(projectRuntime.extendTimeout).toHaveBeenCalledOnce();
+    expect(vi.mocked(meter.extendIdleRunway).mock.invocationCallOrder[0]!)
+      .toBeLessThan(vi.mocked(projectRuntime.extendTimeout).mock.invocationCallOrder[0]!);
+    const workspaceStateCalls = vi.mocked(store.updateProjectWorkspaceState).mock.calls;
+    const readyCallIndex = workspaceStateCalls.findIndex(
+      ([state]) => state.status === "ready" && state.idleDeadlineAt,
+    );
+    const readyState = workspaceStateCalls[readyCallIndex]?.[0];
+    const readyCallOrder =
+      vi.mocked(store.updateProjectWorkspaceState).mock.invocationCallOrder[readyCallIndex]!;
+    expect(vi.mocked(projectRuntime.extendTimeout).mock.invocationCallOrder[0]!)
+      .toBeLessThan(readyCallOrder);
+    expect(workspaceStateCalls.filter(([state]) => state.status === "ready")).toHaveLength(1);
+    const extension = await vi.mocked(projectRuntime.extendTimeout).mock.results[0]?.value;
+    expect(readyState?.idleDeadlineAt).toBeInstanceOf(Date);
+    expect(extension?.expiresAt).toBeInstanceOf(Date);
+    expect(extension?.expiresAt?.getTime()).toBeGreaterThanOrEqual(
+      readyState?.idleDeadlineAt?.getTime() ?? Number.POSITIVE_INFINITY,
+    );
+  });
+
+  it("never publishes Ready when post-turn idle admission crashes", async () => {
+    // Regression caught: a crash after the final prompt used to leave Ready + idleDeadlineAt
+    // durable before billing/provider runway existed. A retry could then sleep until a deadline
+    // that Vercel was not guaranteed to honor.
+    const prompt: ProjectPromptJob = {
+      id: "idle-runway-crash",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-idle-runway-crash",
+      sequence: 1,
+      text: "Finish, then fail idle admission",
+      model: "openai/gpt-5",
+      opencodeSessionId: null,
+      opencodeMessageId: "msg_idle_runway_crash",
+      sendAttemptedAt: null,
+      leaseOwner: "worker",
+    };
+    let claimed = false;
+    let sent = false;
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [prompt];
+      }),
+    });
+    const meter = usage();
+    vi.mocked(meter.extendIdleRunway).mockRejectedValue(
+      new Error("simulated crash before idle admission commits"),
+    );
+    const projectRuntime = runtime();
+    const chat = quietChat();
+    vi.mocked(chat.sendPrompt).mockImplementation(async () => {
+      sent = true;
+    });
+    vi.mocked(chat.getMessageState).mockImplementation(async () =>
+      sent ? "completed" : "missing");
+
+    await expect(runProjectWorkspaceJob({
+      job,
+      workerId: "worker",
+      store,
+      runtime: projectRuntime,
+      chat,
+      usage: meter,
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config: {
+        ...config,
+        idleMs: 10 * 60_000,
+        sandboxTimeoutMs: 10 * 60_000,
+        maxActivationMs: 30 * 60_000,
+      },
+      signal: new AbortController().signal,
+    })).rejects.toThrow("simulated crash before idle admission commits");
+
+    expect(store.completeProjectPrompt).toHaveBeenCalledOnce();
+    expect(meter.extendIdleRunway).toHaveBeenCalledOnce();
+    expect(projectRuntime.extendTimeout).not.toHaveBeenCalled();
+    const workspaceStates = vi.mocked(store.updateProjectWorkspaceState).mock.calls
+      .map(([state]) => state);
+    expect(workspaceStates.some((state) => state.status === "ready")).toBe(false);
+    expect(workspaceStates.some((state) => state.idleDeadlineAt instanceof Date)).toBe(false);
+    expect(workspaceStates).toContainEqual(expect.objectContaining({
+      status: "error",
+      errorCode: "project_runtime_failed",
+    }));
+  });
+
+  it("checkpoints cleanly when quota denies the post-turn idle runway", async () => {
+    // Quota exhaustion may shorten warmth, never trust. The completed conversation stays durable
+    // and the workspace scales to zero without entering the global Project error state.
+    const prompt: ProjectPromptJob = {
+      id: "idle-runway-denied",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-idle-runway-denied",
+      sequence: 1,
+      text: "Finish before quota runs out",
+      model: "openai/gpt-5",
+      opencodeSessionId: null,
+      opencodeMessageId: "msg_idle_runway_denied",
+      sendAttemptedAt: null,
+      leaseOwner: "worker",
+    };
+    let claimed = false;
+    let sent = false;
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [prompt];
+      }),
+    });
+    const meter = usage();
+    vi.mocked(meter.extendIdleRunway).mockRejectedValue(new EntitlementDeniedError({
+      code: "sandbox_quota_exhausted",
+      feature: "sandbox_runs",
+      message: "No sandbox minutes remain.",
+      effectivePlan: "pro",
+      limit: 250,
+      current: 250,
+      upgradeUrl: "/settings?view=billing",
+    }));
+    const projectRuntime = runtime();
+    const chat = quietChat();
+    vi.mocked(chat.sendPrompt).mockImplementation(async () => {
+      sent = true;
+    });
+    vi.mocked(chat.getMessageState).mockImplementation(async () =>
+      sent ? "completed" : "missing");
+
+    await runProjectWorkspaceJob({
+      job,
+      workerId: "worker",
+      store,
+      runtime: projectRuntime,
+      chat,
+      usage: meter,
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config: {
+        ...config,
+        idleMs: 10 * 60_000,
+        sandboxTimeoutMs: 10 * 60_000,
+        maxActivationMs: 30 * 60_000,
+      },
+      signal: new AbortController().signal,
+    });
+
+    expect(store.completeProjectPrompt).toHaveBeenCalledOnce();
+    expect(projectRuntime.extendTimeout).not.toHaveBeenCalled();
+    expect(projectRuntime.checkpointAndStop).toHaveBeenCalledOnce();
+    expect(meter.settle).toHaveBeenCalledOnce();
+    expect(store.updateProjectWorkspaceState).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "stopped",
+        idleDeadlineAt: null,
+        errorCode: null,
+        errorMessage: null,
+      }),
+    );
+    expect(vi.mocked(store.updateProjectWorkspaceState).mock.calls
+      .some(([state]) => state.status === "error")).toBe(false);
+  });
+
   it("falls back to the guarded LWW mirror for binary output without failing the prompt", async () => {
     const binary = Buffer.from("%PDF-1.7\\ncompanion\\0binary", "utf8");
     const files = new Map<string, Buffer>();
@@ -1864,6 +2543,7 @@ describe("Project workspace lifecycle", () => {
     expect(persisted).toContainEqual(expect.objectContaining({
       path: "files/result.pdf",
       modifiedBySessionId: null,
+      modifiedByPromptId: null,
       byteSize: binary.length,
     }));
     expect(persisted).not.toContainEqual(expect.objectContaining({
@@ -1923,6 +2603,8 @@ describe("Project workspace lifecycle", () => {
       loadProjectMaterializationPlan: vi.fn(async () => ({
         desiredGeneration: 1,
         appliedGeneration: 1,
+        desiredFileRevision: 0,
+        appliedFileRevision: 0,
         checkpointGeneration: 0,
         skills: [],
         bootstrapFiles: [{
@@ -1998,10 +2680,12 @@ describe("Project workspace lifecycle", () => {
     expect(versions).toContainEqual(expect.objectContaining({
       checksum: checksum(aBytes),
       modifiedBySessionId: a.sessionId,
+      modifiedByPromptId: a.id,
     }));
     expect(versions).toContainEqual(expect.objectContaining({
       checksum: checksum(bBytes),
       modifiedBySessionId: b.sessionId,
+      modifiedByPromptId: b.id,
     }));
     expect(storedBodies.get(checksum(aBytes))).toEqual(aBytes);
     expect(storedBodies.get(checksum(bBytes))).toEqual(bBytes);
@@ -2011,6 +2695,7 @@ describe("Project workspace lifecycle", () => {
     expect(versions.at(-1)).toMatchObject({
       checksum: checksum(bBytes),
       modifiedBySessionId: null,
+      modifiedByPromptId: null,
     });
   });
 
@@ -2084,11 +2769,13 @@ describe("Project workspace lifecycle", () => {
       path: "files/shared.txt",
       checksum: checksum(aBytes),
       modifiedBySessionId: a.sessionId,
+      modifiedByPromptId: a.id,
     }));
     expect(versions).toContainEqual(expect.objectContaining({
       path: "files/shared.txt",
       checksum: checksum(bBytes),
       modifiedBySessionId: b.sessionId,
+      modifiedByPromptId: b.id,
     }));
     const lastAttachmentVersion = versions.filter(
       (version) => version.path === "files/shared.txt" && version.modifiedBySessionId,

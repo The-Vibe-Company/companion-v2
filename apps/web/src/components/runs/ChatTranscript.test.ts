@@ -2,7 +2,7 @@
 
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SkillRunDetail } from "@companion/contracts";
 import { ChatTranscript } from "./ChatTranscript";
 import type { ChatState } from "./chatStream";
@@ -142,5 +142,100 @@ describe("ChatTranscript scroller", () => {
       await Promise.resolve();
     });
     expect(viewport.scrollTop).toBe(220);
+  });
+
+  it("places each Project file result after its exact turn and opens that version", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const onOpenFiles = vi.fn();
+    const chat = {
+      ...chatState(),
+      error: "OpenCode provider diagnostic",
+    };
+
+    await act(async () => {
+      root?.render(
+        React.createElement(ChatTranscript, {
+          run: null,
+          chat,
+          showPromptBubble: false,
+          showWorking: false,
+          streamDead: false,
+          rowExpanded: () => false,
+          onToggleRow: () => undefined,
+          onReconnect: () => undefined,
+          onOpenFiles,
+          showChatError: false,
+          generatedFileTurns: [
+            {
+              messageId: "user-0",
+              files: [
+                {
+                  id: "file-1",
+                  path: "files/launch.md",
+                  name: "launch.md",
+                  version: 3,
+                  contentType: "text/markdown",
+                  byteSize: 320,
+                  action: "updated",
+                },
+                {
+                  id: "file-2",
+                  path: "files/summary.pdf",
+                  name: "summary.pdf",
+                  version: 1,
+                  contentType: "application/pdf",
+                  byteSize: 640,
+                  action: "created",
+                },
+              ],
+            },
+          ],
+        }),
+      );
+    });
+
+    const messageIds = Array.from(
+      container.querySelectorAll<HTMLElement>("[data-message-id]"),
+    ).map((item) => item.dataset.messageId);
+    expect(messageIds.slice(0, 4)).toEqual([
+      "user:0",
+      "assistant:1",
+      "project:generated-files:user-0",
+      "user:2",
+    ]);
+    const marker = container.querySelector<HTMLElement>(
+      ".run-generated-marker--project",
+    )!;
+    expect(marker.textContent).toContain("Created files · 1");
+    expect(marker.textContent).toContain("Updated files · 1");
+    expect(marker.textContent).toContain("launch.md");
+    expect(marker.textContent).toContain("summary.pdf");
+    expect(container.textContent).not.toContain("OpenCode provider diagnostic");
+    const fileButtons = Array.from(
+      marker.querySelectorAll<HTMLButtonElement>("[data-project-file-id]"),
+    );
+    expect(fileButtons).toHaveLength(2);
+    act(() => fileButtons[0]?.click());
+    expect(onOpenFiles).toHaveBeenCalledWith(
+      "file-1",
+      3,
+      expect.objectContaining({
+        path: "files/launch.md",
+        contentType: "text/markdown",
+        byteSize: 320,
+      }),
+    );
+    act(() => fileButtons[1]?.click());
+    expect(onOpenFiles).toHaveBeenLastCalledWith(
+      "file-2",
+      1,
+      expect.objectContaining({
+        path: "files/summary.pdf",
+        contentType: "application/pdf",
+        byteSize: 640,
+      }),
+    );
   });
 });

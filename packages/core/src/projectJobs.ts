@@ -98,6 +98,8 @@ type RawWorkspaceClaim = {
   checkpointGeneration: number;
   desiredGeneration: number;
   appliedGeneration: number;
+  desiredFileRevision: number;
+  appliedFileRevision: number;
   lastActivityAt: Date | string;
   idleDeadlineAt: Date | string | null;
   activationRevision: number;
@@ -677,6 +679,8 @@ async function readCurrentWorkspaceState(input: {
 }): Promise<{
   desiredGeneration: number;
   appliedGeneration: number;
+  desiredFileRevision: number;
+  appliedFileRevision: number;
   checkpointGeneration: number;
   activationRevision: number;
   authorityRevision: string | null;
@@ -690,6 +694,8 @@ async function readCurrentWorkspaceState(input: {
     .select({
       desiredGeneration: schema.projectWorkspaces.desiredGeneration,
       appliedGeneration: schema.projectWorkspaces.appliedGeneration,
+      desiredFileRevision: schema.projectWorkspaces.desiredFileRevision,
+      appliedFileRevision: schema.projectWorkspaces.appliedFileRevision,
       checkpointGeneration: schema.projectWorkspaces.checkpointGeneration,
       activationRevision: schema.projectWorkspaces.activationRevision,
       authorityRevision: schema.projectWorkspaces.authorityRevision,
@@ -886,6 +892,8 @@ export async function claimProjectWorkspaceJobs(input: {
       claimed."checkpoint_generation" as "checkpointGeneration",
       claimed."desired_generation" as "desiredGeneration",
       claimed."applied_generation" as "appliedGeneration",
+      claimed."desired_file_revision" as "desiredFileRevision",
+      claimed."applied_file_revision" as "appliedFileRevision",
       claimed."last_activity_at" as "lastActivityAt",
       claimed."idle_deadline_at" as "idleDeadlineAt",
       claimed."activation_revision" as "activationRevision",
@@ -1102,6 +1110,8 @@ export async function loadProjectMaterializationPlan(input: {
         creatorId: input.job.creatorId,
         desiredGeneration: workspace.desiredGeneration,
         appliedGeneration: workspace.appliedGeneration,
+        desiredFileRevision: workspace.desiredFileRevision,
+        appliedFileRevision: workspace.appliedFileRevision,
         checkpointGeneration: workspace.checkpointGeneration,
         generation: workspace.desiredGeneration,
         skills: materializedSnapshots.map((row) => ({
@@ -2051,6 +2061,7 @@ export async function updateProjectWorkspaceState(input: {
   checkpointCreatedAt?: Date | null;
   checkpointGeneration?: number;
   appliedGeneration?: number;
+  appliedFileRevision?: number;
   activationRevision?: number;
   lastActivityAt?: Date;
   idleDeadlineAt?: Date | null;
@@ -2061,6 +2072,9 @@ export async function updateProjectWorkspaceState(input: {
   const database = input.database ?? db;
   if (input.checkpointGeneration !== undefined && input.checkpointGeneration < 0) {
     throw new Error("checkpoint generation must be non-negative");
+  }
+  if (input.appliedFileRevision !== undefined && input.appliedFileRevision < 0) {
+    throw new Error("applied file revision must be non-negative");
   }
   try {
     return await withWorkspaceLease({
@@ -2110,6 +2124,9 @@ export async function updateProjectWorkspaceState(input: {
                 : {}),
             ...(input.appliedGeneration !== undefined
               ? { appliedGeneration: input.appliedGeneration }
+              : {}),
+            ...(input.appliedFileRevision !== undefined
+              ? { appliedFileRevision: input.appliedFileRevision }
               : {}),
             ...(input.activationRevision !== undefined
               ? { activationRevision: input.activationRevision }
@@ -2359,9 +2376,12 @@ export async function claimProjectPromptJobs(input: {
         job: input.job,
         workerId: input.workerId,
       });
-      // A prompt may only observe a fully materialized skill projection. Run Skill attaches first and
-      // enqueues immediately; holding claims here lets the supervisor stage/swap that generation.
-      if (workspace.desiredGeneration !== workspace.appliedGeneration) return [];
+      // A prompt may only observe fully materialized skill and creator-uploaded file projections.
+      // Holding claims here lets the supervisor stage/swap either complete projection first.
+      if (
+        workspace.desiredGeneration !== workspace.appliedGeneration
+        || workspace.desiredFileRevision !== workspace.appliedFileRevision
+      ) return [];
       if (workspace.recycleRequestedAt) {
         const recycled: ProjectAuthorityState = {
           authorityRevision: workspace.authorityRevision ?? "",
@@ -2462,7 +2482,9 @@ export async function claimProjectPromptJobs(input: {
           schema.projectSessions,
           and(
             eq(schema.projectSessions.orgId, schema.projectPrompts.orgId),
+            eq(schema.projectSessions.projectId, schema.projectPrompts.projectId),
             eq(schema.projectSessions.id, schema.projectPrompts.sessionId),
+            eq(schema.projectSessions.creatorId, schema.projectPrompts.creatorId),
           ),
         )
         .where(
@@ -2470,6 +2492,9 @@ export async function claimProjectPromptJobs(input: {
             eq(schema.projectPrompts.orgId, input.job.orgId),
             eq(schema.projectPrompts.projectId, input.job.projectId),
             eq(schema.projectPrompts.creatorId, input.job.creatorId),
+            isNull(schema.projectSessions.archivedAt),
+            isNull(schema.projectSessions.stopRequestedAt),
+            notInArray(schema.projectSessions.status, ["stopping"]),
             sessionNotExcluded,
             providerAdmissionCondition,
             sql`${schema.projectPrompts.attempt} < ${schema.projectPrompts.maxAttempts}`,
@@ -2494,7 +2519,13 @@ export async function claimProjectPromptJobs(input: {
         )
         .orderBy(asc(schema.projectPrompts.createdAt))
         .limit(limit)
-        .for("update", { skipLocked: true });
+        // Lock the conversation together with its head prompt. Archive/stop mutations lock this
+        // same session row, so either they linearize first and remove the candidate, or the claim
+        // linearizes first and the mutation waits until the dispatching claim is committed.
+        .for("update", {
+          of: [schema.projectPrompts, schema.projectSessions],
+          skipLocked: true,
+        });
       const jobs: ProjectPromptJob[] = [];
       for (const { prompt, session } of candidates) {
         if (
@@ -3691,6 +3722,53 @@ export function projectFileConflictState(input: {
   return input.existingConflict || input.observedBaseVersion !== input.currentVersion;
 }
 
+async function assertProjectFileAttribution(input: {
+  database: Db;
+  job: ProjectWorkspaceJob;
+  modifiedBySessionId?: string | null;
+  modifiedByPromptId?: string | null;
+}): Promise<void> {
+  if (input.modifiedByPromptId && !input.modifiedBySessionId) {
+    throw new Error("project file prompt attribution requires a session");
+  }
+  if (input.modifiedByPromptId) {
+    const prompts = await input.database
+      .select({ id: schema.projectPrompts.id })
+      .from(schema.projectPrompts)
+      .where(
+        and(
+          eq(schema.projectPrompts.orgId, input.job.orgId),
+          eq(schema.projectPrompts.projectId, input.job.projectId),
+          eq(schema.projectPrompts.sessionId, input.modifiedBySessionId!),
+          eq(schema.projectPrompts.id, input.modifiedByPromptId),
+          eq(schema.projectPrompts.creatorId, input.job.creatorId),
+        ),
+      )
+      .limit(1);
+    if (!prompts[0]) {
+      throw new Error("project file prompt is outside the leased project session");
+    }
+    return;
+  }
+  if (input.modifiedBySessionId) {
+    const sessions = await input.database
+      .select({ id: schema.projectSessions.id })
+      .from(schema.projectSessions)
+      .where(
+        and(
+          eq(schema.projectSessions.orgId, input.job.orgId),
+          eq(schema.projectSessions.projectId, input.job.projectId),
+          eq(schema.projectSessions.id, input.modifiedBySessionId),
+          eq(schema.projectSessions.creatorId, input.job.creatorId),
+        ),
+      )
+      .limit(1);
+    if (!sessions[0]) {
+      throw new Error("project file session is outside the leased project");
+    }
+  }
+}
+
 export async function recordProjectFileVersion(input: {
   job: ProjectWorkspaceJob;
   workerId: string;
@@ -3700,6 +3778,7 @@ export async function recordProjectFileVersion(input: {
   checksum: string;
   storageKey: string;
   modifiedBySessionId?: string | null;
+  modifiedByPromptId?: string | null;
   baseVersion?: number | null;
   database?: Db;
 }): Promise<{ fileId: string; version: number; conflictDetected: boolean }> {
@@ -3763,21 +3842,7 @@ export async function recordProjectFileVersion(input: {
           conflictDetected: existing.conflictDetected || convergedConflict,
         };
       }
-      if (input.modifiedBySessionId) {
-        const sessions = await tx
-          .select({ id: schema.projectSessions.id })
-          .from(schema.projectSessions)
-          .where(
-            and(
-              eq(schema.projectSessions.orgId, input.job.orgId),
-              eq(schema.projectSessions.projectId, input.job.projectId),
-              eq(schema.projectSessions.id, input.modifiedBySessionId),
-              eq(schema.projectSessions.creatorId, input.job.creatorId),
-            ),
-          )
-          .limit(1);
-        if (!sessions[0]) throw new Error("project file session is outside the leased project");
-      }
+      await assertProjectFileAttribution({ ...input, database: tx });
       const version = (existing?.currentVersion ?? 0) + 1;
       const conflictDetected = projectFileConflictState({
         existingConflict: Boolean(existing?.conflictDetected),
@@ -3795,6 +3860,7 @@ export async function recordProjectFileVersion(input: {
             checksum: input.checksum,
             storageKey: input.storageKey,
             modifiedBySessionId: input.modifiedBySessionId ?? null,
+            modifiedByPromptId: input.modifiedByPromptId ?? null,
             conflictDetected,
             deletedAt: null,
             updatedAt: new Date(),
@@ -3820,6 +3886,7 @@ export async function recordProjectFileVersion(input: {
           checksum: input.checksum,
           storageKey: input.storageKey,
           modifiedBySessionId: input.modifiedBySessionId ?? null,
+          modifiedByPromptId: input.modifiedByPromptId ?? null,
           conflictDetected,
         });
       }
@@ -3834,6 +3901,7 @@ export async function recordProjectFileVersion(input: {
         checksum: input.checksum,
         storageKey: input.storageKey,
         modifiedBySessionId: input.modifiedBySessionId ?? null,
+        modifiedByPromptId: input.modifiedByPromptId ?? null,
         baseVersion: observedBaseVersion,
         conflictDetected,
       });
@@ -3849,6 +3917,7 @@ export async function recordProjectFileDeletion(input: {
   path: string;
   baseVersion: number;
   modifiedBySessionId?: string | null;
+  modifiedByPromptId?: string | null;
   database?: Db;
 }): Promise<{
   fileId: string;
@@ -3880,21 +3949,7 @@ export async function recordProjectFileDeletion(input: {
         .for("update");
       const current = rows[0];
       if (!current || current.deletedAt) return null;
-      if (input.modifiedBySessionId) {
-        const sessions = await tx
-          .select({ id: schema.projectSessions.id })
-          .from(schema.projectSessions)
-          .where(
-            and(
-              eq(schema.projectSessions.orgId, input.job.orgId),
-              eq(schema.projectSessions.projectId, input.job.projectId),
-              eq(schema.projectSessions.id, input.modifiedBySessionId),
-              eq(schema.projectSessions.creatorId, input.job.creatorId),
-            ),
-          )
-          .limit(1);
-        if (!sessions[0]) throw new Error("project file session is outside the leased project");
-      }
+      await assertProjectFileAttribution({ ...input, database: tx });
       const conflictDetected =
         current.conflictDetected || input.baseVersion !== current.currentVersion;
       const version = current.currentVersion + 1;
@@ -3904,6 +3959,7 @@ export async function recordProjectFileDeletion(input: {
           currentVersion: version,
           deletedAt: new Date(),
           modifiedBySessionId: input.modifiedBySessionId ?? null,
+          modifiedByPromptId: input.modifiedByPromptId ?? null,
           conflictDetected,
           updatedAt: new Date(),
         })

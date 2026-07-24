@@ -58,7 +58,7 @@ one person. There is no open, self-hostable answer for a **team**.
 | **Pillar 2 — Containers** | Org-admin **approval** of images into the catalog; **1-click deploy** of ≥1 container; surface connection details/secrets. |
 | **Pillar 3 — Skills** | Upload + **validate** + **version** ≥1 `SKILL.md` package; organize with shared labels; **attach** to an agent; sync into the runtime. |
 | **Memory** | **Granite** vault provisioned and mounted for the agent (concrete V0 integration). |
-| **Dashboard** | Cowork navigation with creator-private Projects and Skills one click apart; persistent Project workspaces, direct multi-session OpenCode chat, synchronized capabilities, Secrets and Files; basic list/detail views of agents, containers, and skills. |
+| **Dashboard** | Cowork navigation with creator-private Projects and Skills one click apart; persistent Project workspaces; a searchable, archivable conversation library; direct multi-session OpenCode chat; durable prompt attachments and file outputs; synchronized capabilities and read-only Access metadata; basic list/detail views of agents, containers, and skills. |
 | **Secrets** | Encrypted, write-only secret storage; OpenRouter and provider credentials referenced, never inlined. |
 | **Audit** | Append-only audit log of mutating, deploy, and exec actions (in-app view minimal). |
 | **Managed SaaS billing** | Free and Pro plans; Pro is $10 USD/month per active member with Stripe Tax, automatic prorations, a seven-day delinquency grace period, and transactional skill quotas. Self-hosted remains fully unlocked without Stripe. |
@@ -68,7 +68,8 @@ one person. There is no open, self-hostable answer for a **team**.
 SSO/SAML & SCIM · usage cost dashboards · community marketplace & cross-org sharing · Project sharing ·
 **Kubernetes** and **Modal** providers · audit export & compliance certifications · skill-execution
 sandbox hardening · skill ratings/reviews · agent observability/tracing · Tailscale-style private
-networking parity with v1.
+networking parity with v1 · Project instructions · cross-conversation memory · scheduled tasks ·
+browser control · live artifacts · system notifications · native Office preview.
 
 ---
 
@@ -125,19 +126,44 @@ Each requirement has user stories with acceptance criteria. Priorities: **P0** =
 - As a Member, I can create a private **Project** with a name, default activated model, and accessible
   Skills. *AC:* Companion immediately prepares one persistent named Vercel Sandbox; only the creator can
   enumerate or mutate it, including against a same-org Owner/Admin.
-- As a Project owner, I can start multiple OpenCode sessions that share the same Project filesystem.
-  *AC:* every session has its own immutable model and transcript, sessions may run concurrently, and
-  Companion never creates one sandbox per session.
+- As a Project owner, I can start multiple OpenCode conversations that share the same Project
+  filesystem. *AC:* every conversation has its own immutable model and transcript, conversations may
+  run concurrently, and Companion never creates one sandbox per conversation.
+- As a Project owner, I can find and organize a durable conversation library. *AC:* the API, sidebar,
+  and Project page use `created_at DESC, id DESC` without activity reordering; five active
+  conversations appear per expanded Project; title search is cursor-paginated across `Conversations`
+  and `Archived`; rename, archive, Undo, and restore are creator-only; active work uses
+  `Stop and archive`; V1 exposes no permanent conversation deletion.
+- As a Project owner, I can see work that finishes in the background. *AC:* terminal results after my
+  last view persist as `New result` or `Failed`, increment the Project's internal unread count, and
+  create a clickable in-product notification; opening or explicitly acknowledging the conversation
+  clears unread state without changing its list position.
 - As a Project owner, every active generic Secret I can access and every effective configured model
   connection becomes available at activation. *AC:* plaintext is never persisted or written to `.env`;
   collisions block activation, access loss recycles the runtime, and queued prompts remain dormant
   without VM/billing churn until their immutable model provider is effectively reconnected.
 - As a Project owner, I can browse durable Files and resume after inactivity. *AC:* only the managed
-  `files/` tree is exposed; after ten idle minutes Companion checkpoints and stops the VM, then restores
-  the same workspace and sessions on demand.
+  `files/` tree is exposed; every input attachment returns beside its exact prompt and every turn
+  returns exact created/updated file versions; desktop preview is non-modal, mobile preview is an
+  accessible drawer, and images/PDF/text/Markdown/JSON/CSV preview inline; Files can be added directly
+  to the Project without a synthetic prompt, while prompt attachments support selection, drag-and-drop,
+  and paste and remain linked to their message; after ten idle minutes Companion checkpoints and stops
+  the VM, then restores the same workspace and conversations on demand.
+- As a Project owner, I can understand and recover from failure without learning runtime internals.
+  *AC:* red `Project needs attention` is limited to workspace-wide blocking errors; a recoverable turn
+  failure uses an amber safe-state message, leaves the composer usable, and offers `Continue`,
+  `Start new conversation`, and `Archive`; technical codes stay behind `Technical details`, and no
+  prompt that may have produced effects is replayed automatically.
+- As a Project owner, I can inspect Project context safely. *AC:* one rail exposes complete `Files`,
+  `Skills`, and `Access` surfaces; models use friendly model/provider labels; Access lists Secret names
+  and sources plus model providers and sources but never values, ciphertext, or control-plane
+  credentials.
+- As a Project owner, I can archive and restore a Project separately from deleting it. *AC:* archived
+  Projects leave normal lists but preserve conversations, Files, and workspace; permanent deletion
+  requires a dedicated confirmation naming all three losses.
 - As a Project owner, I can explicitly retry a workspace in Error or Needs attention. *AC:* retries
   requeue the same durable identity and never replace missing provider state with an empty Project.
-- As a Skill user, **Run skill** can add that Skill to a chosen Project and start a direct session.
+- As a Skill user, **Run skill** can add that Skill to a chosen Project and start a direct conversation.
   *AC:* attached Skills and their dependency closure update automatically and atomically between turns;
   legacy standalone Skill Runs keep their existing API semantics.
 

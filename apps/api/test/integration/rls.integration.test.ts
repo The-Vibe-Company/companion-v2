@@ -7,9 +7,11 @@ import {
   beginProjectActivationAdmission,
   claimProjectPromptJobs,
   claimProjectWorkspaceJobs,
+  commitProjectFileUploads,
   completeProjectDeletion,
   createProject,
   createProjectSession,
+  enqueueProjectPrompt,
   createGitHubDestination,
   deleteProjectAttachmentOrphanIfReserved,
   deleteGitHubConnection,
@@ -20,6 +22,8 @@ import {
   GitHubSkillSyncConflictError,
   GitHubSkillSyncNotFoundError,
   isGitHubSyncFenceLive,
+  getProjectSession,
+  listProjectSessions,
   listProjects,
   listProjectAttachmentOrphanReservations,
   listProjectStorageKeys,
@@ -31,10 +35,12 @@ import {
   setGitHubDestinationSkillSelection,
   updateGitHubDestination,
   updateProject,
+  updateProjectSession,
   refreshProjectsForSkillPublication,
   prepareProjectActivationInputs,
   revalidateProjectWorkspaceAuthority,
   reserveProjectAttachmentUploads,
+  reserveProjectFileUploads,
   reserveProjectFileStorageObject,
   recordProjectFileVersion,
   requestProjectDeletion,
@@ -421,6 +427,70 @@ describe("Postgres tenant isolation", () => {
         update project_workspaces
         set lease_owner = null, lease_expires_at = null, heartbeat_at = null
         where lease_owner = ${workerId}
+      `;
+      await integrationSql`delete from projects where id = any(${projectIds}::uuid[])`;
+    }
+  });
+
+  /**
+   * Product promise: a worker crash cannot strand a warm Project after its final prompt has already
+   * reached durable terminal state. The expired workspace lease is sufficient recovery authority;
+   * an unexpired lease remains exclusive even when no prompt or idle deadline exists.
+   *
+   * Failure proof: removing `running` from the workspace claim lifecycle leaves the expired row
+   * unclaimed, while ignoring the outer lease predicate claims the live row or claims the recovered
+   * row twice.
+   */
+  it("reclaims an expired running Project without a prompt exactly once", async () => {
+    const staleProjectId = randomUUID();
+    const liveProjectId = randomUUID();
+    const firstWorkerId = `project-running-recovery-${randomUUID()}`;
+    const secondWorkerId = `project-running-contender-${randomUUID()}`;
+    const projectIds = [staleProjectId, liveProjectId];
+    try {
+      await integrationSql`
+        insert into projects
+          (id, org_id, creator_id, name, default_model, idempotency_key, payload_hash)
+        values
+          (${staleProjectId}::uuid, ${fixture.orgA}::uuid, ${fixture.owner.id},
+           'Expired running recovery', 'openai/gpt-5', ${staleProjectId}, ${staleProjectId}),
+          (${liveProjectId}::uuid, ${fixture.orgA}::uuid, ${fixture.owner.id},
+           'Live running lease', 'openai/gpt-5', ${liveProjectId}, ${liveProjectId})
+      `;
+      await integrationSql`
+        insert into project_workspaces
+          (org_id, project_id, creator_id, sandbox_name, status, available_at,
+           idle_deadline_at, lease_owner, lease_expires_at, heartbeat_at)
+        values
+          (${fixture.orgA}::uuid, ${staleProjectId}::uuid, ${fixture.owner.id},
+           ${`project-${staleProjectId}`}, 'running', now() - interval '1 minute',
+           null, 'crashed-worker', now() - interval '1 minute', now() - interval '2 minutes'),
+          (${fixture.orgA}::uuid, ${liveProjectId}::uuid, ${fixture.owner.id},
+           ${`project-${liveProjectId}`}, 'running', now() - interval '1 minute',
+           null, 'live-worker', now() + interval '10 minutes', now())
+      `;
+
+      const claimAsWorkerRole = (workerId: string) =>
+        integrationSql.begin(async (tx) => {
+          await tx.unsafe(`set local role ${role}`);
+          return tx<Array<{ project_id: string }>>`
+            select project_id
+            from companion_claim_project_workspaces(${workerId}, 32, 30)
+          `;
+        });
+
+      const firstClaims = await claimAsWorkerRole(firstWorkerId);
+      expect(firstClaims.map((claim) => claim.project_id)).toContain(staleProjectId);
+      expect(firstClaims.map((claim) => claim.project_id)).not.toContain(liveProjectId);
+
+      const secondClaims = await claimAsWorkerRole(secondWorkerId);
+      expect(secondClaims.map((claim) => claim.project_id)).not.toContain(staleProjectId);
+      expect(secondClaims.map((claim) => claim.project_id)).not.toContain(liveProjectId);
+    } finally {
+      await integrationSql`
+        update project_workspaces
+        set lease_owner = null, lease_expires_at = null, heartbeat_at = null
+        where lease_owner in (${firstWorkerId}, ${secondWorkerId})
       `;
       await integrationSql`delete from projects where id = any(${projectIds}::uuid[])`;
     }
@@ -813,20 +883,20 @@ describe("Postgres tenant isolation", () => {
       await integrationSql`
         insert into project_files
           (id, org_id, project_id, creator_id, path, content_type, byte_size, checksum, storage_key,
-           modified_by_session_id)
+           modified_by_session_id, modified_by_prompt_id)
         values
           (${fileId}::uuid, ${fixture.orgA}::uuid, ${graphProjectId}::uuid, ${fixture.owner.id},
            'files/output.txt', 'text/plain', 5, ${checksum}, ${`projects/${graphProjectId}/files/${fileId}/1`},
-           ${sessionId}::uuid)
+           ${sessionId}::uuid, ${promptId}::uuid)
       `;
       await integrationSql`
         insert into project_file_versions
           (org_id, project_id, file_id, creator_id, version, content_type, byte_size, checksum,
-           storage_key, modified_by_session_id)
+           storage_key, modified_by_session_id, modified_by_prompt_id)
         values
           (${fixture.orgA}::uuid, ${graphProjectId}::uuid, ${fileId}::uuid, ${fixture.owner.id},
            1, 'text/plain', 5, ${checksum}, ${`projects/${graphProjectId}/files/${fileId}/1`},
-           ${sessionId}::uuid)
+           ${sessionId}::uuid, ${promptId}::uuid)
       `;
       await integrationSql`
         insert into project_secret_inputs
@@ -882,7 +952,9 @@ describe("Postgres tenant isolation", () => {
         });
 
       const creatorRows = await readAs(fixture.orgA, fixture.owner.id);
-      expect(creatorRows.map((row) => row.table_name)).toEqual([...tables].sort());
+      expect(creatorRows.map((row) => row.table_name).sort()).toEqual(
+        [...tables].sort(),
+      );
       expect(creatorRows.every((row) => row.row_count === 1)).toBe(true);
       for (const actor of [fixture.admin, fixture.developer]) {
         const rows = await readAs(fixture.orgA, actor.id);
@@ -2043,6 +2115,56 @@ describe("Postgres tenant isolation", () => {
         authorityRevision: prepared.authorityRevision,
         database: integrationDb,
       })).resolves.toMatchObject({ mode: "current", recycleRequired: false });
+
+      for (const blockedState of [
+        {
+          status: "queued",
+          archivedAt: new Date(),
+          stopRequestedAt: null,
+        },
+        {
+          status: "queued",
+          archivedAt: null,
+          stopRequestedAt: new Date(),
+        },
+        {
+          status: "stopping",
+          archivedAt: null,
+          stopRequestedAt: null,
+        },
+      ] as const) {
+        await integrationDb
+          .update(schema.projectSessions)
+          .set(blockedState)
+          .where(eq(schema.projectSessions.id, sessionId));
+        await expect(
+          claimProjectPromptJobs({
+            job: job!,
+            workerId,
+            limit: 8,
+            leaseSeconds: 30,
+            excludeSessionIds: [],
+            database: integrationDb,
+          }),
+        ).resolves.toEqual([]);
+        const [unclaimed] = await integrationSql<
+          Array<{ status: string; attempt: number }>
+        >`
+          select status, attempt
+          from project_prompts
+          where id = ${promptId}::uuid
+        `;
+        expect(unclaimed).toEqual({ status: "queued", attempt: 0 });
+      }
+      await integrationDb
+        .update(schema.projectSessions)
+        .set({
+          status: "queued",
+          archivedAt: null,
+          stopRequestedAt: null,
+        })
+        .where(eq(schema.projectSessions.id, sessionId));
+
       const promptJobs = await claimProjectPromptJobs({
         job: job!,
         workerId,
@@ -2184,6 +2306,497 @@ describe("Postgres tenant isolation", () => {
     } finally {
       if (createdId) {
         await integrationSql`delete from projects where id = ${createdId}::uuid`;
+      }
+    }
+  });
+
+  it("reopens a completed Project conversation only after an explicit follow-up", async () => {
+    let projectId: string | null = null;
+    try {
+      const created = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          createProject({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            value: {
+              name: "Durable follow-up",
+              default_model: "openai/gpt-5",
+              skill_slugs: [],
+            },
+            idempotencyKey: `project-follow-up-${fixture.suffix}`,
+            database,
+          }),
+      );
+      projectId = created.id;
+      const initial = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          createProjectSession({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId: created.id,
+            prompt: "Prepare the durable brief",
+            model: "openai/gpt-5",
+            modelProvider: "openai",
+            modelCredentialEnvKeys: ["OPENAI_API_KEY"],
+            idempotencyKey: `project-initial-${fixture.suffix}`,
+            attachments: [],
+            database,
+          }),
+      );
+      await integrationDb.transaction(async (database) => {
+        await database
+          .update(schema.projectPrompts)
+          .set({ status: "completed", completedAt: new Date() })
+          .where(
+            and(
+              eq(schema.projectPrompts.orgId, fixture.orgA),
+              eq(schema.projectPrompts.sessionId, initial.id),
+            ),
+          );
+        await database
+          .update(schema.projectSessions)
+          .set({
+            status: "completed",
+            errorCode: "stale_error",
+            userMessage: "Stale terminal copy",
+          })
+          .where(
+            and(
+              eq(schema.projectSessions.orgId, fixture.orgA),
+              eq(schema.projectSessions.id, initial.id),
+            ),
+          );
+      });
+
+      const followUp = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          enqueueProjectPrompt({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId: created.id,
+            sessionId: initial.id,
+            text: "Add the final sources",
+            model: "openai/gpt-5",
+            idempotencyKey: `project-follow-up-prompt-${fixture.suffix}`,
+            attachments: [],
+            database,
+          }),
+      );
+      const reopened = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          getProjectSession({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId: created.id,
+            sessionId: initial.id,
+            database,
+          }),
+      );
+
+      expect(followUp).toMatchObject({
+        sequence: 2,
+        text: "Add the final sources",
+        status: "queued",
+      });
+      expect(reopened).toMatchObject({
+        status: "queued",
+        stop_requested_at: null,
+        error_code: null,
+        message: null,
+      });
+    } finally {
+      if (projectId) {
+        await integrationSql`delete from projects where id = ${projectId}::uuid`;
+      }
+    }
+  });
+
+  it("versions creator uploads without invalidating Project settings revisions", async () => {
+    let projectId: string | null = null;
+    try {
+      const created = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          createProject({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            value: {
+              name: "Direct file upload",
+              default_model: "anthropic/claude-sonnet-4",
+              skill_slugs: [],
+            },
+            idempotencyKey: `project-file-upload-${fixture.suffix}`,
+            database,
+          }),
+      );
+      projectId = created.id;
+      const checksum = `sha256:${"a".repeat(64)}`;
+      const storageKey =
+        `${fixture.orgA}/project-files/${created.id}/sha256/${"a".repeat(64)}`;
+      const uploaded = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        async (database) => {
+          await reserveProjectFileUploads({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId: created.id,
+            storageKeys: [storageKey],
+            database,
+          });
+          return commitProjectFileUploads({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId: created.id,
+            files: [{
+              path: "files/brief.txt",
+              contentType: "text/plain",
+              byteSize: 12,
+              checksum,
+              storageKey,
+            }],
+            database,
+          });
+        },
+      );
+      expect(uploaded).toEqual([
+        expect.objectContaining({
+          path: "files/brief.txt",
+          version: 1,
+          modified_by_session_id: null,
+          modified_by_prompt_id: null,
+        }),
+      ]);
+      const [state] = await integrationSql<Array<{
+        revision: number;
+        desired_file_revision: number;
+        applied_file_revision: number;
+      }>>`
+        select project.revision,
+               workspace.desired_file_revision,
+               workspace.applied_file_revision
+        from projects project
+        join project_workspaces workspace
+          on workspace.org_id = project.org_id and workspace.project_id = project.id
+        where project.id = ${created.id}::uuid
+      `;
+      expect(state).toEqual({
+        revision: 1,
+        desired_file_revision: 1,
+        applied_file_revision: 0,
+      });
+
+      await expect(
+        withTenantContext(
+          { orgId: fixture.orgA, userId: fixture.admin.id },
+          (database) =>
+            commitProjectFileUploads({
+              actor: fixture.admin,
+              orgId: fixture.orgA,
+              projectId: created.id,
+              files: [{
+                path: "files/other.txt",
+                contentType: "text/plain",
+                byteSize: 1,
+                checksum,
+                storageKey,
+              }],
+              database,
+            }),
+        ),
+      ).rejects.toMatchObject({ name: "ProjectNotFoundError" });
+
+      await expect(
+        withTenantContext(
+          { orgId: fixture.orgA, userId: fixture.owner.id },
+          (database) =>
+            updateProject({
+              actor: fixture.owner,
+              orgId: fixture.orgA,
+              projectId: created.id,
+              value: { revision: 1, name: "Direct file upload renamed" },
+              database,
+            }),
+        ),
+      ).resolves.toMatchObject({ revision: 2, name: "Direct file upload renamed" });
+    } finally {
+      if (projectId) {
+        await integrationSql`delete from projects where id = ${projectId}::uuid`;
+      }
+    }
+  });
+
+  it("keeps the conversation library ordered, searchable, archivable and creator-private", async () => {
+    let projectId: string | null = null;
+    const firstId = "00000000-0000-4000-8000-000000000101";
+    const secondId = "00000000-0000-4000-8000-000000000102";
+    const olderId = "00000000-0000-4000-8000-000000000103";
+    const archivedId = "00000000-0000-4000-8000-000000000104";
+    try {
+      const created = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          createProject({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            value: {
+              name: "Conversation library",
+              default_model: "anthropic/claude-sonnet-4",
+              skill_slugs: [],
+            },
+            idempotencyKey: `project-library-${fixture.suffix}`,
+            database,
+          }),
+      );
+      projectId = created.id;
+      const sameCreatedAt = new Date("2026-07-23T12:00:00.000Z");
+      const olderCreatedAt = new Date("2026-07-22T12:00:00.000Z");
+      const viewedAt = new Date("2026-07-23T11:00:00.000Z");
+      const resultAt = new Date("2026-07-23T13:00:00.000Z");
+      await integrationDb.insert(schema.projectSessions).values([
+        {
+          id: firstId,
+          orgId: fixture.orgA,
+          projectId,
+          creatorId: fixture.owner.id,
+          title: "Launch review alpha",
+          model: "anthropic/claude-sonnet-4",
+          modelProvider: "anthropic",
+          status: "idle",
+          lastViewedAt: viewedAt,
+          lastActiveAt: resultAt,
+          createdAt: sameCreatedAt,
+          updatedAt: resultAt,
+        },
+        {
+          id: secondId,
+          orgId: fixture.orgA,
+          projectId,
+          creatorId: fixture.owner.id,
+          title: "Launch review beta",
+          model: "anthropic/claude-sonnet-4",
+          modelProvider: "anthropic",
+          status: "error",
+          lastViewedAt: viewedAt,
+          lastActiveAt: resultAt,
+          createdAt: sameCreatedAt,
+          updatedAt: resultAt,
+        },
+        {
+          id: olderId,
+          orgId: fixture.orgA,
+          projectId,
+          creatorId: fixture.owner.id,
+          title: "Older notes",
+          model: "anthropic/claude-sonnet-4",
+          modelProvider: "anthropic",
+          status: "working",
+          createdAt: olderCreatedAt,
+          updatedAt: olderCreatedAt,
+        },
+        {
+          id: archivedId,
+          orgId: fixture.orgA,
+          projectId,
+          creatorId: fixture.owner.id,
+          title: "Archived notes",
+          model: "anthropic/claude-sonnet-4",
+          modelProvider: "anthropic",
+          status: "idle",
+          archivedAt: resultAt,
+          createdAt: olderCreatedAt,
+          updatedAt: resultAt,
+        },
+      ]);
+
+      const firstPage = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          listProjectSessions({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId: projectId!,
+            query: { q: "launch review", view: "active", limit: 1 },
+            database,
+          }),
+      );
+      expect(firstPage.sessions.map((session) => session.id)).toEqual([secondId]);
+      expect(firstPage.next_cursor).toBeTruthy();
+      const secondPage = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          listProjectSessions({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId: projectId!,
+            query: {
+              q: "launch review",
+              view: "active",
+              cursor: firstPage.next_cursor!,
+              limit: 1,
+            },
+            database,
+          }),
+      );
+      expect(secondPage.sessions.map((session) => session.id)).toEqual([firstId]);
+      expect(secondPage.sessions[0]?.is_unread).toBe(true);
+
+      const archived = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          listProjectSessions({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId: projectId!,
+            query: { q: "", view: "archived", limit: 50 },
+            database,
+          }),
+      );
+      expect(archived.sessions.map((session) => session.id)).toEqual([archivedId]);
+
+      const read = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          updateProjectSession({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId: projectId!,
+            sessionId: secondId,
+            value: { title: "Board review", viewed: true },
+            database,
+          }),
+      );
+      expect(read).toMatchObject({ title: "Board review", is_unread: false });
+
+      await expect(
+        withTenantContext(
+          { orgId: fixture.orgA, userId: fixture.owner.id },
+          (database) =>
+            updateProjectSession({
+              actor: fixture.owner,
+              orgId: fixture.orgA,
+              projectId: projectId!,
+              sessionId: olderId,
+              value: { archived: true },
+              database,
+            }),
+        ),
+      ).rejects.toMatchObject({ name: "ProjectConflictError" });
+      const stoppedAndArchived = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          updateProjectSession({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId: projectId!,
+            sessionId: olderId,
+            value: { archived: true, stop_active: true },
+            database,
+          }),
+      );
+      expect(stoppedAndArchived).toMatchObject({
+        status: "stopping",
+        archived_at: expect.any(String),
+      });
+
+      for (const actor of [fixture.admin, fixture.developer]) {
+        await expect(
+          withTenantContext(
+            { orgId: fixture.orgA, userId: actor.id },
+            (database) =>
+              getProjectSession({
+                actor,
+                orgId: fixture.orgA,
+                projectId: projectId!,
+                sessionId: firstId,
+                database,
+              }),
+          ),
+        ).rejects.toMatchObject({ name: "ProjectNotFoundError" });
+      }
+      await expect(
+        withTenantContext(
+          { orgId: fixture.orgB, userId: fixture.outsider.id },
+          (database) =>
+            listProjectSessions({
+              actor: fixture.outsider,
+              orgId: fixture.orgB,
+              projectId: projectId!,
+              query: { q: "", view: "active", limit: 50 },
+              database,
+            }),
+        ),
+      ).rejects.toMatchObject({ name: "ProjectNotFoundError" });
+
+      const rows = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          listProjects({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            database,
+          }),
+      );
+      expect(rows.find((project) => project.id === projectId)).toMatchObject({
+        session_count: 2,
+        active_session_count: 0,
+        archived_session_count: 2,
+        unread_session_count: 1,
+      });
+
+      const archivedProject = await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          updateProject({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId: projectId!,
+            value: { revision: 1, archived: true },
+            database,
+          }),
+      );
+      expect(archivedProject.archived_at).toEqual(expect.any(String));
+      const [activeProjects, archivedProjects] = await Promise.all([
+        withTenantContext(
+          { orgId: fixture.orgA, userId: fixture.owner.id },
+          (database) =>
+            listProjects({
+              actor: fixture.owner,
+              orgId: fixture.orgA,
+              view: "active",
+              database,
+            }),
+        ),
+        withTenantContext(
+          { orgId: fixture.orgA, userId: fixture.owner.id },
+          (database) =>
+            listProjects({
+              actor: fixture.owner,
+              orgId: fixture.orgA,
+              view: "archived",
+              database,
+            }),
+        ),
+      ]);
+      expect(activeProjects.map((project) => project.id)).not.toContain(projectId);
+      expect(archivedProjects.map((project) => project.id)).toContain(projectId);
+      await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          updateProject({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId: projectId!,
+            value: { revision: 2, archived: false },
+            database,
+          }),
+      );
+    } finally {
+      if (projectId) {
+        await integrationSql`delete from projects where id = ${projectId}::uuid`;
       }
     }
   });
