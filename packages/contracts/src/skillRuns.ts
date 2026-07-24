@@ -545,7 +545,15 @@ export const runChatEventSchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("session.idle"), session_id: z.string().max(RUN_CHAT_ID_MAX) }),
   z.object({ type: z.literal("artifacts.collecting") }),
-  z.object({ type: z.literal("artifacts.updated"), count: z.number().int().nonnegative().max(RUN_ARTIFACT_MAX_FILES) }),
+  z.object({
+    type: z.literal("artifacts.updated"),
+    count: z.number().int().nonnegative().max(RUN_ARTIFACT_MAX_FILES),
+    /**
+     * Projects use the originating prompt as an idempotency key for their post-turn file
+     * reconciliation signal. Skill Runs omit it.
+     */
+    prompt_id: runUuidSchema.optional(),
+  }),
   z.object({
     type: z.literal("prompt.status"),
     prompt_id: runUuidSchema,

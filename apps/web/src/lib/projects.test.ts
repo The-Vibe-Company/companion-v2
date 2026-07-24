@@ -130,6 +130,7 @@ const rawSessionDetail = {
     },
   ],
   transcript: [],
+  current_event_sequence: 0,
   latest_event_sequence: 0,
 };
 

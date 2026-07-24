@@ -21,6 +21,7 @@ import {
 import { createPortal } from "react-dom";
 import { formatBytes, relativeTime } from "@/lib/format";
 import {
+  fetchProject,
   fetchProjectFileVersions,
   fetchProjectFiles,
   fetchProjectSession,
@@ -37,6 +38,7 @@ import type {
   ProjectRuntimeAvailability,
   ProjectSessionStatus,
   ProjectSessionVM,
+  ProjectWorkspaceStatus,
 } from "@/lib/projectsModel";
 import { Icon } from "../Icon";
 import {
@@ -55,8 +57,15 @@ const ACTIVE_SESSION_STATUSES = new Set<ProjectSessionStatus>([
   "working",
   "stopping",
 ]);
+const SETTLING_WORKSPACE_STATUSES = new Set<ProjectWorkspaceStatus>([
+  "queued",
+  "provisioning",
+  "running",
+  "stopping",
+]);
+const PROJECT_PREPARATION_POLL_MS = 2_500;
 const FOCUSABLE =
-  'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  'a[href], button:not([disabled]), input:not([disabled]), video[controls], iframe, [tabindex]:not([tabindex="-1"])';
 const PREVIEWABLE_FILE_TYPES = new Set([
   "image/png",
   "image/jpeg",
@@ -140,6 +149,51 @@ function statusTone(
   return "done";
 }
 
+type ProjectPreparationState = {
+  label: string;
+  detail: string;
+  shortLabel: string;
+};
+
+function projectPreparationState(
+  workspaceStatus: ProjectWorkspaceStatus,
+  sessionStatus: ProjectSessionStatus,
+  optimisticWake: boolean,
+): ProjectPreparationState | null {
+  if (!optimisticWake && sessionStatus !== "queued") return null;
+  if (workspaceStatus === "stopped" || workspaceStatus === "stopping") {
+    return {
+      label: "Waking up your Project",
+      detail: "Restoring the workspace, your files, and synchronized Skills.",
+      shortLabel: "Waking up",
+    };
+  }
+  if (workspaceStatus === "queued" || workspaceStatus === "provisioning") {
+    return {
+      label: "Preparing your Project",
+      detail: "Loading files, Skills, and access before your task starts.",
+      shortLabel: "Getting ready",
+    };
+  }
+  if (
+    sessionStatus === "queued" &&
+    (workspaceStatus === "ready" || workspaceStatus === "running")
+  ) {
+    return {
+      label: "Starting your task",
+      detail: "Your Project is ready. The agent will begin in a moment.",
+      shortLabel: "Starting",
+    };
+  }
+  return optimisticWake
+    ? {
+        label: "Preparing your Project",
+        detail: "Your message is safe while Companion gets the workspace ready.",
+        shortLabel: "Getting ready",
+      }
+    : null;
+}
+
 export function SessionComposer({
   draftKey = "companion:project-draft:standalone",
   disabled,
@@ -147,6 +201,7 @@ export function SessionComposer({
   focusRequest = 0,
   projectFileCount = 0,
   working,
+  workingLabel = "Working",
   onOpenProjectFiles = () => undefined,
   onSend,
 }: {
@@ -156,6 +211,7 @@ export function SessionComposer({
   focusRequest?: number;
   projectFileCount?: number;
   working: boolean;
+  workingLabel?: string;
   onOpenProjectFiles?: () => void;
   onSend: (input: {
     prompt: string;
@@ -378,7 +434,7 @@ export function SessionComposer({
           {working && (
             <span className="cowork-session-composer__working">
               <Icon name="loader" size={12} className="ls-spin" />
-              Working
+              {workingLabel}
             </span>
           )}
           <span />
@@ -1106,6 +1162,8 @@ export function ProjectSessionView({
   const [stopBusy, setStopBusy] = useState(false);
   const [archiveBusy, setArchiveBusy] = useState(false);
   const [runtimeRetryBusy, setRuntimeRetryBusy] = useState(false);
+  const [optimisticWake, setOptimisticWake] = useState(false);
+  const [workspace, setWorkspace] = useState(project.workspace);
   const [composerFocusRequest, setComposerFocusRequest] = useState(0);
   const [files, setFiles] = useState(project.files);
   const [filesOpen, setFilesOpen] = useState(false);
@@ -1119,12 +1177,24 @@ export function ProjectSessionView({
   const filesButtonRef = useRef<HTMLButtonElement>(null);
   const filesReturnFocusRef = useRef<HTMLElement>(null);
   const refreshBusyRef = useRef(false);
+  const fileRefreshGenerationRef = useRef(0);
+  const workspaceRefreshGenerationRef = useRef(0);
   const lastEventIdRef = useRef<string | null>(null);
   const appliedHistoryRef = useRef<string | null>(null);
+  const previousSessionStatusRef = useRef(initialSession.status);
+  const completedPromptIdsRef = useRef(
+    new Set(
+      initialSession.prompts
+        .filter((prompt) => prompt.status === "completed")
+        .map((prompt) => prompt.id),
+    ),
+  );
   const initialSessionRef = useRef(initialSession);
+  const projectFilesRef = useRef(project.files);
   const onSessionChangeRef = useRef(onSessionChange);
   const desktopFilesPanel = useDesktopFilesPanel();
   initialSessionRef.current = initialSession;
+  projectFilesRef.current = project.files;
   onSessionChangeRef.current = onSessionChange;
 
   const resolveToolLabel = useCallback(
@@ -1134,6 +1204,33 @@ export function ProjectSessionView({
     }),
     [],
   );
+
+  const refreshFiles = useCallback(async () => {
+    const generation = fileRefreshGenerationRef.current + 1;
+    fileRefreshGenerationRef.current = generation;
+    try {
+      const next = await fetchProjectFiles(project.id);
+      if (generation === fileRefreshGenerationRef.current) setFiles(next);
+    } catch {
+      // The durable list already on screen remains useful while a refresh is unavailable.
+    }
+  }, [project.id]);
+
+  const refreshProjectState = useCallback(async () => {
+    const workspaceGeneration = workspaceRefreshGenerationRef.current + 1;
+    workspaceRefreshGenerationRef.current = workspaceGeneration;
+    try {
+      const latest = await fetchProject(project.id);
+      if (workspaceGeneration !== workspaceRefreshGenerationRef.current) {
+        return null;
+      }
+      setWorkspace(latest.workspace);
+      return latest;
+    } catch {
+      // Session polling and the global Projects refresh remain authoritative fallbacks.
+      return null;
+    }
+  }, [project.id]);
 
   const reconcileHistory = useCallback(
     (next: ProjectSessionVM, force = false) => {
@@ -1158,12 +1255,22 @@ export function ProjectSessionView({
 
   const apply = useCallback(
     (next: ProjectSessionVM) => {
+      const nextCompletedPromptIds = new Set(
+        next.prompts
+          .filter((prompt) => prompt.status === "completed")
+          .map((prompt) => prompt.id),
+      );
+      const completedPromptBecameDurable = [...nextCompletedPromptIds].some(
+        (promptId) => !completedPromptIdsRef.current.has(promptId),
+      );
+      completedPromptIdsRef.current = nextCompletedPromptIds;
       setSession(next);
       onSessionChangeRef.current(next);
       setLoadError(null);
       if (!ACTIVE_SESSION_STATUSES.has(next.status)) reconcileHistory(next);
+      if (completedPromptBecameDurable) void refreshFiles();
     },
-    [reconcileHistory],
+    [reconcileHistory, refreshFiles],
   );
 
   const refresh = useCallback(async () => {
@@ -1172,6 +1279,18 @@ export function ProjectSessionView({
     try {
       const next = await fetchProjectSession(project.id, session.id);
       apply(next);
+      const lastSeenEvent = Math.max(
+        Number(lastEventIdRef.current ?? "0"),
+        next.latestEventSequence,
+      );
+      lastEventIdRef.current =
+        lastSeenEvent > 0 ? String(lastSeenEvent) : null;
+      if (
+        !ACTIVE_SESSION_STATUSES.has(next.status) &&
+        next.currentEventSequence > lastSeenEvent
+      ) {
+        setStreamNonce((value) => value + 1);
+      }
       return next;
     } catch (cause) {
       setLoadError(
@@ -1185,13 +1304,17 @@ export function ProjectSessionView({
     }
   }, [apply, project.id, session.id]);
 
-  const refreshFiles = useCallback(async () => {
-    try {
-      setFiles(await fetchProjectFiles(project.id));
-    } catch {
-      // The durable list already on screen remains useful while a refresh is unavailable.
+  useEffect(() => {
+    const previous = previousSessionStatusRef.current;
+    previousSessionStatusRef.current = session.status;
+    if (
+      ACTIVE_SESSION_STATUSES.has(previous) &&
+      !ACTIVE_SESSION_STATUSES.has(session.status)
+    ) {
+      void refreshFiles();
+      void refreshProjectState();
     }
-  }, [project.id]);
+  }, [refreshFiles, refreshProjectState, session.status]);
 
   const openFiles = useCallback(
     (
@@ -1246,6 +1369,14 @@ export function ProjectSessionView({
 
   useEffect(() => {
     const nextSession = initialSessionRef.current;
+    fileRefreshGenerationRef.current += 1;
+    workspaceRefreshGenerationRef.current += 1;
+    previousSessionStatusRef.current = nextSession.status;
+    completedPromptIdsRef.current = new Set(
+      nextSession.prompts
+        .filter((prompt) => prompt.status === "completed")
+        .map((prompt) => prompt.id),
+    );
     setSession(nextSession);
     dispatch({ kind: "reset" });
     appliedHistoryRef.current = null;
@@ -1261,12 +1392,26 @@ export function ProjectSessionView({
     setFileSelection(null);
     setAttachmentPreview(null);
     setComposerFocusRequest(0);
+    setOptimisticWake(false);
+    setFiles(projectFilesRef.current);
     setRowOverride(new Map());
-  }, [initialSession.id, project.id, reconcileHistory]);
+  }, [
+    initialSession.id,
+    project.id,
+    reconcileHistory,
+  ]);
+
+  useEffect(
+    () => () => {
+      fileRefreshGenerationRef.current += 1;
+      workspaceRefreshGenerationRef.current += 1;
+    },
+    [],
+  );
 
   useEffect(() => {
-    setFiles(project.files);
-  }, [project.files]);
+    setWorkspace(project.workspace);
+  }, [project.id, project.workspace]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1283,8 +1428,17 @@ export function ProjectSessionView({
             ["completed", "canceled", "error"].includes(event.status))
         ) {
           void refresh();
+          void refreshFiles();
+          void refreshProjectState();
         }
-        if (event.type === "artifacts.updated") void refreshFiles();
+        if (event.type === "artifacts.updated") {
+          // File versions and their prompt attribution become durable at the same barrier.
+          // Refresh both projections so the Files rail and the turn-level Created/Updated block
+          // appear together.
+          void refresh();
+          void refreshFiles();
+          void refreshProjectState();
+        }
       },
       controller.signal,
       {
@@ -1300,6 +1454,9 @@ export function ProjectSessionView({
         },
         onStreamEnd: async () => {
           const next = await refresh();
+          if (next && !ACTIVE_SESSION_STATUSES.has(next.status)) {
+            void refreshProjectState();
+          }
           return next ? !ACTIVE_SESSION_STATUSES.has(next.status) : false;
         },
       },
@@ -1313,6 +1470,7 @@ export function ProjectSessionView({
     project.id,
     refresh,
     refreshFiles,
+    refreshProjectState,
     resolveToolLabel,
     session.id,
     session.status,
@@ -1327,38 +1485,81 @@ export function ProjectSessionView({
     return () => window.clearInterval(timer);
   }, [refresh, session.status]);
 
-  const workspaceBlocked = [
-    project.status,
-    project.workspace.status,
-  ].some((status) => status === "needs_attention" || status === "error");
+  const providerConnectionBlocked =
+    workspace.errorCode === "project_provider_unavailable";
+  const workspaceBlocked =
+    !providerConnectionBlocked &&
+    [project.status, workspace.status].some(
+      (status) => status === "needs_attention" || status === "error",
+    );
   const projectArchived = project.archivedAt !== null;
   const sessionArchived = session.archivedAt !== null;
   const working =
     !workspaceBlocked &&
+    !providerConnectionBlocked &&
     !projectArchived &&
     !sessionArchived &&
     (session.status === "queued" || session.status === "working");
+  const preparation = workspaceBlocked || providerConnectionBlocked
+    ? null
+    : projectPreparationState(
+        workspace.status,
+        session.status,
+        optimisticWake,
+      );
+  const preparing = preparation !== null;
+  const workspaceSettling =
+    !ACTIVE_SESSION_STATUSES.has(session.status) &&
+    SETTLING_WORKSPACE_STATUSES.has(workspace.status);
+  const shouldPollWorkspace = preparing || workspaceSettling;
   const composerDisabled =
     workspaceBlocked ||
+    providerConnectionBlocked ||
     projectArchived ||
     session.status === "stopping" ||
     sessionArchived ||
     !runtime.available;
   const composerDisabledReason = workspaceBlocked
     ? "Messages are paused while this project needs attention."
-    : projectArchived
-      ? "Restore this project to continue the conversation."
-      : sessionArchived
-        ? "Restore this conversation from the Project archive to continue."
-        : session.status === "stopping"
-          ? "This conversation is stopping."
-          : !runtime.available
-            ? "Messages are paused while Projects reconnects."
-            : undefined;
+    : providerConnectionBlocked
+      ? "Reconnect this conversation’s model provider before continuing."
+      : projectArchived
+        ? "Restore this project to continue the conversation."
+        : sessionArchived
+          ? "Restore this conversation from the Project archive to continue."
+          : session.status === "stopping"
+            ? "This conversation is stopping."
+            : !runtime.available
+              ? "Messages are paused while Projects reconnects."
+              : undefined;
   const workspaceTechnicalDetail =
     project.statusDetail ||
-    project.workspace.statusDetail ||
+    workspace.statusDetail ||
     "The persistent workspace could not be restored.";
+
+  useEffect(() => {
+    if (!shouldPollWorkspace) return;
+    let active = true;
+    let refreshing = false;
+    const refreshWorkspace = async () => {
+      if (refreshing || document.visibilityState === "hidden") return;
+      refreshing = true;
+      try {
+        if (active) await refreshProjectState();
+      } finally {
+        refreshing = false;
+      }
+    };
+    void refreshWorkspace();
+    const timer = window.setInterval(
+      () => void refreshWorkspace(),
+      PROJECT_PREPARATION_POLL_MS,
+    );
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [refreshProjectState, shouldPollWorkspace]);
   const visibleFiles = useMemo(
     () =>
       [...files].sort(
@@ -1451,8 +1652,10 @@ export function ProjectSessionView({
         <span
           className={`cds-status cowork-session__status${
             !workspaceBlocked &&
+            !providerConnectionBlocked &&
             !projectArchived &&
             !sessionArchived &&
+            !preparing &&
             (session.status === "idle" || session.status === "completed")
               ? " is-passive"
               : ""
@@ -1462,17 +1665,23 @@ export function ProjectSessionView({
             className={`project-status-dot is-${
               workspaceBlocked
                 ? "error"
-                : projectArchived || sessionArchived
+                : providerConnectionBlocked
                   ? "waiting"
-                  : statusTone(session.status)
+                  : projectArchived || sessionArchived
+                    ? "waiting"
+                    : preparing
+                      ? "waiting"
+                      : statusTone(session.status)
             }`}
             aria-hidden="true"
           />
           {workspaceBlocked
             ? "Needs attention"
-            : projectArchived || sessionArchived
-              ? "Archived"
-              : statusLabel(session.status)}
+            : providerConnectionBlocked
+              ? "Connection needed"
+              : projectArchived || sessionArchived
+                ? "Archived"
+                : preparation?.shortLabel ?? statusLabel(session.status)}
         </span>
         <span
           className="cowork-session__model"
@@ -1512,7 +1721,9 @@ export function ProjectSessionView({
             {stopBusy ? "Stopping…" : "Stop"}
           </button>
         )}
-        {(onNewSession || onRenameSession || onArchiveSession) && (
+        {((!projectArchived && onNewSession) ||
+          onRenameSession ||
+          onArchiveSession) && (
           <details className="cowork-session__menu">
             <summary
               className="cds-iconbtn cds-iconbtn--sm"
@@ -1521,7 +1732,7 @@ export function ProjectSessionView({
               <Icon name="more-horizontal" size={14} />
             </summary>
             <div role="menu">
-              {onNewSession && (
+              {!projectArchived && onNewSession && (
                 <button
                   type="button"
                   role="menuitem"
@@ -1584,8 +1795,12 @@ export function ProjectSessionView({
             ariaLabel="Conversation transcript"
             showPromptBubble={false}
             showWorking={
-              !workspaceBlocked && (working || chat.working.active)
+              !workspaceBlocked &&
+              (working || chat.working.active || preparing)
             }
+            workingLabel={preparation?.label}
+            workingDetail={preparation?.detail}
+            workingVariant={preparing ? "preparing" : "default"}
             streamDead={streamDead}
             rowExpanded={(id, defaultOpen) =>
               rowOverride.get(id) ?? defaultOpen
@@ -1652,7 +1867,9 @@ export function ProjectSessionView({
               />
             </div>
           )}
-          {!workspaceBlocked && session.status === "error" && (
+          {!workspaceBlocked &&
+            !providerConnectionBlocked &&
+            session.status === "error" && (
               <div className="cowork-session__turn-alert" role="status">
                 <Icon name="alert-triangle" size={15} />
                 <span className="cowork-session__turn-alert-copy">
@@ -1705,8 +1922,41 @@ export function ProjectSessionView({
                 </span>
               </div>
             )}
+          {providerConnectionBlocked &&
+            !workspaceBlocked &&
+            !projectArchived &&
+            !sessionArchived && (
+              <div className="cowork-session__turn-alert" role="status">
+                <Icon name="alert-triangle" size={15} />
+                <span className="cowork-session__turn-alert-copy">
+                  <strong>Reconnect this model to continue</strong>
+                  <span>
+                    {workspace.statusDetail ||
+                      "This conversation’s model connection is no longer available. Reconnect it, or start a new conversation with another model."}
+                  </span>
+                </span>
+                <span className="cowork-session__turn-alert-actions">
+                  <Link
+                    href="/settings?view=models"
+                    className="cds-btn cds-btn--secondary cds-btn--sm"
+                  >
+                    Open model settings
+                  </Link>
+                  {onNewSession && (
+                    <button
+                      type="button"
+                      className="cds-btn cds-btn--ghost cds-btn--sm"
+                      onClick={onNewSession}
+                    >
+                      New conversation
+                    </button>
+                  )}
+                </span>
+              </div>
+            )}
           {!runtime.available &&
             !workspaceBlocked &&
+            !providerConnectionBlocked &&
             !projectArchived &&
             !sessionArchived && (
               <div
@@ -1746,24 +1996,35 @@ export function ProjectSessionView({
             focusRequest={composerFocusRequest}
             projectFileCount={visibleFiles.length}
             working={working}
+            workingLabel={preparation?.shortLabel ?? "Working"}
             onOpenProjectFiles={() => openFiles()}
             onSend={async ({ prompt, files: nextFiles, idempotencyKey }) => {
-              const next = await sendProjectPrompt(project.id, session.id, {
-                prompt,
-                model: session.model,
-                files: nextFiles,
-                idempotencyKey,
-              });
-              const acceptedPrompt = [...next.prompts]
-                .reverse()
-                .find((candidate) => candidate.text === prompt);
-              dispatch({
-                kind: "user",
-                text: prompt,
-                messageId: acceptedPrompt?.messageId,
-              });
-              dispatch({ kind: "send" });
-              apply(next);
+              const waking =
+                workspace.status === "stopped" ||
+                workspace.status === "stopping";
+              if (waking) setOptimisticWake(true);
+              try {
+                const next = await sendProjectPrompt(project.id, session.id, {
+                  prompt,
+                  model: session.model,
+                  files: nextFiles,
+                  idempotencyKey,
+                });
+                const acceptedPrompt = [...next.prompts]
+                  .reverse()
+                  .find((candidate) => candidate.text === prompt);
+                dispatch({
+                  kind: "user",
+                  text: prompt,
+                  messageId: acceptedPrompt?.messageId,
+                });
+                dispatch({ kind: "send" });
+                apply(next);
+              } catch (cause) {
+                setOptimisticWake(false);
+                throw cause;
+              }
+              setOptimisticWake(false);
             }}
           />
         </div>

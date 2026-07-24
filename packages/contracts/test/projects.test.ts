@@ -226,6 +226,7 @@ describe("Cowork project contracts", () => {
           output: "x".repeat(RUN_CHAT_TOOL_OUTPUT_MAX + 1),
           duration_ms: 1,
         }],
+        current_event_sequence: 1,
         latest_event_sequence: 1,
       })
     ).toThrow();

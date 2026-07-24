@@ -34,6 +34,19 @@ DECLARE
     nullif(current_setting('companion.retired_runtime_role', true), '');
   runtime_role text;
   runtime_attributes record;
+  protected_table regclass;
+  api_unprotected_tables regclass[] := ARRAY[
+    'public.account'::regclass,
+    'public.agent'::regclass,
+    'public.agent_auth_ephemeral'::regclass,
+    'public.agent_capability_grant'::regclass,
+    'public.agent_host'::regclass,
+    'public.approval_request'::regclass,
+    'public.profiles'::regclass,
+    'public."session"'::regclass,
+    'public."user"'::regclass,
+    'public.verification'::regclass
+  ];
   protected_function regprocedure;
   shared_functions regprocedure[] := ARRAY[
     'public.companion_secret_usage_count(uuid,uuid)'::regprocedure,
@@ -146,22 +159,6 @@ BEGIN
     IF pg_catalog.pg_has_role(runtime_role, current_user, 'member') THEN
       RAISE EXCEPTION 'companion runtime role % must not inherit the migration-owner role', runtime_role;
     END IF;
-
-    EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), runtime_role);
-    EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', runtime_role);
-    EXECUTE format(
-      'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %I',
-      runtime_role
-    );
-    EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', runtime_role);
-    EXECUTE format(
-      'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I',
-      runtime_role
-    );
-    EXECUTE format(
-      'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO %I',
-      runtime_role
-    );
   END LOOP;
 
   IF api_role <> worker_role THEN
@@ -172,8 +169,64 @@ BEGIN
       RAISE EXCEPTION 'companion API and worker roles must not have cross-role membership';
     END IF;
 
-    -- Re-applying the split is also a downgrade pass: a role reused from the former union topology
-    -- must lose the opposite process's SECURITY DEFINER capabilities before receiving its own set.
+    -- A split-role application is also a downgrade pass for names reused from the legacy union
+    -- topology. Clear every direct/current and future table or sequence grant first. The migration
+    -- hook is rerun after each schema migration, so future tables fail closed until they either
+    -- enable RLS or are deliberately added to a process-specific unprotected-table list.
+    FOREACH runtime_role IN ARRAY ARRAY[api_role, worker_role]
+    LOOP
+      EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), runtime_role);
+      EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', runtime_role);
+      EXECUTE format(
+        'ALTER DEFAULT PRIVILEGES IN SCHEMA public
+         REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM %I',
+        runtime_role
+      );
+      EXECUTE format(
+        'ALTER DEFAULT PRIVILEGES IN SCHEMA public
+         REVOKE USAGE, SELECT ON SEQUENCES FROM %I',
+        runtime_role
+      );
+      EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM %I',
+        runtime_role
+      );
+      EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM %I',
+        runtime_role
+      );
+
+      FOR protected_table IN
+        SELECT table_class.oid::regclass
+        FROM pg_catalog.pg_class table_class
+        JOIN pg_catalog.pg_namespace table_namespace
+          ON table_namespace.oid = table_class.relnamespace
+        WHERE table_namespace.nspname = 'public'
+          AND table_class.relkind IN ('r', 'p')
+          AND table_class.relrowsecurity
+        ORDER BY table_class.oid
+      LOOP
+        EXECUTE format(
+          'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %s TO %I',
+          protected_table,
+          runtime_role
+        );
+      END LOOP;
+    END LOOP;
+
+    -- Better Auth, user profiles and Agent Auth are API-owned surfaces without RLS. Worker
+    -- heartbeat tables are intentionally absent: both processes reach them only through the
+    -- narrow SECURITY DEFINER readiness/heartbeat functions.
+    FOREACH protected_table IN ARRAY api_unprotected_tables
+    LOOP
+      EXECUTE format(
+        'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %s TO %I',
+        protected_table,
+        api_role
+      );
+    END LOOP;
+
+    -- Re-applying the split must also remove opposite-process SECURITY DEFINER capabilities.
     FOREACH protected_function IN ARRAY worker_functions
     LOOP
       EXECUTE format(
@@ -190,6 +243,25 @@ BEGIN
         worker_role
       );
     END LOOP;
+  ELSE
+    -- Backward-compatible simple installs deliberately retain one union role, including defaults.
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), api_role);
+    EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', api_role);
+    EXECUTE format(
+      'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %I',
+      api_role
+    );
+    EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', api_role);
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA public
+       GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I',
+      api_role
+    );
+    EXECUTE format(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA public
+       GRANT USAGE, SELECT ON SEQUENCES TO %I',
+      api_role
+    );
   END IF;
 
   IF retired_runtime_role IS NOT NULL

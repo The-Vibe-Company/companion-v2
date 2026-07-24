@@ -16,11 +16,12 @@ if (!databaseUrl?.trim()) {
  *
  * Regression caught:
  * Applying one unioned grant set to both production logins would let an API compromise claim a
- * Project workspace, enter its exact lease, or forge worker heartbeats.
+ * Project workspace, enter its exact lease, or forge worker heartbeats, while a worker compromise
+ * could read or mutate Better Auth identities and sessions.
  *
  * Why this test is integrated:
- * PostgreSQL's effective EXECUTE privileges include role attributes, PUBLIC grants and function
- * signatures. Only a migrated database and real login roles prove the separation.
+ * PostgreSQL's effective function and table privileges include role attributes, PUBLIC grants,
+ * defaults and exact signatures. Only a migrated database and real login roles prove separation.
  *
  * Failure proof:
  * Granting companion_claim_project_workspaces to the API role or removing the creator/pre-tenant
@@ -115,7 +116,7 @@ describe("separated API and worker database grants", () => {
     await sql.end();
   });
 
-  it("keeps both runtime logins non-privileged and able to use RLS-protected tables", async () => {
+  it("keeps both logins non-privileged and limits direct tables to their intended surfaces", async () => {
     const attributes = await sql<{
       name: string;
       canLogin: boolean;
@@ -123,6 +124,11 @@ describe("separated API and worker database grants", () => {
       bypassRls: boolean;
       inherit: boolean;
       projectsTable: boolean;
+      authUserTable: boolean;
+      profilesTable: boolean;
+      agentsTable: boolean;
+      projectHeartbeatTable: boolean;
+      runHeartbeatTable: boolean;
       tableDefaults: boolean;
       sequenceDefaults: boolean;
     }[]>`
@@ -137,6 +143,31 @@ describe("separated API and worker database grants", () => {
           'public.projects',
           'SELECT,INSERT,UPDATE,DELETE'
         ) as "projectsTable",
+        has_table_privilege(
+          rolname,
+          'public."user"',
+          'SELECT,INSERT,UPDATE,DELETE'
+        ) as "authUserTable",
+        has_table_privilege(
+          rolname,
+          'public.profiles',
+          'SELECT,INSERT,UPDATE,DELETE'
+        ) as "profilesTable",
+        has_table_privilege(
+          rolname,
+          'public.agent',
+          'SELECT,INSERT,UPDATE,DELETE'
+        ) as "agentsTable",
+        has_table_privilege(
+          rolname,
+          'public.project_worker_heartbeats',
+          'SELECT,INSERT,UPDATE,DELETE'
+        ) as "projectHeartbeatTable",
+        has_table_privilege(
+          rolname,
+          'public.skill_run_worker_heartbeats',
+          'SELECT,INSERT,UPDATE,DELETE'
+        ) as "runHeartbeatTable",
         exists (
           select 1
           from pg_default_acl defaults
@@ -166,8 +197,13 @@ describe("separated API and worker database grants", () => {
         bypassRls: false,
         inherit: false,
         projectsTable: true,
-        tableDefaults: true,
-        sequenceDefaults: true,
+        authUserTable: true,
+        profilesTable: true,
+        agentsTable: true,
+        projectHeartbeatTable: false,
+        runHeartbeatTable: false,
+        tableDefaults: false,
+        sequenceDefaults: false,
       },
       {
         name: workerRole,
@@ -176,10 +212,97 @@ describe("separated API and worker database grants", () => {
         bypassRls: false,
         inherit: false,
         projectsTable: true,
-        tableDefaults: true,
-        sequenceDefaults: true,
+        authUserTable: false,
+        profilesTable: false,
+        agentsTable: false,
+        projectHeartbeatTable: false,
+        runHeartbeatTable: false,
+        tableDefaults: false,
+        sequenceDefaults: false,
       },
     ]);
+  });
+
+  it("grants every unprotected API table to the API role only", async () => {
+    const apiTables = [
+      "public.account",
+      "public.agent",
+      "public.agent_auth_ephemeral",
+      "public.agent_capability_grant",
+      "public.agent_host",
+      "public.approval_request",
+      "public.profiles",
+      'public."session"',
+      'public."user"',
+      "public.verification",
+    ];
+
+    for (const table of apiTables) {
+      const [privileges] = await sql<{ api: boolean; worker: boolean }[]>`
+        select
+          has_table_privilege(
+            ${apiRole},
+            ${table},
+            'SELECT,INSERT,UPDATE,DELETE'
+          ) as api,
+          has_table_privilege(
+            ${workerRole},
+            ${table},
+            'SELECT,INSERT,UPDATE,DELETE'
+          ) as worker
+      `;
+      expect(privileges, table).toEqual({ api: true, worker: false });
+    }
+
+    for (const table of [
+      "public.project_worker_heartbeats",
+      "public.skill_run_worker_heartbeats",
+    ]) {
+      const [privileges] = await sql<{ api: boolean; worker: boolean }[]>`
+        select
+          has_table_privilege(
+            ${apiRole},
+            ${table},
+            'SELECT,INSERT,UPDATE,DELETE'
+          ) as api,
+          has_table_privilege(
+            ${workerRole},
+            ${table},
+            'SELECT,INSERT,UPDATE,DELETE'
+          ) as worker
+      `;
+      expect(privileges, table).toEqual({ api: false, worker: false });
+    }
+  });
+
+  it("prevents heartbeat spoofing by the API and Better Auth access by the worker", async () => {
+    await expect(
+      sql.begin(async (tx) => {
+        await tx.unsafe(`set local role ${apiRole}`);
+        await tx`
+          insert into project_worker_heartbeats (
+            worker_id,
+            protocol_version,
+            expires_at
+          )
+          values ('spoofed-api-worker', 1, clock_timestamp() + interval '1 minute')
+        `;
+      }),
+    ).rejects.toThrow(/permission denied/i);
+
+    await expect(
+      sql.begin(async (tx) => {
+        await tx.unsafe(`set local role ${workerRole}`);
+        await tx`select id, email from "user" limit 1`;
+      }),
+    ).rejects.toThrow(/permission denied/i);
+
+    await expect(
+      sql.begin(async (tx) => {
+        await tx.unsafe(`set local role ${workerRole}`);
+        await tx`select id, user_id from "session" limit 1`;
+      }),
+    ).rejects.toThrow(/permission denied/i);
   });
 
   it("grants Project claim and lease mutation functions only to the worker", async () => {
@@ -259,9 +382,65 @@ describe("separated API and worker database grants", () => {
     });
   });
 
+  it("makes new tables fail closed until the post-migration grant hook classifies them", async () => {
+    const futureTable = `runtime_future_${suffix}`;
+    await sql.unsafe(`create table ${futureTable} (id uuid primary key)`);
+    try {
+      const [beforeClassification] = await sql<{
+        api: boolean;
+        worker: boolean;
+        simple: boolean;
+      }[]>`
+        select
+          has_table_privilege(
+            ${apiRole},
+            ${`public.${futureTable}`},
+            'SELECT,INSERT,UPDATE,DELETE'
+          ) as api,
+          has_table_privilege(
+            ${workerRole},
+            ${`public.${futureTable}`},
+            'SELECT,INSERT,UPDATE,DELETE'
+          ) as worker,
+          has_table_privilege(
+            ${simpleRole},
+            ${`public.${futureTable}`},
+            'SELECT,INSERT,UPDATE,DELETE'
+          ) as simple
+      `;
+      expect(beforeClassification).toEqual({
+        api: false,
+        worker: false,
+        simple: true,
+      });
+
+      await sql.unsafe(`alter table ${futureTable} enable row level security`);
+      await applyGrantBlock({ apiRole, workerRole });
+
+      const [afterClassification] = await sql<{ api: boolean; worker: boolean }[]>`
+        select
+          has_table_privilege(
+            ${apiRole},
+            ${`public.${futureTable}`},
+            'SELECT,INSERT,UPDATE,DELETE'
+          ) as api,
+          has_table_privilege(
+            ${workerRole},
+            ${`public.${futureTable}`},
+            'SELECT,INSERT,UPDATE,DELETE'
+          ) as worker
+      `;
+      expect(afterClassification).toEqual({ api: true, worker: true });
+    } finally {
+      await sql.unsafe(`drop table if exists ${futureTable}`);
+    }
+  });
+
   it("preserves the legacy union contract for simple installs", async () => {
     const [privileges] = await sql<{
       projectTable: boolean;
+      authUserTable: boolean;
+      projectHeartbeatTable: boolean;
       workerClaim: boolean;
       apiDiscovery: boolean;
     }[]>`
@@ -271,6 +450,16 @@ describe("separated API and worker database grants", () => {
           'public.projects',
           'SELECT,INSERT,UPDATE,DELETE'
         ) as "projectTable",
+        has_table_privilege(
+          ${simpleRole},
+          'public."user"',
+          'SELECT,INSERT,UPDATE,DELETE'
+        ) as "authUserTable",
+        has_table_privilege(
+          ${simpleRole},
+          'public.project_worker_heartbeats',
+          'SELECT,INSERT,UPDATE,DELETE'
+        ) as "projectHeartbeatTable",
         has_function_privilege(
           ${simpleRole},
           'public.companion_claim_project_workspaces(text,integer,integer)',
@@ -284,6 +473,8 @@ describe("separated API and worker database grants", () => {
     `;
     expect(privileges).toEqual({
       projectTable: true,
+      authUserTable: true,
+      projectHeartbeatTable: true,
       workerClaim: true,
       apiDiscovery: true,
     });
@@ -301,8 +492,9 @@ describe("separated API and worker database grants", () => {
       ).rejects.toThrow(/must not have cross-role membership/i);
     } finally {
       await sql.unsafe(`revoke ${crossWorkerRole} from ${crossApiRole}`);
-      await sql.unsafe(`drop owned by ${crossApiRole}`);
-      await sql.unsafe(`drop owned by ${crossWorkerRole}`);
+      // The grant hook rejects this topology before assigning either role an object privilege.
+      // Avoid DROP OWNED, which itself requires superuser or target-role membership and would make
+      // this production-like non-superuser migration-owner test depend on a broader test login.
       await sql.unsafe(`drop role ${crossApiRole}`);
       await sql.unsafe(`drop role ${crossWorkerRole}`);
     }

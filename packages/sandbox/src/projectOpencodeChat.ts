@@ -7,6 +7,8 @@ import {
 import type { RunChatEvent, RunChatHistoryItem } from "@companion/contracts";
 import {
   OPENCODE_SERVER_USERNAME,
+  PROJECT_FILES_DIR,
+  PROJECT_WORKDIR,
   RunRuntimeError,
   modelPartsForProject,
   type ProjectChatEventEnvelope,
@@ -21,12 +23,15 @@ import {
 
 const RECOVERY_MESSAGE_PREFIX =
   "Companion restored this private Project from a durable checkpoint.";
+const PROJECT_OPENCODE_DIRECTORY =
+  `${PROJECT_WORKDIR}/${PROJECT_FILES_DIR}`;
 
 /** V2 SDK client used only by Cowork Projects; legacy Skill Runs retain the pinned v1 bridge. */
 export function createProjectChatClient(target: ProjectChatTarget): OpencodeClient {
   const auth = Buffer.from(`${OPENCODE_SERVER_USERNAME}:${target.password}`).toString("base64");
   return createOpencodeClient({
     baseUrl: target.domain,
+    directory: PROJECT_OPENCODE_DIRECTORY,
     headers: { authorization: `Basic ${auth}` },
     fetch: (input: string | URL | Request, init?: RequestInit) => {
       const request = new Request(input, init);
@@ -42,7 +47,10 @@ async function createProjectChatSession(
   title: string,
   signal?: AbortSignal,
 ): Promise<{ id: string; title: string }> {
-  const response = await client.session.create({ title }, { signal });
+  const response = await client.session.create(
+    { title, directory: PROJECT_OPENCODE_DIRECTORY },
+    { signal },
+  );
   if (response.error || !response.data) {
     throw new RunRuntimeError("OpenCode did not create the Project session");
   }
@@ -54,12 +62,18 @@ async function getProjectSessionState(
   sessionId: string,
   signal?: AbortSignal,
 ) {
-  const session = await client.session.get({ sessionID: sessionId }, { signal });
+  const session = await client.session.get(
+    { sessionID: sessionId, directory: PROJECT_OPENCODE_DIRECTORY },
+    { signal },
+  );
   if (session.error) {
     if ("name" in session.error && session.error.name === "NotFoundError") return "missing" as const;
     throw new RunRuntimeError("OpenCode could not validate the Project session");
   }
-  const status = await client.session.status({}, { signal });
+  const status = await client.session.status(
+    { directory: PROJECT_OPENCODE_DIRECTORY },
+    { signal },
+  );
   if (status.error) throw new RunRuntimeError("OpenCode could not report Project session status");
   return status.data?.[sessionId]?.type ?? "idle";
 }
@@ -69,7 +83,10 @@ async function loadProjectSessionMessages(
   sessionId: string,
   signal?: AbortSignal,
 ) {
-  const response = await client.session.messages({ sessionID: sessionId }, { signal });
+  const response = await client.session.messages(
+    { sessionID: sessionId, directory: PROJECT_OPENCODE_DIRECTORY },
+    { signal },
+  );
   if (response.error) throw new RunRuntimeError("OpenCode could not load the Project transcript");
   return response.data ?? [];
 }
@@ -365,6 +382,7 @@ export async function sendProjectPromptAsync(input: {
   const response = await input.client.session.promptAsync({
     sessionID: input.sessionId,
     messageID: input.messageId,
+    directory: PROJECT_OPENCODE_DIRECTORY,
     model: modelPartsForProject(input.modelRef),
     parts: [{ type: "text", text: input.text }],
   }, { signal: input.signal });
@@ -398,6 +416,7 @@ export async function rehydrateProjectSession(input: {
   const response = await input.client.session.promptAsync({
     sessionID: input.sessionId,
     messageID: messageId,
+    directory: PROJECT_OPENCODE_DIRECTORY,
     noReply: true,
     parts: [{
       type: "text",
@@ -420,6 +439,7 @@ async function approvePermission(
 ): Promise<void> {
   const response = await client.permission.reply({
     requestID: permission.id,
+    directory: PROJECT_OPENCODE_DIRECTORY,
     reply: "always",
   }, { signal });
   if (response.error) {
@@ -451,7 +471,7 @@ export async function* streamProjectChatEvents(input: {
 }): AsyncGenerator<ProjectChatEventEnvelope> {
   const states = input.states ?? new Map<string, OpencodeStreamState>();
   const subscription = await input.client.event.subscribe(
-    {},
+    { directory: PROJECT_OPENCODE_DIRECTORY },
     input.signal ? { signal: input.signal } : {},
   );
   input.onConnected?.();
@@ -488,7 +508,10 @@ export function createOpencodeProjectChatRuntime(
   const streamStates = new WeakMap<object, Map<string, OpencodeStreamState>>();
   return {
     async findSessionByTitle(target, title, signal) {
-      const response = await clientFor(target).session.list({}, { signal });
+      const response = await clientFor(target).session.list(
+        { directory: PROJECT_OPENCODE_DIRECTORY },
+        { signal },
+      );
       if (response.error) throw new Error("OpenCode could not list Project sessions");
       const session = (response.data ?? []).find((candidate) => candidate.title === title);
       return session ? { id: session.id, title: session.title ?? title } : null;
@@ -498,7 +521,7 @@ export function createOpencodeProjectChatRuntime(
     },
     async abortSession(target, sessionId, signal) {
       const response = await clientFor(target).session.abort(
-        { sessionID: sessionId },
+        { sessionID: sessionId, directory: PROJECT_OPENCODE_DIRECTORY },
         { signal },
       );
       if (response.error) throw new RunRuntimeError("OpenCode could not stop the Project session");
@@ -532,7 +555,11 @@ export function createOpencodeProjectChatRuntime(
     },
     async getFileChanges(target, sessionId, messageId, signal) {
       const response = await clientFor(target).session.diff(
-        { sessionID: sessionId, messageID: messageId },
+        {
+          sessionID: sessionId,
+          messageID: messageId,
+          directory: PROJECT_OPENCODE_DIRECTORY,
+        },
         { signal },
       );
       if (response.error) {

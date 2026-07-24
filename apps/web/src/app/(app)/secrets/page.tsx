@@ -76,7 +76,7 @@ export default async function SecretsPage({ searchParams }: { searchParams: Prom
         localUpdateCount: localSkills.filter((skill) => skill.status === "update").length,
         archivedCount: new Set([...archivedMine, ...archivedOrg].map((skill) => skill.id)).size,
       }}
-      projectsEnabled={projectsFeatureEnabled()}
+      projectsEnabled={projectsFeatureEnabled(whoami.email)}
     />
   );
 }

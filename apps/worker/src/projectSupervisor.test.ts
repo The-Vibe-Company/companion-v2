@@ -18,6 +18,7 @@ import {
   applyProjectUnifiedPatch,
   createProjectAttachmentRetentionScheduler,
   createProjectSupervisor,
+  managedChangePath,
   projectArchiveMatchesChecksum,
   projectFileCacheKey,
   runProjectWorkspaceJob,
@@ -195,7 +196,10 @@ function baseStore(overrides: Partial<ProjectWorkspaceStore> = {}): ProjectWorks
     requeueProjectPromptAtBoundary: vi.fn(async () => true),
     requeueProjectPrompts: vi.fn(async () => undefined),
     appendProjectSessionEvent: vi.fn(async () => 1),
+    loadPendingProjectFileReconciliations: vi.fn(async () => []),
+    appendCompletedProjectPromptArtifactsUpdated: vi.fn(async () => 1),
     persistProjectFiles: vi.fn(async () => undefined),
+    persistProjectFileHistory: vi.fn(async () => undefined),
     persistProjectFileDeletions: vi.fn(async () => undefined),
     loadProjectFileBaseline: vi.fn(async () => []),
     reserveProjectFileStorageObject: vi.fn(async () => undefined),
@@ -259,6 +263,16 @@ describe("Project skill archive integrity", () => {
 });
 
 describe("Project turn-scoped file capture", () => {
+  it("normalizes only absolute paths inside the managed Project directory", () => {
+    expect(
+      managedChangePath("/vercel/sandbox/files/nested/todo.txt"),
+    ).toBe("nested/todo.txt");
+    expect(managedChangePath("./files/todo.txt")).toBe("todo.txt");
+    expect(() =>
+      managedChangePath("/vercel/sandbox/private/control.txt"),
+    ).toThrow();
+  });
+
   it("reconstructs message-specific modified and added bytes from unified patches", () => {
     expect(applyProjectUnifiedPatch(
       Buffer.from("base\n"),
@@ -1039,6 +1053,245 @@ describe("Project workspace lifecycle", () => {
     expect(meter.settle).not.toHaveBeenCalled();
     expect(store.prepareProjectActivation).not.toHaveBeenCalled();
     expect(projectRuntime.activate).toHaveBeenCalledOnce();
+  });
+
+  it("reattaches two follow-ups to the same healthy warm OpenCode server", async () => {
+    // Product promise: a follow-up inside the ten-minute warm window starts on the existing
+    // Project server. This two-lease scenario fails if either lease re-enters provider activation,
+    // projection swaps, server startup, or checkpoint suspension.
+    const prompts: ProjectPromptJob[] = [
+      {
+        id: "warm-follow-up-a",
+        orgId: job.orgId,
+        projectId: job.projectId,
+        creatorId: job.creatorId,
+        sessionId: "warm-shared-session",
+        sequence: 2,
+        text: "First warm follow-up",
+        model: "openai/gpt-5",
+        opencodeSessionId: "native-warm-shared",
+        opencodeMessageId: "msg_warm_follow_up_a",
+        sendAttemptedAt: null,
+        leaseOwner: "worker",
+      },
+      {
+        id: "warm-follow-up-b",
+        orgId: job.orgId,
+        projectId: job.projectId,
+        creatorId: job.creatorId,
+        sessionId: "warm-shared-session",
+        sequence: 3,
+        text: "Second warm follow-up",
+        model: "openai/gpt-5",
+        opencodeSessionId: "native-warm-shared",
+        opencodeMessageId: "msg_warm_follow_up_b",
+        sendAttemptedAt: null,
+        leaseOwner: "worker",
+      },
+    ];
+    let runIndex = 0;
+    let claimedInRun = false;
+    const sent = new Set<string>();
+    const readyStates: Array<{
+      lastActivityAt?: Date;
+      idleDeadlineAt?: Date | null;
+    }> = [];
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimedInRun) return [];
+        claimedInRun = true;
+        return [prompts[runIndex]!];
+      }),
+      updateProjectWorkspaceState: vi.fn(async (state) => {
+        if (state.status === "ready") {
+          readyStates.push({
+            lastActivityAt: state.lastActivityAt,
+            idleDeadlineAt: state.idleDeadlineAt,
+          });
+        }
+        return true;
+      }),
+    });
+    const projectRuntime = runtime();
+    vi.mocked(projectRuntime.observe).mockResolvedValue({
+      state: "running",
+      startedAt: new Date(Date.now() - 60_000),
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+      currentSnapshotId: "checkpoint-warm",
+    });
+    const chat = quietChat();
+    vi.mocked(chat.getSessionState).mockResolvedValue("idle");
+    vi.mocked(chat.getMessageState).mockImplementation(
+      async (_target, _sessionId, messageId) =>
+        sent.has(messageId) ? "completed" : "missing",
+    );
+    vi.mocked(chat.sendPrompt).mockImplementation(
+      async (_target, _sessionId, _text, messageId) => {
+        sent.add(messageId);
+      },
+    );
+    const meter = usage();
+    const warmJob: ProjectWorkspaceJob = {
+      ...job,
+      status: "ready",
+      sandboxId: job.sandboxName,
+      sandboxDomain: "https://project.invalid",
+      checkpointId: "checkpoint-warm",
+      activationRevision: 4,
+      authorityRevision: "authority-1",
+      environmentExposureAttemptedAt: new Date(),
+      lastActivityAt: new Date(),
+      // Prompt acceptance clears the prior durable deadline while advancing lastActivityAt so an
+      // old deadline claimant cannot race this newly queued follow-up.
+      idleDeadlineAt: null,
+    };
+    const warmConfig = {
+      ...config,
+      idleMs: 10 * 60_000,
+      sandboxTimeoutMs: 60 * 60_000,
+      maxActivationMs: 2 * 60 * 60_000,
+    };
+
+    await runProjectWorkspaceJob({
+      job: warmJob,
+      workerId: "worker",
+      store,
+      runtime: projectRuntime,
+      chat,
+      usage: meter,
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config: warmConfig,
+      signal: new AbortController().signal,
+    });
+
+    const firstReady = readyStates.at(-1);
+    expect(firstReady?.lastActivityAt).toBeInstanceOf(Date);
+    expect(firstReady?.idleDeadlineAt).toBeInstanceOf(Date);
+    runIndex = 1;
+    claimedInRun = false;
+    await runProjectWorkspaceJob({
+      job: {
+        ...warmJob,
+        leaseGeneration: 2,
+        lastActivityAt: firstReady!.lastActivityAt!,
+        idleDeadlineAt: null,
+      },
+      workerId: "worker",
+      store,
+      runtime: projectRuntime,
+      chat,
+      usage: meter,
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config: warmConfig,
+      signal: new AbortController().signal,
+    });
+
+    expect(chat.sendPrompt).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(chat.sendPrompt).mock.calls.map(([target]) => target.domain))
+      .toEqual(["https://project.invalid", "https://project.invalid"]);
+    expect(vi.mocked(chat.sendPrompt).mock.calls.map(([, sessionId]) => sessionId))
+      .toEqual(["native-warm-shared", "native-warm-shared"]);
+    expect(chat.createSession).not.toHaveBeenCalled();
+    expect(projectRuntime.healthCheck).toHaveBeenCalledTimes(2);
+    expect(projectRuntime.activate).not.toHaveBeenCalled();
+    expect(projectRuntime.syncSkillBundles).not.toHaveBeenCalled();
+    expect(projectRuntime.syncFiles).not.toHaveBeenCalled();
+    expect(projectRuntime.startServer).not.toHaveBeenCalled();
+    expect(projectRuntime.checkpointAndStop).not.toHaveBeenCalled();
+    expect(meter.reserve).not.toHaveBeenCalled();
+    expect(meter.start).not.toHaveBeenCalled();
+    expect(meter.settle).not.toHaveBeenCalled();
+    expect(meter.refresh).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(store.updateProjectWorkspaceState).mock.calls
+      .some(([state]) => state.status === "provisioning")).toBe(false);
+    expect(readyStates).toHaveLength(2);
+    expect(readyStates[1]!.idleDeadlineAt!.getTime())
+      .toBeGreaterThan(readyStates[0]!.idleDeadlineAt!.getTime());
+  });
+
+  it("falls back to the fenced restart path when warm OpenCode health fails", async () => {
+    const prompt: ProjectPromptJob = {
+      id: "warm-health-fallback",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "warm-health-session",
+      sequence: 2,
+      text: "Continue after the stale server",
+      model: "openai/gpt-5",
+      opencodeSessionId: "native-warm-health",
+      opencodeMessageId: "msg_warm_health_fallback",
+      sendAttemptedAt: null,
+      leaseOwner: "worker",
+    };
+    let claimed = false;
+    let sent = false;
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [prompt];
+      }),
+    });
+    const projectRuntime = runtime();
+    vi.mocked(projectRuntime.observe).mockResolvedValue({
+      state: "running",
+      startedAt: new Date(Date.now() - 60_000),
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+      currentSnapshotId: "checkpoint-warm",
+    });
+    vi.mocked(projectRuntime.healthCheck)
+      .mockRejectedValueOnce(new Error("stale OpenCode process"))
+      .mockResolvedValue({ ok: true, ms: 1 });
+    const chat = quietChat();
+    vi.mocked(chat.getSessionState).mockResolvedValue("idle");
+    vi.mocked(chat.sendPrompt).mockImplementation(async () => {
+      sent = true;
+    });
+    vi.mocked(chat.getMessageState).mockImplementation(async () =>
+      sent ? "completed" : "missing");
+
+    await runProjectWorkspaceJob({
+      job: {
+        ...job,
+        status: "ready",
+        sandboxId: job.sandboxName,
+        sandboxDomain: "https://project.invalid",
+        checkpointId: "checkpoint-warm",
+        activationRevision: 4,
+        authorityRevision: "authority-1",
+        environmentExposureAttemptedAt: new Date(),
+        lastActivityAt: new Date(),
+        idleDeadlineAt: new Date(Date.now() + 10 * 60_000),
+      },
+      workerId: "worker",
+      store,
+      runtime: projectRuntime,
+      chat,
+      usage: usage(),
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config: {
+        ...config,
+        idleMs: 10 * 60_000,
+        sandboxTimeoutMs: 60 * 60_000,
+        maxActivationMs: 2 * 60 * 60_000,
+      },
+      signal: new AbortController().signal,
+    });
+
+    expect(projectRuntime.healthCheck).toHaveBeenCalledTimes(2);
+    expect(projectRuntime.activate).toHaveBeenCalledOnce();
+    expect(projectRuntime.syncSkillBundles).toHaveBeenCalledOnce();
+    expect(projectRuntime.syncFiles).toHaveBeenCalledOnce();
+    expect(projectRuntime.startServer).toHaveBeenCalledOnce();
+    expect(projectRuntime.checkpointAndStop).not.toHaveBeenCalled();
+    expect(chat.sendPrompt).toHaveBeenCalledOnce();
+    expect(store.updateProjectWorkspaceState).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "provisioning" }),
+    );
   });
 
   it("suspends an expired warm Project without reserving a throwaway activation", async () => {
@@ -2508,7 +2761,7 @@ describe("Project workspace lifecycle", () => {
     vi.mocked(chat.getMessageState).mockImplementation(async () =>
       sent ? "completed" : "missing");
     vi.mocked(chat.getFileChanges).mockResolvedValue([{
-      path: "result.pdf",
+      path: "/vercel/sandbox/files/result.pdf",
       status: "added",
       patch: "Binary files differ",
     }, {
@@ -2542,8 +2795,8 @@ describe("Project workspace lifecycle", () => {
     expect(store.completeProjectPrompt).toHaveBeenCalledOnce();
     expect(persisted).toContainEqual(expect.objectContaining({
       path: "files/result.pdf",
-      modifiedBySessionId: null,
-      modifiedByPromptId: null,
+      modifiedBySessionId: prompt.sessionId,
+      modifiedByPromptId: prompt.id,
       byteSize: binary.length,
     }));
     expect(persisted).not.toContainEqual(expect.objectContaining({
@@ -2561,6 +2814,664 @@ describe("Project workspace lifecycle", () => {
     });
     expect(vi.mocked(store.reserveProjectFileStorageObject).mock.invocationCallOrder[0])
       .toBeLessThan(putContentAddressed.mock.invocationCallOrder[0]!);
+  });
+
+  it("mirrors a created managed file when OpenCode reports no message diff", async () => {
+    const files = new Map<string, Buffer>();
+    const projectRuntime = runtime(files);
+    const prompt: ProjectPromptJob = {
+      id: "empty-diff-file",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-empty-diff-file",
+      sequence: 1,
+      text: "Create todo.txt",
+      model: "openai/gpt-5",
+      opencodeSessionId: null,
+      opencodeMessageId: "msg_empty_diff_file",
+      sendAttemptedAt: null,
+      leaseOwner: "worker",
+    };
+    let claimed = false;
+    let sent = false;
+    const persisted: ProjectCachedFile[] = [];
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [prompt];
+      }),
+      persistProjectFiles: vi.fn(async ({ files: next }) => {
+        persisted.push(...next);
+      }),
+    });
+    const chat = quietChat();
+    vi.mocked(chat.sendPrompt).mockImplementation(async () => {
+      files.set("todo.txt", Buffer.from("A durable joke\n"));
+      sent = true;
+    });
+    vi.mocked(chat.getMessageState).mockImplementation(async () =>
+      sent ? "completed" : "missing");
+    vi.mocked(chat.getFileChanges).mockResolvedValue([]);
+
+    await runProjectWorkspaceJob({
+      job,
+      workerId: "worker",
+      store,
+      runtime: projectRuntime,
+      chat,
+      usage: usage(),
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config,
+      signal: new AbortController().signal,
+    });
+
+    expect(store.failProjectPrompt).not.toHaveBeenCalled();
+    expect(store.completeProjectPrompt).toHaveBeenCalledOnce();
+    expect(persisted).toContainEqual(
+      expect.objectContaining({
+        path: "files/todo.txt",
+        byteSize: Buffer.byteLength("A durable joke\n"),
+        modifiedBySessionId: prompt.sessionId,
+        modifiedByPromptId: prompt.id,
+      }),
+    );
+    expect(store.appendCompletedProjectPromptArtifactsUpdated).toHaveBeenCalledWith({
+      job,
+      prompt,
+      workerId: "worker",
+      count: 1,
+    });
+    const artifactsSignalOrder = vi.mocked(
+      store.appendCompletedProjectPromptArtifactsUpdated,
+    ).mock.invocationCallOrder[0]!;
+    expect(vi.mocked(store.persistProjectFiles).mock.invocationCallOrder.at(-1)!)
+      .toBeLessThan(artifactsSignalOrder);
+    expect(vi.mocked(store.persistProjectFileDeletions).mock.invocationCallOrder.at(-1)!)
+      .toBeLessThan(artifactsSignalOrder);
+  });
+
+  it("reconstructs pending Files work after restart before projecting S3 over provider bytes", async () => {
+    const recovered = Buffer.from("recover me after the worker crash\n");
+    const files = new Map<string, Buffer>([["recovered.txt", recovered]]);
+    const projectRuntime = runtime(files);
+    const pending = {
+      id: "00000000-0000-4000-8000-000000000701",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "00000000-0000-4000-8000-000000000702",
+      sequence: 1,
+    };
+    let reconciled = false;
+    const durable = new Map<string, ProjectCachedFile>();
+    const storedBodies = new Map<string, Buffer>();
+    const store = baseStore({
+      loadPendingProjectFileReconciliations: vi.fn(async () =>
+        reconciled ? [] : [pending]),
+      appendCompletedProjectPromptArtifactsUpdated: vi.fn(async ({ prompt }) => {
+        expect(prompt.id).toBe(pending.id);
+        reconciled = true;
+        return 1;
+      }),
+      loadProjectMaterializationPlan: vi.fn(async () => ({
+        desiredGeneration: 1,
+        appliedGeneration: 1,
+        desiredFileRevision: 0,
+        appliedFileRevision: 0,
+        checkpointGeneration: 1,
+        skills: [],
+        bootstrapFiles: [...durable.values()].map((file) => ({
+          storageKey: file.storageKey,
+          workspacePath: file.path,
+          checksum: file.checksum,
+        })),
+      })),
+      persistProjectFiles: vi.fn(async ({ files: next }) => {
+        for (const file of next) durable.set(file.path, file);
+      }),
+    });
+    const storage: ProjectFileStorage = {
+      get: vi.fn(async (key) => storedBodies.get(key) ?? Buffer.alloc(0)),
+      putContentAddressed: vi.fn(async ({ orgId, projectId, checksum, body }) => {
+        const key = projectFileCacheKey({ orgId, projectId, checksum });
+        storedBodies.set(key, Buffer.from(body));
+        return key;
+      }),
+      delete: vi.fn(async () => undefined),
+    };
+
+    await runProjectWorkspaceJob({
+      job: {
+        ...job,
+        status: "ready",
+        sandboxId: job.sandboxName,
+        sandboxDomain: "https://project.invalid",
+        checkpointId: "checkpoint-before-reconciliation",
+        checkpointGeneration: 1,
+        activationRevision: 1,
+        authorityRevision: "authority-1",
+        lastActivityAt: new Date(),
+      },
+      workerId: "worker",
+      store,
+      runtime: projectRuntime,
+      chat: quietChat(),
+      usage: usage(),
+      storage,
+      goldenSnapshotId: "golden",
+      config: { ...config, idleMs: 60_000 },
+      signal: new AbortController().signal,
+    });
+
+    expect(reconciled).toBe(true);
+    expect(durable.get("files/recovered.txt")).toEqual(expect.objectContaining({
+      modifiedBySessionId: pending.sessionId,
+      modifiedByPromptId: pending.id,
+    }));
+    expect(files.get("recovered.txt")).toEqual(recovered);
+    expect(store.resolveProjectActivationEnvironment).toHaveBeenCalled();
+    expect(vi.mocked(projectRuntime.listFiles).mock.invocationCallOrder[0]!)
+      .toBeLessThan(vi.mocked(projectRuntime.syncFiles).mock.invocationCallOrder[0]!);
+    expect(vi.mocked(store.persistProjectFiles).mock.invocationCallOrder[0]!)
+      .toBeLessThan(vi.mocked(projectRuntime.syncFiles).mock.invocationCallOrder[0]!);
+  });
+
+  it("keeps every distinct completed prompt pending until its own barrier commits", async () => {
+    const sessionId = "00000000-0000-4000-8000-000000000712";
+    const pending = [
+      {
+        id: "00000000-0000-4000-8000-000000000711",
+        orgId: job.orgId,
+        projectId: job.projectId,
+        creatorId: job.creatorId,
+        sessionId,
+        sequence: 1,
+      },
+      {
+        id: "00000000-0000-4000-8000-000000000713",
+        orgId: job.orgId,
+        projectId: job.projectId,
+        creatorId: job.creatorId,
+        sessionId,
+        sequence: 2,
+      },
+    ];
+    const reconciled = new Set<string>();
+    const store = baseStore({
+      loadPendingProjectFileReconciliations: vi.fn(async () =>
+        pending.filter((prompt) => !reconciled.has(prompt.id))),
+      appendCompletedProjectPromptArtifactsUpdated: vi.fn(async ({ prompt }) => {
+        reconciled.add(prompt.id);
+        return prompt.sequence;
+      }),
+    });
+
+    await runProjectWorkspaceJob({
+      job: {
+        ...job,
+        status: "ready",
+        sandboxId: job.sandboxName,
+        sandboxDomain: "https://project.invalid",
+        checkpointId: "checkpoint-distinct-prompts",
+        checkpointGeneration: 1,
+        activationRevision: 1,
+        authorityRevision: "authority-1",
+        lastActivityAt: new Date(),
+      },
+      workerId: "worker",
+      store,
+      runtime: runtime(),
+      chat: quietChat(),
+      usage: usage(),
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config: { ...config, idleMs: 60_000 },
+      signal: new AbortController().signal,
+    });
+
+    expect([...reconciled].sort()).toEqual(pending.map(({ id }) => id).sort());
+    expect(store.appendCompletedProjectPromptArtifactsUpdated).toHaveBeenCalledTimes(2);
+    const readyCall = vi.mocked(store.updateProjectWorkspaceState).mock.calls
+      .findIndex(([state]) => state.status === "ready");
+    const readyOrder = vi.mocked(store.updateProjectWorkspaceState)
+      .mock.invocationCallOrder[readyCall]!;
+    expect(Math.max(
+      ...vi.mocked(store.appendCompletedProjectPromptArtifactsUpdated).mock.invocationCallOrder,
+    )).toBeLessThan(readyOrder);
+  });
+
+  it("drains a quick diff-less turn and concurrent upload before publishing Ready", async () => {
+    const generated = Buffer.from("agent output\n");
+    const uploaded = Buffer.from("creator upload\n");
+    const uploadedChecksum =
+      `sha256:${createHash("sha256").update(uploaded).digest("hex")}`;
+    const files = new Map<string, Buffer>();
+    const projectRuntime = runtime(files);
+    const prompt: ProjectPromptJob = {
+      id: "upload-during-empty-diff",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-upload-during-empty-diff",
+      sequence: 1,
+      text: "Create result.txt while I upload context.txt",
+      model: "openai/gpt-5",
+      opencodeSessionId: null,
+      opencodeMessageId: "msg_upload_during_empty_diff",
+      sendAttemptedAt: null,
+      leaseOwner: "worker",
+    };
+    let claimed = false;
+    let sent = false;
+    let uploadCommitted = false;
+    let fileApplied = false;
+    const durable = new Map<string, ProjectCachedFile>();
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [prompt];
+      }),
+      loadProjectMaterializationPlan: vi.fn(async () => ({
+        desiredGeneration: 1,
+        appliedGeneration: 1,
+        desiredFileRevision: uploadCommitted ? 1 : 0,
+        appliedFileRevision: fileApplied ? 1 : 0,
+        checkpointGeneration: 0,
+        skills: [],
+        bootstrapFiles: [
+          ...(uploadCommitted
+            ? [{
+                storageKey: "direct-upload-context",
+                workspacePath: "files/context.txt",
+                checksum: uploadedChecksum,
+              }]
+            : []),
+          ...[...durable.values()]
+            .filter((file) => file.path !== "files/context.txt")
+            .map((file) => ({
+              storageKey: file.storageKey,
+              workspacePath: file.path,
+              checksum: file.checksum,
+            })),
+        ],
+      })),
+      updateProjectWorkspaceState: vi.fn(async (state) => {
+        if (state.appliedFileRevision === 1) fileApplied = true;
+        return true;
+      }),
+      loadProjectFileBaseline: vi.fn(async () => [
+        ...(uploadCommitted
+          ? [{
+              path: "files/context.txt",
+              version: 1,
+              checksum: uploadedChecksum,
+            }]
+          : []),
+        ...[...durable.values()]
+          .filter((file) => file.path !== "files/context.txt")
+          .map((file, index) => ({
+            path: file.path,
+            version: index + 1,
+            checksum: file.checksum,
+          })),
+      ]),
+      persistProjectFiles: vi.fn(async ({ files: next }) => {
+        for (const file of next) durable.set(file.path, file);
+      }),
+      persistProjectFileDeletions: vi.fn(async ({ files: deleted }) => {
+        for (const file of deleted) durable.delete(file.path);
+      }),
+    });
+    const chat = quietChat();
+    vi.mocked(chat.sendPrompt).mockImplementation(async () => {
+      files.set("result.txt", generated);
+      uploadCommitted = true;
+      sent = true;
+    });
+    vi.mocked(chat.getMessageState).mockImplementation(async () =>
+      sent ? "completed" : "missing");
+    vi.mocked(chat.getFileChanges).mockResolvedValue([]);
+    const storage: ProjectFileStorage = {
+      ...emptyStorage,
+      get: vi.fn(async (key) => {
+        if (key === "direct-upload-context") return uploaded;
+        const generatedFile = [...durable.values()].find((file) => file.storageKey === key);
+        return generatedFile?.path === "files/result.txt" ? generated : Buffer.alloc(0);
+      }),
+    };
+
+    await runProjectWorkspaceJob({
+      job,
+      workerId: "worker",
+      store,
+      runtime: projectRuntime,
+      chat,
+      usage: usage(),
+      storage,
+      goldenSnapshotId: "golden",
+      config,
+      signal: new AbortController().signal,
+    });
+
+    expect(fileApplied).toBe(true);
+    expect(files.get("context.txt")).toEqual(uploaded);
+    expect(files.get("result.txt")).toEqual(generated);
+    expect(
+      vi.mocked(store.persistProjectFileDeletions).mock.calls
+        .flatMap(([call]) => call.files)
+        .map((file) => file.path),
+    ).not.toContain("files/context.txt");
+    expect(store.appendCompletedProjectPromptArtifactsUpdated).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt,
+        count: 2,
+      }),
+    );
+    expect(vi.mocked(projectRuntime.syncFiles).mock.invocationCallOrder[0]!)
+      .toBeLessThan(
+        vi.mocked(store.appendCompletedProjectPromptArtifactsUpdated).mock.invocationCallOrder[0]!,
+      );
+    const readyCall = vi.mocked(store.updateProjectWorkspaceState).mock.calls
+      .findIndex(([state]) => state.status === "ready");
+    expect(readyCall).toBeGreaterThanOrEqual(0);
+    const readyOrder = vi.mocked(store.updateProjectWorkspaceState)
+      .mock.invocationCallOrder[readyCall]!;
+    expect(
+      vi.mocked(store.appendCompletedProjectPromptArtifactsUpdated).mock.invocationCallOrder[0]!,
+    ).toBeLessThan(readyOrder);
+  });
+
+  it("keeps a newer same-path upload current while retaining stale runtime bytes as history", async () => {
+    // Product promise: if a creator upload wins while the runtime still contains older bytes at
+    // the same path, recovery must not make the stale provider copy current before materializing
+    // the upload. The stale copy remains downloadable history instead.
+    const staleRuntime = Buffer.from("older runtime context\n");
+    const uploaded = Buffer.from("newer creator upload\n");
+    const uploadedChecksum =
+      `sha256:${createHash("sha256").update(uploaded).digest("hex")}`;
+    const files = new Map<string, Buffer>([["context.txt", staleRuntime]]);
+    const projectRuntime = runtime(files);
+    const pending = {
+      id: "00000000-0000-4000-8000-000000000721",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "00000000-0000-4000-8000-000000000722",
+      sequence: 1,
+    };
+    let reconciled = false;
+    let fileApplied = false;
+    let currentChecksum = uploadedChecksum;
+    const history: ProjectCachedFile[] = [];
+    const store = baseStore({
+      loadPendingProjectFileReconciliations: vi.fn(async () =>
+        reconciled ? [] : [pending]),
+      appendCompletedProjectPromptArtifactsUpdated: vi.fn(async () => {
+        reconciled = true;
+        return 1;
+      }),
+      loadProjectMaterializationPlan: vi.fn(async () => ({
+        desiredGeneration: 1,
+        appliedGeneration: 1,
+        desiredFileRevision: 1,
+        appliedFileRevision: fileApplied ? 1 : 0,
+        checkpointGeneration: 1,
+        skills: [],
+        bootstrapFiles: [{
+          storageKey: "direct-upload-context",
+          workspacePath: "files/context.txt",
+          checksum: currentChecksum,
+        }],
+      })),
+      loadProjectFileBaseline: vi.fn(async () => [{
+        path: "files/context.txt",
+        version: 1,
+        checksum: currentChecksum,
+      }]),
+      persistProjectFileHistory: vi.fn(async ({ files: historical }) => {
+        history.push(...historical);
+      }),
+      persistProjectFiles: vi.fn(async ({ files: current }) => {
+        const replacement = current.find(
+          (file: ProjectCachedFile) => file.path === "files/context.txt",
+        );
+        if (replacement) currentChecksum = replacement.checksum;
+      }),
+      updateProjectWorkspaceState: vi.fn(async (state) => {
+        if (state.appliedFileRevision === 1) fileApplied = true;
+        return true;
+      }),
+    });
+    const storage: ProjectFileStorage = {
+      ...emptyStorage,
+      get: vi.fn(async (key) =>
+        key === "direct-upload-context" ? uploaded : Buffer.alloc(0)),
+    };
+
+    await runProjectWorkspaceJob({
+      job: {
+        ...job,
+        status: "ready",
+        sandboxId: job.sandboxName,
+        sandboxDomain: "https://project.invalid",
+        checkpointId: "checkpoint-before-same-path-upload",
+        checkpointGeneration: 1,
+        desiredFileRevision: 1,
+        appliedFileRevision: 0,
+        activationRevision: 1,
+        authorityRevision: "authority-1",
+        lastActivityAt: new Date(),
+      },
+      workerId: "worker",
+      store,
+      runtime: projectRuntime,
+      chat: quietChat(),
+      usage: usage(),
+      storage,
+      goldenSnapshotId: "golden",
+      config: { ...config, idleMs: 60_000 },
+      signal: new AbortController().signal,
+    });
+
+    expect(reconciled).toBe(true);
+    expect(files.get("context.txt")).toEqual(uploaded);
+    expect(currentChecksum).toBe(uploadedChecksum);
+    expect(history).toHaveLength(1);
+    expect(history[0]).toEqual(expect.objectContaining({
+      path: "files/context.txt",
+      checksum: `sha256:${createHash("sha256").update(staleRuntime).digest("hex")}`,
+      modifiedBySessionId: pending.sessionId,
+      modifiedByPromptId: pending.id,
+      baseVersion: 1,
+    }));
+    expect(
+      vi.mocked(store.persistProjectFiles).mock.calls
+        .flatMap(([call]) => call.files)
+        .map((file) => file.path),
+    ).not.toContain("files/context.txt");
+  });
+
+  it("does not signal Files when the quiescent mirror did not persist", async () => {
+    const files = new Map<string, Buffer>();
+    const projectRuntime = runtime(files);
+    const prompt: ProjectPromptJob = {
+      id: "failed-file-barrier",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-failed-file-barrier",
+      sequence: 1,
+      text: "Create a file",
+      model: "openai/gpt-5",
+      opencodeSessionId: null,
+      opencodeMessageId: "msg_failed_file_barrier",
+      sendAttemptedAt: null,
+      leaseOwner: "worker",
+    };
+    let claimed = false;
+    let sent = false;
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [prompt];
+      }),
+      persistProjectFiles: vi.fn(async ({ files: next }) => {
+        if (next.length > 0) throw new Error("simulated durable file failure");
+      }),
+    });
+    const chat = quietChat();
+    vi.mocked(chat.sendPrompt).mockImplementation(async () => {
+      files.set("result.txt", Buffer.from("not durable yet\n"));
+      sent = true;
+    });
+    vi.mocked(chat.getMessageState).mockImplementation(async () =>
+      sent ? "completed" : "missing");
+    vi.mocked(chat.getFileChanges).mockResolvedValue([]);
+
+    await expect(runProjectWorkspaceJob({
+      job,
+      workerId: "worker",
+      store,
+      runtime: projectRuntime,
+      chat,
+      usage: usage(),
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config,
+      signal: new AbortController().signal,
+    })).rejects.toThrow("simulated durable file failure");
+
+    expect(store.completeProjectPrompt).toHaveBeenCalledOnce();
+    expect(store.appendCompletedProjectPromptArtifactsUpdated).not.toHaveBeenCalled();
+  });
+
+  it("does not let a diff-less turn pre-empt a concurrent turn's attributed file version", async () => {
+    const bBytes = Buffer.from("session-b\n");
+    const bChecksum = `sha256:${createHash("sha256").update(bBytes).digest("hex")}`;
+    const shared = new Map<string, Buffer>();
+    const projectRuntime = runtime(shared);
+    const prompt = (id: "a" | "b"): ProjectPromptJob => ({
+      id: `diff-race-${id}`,
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: `diff-race-session-${id}`,
+      sequence: 1,
+      text: `Run ${id}`,
+      model: id === "a" ? "openai/gpt-5" : "google/gemini-2.5-pro",
+      opencodeSessionId: null,
+      opencodeMessageId: `msg_diff_race_${id}`,
+      sendAttemptedAt: null,
+      leaseOwner: "worker",
+    });
+    const a = prompt("a");
+    const b = prompt("b");
+    let claimed = false;
+    const sent = new Set<string>();
+    const completed: string[] = [];
+    const versions: ProjectCachedFile[] = [];
+    let current: {
+      path: string;
+      version: number;
+      checksum: string;
+    } | null = null;
+    let signalBWritten!: () => void;
+    const bWritten = new Promise<void>((resolve) => {
+      signalBWritten = resolve;
+    });
+    let releaseBChanges!: () => void;
+    const bChangesMayCommit = new Promise<void>((resolve) => {
+      releaseBChanges = resolve;
+    });
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [a, b];
+      }),
+      loadProjectFileBaseline: vi.fn(async () => current ? [current] : []),
+      persistProjectFiles: vi.fn(async ({ files }) => {
+        for (const file of files) {
+          // Match recordProjectFileVersion's content de-duplication: an equal current checksum
+          // cannot manufacture a second immutable version with different attribution.
+          if (current?.checksum === file.checksum) continue;
+          current = {
+            path: file.path,
+            version: (current?.version ?? 0) + 1,
+            checksum: file.checksum,
+          };
+          versions.push(file);
+        }
+      }),
+      completeProjectPrompt: vi.fn(async ({ prompt: finished }) => {
+        completed.push(finished.id);
+        if (finished.id === a.id) releaseBChanges();
+        return true;
+      }),
+    });
+    const chat = quietChat();
+    vi.mocked(chat.createSession).mockImplementation(async (_target, title) => ({
+      id: title,
+      title,
+    }));
+    vi.mocked(chat.sendPrompt).mockImplementation(async (_target, sessionId) => {
+      sent.add(sessionId);
+      if (sessionId.endsWith(b.sessionId)) {
+        shared.set("report.txt", bBytes);
+        signalBWritten();
+      }
+    });
+    vi.mocked(chat.getMessageState).mockImplementation(async (_target, sessionId) =>
+      sent.has(sessionId) ? "completed" : "missing");
+    vi.mocked(chat.getFileChanges).mockImplementation(async (_target, sessionId) => {
+      if (sessionId.endsWith(a.sessionId)) {
+        // A finishes after B wrote into the shared tree, but OpenCode attributes no path to A.
+        await bWritten;
+        return [];
+      }
+      // Hold B's attributed commit until A has completed. The old eager full scan would persist
+      // B's bytes neutrally here, causing this equal-checksum attributed version to be de-duplicated.
+      await bChangesMayCommit;
+      return [{
+        path: "/vercel/sandbox/files/report.txt",
+        status: "added" as const,
+        patch: "@@ -0,0 +1,1 @@\n+session-b\n",
+      }];
+    });
+    const storage: ProjectFileStorage = {
+      get: vi.fn(async () => Buffer.alloc(0)),
+      putContentAddressed: vi.fn(async ({ orgId, projectId, checksum }) =>
+        projectFileCacheKey({ orgId, projectId, checksum })),
+      delete: vi.fn(async () => undefined),
+    };
+
+    await runProjectWorkspaceJob({
+      job,
+      workerId: "worker",
+      store,
+      runtime: projectRuntime,
+      chat,
+      usage: usage(),
+      storage,
+      goldenSnapshotId: "golden",
+      config,
+      signal: new AbortController().signal,
+    });
+
+    expect(completed).toEqual(expect.arrayContaining([a.id, b.id]));
+    expect(versions.filter((version) => version.checksum === bChecksum)).toEqual([
+      expect.objectContaining({
+        path: "files/report.txt",
+        modifiedBySessionId: b.sessionId,
+        modifiedByPromptId: b.id,
+      }),
+    ]);
+    expect(current).toMatchObject({ checksum: bChecksum });
   });
 
   it("preserves both turn versions while the final LWW pointer follows shared filesystem bytes", async () => {
@@ -2649,7 +3560,9 @@ describe("Project workspace lifecycle", () => {
       if (sessionId.endsWith("session-a")) await bPersisted;
       const value = sessionId.endsWith("session-a") ? "session-a" : "session-b";
       return [{
-        path: "report.txt",
+        path: sessionId.endsWith("session-a")
+          ? "/vercel/sandbox/files/report.txt"
+          : "report.txt",
         status: "modified",
         patch: `@@ -1,1 +1,1 @@\n-base\n+${value}\n`,
       }];

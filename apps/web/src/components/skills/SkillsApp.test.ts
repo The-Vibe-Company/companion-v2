@@ -522,6 +522,61 @@ describe("SkillsApp initial route", () => {
     expect(primary.textContent).toContain("Organization");
   });
 
+  it("keeps the Projects switch out of the shell when the rollout is unavailable", async () => {
+    const { container } = await mountSkillsApp(
+      { lib: "mine", kind: "all" },
+      { props: { projectsEnabled: false } },
+    );
+
+    expect(container.querySelector('nav[aria-label="Workspace space"]')).toBeNull();
+    expect(container.querySelector('a[href="/projects"]')).toBeNull();
+  });
+
+  it("removes direct Run Skill transcripts when the rollout is unavailable", async () => {
+    const route = {
+      lib: "org" as const,
+      kind: "all" as const,
+      skill: "seo-helper",
+      run: "run-private",
+    };
+    const { container } = await mountSkillsApp(route, {
+      url: "/skills?lib=org&skill=seo-helper&run=run-private",
+      props: { runSkillEnabled: false },
+    });
+    await flushEffects();
+
+    expect(container.textContent).toContain("seo-helper");
+    expect(container.textContent).not.toContain("Run skill");
+    expect(container.querySelector("#dtab-sessions")).toBeNull();
+    expect(window.location.pathname + window.location.search).toBe(
+      "/skills?lib=org&skill=seo-helper",
+    );
+  });
+
+  it("scrubs a Run Skill transcript introduced through browser history", async () => {
+    const route = {
+      lib: "org" as const,
+      kind: "all" as const,
+      skill: "seo-helper",
+    };
+    const { container } = await mountSkillsApp(route, {
+      url: "/skills?lib=org&skill=seo-helper",
+      props: { runSkillEnabled: false },
+    });
+
+    act(() => {
+      window.history.pushState({}, "", "/skills?lib=org&skill=seo-helper&run=run-private");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await flushEffects();
+
+    expect(container.textContent).toContain("seo-helper");
+    expect(container.querySelector("#dtab-sessions")).toBeNull();
+    expect(window.location.pathname + window.location.search).toBe(
+      "/skills?lib=org&skill=seo-helper",
+    );
+  });
+
   it("renders All skills (every org skill, ignoring saved filters) from the default route", () => {
     const html = render({ lib: "org", kind: "all" });
     expect(html).toContain("All skills");

@@ -631,7 +631,7 @@ migrate_and_seed() {
   fi
 
   if env "${seed_env[@]}" pnpm --filter @companion/api seed:test-user; then
-    ok "Seed complete — login: admin@tvc.dev / adminadmin"
+    ok "Seed complete — login: ${COMPANION_SEED_EMAIL:-admin@thevibecompany.co} / adminadmin"
   else
     warn "Seed failed (database still usable)"
   fi

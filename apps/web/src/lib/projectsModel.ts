@@ -30,7 +30,10 @@ export type ProjectSessionVM = {
   history: RunChatHistoryItem[];
   prompts: ProjectPromptVM[];
   pendingPrompts: ProjectPromptVM[];
+  /** Prefix already represented by the durable transcript; use as the SSE replay cursor. */
   latestEventSequence: number;
+  /** Current durable event allocator maximum; may advance after the transcript becomes terminal. */
+  currentEventSequence: number;
   createdAt: string;
   updatedAt: string;
   lastActiveAt: string;
@@ -123,6 +126,7 @@ export type ProjectFileVersionVM = {
 
 export type ProjectWorkspaceVM = {
   status: ProjectWorkspaceStatus;
+  errorCode?: string | null;
   statusDetail: string | null;
   lastActiveAt: string | null;
   sleepAt: string | null;
@@ -134,6 +138,7 @@ export type ProjectRowVM = {
   defaultModel: string;
   revision: number;
   status: ProjectWorkspaceStatus;
+  errorCode?: string | null;
   statusDetail: string | null;
   skillCount: number;
   sessionCount: number;
@@ -269,6 +274,13 @@ function normalizeProjectSession(
     pendingPrompts: pendingPromptRows,
     latestEventSequence:
       "latest_event_sequence" in row ? row.latest_event_sequence : 0,
+    currentEventSequence:
+      "current_event_sequence" in row &&
+      typeof row.current_event_sequence === "number"
+        ? row.current_event_sequence
+        : "latest_event_sequence" in row
+          ? row.latest_event_sequence
+          : 0,
     createdAt,
     updatedAt: row.updated_at,
     lastActiveAt: row.last_active_at,
@@ -364,6 +376,7 @@ function normalizeProjectRow(row: ProjectRow): ProjectRowVM {
     defaultModel: row.default_model,
     revision: row.revision,
     status: row.status,
+    errorCode: row.error_code,
     statusDetail: row.message,
     skillCount: row.skill_count,
     sessionCount: row.session_count,
@@ -421,6 +434,7 @@ export function normalizeProjectDetail(value: unknown): ProjectDetailVM {
     },
     workspace: {
       status: row.status,
+      errorCode: row.error_code,
       statusDetail: row.message,
       lastActiveAt: row.last_activity_at,
       sleepAt: null,

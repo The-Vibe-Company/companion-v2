@@ -159,7 +159,32 @@ function ReasoningMarker({
   );
 }
 
-function WorkingMarker({ label }: { label: string }) {
+function WorkingMarker({
+  label,
+  detail,
+  variant,
+}: {
+  label: string;
+  detail?: string;
+  variant: "default" | "preparing";
+}) {
+  if (variant === "preparing") {
+    return (
+      <div
+        className="run-working run-working--preparing"
+        role="status"
+        aria-live="polite"
+      >
+        <span className="run-working__signal" aria-hidden="true">
+          <Icon name="loader" size={13} className="ls-spin" />
+        </span>
+        <span className="run-working__copy">
+          <strong>{label || "Preparing your Project"}</strong>
+          {detail && <small>{detail}</small>}
+        </span>
+      </div>
+    );
+  }
   return (
     <div className="run-working" role="status" aria-live="polite">
       <Icon name="loader" size={12} className="ls-spin" />
@@ -205,6 +230,9 @@ export function ChatTranscript({
   renderUserAttachments,
   showChatError = true,
   ariaLabel = "Run transcript",
+  workingLabel,
+  workingDetail,
+  workingVariant = "default",
 }: {
   run: SkillRunDetail | null;
   chat: ChatState;
@@ -226,12 +254,17 @@ export function ChatTranscript({
   ) => ReactNode;
   showChatError?: boolean;
   ariaLabel?: string;
+  workingLabel?: string;
+  workingDetail?: string;
+  workingVariant?: "default" | "preparing";
 }) {
   const terminalStatus = run?.status ?? "starting";
   const revision = [
     chat.items.length,
     run?.artifacts.length ?? 0,
     generatedFileTurns.reduce((count, turn) => count + turn.files.length, 0),
+    workingLabel ?? chat.working.label,
+    workingDetail ?? "",
   ].join(":");
   const artifactPaths = useMemo(() => Object.fromEntries(
     (run?.artifacts ?? []).flatMap((artifact) => {
@@ -371,7 +404,11 @@ export function ChatTranscript({
             )}
             {showWorking && (
               <MessageScroller.Item messageId={`${run?.id ?? "run"}:working`} className="run-marker run-marker--wide">
-                <WorkingMarker label={chat.working.label} />
+                <WorkingMarker
+                  label={workingLabel ?? chat.working.label}
+                  detail={workingDetail}
+                  variant={workingVariant}
+                />
               </MessageScroller.Item>
             )}
             {chat.warnings.map((warning) => (

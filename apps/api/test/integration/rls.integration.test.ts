@@ -1811,7 +1811,7 @@ describe("Postgres tenant isolation", () => {
     }
   });
 
-  it("keeps provider-blocked prompts dormant until an effective compatible connection exists", async () => {
+  it("keeps provider-blocked prompts dormant and reopens a cold gate for an admitted prompt", async () => {
     const projectId = randomUUID();
     const sessionId = randomUUID();
     const promptId = randomUUID();
@@ -1866,7 +1866,7 @@ describe("Postgres tenant isolation", () => {
         database: integrationDb,
       });
       expect(blocked.map((claim) => claim.projectId)).not.toContain(projectId);
-      // A new prompt only updates availability; it must not reopen admission.
+      // Availability alone must not reopen admission while the provider is still unavailable.
       await integrationSql`
         update project_workspaces set available_at = now() - interval '1 minute'
         where project_id = ${projectId}::uuid
@@ -1912,16 +1912,22 @@ describe("Postgres tenant isolation", () => {
           (${personalConnectionId}::uuid, ${fixture.orgA}::uuid, 'personal',
            ${fixture.owner.id}, ${provider}, 'BLOCKED_PROVIDER_API_KEY', ${fixture.owner.id})
       `;
-      await signalProjectProviderChange({
-        orgId: fixture.orgA,
-        provider,
-        connectionId: personalConnectionId,
-        scope: "personal",
-        userId: fixture.owner.id,
-        mode: "boundary",
-        actorId: fixture.owner.id,
-        database: integrationDb,
-      });
+      // Simulate a missed/raced connect signal: accepting a prompt with the now-effective immutable
+      // credential snapshot must repair this cold, pre-exposure gate without a manual retry.
+      await withTenantContext(
+        { orgId: fixture.orgA, userId: fixture.owner.id },
+        (database) =>
+          enqueueProjectPrompt({
+            actor: fixture.owner,
+            orgId: fixture.orgA,
+            projectId,
+            sessionId,
+            text: "Continue with the connected provider",
+            idempotencyKey: `provider-recovery-${promptId}`,
+            attachments: [],
+            database,
+          }),
+      );
       const [woken] = await integrationSql<
         Array<{ status: string; error_code: string | null }>
       >`

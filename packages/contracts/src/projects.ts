@@ -309,6 +309,9 @@ export const projectSessionDetailSchema = projectSessionRowSchema
   .extend({
     prompts: z.array(projectPromptRowSchema),
     transcript: projectTranscriptSchema,
+    /** Highest sequence allocated, including events appended after the transcript snapshot. */
+    current_event_sequence: z.number().int().nonnegative(),
+    /** Highest sequence already folded into the transcript; SSE replay starts after this cursor. */
     latest_event_sequence: z.number().int().nonnegative(),
   })
   .strict();
@@ -524,6 +527,16 @@ export interface ProjectPromptJob {
   /** Non-null means promptAsync may have reached OpenCode and must never be blindly replayed. */
   sendAttemptedAt: Date | null;
   leaseOwner: string;
+}
+
+/** Durable post-turn Files work reconstructed independently from an expired prompt lease. */
+export interface ProjectFileReconciliationJob {
+  id: string;
+  orgId: string;
+  projectId: string;
+  sessionId: string;
+  creatorId: string;
+  sequence: number;
 }
 
 export interface ProjectSessionStopJob {

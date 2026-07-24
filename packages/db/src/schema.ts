@@ -1835,6 +1835,11 @@ export const projectPrompts = pgTable(
     errorMessage: text("error_message"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
+    /**
+     * Durable completion fence for the post-turn Files reconciliation. A completed prompt remains
+     * pending until its idempotent artifacts.updated barrier has been committed at this sequence.
+     */
+    fileReconciliationEventSequence: integer("file_reconciliation_event_sequence"),
     createdAt: now(),
     updatedAt: updatedAt(),
   },
@@ -1871,6 +1876,11 @@ export const projectPrompts = pgTable(
       t.opencodeMessageId,
     ),
     byClaim: index("project_prompts_claim_idx").on(t.status, t.availableAt, t.leaseExpiresAt),
+    byPendingFileReconciliation: index("project_prompts_file_reconciliation_idx")
+      .on(t.orgId, t.projectId, t.completedAt, t.id)
+      .where(
+        sql`${t.status} = 'completed' AND ${t.fileReconciliationEventSequence} IS NULL`,
+      ),
     textCheck: check(
       "project_prompts_text_check",
       sql`char_length(btrim(${t.text})) BETWEEN 1 AND 8000`,
@@ -1895,6 +1905,11 @@ export const projectPrompts = pgTable(
     usageAdmissionCheck: check(
       "project_prompts_usage_admission_check",
       sql`${t.usageActivationRevision} >= 1 AND ${t.usageReservationMs} >= 0`,
+    ),
+    fileReconciliationCheck: check(
+      "project_prompts_file_reconciliation_check",
+      sql`${t.fileReconciliationEventSequence} IS NULL
+        OR ${t.fileReconciliationEventSequence} >= 1`,
     ),
   }),
 );

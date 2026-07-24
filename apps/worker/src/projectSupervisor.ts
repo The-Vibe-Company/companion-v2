@@ -1,12 +1,14 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import type {
-  ProjectPromptJob as CoreProjectPromptJob,
-  ProjectSessionStopJob as CoreProjectSessionStopJob,
-  ProjectSessionEvent,
-  ProjectWorkspaceJob as CoreProjectWorkspaceJob,
-  ProjectWorkspaceStatus,
-  RunChatEvent,
-  RunChatHistoryItem,
+import {
+  RUN_ARTIFACT_MAX_FILES,
+  type ProjectFileReconciliationJob,
+  type ProjectPromptJob as CoreProjectPromptJob,
+  type ProjectSessionStopJob as CoreProjectSessionStopJob,
+  type ProjectSessionEvent,
+  type ProjectWorkspaceJob as CoreProjectWorkspaceJob,
+  type ProjectWorkspaceStatus,
+  type RunChatEvent,
+  type RunChatHistoryItem,
 } from "@companion/contracts";
 import {
   billingRuntimeConfig,
@@ -15,6 +17,8 @@ import {
   extendSandboxUsageReservation,
   loadSecretsMasterKey,
   OPENCODE_SERVER_USERNAME,
+  PROJECT_FILES_DIR,
+  PROJECT_WORKDIR,
   redactAndBoundProjectEvents,
   redactAndBoundProjectTranscript,
   recordSandboxRuntimeObservation,
@@ -35,6 +39,7 @@ import {
   type SkillBundle,
 } from "@companion/core";
 import {
+  appendCompletedProjectPromptArtifactsUpdated,
   appendProjectSessionEvent,
   beginProjectActivationAdmission,
   buildSkillBundle,
@@ -56,6 +61,7 @@ import {
   interruptProjectPromptsForRecycle,
   inspectProjectPromptProviderAdmission,
   listProjectStorageKeys,
+  loadPendingProjectFileReconciliations,
   loadProjectMaterializationPlan,
   loadProjectPromptAttachments,
   loadProjectSessionTranscript,
@@ -70,6 +76,7 @@ import {
   readProjectWorkspaceControl,
   reserveProjectFileStorageObject,
   recordProjectFileVersion,
+  recordProjectFileHistoricalVersion,
   recordProjectFileDeletion,
   rebindProjectSession,
   releaseProjectWorkspaceLease,
@@ -403,7 +410,22 @@ export interface ProjectWorkspaceStore {
     workerId: string;
     event: RunChatEvent;
   }): Promise<number>;
+  loadPendingProjectFileReconciliations(input: {
+    job: ProjectWorkspaceJob;
+    workerId: string;
+  }): Promise<ProjectFileReconciliationJob[]>;
+  appendCompletedProjectPromptArtifactsUpdated(input: {
+    job: ProjectWorkspaceJob;
+    prompt: ProjectFileReconciliationJob;
+    workerId: string;
+    count: number;
+  }): Promise<number>;
   persistProjectFiles(input: {
+    job: ProjectWorkspaceJob;
+    workerId: string;
+    files: ProjectCachedFile[];
+  }): Promise<void>;
+  persistProjectFileHistory(input: {
     job: ProjectWorkspaceJob;
     workerId: string;
     files: ProjectCachedFile[];
@@ -617,8 +639,11 @@ async function mirrorProjectFiles(input: {
   modifiedBySessionId: string | null;
   modifiedByPromptId: string | null;
   changedPaths?: ReadonlySet<string>;
+  /** Paths whose durable current pointer must survive this provider-side recovery scan. */
+  preserveCurrentPaths?: ReadonlySet<string>;
+  deleteMissing?: boolean;
   signal: AbortSignal;
-}): Promise<void> {
+}): Promise<number> {
   const files = await input.runtime.listFiles({
     ref: input.ref,
     maxFiles: PROJECT_FILE_MAX_COUNT,
@@ -679,33 +704,55 @@ async function mirrorProjectFiles(input: {
   }
   // DB metadata is committed only after every object is durable; previews never reference a
   // partially mirrored idle snapshot.
+  const historical = input.preserveCurrentPaths
+    ? cached.filter((file) => input.preserveCurrentPaths!.has(file.path))
+    : [];
+  const current = historical.length === 0
+    ? cached
+    : cached.filter((file) => !input.preserveCurrentPaths!.has(file.path));
+  await input.store.persistProjectFileHistory({
+    job: input.job,
+    workerId: input.workerId,
+    files: historical,
+  });
   await input.store.persistProjectFiles({
     job: input.job,
     workerId: input.workerId,
-    files: cached,
+    files: current,
   });
-  const deleted = [...input.baseline.values()]
-    .filter((file) => {
-      if (present.has(file.path)) return false;
-      if (!input.changedPaths) return true;
-      const relative = file.path.replace(/^files\//, "");
-      return input.changedPaths.has(file.path) || input.changedPaths.has(relative);
-    })
-    .map((file) => ({
-      path: file.path,
-      modifiedBySessionId: input.modifiedBySessionId,
-      modifiedByPromptId: input.modifiedByPromptId,
-      baseVersion: file.version,
-    }));
+  const deleted = input.deleteMissing === false
+    ? []
+    : [...input.baseline.values()]
+        .filter((file) => {
+          if (present.has(file.path)) return false;
+          if (!input.changedPaths) return true;
+          const relative = file.path.replace(/^files\//, "");
+          return input.changedPaths.has(file.path) || input.changedPaths.has(relative);
+        })
+        .map((file) => ({
+          path: file.path,
+          modifiedBySessionId: input.modifiedBySessionId,
+          modifiedByPromptId: input.modifiedByPromptId,
+          baseVersion: file.version,
+        }));
   await input.store.persistProjectFileDeletions({
     job: input.job,
     workerId: input.workerId,
     files: deleted,
   });
+  return files.length;
 }
 
-function managedChangePath(value: string): string | null {
-  const normalized = value.replaceAll("\\", "/").replace(/^files\//, "");
+export function managedChangePath(value: string): string | null {
+  const portable = value.replaceAll("\\", "/");
+  const managedRoot = `${PROJECT_WORKDIR}/${PROJECT_FILES_DIR}`;
+  const normalized = (
+    portable.startsWith(`${managedRoot}/`)
+      ? portable.slice(managedRoot.length + 1)
+      : portable.startsWith("/")
+        ? portable
+        : portable.replace(/^\.\//, "").replace(/^files\//, "")
+  );
   if (
     !normalized
     || normalized.startsWith("/")
@@ -794,8 +841,6 @@ async function persistCapturedTurnFiles(input: {
   workerId: string;
   store: ProjectWorkspaceStore;
   storage: ProjectFileStorage;
-  runtime: ProjectWorkspaceRuntime;
-  ref: ProjectWorkspaceRef;
   redactor: RunRedactor;
   sessionId: string;
   promptId: string;
@@ -806,12 +851,10 @@ async function persistCapturedTurnFiles(input: {
 }): Promise<void> {
   const files: ProjectCachedFile[] = [];
   const deleted: ProjectDeletedFile[] = [];
-  const changedPaths = new Set<string>();
   for (const change of input.changes) {
     const relative = managedChangePath(change.path);
     if (relative === null) continue;
     const workspacePath = `files/${relative}`;
-    changedPaths.add(relative);
     const baseVersion = input.versionBaseline.get(workspacePath)?.version ?? null;
     if (change.status === "deleted") {
       // Absence at turn start is version zero. If another Session created the path before this
@@ -874,22 +917,6 @@ async function persistCapturedTurnFiles(input: {
     job: input.job,
     workerId: input.workerId,
     files: deleted,
-  });
-  // Reconcile the current shared tree after preserving the immutable per-turn bytes. This final
-  // metadata write is the explicit LWW pointer; concurrent versions above remain recoverable.
-  await mirrorProjectFiles({
-    job: input.job,
-    workerId: input.workerId,
-    runtime: input.runtime,
-    ref: input.ref,
-    store: input.store,
-    storage: input.storage,
-    redactor: input.redactor,
-    baseline: await loadProjectFileBaselineMap(input),
-    modifiedBySessionId: null,
-    modifiedByPromptId: null,
-    changedPaths,
-    signal: input.signal,
   });
 }
 
@@ -1065,6 +1092,7 @@ async function processProjectPrompt(input: {
   config: ProjectWorkerConfig;
   activationRevision: number;
   withFileCommit<T>(operation: () => Promise<T>): Promise<T>;
+  requestFileReconciliation(prompt: ProjectPromptJob): void;
   onBoundary(): void;
   signal: AbortSignal;
 }): Promise<void> {
@@ -1367,8 +1395,6 @@ async function processProjectPrompt(input: {
     await input.withFileCommit(() => persistCapturedTurnFiles({
       job: input.job,
       workerId: input.workerId,
-      runtime: input.runtime,
-      ref: input.ref,
       store: input.store,
       storage: input.storage,
       redactor: input.redactor,
@@ -1391,6 +1417,13 @@ async function processProjectPrompt(input: {
       transcript,
     });
     if (!completed) throw new ProjectLostLease();
+    // The provider's current tree can already contain bytes written by another still-running
+    // Session. Defer the neutral LWW mirror until every active turn has committed its exact,
+    // attributed version; otherwise a diff-less turn could persist those bytes first and the
+    // checksum de-duplication would prevent their real author from receiving an immutable version.
+    // Register only after the prompt is durably terminal: the later artifacts.updated barrier is
+    // explicitly validated against that completed prompt.
+    input.requestFileReconciliation(input.prompt);
   } catch (error) {
     const reason = input.signal.aborted ? abortReason(input.signal) : error;
     if (reason instanceof ProjectPromptStopped) return;
@@ -1468,8 +1501,12 @@ export async function runProjectWorkspaceJob(input: {
   let reservedActivationRevision: number | null = null;
   let recorder: ProjectRecorder | null = null;
   let redactor = createRunRedactor([]);
+  let redactorReady = false;
   let activationEnvironmentResolved = false;
   let target: ProjectChatTarget | null = null;
+  let startServerForPrompts: () => Promise<void> = async () => {
+    throw new RunRuntimeError("Project OpenCode server cannot start before activation");
+  };
   let authorityRevision = input.job.authorityRevision ?? "";
   let activationRevision = input.job.activationRevision;
   let activationAdmissionToken = input.job.activationAdmissionToken;
@@ -1490,6 +1527,9 @@ export async function runProjectWorkspaceJob(input: {
   const activeSessionIds = new Set<string>();
   const preclaimedPrompts: ProjectPromptJob[] = [];
   const preclaimedSessionStops: ProjectSessionStopJob[] = [];
+  // This cache is only an optimization. Core reconstructs the authoritative set from every
+  // completed prompt whose durable reconciliation sequence is still null.
+  const fileReconciliationPrompts = new Map<string, ProjectFileReconciliationJob>();
   let fileCommitTail = Promise.resolve();
   const withFileCommit = async <T>(operation: () => Promise<T>): Promise<T> => {
     const previous = fileCommitTail;
@@ -1503,6 +1543,121 @@ export async function runProjectWorkspaceJob(input: {
     } finally {
       release();
     }
+  };
+  const refreshPendingFileReconciliations = async (): Promise<void> => {
+    const pending = await input.store.loadPendingProjectFileReconciliations({
+      job: input.job,
+      workerId: input.workerId,
+    });
+    for (const prompt of pending) fileReconciliationPrompts.set(prompt.id, prompt);
+  };
+  const reconcileCompletedPromptFiles = async (
+    boundarySignal: AbortSignal,
+  ): Promise<boolean> => {
+    await refreshPendingFileReconciliations();
+    if (fileReconciliationPrompts.size === 0) return true;
+    if (activePrompts.size > 0) return false;
+    if (!redactorReady) {
+      throw new RunRuntimeError(
+        "Project Files reconciliation requires an admitted activation redactor",
+      );
+    }
+    await withFileCommit(async () => {
+      await refreshPendingFileReconciliations();
+      if (fileReconciliationPrompts.size === 0 || activePrompts.size > 0) return;
+      const uniqueOwner = fileReconciliationPrompts.size === 1
+        ? [...fileReconciliationPrompts.values()][0]!
+        : null;
+      let before = await input.store.loadProjectMaterializationPlan({
+        job: input.job,
+        workerId: input.workerId,
+      });
+      if (
+        before.desiredFileRevision !== before.appliedFileRevision
+        || before.desiredFileRevision !== appliedFileRevision
+      ) {
+        // Preserve recoverable provider output before replacing the shared tree with a creator
+        // upload. Missing paths are non-destructive because the runtime intentionally does not yet
+        // contain the newer durable projection.
+        await mirrorProjectFiles({
+          job: input.job,
+          workerId: input.workerId,
+          runtime: input.runtime,
+          ref,
+          store: input.store,
+          storage: input.storage,
+          redactor,
+          baseline: await loadProjectFileBaselineMap(input),
+          modifiedBySessionId: uniqueOwner?.sessionId ?? null,
+          modifiedByPromptId: uniqueOwner?.id ?? null,
+          preserveCurrentPaths: new Set(
+            before.bootstrapFiles.map((file) => file.workspacePath),
+          ),
+          deleteMissing: false,
+          signal: boundarySignal,
+        });
+        before = await input.store.loadProjectMaterializationPlan({
+          job: input.job,
+          workerId: input.workerId,
+        });
+        const restartServer = Boolean(target);
+        if (restartServer) {
+          await (recorder as ProjectRecorder | null)?.stop();
+          recorder = null;
+        }
+        await applyDurableFileProjection(before, boundarySignal);
+        if (restartServer) {
+          clearProjectChatTarget(target);
+          target = null;
+          await startServerForPrompts();
+        }
+      }
+      // This full bounded scan is the fallback for writes OpenCode omitted from its message diff
+      // and the final LWW reconciliation for reported paths. It runs only when no turn can still
+      // own an observed byte sequence. A sole pending prompt receives attribution; when multiple
+      // completed turns could own a diff-less byte sequence, the version remains explicitly
+      // neutral instead of guessing. Missing paths are non-destructive here: exact deletions come
+      // from session.diff, while a neutral tombstone could race a durable creator upload.
+      const count = await mirrorProjectFiles({
+        job: input.job,
+        workerId: input.workerId,
+        runtime: input.runtime,
+        ref,
+        store: input.store,
+        storage: input.storage,
+        redactor,
+        baseline: await loadProjectFileBaselineMap(input),
+        modifiedBySessionId: uniqueOwner?.sessionId ?? null,
+        modifiedByPromptId: uniqueOwner?.id ?? null,
+        deleteMissing: false,
+        signal: boundarySignal,
+      });
+      const after = await input.store.loadProjectMaterializationPlan({
+        job: input.job,
+        workerId: input.workerId,
+      });
+      if (
+        after.desiredFileRevision !== after.appliedFileRevision
+        || after.desiredFileRevision !== appliedFileRevision
+      ) {
+        // A direct upload landed during the scan. Its desired projection wins before the Files
+        // barrier is published; the pending prompts are retried after materialization.
+        return;
+      }
+      for (const [promptId, prompt] of [...fileReconciliationPrompts]) {
+        await input.store.appendCompletedProjectPromptArtifactsUpdated({
+          job: input.job,
+          prompt,
+          workerId: input.workerId,
+          count: Math.min(count, RUN_ARTIFACT_MAX_FILES),
+        });
+        if (fileReconciliationPrompts.get(promptId)?.id === prompt.id) {
+          fileReconciliationPrompts.delete(promptId);
+        }
+      }
+    });
+    await refreshPendingFileReconciliations();
+    return fileReconciliationPrompts.size === 0;
   };
   const applyDurableFileProjection = async (
     durablePlan: ProjectMaterializationPlan,
@@ -1534,9 +1689,42 @@ export async function runProjectWorkspaceJob(input: {
     });
     await applyDurableFileProjection(durablePlan, boundarySignal);
   };
+  const resolveFileReconciliationRedactor = async (): Promise<void> => {
+    const activation = await input.store.resolveProjectActivationEnvironment({
+      job: input.job,
+      workerId: input.workerId,
+      activationRevision,
+      authorityRevision,
+    });
+    try {
+      redactor.clear();
+      redactor = createRunRedactor(activation.injectedLiterals);
+      redactorReady = true;
+      authorityRevision = activation.authorityRevision;
+    } finally {
+      // Recovery needs the same complete literal set as a live turn, but it never exposes those
+      // values to the provider. Drop every decrypted container immediately after constructing the
+      // in-memory redactor.
+      for (const key of Object.keys(activation.env)) {
+        activation.env[key] = "";
+        delete activation.env[key];
+      }
+      activation.injectedLiterals.length = 0;
+      activation.serverPassword = "";
+    }
+  };
   const persistOrRestoreFileProjection = async (
     boundarySignal: AbortSignal,
   ): Promise<void> => {
+    await refreshPendingFileReconciliations();
+    if (fileReconciliationPrompts.size > 0) {
+      const drained = await reconcileCompletedPromptFiles(boundarySignal);
+      if (!drained) {
+        throw new RunRuntimeError(
+          "Project Files reconciliation did not reach its durable barrier",
+        );
+      }
+    }
     const durablePlan = await input.store.loadProjectMaterializationPlan({
       job: input.job,
       workerId: input.workerId,
@@ -1774,12 +1962,30 @@ export async function runProjectWorkspaceJob(input: {
       await input.store.completeProjectDeletion({ job: input.job, workerId: input.workerId });
       return;
     }
+    await refreshPendingFileReconciliations();
     if (input.job.recycleRequestedAt) {
       const observation = await input.runtime.observe(ref, signal);
+      providerRunning = observation.state === "running";
       const observedActivationRevision =
         input.job.activationAdmissionRevision ?? activationRevision;
       let checkpointId = input.job.checkpointId ?? observation.currentSnapshotId;
       if (observation.state === "running") {
+        if (fileReconciliationPrompts.size > 0) {
+          try {
+            // A boundary rotation can often still resolve the exact injected literals. Capture
+            // completed output first when that authority remains valid; an immediate revocation
+            // intentionally falls through to the safe durable projection below.
+            await resolveFileReconciliationRedactor();
+            await reconcileCompletedPromptFiles(signal);
+          } catch (error) {
+            if (
+              error instanceof ProjectLostLease
+              || error instanceof LostProjectWorkspaceLeaseError
+            ) {
+              throw error;
+            }
+          }
+        }
         // A warm Project has no active turn. Restore the exact durable Files projection before the
         // security stop so unattended/background writes cannot become trusted Project versions.
         const recyclePlan = await input.store.loadProjectMaterializationPlan({
@@ -1853,7 +2059,7 @@ export async function runProjectWorkspaceJob(input: {
       if (!completed) throw new ProjectLostLease();
       return;
     }
-    if (skillSyncFailurePending) {
+    if (skillSyncFailurePending && fileReconciliationPrompts.size === 0) {
       await stopAndSurfaceSkillFailure(signal);
       return;
     }
@@ -1903,10 +2109,30 @@ export async function runProjectWorkspaceJob(input: {
     const projectionIsCurrent =
       plan.desiredGeneration === plan.appliedGeneration
       && plan.desiredFileRevision === plan.appliedFileRevision;
+    const warmWindowEndsAt =
+      input.job.idleDeadlineAt?.getTime()
+      // Accepting a follow-up clears the durable deadline so the deadline claimant cannot race the
+      // new command. `lastActivityAt` is advanced in that same transaction, preserving the
+      // equivalent warm-window proof for this lease.
+      ?? input.job.lastActivityAt.getTime() + input.config.idleMs;
+    const warmReattachCandidate =
+      activationRevision > 0
+      && input.job.status === "ready"
+      && warmWindowEndsAt > Date.now()
+      && input.job.sandboxId !== null
+      && Boolean(input.job.sandboxDomain)
+      && input.job.environmentExposureAttemptedAt !== null
+      && activationAdmissionToken === null
+      && input.job.recycleRequestedAt === null
+      && !skillSyncFailurePending
+      && projectionIsCurrent
+      && fileReconciliationPrompts.size === 0
+      && providerAdmission !== "provider_unavailable";
     if (
       providerAdmission === "provider_unavailable"
       && !warmIdleStopDue
       && projectionIsCurrent
+      && fileReconciliationPrompts.size === 0
     ) {
       preclaimedSessionStops.push(...await input.store.claimProjectSessionStops({
         job: input.job,
@@ -1917,10 +2143,11 @@ export async function runProjectWorkspaceJob(input: {
       providerAdmission === "provider_unavailable"
       && !warmIdleStopDue
       && projectionIsCurrent
+      && fileReconciliationPrompts.size === 0
       && preclaimedSessionStops.length === 0
     ) {
-      // Leave every prompt queued before billing or provider I/O. Provider-connect signals are the
-      // only path that clears this recoverable gate; another prompt cannot wake it by itself.
+      // Leave every prompt queued before billing or provider I/O. A provider-connect signal or the
+      // admission of a newly compatible prompt can clear this recoverable cold-workspace gate.
       const blocked = await input.store.updateProjectWorkspaceState({
         job: input.job,
         workerId: input.workerId,
@@ -1941,6 +2168,7 @@ export async function runProjectWorkspaceJob(input: {
       && input.job.idleDeadlineAt !== null
       && input.job.idleDeadlineAt.getTime() <= Date.now()
       && projectionIsCurrent
+      && fileReconciliationPrompts.size === 0
     ) {
       preclaimedPrompts.push(...await input.store.claimProjectPromptJobs({
         job: input.job,
@@ -2033,13 +2261,15 @@ export async function runProjectWorkspaceJob(input: {
       }
     }
 
-    await input.store.updateProjectWorkspaceState({
-      job: input.job,
-      workerId: input.workerId,
-      status: "provisioning",
-      errorCode: null,
-      errorMessage: null,
-    });
+    if (!warmReattachCandidate) {
+      await input.store.updateProjectWorkspaceState({
+        job: input.job,
+        workerId: input.workerId,
+        status: "provisioning",
+        errorCode: null,
+        errorMessage: null,
+      });
+    }
 
     let previousObservation: Awaited<ReturnType<ProjectWorkspaceRuntime["observe"]>> | null = null;
     const previousActivationRevision = activationRevision;
@@ -2061,6 +2291,7 @@ export async function runProjectWorkspaceJob(input: {
     const recoveringPendingAdmission = activationAdmissionToken !== null;
     const continuingWarmActivation =
       previousObservation?.state === "running" && !recoveringPendingAdmission;
+    let reattachedWarmServer = false;
     if (continuingWarmActivation) {
       if (!authorityRevision) {
         throw new RunRuntimeError("warm Project activation has no authority revision");
@@ -2080,6 +2311,70 @@ export async function runProjectWorkspaceJob(input: {
         activationRevision,
       });
       activationBudgetMs = budget?.limitMs ?? input.config.maxActivationMs;
+
+      if (warmReattachCandidate && input.job.sandboxDomain) {
+        const activation = await input.store.resolveProjectActivationEnvironment({
+          job: input.job,
+          workerId: input.workerId,
+          activationRevision,
+          authorityRevision,
+        });
+        let candidateRecorder: ProjectRecorder | null = null;
+        const candidateTarget: ProjectChatTarget = {
+          domain: input.job.sandboxDomain,
+          password: activation.serverPassword,
+        };
+        try {
+          redactor.clear();
+          redactor = createRunRedactor(activation.injectedLiterals);
+          redactorReady = true;
+          authorityRevision = activation.authorityRevision;
+          await input.runtime.healthCheck({
+            ref,
+            domain: candidateTarget.domain,
+            password: candidateTarget.password,
+            signal: AbortSignal.any([
+              signal,
+              AbortSignal.timeout(Math.min(10_000, input.config.heartbeatMs)),
+            ]),
+          });
+          candidateRecorder = startProjectRecorder({
+            chat: input.chat,
+            target: candidateTarget,
+            store: input.store,
+            job: input.job,
+            workerId: input.workerId,
+            promptByNativeSession,
+            redactor,
+            parentSignal: signal,
+          });
+          await candidateRecorder.started;
+          if (candidateRecorder.error()) throw candidateRecorder.error();
+          target = candidateTarget;
+          recorder = candidateRecorder;
+          candidateRecorder = null;
+          activationEnvironmentResolved = true;
+          reattachedWarmServer = true;
+        } catch {
+          await candidateRecorder?.stop().catch(() => undefined);
+          clearProjectChatTarget(candidateTarget);
+          redactor.clear();
+          redactor = createRunRedactor([]);
+          redactorReady = false;
+          activationEnvironmentResolved = false;
+          if (signal.aborted) throw abortReason(signal);
+          // A missing/unhealthy OpenCode process is not a workspace failure. Fall through to the
+          // existing fenced restart path, which stops any ambiguous process before re-projecting
+          // Skills and Files and injecting the environment again.
+        } finally {
+          for (const key of Object.keys(activation.env)) {
+            activation.env[key] = "";
+            delete activation.env[key];
+          }
+          activation.injectedLiterals.length = 0;
+          activation.serverPassword = "";
+        }
+      }
     } else if (previousObservation && !recoveringPendingAdmission) {
       // A truly stopped/missing VM ends the previous activation. Only its subsequent resume gets
       // a new revision and reservation.
@@ -2116,47 +2411,68 @@ export async function runProjectWorkspaceJob(input: {
       // Provider restoration is secretless. For a warm activation this call only kills the old
       // OpenCode server; for a stopped activation it resumes before any new pins are installed.
     }
-    ref.timeoutMs = Math.min(
-      input.config.sandboxTimeoutMs,
-      activationBudgetMs,
-    );
-    // A signal that committed after begin remains ordered after the durable admission and sets the
-    // recycle fence. This last check avoids unnecessary provider churn; prepare below is still the
-    // authoritative no-injection boundary if a mutation races after this check.
-    await validateActivationEnvironment();
-    providerActivationAttempted = true;
-    const workspace = await input.runtime.activate({
-      ref,
-      sourceSnapshotId: input.job.checkpointId ?? input.goldenSnapshotId,
-      signal,
-    });
-    // From this exact point provider cleanup belongs to a lease owner even if the first durable
-    // post-restore update loses its fence.
-    providerRunning = true;
-    if (!continuingWarmActivation) {
-      if (!activationAdmissionToken) {
-        throw new RunRuntimeError("Project activation lost its admission fence");
+    let workspace: Awaited<ReturnType<ProjectWorkspaceRuntime["activate"]>>;
+    if (reattachedWarmServer) {
+      workspace = {
+        sandboxId: input.job.sandboxId!,
+        domain: input.job.sandboxDomain!,
+        resumed: false,
+        restoredFromSnapshot: false,
+      };
+    } else {
+      if (warmReattachCandidate) {
+        // Health/recorder attachment failed. Only now expose the slower preparation state while
+        // the established restart path rebuilds the OpenCode process and projections.
+        await input.store.updateProjectWorkspaceState({
+          job: input.job,
+          workerId: input.workerId,
+          status: "provisioning",
+          errorCode: null,
+          errorMessage: null,
+        });
       }
-      // The previous OpenCode process is now stopped, so advancing DB pins cannot leave an old
-      // exposed process outside the new activation's revocation fence.
-      const prepared = await input.store.prepareProjectActivation({
-        job: input.job,
-        workerId: input.workerId,
-        activationRevision,
-        admissionToken: activationAdmissionToken,
+      ref.timeoutMs = Math.min(
+        input.config.sandboxTimeoutMs,
+        activationBudgetMs,
+      );
+      // A signal that committed after begin remains ordered after the durable admission and sets the
+      // recycle fence. This last check avoids unnecessary provider churn; prepare below is still the
+      // authoritative no-injection boundary if a mutation races after this check.
+      await validateActivationEnvironment();
+      providerActivationAttempted = true;
+      workspace = await input.runtime.activate({
+        ref,
+        sourceSnapshotId: input.job.checkpointId ?? input.goldenSnapshotId,
+        signal,
       });
-      activationAdmissionToken = null;
-      authorityRevision = prepared.authorityRevision;
-      activationStartedAt = Date.now();
-      provisionedUntil = activationStartedAt + ref.timeoutMs;
-      await input.usage.start({
-        job: input.job,
-        activationRevision,
-        runtimeDeadlineAt: new Date(
-          activationStartedAt
-            + Math.min(input.config.maxActivationMs, activationBudgetMs),
-        ),
-      });
+      // From this exact point provider cleanup belongs to a lease owner even if the first durable
+      // post-restore update loses its fence.
+      providerRunning = true;
+      if (!continuingWarmActivation) {
+        if (!activationAdmissionToken) {
+          throw new RunRuntimeError("Project activation lost its admission fence");
+        }
+        // The previous OpenCode process is now stopped, so advancing DB pins cannot leave an old
+        // exposed process outside the new activation's revocation fence.
+        const prepared = await input.store.prepareProjectActivation({
+          job: input.job,
+          workerId: input.workerId,
+          activationRevision,
+          admissionToken: activationAdmissionToken,
+        });
+        activationAdmissionToken = null;
+        authorityRevision = prepared.authorityRevision;
+        activationStartedAt = Date.now();
+        provisionedUntil = activationStartedAt + ref.timeoutMs;
+        await input.usage.start({
+          job: input.job,
+          activationRevision,
+          runtimeDeadlineAt: new Date(
+            activationStartedAt
+              + Math.min(input.config.maxActivationMs, activationBudgetMs),
+          ),
+        });
+      }
     }
     if (workspace.restoredFromSnapshot) {
       // `appliedGeneration` describes the last live VM. A reconstructed VM contains only the
@@ -2177,36 +2493,49 @@ export async function runProjectWorkspaceJob(input: {
       state: "running",
       expiresAt: continuingWarmActivation ? previousObservation?.expiresAt ?? null : null,
     });
-    await input.store.updateProjectWorkspaceState({
-      job: input.job,
-      workerId: input.workerId,
-      status: "provisioning",
-      sandboxId: workspace.sandboxId,
-      sandboxDomain: workspace.domain,
-      activationRevision,
-    });
-    // Re-materialize the exact projection on every activation, even when generation metadata
-    // matches. Skills are executable and a previous turn may have drifted their checkpoint copy.
-    await input.runtime.syncSkillBundles({
-      ref,
-      generation: plan.desiredGeneration,
-      skills: plan.skills,
-      signal,
-    });
-    if (plan.desiredGeneration !== appliedGeneration) {
-      const applied = await input.store.updateProjectWorkspaceState({
+    if (!reattachedWarmServer) {
+      await input.store.updateProjectWorkspaceState({
         job: input.job,
         workerId: input.workerId,
-        appliedGeneration: plan.desiredGeneration,
+        status: "provisioning",
+        sandboxId: workspace.sandboxId,
+        sandboxDomain: workspace.domain,
+        activationRevision,
       });
-      if (!applied) throw new ProjectLostLease();
-      appliedGeneration = plan.desiredGeneration;
+      // Re-materialize the exact projection on every activation, even when generation metadata
+      // matches. Skills are executable and a previous turn may have drifted their checkpoint copy.
+      await input.runtime.syncSkillBundles({
+        ref,
+        generation: plan.desiredGeneration,
+        skills: plan.skills,
+        signal,
+      });
+      if (plan.desiredGeneration !== appliedGeneration) {
+        const applied = await input.store.updateProjectWorkspaceState({
+          job: input.job,
+          workerId: input.workerId,
+          appliedGeneration: plan.desiredGeneration,
+        });
+        if (!applied) throw new ProjectLostLease();
+        appliedGeneration = plan.desiredGeneration;
+      }
+      if (fileReconciliationPrompts.size > 0) {
+        // A prior worker may have completed the prompt and crashed before its post-turn Files scan.
+        // The activated VM/checkpoint is still the only recoverable copy, so scan it with the exact
+        // admitted literal set before any S3 projection can replace the managed tree.
+        await resolveFileReconciliationRedactor();
+        await reconcileCompletedPromptFiles(signal);
+        plan = await input.store.loadProjectMaterializationPlan({
+          job: input.job,
+          workerId: input.workerId,
+        });
+      }
+      // S3 metadata is authoritative for the managed files projection. Replace it even when empty:
+      // an older restored checkpoint may still contain a path that was durably tombstoned later.
+      await applyDurableFileProjection(plan, signal);
     }
-    // S3 metadata is authoritative for the managed files projection. Replace it even when empty:
-    // an older restored checkpoint may still contain a path that was durably tombstoned later.
-    await applyDurableFileProjection(plan, signal);
 
-    const startServerForPrompts = async (): Promise<void> => {
+    startServerForPrompts = async (): Promise<void> => {
       if (target && recorder) return;
       const authority = await input.store.revalidateProjectWorkspaceAuthority({
         job: input.job,
@@ -2224,6 +2553,7 @@ export async function runProjectWorkspaceJob(input: {
       });
       redactor.clear();
       redactor = createRunRedactor(activation.injectedLiterals);
+      redactorReady = true;
       authorityRevision = activation.authorityRevision;
       target = { domain: workspace.domain, password: activation.serverPassword };
       const exposureFenced = await input.store.markProjectActivationExposureAttempted({
@@ -2285,12 +2615,13 @@ export async function runProjectWorkspaceJob(input: {
       // `ready` is a promise that the provider can remain warm through idleDeadlineAt. Keep the
       // activation non-idle until the quiescent boundary has durably admitted billing runway and
       // observed/extended the provider to that same deadline.
-      status: "provisioning",
+      status: reattachedWarmServer ? "running" : "provisioning",
       lastActivityAt: new Date(lastActivityAt),
       idleDeadlineAt: null,
     });
     if (!initialized) throw new ProjectLostLease();
-    let interactiveStatus: "provisioning" | "running" = "provisioning";
+    let interactiveStatus: "provisioning" | "running" =
+      reattachedWarmServer ? "running" : "provisioning";
     const syncInteractiveStatus = async (): Promise<void> => {
       // A completed prompt must not publish Ready before its post-turn runway is admitted. The
       // quiescent branch below is the sole writer of Ready for this activation.
@@ -2314,7 +2645,12 @@ export async function runProjectWorkspaceJob(input: {
       if (promptFailure) throw promptFailure;
       const currentRecorder = recorder as ProjectRecorder | null;
       if (currentRecorder?.error()) throw currentRecorder.error();
-      if (skillSyncFailurePending && activePrompts.size === 0) {
+      let filesReconciled = await reconcileCompletedPromptFiles(signal);
+      if (
+        skillSyncFailurePending
+        && activePrompts.size === 0
+        && filesReconciled
+      ) {
         await stopAndSurfaceSkillFailure(signal);
         return;
       }
@@ -2376,7 +2712,7 @@ export async function runProjectWorkspaceJob(input: {
         && activePrompts.size === 0
         && Date.now() >= nextMaterializationCheckAt
       ) {
-        const refreshed = await input.store.loadProjectMaterializationPlan({
+        let refreshed = await input.store.loadProjectMaterializationPlan({
           job: input.job,
           workerId: input.workerId,
         });
@@ -2411,8 +2747,8 @@ export async function runProjectWorkspaceJob(input: {
             appliedGeneration = refreshed.desiredGeneration;
           }
           if (fileProjectionChanged) {
-            // Creator uploads are durable desired state. Replace the whole managed files/ subtree
-            // only after every active turn has finished, then open prompt admission again.
+            // With no pending post-turn capture, creator uploads are the authoritative complete
+            // projection and can replace the managed tree at this quiescent boundary.
             await applyDurableFileProjection(refreshed, signal);
           }
           if (restartServer) {
@@ -2426,7 +2762,7 @@ export async function runProjectWorkspaceJob(input: {
         }
       }
 
-      const capacity = boundaryRecyclePending
+      const capacity = boundaryRecyclePending || fileReconciliationPrompts.size > 0
         ? 0
         : Math.max(0, input.config.concurrency - activePrompts.size);
       if (capacity > 0) {
@@ -2500,6 +2836,9 @@ export async function runProjectWorkspaceJob(input: {
             config: input.config,
             activationRevision,
             withFileCommit,
+            requestFileReconciliation: (completedPrompt) => {
+              fileReconciliationPrompts.set(completedPrompt.id, completedPrompt);
+            },
             onBoundary: () => {
               boundaryRecyclePending = true;
             },
@@ -2533,7 +2872,12 @@ export async function runProjectWorkspaceJob(input: {
         await syncInteractiveStatus();
       }
 
-      if (boundaryRecyclePending && activePrompts.size === 0) {
+      filesReconciled = await reconcileCompletedPromptFiles(signal);
+      if (
+        boundaryRecyclePending
+        && activePrompts.size === 0
+        && filesReconciled
+      ) {
         // Rotations and additions are admitted at the first quiescent boundary. Existing turns are
         // allowed to finish; no newly claimed prompt can cross into the stale environment.
         await input.store.updateProjectWorkspaceState({
@@ -2573,12 +2917,17 @@ export async function runProjectWorkspaceJob(input: {
 
       if (
         activePrompts.size === 0
+        && filesReconciled
         && Date.now() - lastActivityAt >= input.config.idleMs
       ) {
         await checkpointAndStopIdleWorkspace(signal);
         return;
       }
-      if (activePrompts.size === 0 && !boundaryRecyclePending) {
+      if (
+        activePrompts.size === 0
+        && !boundaryRecyclePending
+        && filesReconciled
+      ) {
         const control = await input.store.readProjectWorkspaceControl({
           job: input.job,
           workerId: input.workerId,
@@ -2745,9 +3094,10 @@ export async function runProjectWorkspaceJob(input: {
         reason: recycle ? "project_credentials_recycled" : "project_worker_shutdown",
       });
       await Promise.allSettled([...activePrompts.values()].map(({ task }) => task));
-      await persistOrRestoreFileProjection(input.signal);
-      await input.runtime.scrubAgentState(ref, input.signal);
-      const checkpoint = await input.runtime.checkpointAndStop(ref, input.signal);
+      const shutdownSignal = AbortSignal.timeout(60_000);
+      await persistOrRestoreFileProjection(shutdownSignal);
+      await input.runtime.scrubAgentState(ref, shutdownSignal);
+      const checkpoint = await input.runtime.checkpointAndStop(ref, shutdownSignal);
       providerStopped = true;
       await input.usage.record({
         job: input.job,
@@ -3070,9 +3420,36 @@ export function createCoreProjectWorkspaceStore(input: {
         event: args.event as ProjectSessionEvent,
         database: db,
       }),
+    loadPendingProjectFileReconciliations: (args) =>
+      loadPendingProjectFileReconciliations({
+        ...args,
+        database: db,
+      }),
+    appendCompletedProjectPromptArtifactsUpdated: (args) =>
+      appendCompletedProjectPromptArtifactsUpdated({
+        ...args,
+        database: db,
+      }),
     async persistProjectFiles(args) {
       for (const file of args.files) {
         await recordProjectFileVersion({
+          job: args.job,
+          workerId: args.workerId,
+          path: file.path,
+          contentType: file.contentType,
+          byteSize: file.byteSize,
+          checksum: file.checksum,
+          storageKey: file.storageKey,
+          modifiedBySessionId: file.modifiedBySessionId,
+          modifiedByPromptId: file.modifiedByPromptId,
+          baseVersion: file.baseVersion,
+          database: db,
+        });
+      }
+    },
+    async persistProjectFileHistory(args) {
+      for (const file of args.files) {
+        await recordProjectFileHistoricalVersion({
           job: args.job,
           workerId: args.workerId,
           path: file.path,

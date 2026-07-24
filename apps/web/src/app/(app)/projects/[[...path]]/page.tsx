@@ -76,7 +76,6 @@ export default async function ProjectsPage({
   params: Promise<{ path?: string[] }>;
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  if (!projectsFeatureEnabled()) redirect("/skills");
   const [{ path = [] }, query] = await Promise.all([params, searchParams]);
   const validRoute =
     path.length === 0 ||
@@ -94,6 +93,7 @@ export default async function ProjectsPage({
   if (authState.status === "unauthenticated") redirect("/login");
   if (authState.status === "unavailable") return <AuthUnavailable />;
   if (authState.user.needsOnboarding) redirect("/onboarding");
+  if (!projectsFeatureEnabled(authState.user.email)) redirect("/skills");
 
   const orgContext = await loadOrgContext().catch(() => null);
   if (!orgContext) return <WorkspaceLoadError />;
@@ -151,7 +151,7 @@ export default async function ProjectsPage({
   const initialDialog =
     query.new === "1"
       ? { kind: "new-project" as const, initialSkillSlug: skill }
-      : project && query.newSession === "1"
+      : project && !project.archivedAt && query.newSession === "1"
         ? {
             kind: "new-session" as const,
             projectId: project.id,

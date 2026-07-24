@@ -8,6 +8,97 @@ import {
 } from "../src/projectOpencodeChat";
 
 describe("Project OpenCode bridge", () => {
+  const directory = "/vercel/sandbox/files";
+
+  it("scopes every Project session operation to the managed Files directory", async () => {
+    const list = vi.fn(async () => ({ error: undefined, data: [] }));
+    const create = vi.fn(async () => ({
+      error: undefined,
+      data: { id: "session-1", title: "companion:session-1" },
+    }));
+    const abort = vi.fn(async () => ({ error: undefined, data: true }));
+    const get = vi.fn(async () => ({
+      error: undefined,
+      data: { id: "session-1" },
+    }));
+    const status = vi.fn(async () => ({
+      error: undefined,
+      data: { "session-1": { type: "idle" } },
+    }));
+    const messages = vi.fn(async () => ({ error: undefined, data: [] }));
+    const diff = vi.fn(async () => ({ error: undefined, data: [] }));
+    const promptAsync = vi.fn(async () => ({
+      error: undefined,
+      data: undefined,
+    }));
+    const client = {
+      session: {
+        list,
+        create,
+        abort,
+        get,
+        status,
+        messages,
+        diff,
+        promptAsync,
+      },
+    } as unknown as OpencodeClient;
+    const runtime = createOpencodeProjectChatRuntime(() => client);
+    const target = {
+      domain: "https://project.invalid",
+      password: "password",
+    };
+
+    await runtime.findSessionByTitle(target, "companion:session-1");
+    await runtime.createSession(target, "companion:session-1");
+    await runtime.abortSession(target, "session-1");
+    await runtime.getSessionState(target, "session-1");
+    await runtime.getMessageState(target, "session-1", "message-1");
+    await runtime.loadItems(target, "session-1");
+    await runtime.getFileChanges(target, "session-1", "message-1");
+    await runtime.sendPrompt(
+      target,
+      "session-1",
+      "Create the file",
+      "message-1",
+      "openai/gpt-5",
+    );
+
+    expect(list).toHaveBeenCalledWith({ directory }, { signal: undefined });
+    expect(create).toHaveBeenCalledWith(
+      { title: "companion:session-1", directory },
+      { signal: undefined },
+    );
+    expect(abort).toHaveBeenCalledWith(
+      { sessionID: "session-1", directory },
+      { signal: undefined },
+    );
+    expect(get).toHaveBeenCalledWith(
+      { sessionID: "session-1", directory },
+      { signal: undefined },
+    );
+    expect(status).toHaveBeenCalledWith(
+      { directory },
+      { signal: undefined },
+    );
+    expect(messages).toHaveBeenCalledWith(
+      { sessionID: "session-1", directory },
+      { signal: undefined },
+    );
+    expect(diff).toHaveBeenCalledWith(
+      { sessionID: "session-1", messageID: "message-1", directory },
+      { signal: undefined },
+    );
+    expect(promptAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionID: "session-1",
+        messageID: "message-1",
+        directory,
+      }),
+      { signal: undefined },
+    );
+  });
+
   it("accepts an assistant reply when the provider finishes through session idle only", async () => {
     const client = {
       session: {
@@ -132,6 +223,7 @@ describe("Project OpenCode bridge", () => {
       {
         sessionID: "session-1",
         messageID: "message-1",
+        directory,
         model: {
           providerID: "openrouter",
           modelID: "anthropic/claude-sonnet-4.5",
@@ -273,10 +365,17 @@ describe("Project OpenCode bridge", () => {
       result.push(event);
     }
 
-    expect(subscribe).toHaveBeenCalledOnce();
+    expect(subscribe).toHaveBeenCalledWith(
+      { directory },
+      {},
+    );
     expect(connected).toHaveBeenCalledOnce();
     expect(approve).toHaveBeenCalledWith(
-      { requestID: "permission-1", reply: "always" },
+      {
+        requestID: "permission-1",
+        directory,
+        reply: "always",
+      },
       { signal: undefined },
     );
     expect(approveV2).toHaveBeenCalledWith(

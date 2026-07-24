@@ -34,7 +34,12 @@ import {
   type ProjectUsageAdmission,
 } from "./billing";
 import { deterministicAgentMessageId } from "./messageIds";
-import { isManagedProjectFilePath, isProjectControlPlaneEnvKey } from "./projectJobs";
+import {
+  isManagedProjectFilePath,
+  isProjectControlPlaneEnvKey,
+  isProjectSessionProviderAdmitted,
+  loadEffectiveProjectProviderKeys,
+} from "./projectJobs";
 import { listSecrets } from "./secrets";
 import { resolveRunDependencyClosure } from "./skillRuns";
 import { assertMember, type ActorContext } from "./services";
@@ -152,6 +157,63 @@ function assertSessionAcceptsWork(session: ProjectSessionRecord): void {
   if (session.archivedAt) {
     throw new ProjectConflictError("restore this conversation before continuing");
   }
+}
+
+/**
+ * A cold provider gate can outlive the connection change that made a session admissible (for
+ * example when the connect signal raced an earlier worker write). Prompt admission already holds
+ * the workspace row lock; reopen only that pre-exposure state and leave warm runtimes to the
+ * provider recycle fence.
+ */
+async function reopenColdProviderGateForSession(input: {
+  orgId: string;
+  projectId: string;
+  creatorId: string;
+  session: Pick<
+    ProjectSessionRecord,
+    "modelProvider" | "modelCredentialEnvKeys"
+  >;
+  database: Db;
+  now: Date;
+}): Promise<void> {
+  const effectiveProviderKeys = await loadEffectiveProjectProviderKeys({
+    database: input.database,
+    orgId: input.orgId,
+    creatorId: input.creatorId,
+  });
+  if (
+    !isProjectSessionProviderAdmitted({
+      modelProvider: input.session.modelProvider,
+      modelCredentialEnvKeys: input.session.modelCredentialEnvKeys,
+      effectiveProviderKeys,
+    })
+  ) {
+    return;
+  }
+  await input.database
+    .update(schema.projectWorkspaces)
+    .set({
+      status: "queued",
+      recycleRequestedAt: null,
+      recycleReason: null,
+      attempt: 0,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+      availableAt: input.now,
+      updatedAt: input.now,
+    })
+    .where(
+      and(
+        eq(schema.projectWorkspaces.orgId, input.orgId),
+        eq(schema.projectWorkspaces.projectId, input.projectId),
+        eq(schema.projectWorkspaces.creatorId, input.creatorId),
+        eq(
+          schema.projectWorkspaces.lastErrorCode,
+          "project_provider_unavailable",
+        ),
+        isNull(schema.projectWorkspaces.environmentExposureAttemptedAt),
+      ),
+    );
 }
 
 function projectCreatePayloadHash(value: CreateProjectInput): string {
@@ -1836,6 +1898,7 @@ export async function getProjectSession(input: {
       database,
     }),
     transcript: projectTranscriptSchema.parse(session.transcript),
+    current_event_sequence: session.transcriptSequence,
     // Resume after the event prefix represented by this transcript, not after the current event
     // allocator maximum. Mid-turn events appended after the last snapshot must still replay.
     latest_event_sequence: session.transcriptEventSequence,
@@ -2370,6 +2433,14 @@ export async function createProjectSession(input: {
           eq(schema.projectWorkspaces.creatorId, input.actor.id),
         ),
       );
+    await reopenColdProviderGateForSession({
+      orgId: input.orgId,
+      projectId: input.projectId,
+      creatorId: input.actor.id,
+      session: sessions[0]!,
+      database: tx,
+      now,
+    });
     await tx
       .update(schema.projects)
       .set({ updatedAt: now })
@@ -2399,6 +2470,7 @@ export async function createProjectSession(input: {
         database: tx,
       }),
       transcript: [],
+      current_event_sequence: 0,
       latest_event_sequence: 0,
     };
   }) as Promise<ProjectSessionDetail>;
@@ -2586,6 +2658,14 @@ export async function enqueueProjectPrompt(input: {
           eq(schema.projectWorkspaces.creatorId, input.actor.id),
         ),
       );
+    await reopenColdProviderGateForSession({
+      orgId: input.orgId,
+      projectId: input.projectId,
+      creatorId: input.actor.id,
+      session,
+      database: tx,
+      now,
+    });
     const row = inserted[0]!;
     return {
       id: row.id,

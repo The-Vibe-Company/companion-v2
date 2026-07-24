@@ -489,7 +489,8 @@ function ProjectsHome({
             </div>
           );
         })}
-        {visible.length === 0 && !archivedLoading && (
+        {visible.length === 0 &&
+          (filter !== "archived" || !archivedLoading) && (
           <div className="cowork-table-empty">
             <Icon
               name={projects.length === 0 ? "boxes" : "search-x"}
@@ -523,7 +524,7 @@ function ProjectsHome({
               )}
           </div>
         )}
-        {archivedLoading && (
+        {filter === "archived" && archivedLoading && (
           <div className="cowork-table-empty" role="status">
             <Icon name="loader" size={18} className="ls-spin" />
             <strong>Loading archived Projects…</strong>
@@ -1409,10 +1410,18 @@ export function ProjectsApp({
 }) {
   const router = useRouter();
   const orgActions = useOrgActions();
+  const archivedInitialNewSessionProjectId =
+    initialDialog?.kind === "new-session" &&
+    initialProject?.id === initialDialog.projectId &&
+    initialProject.archivedAt !== null
+      ? initialProject.id
+      : null;
   const [projects, setProjects] = useState(initialProjects);
   const [project, setProject] = useState(initialProject);
   const [session, setSession] = useState(initialSession);
-  const [dialog, setDialog] = useState<DialogState>(initialDialog);
+  const [dialog, setDialog] = useState<DialogState>(
+    archivedInitialNewSessionProjectId ? null : initialDialog,
+  );
   const [settingsTarget, setSettingsTarget] = useState<ProjectDetailVM | null>(
     initialDialog?.kind === "settings" ? initialProject : null,
   );
@@ -1447,6 +1456,11 @@ export function ProjectsApp({
     [],
   );
   const closeMobileNavigation = useCallback(() => setMobileOpen(false), []);
+
+  useEffect(() => {
+    if (!archivedInitialNewSessionProjectId) return;
+    router.replace(`/projects/${archivedInitialNewSessionProjectId}`);
+  }, [archivedInitialNewSessionProjectId, router]);
 
   const sidebarProjects = useMemo(
     () =>
@@ -1714,6 +1728,7 @@ export function ProjectsApp({
                   workspace: {
                     ...current.workspace,
                     status: refreshedRow.status,
+                    errorCode: refreshedRow.errorCode,
                     statusDetail: refreshedRow.statusDetail,
                     lastActiveAt: refreshedRow.updatedAt,
                   },
@@ -1828,6 +1843,13 @@ export function ProjectsApp({
     projectId: string,
     initialSkillSlug: string | null = null,
   ) => {
+    if (project?.id === projectId && project.archivedAt) {
+      setToast({
+        tone: "neutral",
+        message: "Restore this Project before starting a conversation.",
+      });
+      return;
+    }
     const requestId = ++dialogRequestRef.current;
     setError(null);
     setDialog({ kind: "new-session", projectId, initialSkillSlug });
@@ -1839,6 +1861,14 @@ export function ProjectsApp({
     try {
       const detail = await fetchProject(projectId);
       if (requestId !== dialogRequestRef.current) return;
+      if (detail.archivedAt) {
+        setDialog(null);
+        setToast({
+          tone: "neutral",
+          message: "Restore this Project before starting a conversation.",
+        });
+        return;
+      }
       setProject(detail);
       replaceProject(detail);
     } catch (cause) {
@@ -2155,7 +2185,11 @@ export function ProjectsApp({
             onRetryRuntime={retryRuntime}
             onOpenNavigation={() => setMobileOpen(true)}
             onProjectSettings={() => void openSettings(project.id)}
-            onNewSession={() => void openNewSession(project.id)}
+            onNewSession={
+              project.archivedAt
+                ? undefined
+                : () => void openNewSession(project.id)
+            }
             onRenameSession={() => {
               setError(null);
               setDialog({

@@ -6,11 +6,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RunChatEvent } from "@companion/contracts";
 import type {
   ProjectDetailVM,
+  ProjectFileVM,
   ProjectRuntimeAvailability,
   ProjectSessionVM,
   ProjectWorkspaceStatus,
 } from "@/lib/projectsModel";
 import {
+  ProjectFilesDrawer,
   ProjectSessionView,
   SessionComposer,
 } from "./ProjectSessionView";
@@ -25,6 +27,7 @@ const SESSION_ID = "22222222-2222-4222-8222-222222222222";
 const NOW = "2026-07-24T05:00:00.000Z";
 
 const projectRpc = vi.hoisted(() => ({
+  fetchProject: vi.fn(),
   fetchProjectFileVersions: vi.fn(),
   fetchProjectFiles: vi.fn(),
   fetchProjectSession: vi.fn(),
@@ -37,6 +40,8 @@ const streamRpc = vi.hoisted(() => ({
       _projectId: string,
       _sessionId: string,
       _onEvent: (event: RunChatEvent) => void,
+      _signal?: AbortSignal,
+      _cursor?: { lastEventId?: string | null },
     ) => new Promise<void>(() => undefined),
   ),
 }));
@@ -77,11 +82,17 @@ vi.mock("../runs/ChatTranscript", async () => {
   return {
     ChatTranscript: ({
       showWorking,
+      workingLabel,
+      workingDetail,
+      workingVariant,
       renderUserAttachments,
       generatedFileTurns = [],
       onOpenFiles,
     }: {
       showWorking: boolean;
+      workingLabel?: string;
+      workingDetail?: string;
+      workingVariant?: "default" | "preparing";
       renderUserAttachments?: (
         messageId: string | null,
         text: string,
@@ -119,6 +130,20 @@ vi.mock("../runs/ChatTranscript", async () => {
           "data-working": String(showWorking),
         },
         "Existing transcript",
+        showWorking
+          ? createElement(
+              "div",
+              {
+                role: "status",
+                "aria-live": "polite",
+                "data-working-variant": workingVariant ?? "default",
+              },
+              workingLabel ?? "Working",
+              workingDetail
+                ? createElement("small", null, workingDetail)
+                : null,
+            )
+          : null,
         renderUserAttachments?.(
           "message-with-attachment",
           "Review the brief",
@@ -153,6 +178,7 @@ function session(
     prompts: [],
     pendingPrompts: [],
     latestEventSequence: 0,
+    currentEventSequence: 0,
     createdAt: NOW,
     updatedAt: NOW,
     lastActiveAt: NOW,
@@ -283,13 +309,238 @@ function setValue(input: HTMLTextAreaElement, value: string): void {
 }
 
 afterEach(() => {
-  vi.clearAllMocks();
   act(() => roots.splice(0).forEach((root) => root.unmount()));
+  vi.resetAllMocks();
+  streamRpc.openProjectStream.mockImplementation(
+    (
+      _projectId: string,
+      _sessionId: string,
+      _onEvent: (event: RunChatEvent) => void,
+      _signal?: AbortSignal,
+      _cursor?: { lastEventId?: string | null },
+    ) => new Promise<void>(() => undefined),
+  );
   window.sessionStorage.clear();
   document.body.innerHTML = "";
 });
 
 describe("ProjectSessionView workspace state", () => {
+  it("shows the real wake and preparation phases inline while a queued Project starts", async () => {
+    let resolveProject!: (value: ProjectDetailVM) => void;
+    projectRpc.fetchProject.mockReturnValueOnce(
+      new Promise<ProjectDetailVM>((resolve) => {
+        resolveProject = resolve;
+      }),
+    );
+    const sleeping = project({
+      status: "stopped",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    const { container } = await renderSessionView(sleeping);
+
+    let preparation = container.querySelector<HTMLElement>(
+      '[role="status"][data-working-variant="preparing"]',
+    );
+    expect(preparation?.getAttribute("aria-live")).toBe("polite");
+    expect(preparation?.textContent).toContain("Waking up your Project");
+    expect(preparation?.textContent).toContain(
+      "Restoring the workspace, your files, and synchronized Skills.",
+    );
+    expect(
+      container.querySelector(".cowork-session__top .cds-status")
+        ?.textContent,
+    ).toContain("Waking up");
+
+    const provisioning = project({
+      status: "provisioning",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    await act(async () => {
+      resolveProject(provisioning);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    preparation = container.querySelector<HTMLElement>(
+      '[role="status"][data-working-variant="preparing"]',
+    );
+    expect(preparation?.textContent).toContain("Preparing your Project");
+    expect(preparation?.textContent).toContain(
+      "Loading files, Skills, and access before your task starts.",
+    );
+    expect(
+      container.querySelector(".cowork-session__top .cds-status")
+        ?.textContent,
+    ).toContain("Getting ready");
+  });
+
+  it("settles a completed warm turn before the next follow-up starts", async () => {
+    const active = project({
+      status: "provisioning",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    active.sessions = [session({ status: "working" })];
+    const ready = project({
+      status: "ready",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    ready.sessions = [session({ status: "completed" })];
+    projectRpc.fetchProjectSession.mockResolvedValue(
+      session({ status: "completed" }),
+    );
+    projectRpc.fetchProject.mockResolvedValue(ready);
+    projectRpc.fetchProjectFiles.mockResolvedValue([]);
+    projectRpc.sendProjectPrompt.mockResolvedValue(
+      session({ status: "queued" }),
+    );
+
+    const { container } = await renderSessionView(active);
+    const onEvent = streamRpc.openProjectStream.mock.calls.at(-1)?.[2];
+    await act(async () => {
+      onEvent?.({ type: "session.idle", session_id: SESSION_ID });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(projectRpc.fetchProject).toHaveBeenCalledWith(PROJECT_ID);
+    expect(
+      container.querySelector(
+        '[role="status"][data-working-variant="preparing"]',
+      ),
+    ).toBeNull();
+
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    setValue(textarea, "Continue with the same warm Project");
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Send"]')!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const preparation = container.querySelector<HTMLElement>(
+      '[role="status"][data-working-variant="preparing"]',
+    );
+    expect(preparation?.textContent).toContain("Starting your task");
+    expect(preparation?.textContent).not.toContain(
+      "Preparing your Project",
+    );
+  });
+
+  it("does not let an older preparation response hide a durable File refresh", async () => {
+    const fileId = "55555555-5555-4555-8555-555555555552";
+    const durableFile = {
+      id: fileId,
+      path: "files/durable.txt",
+      name: "durable.txt",
+      version: 1,
+      contentType: "text/plain",
+      byteSize: 18,
+      conflictDetected: false,
+      modifiedBySessionId: SESSION_ID,
+      modifiedByPromptId: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    let resolveOlderProject!: (value: ProjectDetailVM) => void;
+    projectRpc.fetchProject.mockReturnValueOnce(
+      new Promise<ProjectDetailVM>((resolve) => {
+        resolveOlderProject = resolve;
+      }),
+    );
+    projectRpc.fetchProjectFiles.mockResolvedValueOnce([durableFile]);
+    const sleeping = project({
+      status: "stopped",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    const { container } = await renderSessionView(sleeping);
+    const onEvent = streamRpc.openProjectStream.mock.calls.at(-1)?.[2];
+
+    await act(async () => {
+      onEvent?.({ type: "artifacts.updated", count: 1 });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(button(container, "Files").textContent).toContain("1");
+
+    const olderProjection = project({
+      status: "provisioning",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    olderProjection.files = [];
+    await act(async () => {
+      resolveOlderProject(olderProjection);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(button(container, "Files").textContent).toContain("1");
+  });
+
+  it("acknowledges a cold follow-up immediately and clears preparation if admission fails", async () => {
+    let rejectSend!: (cause: Error) => void;
+    projectRpc.sendProjectPrompt.mockReturnValueOnce(
+      new Promise<ProjectSessionVM>((_resolve, reject) => {
+        rejectSend = reject;
+      }),
+    );
+    projectRpc.fetchProject.mockReturnValue(
+      new Promise<ProjectDetailVM>(() => undefined),
+    );
+    const sleeping = project({
+      status: "stopped",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    sleeping.sessions = [session({ status: "completed" })];
+    const { container } = await renderSessionView(sleeping);
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    setValue(textarea, "Continue with the launch plan");
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Send"]')!
+        .click();
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector(
+        '[role="status"][data-working-variant="preparing"]',
+      )?.textContent,
+    ).toContain("Waking up your Project");
+    expect(
+      container.querySelector(".cowork-session__status .project-status-dot")
+        ?.classList,
+    ).toContain("is-waiting");
+    expect(
+      container.querySelector(".cowork-session__status")?.classList,
+    ).not.toContain("is-passive");
+
+    await act(async () => {
+      rejectSend(new Error("Could not queue the message."));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector(
+        '[role="status"][data-working-variant="preparing"]',
+      ),
+    ).toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      "Could not queue the message.",
+    );
+  });
+
   it("keeps the conversation title as the mobile header landmark and de-emphasizes passive status", async () => {
     const available = project({
       status: "stopped",
@@ -305,6 +556,38 @@ describe("ProjectSessionView workspace state", () => {
     expect(
       container.querySelector(".cowork-session__status")?.classList,
     ).toContain("is-passive");
+  });
+
+  it("surfaces a missing model connection instead of promising that a queued task will start", async () => {
+    const disconnected = project({
+      status: "error",
+      workspaceStatus: "error",
+      statusDetail: "Reconnect this session's model provider to continue.",
+      workspaceDetail: "Reconnect this session's model provider to continue.",
+    });
+    disconnected.workspace.errorCode = "project_provider_unavailable";
+    disconnected.sessions = [session({ status: "queued" })];
+
+    const { container } = await renderSessionView(disconnected);
+
+    expect(
+      container.querySelector(
+        '[role="status"][data-working-variant="preparing"]',
+      ),
+    ).toBeNull();
+    expect(
+      container.querySelector(".cowork-session__top .cds-status")
+        ?.textContent,
+    ).toContain("Connection needed");
+    expect(container.textContent).toContain(
+      "Reconnect this model to continue",
+    );
+    expect(
+      container.querySelector<HTMLAnchorElement>(
+        'a[href="/settings?view=models"]',
+      ),
+    ).not.toBeNull();
+    expect(container.querySelector("textarea")?.disabled).toBe(true);
   });
 
   it.each([
@@ -614,7 +897,10 @@ describe("ProjectSessionView workspace state", () => {
     archived.archivedAt = NOW;
     archived.sessions = [session({ status: "completed" })];
 
-    const { container } = await renderSessionView(archived);
+    const onNewSession = vi.fn();
+    const { container } = await renderSessionView(archived, {
+      onNewSession,
+    });
 
     expect(
       container.querySelector(".cowork-session__top .cds-status")
@@ -626,7 +912,72 @@ describe("ProjectSessionView workspace state", () => {
     expect(
       container.querySelector<HTMLTextAreaElement>("textarea")?.placeholder,
     ).toBe("Restore this project to continue the conversation.");
+    expect(
+      [...container.querySelectorAll("button")].some(
+        (candidate) => candidate.textContent?.trim() === "New conversation",
+      ),
+    ).toBe(false);
+    expect(onNewSession).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["video/mp4", "video"],
+    ["application/pdf", "iframe"],
+  ])(
+    "keeps the %s native preview inside the mobile Files focus loop",
+    async (contentType, previewSelector) => {
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      roots.push(root);
+      const file: ProjectFileVM = {
+        id: "55555555-5555-4555-8555-555555555599",
+        path: "files/preview.bin",
+        name: "preview.bin",
+        version: 1,
+        contentType,
+        byteSize: 120,
+        conflictDetected: false,
+        modifiedBySessionId: SESSION_ID,
+        modifiedByPromptId: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+      };
+      await act(async () => {
+        root.render(
+          React.createElement(ProjectFilesDrawer, {
+            open: true,
+            projectId: PROJECT_ID,
+            files: [],
+            selection: {
+              ...file,
+              exactVersion: true,
+            },
+            attachmentPreview: null,
+            returnFocusRef: { current: null },
+            onSelectionChange: vi.fn(),
+            onClose: vi.fn(),
+          }),
+        );
+        await Promise.resolve();
+      });
+      const preview = document.body.querySelector<HTMLElement>(
+        '.cowork-file-preview[aria-label="Preview preview.bin"]',
+      )!;
+      const download = preview.querySelector<HTMLAnchorElement>(
+        'a[aria-label="Download preview.bin version 1"]',
+      )!;
+      expect(preview.querySelector(previewSelector)).not.toBeNull();
+      act(() => download.focus());
+      const tab = new KeyboardEvent("keydown", {
+        key: "Tab",
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => document.dispatchEvent(tab));
+      expect(tab.defaultPrevented).toBe(false);
+    },
+  );
 
   it("previews a durable prompt attachment beside the conversation", async () => {
     const available = project({
@@ -890,6 +1241,40 @@ describe("ProjectSessionView workspace state", () => {
       byteSize: 900,
       updatedAt: "2026-07-24T06:00:00.000Z",
     };
+    const promptId = "33333333-3333-4333-8333-333333333334";
+    const reconciledSession = session({
+      status: "completed",
+      latestEventSequence: 1,
+      currentEventSequence: 2,
+      prompts: [
+        {
+          id: promptId,
+          messageId: "message-reconciled-file",
+          text: "Create the live file",
+          status: "completed",
+          attachments: [],
+          fileChanges: [
+            {
+              projectId: PROJECT_ID,
+              fileId,
+              path: updatedFile.path,
+              kind: "updated",
+              version: updatedFile.version,
+              contentType: updatedFile.contentType,
+              byteSize: updatedFile.byteSize,
+              modifiedBySessionId: SESSION_ID,
+              modifiedByPromptId: promptId,
+              conflictDetected: false,
+              createdAt: updatedFile.updatedAt,
+            },
+          ],
+          createdAt: NOW,
+          completedAt: updatedFile.updatedAt,
+          errorCode: null,
+          errorMessage: null,
+        },
+      ],
+    });
     const available = project({
       status: "ready",
       statusDetail: null,
@@ -899,7 +1284,8 @@ describe("ProjectSessionView workspace state", () => {
     available.sessions = [session({ status: "idle" })];
     projectRpc.fetchProjectFiles
       .mockResolvedValueOnce([initialFile])
-      .mockResolvedValueOnce([updatedFile]);
+      .mockResolvedValue([updatedFile]);
+    projectRpc.fetchProjectSession.mockResolvedValueOnce(reconciledSession);
     const { container } = await renderSessionView(available);
 
     await act(async () => {
@@ -929,7 +1315,256 @@ describe("ProjectSessionView workspace state", () => {
     expect(preview.querySelector("img")).toBeNull();
     expect(preview.querySelector("video")).not.toBeNull();
     expect(preview.textContent).toContain("v2");
+    expect(
+      container.querySelector(
+        `[data-generated-file-id="${fileId}"]`,
+      ),
+    ).not.toBeNull();
     expect(preview.textContent).toContain("900 B");
+  });
+
+  it("refreshes Project Files when a turn reaches a terminal event", async () => {
+    const available = project({
+      status: "running",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    available.sessions = [session({ status: "working" })];
+    projectRpc.fetchProjectSession.mockResolvedValue(
+      session({ status: "idle" }),
+    );
+    projectRpc.fetchProjectFiles.mockResolvedValue([]);
+    await renderSessionView(available);
+    const onEvent = streamRpc.openProjectStream.mock.calls.at(-1)?.[2];
+
+    await act(async () => {
+      onEvent?.({
+        type: "prompt.status",
+        prompt_id: "33333333-3333-4333-8333-333333333333",
+        message_id: "message-terminal",
+        ordinal: 1,
+        status: "completed",
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(projectRpc.fetchProjectFiles).toHaveBeenCalledWith(PROJECT_ID);
+  });
+
+  it("reopens a terminal stream when durable reconciliation advances its event cursor", async () => {
+    vi.useFakeTimers();
+    try {
+      const available = project({
+        status: "ready",
+        statusDetail: null,
+        workspaceDetail: null,
+      });
+      available.sessions = [
+        session({
+          status: "completed",
+          latestEventSequence: 1,
+          currentEventSequence: 1,
+        }),
+      ];
+      projectRpc.fetchProjectSession.mockResolvedValue(
+        session({
+          status: "completed",
+          latestEventSequence: 1,
+          currentEventSequence: 2,
+        }),
+      );
+      await renderSessionView(available);
+      expect(streamRpc.openProjectStream).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+        await Promise.resolve();
+      });
+
+      expect(streamRpc.openProjectStream.mock.calls.length).toBeGreaterThan(1);
+      expect(
+        streamRpc.openProjectStream.mock.calls.at(-1)?.[4],
+      ).toEqual(
+        expect.objectContaining({ lastEventId: "1" }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("advances the replay cursor past folded events before reopening for a late barrier", async () => {
+    vi.useFakeTimers();
+    try {
+      const available = project({
+        status: "ready",
+        statusDetail: null,
+        workspaceDetail: null,
+      });
+      available.sessions = [
+        session({
+          status: "completed",
+          latestEventSequence: 1,
+          currentEventSequence: 1,
+        }),
+      ];
+      projectRpc.fetchProjectSession
+        .mockResolvedValueOnce(
+          session({
+            status: "completed",
+            latestEventSequence: 2,
+            currentEventSequence: 2,
+          }),
+        )
+        .mockResolvedValue(
+          session({
+            status: "completed",
+            latestEventSequence: 2,
+            currentEventSequence: 3,
+          }),
+        );
+      await renderSessionView(available);
+      expect(streamRpc.openProjectStream).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+        await Promise.resolve();
+      });
+
+      expect(streamRpc.openProjectStream).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+        await Promise.resolve();
+      });
+
+      expect(streamRpc.openProjectStream.mock.calls.length).toBeGreaterThan(1);
+      expect(
+        streamRpc.openProjectStream.mock.calls.at(-1)?.[4],
+      ).toEqual(
+        expect.objectContaining({ lastEventId: "2" }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a completed turn file visible while another prompt remains queued", async () => {
+    const firstPromptId = "33333333-3333-4333-8333-333333333331";
+    const secondPromptId = "33333333-3333-4333-8333-333333333332";
+    const fileId = "55555555-5555-4555-8555-555555555551";
+    const firstPrompt = {
+      id: firstPromptId,
+      messageId: "message-first",
+      text: "Create the first file",
+      status: "running" as const,
+      attachments: [],
+      fileChanges: [],
+      createdAt: NOW,
+      completedAt: null,
+      errorCode: null,
+      errorMessage: null,
+    };
+    const secondPrompt = {
+      id: secondPromptId,
+      messageId: "message-second",
+      text: "Continue with the next task",
+      status: "queued" as const,
+      attachments: [],
+      fileChanges: [],
+      createdAt: NOW,
+      completedAt: null,
+      errorCode: null,
+      errorMessage: null,
+    };
+    const durableFile = {
+      id: fileId,
+      path: "files/first.txt",
+      name: "first.txt",
+      version: 1,
+      contentType: "text/plain",
+      byteSize: 12,
+      conflictDetected: false,
+      modifiedBySessionId: SESSION_ID,
+      modifiedByPromptId: firstPromptId,
+      createdAt: NOW,
+      updatedAt: NOW,
+    };
+    const available = project({
+      status: "running",
+      statusDetail: null,
+      workspaceDetail: null,
+    });
+    available.sessions = [
+      session({
+        status: "queued",
+        prompts: [firstPrompt, secondPrompt],
+        pendingPrompts: [firstPrompt, secondPrompt],
+      }),
+    ];
+    projectRpc.fetchProjectSession.mockResolvedValue(
+      session({
+        status: "queued",
+        prompts: [
+          {
+            ...firstPrompt,
+            status: "completed",
+            completedAt: NOW,
+            fileChanges: [
+              {
+                projectId: PROJECT_ID,
+                fileId,
+                path: "files/first.txt",
+                kind: "created",
+                version: 1,
+                contentType: "text/plain",
+                byteSize: 12,
+                modifiedBySessionId: SESSION_ID,
+                modifiedByPromptId: firstPromptId,
+                conflictDetected: false,
+                createdAt: NOW,
+              },
+            ],
+          },
+          secondPrompt,
+        ],
+        pendingPrompts: [secondPrompt],
+      }),
+    );
+    let resolveStaleFiles!: (value: []) => void;
+    projectRpc.fetchProjectFiles
+      .mockReturnValueOnce(
+        new Promise<[]>((resolve) => {
+          resolveStaleFiles = resolve;
+        }),
+      )
+      .mockResolvedValueOnce([durableFile]);
+    const { container } = await renderSessionView(available);
+    const onEvent = streamRpc.openProjectStream.mock.calls.at(-1)?.[2];
+
+    await act(async () => {
+      onEvent?.({
+        type: "prompt.status",
+        prompt_id: firstPromptId,
+        message_id: "message-first",
+        ordinal: 1,
+        status: "completed",
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(projectRpc.fetchProjectFiles).toHaveBeenCalledTimes(2);
+    expect(button(container, "Files").textContent).toContain("1");
+
+    await act(async () => {
+      resolveStaleFiles([]);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(button(container, "Files").textContent).toContain("1");
   });
 
   it("restores an exact generated target after selecting another desktop file", async () => {

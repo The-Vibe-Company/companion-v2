@@ -617,6 +617,7 @@ export function NewSessionDialog({
         )}
         <textarea
           data-autofocus
+          aria-label="What should this conversation do?"
           rows={4}
           value={prompt}
           disabled={busy}

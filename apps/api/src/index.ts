@@ -192,7 +192,11 @@ import {
   SkillPublicReleaseNotFoundError,
   SkillPublicReleaseValidationError,
 } from "@companion/core/services";
-import { SecretConfigurationError, loadSecretsMasterKey } from "@companion/core";
+import {
+  SecretConfigurationError,
+  hasInternalProductAccess,
+  loadSecretsMasterKey,
+} from "@companion/core";
 import {
   addCommentInputSchema,
   addOrgAccessDomainInputSchema,
@@ -3809,6 +3813,7 @@ app.delete("/v1/org-provider-connections/:provider", async (c) => {
 
 class ProjectsFeatureDisabledError extends Error {}
 class ProjectsSessionOnlyError extends Error {}
+class InternalProductAccessRequiredError extends Error {}
 
 function projectsFeatureEnabled(): boolean {
   const setting = process.env.COMPANION_PROJECTS_ENABLED?.trim().toLowerCase();
@@ -3820,11 +3825,15 @@ function assertProjectSession(c: Context): void {
   if (isTokenRequest(c) || isAgentRequest(c)) {
     throw new ProjectsSessionOnlyError("only authenticated browser sessions can use projects");
   }
-  actorFromContext(c);
+  const actor = actorFromContext(c);
+  if (!hasInternalProductAccess(actor.email)) {
+    throw new InternalProductAccessRequiredError();
+  }
 }
 
 function projectError(c: Context, error: unknown): Response {
   if (error instanceof ProjectsFeatureDisabledError) return jsonError(c, "not found", 404);
+  if (error instanceof InternalProductAccessRequiredError) return jsonError(c, "not found", 404);
   if (error instanceof ProjectsSessionOnlyError) return jsonError(c, error, 401);
   if (error instanceof ProjectNotFoundError) return jsonError(c, error, 404);
   if (error instanceof ProjectConflictError) return jsonError(c, error, 409);
@@ -4940,9 +4949,23 @@ async function withApiRunContext<T>(
   }
 }
 
+class RunFeatureDisabledError extends Error {}
+class RunSessionOnlyError extends Error {}
+
+function runFeatureEnabled(): boolean {
+  const setting = process.env.COMPANION_RUNS_ENABLED?.trim().toLowerCase();
+  return setting === "true" || setting === "1";
+}
+
 function assertRunSession(c: Context): void {
-  if (isTokenRequest(c)) throw new Error("personal access tokens cannot use skill runs");
-  actorFromContext(c);
+  if (!runFeatureEnabled()) throw new RunFeatureDisabledError();
+  if (isTokenRequest(c) || isAgentRequest(c)) {
+    throw new RunSessionOnlyError("only authenticated browser sessions can use skill runs");
+  }
+  const actor = actorFromContext(c);
+  if (!hasInternalProductAccess(actor.email)) {
+    throw new InternalProductAccessRequiredError();
+  }
 }
 
 function idempotencyKey(c: Context): string {
@@ -4977,6 +5000,9 @@ function isRunUploadFile(value: unknown): value is {
 
 /** Map run service failures onto the HTTP statuses the run UI expects. */
 function runError(c: Context, error: unknown): Response {
+  if (error instanceof RunFeatureDisabledError) return jsonError(c, "not found", 404);
+  if (error instanceof InternalProductAccessRequiredError) return jsonError(c, "not found", 404);
+  if (error instanceof RunSessionOnlyError) return jsonError(c, error, 401);
   if (error instanceof RunBusyError) return jsonError(c, error, 409);
   if (error instanceof RunValidationError) {
     if (error.code.endsWith("not_found")) return jsonError(c, error, 404);
@@ -5171,10 +5197,9 @@ app.post(
   // make the server read or measure a large upload body.
   async (c, next) => {
     try {
-      if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
-      actorFromContext(c);
+      assertRunSession(c);
     } catch (error) {
-      return jsonError(c, error, 401);
+      return runError(c, error);
     }
     await next();
   },
@@ -5328,7 +5353,7 @@ app.post(
     try {
       assertRunSession(c);
     } catch (error) {
-      return jsonError(c, error, 401);
+      return runError(c, error);
     }
     await next();
   },
@@ -5797,7 +5822,7 @@ async function streamRunDownload(
 /** Stream a run attachment back to its creator. */
 app.get("/v1/runs/:id/attachments/:attachmentId", async (c) => {
   try {
-    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
+    assertRunSession(c);
     const asset = await withTenant(c, ({ actor, orgId, database }) =>
       getRunAttachment({
         actor,
@@ -5812,6 +5837,13 @@ app.get("/v1/runs/:id/attachments/:attachmentId", async (c) => {
       previewContentType: asset.previewContentType,
     });
   } catch (error) {
+    if (
+      error instanceof InternalProductAccessRequiredError
+      || error instanceof RunSessionOnlyError
+      || (error instanceof Error && error.message === "not authenticated")
+    ) {
+      return runError(c, error);
+    }
     // Not-visible run / unknown attachment / cross-tenant all surface as a 404.
     return jsonError(c, error, 404);
   }
@@ -5820,7 +5852,7 @@ app.get("/v1/runs/:id/attachments/:attachmentId", async (c) => {
 /** Serve creator-private cached outputs without exposing S3 or the retained sandbox. */
 app.get("/v1/runs/:id/artifacts/:artifactId", async (c) => {
   try {
-    if (isTokenRequest(c)) return jsonError(c, "personal access tokens cannot use skill runs", 401);
+    assertRunSession(c);
     const loadAsset = async (): Promise<RunDownloadAsset> => {
       const asset = await withTenant(c, ({ actor, orgId, database }) =>
         getRunArtifact({
@@ -5839,6 +5871,13 @@ app.get("/v1/runs/:id/artifacts/:artifactId", async (c) => {
     const asset = await loadAsset();
     return await streamRunDownload(c, asset, loadAsset);
   } catch (error) {
+    if (
+      error instanceof InternalProductAccessRequiredError
+      || error instanceof RunSessionOnlyError
+      || (error instanceof Error && error.message === "not authenticated")
+    ) {
+      return runError(c, error);
+    }
     // Expired, missing and unauthorized artifacts are intentionally indistinguishable.
     return jsonError(c, error, 404);
   }

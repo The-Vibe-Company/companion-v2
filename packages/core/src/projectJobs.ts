@@ -14,6 +14,7 @@ import {
 } from "drizzle-orm";
 import type {
   ProjectAuthorityState,
+  ProjectFileReconciliationJob,
   ProjectMaterializationPlan,
   ProjectModelProviderPin,
   ProjectPromptJob,
@@ -306,7 +307,7 @@ export function projectPromptSendFenceDecision(input: {
     : "provider_unavailable";
 }
 
-async function currentEffectiveProjectProviderKeys(input: {
+export async function loadEffectiveProjectProviderKeys(input: {
   database: Db;
   orgId: string;
   creatorId: string;
@@ -2238,8 +2239,8 @@ export async function completeProjectWorkspaceRecycle(input: {
 
 /**
  * Inspect durable queued/pre-send work before a stopped Project can reserve billing or touch its
- * provider. A blocked result is recoverable: prompts remain queued and a provider-connect signal
- * wakes the workspace after an effective connection exists again.
+ * provider. A blocked result is recoverable: prompts remain queued; a provider-connect signal or a
+ * newly accepted compatible prompt wakes the cold workspace after an effective connection exists.
  */
 export async function inspectProjectPromptProviderAdmission(input: {
   job: ProjectWorkspaceJob;
@@ -2282,7 +2283,7 @@ export async function inspectProjectPromptProviderAdmission(input: {
               ),
             ),
           ),
-        currentEffectiveProjectProviderKeys({
+        loadEffectiveProjectProviderKeys({
           database: tx,
           orgId: input.job.orgId,
           creatorId: input.job.creatorId,
@@ -2335,7 +2336,7 @@ export async function revalidateProjectPromptProviderAdmission(input: {
           )
           .limit(1);
         if (!sessions[0]) return "lost_lease" as const;
-        const effectiveProviderKeys = await currentEffectiveProjectProviderKeys({
+        const effectiveProviderKeys = await loadEffectiveProjectProviderKeys({
           database: tx,
           orgId: input.job.orgId,
           creatorId: input.job.creatorId,
@@ -3423,6 +3424,153 @@ export async function appendProjectSessionEvent(input: {
   });
 }
 
+/**
+ * Reconstruct post-turn Files work under the current Project workspace lease.
+ *
+ * Prompt leases deliberately end at completion, while file capture can be delayed until every
+ * concurrent turn is quiescent. The null reconciliation sequence is therefore the durable work
+ * queue: it survives Ready lease release and worker crashes without replaying the prompt itself.
+ */
+export async function loadPendingProjectFileReconciliations(input: {
+  job: ProjectWorkspaceJob;
+  workerId: string;
+  database?: Db;
+}): Promise<ProjectFileReconciliationJob[]> {
+  const database = input.database ?? db;
+  return withWorkspaceLease({
+    ...input,
+    database,
+    fn: async (tx) => {
+      const rows = await tx
+        .select({
+          id: schema.projectPrompts.id,
+          orgId: schema.projectPrompts.orgId,
+          projectId: schema.projectPrompts.projectId,
+          sessionId: schema.projectPrompts.sessionId,
+          creatorId: schema.projectPrompts.creatorId,
+          sequence: schema.projectPrompts.sequence,
+        })
+        .from(schema.projectPrompts)
+        .where(
+          and(
+            eq(schema.projectPrompts.orgId, input.job.orgId),
+            eq(schema.projectPrompts.projectId, input.job.projectId),
+            eq(schema.projectPrompts.creatorId, input.job.creatorId),
+            eq(schema.projectPrompts.status, "completed"),
+            isNull(schema.projectPrompts.fileReconciliationEventSequence),
+          ),
+        )
+        .orderBy(
+          asc(schema.projectPrompts.completedAt),
+          asc(schema.projectPrompts.id),
+        );
+      return rows;
+    },
+  });
+}
+
+/**
+ * Publish the post-turn file barrier after a completed prompt.
+ *
+ * Ordinary OpenCode events are accepted only while their prompt lease is live. File
+ * reconciliation deliberately happens after every concurrent turn has completed, so this
+ * narrower writer validates the current workspace lease plus the terminal prompt instead. The
+ * prompt row is locked and records the committed event sequence, making concurrent retries
+ * idempotent without relying on a racy JSON event lookup.
+ */
+export async function appendCompletedProjectPromptArtifactsUpdated(input: {
+  job: ProjectWorkspaceJob;
+  prompt: ProjectFileReconciliationJob;
+  workerId: string;
+  count: number;
+  database?: Db;
+}): Promise<number> {
+  const database = input.database ?? db;
+  const event = runChatEventSchema.parse({
+    type: "artifacts.updated",
+    count: input.count,
+    prompt_id: input.prompt.id,
+  });
+  return withWorkspaceLease({
+    ...input,
+    database,
+    fn: async (tx) => {
+      // Serialize retries for this prompt. The marker and event are committed in this same
+      // transaction, so a concurrent caller either writes the one barrier or observes its exact
+      // sequence after the row lock is released.
+      const promptRows = await tx
+        .select({
+          id: schema.projectPrompts.id,
+          status: schema.projectPrompts.status,
+          eventSequence: schema.projectPrompts.fileReconciliationEventSequence,
+        })
+        .from(schema.projectPrompts)
+        .where(
+          and(
+            eq(schema.projectPrompts.orgId, input.prompt.orgId),
+            eq(schema.projectPrompts.projectId, input.prompt.projectId),
+            eq(schema.projectPrompts.sessionId, input.prompt.sessionId),
+            eq(schema.projectPrompts.id, input.prompt.id),
+            eq(schema.projectPrompts.creatorId, input.prompt.creatorId),
+          ),
+        )
+        .limit(1)
+        .for("update");
+      const prompt = promptRows[0];
+      if (!prompt || prompt.status !== "completed") {
+        throw new LostProjectWorkspaceLeaseError();
+      }
+      if (prompt.eventSequence !== null) return prompt.eventSequence;
+
+      const sequenceRows = await tx
+        .update(schema.projectSessions)
+        .set({
+          transcriptSequence: sql`${schema.projectSessions.transcriptSequence} + 1`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.projectSessions.orgId, input.prompt.orgId),
+            eq(schema.projectSessions.projectId, input.prompt.projectId),
+            eq(schema.projectSessions.id, input.prompt.sessionId),
+            eq(schema.projectSessions.creatorId, input.prompt.creatorId),
+          ),
+        )
+        .returning({ sequence: schema.projectSessions.transcriptSequence });
+      const sequence = sequenceRows[0]?.sequence;
+      if (!sequence) throw new LostProjectWorkspaceLeaseError();
+      await tx.insert(schema.projectSessionEvents).values({
+        orgId: input.prompt.orgId,
+        projectId: input.prompt.projectId,
+        sessionId: input.prompt.sessionId,
+        creatorId: input.prompt.creatorId,
+        sequence,
+        event,
+      });
+      const marked = await tx
+        .update(schema.projectPrompts)
+        .set({
+          fileReconciliationEventSequence: sequence,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.projectPrompts.orgId, input.prompt.orgId),
+            eq(schema.projectPrompts.projectId, input.prompt.projectId),
+            eq(schema.projectPrompts.sessionId, input.prompt.sessionId),
+            eq(schema.projectPrompts.id, input.prompt.id),
+            eq(schema.projectPrompts.creatorId, input.prompt.creatorId),
+            eq(schema.projectPrompts.status, "completed"),
+            isNull(schema.projectPrompts.fileReconciliationEventSequence),
+          ),
+        )
+        .returning({ id: schema.projectPrompts.id });
+      if (!marked[0]) throw new LostProjectWorkspaceLeaseError();
+      return sequence;
+    },
+  });
+}
+
 export async function completeProjectPrompt(input: {
   job: ProjectWorkspaceJob;
   prompt: ProjectPromptJob;
@@ -3843,7 +3991,25 @@ export async function recordProjectFileVersion(input: {
         };
       }
       await assertProjectFileAttribution({ ...input, database: tx });
-      const version = (existing?.currentVersion ?? 0) + 1;
+      const versionRows = existing
+        ? await tx
+            .select({
+              value: sql<number>`coalesce(max(${schema.projectFileVersions.version}), 0)`,
+            })
+            .from(schema.projectFileVersions)
+            .where(
+              and(
+                eq(schema.projectFileVersions.orgId, input.job.orgId),
+                eq(schema.projectFileVersions.projectId, input.job.projectId),
+                eq(schema.projectFileVersions.fileId, existing.id),
+                eq(schema.projectFileVersions.creatorId, input.job.creatorId),
+              ),
+            )
+        : [];
+      const version = Math.max(
+        existing?.currentVersion ?? 0,
+        Number(versionRows[0]?.value ?? 0),
+      ) + 1;
       const conflictDetected = projectFileConflictState({
         existingConflict: Boolean(existing?.conflictDetected),
         currentVersion: existing?.currentVersion ?? 0,
@@ -3906,6 +4072,129 @@ export async function recordProjectFileVersion(input: {
         conflictDetected,
       });
       return { fileId, version, conflictDetected };
+    },
+  });
+}
+
+/**
+ * Retain provider bytes observed behind a newer durable projection without changing the current
+ * last-writer-wins pointer. Version allocation considers this recovery history so a later current
+ * write cannot reuse its immutable version number.
+ */
+export async function recordProjectFileHistoricalVersion(input: {
+  job: ProjectWorkspaceJob;
+  workerId: string;
+  path: string;
+  contentType: string;
+  byteSize: number;
+  checksum: string;
+  storageKey: string;
+  modifiedBySessionId?: string | null;
+  modifiedByPromptId?: string | null;
+  baseVersion?: number | null;
+  database?: Db;
+}): Promise<{ fileId: string; version: number; conflictDetected: boolean }> {
+  const database = input.database ?? db;
+  if (!isManagedProjectFilePath(input.path)) {
+    throw new Error("project file path must stay under files/");
+  }
+  return withWorkspaceLease({
+    ...input,
+    database,
+    fn: async (tx) => {
+      const ownership = await tx
+        .update(schema.projectAttachmentUploads)
+        .set({ committedAt: new Date(), touchedAt: new Date() })
+        .where(
+          and(
+            eq(schema.projectAttachmentUploads.storageKey, input.storageKey),
+            eq(schema.projectAttachmentUploads.orgId, input.job.orgId),
+            eq(schema.projectAttachmentUploads.projectId, input.job.projectId),
+            eq(schema.projectAttachmentUploads.creatorId, input.job.creatorId),
+            eq(schema.projectAttachmentUploads.kind, "file"),
+            isNull(schema.projectAttachmentUploads.deleteRequestedAt),
+          ),
+        )
+        .returning({ storageKey: schema.projectAttachmentUploads.storageKey });
+      if (!ownership[0]) {
+        throw new Error("project file storage object was not reserved");
+      }
+      const existingRows = await tx
+        .select()
+        .from(schema.projectFiles)
+        .where(
+          and(
+            eq(schema.projectFiles.orgId, input.job.orgId),
+            eq(schema.projectFiles.projectId, input.job.projectId),
+            eq(schema.projectFiles.creatorId, input.job.creatorId),
+            eq(schema.projectFiles.path, input.path),
+            isNull(schema.projectFiles.deletedAt),
+          ),
+        )
+        .for("update");
+      const existing = existingRows[0];
+      if (!existing) {
+        throw new Error("historical project file requires a durable current version");
+      }
+      if (existing.checksum === input.checksum) {
+        return {
+          fileId: existing.id,
+          version: existing.currentVersion,
+          conflictDetected: existing.conflictDetected,
+        };
+      }
+      await assertProjectFileAttribution({ ...input, database: tx });
+      const versionRows = await tx
+        .select({
+          value: sql<number>`coalesce(max(${schema.projectFileVersions.version}), 0)`,
+        })
+        .from(schema.projectFileVersions)
+        .where(
+          and(
+            eq(schema.projectFileVersions.orgId, input.job.orgId),
+            eq(schema.projectFileVersions.projectId, input.job.projectId),
+            eq(schema.projectFileVersions.fileId, existing.id),
+            eq(schema.projectFileVersions.creatorId, input.job.creatorId),
+          ),
+        );
+      const version = Math.max(
+        existing.currentVersion,
+        Number(versionRows[0]?.value ?? 0),
+      ) + 1;
+      const observedBaseVersion = input.baseVersion ?? 0;
+      // Reaching this path means provider truth diverged from an already-newer durable projection.
+      // Preserve that overlap explicitly even when the scan's durable baseline version happens to
+      // equal the current pointer.
+      const conflictDetected = true;
+      if (!existing.conflictDetected) {
+        await tx
+          .update(schema.projectFiles)
+          .set({ conflictDetected: true, updatedAt: new Date() })
+          .where(
+            and(
+              eq(schema.projectFiles.orgId, input.job.orgId),
+              eq(schema.projectFiles.projectId, input.job.projectId),
+              eq(schema.projectFiles.id, existing.id),
+              eq(schema.projectFiles.creatorId, input.job.creatorId),
+            ),
+          );
+      }
+      await tx.insert(schema.projectFileVersions).values({
+        orgId: input.job.orgId,
+        projectId: input.job.projectId,
+        fileId: existing.id,
+        creatorId: input.job.creatorId,
+        version,
+        contentType: input.contentType,
+        byteSize: input.byteSize,
+        checksum: input.checksum,
+        storageKey: input.storageKey,
+        modifiedBySessionId: input.modifiedBySessionId ?? null,
+        modifiedByPromptId: input.modifiedByPromptId ?? null,
+        baseVersion: observedBaseVersion,
+        conflictDetected,
+      });
+      return { fileId: existing.id, version, conflictDetected };
     },
   });
 }

@@ -199,7 +199,12 @@ vi.mock("@companion/storage", () => ({
 
 import { app } from "./index";
 
-const actor = { id: "run-user", email: "run-user@example.test", name: "Run User" };
+const actor = { id: "run-user", email: "run-user@thevibecompany.co", name: "Run User" };
+const ineligibleActor = {
+  id: "outside-user",
+  email: "outside@example.test",
+  name: "Outside User",
+};
 const skillVersionId = "00000000-0000-4000-8000-000000000001";
 const configId = "00000000-0000-4000-8000-000000000002";
 const secretId = "00000000-0000-4000-8000-000000000003";
@@ -273,8 +278,22 @@ describe("session-only project routes", () => {
     updated_at: "2026-07-23T18:01:00.000Z",
     prompts: [],
     transcript: [],
+    current_event_sequence: 0,
     latest_event_sequence: 0,
   };
+
+  it("hides Projects from signed-in users outside the internal pilot", async () => {
+    authMocks.getSession.mockResolvedValue({
+      user: ineligibleActor,
+      session: { id: "session-outside" },
+    });
+
+    const response = await app.request("/v1/projects");
+
+    expect(response.status).toBe(404);
+    expect(serviceMocks.listProjects).not.toHaveBeenCalled();
+    expect(serviceMocks.listOrgs).not.toHaveBeenCalled();
+  });
 
   it("lists runtime readiness and supports exact create/update/skills contracts", async () => {
     signIn();
@@ -804,6 +823,55 @@ describe("session-only project routes", () => {
 });
 
 describe("session-only RunSkill routes", () => {
+  it("hides Run Skill when its deployment flag is disabled", async () => {
+    signIn();
+    process.env.COMPANION_RUNS_ENABLED = "false";
+    try {
+      const response = await app.request("/v1/skills/demo/run-options");
+
+      expect(response.status).toBe(404);
+      expect(serviceMocks.getRunOptions).not.toHaveBeenCalled();
+      expect(catalogMocks.listModels).not.toHaveBeenCalled();
+      expect(serviceMocks.listOrgs).not.toHaveBeenCalled();
+    } finally {
+      process.env.COMPANION_RUNS_ENABLED = "true";
+    }
+  });
+
+  it("hides Run Skill options from signed-in users outside the internal pilot", async () => {
+    authMocks.getSession.mockResolvedValue({
+      user: ineligibleActor,
+      session: { id: "session-outside" },
+    });
+
+    const response = await app.request("/v1/skills/demo/run-options");
+
+    expect(response.status).toBe(404);
+    expect(serviceMocks.getRunOptions).not.toHaveBeenCalled();
+    expect(catalogMocks.listModels).not.toHaveBeenCalled();
+    expect(serviceMocks.listOrgs).not.toHaveBeenCalled();
+  });
+
+  it("rejects an ineligible Run Skill launch before reading its multipart body", async () => {
+    authMocks.getSession.mockResolvedValue({
+      user: ineligibleActor,
+      session: { id: "session-outside" },
+    });
+    const response = await app.request("/v1/skills/demo/runs", {
+      method: "POST",
+      headers: {
+        "content-type": "multipart/form-data; boundary=blocked",
+        "content-length": String(65 * 1024 * 1024),
+      },
+      body: "--blocked--",
+    });
+
+    expect(response.status).toBe(404);
+    expect(serviceMocks.createRun).not.toHaveBeenCalled();
+    expect(storageMocks.putSkillArchive).not.toHaveBeenCalled();
+    expect(serviceMocks.listOrgs).not.toHaveBeenCalled();
+  });
+
   it("creates, heartbeats and cancels creator-private prewarms without exposing provider state", async () => {
     signIn();
     const prewarm = {

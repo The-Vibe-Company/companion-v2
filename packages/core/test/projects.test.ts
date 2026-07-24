@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
+import type { ProjectPromptJob, ProjectWorkspaceJob } from "@companion/contracts";
+import { schema, type Db } from "@companion/db";
 import {
+  appendCompletedProjectPromptArtifactsUpdated,
   buildProjectAuthorityInputs,
   classifyProjectAuthorityChange,
   isProjectSessionProviderAdmitted,
+  LostProjectWorkspaceLeaseError,
   projectFileConflictState,
   projectPromptSendFenceDecision,
 } from "../src/projectJobs";
@@ -16,6 +20,135 @@ import {
   reopenedProjectSessionState,
   sandboxNameForProject,
 } from "../src/projects";
+
+const artifactJob: ProjectWorkspaceJob = {
+  orgId: "00000000-0000-4000-8000-000000000001",
+  projectId: "00000000-0000-4000-8000-000000000002",
+  creatorId: "creator",
+  status: "running",
+  sandboxName: "project-artifact-test",
+  sandboxId: "project-artifact-test",
+  sandboxDomain: "https://project.invalid",
+  checkpointId: null,
+  checkpointGeneration: 0,
+  desiredGeneration: 1,
+  appliedGeneration: 1,
+  desiredFileRevision: 0,
+  appliedFileRevision: 0,
+  lastActivityAt: new Date(),
+  idleDeadlineAt: null,
+  activationRevision: 1,
+  authorityRevision: "authority-1",
+  activationAdmissionToken: null,
+  activationAdmissionRevision: null,
+  activationAdmissionAuthorityRevision: null,
+  activationAdmittedAt: null,
+  environmentExposureAttemptedAt: null,
+  recycleRequestedAt: null,
+  recycleReason: null,
+  skillSyncErrorAt: null,
+  skillSyncErrorCode: null,
+  skillSyncErrorMessage: null,
+  leaseGeneration: 1,
+  deleteRequestedAt: null,
+};
+
+const artifactPrompt: ProjectPromptJob = {
+  id: "00000000-0000-4000-8000-000000000003",
+  orgId: artifactJob.orgId,
+  projectId: artifactJob.projectId,
+  creatorId: artifactJob.creatorId,
+  sessionId: "00000000-0000-4000-8000-000000000004",
+  sequence: 1,
+  text: "Create the deliverable",
+  model: "openai/gpt-5",
+  opencodeSessionId: "opencode-session",
+  opencodeMessageId: "opencode-message",
+  sendAttemptedAt: new Date(),
+  leaseOwner: "worker",
+};
+
+function completedArtifactEventDb(input: {
+  entered?: boolean;
+  promptStatus?: "completed" | "running";
+} = {}) {
+  let transcriptSequence = 7;
+  let fileReconciliationEventSequence: number | null = null;
+  let transactionTail = Promise.resolve();
+  const events: Array<{
+    sequence: number;
+    event: Record<string, unknown>;
+  }> = [];
+  const handle = {
+    transaction: async (fn: (transaction: Db) => Promise<unknown>) => {
+      const previous = transactionTail;
+      let release!: () => void;
+      transactionTail = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        return await fn(handle as unknown as Db);
+      } finally {
+        release();
+      }
+    },
+    execute: async () => [{ entered: input.entered ?? true }],
+    select: () => ({
+      from: (table: unknown) => ({
+        where: () => ({
+          limit: () => ({
+            for: async () => table === schema.projectPrompts
+              ? [{
+                  id: artifactPrompt.id,
+                  status: input.promptStatus ?? "completed",
+                  eventSequence: fileReconciliationEventSequence,
+                }]
+              : (() => {
+                  throw new Error("unexpected artifact event select");
+                })(),
+          }),
+        }),
+      }),
+    }),
+    update: (table: unknown) => ({
+      set: (values: Record<string, unknown>) => ({
+        where: () => ({
+          returning: async () => {
+            if (table === schema.projectSessions) {
+              transcriptSequence += 1;
+              return [{ sequence: transcriptSequence }];
+            }
+            if (table === schema.projectPrompts) {
+              if (fileReconciliationEventSequence !== null) return [];
+              fileReconciliationEventSequence =
+                values.fileReconciliationEventSequence as number;
+              return [{ id: artifactPrompt.id }];
+            }
+            throw new Error("unexpected artifact event update");
+          },
+        }),
+      }),
+    }),
+    insert: (table: unknown) => ({
+      values: async (value: Record<string, unknown>) => {
+        if (table !== schema.projectSessionEvents) {
+          throw new Error("unexpected artifact event insert");
+        }
+        events.push({
+          sequence: value.sequence as number,
+          event: value.event as Record<string, unknown>,
+        });
+      },
+    }),
+  };
+  return {
+    database: handle as unknown as Db,
+    events,
+    sequence: () => transcriptSequence,
+    reconciliationSequence: () => fileReconciliationEventSequence,
+  };
+}
 
 describe("Cowork project helpers", () => {
   it("accepts only bounded visible Project create idempotency keys", () => {
@@ -129,6 +262,63 @@ describe("Cowork project helpers", () => {
       expect(error).toBeInstanceOf(ProjectValidationError);
       expect(error).toMatchObject({ code: "skill_dependency_version_conflict" });
     }
+  });
+});
+
+describe("Project file reconciliation barrier", () => {
+  it("linearizes concurrent retries into one artifacts.updated event", async () => {
+    const state = completedArtifactEventDb();
+    const [first, retried] = await Promise.all([
+      appendCompletedProjectPromptArtifactsUpdated({
+        job: artifactJob,
+        prompt: artifactPrompt,
+        workerId: "worker",
+        count: 3,
+        database: state.database,
+      }),
+      appendCompletedProjectPromptArtifactsUpdated({
+        job: artifactJob,
+        prompt: artifactPrompt,
+        workerId: "worker",
+        count: 3,
+        database: state.database,
+      }),
+    ]);
+
+    expect(first).toBe(8);
+    expect(retried).toBe(8);
+    expect(state.sequence()).toBe(8);
+    expect(state.reconciliationSequence()).toBe(8);
+    expect(state.events).toEqual([{
+      sequence: 8,
+      event: {
+        type: "artifacts.updated",
+        count: 3,
+        prompt_id: artifactPrompt.id,
+      },
+    }]);
+  });
+
+  it("rejects the barrier unless both the workspace lease and terminal prompt are valid", async () => {
+    const running = completedArtifactEventDb({ promptStatus: "running" });
+    await expect(appendCompletedProjectPromptArtifactsUpdated({
+      job: artifactJob,
+      prompt: artifactPrompt,
+      workerId: "worker",
+      count: 0,
+      database: running.database,
+    })).rejects.toBeInstanceOf(LostProjectWorkspaceLeaseError);
+    expect(running.events).toEqual([]);
+
+    const lostLease = completedArtifactEventDb({ entered: false });
+    await expect(appendCompletedProjectPromptArtifactsUpdated({
+      job: artifactJob,
+      prompt: artifactPrompt,
+      workerId: "worker",
+      count: 0,
+      database: lostLease.database,
+    })).rejects.toBeInstanceOf(LostProjectWorkspaceLeaseError);
+    expect(lostLease.events).toEqual([]);
   });
 });
 

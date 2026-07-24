@@ -107,6 +107,66 @@
   color: var(--color-faint);
 }
 
+.run-working--preparing {
+  width: min(540px, 100%);
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  color: var(--color-muted);
+  background: var(--color-surface-sunken);
+  font-family: var(--font-ui);
+}
+
+.run-working__signal {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--color-accent-edge);
+  border-radius: var(--radius-sm);
+  color: var(--color-fg);
+  background: var(--color-accent-tint);
+}
+
+.run-working__signal .ls-spin {
+  color: currentColor;
+}
+
+.run-working__copy {
+  min-width: 0;
+  display: grid;
+  align-content: center;
+  gap: 2px;
+}
+
+.run-working__copy strong {
+  color: var(--color-fg);
+  font: var(--weight-semibold) var(--text-xs) / var(--leading-normal)
+    var(--font-ui);
+}
+
+.run-working__copy small {
+  color: var(--color-muted);
+  font: var(--text-xs) / var(--leading-normal) var(--font-ui);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .run-working--preparing {
+    animation: cowork-preparing-in var(--duration-fast) var(--ease-out-quint);
+  }
+}
+
+@keyframes cowork-preparing-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+}
+
 .cowork-session__turn-alert {
   width: min(calc(100% - 48px), 760px);
   display: grid;

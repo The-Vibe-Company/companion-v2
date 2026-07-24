@@ -528,9 +528,9 @@ run_dev() {
   log "Seeding local test user"
   pnpm --filter @companion/api seed:test-user
   if [ -n "${COMPANION_SEED_PASSWORD:-}" ]; then
-    log "Local test user: ${COMPANION_SEED_EMAIL:-admin@tvc.dev} / [COMPANION_SEED_PASSWORD]"
+    log "Local test user: ${COMPANION_SEED_EMAIL:-admin@thevibecompany.co} / [COMPANION_SEED_PASSWORD]"
   else
-    log "Local development credentials: ${COMPANION_SEED_EMAIL:-admin@tvc.dev} / adminadmin"
+    log "Local development credentials: ${COMPANION_SEED_EMAIL:-admin@thevibecompany.co} / adminadmin"
   fi
   log "Existing local users keep their current password."
 

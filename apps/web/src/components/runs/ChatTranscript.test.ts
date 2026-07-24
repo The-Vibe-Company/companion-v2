@@ -66,6 +66,41 @@ function chatState(): ChatState {
 }
 
 describe("ChatTranscript scroller", () => {
+  it("announces a detailed preparation state without replacing normal working copy", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        React.createElement(ChatTranscript, {
+          run: null,
+          chat: chatState(),
+          showPromptBubble: false,
+          showWorking: true,
+          workingLabel: "Preparing your Project",
+          workingDetail:
+            "Loading files, Skills, and access before your task starts.",
+          workingVariant: "preparing",
+          streamDead: false,
+          rowExpanded: () => false,
+          onToggleRow: () => undefined,
+          onReconnect: () => undefined,
+          onOpenFiles: () => undefined,
+        }),
+      );
+    });
+
+    const status = container.querySelector<HTMLElement>(
+      ".run-working--preparing",
+    );
+    expect(status?.getAttribute("role")).toBe("status");
+    expect(status?.getAttribute("aria-live")).toBe("polite");
+    expect(status?.textContent).toContain("Preparing your Project");
+    expect(status?.textContent).toContain(
+      "Loading files, Skills, and access before your task starts.",
+    );
+  });
+
   it("marks user turns as anchors and exposes the shadcn jump-to-latest control", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);

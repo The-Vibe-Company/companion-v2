@@ -123,6 +123,7 @@ function session(overrides: Partial<ProjectSessionVM> = {}): ProjectSessionVM {
     prompts: [],
     pendingPrompts: [],
     latestEventSequence: 0,
+    currentEventSequence: 0,
     createdAt: NOW,
     updatedAt: NOW,
     lastActiveAt: NOW,
@@ -605,6 +606,41 @@ describe("ProjectsApp", () => {
     expect(container.textContent).toContain("No archived Projects");
   });
 
+  it("does not let an archived background load hide the active empty state", async () => {
+    let resolveArchived!: (value: {
+      projects: ProjectRowVM[];
+      runtime: ProjectRuntimeAvailability;
+    }) => void;
+    const archivedPending = new Promise<{
+      projects: ProjectRowVM[];
+      runtime: ProjectRuntimeAvailability;
+    }>((resolve) => {
+      resolveArchived = resolve;
+    });
+    projectRpc.fetchProjects.mockImplementation(async (view?: string) =>
+      view === "archived"
+        ? archivedPending
+        : { projects: [], runtime: { available: true, message: null } });
+
+    const container = await mount({ projects: [] });
+
+    expect(container.textContent).toContain("Create your first project");
+    expect(container.textContent).not.toContain("Loading archived Projects");
+
+    act(() => button(container, "Archived").click());
+    expect(container.textContent).toContain("Loading archived Projects");
+
+    await act(async () => {
+      resolveArchived({
+        projects: [],
+        runtime: { available: true, message: null },
+      });
+      await archivedPending;
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("No archived Projects");
+  });
+
   it("refetches the open Archived view after a Project is archived from the sidebar", async () => {
     const inactive = session({ status: "completed" });
     const activeRow = projectRow({
@@ -1029,9 +1065,35 @@ describe("ProjectsApp", () => {
       idempotencyKey: expect.any(String),
     });
     expect(document.body.textContent).toContain("New conversation");
+    expect(
+      document.body
+        .querySelector<HTMLTextAreaElement>('[role="dialog"] textarea')
+        ?.getAttribute("aria-label"),
+    ).toBe("What should this conversation do?");
     expect(router.replace).toHaveBeenCalledWith(
       `/projects/${PROJECT_ID}?newSession=1`,
     );
+  });
+
+  it("does not open a direct new-conversation dialog for an archived Project", async () => {
+    const archived = projectDetail({
+      archivedAt: NOW,
+      status: "stopped",
+      activeSessionCount: 0,
+      sessions: [session({ status: "completed" })],
+    });
+    await mount({
+      project: archived,
+      dialog: {
+        kind: "new-session",
+        projectId: PROJECT_ID,
+        initialSkillSlug: null,
+      },
+    });
+
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    expect(projectRpc.createProjectSession).not.toHaveBeenCalled();
+    expect(router.replace).toHaveBeenCalledWith(`/projects/${PROJECT_ID}`);
   });
 
   it("reuses a project creation key until its payload changes", async () => {

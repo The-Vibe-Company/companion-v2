@@ -283,6 +283,11 @@ non-archived conversations per Project in canonical `created_at DESC, id DESC` o
 or was viewed. The project row owns the settings and new-conversation actions. The Projects `+` opens
 the compact Project setup dialog.
 
+During the internal rollout, this route switch is shown only to authenticated members whose email uses
+the exact `thevibecompany.co` domain and only while Projects is enabled. Everyone else keeps the normal
+Skills navigation with no disabled, teaser, or empty Projects control. The same quiet omission applies
+to Run Skill and its Sessions history when that capability is unavailable.
+
 Prefer tables and structured rows for resources. Companion lists fleets, containers, skills, members, providers, scopes, audit events, and planned changes. These surfaces should be compact and sortable/filterable over time, not inflated into repeated marketing cards.
 
 Summary metrics are inline counts, not hero cards. Use patterns like `Total 12 · Healthy 9 · Degraded 2 · Down 1`, with tabular numerals and status labels. Avoid large vanity numerals.
@@ -342,6 +347,13 @@ the Project default is preselected. A conversation sends the prompt directly to 
 the real transcript, tool activity, errors, and generated Files. Do not invent Companion plan,
 approval, progress, or deliverable-review states. OpenCode permissions are handled automatically by
 the runtime and do not create approval UI.
+When a queued message must wake or prepare the persistent workspace, replace the generic working
+marker with one compact inline state in the transcript: `Waking up your Project`, `Preparing your
+Project`, then `Starting your task`. Drive those labels from the durable workspace and conversation
+states, update them in place, and return to real OpenCode activity as soon as the turn starts. Never
+show a fabricated percentage, countdown, or time estimate. If the selected model connection is no
+longer available, replace preparation with the actionable `Connection needed` state; never promise
+that the task is about to start indefinitely.
 
 Conversation read state is durable. Completion in the background marks the conversation `New result`
 or `Failed`, increments a quiet Project count, and produces a clickable in-product notification.
