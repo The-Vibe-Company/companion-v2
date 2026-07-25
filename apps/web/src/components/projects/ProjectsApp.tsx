@@ -93,6 +93,8 @@ type ProjectSessionChange = {
 const PROJECT_REFRESH_MS = 15_000;
 /** Long enough to read a confirmation and still reach its Undo. */
 const TOAST_DISMISS_MS = 10_000;
+/** Newest background results stay visible; older ones queue behind them. */
+const VISIBLE_RESULT_TOASTS = 3;
 const PROJECT_VIEWED_MAX_ATTEMPTS = 3;
 const PROJECT_VIEWED_RETRY_DELAYS_MS = [1_000, 3_000] as const;
 
@@ -2108,7 +2110,7 @@ export function ProjectsApp({
       sessionMutationRef.current.delete(mutationKey);
     }
   };
-  const visibleResultToasts = resultToasts.slice(0, 3);
+  const visibleResultToasts = resultToasts.slice(-VISIBLE_RESULT_TOASTS);
 
   // Confirmations expire on their own so a burst of background results cannot pile up unread.
   // Warnings and failures stay until dismissed: they carry something the member still has to act on.
@@ -2119,7 +2121,11 @@ export function ProjectsApp({
   }, [toast]);
 
   useEffect(() => {
-    const expiring = resultToasts.find((candidate) => candidate.tone === "neutral");
+    // Recomputed here rather than read from a render-scoped array: a fresh array identity every
+    // render would restart the timer forever and nothing would ever expire.
+    const expiring = resultToasts
+      .slice(-VISIBLE_RESULT_TOASTS)
+      .find((candidate) => candidate.tone === "neutral");
     if (!expiring) return;
     const timer = window.setTimeout(
       () =>
@@ -2593,6 +2599,7 @@ export function ProjectsApp({
           busy={orgActions.busy}
         />
       )}
+      <div className="project-toast-stack">
       {orgActions.error && (
         <div className="project-toast" role="alert">
           <Icon name="alert-triangle" size={14} />
@@ -2682,6 +2689,7 @@ export function ProjectsApp({
           </button>
         </div>
       ) : null}
+      </div>
     </div>
   );
 }

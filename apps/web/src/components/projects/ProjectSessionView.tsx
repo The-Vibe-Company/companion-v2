@@ -19,6 +19,7 @@ import {
   useState,
   type ClipboardEvent,
   type DragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type RefObject,
 } from "react";
@@ -1344,22 +1345,42 @@ export function ProjectFilesPanel({
       setWidth(clampFilesPanelWidth(stored));
     }
   }, []);
+  const commitWidth = (next: number) => {
+    setWidth(next);
+    localStorage.setItem(PROJECT_FILES_WIDTH_KEY, String(Math.round(next)));
+  };
+  const currentWidth = (element: HTMLElement) =>
+    width ?? element.parentElement?.getBoundingClientRect().width ?? PROJECT_FILES_MIN_WIDTH;
   const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
+    // Capture on the handle: without it a drag crossing the PDF iframe stops delivering events to
+    // the parent document and the panel sticks mid-resize.
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const handle = event.currentTarget;
     const startX = event.clientX;
-    const startWidth =
-      width ?? event.currentTarget.parentElement?.getBoundingClientRect().width ?? PROJECT_FILES_MIN_WIDTH;
+    const startWidth = currentWidth(handle);
     const nextWidth = (pointer: PointerEvent) =>
       clampFilesPanelWidth(startWidth + startX - pointer.clientX);
     const move = (pointer: PointerEvent) => setWidth(nextWidth(pointer));
     const up = (pointer: PointerEvent) => {
-      window.removeEventListener("pointermove", move);
-      const settled = nextWidth(pointer);
-      setWidth(settled);
-      localStorage.setItem(PROJECT_FILES_WIDTH_KEY, String(Math.round(settled)));
+      handle.removeEventListener("pointermove", move);
+      if (handle.hasPointerCapture(pointer.pointerId)) {
+        handle.releasePointerCapture(pointer.pointerId);
+      }
+      commitWidth(nextWidth(pointer));
     };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up, { once: true });
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up, { once: true });
+    handle.addEventListener("pointercancel", up, { once: true });
+  };
+  /** Keyboard parity with the Skill Runs canvas: the panel must be resizable without a pointer. */
+  const keyResize = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 96 : 24;
+    const delta =
+      event.key === "ArrowLeft" ? step : event.key === "ArrowRight" ? -step : 0;
+    if (delta === 0) return;
+    event.preventDefault();
+    commitWidth(clampFilesPanelWidth(currentWidth(event.currentTarget) + delta));
   };
   return (
     <aside
@@ -1372,7 +1393,11 @@ export function ProjectFilesPanel({
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize the files panel"
+        aria-valuenow={width === null ? undefined : Math.round(width)}
+        aria-valuemin={PROJECT_FILES_MIN_WIDTH}
+        tabIndex={0}
         onPointerDown={startResize}
+        onKeyDown={keyResize}
       />
       <header className="run-files-drawer__head">
         <div>

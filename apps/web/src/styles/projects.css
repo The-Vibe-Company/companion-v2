@@ -350,8 +350,8 @@
   white-space: nowrap;
 }
 
-.projects-side__all-signal:first-of-type {
-  margin-inline-start: auto;
+.projects-side__all .tnum {
+  margin-inline-end: auto;
 }
 
 .projects-side__all-signal + .projects-side__all-signal {
@@ -2624,11 +2624,31 @@
   font-size: 9px;
 }
 
-.project-toast {
+/* Several background results can be visible at once, so the toasts share one fixed stack instead
+   of each pinning itself to the same corner and covering the others. */
+.project-toast-stack {
   position: fixed;
   z-index: 1100;
   right: 18px;
   bottom: 18px;
+  display: flex;
+  max-width: min(420px, calc(100vw - 36px));
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.project-toast-stack:empty {
+  display: none;
+}
+
+.project-toast-stack > * {
+  pointer-events: auto;
+}
+
+.project-toast {
+  position: static;
   display: flex;
   max-width: 420px;
   align-items: center;

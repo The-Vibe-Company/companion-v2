@@ -289,6 +289,9 @@ export function useFilePreview(input: {
         }
         if (!response.ok) throw new Error(`Preview failed (${response.status}).`);
         const bytes = await response.arrayBuffer();
+        // Selecting another file mid-flight must not render the previous one underneath it, nor
+        // strand the object URL this effect would no longer revoke.
+        if (controller.signal.aborted) return;
         if (previewKind === "xlsx") {
           setPreview({ kind: "xlsx", bytes });
         } else if (["text", "markdown", "csv"].includes(previewKind)) {

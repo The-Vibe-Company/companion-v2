@@ -37,6 +37,13 @@ worker communicate through Postgres and external providers. Deploy `api` once be
 supervisor so
 the first database migration has completed; later API deploys run migrations before replacing the live process.
 
+**Deploy `api` before `worker` on every release, not only the first.** Only the API carries a
+pre-deploy migration hook (`api.railway.json`), so a worker started ahead of it runs new code against
+the old schema. A worker released before migration `0058`, for example, selects `attempt` from
+`companion_claim_project_workspaces` and every claim fails with `42703`; the supervisor logs
+`project workspace claim will retry (...)` once per claim interval and processes no Project until the
+migration lands, then recovers on its own. Nothing is lost, but Projects stall for the window.
+
 Run the API and worker with two distinct `LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT` roles that neither
 own database objects nor belong to the migration-owner role. Keep the Railway Postgres owner URL only
 in `DATABASE_MIGRATION_URL` on the API (for its pre-deploy migration). Create both logins from the

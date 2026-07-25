@@ -1060,3 +1060,8 @@
     display: none;
   }
 }
+
+.cowork-session-files-panel__resize:focus-visible {
+  background: var(--color-accent);
+  outline: none;
+}
