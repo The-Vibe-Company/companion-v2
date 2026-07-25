@@ -4630,8 +4630,9 @@ describe("projectRetryDelayMs", () => {
     expect(projectRetryDelayMs(1_000, 1)).toBe(1_000);
     expect(projectRetryDelayMs(1_000, 2)).toBe(2_000);
     expect(projectRetryDelayMs(1_000, 5)).toBe(16_000);
+    // The claim clamps `attempt` at `max_attempts` (default 5), so 16s is the reachable delay at a
+    // one-second claim interval; the absolute ceiling only binds for larger operator settings.
     expect(projectRetryDelayMs(1_000, 7)).toBe(60_000);
-    // A recovered provider is still picked up within a minute no matter how long it was broken.
     expect(projectRetryDelayMs(1_000, 500)).toBe(60_000);
   });
 

@@ -243,7 +243,6 @@ export interface ProjectWorkspaceStore {
     job: ProjectWorkspaceJob;
     workerId: string;
     delayMs?: number;
-    backoff?: boolean;
     errorCode?: string;
     errorMessage?: string;
   }): Promise<boolean>;
@@ -3654,7 +3653,6 @@ export async function runProjectWorkspaceJob(input: {
         : providerStopped
           ? 0
           : input.config.claimIntervalMs,
-      backoff: runtimeFailureRelease,
     }).catch(() => false);
   }
 }
@@ -3663,10 +3661,17 @@ export async function runProjectWorkspaceJob(input: {
  * `companion_claim_project_workspaces` reclaims a `project_runtime_failed` workspace on every pass
  * and treats `available_at` as the backoff boundary. Releasing at a flat claim interval therefore
  * retried a permanently failing activation once per second forever, each attempt doing provider
- * work. Back off exponentially instead, capped so a recovered provider is still picked up promptly.
+ * work. Back off exponentially instead.
+ *
+ * The claim clamps the counter with `least(attempt + 1, max_attempts)`, so the reachable delay is
+ * bounded by `max_attempts` (default 5) long before the absolute ceiling: at the default one-second
+ * claim interval a stuck workspace settles at one provider attempt every 16 seconds rather than one
+ * per second. `PROJECT_RETRY_MAX_DELAY_MS` only binds when an operator raises the claim interval or
+ * `max_attempts`. A member is never held behind this: `retryProjectWorkspace` resets `available_at`
+ * and `attempt`, which is what the `Try again` action on the needs-attention banner calls.
  */
 export function projectRetryDelayMs(claimIntervalMs: number, attempt: number): number {
-  const exponent = Math.min(Math.max(attempt, 1) - 1, 16);
+  const exponent = Math.max(Math.max(attempt, 1) - 1, 0);
   return Math.min(claimIntervalMs * 2 ** exponent, PROJECT_RETRY_MAX_DELAY_MS);
 }
 

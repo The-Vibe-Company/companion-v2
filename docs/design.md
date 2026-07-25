@@ -982,11 +982,18 @@ completion or during an in-flight turn cannot strand the activation.
 
 A `project_runtime_failed` workspace stays retryable and `available_at` is the only backoff boundary,
 so the worker releases that lease with an exponential delay derived from the claimed `attempt`
-(`projectRetryDelayMs`: claim interval doubling per attempt, capped at one minute). Releasing at a
-flat claim interval retried a permanently failing activation once per second forever, each pass doing
-provider work. Successful and boundary releases are unchanged, and the first retry still happens at
-the claim interval. The supervisor loop logs a bounded classification when a claim or a job escapes
-its durable failure handling; neither path is silent.
+(`projectRetryDelayMs`: the claim interval doubling per attempt). Releasing at a flat claim interval
+retried a permanently failing activation once per second forever, each pass doing provider work.
+Because the claim clamps the counter with `least(attempt + 1, max_attempts)`, the reachable delay is
+bounded by `max_attempts` (default 5) rather than by the absolute one-minute ceiling: at the default
+one-second claim interval a stuck workspace settles at one provider attempt every 16 seconds. The
+backoff deliberately still applies when a prompt is queued - a workspace that cannot activate cannot
+serve that prompt either, and cancelling the delay whenever work was pending would reinstate the
+storm for its most common trigger. `retryProjectWorkspace` resets `available_at` and `attempt`, so
+the needs-attention `Try again` action remains the member's immediate escape hatch. Successful and
+boundary releases are unchanged, and the first retry still happens at the claim interval. The
+supervisor loop logs a bounded classification when a claim or a job escapes its durable failure
+handling; neither path is silent.
 
 Native OpenCode questions are distinct from permissions. The shared event subscription normalizes
 legacy and v2 question payloads into the bounded Project event vocabulary, persists the safe prompt
@@ -1150,7 +1157,11 @@ with Escape and focus restoration. That desktop panel is drag-resizable and stor
 previewed inline through `apps/web/src/components/files/filePreview.tsx`, the single preview engine
 shared with Skill Run artifacts: text-shaped files are fetched and rendered in-product because
 browsers refuse to display `text/csv` inline and cannot render Markdown, and the PDF frame carries no
-`sandbox` attribute because any value disables the viewer. Preview classification strips media-type
+`sandbox` attribute because any value disables the viewer. Dropping that attribute is a deliberate
+trade: the bytes are re-wrapped as a Blob whose type is hard-coded to `application/pdf` and only the
+`pdf` preview kind reaches that branch, so MIME confusion is impossible, but the frame does run on
+the app origin and regains the navigation and popup handling `sandbox=""` suppressed. The alternative
+is no PDF preview at all, because a sandboxed frame renders the browser's broken-file icon. Preview classification strips media-type
 parameters, since stored types are `text/markdown; charset=utf-8` and an exact-string match silently
 marked every generated Markdown, CSV, and text file unpreviewable. Remaining
 Office formats are download/open-external in V1. Composer file input supports selection, drag-and-drop,

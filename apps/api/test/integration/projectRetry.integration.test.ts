@@ -280,17 +280,13 @@ describe("Project workspace retry", () => {
   });
 
   /**
-   * Backoff exists so Companion stops hammering a broken provider, not so it can sit in front of the
-   * creator. A queued prompt must keep the workspace immediately claimable, otherwise sending a
-   * message to a Project that just failed would wait out the whole backoff window.
+   * The workspace activates before it claims prompts, so an activation failure leaves the prompt
+   * that triggered it still `queued`. An earlier fix cancelled backoff whenever a prompt was
+   * queued, which nullified it in exactly that dominant case and kept the once-per-second provider
+   * storm alive. Backoff must hold; `retryProjectWorkspace` is the member's immediate escape hatch.
    */
-  it("never delays a release past work the creator already asked for", async () => {
-    const workerId = `backoff-yield-${randomUUID()}`;
-    const claim = async () => {
-      const jobs = await claimProjectWorkspaceJobs({ workerId, limit: 10, database: integrationDb });
-      return jobs.find((candidate) => candidate.projectId === needsAttentionProjectId)!;
-    };
-    /** Milliseconds the workspace is held back from the claim loop. */
+  it("holds a failing activation back even while its triggering prompt is still queued", async () => {
+    const workerId = `backoff-hold-${randomUUID()}`;
     const holdOffMs = async () => {
       const [row] = await integrationSql<Array<{ hold_off_ms: number }>>`
         select extract(epoch from ("available_at" - now())) * 1000 as "hold_off_ms"
@@ -300,29 +296,6 @@ describe("Project workspace retry", () => {
       return Number(row!.hold_off_ms);
     };
 
-    await integrationSql`
-      update "project_workspaces"
-      set "status" = 'error', "last_error_code" = 'project_runtime_failed',
-          "available_at" = now() - interval '1 minute',
-          "lease_owner" = null, "lease_expires_at" = null
-      where "org_id" = ${fixture.orgA}::uuid and "project_id" = ${needsAttentionProjectId}::uuid
-    `;
-
-    const idle = await claim();
-    await releaseProjectWorkspaceLease({
-      job: idle,
-      workerId,
-      delayMs: 60_000,
-      backoff: true,
-      database: integrationDb,
-    });
-    expect(await holdOffMs()).toBeGreaterThan(30_000);
-
-    await integrationSql`
-      update "project_workspaces"
-      set "available_at" = now() - interval '1 minute', "lease_owner" = null, "lease_expires_at" = null
-      where "org_id" = ${fixture.orgA}::uuid and "project_id" = ${needsAttentionProjectId}::uuid
-    `;
     const sessionId = randomUUID();
     await integrationSql`
       insert into "project_sessions"
@@ -339,15 +312,35 @@ describe("Project workspace retry", () => {
               ${sessionId}::uuid, ${fixture.owner.id}, 1, 'Please continue', 'queued',
               ${randomUUID()}, ${randomUUID()}, 1, 0, ${`msg_${randomUUID()}`})
     `;
+    await integrationSql`
+      update "project_workspaces"
+      set "status" = 'error', "last_error_code" = 'project_runtime_failed',
+          "available_at" = now() - interval '1 minute',
+          "lease_owner" = null, "lease_expires_at" = null
+      where "org_id" = ${fixture.orgA}::uuid and "project_id" = ${needsAttentionProjectId}::uuid
+    `;
 
-    const pending = await claim();
+    const jobs = await claimProjectWorkspaceJobs({ workerId, limit: 10, database: integrationDb });
+    const claimed = jobs.find((candidate) => candidate.projectId === needsAttentionProjectId)!;
     await releaseProjectWorkspaceLease({
-      job: pending,
+      job: claimed,
       workerId,
       delayMs: 60_000,
-      backoff: true,
       database: integrationDb,
     });
+    expect(await holdOffMs()).toBeGreaterThan(30_000);
+
+    // The member is never stuck behind the hold: the needs-attention `Try again` action clears it.
+    await withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) =>
+        retryProjectWorkspace({
+          actor: fixture.owner,
+          orgId: fixture.orgA,
+          projectId: needsAttentionProjectId,
+          database,
+        }),
+    );
     expect(await holdOffMs()).toBeLessThan(1_000);
   });
 });
