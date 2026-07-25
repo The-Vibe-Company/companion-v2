@@ -280,8 +280,12 @@ independently scrollable region. Each project is a disclosure: its live and rece
 directly below it, while the complete history remains on the Project page. Show at most five
 non-archived conversations per Project in canonical `created_at DESC, id DESC` order, followed by
 `All conversations · N`. A conversation never changes position because it started, completed, failed,
-or was viewed. The project row owns the settings and new-conversation actions. The Projects `+` opens
-the compact Project setup dialog.
+or was viewed. Because that order can push a working or unread conversation out of the visible five,
+`All conversations · N` also carries a quiet dot-plus-label roll-up of the signals outside it, such as
+`2 working`; it stays absent when every signalled conversation is already listed. Searching the
+sidebar matches Project names only, since conversation titles are capped server-side and a partial
+match would read as an exhaustive one. The project row owns the settings and new-conversation actions.
+The Projects `+` opens the compact Project setup dialog.
 
 During the internal rollout, this route switch is shown only to authenticated members whose email uses
 the exact `thevibecompany.co` domain and only while Projects is enabled. Everyone else keeps the normal
@@ -379,8 +383,14 @@ packages, OpenCode storage, and sandbox addresses stay hidden. Preserve nested p
 `files/`. Every prompt attachment stays associated with the message that introduced it. After a turn,
 show one compact `Created files` or `Updated files` block linked to the exact immutable versions
 captured for that prompt. On desktop, file selection opens a non-modal side panel while the transcript
-and composer remain usable. On mobile, it opens an accessible drawer. Preview images, PDF, text,
-Markdown, JSON, and CSV inline; Office files remain download/open-externally in this version. New files
+and composer remain usable, and that panel is drag-resizable with its width remembered per member.
+On mobile, it opens an accessible drawer. Preview images, PDF, text, Markdown, JSON, CSV, and XLSX
+inline; remaining Office files stay download/open-externally in this version. Companion renders those
+previews itself rather than delegating to the browser: the same engine serves Skill Run artifacts, so
+Markdown reads as a formatted document, CSV and XLSX as tables, and text through the code view with a
+gutter. Classify by media type with parameters stripped, never by exact string, and never place a
+`sandbox` attribute on the PDF frame, which disables the viewer. Oversized, unsupported, expired, and
+failed previews each state what happened and keep Download reachable. New files
 can be added directly from the Project Files surface or attached to a prompt through selection,
 drag-and-drop, and paste. Direct additions become durable Project Files without creating a synthetic
 conversation; prompt attachments remain linked to their originating message. Existing managed Files

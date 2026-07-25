@@ -1034,3 +1034,29 @@
     min-height: 44px;
   }
 }
+
+/* Drag handle for the desktop Files workbench. Width is persisted per member; the panel keeps its
+   own minimum so the transcript and composer stay usable. */
+.cowork-session-files-panel {
+  position: relative;
+}
+
+.cowork-session-files-panel__resize {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: -3px;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.cowork-session-files-panel__resize:hover,
+.cowork-session-files-panel__resize:active {
+  background: var(--color-accent-tint);
+}
+
+@media (max-width: 1023px) {
+  .cowork-session-files-panel__resize {
+    display: none;
+  }
+}

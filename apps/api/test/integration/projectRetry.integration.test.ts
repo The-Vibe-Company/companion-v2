@@ -3,6 +3,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { schema, withTenantContext } from "@companion/db";
 import {
   ProjectNotFoundError,
+  claimProjectWorkspaceJobs,
+  releaseProjectWorkspaceLease,
   retryProjectWorkspace,
 } from "@companion/core/services";
 import {
@@ -235,5 +237,117 @@ describe("Project workspace retry", () => {
       activation_revision: 2,
       attempt: 0,
     }]);
+  });
+
+  /**
+   * The worker derives its retry backoff from the claimed `attempt`. The claim function declares an
+   * explicit RETURNS TABLE, so a counter that exists on the row but is missing from the projection
+   * leaves the worker unable to back off and it retries a failing activation every claim interval.
+   */
+  it("returns the retry counter it increments, so the worker can back off", async () => {
+    const workerId = `retry-backoff-${randomUUID()}`;
+    await integrationSql`
+      update "project_workspaces"
+      set "status" = 'error',
+          "last_error_code" = 'project_runtime_failed',
+          "available_at" = now() - interval '1 minute',
+          "lease_owner" = null,
+          "lease_expires_at" = null,
+          "attempt" = 0
+      where "org_id" = ${fixture.orgA}::uuid and "project_id" = ${needsAttentionProjectId}::uuid
+    `;
+
+    const claimOnce = async () => {
+      const rows = await integrationSql<Array<{ attempt: number; max_attempts: number }>>`
+        select "attempt", "max_attempts"
+        from companion_claim_project_workspaces(${workerId}, 10, 30)
+        where "project_id" = ${needsAttentionProjectId}::uuid
+      `;
+      return rows[0];
+    };
+
+    const first = await claimOnce();
+    expect(first?.attempt).toBe(1);
+    expect(first?.max_attempts).toBeGreaterThan(0);
+
+    await integrationSql`
+      update "project_workspaces"
+      set "lease_owner" = null, "lease_expires_at" = null, "available_at" = now() - interval '1 minute'
+      where "org_id" = ${fixture.orgA}::uuid and "project_id" = ${needsAttentionProjectId}::uuid
+    `;
+    const second = await claimOnce();
+    expect(second?.attempt).toBe(2);
+  });
+
+  /**
+   * Backoff exists so Companion stops hammering a broken provider, not so it can sit in front of the
+   * creator. A queued prompt must keep the workspace immediately claimable, otherwise sending a
+   * message to a Project that just failed would wait out the whole backoff window.
+   */
+  it("never delays a release past work the creator already asked for", async () => {
+    const workerId = `backoff-yield-${randomUUID()}`;
+    const claim = async () => {
+      const jobs = await claimProjectWorkspaceJobs({ workerId, limit: 10, database: integrationDb });
+      return jobs.find((candidate) => candidate.projectId === needsAttentionProjectId)!;
+    };
+    /** Milliseconds the workspace is held back from the claim loop. */
+    const holdOffMs = async () => {
+      const [row] = await integrationSql<Array<{ hold_off_ms: number }>>`
+        select extract(epoch from ("available_at" - now())) * 1000 as "hold_off_ms"
+        from "project_workspaces"
+        where "org_id" = ${fixture.orgA}::uuid and "project_id" = ${needsAttentionProjectId}::uuid
+      `;
+      return Number(row!.hold_off_ms);
+    };
+
+    await integrationSql`
+      update "project_workspaces"
+      set "status" = 'error', "last_error_code" = 'project_runtime_failed',
+          "available_at" = now() - interval '1 minute',
+          "lease_owner" = null, "lease_expires_at" = null
+      where "org_id" = ${fixture.orgA}::uuid and "project_id" = ${needsAttentionProjectId}::uuid
+    `;
+
+    const idle = await claim();
+    await releaseProjectWorkspaceLease({
+      job: idle,
+      workerId,
+      delayMs: 60_000,
+      backoff: true,
+      database: integrationDb,
+    });
+    expect(await holdOffMs()).toBeGreaterThan(30_000);
+
+    await integrationSql`
+      update "project_workspaces"
+      set "available_at" = now() - interval '1 minute', "lease_owner" = null, "lease_expires_at" = null
+      where "org_id" = ${fixture.orgA}::uuid and "project_id" = ${needsAttentionProjectId}::uuid
+    `;
+    const sessionId = randomUUID();
+    await integrationSql`
+      insert into "project_sessions"
+        ("id", "org_id", "project_id", "creator_id", "title", "model", "model_provider", "status")
+      values (${sessionId}::uuid, ${fixture.orgA}::uuid, ${needsAttentionProjectId}::uuid,
+              ${fixture.owner.id}, 'Waiting work', 'openai/gpt-5', 'openai', 'queued')
+    `;
+    await integrationSql`
+      insert into "project_prompts"
+        ("id", "org_id", "project_id", "session_id", "creator_id", "sequence", "text", "status",
+         "idempotency_key", "payload_hash", "usage_activation_revision", "usage_reservation_ms",
+         "opencode_message_id")
+      values (${randomUUID()}::uuid, ${fixture.orgA}::uuid, ${needsAttentionProjectId}::uuid,
+              ${sessionId}::uuid, ${fixture.owner.id}, 1, 'Please continue', 'queued',
+              ${randomUUID()}, ${randomUUID()}, 1, 0, ${`msg_${randomUUID()}`})
+    `;
+
+    const pending = await claim();
+    await releaseProjectWorkspaceLease({
+      job: pending,
+      workerId,
+      delayMs: 60_000,
+      backoff: true,
+      database: integrationDb,
+    });
+    expect(await holdOffMs()).toBeLessThan(1_000);
   });
 });

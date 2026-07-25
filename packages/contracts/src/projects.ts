@@ -574,6 +574,9 @@ export interface ProjectWorkspaceJob {
   skillSyncErrorMessage: string | null;
   leaseGeneration: number;
   deleteRequestedAt: Date | null;
+  /** Consecutive claim count. Drives the `available_at` retry backoff after a runtime failure. */
+  attempt: number;
+  maxAttempts: number;
 }
 
 export interface ProjectMaterializedSkill {

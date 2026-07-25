@@ -18,14 +18,15 @@ import type {
 } from "@companion/contracts";
 import { runArtifactHref, runAttachmentHref } from "@/lib/runQueries";
 import { Icon } from "../Icon";
-import { langForFile } from "../skills/fileFormat";
-import { CodeView } from "../skills/markdown";
+import {
+  CanvasStatus,
+  FilePreviewBody,
+  useFilePreview,
+  type FilePreviewState,
+} from "../files/filePreview";
 import { copyRunText } from "./clipboard";
 import { formatRunFileBytes } from "./ChatMedia";
-import { ChatMarkdown } from "./chatMarkdown";
 
-const TEXT_PREVIEW_LIMIT = 1024 * 1024;
-const XLSX_PREVIEW_LIMIT = 10 * 1024 * 1024;
 const DEFAULT_WIDTH = 640;
 const MIN_WIDTH = 420;
 const WIDTH_KEY = "companion:run-artifact-canvas-width";
@@ -45,14 +46,7 @@ type CanvasFile = {
   promptOrdinal: number | null;
 };
 
-type PreviewState =
-  | { kind: "idle" | "loading" }
-  | { kind: "text"; text: string }
-  | { kind: "blob"; url: string }
-  | { kind: "direct"; url: string }
-  | { kind: "xlsx"; bytes: ArrayBuffer }
-  | { kind: "expired" | "unsupported" | "too_large"; message: string }
-  | { kind: "error"; message: string };
+type PreviewState = FilePreviewState;
 
 type TreeNode = { name: string; path: string; folders: TreeNode[]; files: CanvasFile[] };
 
@@ -86,161 +80,6 @@ function formatExpiry(expiresAt: string | null, clock: number): string | null {
   if (remaining <= 0) return "Expired";
   const hours = Math.max(1, Math.ceil(remaining / 3_600_000));
   return `Expires in ${hours}h`;
-}
-
-function parseCsv(text: string): { rows: string[][]; truncated: boolean } {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = "";
-  let quoted = false;
-  let truncated = false;
-  const pushCell = () => {
-    if (row.length < 100) row.push(cell);
-    else truncated = true;
-    cell = "";
-  };
-  const pushRow = () => {
-    pushCell();
-    if (rows.length < 500) rows.push(row);
-    else truncated = true;
-    row = [];
-  };
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index]!;
-    if (char === '"') {
-      if (quoted && text[index + 1] === '"') {
-        cell += '"';
-        index += 1;
-      } else quoted = !quoted;
-    } else if (char === "," && !quoted) pushCell();
-    else if ((char === "\n" || char === "\r") && !quoted) {
-      if (char === "\r" && text[index + 1] === "\n") index += 1;
-      pushRow();
-    } else cell += char;
-  }
-  if (cell || row.length) pushRow();
-  return { rows, truncated };
-}
-
-function DataTable({ rows, truncated }: { rows: unknown[][]; truncated: boolean }) {
-  if (rows.length === 0) return <div className="run-canvas-state">This file contains no rows.</div>;
-  return (
-    <div className="run-canvas-table-wrap">
-      <table className="run-canvas-table">
-        <tbody>
-          {rows.map((row, rowIndex) => (
-            <tr key={rowIndex}>
-              <th scope="row">{rowIndex + 1}</th>
-              {row.map((cell, cellIndex) => <td key={cellIndex}>{cell instanceof Date ? cell.toLocaleString() : String(cell ?? "")}</td>)}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {truncated && <p className="run-canvas-limit">Preview limited to 500 rows, 100 columns and 50,000 cells.</p>}
-    </div>
-  );
-}
-
-function XlsxPreview({ bytes }: { bytes: ArrayBuffer }) {
-  const workerRef = useRef<Worker | null>(null);
-  const timeoutRef = useRef<number | null>(null);
-  const requestRef = useRef(0);
-  const [sheet, setSheet] = useState<string | undefined>();
-  const [result, setResult] = useState<{ sheets: string[]; sheet: string | null; rows: unknown[][]; truncated: boolean } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const worker = new Worker(new URL("./xlsxPreview.worker.ts", import.meta.url), { type: "module" });
-    workerRef.current = worker;
-    worker.onmessage = (event: MessageEvent<{ requestId: number; error?: string; sheets?: string[]; sheet?: string | null; rows?: unknown[][]; truncated?: boolean }>) => {
-      if (event.data.requestId !== requestRef.current) return;
-      if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-      setLoading(false);
-      if (event.data.error) {
-        setError(event.data.error);
-        return;
-      }
-      setError(null);
-      setResult({
-        sheets: event.data.sheets ?? [],
-        sheet: event.data.sheet ?? null,
-        rows: event.data.rows ?? [],
-        truncated: event.data.truncated ?? false,
-      });
-    };
-    return () => {
-      if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-      worker.terminate();
-      workerRef.current = null;
-    };
-  }, [bytes]);
-
-  useEffect(() => {
-    const worker = workerRef.current;
-    if (!worker) return;
-    requestRef.current += 1;
-    setLoading(true);
-    setError(null);
-    worker.postMessage({ requestId: requestRef.current, bytes, sheet });
-    if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current);
-    timeoutRef.current = window.setTimeout(() => {
-      worker.terminate();
-      workerRef.current = null;
-      setLoading(false);
-      setError("This workbook is too complex to preview safely.");
-    }, 8_000);
-    return () => {
-      if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    };
-  }, [bytes, sheet]);
-
-  if (loading && !result) return <CanvasStatus icon="loader" spin message="Loading workbook…" />;
-  if (error) return <CanvasStatus icon="alert-triangle" message={error} />;
-  return (
-    <div className="run-canvas-xlsx">
-      {(result?.sheets.length ?? 0) > 1 && (
-        <div
-          className="run-canvas-sheets"
-          role="tablist"
-          aria-label="Workbook sheets"
-          onKeyDown={(event) => {
-            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-            event.preventDefault();
-            const tabs = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
-            const current = Math.max(0, tabs.indexOf(document.activeElement as HTMLButtonElement));
-            const next = event.key === "Home"
-              ? 0
-              : event.key === "End"
-                ? tabs.length - 1
-                : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
-            tabs[next]?.focus();
-            if (tabs[next]) setSheet(tabs[next]!.textContent ?? undefined);
-          }}
-        >
-          {result!.sheets.map((name) => (
-            <button key={name} type="button" role="tab" aria-selected={result?.sheet === name} tabIndex={result?.sheet === name ? 0 : -1} onClick={() => setSheet(name)}>{name}</button>
-          ))}
-        </div>
-      )}
-      {loading
-        ? <CanvasStatus icon="loader" spin message="Loading workbook…" />
-        : <DataTable rows={result?.rows ?? []} truncated={result?.truncated ?? false} />}
-    </div>
-  );
-}
-
-function CanvasStatus({ icon, message, spin = false, children }: { icon: string; message: string; spin?: boolean; children?: React.ReactNode }) {
-  return (
-    <div className="run-canvas-state" role="status">
-      <Icon name={icon} size={22} className={spin ? "ls-spin" : undefined} />
-      <span>{message}</span>
-      {children}
-    </div>
-  );
 }
 
 function TreeFile({ file, selected, onSelect }: { file: CanvasFile; selected: boolean; onSelect: () => void }) {
@@ -295,7 +134,6 @@ export function RunArtifactCanvas({
   const [width, setWidth] = useState(DEFAULT_WIDTH);
   const [clock, setClock] = useState(() => Date.now());
   const [retry, setRetry] = useState(0);
-  const [preview, setPreview] = useState<PreviewState>({ kind: "idle" });
   const [mobilePreview, setMobilePreview] = useState(false);
   const [mobile, setMobile] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -386,71 +224,21 @@ export function RunArtifactCanvas({
     };
   }, [mobile, open]);
 
+  // The shared engine owns fetch/decode/limits/cleanup; this surface only supplies the target.
+  const preview = useFilePreview({
+    href: selected ? previewHref(runId, selected) : null,
+    previewKind: selected?.previewKind ?? null,
+    byteSize: selected?.byteSize ?? 0,
+    generation: selected ? selected.updatedAt ?? selected.expiresAt ?? String(selected.byteSize) : null,
+    expiresAt: selected?.expiresAt ?? null,
+    enabled: open && Boolean(selected),
+    retryToken: retry,
+    clock,
+  });
+
   useEffect(() => {
-    const controller = new AbortController();
-    let blobUrl: string | null = null;
-    const load = async () => {
-      setCopied(false);
-      if (!open) {
-        setPreview({ kind: "idle" });
-        return;
-      }
-      if (!selected) {
-        setPreview({ kind: "idle" });
-        return;
-      }
-      if (selected.expiresAt && Date.parse(selected.expiresAt) <= Date.now()) {
-        setPreview({ kind: "expired", message: "This generated file has expired." });
-        return;
-      }
-      if (!selected.previewKind) {
-        setPreview({ kind: "unsupported", message: "Preview is not supported for this format." });
-        return;
-      }
-      if (["text", "markdown", "csv"].includes(selected.previewKind) && selected.byteSize > TEXT_PREVIEW_LIMIT) {
-        setPreview({ kind: "too_large", message: "This preview is larger than the 1 MB display limit." });
-        return;
-      }
-      if (selected.previewKind === "xlsx" && selected.byteSize > XLSX_PREVIEW_LIMIT) {
-        setPreview({ kind: "too_large", message: "This workbook is larger than the 10 MB display limit." });
-        return;
-      }
-      if (selected.previewKind === "image" || selected.previewKind === "video") {
-        const generation = selected.updatedAt ?? selected.expiresAt ?? String(selected.byteSize);
-        setPreview({ kind: "direct", url: `${previewHref(runId, selected)}?v=${encodeURIComponent(generation)}` });
-        return;
-      }
-      setPreview({ kind: "loading" });
-      try {
-        const response = await fetch(previewHref(runId, selected), { signal: controller.signal });
-        if (response.status === 404) {
-          setPreview({ kind: "expired", message: "This file is no longer available." });
-          return;
-        }
-        if (!response.ok) throw new Error(`Preview failed (${response.status}).`);
-        const bytes = await response.arrayBuffer();
-        if (selected.previewKind === "xlsx") {
-          setPreview({ kind: "xlsx", bytes });
-        } else if (["text", "markdown", "csv"].includes(selected.previewKind)) {
-          setPreview({ kind: "text", text: new TextDecoder("utf-8", { fatal: true }).decode(bytes) });
-        } else {
-          const safeContentType = selected.previewKind === "pdf"
-            ? "application/pdf"
-            : selected.previewContentType ?? "application/octet-stream";
-          blobUrl = URL.createObjectURL(new Blob([bytes], { type: safeContentType }));
-          setPreview({ kind: "blob", url: blobUrl });
-        }
-      } catch (error) {
-        if (controller.signal.aborted) return;
-        setPreview({ kind: "error", message: error instanceof Error ? error.message : "Preview unavailable." });
-      }
-    };
-    void load();
-    return () => {
-      controller.abort();
-      if (blobUrl) URL.revokeObjectURL(blobUrl);
-    };
-  }, [clock, open, retry, runId, selected]);
+    setCopied(false);
+  }, [open, selected]);
 
   const resize = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -575,18 +363,13 @@ export function RunArtifactCanvas({
                 <a className="cds-iconbtn cds-iconbtn--sm" href={previewHref(runId, selected, true)} download={selected.name} aria-label={`Download ${selected.name}`} title="Download"><Icon name="download" size={13} /></a>
               </div>
               <div className="run-canvas-viewer__content">
-                {preview.kind === "loading" && <CanvasStatus icon="loader" spin message="Loading preview…" />}
-                {preview.kind === "expired" && <CanvasStatus icon="clock" message={preview.message}><a className="btn-sec" href={previewHref(runId, selected, true)} download={selected.name}>Download</a></CanvasStatus>}
-                {preview.kind === "unsupported" && <CanvasStatus icon="file" message={preview.message}><a className="btn-sec" href={previewHref(runId, selected, true)} download={selected.name}>Download</a></CanvasStatus>}
-                {preview.kind === "too_large" && <CanvasStatus icon="file" message={preview.message}><a className="btn-sec" href={previewHref(runId, selected, true)} download={selected.name}>Download</a></CanvasStatus>}
-                {preview.kind === "error" && <CanvasStatus icon="alert-triangle" message={preview.message}><div><button type="button" className="btn-sec" onClick={() => setRetry((value) => value + 1)}>Retry</button><a className="btn-sec" href={previewHref(runId, selected, true)} download={selected.name}>Download</a></div></CanvasStatus>}
-                {preview.kind === "text" && selected.previewKind === "markdown" && <div className="run-canvas-document"><ChatMarkdown text={preview.text} /></div>}
-                {preview.kind === "text" && selected.previewKind === "csv" && (() => { const csv = parseCsv(preview.text); return <DataTable rows={csv.rows} truncated={csv.truncated} />; })()}
-                {preview.kind === "text" && selected.previewKind === "text" && <div className="run-canvas-code"><CodeView content={preview.text} lang={langForFile(selected.name)} gutter /></div>}
-                {preview.kind === "xlsx" && <XlsxPreview bytes={preview.bytes} />}
-                {preview.kind === "direct" && selected.previewKind === "image" && <div className="run-canvas-media"><img src={preview.url} alt={selected.name} /></div>}
-                {preview.kind === "direct" && selected.previewKind === "video" && <div className="run-canvas-media"><video src={preview.url} controls preload="metadata" /></div>}
-                {preview.kind === "blob" && selected.previewKind === "pdf" && <iframe className="run-canvas-pdf" src={preview.url} title={selected.name} sandbox="" />}
+                <FilePreviewBody
+                  state={preview}
+                  previewKind={selected.previewKind}
+                  name={selected.name}
+                  downloadHref={previewHref(runId, selected, true)}
+                  onRetry={() => setRetry((value) => value + 1)}
+                />
               </div>
             </>
           )}

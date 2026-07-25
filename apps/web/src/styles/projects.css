@@ -342,6 +342,22 @@
   background: var(--color-surface-raised);
 }
 
+/* Rolls up conversations that carry a signal but sit outside the visible five. */
+.projects-side__all-signal {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.projects-side__all-signal:first-of-type {
+  margin-inline-start: auto;
+}
+
+.projects-side__all-signal + .projects-side__all-signal {
+  margin-inline-start: 6px;
+}
+
 .projects-side__unread {
   display: inline-grid;
   min-width: 17px;

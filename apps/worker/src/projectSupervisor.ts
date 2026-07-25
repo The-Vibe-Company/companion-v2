@@ -124,6 +124,7 @@ const PROJECT_FILE_MAX_TOTAL_BYTES = 250 * 1024 * 1024;
 const MATERIALIZATION_POLL_MS = 5_000;
 const PROMPT_STATE_POLL_MS = 500;
 const PROMPT_IDLE_CONFIRMATION_MS = 2_000;
+const PROJECT_RETRY_MAX_DELAY_MS = 60_000;
 const RESERVED_PROJECT_FILE_ROOTS = new Set([
   ".claude",
   ".companion",
@@ -242,6 +243,7 @@ export interface ProjectWorkspaceStore {
     job: ProjectWorkspaceJob;
     workerId: string;
     delayMs?: number;
+    backoff?: boolean;
     errorCode?: string;
     errorMessage?: string;
   }): Promise<boolean>;
@@ -638,6 +640,15 @@ function errorMessage(error: unknown): string {
   if (error instanceof ProjectEnvironmentInvalidError) return error.message;
   if (error instanceof RunRuntimeError) return "Project runtime operation failed";
   return "Project workspace operation failed";
+}
+
+/** Bounded classification for supervisor-loop logs. Never carries provider bodies or secrets. */
+function projectErrorLabel(error: unknown): string {
+  if (!error || typeof error !== "object") return "unknown";
+  const value = error as { name?: unknown; code?: unknown };
+  const parts = [typeof value.name === "string" && value.name ? value.name : "Error"];
+  if (typeof value.code === "string" && value.code) parts.push(`code=${value.code}`);
+  return parts.join(" ");
 }
 
 function clearProjectChatTarget(target: ProjectChatTarget | null): void {
@@ -1910,6 +1921,9 @@ export async function runProjectWorkspaceJob(input: {
   const signal = AbortSignal.any([input.signal, heartbeatAbort.signal, activationAbort.signal]);
   let providerRunning = false;
   let providerStopped = false;
+  // Set when the lifecycle exits through a retryable runtime failure, so the lease release can
+  // apply real backoff instead of re-arming the claim loop one second later.
+  let runtimeFailureRelease = false;
   let providerActivationAttempted = false;
   let usageReserved = false;
   let reservedActivationRevision: number | null = null;
@@ -3622,6 +3636,7 @@ export async function runProjectWorkspaceJob(input: {
             : "project_runtime_failed",
       errorMessage: errorMessage(reason),
     }).catch(() => false);
+    runtimeFailureRelease = !(reason instanceof ProjectLostLease) && !unrecoverable;
     throw reason;
   } finally {
     heartbeatAbort.abort();
@@ -3634,9 +3649,25 @@ export async function runProjectWorkspaceJob(input: {
     await input.store.releaseProjectWorkspaceLease({
       job: input.job,
       workerId: input.workerId,
-      delayMs: providerStopped ? 0 : input.config.claimIntervalMs,
+      delayMs: runtimeFailureRelease
+        ? projectRetryDelayMs(input.config.claimIntervalMs, input.job.attempt)
+        : providerStopped
+          ? 0
+          : input.config.claimIntervalMs,
+      backoff: runtimeFailureRelease,
     }).catch(() => false);
   }
+}
+
+/**
+ * `companion_claim_project_workspaces` reclaims a `project_runtime_failed` workspace on every pass
+ * and treats `available_at` as the backoff boundary. Releasing at a flat claim interval therefore
+ * retried a permanently failing activation once per second forever, each attempt doing provider
+ * work. Back off exponentially instead, capped so a recovered provider is still picked up promptly.
+ */
+export function projectRetryDelayMs(claimIntervalMs: number, attempt: number): number {
+  const exponent = Math.min(Math.max(attempt, 1) - 1, 16);
+  return Math.min(claimIntervalMs * 2 ** exponent, PROJECT_RETRY_MAX_DELAY_MS);
 }
 
 export function projectArchiveMatchesChecksum(
@@ -4056,7 +4087,12 @@ export function createProjectSupervisor(input: {
           workerId,
           limit: capacity,
           leaseSeconds: input.config.leaseSeconds,
-        }).catch(() => []);
+        }).catch((error) => {
+          // A misconfigured database or a broken claim function would otherwise spin this loop at
+          // the claim interval with no signal at all.
+          console.warn(`project workspace claim will retry (${projectErrorLabel(error)})`);
+          return [];
+        });
         for (const job of jobs) {
           const task = runProjectWorkspaceJob({
             job,
@@ -4069,7 +4105,15 @@ export function createProjectSupervisor(input: {
             goldenSnapshotId: input.goldenSnapshotId,
             config: input.config,
             signal: abort.signal,
-          }).catch(() => undefined).finally(() => active.delete(task));
+          }).catch((error) => {
+            // `runProjectWorkspaceJob` persists its own durable failure state. Anything escaping
+            // that boundary is an invariant break: log identifiers and a bounded classification.
+            console.error("project workspace processor escaped durable failure handling", {
+              projectId: job.projectId,
+              orgId: job.orgId,
+              code: projectErrorLabel(error),
+            });
+          }).finally(() => active.delete(task));
           active.add(task);
         }
       }

@@ -161,6 +161,8 @@ type RawWorkspaceClaim = {
   skillSyncErrorMessage: string | null;
   leaseGeneration: number;
   deleteRequestedAt: Date | string | null;
+  attempt: number;
+  maxAttempts: number;
 };
 
 export class LostProjectWorkspaceLeaseError extends Error {
@@ -955,7 +957,9 @@ export async function claimProjectWorkspaceJobs(input: {
       claimed."skill_sync_error_code" as "skillSyncErrorCode",
       claimed."skill_sync_error_message" as "skillSyncErrorMessage",
       claimed."lease_generation" as "leaseGeneration",
-      claimed."delete_requested_at" as "deleteRequestedAt"
+      claimed."delete_requested_at" as "deleteRequestedAt",
+      claimed."attempt",
+      claimed."max_attempts" as "maxAttempts"
     from companion_claim_project_workspaces(
       ${input.workerId},
       ${limit},
@@ -1009,11 +1013,18 @@ export async function releaseProjectWorkspaceLease(input: {
   job: ProjectWorkspaceJob;
   workerId: string;
   delayMs?: number;
+  /**
+   * Marks `delayMs` as retry backoff after a runtime failure rather than a plain re-arm. Backoff is
+   * about not hammering a broken provider, so it must never sit in front of work the creator has
+   * already asked for: a queued prompt or a pending stop keeps the workspace immediately claimable.
+   */
+  backoff?: boolean;
   errorCode?: string | null;
   errorMessage?: string | null;
   database?: Db;
 }): Promise<boolean> {
   const database = input.database ?? db;
+  const delayMs = Math.max(0, input.delayMs ?? 0);
   try {
     return await withWorkspaceLease({
       ...input,
@@ -1025,7 +1036,21 @@ export async function releaseProjectWorkspaceLease(input: {
             leaseOwner: null,
             leaseExpiresAt: null,
             heartbeatAt: null,
-            availableAt: new Date(Date.now() + Math.max(0, input.delayMs ?? 0)),
+            availableAt: input.backoff && delayMs > 0
+              ? sql`case when exists (
+                  select 1 from ${schema.projectPrompts} p
+                  where p."org_id" = ${input.job.orgId}
+                    and p."project_id" = ${input.job.projectId}
+                    and p."status" = 'queued'
+                ) or exists (
+                  select 1 from ${schema.projectSessions} s
+                  where s."org_id" = ${input.job.orgId}
+                    and s."project_id" = ${input.job.projectId}
+                    and s."stop_requested_at" is not null
+                ) then clock_timestamp()
+                else clock_timestamp() + make_interval(secs => ${delayMs / 1000})
+                end`
+              : new Date(Date.now() + delayMs),
             ...(input.errorCode !== undefined ? { lastErrorCode: input.errorCode } : {}),
             ...(input.errorMessage !== undefined
               ? { lastErrorMessage: input.errorMessage }

@@ -1206,6 +1206,16 @@ describe("ProjectSessionView workspace state", () => {
   ])(
     "keeps the %s native preview inside the mobile Files focus loop",
     async (contentType, previewSelector) => {
+      // PDFs are fetched and re-wrapped as a typed Blob before they reach the frame, so the
+      // preview only appears once those bytes resolve.
+      if (contentType === "application/pdf") {
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(async () => new Response(new Uint8Array([37, 80, 68, 70, 45]), { status: 200 })),
+        );
+        vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:project-pdf");
+        vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+      }
       const container = document.createElement("div");
       document.body.appendChild(container);
       const root = createRoot(container);
@@ -1239,6 +1249,10 @@ describe("ProjectSessionView workspace state", () => {
             onClose: vi.fn(),
           }),
         );
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await Promise.resolve();
         await Promise.resolve();
       });
       const preview = document.body.querySelector<HTMLElement>(
@@ -1532,7 +1546,7 @@ describe("ProjectSessionView workspace state", () => {
     preview = document.body.querySelector<HTMLElement>(
       '.cowork-file-preview[aria-label="Preview deck.pptx"]',
     )!;
-    expect(preview.textContent).toContain("Preview not available");
+    expect(preview.textContent).toContain("Preview is not supported for this format.");
     expect(
       preview
         .querySelector<HTMLAnchorElement>(

@@ -301,13 +301,14 @@ export function ProjectsSidebar({
     };
   }, [mobileOpen, modalOpen, onCloseMobile]);
 
+  // Only Project names are searchable here: `recentSessions` is capped at five server-side, so
+  // matching conversation titles would quietly miss every older conversation. Full conversation
+  // search lives on the Project page.
   const visibleProjects = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
     if (!normalized) return projects;
     return projects.filter((project) =>
-      `${project.name} ${project.recentSessions.map((session) => session.title).join(" ")}`
-        .toLocaleLowerCase()
-        .includes(normalized),
+      project.name.toLocaleLowerCase().includes(normalized),
     );
   }, [projects, query]);
 
@@ -404,7 +405,7 @@ export function ProjectsSidebar({
           {searching && (
             <label className="projects-side__search">
               <Icon name="search" size={13} />
-              <span className="sr-only">Search projects and conversations</span>
+              <span className="sr-only">Search projects by name</span>
               <input
                 ref={searchRef}
                 value={query}
@@ -432,6 +433,21 @@ export function ProjectsSidebar({
               const hiddenSessionCount = Math.max(
                 0,
                 project.sessionCount - sessions.length,
+              );
+              // Conversations keep their canonical creation order, so a conversation that is
+              // working or has a new result can sit below the visible five and show no signal at
+              // all. Roll those up onto the "All conversations" row instead of reordering.
+              const hiddenWorking = Math.max(
+                0,
+                project.activeSessionCount -
+                  sessions.filter((candidate) =>
+                    ["queued", "working", "stopping"].includes(candidate.status),
+                  ).length,
+              );
+              const hiddenUnread = Math.max(
+                0,
+                project.unreadSessionCount -
+                  sessions.filter((candidate) => candidate.isUnread).length,
               );
               return (
                 <div className="projects-side__branch" key={project.id}>
@@ -577,6 +593,24 @@ export function ProjectsSidebar({
                         >
                           All conversations
                           <span className="tnum">· {project.sessionCount}</span>
+                          {hiddenWorking > 0 && (
+                            <span className="projects-side__all-signal is-working">
+                              <span
+                                className="project-status-dot is-working"
+                                aria-hidden="true"
+                              />
+                              {hiddenWorking} working
+                            </span>
+                          )}
+                          {hiddenUnread > 0 && (
+                            <span className="projects-side__all-signal is-new">
+                              <span
+                                className="project-status-dot is-new"
+                                aria-hidden="true"
+                              />
+                              {hiddenUnread} new
+                            </span>
+                          )}
                         </Link>
                       )}
                     </div>

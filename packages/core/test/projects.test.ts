@@ -52,6 +52,8 @@ const artifactJob: ProjectWorkspaceJob = {
   skillSyncErrorMessage: null,
   leaseGeneration: 1,
   deleteRequestedAt: null,
+  attempt: 1,
+  maxAttempts: 5,
 };
 
 const artifactPrompt: ProjectPromptJob = {

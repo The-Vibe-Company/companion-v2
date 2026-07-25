@@ -34,6 +34,7 @@ import {
   type ProjectQuestionJob,
   type ProjectUsageMeter,
   type ProjectWorkspaceJob,
+  projectRetryDelayMs,
   type ProjectWorkspaceStore,
 } from "./projectSupervisor";
 import type { ProjectWorkerConfig } from "./config";
@@ -68,6 +69,8 @@ const job: ProjectWorkspaceJob = {
   skillSyncErrorMessage: null,
   leaseGeneration: 1,
   deleteRequestedAt: null,
+  attempt: 1,
+  maxAttempts: 5,
 };
 
 const config: ProjectWorkerConfig = {
@@ -1478,6 +1481,77 @@ describe("Project workspace lifecycle", () => {
     expect(store.releaseProjectWorkspaceLease).toHaveBeenCalledWith(
       expect.objectContaining({ delayMs: config.claimIntervalMs }),
     );
+  });
+
+  /**
+   * The claim function reclaims a `project_runtime_failed` workspace on every pass and relies on
+   * `available_at` for backoff. Releasing at a flat claim interval meant a permanently failing
+   * activation performed provider work once per second indefinitely.
+   */
+  it("backs a repeatedly failing activation off instead of retrying every second", async () => {
+    const prompt: ProjectPromptJob = {
+      id: "repeatedly-failing",
+      orgId: job.orgId,
+      projectId: job.projectId,
+      creatorId: job.creatorId,
+      sessionId: "session-repeatedly-failing",
+      sequence: 1,
+      text: "Start once",
+      model: "openai/gpt-5",
+      opencodeSessionId: null,
+      opencodeMessageId: "msg_repeatedly_failing",
+      sendAttemptedAt: null,
+      leaseOwner: "worker",
+    };
+    let claimed = false;
+    const store = baseStore({
+      claimProjectPromptJobs: vi.fn(async () => {
+        if (claimed) return [];
+        claimed = true;
+        return [prompt];
+      }),
+    });
+    const projectRuntime = runtime();
+    vi.mocked(projectRuntime.startServer).mockRejectedValue(new Error("response lost"));
+    vi.mocked(projectRuntime.scrubAgentState).mockRejectedValue(new Error("provider unavailable"));
+
+    await expect(runProjectWorkspaceJob({
+      job: { ...job, attempt: 5 },
+      workerId: "worker",
+      store,
+      runtime: projectRuntime,
+      chat: quietChat(),
+      usage: usage(),
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config,
+      signal: new AbortController().signal,
+    })).rejects.toBeInstanceOf(Error);
+
+    expect(store.releaseProjectWorkspaceLease).toHaveBeenCalledWith(
+      expect.objectContaining({ delayMs: config.claimIntervalMs * 16 }),
+    );
+  });
+
+  it("keeps a successful boundary release prompt regardless of the attempt counter", async () => {
+    const store = baseStore();
+
+    await runProjectWorkspaceJob({
+      job: { ...job, attempt: 5, status: "stopped", desiredGeneration: 1, appliedGeneration: 1 },
+      workerId: "worker",
+      store,
+      runtime: runtime(),
+      chat: quietChat(),
+      usage: usage(),
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config,
+      signal: new AbortController().signal,
+    }).catch(() => undefined);
+
+    // A checkpointed workspace re-arms immediately; the idle deadline, not a delay, governs it.
+    const release = vi.mocked(store.releaseProjectWorkspaceLease).mock.calls.at(-1)?.[0];
+    expect(release?.delayMs).toBe(0);
   });
 
   it("reserves needs-attention for an activated Project with no sandbox or checkpoint", async () => {
@@ -4548,5 +4622,20 @@ describe("Project workspace lifecycle", () => {
     await scheduler.run();
     expect(sweep).toHaveBeenCalledOnce();
     await scheduler.stop();
+  });
+});
+
+describe("projectRetryDelayMs", () => {
+  it("grows exponentially from the claim interval and stops at a minute", () => {
+    expect(projectRetryDelayMs(1_000, 1)).toBe(1_000);
+    expect(projectRetryDelayMs(1_000, 2)).toBe(2_000);
+    expect(projectRetryDelayMs(1_000, 5)).toBe(16_000);
+    expect(projectRetryDelayMs(1_000, 7)).toBe(60_000);
+    // A recovered provider is still picked up within a minute no matter how long it was broken.
+    expect(projectRetryDelayMs(1_000, 500)).toBe(60_000);
+  });
+
+  it("treats a missing or zero attempt as the first try", () => {
+    expect(projectRetryDelayMs(1_000, 0)).toBe(1_000);
   });
 });

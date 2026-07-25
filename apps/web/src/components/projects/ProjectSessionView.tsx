@@ -6,6 +6,7 @@ import {
   PROJECT_PROMPT_MAX_QUEUED,
   RUN_CHAT_QUESTION_ANSWER_MAX,
   type RunChatEvent,
+  type RunFilePreviewKind,
 } from "@companion/contracts";
 import Link from "next/link";
 import {
@@ -18,6 +19,7 @@ import {
   useState,
   type ClipboardEvent,
   type DragEvent,
+  type PointerEvent as ReactPointerEvent,
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
@@ -47,7 +49,13 @@ import type {
   ProjectSessionVM,
   ProjectWorkspaceStatus,
 } from "@/lib/projectsModel";
+import {
+  FilePreviewBody,
+  filePreviewKindFor,
+  useFilePreview,
+} from "../files/filePreview";
 import { Icon } from "../Icon";
+import { ProjectsActionMenu } from "./ProjectsSidebar";
 import {
   ChatTranscript,
   type GeneratedProjectFile,
@@ -73,22 +81,15 @@ const SETTLING_WORKSPACE_STATUSES = new Set<ProjectWorkspaceStatus>([
 const PROJECT_PREPARATION_POLL_MS = 2_500;
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), video[controls], iframe, [tabindex]:not([tabindex="-1"])';
-const PREVIEWABLE_FILE_TYPES = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-  "image/avif",
-  "video/mp4",
-  "video/webm",
-  "application/pdf",
-  "application/json",
-  "text/csv",
-  "text/markdown",
-  "text/plain",
-]);
+const PROJECT_FILES_WIDTH_KEY = "companion:project-files-panel-width";
+const PROJECT_FILES_MIN_WIDTH = 340;
 
-type ProjectFilePreviewKind = "image" | "video" | "document";
+/** Keeps the transcript usable no matter how far the reader drags the workbench open. */
+function clampFilesPanelWidth(value: number): number {
+  const max = Math.max(PROJECT_FILES_MIN_WIDTH, window.innerWidth * 0.7);
+  return Math.round(Math.max(PROJECT_FILES_MIN_WIDTH, Math.min(value, max)));
+}
+
 type ProjectAttachmentPreview = {
   attachment: ProjectPromptAttachmentVM;
   href: string;
@@ -121,11 +122,9 @@ function currentFilePreviewTarget(
 
 function filePreviewKind(
   contentType: string | null,
-): ProjectFilePreviewKind | null {
-  if (!contentType || !PREVIEWABLE_FILE_TYPES.has(contentType)) return null;
-  if (contentType.startsWith("image/")) return "image";
-  if (contentType.startsWith("video/")) return "video";
-  return "document";
+  fileName?: string,
+): RunFilePreviewKind | null {
+  return filePreviewKindFor(contentType, fileName);
 }
 
 function statusLabel(status: ProjectSessionStatus): string {
@@ -1112,13 +1111,25 @@ function ProjectFilePreview({
   projectId: string;
   target: ProjectFilePreviewTarget;
 }) {
-  const kind = filePreviewKind(target.contentType);
+  const [retry, setRetry] = useState(0);
+  const kind = filePreviewKind(target.contentType, target.name);
   const src = target.exactVersion
     ? projectFileVersionHref(projectId, target.id, target.version)
     : projectFileHref(projectId, target.id);
   const downloadHref = target.exactVersion
     ? projectFileVersionHref(projectId, target.id, target.version, true)
     : projectFileHref(projectId, target.id, true);
+  // Text-shaped deliverables are fetched and rendered by the product: browsers refuse to display
+  // `text/csv` inline and cannot render Markdown at all.
+  const preview = useFilePreview({
+    href: src,
+    previewKind: kind,
+    byteSize: target.byteSize,
+    // Version-pinned URLs are already unique; only the "current" URL needs busting when new bytes
+    // land under the same path.
+    generation: target.exactVersion ? null : `${target.version}`,
+    retryToken: retry,
+  });
   return (
     <section
       className="cowork-file-preview"
@@ -1142,30 +1153,13 @@ function ProjectFilePreview({
         </a>
       </header>
       <div className="cowork-file-preview__canvas">
-        {kind === null ? (
-          <div className="project-files-drawer__empty">
-            <Icon name="file" size={18} />
-            <strong>Preview not available</strong>
-            <span>Download this saved version to open it.</span>
-          </div>
-        ) : kind === "image" ? (
-          // eslint-disable-next-line @next/next/no-img-element -- authenticated project file URL
-          <img src={src} alt={`Preview of ${target.name}`} />
-        ) : kind === "video" ? (
-          <video
-            src={src}
-            controls
-            preload="metadata"
-            aria-label={`Preview of ${target.name}`}
-          />
-        ) : (
-          <iframe
-            src={src}
-            title={`Preview ${target.name}`}
-            sandbox=""
-            loading="lazy"
-          />
-        )}
+        <FilePreviewBody
+          state={preview}
+          previewKind={kind}
+          name={target.name}
+          downloadHref={downloadHref}
+          onRetry={() => setRetry((value) => value + 1)}
+        />
       </div>
     </section>
   );
@@ -1176,7 +1170,17 @@ function ProjectPromptAttachmentPreview({
 }: {
   preview: ProjectAttachmentPreview;
 }) {
-  const kind = filePreviewKind(preview.attachment.contentType);
+  const [retry, setRetry] = useState(0);
+  const kind = filePreviewKind(
+    preview.attachment.contentType,
+    preview.attachment.fileName,
+  );
+  const state = useFilePreview({
+    href: kind ? preview.href : null,
+    previewKind: kind,
+    byteSize: preview.attachment.byteSize,
+    retryToken: retry,
+  });
   if (!kind) return null;
   return (
     <section
@@ -1199,27 +1203,13 @@ function ProjectPromptAttachmentPreview({
         </a>
       </header>
       <div className="cowork-file-preview__canvas">
-        {kind === "image" ? (
-          // eslint-disable-next-line @next/next/no-img-element -- authenticated Project attachment URL
-          <img
-            src={preview.href}
-            alt={`Preview of ${preview.attachment.fileName}`}
-          />
-        ) : kind === "video" ? (
-          <video
-            src={preview.href}
-            controls
-            preload="metadata"
-            aria-label={`Preview of ${preview.attachment.fileName}`}
-          />
-        ) : (
-          <iframe
-            src={preview.href}
-            title={`Preview ${preview.attachment.fileName}`}
-            sandbox=""
-            loading="lazy"
-          />
-        )}
+        <FilePreviewBody
+          state={state}
+          previewKind={kind}
+          name={preview.attachment.fileName}
+          downloadHref={preview.downloadHref}
+          onRetry={() => setRetry((value) => value + 1)}
+        />
       </div>
     </section>
   );
@@ -1341,14 +1331,49 @@ export function ProjectFilesPanel({
   onSelectionChange: (target: ProjectFilePreviewTarget | null) => void;
   onClose: () => void;
 }) {
+  const [width, setWidth] = useState<number | null>(null);
   useEffect(
     () => () => {
       returnFocusRef.current?.focus();
     },
     [returnFocusRef],
   );
+  useEffect(() => {
+    const stored = Number(localStorage.getItem(PROJECT_FILES_WIDTH_KEY));
+    if (Number.isFinite(stored) && stored > 0) {
+      setWidth(clampFilesPanelWidth(stored));
+    }
+  }, []);
+  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth =
+      width ?? event.currentTarget.parentElement?.getBoundingClientRect().width ?? PROJECT_FILES_MIN_WIDTH;
+    const nextWidth = (pointer: PointerEvent) =>
+      clampFilesPanelWidth(startWidth + startX - pointer.clientX);
+    const move = (pointer: PointerEvent) => setWidth(nextWidth(pointer));
+    const up = (pointer: PointerEvent) => {
+      window.removeEventListener("pointermove", move);
+      const settled = nextWidth(pointer);
+      setWidth(settled);
+      localStorage.setItem(PROJECT_FILES_WIDTH_KEY, String(Math.round(settled)));
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up, { once: true });
+  };
   return (
-    <aside className="cowork-session-files-panel" aria-label="Project files">
+    <aside
+      className="cowork-session-files-panel"
+      aria-label="Project files"
+      style={width === null ? undefined : { width: `${width}px` }}
+    >
+      <div
+        className="cowork-session-files-panel__resize"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize the files panel"
+        onPointerDown={startResize}
+      />
       <header className="run-files-drawer__head">
         <div>
           <span>Project files</span>
@@ -2201,65 +2226,45 @@ export function ProjectSessionView({
         {((!projectArchived && onNewSession) ||
           onRenameSession ||
           onArchiveSession) && (
-          <details className="cowork-session__menu">
-            <summary
-              className="cds-iconbtn cds-iconbtn--sm"
-              aria-label="Conversation actions"
-            >
-              <Icon name="more-horizontal" size={14} />
-            </summary>
-            <div role="menu">
-              {!projectArchived && onNewSession && (
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={(event) => {
-                    event.currentTarget
-                      .closest("details")
-                      ?.removeAttribute("open");
-                    onNewSession();
-                  }}
-                >
-                  <Icon name="square-pen" size={13} />
-                  New conversation
-                </button>
-              )}
-              {onRenameSession && (
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={(event) => {
-                    event.currentTarget
-                      .closest("details")
-                      ?.removeAttribute("open");
-                    onRenameSession();
-                  }}
-                >
-                  <Icon name="pencil" size={13} />
-                  Rename
-                </button>
-              )}
-              {onArchiveSession && (
-                <button
-                  type="button"
-                  role="menuitem"
-                  disabled={archiveBusy}
-                  onClick={(event) => {
-                    event.currentTarget
-                      .closest("details")
-                      ?.removeAttribute("open");
-                    setArchiveBusy(true);
-                    void Promise.resolve(onArchiveSession()).finally(() =>
-                      setArchiveBusy(false),
-                    );
-                  }}
-                >
-                  <Icon name="archive" size={13} />
-                  {working ? "Stop and archive" : "Archive"}
-                </button>
-              )}
-            </div>
-          </details>
+          <ProjectsActionMenu
+            label="Conversation actions"
+            className="cds-iconbtn cds-iconbtn--sm cowork-session__menu-trigger"
+            actions={[
+              ...(!projectArchived && onNewSession
+                ? [
+                    {
+                      label: "New conversation",
+                      icon: "square-pen",
+                      onSelect: onNewSession,
+                    },
+                  ]
+                : []),
+              ...(onRenameSession
+                ? [
+                    {
+                      label: "Rename",
+                      icon: "pencil",
+                      onSelect: onRenameSession,
+                    },
+                  ]
+                : []),
+              ...(onArchiveSession
+                ? [
+                    {
+                      label: working ? "Stop and archive" : "Archive",
+                      icon: "archive",
+                      disabled: archiveBusy,
+                      onSelect: () => {
+                        setArchiveBusy(true);
+                        void Promise.resolve(onArchiveSession()).finally(() =>
+                          setArchiveBusy(false),
+                        );
+                      },
+                    },
+                  ]
+                : []),
+            ]}
+          />
         )}
       </header>
 

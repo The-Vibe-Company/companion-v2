@@ -980,6 +980,14 @@ a turn that may have produced external effects. Any `running` workspace whose wo
 claimable even when no prompt remains and no idle deadline was installed, so a crash after durable turn
 completion or during an in-flight turn cannot strand the activation.
 
+A `project_runtime_failed` workspace stays retryable and `available_at` is the only backoff boundary,
+so the worker releases that lease with an exponential delay derived from the claimed `attempt`
+(`projectRetryDelayMs`: claim interval doubling per attempt, capped at one minute). Releasing at a
+flat claim interval retried a permanently failing activation once per second forever, each pass doing
+provider work. Successful and boundary releases are unchanged, and the first retry still happens at
+the claim interval. The supervisor loop logs a bounded classification when a claim or a job escapes
+its durable failure handling; neither path is silent.
+
 Native OpenCode questions are distinct from permissions. The shared event subscription normalizes
 legacy and v2 question payloads into the bounded Project event vocabulary, persists the safe prompt
 under the current turn, and sets live activity to `waiting_for_answer`. A session-only mutation queues
@@ -1137,7 +1145,14 @@ snapshots, control-plane terms, sandbox ids, or server credentials.
 Each member message restores its durable prompt attachments. Each completed turn may render the exact
 created and updated file versions attributed to that prompt. Desktop opens Files in a persistent
 non-modal side panel so the transcript and composer remain usable; mobile uses a focus-trapped drawer
-with Escape and focus restoration. Images, PDF, text, Markdown, JSON, and CSV can be previewed inline.
+with Escape and focus restoration. That desktop panel is drag-resizable and stores its width under
+`companion:project-files-panel-width`. Images, PDF, text, Markdown, JSON, CSV, and XLSX can be
+previewed inline through `apps/web/src/components/files/filePreview.tsx`, the single preview engine
+shared with Skill Run artifacts: text-shaped files are fetched and rendered in-product because
+browsers refuse to display `text/csv` inline and cannot render Markdown, and the PDF frame carries no
+`sandbox` attribute because any value disables the viewer. Preview classification strips media-type
+parameters, since stored types are `text/markdown; charset=utf-8` and an exact-string match silently
+marked every generated Markdown, CSV, and text file unpreviewable. Remaining
 Office formats are download/open-external in V1. Composer file input supports selection, drag-and-drop,
 and paste; those attachments stay prompt-linked. The Project Files surface also accepts direct uploads
 as shared durable desired state without creating a conversation. Conversation text drafts are restored

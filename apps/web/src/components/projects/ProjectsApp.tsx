@@ -25,6 +25,8 @@ import {
 } from "@/lib/projects";
 import {
   mergeProjectRow,
+  projectStatusLabel,
+  projectStatusTone,
   sortProjectSessionsByCreatedAt,
   type ProjectDetailVM,
   type ProjectFileVM,
@@ -89,6 +91,8 @@ type ProjectSessionChange = {
 };
 
 const PROJECT_REFRESH_MS = 15_000;
+/** Long enough to read a confirmation and still reach its Undo. */
+const TOAST_DISMISS_MS = 10_000;
 const PROJECT_VIEWED_MAX_ATTEMPTS = 3;
 const PROJECT_VIEWED_RETRY_DELAYS_MS = [1_000, 3_000] as const;
 
@@ -98,48 +102,6 @@ function isNotFoundResponse(cause: unknown): boolean {
     "status" in cause &&
     (cause as Error & { status?: unknown }).status === 404
   );
-}
-
-function projectStatusLabel(
-  status: ProjectRowVM["status"],
-  activeSessionCount = 0,
-): string {
-  switch (status) {
-    case "queued":
-    case "provisioning":
-      return "Getting ready";
-    case "ready":
-      return "Idle";
-    case "running":
-      return activeSessionCount > 0 ? "Working" : "Ready";
-    case "stopping":
-      return "Going to sleep";
-    case "stopped":
-      return "Sleeping";
-    case "needs_attention":
-    case "error":
-      return "Needs attention";
-    case "deleting":
-    case "deleted":
-      return "Deleting";
-  }
-}
-
-function projectStatusTone(
-  status: ProjectRowVM["status"],
-  activeSessionCount = 0,
-): "working" | "waiting" | "done" | "error" {
-  if (status === "running")
-    return activeSessionCount > 0 ? "working" : "done";
-  if (
-    status === "queued" ||
-    status === "provisioning" ||
-    status === "stopping" ||
-    status === "deleting"
-  )
-    return "waiting";
-  if (status === "needs_attention" || status === "error") return "error";
-  return "done";
 }
 
 function projectFilter(
@@ -460,7 +422,9 @@ function ProjectsHome({
                     )}
               </span>
               <span className="cowork-project-row__meta" role="cell">
-                {project.sessionCount} sessions · {project.fileCount} files
+                {project.sessionCount}{" "}
+                {project.sessionCount === 1 ? "conversation" : "conversations"} ·{" "}
+                {project.fileCount} {project.fileCount === 1 ? "file" : "files"}
               </span>
               <span className="cowork-project-row__time tnum" role="cell">
                 <time dateTime={project.updatedAt}>
@@ -973,45 +937,56 @@ function ProjectOverview({
               )}
             </div>
           ) : (
-            <button
-              type="button"
-              className="cowork-project-empty"
-              onClick={
-                view === "active" && !query ? onNewSession : undefined
-              }
-              disabled={
-                view === "archived" ||
-                Boolean(query) ||
-                loadingSessions ||
-                !acceptsSessions
-              }
-            >
-              <span>
-                <Icon
-                  name={view === "active" ? "message-square" : "archive"}
-                  size={16}
-                />
-              </span>
-              <strong>
-                {loadingSessions
-                  ? "Loading conversations…"
-                  : query
-                    ? "No matching conversations"
-                    : view === "archived"
-                      ? "No archived conversations"
-                      : "Start the first conversation"}
-              </strong>
-              <small>
-                {query
-                  ? "Try another search."
-                  : view === "archived"
-                    ? "Conversations you archive will stay available here."
-                    : "Describe an outcome. The agent already has this Project’s context."}
-              </small>
-              {view === "active" && !query && (
-                <Icon name="arrow-right" size={14} />
-              )}
-            </button>
+            (() => {
+              // Only the "start the first conversation" case is actionable. The other states are
+              // prose, so they must not be rendered inside a disabled control where keyboard and
+              // assistive-technology users cannot reach them.
+              const actionable =
+                view === "active" &&
+                !query &&
+                !loadingSessions &&
+                acceptsSessions;
+              const body = (
+                <>
+                  <span>
+                    <Icon
+                      name={view === "active" ? "message-square" : "archive"}
+                      size={16}
+                    />
+                  </span>
+                  <strong>
+                    {loadingSessions
+                      ? "Loading conversations…"
+                      : query
+                        ? "No matching conversations"
+                        : view === "archived"
+                          ? "No archived conversations"
+                          : "Start the first conversation"}
+                  </strong>
+                  <small>
+                    {query
+                      ? "Try another search."
+                      : view === "archived"
+                        ? "Conversations you archive will stay available here."
+                        : "Describe an outcome. The agent already has this Project’s context."}
+                  </small>
+                  {actionable && <Icon name="arrow-right" size={14} />}
+                </>
+              );
+              return actionable ? (
+                <button
+                  type="button"
+                  className="cowork-project-empty"
+                  onClick={onNewSession}
+                >
+                  {body}
+                </button>
+              ) : (
+                <p className="cowork-project-empty" role="status">
+                  {body}
+                </p>
+              );
+            })()
           )}
         </section>
         <aside className="cowork-project__rail" aria-label="Project context">
@@ -2133,7 +2108,28 @@ export function ProjectsApp({
       sessionMutationRef.current.delete(mutationKey);
     }
   };
-  const visibleResultToast = resultToasts[0] ?? null;
+  const visibleResultToasts = resultToasts.slice(0, 3);
+
+  // Confirmations expire on their own so a burst of background results cannot pile up unread.
+  // Warnings and failures stay until dismissed: they carry something the member still has to act on.
+  useEffect(() => {
+    if (!toast || toast.tone !== "neutral") return;
+    const timer = window.setTimeout(() => setToast(null), TOAST_DISMISS_MS);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
+  useEffect(() => {
+    const expiring = resultToasts.find((candidate) => candidate.tone === "neutral");
+    if (!expiring) return;
+    const timer = window.setTimeout(
+      () =>
+        setResultToasts((current) =>
+          current.filter((candidate) => candidate.id !== expiring.id),
+        ),
+      TOAST_DISMISS_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [resultToasts]);
 
   return (
     <div className={`app app--projects${mobileOpen ? " app--side-open" : ""}`}>
@@ -2610,8 +2606,9 @@ export function ProjectsApp({
           </button>
         </div>
       )}
-      {visibleResultToast ? (
+      {visibleResultToasts.map((visibleResultToast) => (
         <div
+          key={visibleResultToast.id}
           className={`project-toast project-toast--${visibleResultToast.tone}`}
           role="status"
         >
@@ -2652,7 +2649,8 @@ export function ProjectsApp({
             <Icon name="x" size={13} />
           </button>
         </div>
-      ) : toast ? (
+      ))}
+      {toast ? (
         <div
           className={`project-toast project-toast--${toast.tone}`}
           role={toast.tone === "danger" ? "alert" : "status"}

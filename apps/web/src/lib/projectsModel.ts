@@ -477,6 +477,50 @@ export function normalizeProjectSessionsResponse(value: unknown): {
   };
 }
 
+export type ProjectStatusTone = "working" | "waiting" | "done" | "error";
+
+/**
+ * One vocabulary for Project lifecycle state. It previously lived in three places that already
+ * disagreed: the same running Project read `Working` in the Run Skill picker and `Ready` in the
+ * Projects list, and `Idle` described the same awake-and-free state as `Ready`.
+ */
+export function projectStatusLabel(
+  status: ProjectRowVM["status"],
+  activeSessionCount = 0,
+): string {
+  switch (status) {
+    case "queued":
+    case "provisioning":
+      return "Getting ready";
+    case "ready":
+      return "Ready";
+    case "running":
+      return activeSessionCount > 0 ? "Working" : "Ready";
+    case "stopping":
+      return "Going to sleep";
+    case "stopped":
+      return "Sleeping";
+    case "needs_attention":
+    case "error":
+      return "Needs attention";
+    case "deleting":
+    case "deleted":
+      return "Deleting";
+  }
+}
+
+export function projectStatusTone(
+  status: ProjectRowVM["status"],
+  activeSessionCount = 0,
+): ProjectStatusTone {
+  if (status === "running") return activeSessionCount > 0 ? "working" : "done";
+  if (["queued", "provisioning", "stopping", "deleting"].includes(status)) {
+    return "waiting";
+  }
+  if (status === "needs_attention" || status === "error") return "error";
+  return "done";
+}
+
 /** Canonical Project conversation order: creation time descending, then id descending. */
 export function sortProjectSessionsByCreatedAt<
   T extends Pick<ProjectSessionVM, "id" | "createdAt">,

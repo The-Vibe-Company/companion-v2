@@ -3,34 +3,15 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ensureProjectSkill, fetchProjects } from "@/lib/projects";
-import type {
-  ProjectRowVM,
-  ProjectRuntimeAvailability,
+import {
+  projectStatusLabel,
+  projectStatusTone,
+  type ProjectRowVM,
+  type ProjectRuntimeAvailability,
 } from "@/lib/projectsModel";
 import { relativeTime } from "@/lib/format";
 import { Icon } from "../Icon";
 import { CoworkDialog } from "./ProjectDialogs";
-
-function projectStatusLabel(status: ProjectRowVM["status"]): string {
-  if (status === "running") return "Working";
-  if (status === "queued" || status === "provisioning") return "Getting ready";
-  if (status === "stopping") return "Going to sleep";
-  if (status === "stopped") return "Sleeping";
-  if (status === "needs_attention" || status === "error")
-    return "Needs attention";
-  if (status === "deleting" || status === "deleted") return "Deleting";
-  return "Idle";
-}
-
-function projectStatusTone(
-  status: ProjectRowVM["status"],
-): "working" | "waiting" | "error" | "done" {
-  if (status === "running") return "working";
-  if (["queued", "provisioning", "stopping", "deleting"].includes(status))
-    return "waiting";
-  if (status === "needs_attention" || status === "error") return "error";
-  return "done";
-}
 
 export function ProjectRunPicker({
   skillSlug,
@@ -163,13 +144,13 @@ export function ProjectRunPicker({
                 onClick={() => choose(project.id)}
               >
                 <span
-                  className={`project-status-dot is-${projectStatusTone(project.status)}`}
+                  className={`project-status-dot is-${projectStatusTone(project.status, project.activeSessionCount)}`}
                   aria-hidden="true"
                 />
                 <span>
                   <strong>{project.name}</strong>
                   <small>
-                    {projectStatusLabel(project.status)} ·{" "}
+                    {projectStatusLabel(project.status, project.activeSessionCount)} ·{" "}
                     {project.sessionCount} sessions · updated{" "}
                     {relativeTime(project.updatedAt)}
                   </small>

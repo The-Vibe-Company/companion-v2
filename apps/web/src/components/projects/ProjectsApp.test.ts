@@ -490,8 +490,11 @@ describe("ProjectsApp", () => {
       await Promise.resolve();
     });
 
+    // Both results are surfaced together. Hiding the rest behind the first meant a burst of
+    // background results queued silently while the member had no idea more were waiting.
     expect(container.textContent).toContain("Launch brief has a new result.");
-    expect(container.textContent).not.toContain("Research summary failed.");
+    expect(container.textContent).toContain("Research summary failed.");
+    expect(container.querySelectorAll(".project-toast")).toHaveLength(2);
 
     await act(async () => {
       button(container, "Open").click();
@@ -500,6 +503,7 @@ describe("ProjectsApp", () => {
     expect(router.push).toHaveBeenCalledWith(
       `/projects/${PROJECT_ID}/sessions/${firstId}`,
     );
+    // Opening one result never discards the others.
     expect(container.textContent).toContain("Research summary failed.");
 
     await act(async () => {
@@ -510,6 +514,51 @@ describe("ProjectsApp", () => {
       `/projects/${PROJECT_ID}/sessions/${secondId}`,
     );
     expect(container.querySelector(".project-toast")).toBeNull();
+  });
+
+  it("expires a confirmation on its own so it cannot sit on screen forever", async () => {
+    vi.useFakeTimers();
+    const inactive = session({ status: "completed" });
+    projectRpc.updateProjectSession.mockResolvedValue({
+      ...inactive,
+      archivedAt: NOW,
+    });
+    const container = await mount({
+      project: projectDetail({
+        status: "stopped",
+        activeSessionCount: 0,
+        sessions: [inactive],
+        recentSessions: [inactive],
+      }),
+    });
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(".cowork-session-row__action")!
+        .click();
+      await Promise.resolve();
+      [
+        ...document.body.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
+      ]
+        .find((candidate) => candidate.textContent?.trim() === "Archive")!
+        .click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("Conversation archived.");
+
+    // Undo stays reachable for the full window before the confirmation clears itself.
+    await act(async () => {
+      vi.advanceTimersByTime(9_000);
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("Undo");
+
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+      await Promise.resolve();
+    });
+    expect(container.textContent).not.toContain("Conversation archived.");
   });
 
   it("rolls back a failed read acknowledgement and retries it only three times", async () => {
@@ -782,9 +831,11 @@ describe("ProjectsApp", () => {
     );
     expect(panel).not.toBeNull();
     expect(panel?.querySelector('[role="dialog"]')).toBeNull();
+    // The enclosing section carries "Preview calendar.png", so the image itself is named by the
+    // file rather than repeating the word.
     expect(
       panel
-        ?.querySelector<HTMLImageElement>('img[alt="Preview of calendar.png"]')
+        ?.querySelector<HTMLImageElement>('img[alt="calendar.png"]')
         ?.getAttribute("src"),
     ).toContain(`/v1/projects/${PROJECT_ID}/files/`);
 
