@@ -16,7 +16,7 @@ import tempfile
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from companion_lib import api_post_json, api_redeem_secret_plan, companion_home, load_json
 
@@ -223,6 +223,7 @@ def deploy_packages_with_projection(
     skill: str,
     items: list[dict[str, Any]],
     remove_projection_if_empty: bool = False,
+    target_validator: Callable[[Path], Path] | None = None,
 ) -> Path:
     """Swap all package targets and one projection as a rollback-safe transaction.
 
@@ -244,12 +245,26 @@ def deploy_packages_with_projection(
 
     try:
         for target in target_dirs:
+            target = target_validator(target) if target_validator else target
             target.parent.mkdir(parents=True, exist_ok=True)
+            parent_stat = target.parent.lstat()
+            target_stat = target.lstat() if os.path.lexists(target) else None
             staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.companion-staging.", dir=str(target.parent)))
             shutil.rmtree(staging)
             shutil.copytree(package_dir, staging)
             backup = target.parent / f".{target.name}.companion-backup.{uuid.uuid4().hex}"
-            target_rows.append({"target": str(target), "staging": str(staging), "backup": str(backup), "existed": os.path.lexists(target)})
+            target_rows.append(
+                {
+                    "target": str(target),
+                    "staging": str(staging),
+                    "backup": str(backup),
+                    "existed": os.path.lexists(target),
+                    "parentDev": parent_stat.st_dev,
+                    "parentIno": parent_stat.st_ino,
+                    "targetDev": target_stat.st_dev if target_stat else None,
+                    "targetIno": target_stat.st_ino if target_stat else None,
+                }
+            )
 
         with projection_lock(directory):
             if marker.exists():
@@ -267,8 +282,18 @@ def deploy_packages_with_projection(
                     target = Path(row["target"])
                     backup = Path(row["backup"])
                     staging = Path(row["staging"])
+                    target = target_validator(target) if target_validator else target
+                    parent_stat = target.parent.lstat()
+                    if (parent_stat.st_dev, parent_stat.st_ino) != (row["parentDev"], row["parentIno"]):
+                        raise ValueError("install destination changed while preparing the package")
+                    target_stat = target.lstat() if os.path.lexists(target) else None
+                    if bool(target_stat) != bool(row["existed"]):
+                        raise ValueError("install destination changed while preparing the package")
+                    if target_stat and (target_stat.st_dev, target_stat.st_ino) != (row["targetDev"], row["targetIno"]):
+                        raise ValueError("install destination changed while preparing the package")
                     if os.path.lexists(target):
                         target.rename(backup)
+                    target = target_validator(target) if target_validator else target
                     staging.rename(target)
                 if os.path.lexists(env_path):
                     if stat.S_ISLNK(os.lstat(env_path).st_mode):

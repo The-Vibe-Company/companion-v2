@@ -254,8 +254,10 @@ directories. A v2 token migrates to a preserved `legacyPat` value that is ignore
 explicitly selects `COMPANION_AUTH_MODE=legacy-pat`. The lockfile keeps `apiUrl` metadata but never
 stores tokens, JWTs, tickets, or keys. Legacy URL-keyed lockfiles are migrated on
 the next write, and `skills.log.json` is only a read-once legacy alias. Installs fan out through the
-bundled `scripts/tools.json` registry, currently covering Claude Code, Codex, and OpenCode; OpenCode
-uses the shared Agent Skills paths (`~/.agents/skills` and `.agents/skills`). The package and its presentation manifest ship in `packages/companion-skill`; the
+bundled `scripts/tools.json` registry, currently covering Claude Code, Codex, OpenCode, and OpenClaw.
+OpenCode uses the shared Agent Skills paths (`~/.agents/skills` and `.agents/skills`); OpenClaw uses
+its managed global directory (`~/.openclaw/skills`) and workspace directory (`<workspace>/skills`).
+The package and its presentation manifest ship in `packages/companion-skill`; the
 authoritative version is the `version` in the bundled `companion.json`, which the API packs (and
 caches) on demand. Local skill rows also expose official integrity metadata: the canonical package
 checksum plus SHA-256 hashes for tracked files such as `SKILL.md`, `companion.json`, and

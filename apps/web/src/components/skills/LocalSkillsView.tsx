@@ -46,11 +46,12 @@ type PromptMode = "default" | "reinstall";
 type CopiedKind = "prompt" | "reinstall";
 
 /** The assistants the install dialog can target. Their display name is reported as the install agent. */
-type AssistantId = "claude-code" | "codex" | "opencode";
+type AssistantId = "claude-code" | "codex" | "opencode" | "openclaw";
 const ASSISTANTS: Record<AssistantId, { name: string; vendor: string; hint: string }> = {
   "claude-code": { name: "Claude Code", vendor: "anthropic", hint: "paste into Claude Code" },
   codex: { name: "Codex", vendor: "openai", hint: "paste into Codex" },
   opencode: { name: "OpenCode", vendor: "opencode", hint: "paste into OpenCode" },
+  openclaw: { name: "OpenClaw", vendor: "openclaw", hint: "paste into OpenClaw" },
 };
 
 /**
@@ -113,6 +114,21 @@ function OpenCodeLogo() {
       <Icon name="terminal" size={18} style={{ color: "#fff" }} />
     </span>
   );
+}
+
+function OpenClawLogo() {
+  return (
+    <span className="ls-tile__logo" style={{ background: "#44546f" }} aria-hidden="true">
+      <Icon name="bot" size={18} style={{ color: "#fff" }} />
+    </span>
+  );
+}
+
+function AssistantLogo({ id }: { id: AssistantId }) {
+  if (id === "claude-code") return <ClaudeLogo />;
+  if (id === "codex") return <CodexLogo />;
+  if (id === "opencode") return <OpenCodeLogo />;
+  return <OpenClawLogo />;
 }
 
 function MarkdownNotes({ value }: { value: string }) {
@@ -282,7 +298,7 @@ export function LocalSkillsView({
         <div className="ls-banner ls-banner--ok" role="status">
           <Icon name="check-circle-2" size={16} className="ls-banner__ico" />
           <span className="ls-banner__text">
-            <strong>Connected.</strong> Claude Code, Codex, OpenCode, and your agents can manage the
+            <strong>Connected.</strong> Claude Code, Codex, OpenCode, OpenClaw, and your agents can manage the
             skills on this machine.
           </span>
         </div>
@@ -296,8 +312,8 @@ export function LocalSkillsView({
           <span className="ls-banner__stack">
             <span className="ls-banner__title">Companion is not connected to your assistant</span>
             <span className="ls-banner__sub">
-              Claude Code, Codex, and OpenCode can&rsquo;t manage the skills on this machine yet. It takes
-              about a minute.
+              Claude Code, Codex, OpenCode, and OpenClaw can&rsquo;t manage the skills on this machine yet.
+              It takes about a minute.
             </span>
           </span>
           <button
@@ -493,9 +509,9 @@ function InstallGate({
 
         <div className="ls-gate__body">
           <p className="ls-gate__lede">
-            Install the skill on this machine so Claude Code, Codex, OpenCode, and your agents can
-            manage the skills here. You give it a short prompt once. It only acts after confirming
-            changes with you.
+            Install the skill on this machine so Claude Code, Codex, OpenCode, OpenClaw, and your
+            agents can manage the skills here. You give it a short prompt once. It only acts after
+            confirming changes with you.
           </p>
 
           <div className="ls-gate__feats">
@@ -526,7 +542,7 @@ function InstallGate({
                   aria-pressed={on}
                   onClick={() => setAssistant(id)}
                 >
-                  {id === "claude-code" ? <ClaudeLogo /> : id === "codex" ? <CodexLogo /> : <OpenCodeLogo />}
+                  <AssistantLogo id={id} />
                   <span className="ls-tile__text">
                     <span className="ls-tile__name">{info.name}</span>
                     <span className="ls-tile__vendor mono">{info.vendor}</span>
