@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -24,7 +25,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import cmp_to_key
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 
 class TokenRefreshUnavailable(Exception):
@@ -397,7 +398,11 @@ def resolve_credentials() -> tuple[str, str, str | None]:
     return api_url, token, workspace_id
 
 
-def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
+def _atomic_json_write(
+    path: Path,
+    payload: dict[str, Any],
+    before_replace: Callable[[], None] | None = None,
+) -> None:
     """Write private JSON through a same-directory temp file and atomic replacement."""
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -410,6 +415,8 @@ def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
+        if before_replace:
+            before_replace()
         os.replace(temp_path, path)
         os.chmod(path, 0o600)
     except BaseException:
@@ -602,7 +609,7 @@ def lockfile_candidates() -> list[Path]:
 
 # --- Multi-tool support -------------------------------------------------------
 #
-# A skill can be installed into several local coding tools (Claude Code, Codex, OpenCode, …) at once.
+# A skill can be installed into several local agent tools (Claude Code, Codex, OpenCode, OpenClaw, …) at once.
 # The tool registry (scripts/tools.json) is the single, extensible source of truth for each
 # tool's on-disk skill directories; ~/.companion/config.json records which tools this machine
 # uses; and lockfile records grow a `targets[]` array so every install location stays tracked.
@@ -692,6 +699,44 @@ def find_project_root(start: Path | None = None) -> Path | None:
 def project_lockfile_path(project_root: Path) -> Path:
     """Per-project lockfile, so multiple projects never overwrite each other's project-scope installs."""
     return Path(project_root) / ".companion" / "skills.lock.json"
+
+
+def _validate_contained_project_lockfile(path: Path, project_root: Path) -> None:
+    """Reject a project lockfile redirected outside its selected project/workspace root."""
+    root = Path(os.path.abspath(str(Path(project_root).expanduser())))
+    target = Path(os.path.abspath(str(Path(path).expanduser())))
+    if target == root or root not in target.parents:
+        fail(f"refusing project lockfile outside the selected root: {target}")
+    if not os.path.lexists(root):
+        fail(f"selected project or workspace root does not exist: {root}")
+    root_stat = root.lstat()
+    if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+        fail(f"refusing a non-directory or symbolic-link project root: {root}")
+    physical_root = root.resolve(strict=True)
+
+    current = root
+    for part in target.parent.relative_to(root).parts:
+        current /= part
+        if not os.path.lexists(current):
+            current.mkdir(mode=0o755)
+        ancestor_stat = current.lstat()
+        if stat.S_ISLNK(ancestor_stat.st_mode) or not stat.S_ISDIR(ancestor_stat.st_mode):
+            fail(f"refusing a non-directory or symbolic-link project lockfile ancestor: {current}")
+        physical_ancestor = current.resolve(strict=True)
+        if physical_ancestor != physical_root and physical_root not in physical_ancestor.parents:
+            fail(f"project lockfile ancestor escaped the selected root: {current}")
+
+    if os.path.lexists(target):
+        target_stat = target.lstat()
+        if stat.S_ISLNK(target_stat.st_mode) or not stat.S_ISREG(target_stat.st_mode):
+            fail(f"refusing a non-file or symbolic-link project lockfile: {target}")
+
+
+def validate_project_lockfile_path(project_root: Path) -> Path:
+    """Return the canonical project lockfile path after enforcing its containment boundary."""
+    path = project_lockfile_path(project_root)
+    _validate_contained_project_lockfile(path, project_root)
+    return path
 
 
 def compute_dir_checksum(path: Path) -> str:
@@ -798,6 +843,10 @@ def upsert_skill_lock_record(
     """
     if not targets:
         return
+    validate_project_path = None
+    if relative_to is not None:
+        validate_project_path = lambda: _validate_contained_project_lockfile(path, relative_to)
+        validate_project_path()
     raw = load_json(path)
     if not isinstance(raw, dict):
         raw = {}
@@ -841,8 +890,11 @@ def upsert_skill_lock_record(
         "targets": merged,
         "addedAt": now_iso(),
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+    if validate_project_path:
+        _atomic_json_write(path, raw, before_replace=validate_project_path)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
 
 
 def workspace_lock_entry(raw: dict[str, Any], workspace_id: str | None, api_url: str) -> dict[str, Any] | None:

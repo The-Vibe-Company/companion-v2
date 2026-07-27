@@ -120,7 +120,7 @@ export function buildCompanionSkillPrompts(version: string): LocalSkillPrompts {
     "7. Verify the exact checksum and size. Inspect the ZIP without executing scripts; reject",
     "   traversal, absolute paths, duplicate/case-colliding paths, links, and special files, and",
     "   require SKILL.md at the root.",
-    "8. Ask global or project and which tool(s): Claude Code, Codex, or OpenCode. Confirm before",
+    "8. Ask global or project/workspace and which tool(s): Claude Code, Codex, OpenCode, or OpenClaw. Confirm before",
     "   replacement, stage beside the destination, and atomically swap with rollback. Install only",
     "   the root package and report declared prerequisites.",
     "9. Run the bootstrap once from the installed companion folder:",

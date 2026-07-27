@@ -2,12 +2,12 @@
 """Install (or update) a published workspace skill into every local tool at once.
 
 This is the deterministic fan-out behind multi-tool installs. Given a skill slug it downloads the
-package once and deploys it into each configured tool (Claude Code, Codex, OpenCode, …) at the requested
-scope (user-global and/or the current project), then records every install location in the right
-lockfile so updates and audits stay tool-aware:
+package once and deploys it into each configured tool (Claude Code, Codex, OpenCode, OpenClaw, …) at
+the requested scope (user-global and/or the current project or workspace), then records every install
+location in the right lockfile so updates and audits stay tool-aware:
 
   - user-scope targets   -> ~/.companion/skills.lock.json
-  - project-scope targets -> <repo>/.companion/skills.lock.json  (one per project)
+  - project-scope targets -> <root>/.companion/skills.lock.json  (one per project or workspace)
 
 The tool set comes from ~/.companion/config.json (see `detect_tools`), overridable with --tools.
 A target whose on-disk folder was locally customized (its checksum diverges from the lockfile) is
@@ -22,6 +22,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import zipfile
@@ -48,6 +49,7 @@ from companion_lib import (  # noqa: E402
     resolve_credentials,
     resolve_target_dir,
     upsert_skill_lock_record,
+    validate_project_lockfile_path,
     workspace_lock_entry,
 )
 from secrets_runtime import (  # noqa: E402
@@ -99,22 +101,99 @@ def remove_swap_path(path: Path) -> None:
     shutil.rmtree(path)
 
 
-def deploy_to_target(package_dir: Path, target_dir: Path) -> None:
+def _absolute_without_resolving(path: Path) -> Path:
+    """Return an absolute lexical path without following symbolic links."""
+    return Path(os.path.abspath(str(path.expanduser())))
+
+
+def install_root_for_scope(scope: str, project_root: Path | None) -> Path:
+    """Return the user-selected containment root for an install scope."""
+    if scope == "user":
+        return _absolute_without_resolving(Path.home())
+    if scope == "project" and project_root is not None:
+        return _absolute_without_resolving(project_root)
+    fail("project scope requires a project or workspace root")
+
+
+def default_project_or_workspace_root(start: Path | None = None) -> Path:
+    """Prefer the nearest Git root, then fall back to the current OpenClaw-style workspace."""
+    current = _absolute_without_resolving(start or Path.cwd())
+    return find_project_root(current) or current
+
+
+def _is_contained(root: Path, candidate: Path) -> bool:
+    return candidate == root or root in candidate.parents
+
+
+def validate_install_target(target_dir: Path, install_root: Path, *, create_parents: bool) -> Path:
+    """Reject redirects outside `install_root` and return a safe lexical target path.
+
+    Every existing ancestor must be a real directory rather than a symbolic link. Missing ancestors
+    are optionally created one level at a time and checked immediately, so staging can never be
+    redirected through a repository-controlled `skills` link.
+    """
+    root = _absolute_without_resolving(install_root)
+    target = _absolute_without_resolving(target_dir)
+    if not _is_contained(root, target) or target == root:
+        fail(f"refusing install target outside the selected root: {target}")
+    if not os.path.lexists(root):
+        fail(f"selected install root does not exist: {root}")
+    root_stat = root.lstat()
+    if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+        fail(f"refusing a non-directory or symbolic-link install root: {root}")
+    physical_root = root.resolve(strict=True)
+
+    current = root
+    for part in target.parent.relative_to(root).parts:
+        current /= part
+        if not os.path.lexists(current):
+            if not create_parents:
+                continue
+            current.mkdir(mode=0o755)
+        ancestor_stat = current.lstat()
+        if stat.S_ISLNK(ancestor_stat.st_mode) or not stat.S_ISDIR(ancestor_stat.st_mode):
+            fail(f"refusing a non-directory or symbolic-link destination ancestor: {current}")
+        if not _is_contained(physical_root, current.resolve(strict=True)):
+            fail(f"destination ancestor escaped the selected install root: {current}")
+
+    if os.path.lexists(target):
+        target_stat = target.lstat()
+        if stat.S_ISLNK(target_stat.st_mode) or not stat.S_ISDIR(target_stat.st_mode):
+            fail(f"refusing to replace a non-directory or symbolic-link destination: {target}")
+        if not _is_contained(physical_root, target.resolve(strict=True)):
+            fail(f"existing destination escaped the selected install root: {target}")
+    return target
+
+
+def deploy_to_target(package_dir: Path, target_dir: Path, install_root: Path) -> None:
     """Replace `target_dir` with a fresh copy of the package using transient swap folders.
 
     The backup folder exists only during the swap. It is restored if the new folder fails to land, and
     otherwise deleted before this function returns so local skill scanners never discover stale copies.
     """
-    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    target_dir = validate_install_target(target_dir, install_root, create_parents=True)
+    parent_stat = target_dir.parent.lstat()
+    target_stat = target_dir.lstat() if os.path.lexists(target_dir) else None
     staging = Path(tempfile.mkdtemp(prefix=f".{target_dir.name}.companion-staging.", dir=str(target_dir.parent)))
     shutil.rmtree(staging)
     backup = Path(tempfile.mkdtemp(prefix=f".{target_dir.name}.companion-backup.", dir=str(target_dir.parent)))
     backup.rmdir()
     try:
         shutil.copytree(package_dir, staging)
-        if target_dir.exists():
+        checked_target = validate_install_target(target_dir, install_root, create_parents=False)
+        checked_parent_stat = checked_target.parent.lstat()
+        if (checked_parent_stat.st_dev, checked_parent_stat.st_ino) != (parent_stat.st_dev, parent_stat.st_ino):
+            fail("install destination changed while preparing the package")
+        current_target_stat = checked_target.lstat() if os.path.lexists(checked_target) else None
+        if (target_stat is None) != (current_target_stat is None):
+            fail("install destination changed while preparing the package")
+        if target_stat is not None and current_target_stat is not None:
+            if (current_target_stat.st_dev, current_target_stat.st_ino) != (target_stat.st_dev, target_stat.st_ino):
+                fail("install destination changed while preparing the package")
+        if os.path.lexists(target_dir):
             target_dir.rename(backup)
         try:
+            validate_install_target(target_dir, install_root, create_parents=False)
             staging.rename(target_dir)
         except OSError:
             if backup.exists() and not target_dir.exists():
@@ -134,7 +213,7 @@ def plan_targets(tools: list[str], scopes: list[str], project_root: Path | None)
     plan: list[tuple[str, str]] = []
     for scope in scopes:
         if scope == "project" and project_root is None:
-            fail("project scope requested but no project root was found (run inside a repo or pass --project)")
+            fail("project scope requested but no project or workspace root was found (pass --project)")
         for tool in tools:
             plan.append((tool, scope))
     return plan
@@ -171,6 +250,11 @@ def target_conflict(
     """Classify whether a target can be safely replaced under the shared install policy."""
     try:
         target_dir = resolve_target_dir(tool, scope, skill_name, project_root, registry)
+        validate_install_target(
+            target_dir,
+            install_root_for_scope(scope, project_root),
+            create_parents=False,
+        )
     except SystemExit as exc:
         row: dict[str, Any] = {"tool": tool, "scope": scope, "status": "error", "reason": str(exc), "path": None}
         if include_checksum:
@@ -257,9 +341,9 @@ def fan_out_install(
         # Isolate each target: a copy/remove/rename failure on one must not abort the fan-out, so every
         # successful target is still returned and recorded in the lockfile (no untracked partial installs).
         try:
-            deploy_to_target(package_dir, target_dir)
+            deploy_to_target(package_dir, target_dir, install_root_for_scope(scope, project_root))
             checksum = compute_dir_checksum(target_dir)
-        except OSError as exc:
+        except (OSError, SystemExit) as exc:
             results.append({"tool": tool, "scope": scope, "status": "error", "reason": str(exc), "path": str(target_dir), "checksum": None})
             continue
         results.append(
@@ -503,6 +587,14 @@ def install_prepared_node(
     ]
     if workspace_id and node["slug"] in preflight_skills_set:
         target_dirs = [resolve_target_dir(tool, scope, node["skill"]["name"], project_root, registry) for tool, scope in plan]
+        target_roots = {
+            str(target): install_root_for_scope(scope, project_root)
+            for (_tool, scope), target in zip(plan, target_dirs)
+        }
+
+        def validate_projected_target(target: Path) -> Path:
+            return validate_install_target(target, target_roots[str(target)], create_parents=True)
+
         try:
             projection_path = deploy_packages_with_projection(
                 package_dir,
@@ -511,6 +603,7 @@ def install_prepared_node(
                 node["slug"],
                 projection_items,
                 remove_projection_if_empty=not active_preflight_items,
+                target_validator=validate_projected_target,
             )
             results = [
                 {
@@ -531,7 +624,7 @@ def install_prepared_node(
                 ],
             }
             update_projection_state(workspace_id, filtered_redeemed, {node["slug"]: projection_path})
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, SystemExit) as exc:
             results = [
                 {"tool": tool, "scope": scope, "status": "error", "reason": str(exc), "path": str(target_dir), "checksum": None}
                 for (tool, scope), target_dir in zip(plan, target_dirs)
@@ -620,7 +713,7 @@ def resolve_tools(args_tools: str | None, registry: dict[str, Any]) -> list[str]
         fail(
             "no tools configured. Detected on this machine: "
             f"{hint}. Confirm the set with the user, then write {config_path()} "
-            "(or pass --tools claude-code,codex,opencode)."
+            "(or pass --tools claude-code,codex,opencode,openclaw)."
         )
     unknown = [tool for tool in wanted if tool not in registry]
     if unknown:
@@ -634,7 +727,10 @@ def main() -> None:
     parser.add_argument("--version", help="version to install (defaults to the current published version)")
     parser.add_argument("--tools", help="comma-separated tool keys (defaults to ~/.companion/config.json)")
     parser.add_argument("--scope", choices=["user", "project", "both"], default="user", help="install scope")
-    parser.add_argument("--project", help="project root for project-scope installs (defaults to the current repo root)")
+    parser.add_argument(
+        "--project",
+        help="project or workspace root for project-scope installs (defaults to the nearest repo root or current directory)",
+    )
     parser.add_argument("--force", action="store_true", help="overwrite locally customized targets")
     parser.add_argument(
         "--confirm-secrets",
@@ -665,7 +761,11 @@ def main() -> None:
 
     project_root: Path | None = None
     if "project" in scopes:
-        project_root = Path(args.project).expanduser().resolve() if args.project else find_project_root()
+        project_root = (
+            _absolute_without_resolving(Path(args.project))
+            if args.project
+            else default_project_or_workspace_root()
+        )
 
     install_target_plan = plan_targets(tools, scopes, project_root)
 
@@ -677,7 +777,7 @@ def main() -> None:
     if isinstance(raw_user, dict):
         prior_user = workspace_lock_entry(raw_user, workspace_id, api_url).get("skills", {}) or {}
     if project_root is not None:
-        raw_project = load_json(project_lockfile_path(project_root))
+        raw_project = load_json(validate_project_lockfile_path(project_root))
         if isinstance(raw_project, dict):
             prior_project = workspace_lock_entry(raw_project, workspace_id, api_url).get("skills", {}) or {}
 

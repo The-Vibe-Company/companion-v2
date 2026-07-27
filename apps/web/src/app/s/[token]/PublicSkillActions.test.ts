@@ -52,6 +52,9 @@ describe("buildPublicInstallPrompt", () => {
     expect(prompt).toContain("Never interpolate the ticket");
     expect(prompt).toContain("Pipe the captured JSON over stdin");
     expect(prompt).toContain("do not resolve dependencies, secrets, skill_installs, or scripts");
+    expect(prompt).toContain("Claude Code, Codex, OpenCode, or OpenClaw");
+    expect(prompt).toContain("~/.openclaw/skills/<slug>");
+    expect(prompt).toContain("<workspace>/skills/<slug>");
   });
 });
 
