@@ -1,22 +1,22 @@
 {
   "files": {
-    "SKILL.md": "sha256:48364612c4912ea83cd10ed2256d08edc4126529e3f154751f2ea241862bf599",
-    "companion.json": "sha256:1de5cab73e834cad24aaa0e48fe0515aaa4a95e7a269e9f5036eca0908b737a4",
+    "SKILL.md": "sha256:1124a0b05c0bc7c3ba867a10109dfed4c97e70cbb69a4c75bca6b926141030df",
+    "companion.json": "sha256:d0c817446c1316eb43a7950849b6d8b8456c806c1bf06aad918afb9e2653ab3d",
     "evals/evals.json": "sha256:d1a0a6b92fd19462fcc048d983ebee05c9b2f316057a3779ac329d709d5a5092",
-    "scripts/bootstrap.py": "sha256:bfb6de8f0ee59d3f7d947212060a83635a5ce1eaa6b172b8dc05e58d9b97b35f",
+    "scripts/bootstrap.py": "sha256:fcc58a22a3d8d270d3d2faef448bafefc3215556462aa5e66c37da82567711a0",
     "scripts/bootstrap_integrity.py": "sha256:697301a13d7fae907966209507e2636692b276c401e334ee97e4596e7b7b2ebe",
     "scripts/bootstrap_update.py": "sha256:6d2ff39c0e0ce5d51af9403cc408d1065a2c78c5e2f1a71ec8906b2719c70547",
     "scripts/check_updates.py": "sha256:c7da8735afd89e4c47764b64907ff3f295ae0f98f9c551cf77eb083c6bdf1116",
-    "scripts/companion-agent-client.mjs": "sha256:cadbfe4d283b332c36652578aeee475ea4309956d4ec9c9fab8f08c59bec9a4d",
-    "scripts/companion_lib.py": "sha256:e47e2e1c323b360feaab4e70246ca3cfb8e394e602976c99067129a88760d3e1",
+    "scripts/companion-agent-client.mjs": "sha256:925ed7fe82d7e9fa6799547dd9a20e3bbc216cc58dc41a2ff6ae56afb9f22acf",
+    "scripts/companion_lib.py": "sha256:68319e6d7674656757b961e5223acb445f587c0dd56be3cacd4d81057ba8f511",
     "scripts/create_secret.py": "sha256:f64b5f344c8b273bcef84b3fe833f09fd152af1875815d01c73e91692c9320d2",
-    "scripts/install_skill.py": "sha256:dc3c26fbca32a37a22235b5def477d1ec5828dfa9e5536029f5be8632f0bddb1",
-    "scripts/secrets_runtime.py": "sha256:bab6a780b2508248ed632feb15720682726baca1e75e34fe93e2157f430a6d6c",
+    "scripts/install_skill.py": "sha256:17d8e6138ce01fe2a6d20407cfd253afa555c8b0070cfae946d266d1cee02b76",
+    "scripts/secrets_runtime.py": "sha256:0da3919d57bee3d79b129c97ac93966990818511480e95ab5c01caec8dbea11d",
     "scripts/skill_guard.py": "sha256:27c9d27da0f7bbe39aeeb9f796f64671a8ac119b6be2f1295c92590cd8998a70",
     "scripts/sync_companion.py": "sha256:6338283999c982750e0226104aa862d1037e492e17170bb182af6d1173ca9b7e",
     "scripts/sync_secrets.py": "sha256:7059dec3ccf12208f046251fc5d4046187e4423d6f59e5464b0e8c7e9718b83c",
-    "scripts/tools.json": "sha256:65ba85df0cbfaf511281804efb2e00543433dc5d632259589b271c32c50757bf"
+    "scripts/tools.json": "sha256:cff30ae83b62de13db582cbaf3b8d1092c43e96ad33714f11b75e2fd5b7bc244"
   },
   "schemaVersion": 1,
-  "version": "1.27.1"
+  "version": "1.28.0"
 }

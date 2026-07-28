@@ -33,7 +33,7 @@ const CENTRAL_SIGNATURE = 0x02014b50;
 const LOCAL_SIGNATURE = 0x04034b50;
 const WIN32_RESERVED_BASENAME = /^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])$/i;
 
-export type PublicInstallTool = "claude-code" | "codex" | "opencode";
+export type PublicInstallTool = "claude-code" | "codex" | "opencode" | "openclaw";
 export type PublicInstallScope = "global" | "project";
 
 export interface PublicInstallPrerequisites {
@@ -324,9 +324,10 @@ export function inspectPublicSkillZip(bytes: Uint8Array): InspectedPublicSkillZi
   return { files, prerequisites: prerequisitesFrom(files) };
 }
 
-function libraryParts(tool: PublicInstallTool): string[] {
+function libraryParts(tool: PublicInstallTool, scope: PublicInstallScope): string[] {
   if (tool === "claude-code") return [".claude", "skills"];
   if (tool === "codex") return [".codex", "skills"];
+  if (tool === "openclaw") return scope === "global" ? [".openclaw", "skills"] : ["skills"];
   return [".agents", "skills"];
 }
 
@@ -347,7 +348,7 @@ export function resolvePublicSkillDestination(input: {
   projectRoot?: string;
 }): string {
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(input.slug)) throw new Error("invalid public skill slug");
-  return resolve(installBase(input), ...libraryParts(input.tool), input.slug);
+  return resolve(installBase(input), ...libraryParts(input.tool, input.scope), input.slug);
 }
 
 function isPhysicallyContained(root: string, candidate: string): boolean {
@@ -363,7 +364,7 @@ interface SecureInstallLocation {
 
 /**
  * Resolve the install library through real paths and reject links in every package-controlled
- * ancestor. This prevents `.codex`, `.claude`, `.agents`, or their `skills` child from redirecting
+ * ancestor. This prevents tool-specific directories or their `skills` child from redirecting
  * staging and replacement outside the selected home/project root.
  */
 function secureInstallLocation(input: {
@@ -381,7 +382,7 @@ function secureInstallLocation(input: {
   let logicalAncestor = base;
   let physicalAncestor = physicalBase;
 
-  for (const part of libraryParts(input.tool)) {
+  for (const part of libraryParts(input.tool, input.scope)) {
     logicalAncestor = join(logicalAncestor, part);
     if (!existsSync(logicalAncestor)) {
       try {

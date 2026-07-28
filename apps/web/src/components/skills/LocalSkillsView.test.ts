@@ -94,10 +94,11 @@ describe("LocalSkillsView", () => {
   it("auto-opens the dismissible connect dialog with an assistant chooser when not installed", async () => {
     const container = await mount();
     expect(container.textContent).toContain("Connect Companion to your assistant");
-    // Both assistant tiles are offered; the install is no longer forced ("Maybe later" is available).
+    // All supported assistant tiles are offered; the install is no longer forced ("Maybe later" is available).
     expect(container.textContent).toContain("Claude Code");
     expect(container.textContent).toContain("Codex");
     expect(container.textContent).toContain("OpenCode");
+    expect(container.textContent).toContain("OpenClaw");
     expect(container.textContent).toContain("Maybe later");
   });
 
@@ -131,6 +132,31 @@ describe("LocalSkillsView", () => {
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining("agent=OpenCode"));
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining("Agent Auth"));
     expect(writeText).not.toHaveBeenCalledWith(expect.stringContaining("cmp_pat_"));
+  });
+
+  it("reports OpenClaw as the installing assistant when selected", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    const container = await mount();
+    const openClaw = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("OpenClaw"),
+    );
+    await act(async () => openClaw?.click());
+
+    const copy = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Copy prompt"),
+    );
+    await act(async () => {
+      copy?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining("agent=OpenClaw"));
   });
 
   it("flips to the Connected banner when an out-of-band install is reported", async () => {

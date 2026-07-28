@@ -2,7 +2,7 @@
 name: companion
 description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, declare the secrets and environment variables a skill needs, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
 license: MIT
-compatibility: claude-code codex opencode
+compatibility: claude-code codex opencode openclaw
 allowed-tools: read_file write_file run_shell
 ---
 
@@ -148,12 +148,13 @@ The bootstrap resolves the Agent Auth connection, obtains `skills:read` on deman
 with `workspace`, `companion`, `integrity`, `skills`, `actions`, and `errors`.
 
 Self-update covers every existing user-global Companion copy in the registered tool locations
-(`~/.claude/skills/companion`, `~/.codex/skills/companion`, `~/.agents/skills/companion`, and future
-entries in `scripts/tools.json`). It does not silently add Companion to a tool where the folder is
-absent. The bootstrap verifies every existing copy against its own installed integrity baseline,
-downloads and verifies the official package once, stages every outdated target, and swaps all targets
-as one transaction. A failure rolls every swapped target back; a customized or unverifiable copy
-blocks the whole fan-out instead of leaving tools on a partial update.
+(`~/.claude/skills/companion`, `~/.codex/skills/companion`, `~/.agents/skills/companion`,
+`~/.openclaw/skills/companion`, and future entries in `scripts/tools.json`). It does not silently add
+Companion to a tool where the folder is absent. The bootstrap verifies every existing copy against
+its own installed integrity baseline, downloads and verifies the official package once, stages every
+outdated target, and swaps all targets as one transaction. A failure rolls every swapped target back;
+a customized or unverifiable copy blocks the whole fan-out instead of leaving tools on a partial
+update.
 
 When explicit legacy mode is active, the bootstrap instead checks the preserved file-backed PAT with
 `POST /tokens/refresh` before those calls. This compatibility path is never inferred from a failed
@@ -341,19 +342,23 @@ treat a close-named skill as its replacement.
 record that only has a single `installPath` is read as one `claude-code`/`user` target. There are two
 lockfile levels, same shape:
 
-- **User-scope** installs (`~/.claude/skills`, `~/.codex/skills`, `~/.agents/skills` for OpenCode) live in `~/.companion/skills.lock.json`.
-- **Project-scope** installs (`.claude/skills`, `.codex/skills`, `.agents/skills` for OpenCode inside a repo) live in a **per-project**
+- **User-scope** installs (`~/.claude/skills`, `~/.codex/skills`, `~/.agents/skills` for OpenCode, and
+  `~/.openclaw/skills` for OpenClaw) live in `~/.companion/skills.lock.json`.
+- **Project-scope** installs (`.claude/skills`, `.codex/skills`, `.agents/skills` for OpenCode, or
+  `skills` for OpenClaw inside a repo/workspace) live in a **per-project**
   `<repo>/.companion/skills.lock.json`, one per project, with repo-relative paths so it can optionally
   be committed to share the project's skill set. Never write a PAT, JWT, ticket, or private key to
   this lockfile.
 
 The set of tools this machine uses is recorded in `~/.companion/config.json`
-(`{ "schemaVersion": 1, "tools": ["claude-code", "codex", "opencode"] }` — never any secret). The supported tools
-and their on-disk skill directories are declared in this skill's `scripts/tools.json` registry, which
-is extensible: adding a tool there is enough to make it an install target. The OpenCode target uses
-the shared Agent Skills paths (`~/.agents/skills` and `.agents/skills`) so the same installed package
-is discoverable by OpenCode's agent-compatible loader. `scripts/tools.schema.json`
-is its JSON Schema (referenced via `$schema`) describing the registry shape.
+(`{ "schemaVersion": 1, "tools": ["claude-code", "codex", "opencode", "openclaw"] }` — never any
+secret). The supported tools and their on-disk skill directories are declared in this skill's
+`scripts/tools.json` registry, which is extensible: adding a tool there is enough to make it an
+install target. The OpenCode target uses the shared Agent Skills paths (`~/.agents/skills` and
+`.agents/skills`) so the same installed package is discoverable by OpenCode's agent-compatible
+loader. OpenClaw uses `~/.openclaw/skills` for user-global installs and `<workspace>/skills` for
+workspace installs. `scripts/tools.schema.json` is the registry's JSON Schema (referenced via
+`$schema`).
 
 ### List workspace and local skills
 
@@ -500,7 +505,7 @@ python3 scripts/bootstrap.py --summary
 Run that script from this skill's package root. It only reads local Companion state and calls the
 skills API with `skills:read`; it does not write files, publish, install, or update anything.
 
-### Install a skill into your tools (Claude Code, Codex, OpenCode, …)
+### Install a skill into your tools (Claude Code, Codex, OpenCode, OpenClaw, …)
 
 Installing a skill deploys its package into **every tool the user works with**, not just the one in
 use right now. Resolve the target tools, confirm with the user, then fan out:
@@ -510,12 +515,12 @@ use right now. Resolve the target tools, confirm with the user, then fan out:
    `detect_tools` from `companion_lib`), **propose the detected set to the user for confirmation**
    (they can add or remove tools), then persist it to `config.json`. Reuse it on later installs.
 2. **Ask the user where to install — always.** Before installing, ask whether they want it **global**
-   (user-scope, available in every project) or **for this project only** (project-scope in the current
-   repo), or both. Never silently pick a scope. Use a structured choice if the runtime offers one.
-   `user` maps to global, `project` to the current repo; pass `--scope user|project|both` accordingly.
-   There can be many projects on the machine, so project-scope installs are tracked per repo in
-   `<repo>/.companion/skills.lock.json`. For a project-scope install, confirm the current repo is the
-   intended one (project scope requires a repo root).
+   (user-scope, available in every project) or **for this project/workspace only** (project-scope in
+   the current repo or workspace), or both. Never silently pick a scope. Use a structured choice if
+   the runtime offers one. `user` maps to global; `project` maps to the nearest repository root, or
+   the current working directory when the workspace is not a Git repository. Pass
+   `--scope user|project|both` accordingly, and pass `--project <path>` when another workspace is
+   intended. Project-scope installs are tracked in `<root>/.companion/skills.lock.json`.
 3. **Let the installer resolve dependencies and preflight everything.** `install_skill.py` resolves
    the requested version and its dependency closure, then calls the server secret preflight before
    any package download or local mutation. Required missing bindings block only this install;
@@ -528,8 +533,9 @@ use right now. Resolve the target tools, confirm with the user, then fan out:
 
    ```sh
    python3 scripts/install_skill.py <slug> --scope user            # all configured tools, user-global
-   python3 scripts/install_skill.py <slug> --scope both            # user-global + the current repo
-   python3 scripts/install_skill.py <slug> --tools claude-code,codex,opencode --json
+   python3 scripts/install_skill.py <slug> --scope both            # user-global + the current project/workspace
+   python3 scripts/install_skill.py <slug> --scope project --project /path/to/openclaw-workspace
+   python3 scripts/install_skill.py <slug> --tools claude-code,codex,opencode,openclaw --json
    python3 scripts/install_skill.py <slug> --confirm-secrets --report
    ```
 
@@ -545,9 +551,10 @@ use right now. Resolve the target tools, confirm with the user, then fan out:
    folder was customized locally remains untouched unless `--force` is explicit.
 4. **Report once.** After the dependency-first fan-out, send a single aggregate
    `POST /skills/{slug}/install` for the requested root skill with the
-   installed version and an `agent` label listing the tools (for example `"Claude Code, Codex, OpenCode"`). The
-   workspace tracks installs per user, not per tool, so this stays one call even across multiple tools
-   and projects. (`install_skill.py --report` can send it for you.)
+   installed version and an `agent` label listing the tools (for example
+   `"Claude Code, Codex, OpenCode, OpenClaw"`). The workspace tracks installs per user, not per tool,
+   so this stays one call even across multiple tools and projects. (`install_skill.py --report` can
+   send it for you.)
 
 To **update** installed skills across tools, `python3 scripts/bootstrap.py --summary` lists every local
 skill with its per-tool `targets`; re-run `install_skill.py <slug>` to bring the behind targets up to
@@ -1115,7 +1122,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.27.1","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.28.0","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 

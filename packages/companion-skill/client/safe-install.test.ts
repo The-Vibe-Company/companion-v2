@@ -1,10 +1,14 @@
-import { mkdirSync, readFileSync, readdirSync, symlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { zipSync } from "fflate";
 import { describe, expect, it } from "vitest";
-import { inspectPublicSkillZip, installPublicSkillZip } from "./safe-install.js";
+import {
+  inspectPublicSkillZip,
+  installPublicSkillZip,
+  resolvePublicSkillDestination,
+} from "./safe-install.js";
 
 const encoder = new TextEncoder();
 const SKILL_ID = "84d8bee1-5ad3-4676-8c16-730e2a15ba70";
@@ -161,6 +165,35 @@ describe("safe public skill ZIP inspection", () => {
 });
 
 describe("atomic public skill install", () => {
+  it("resolves and installs OpenClaw project skills in the workspace skills directory", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "companion-openclaw-install-"));
+    expect(resolvePublicSkillDestination({
+      slug: "safe-skill",
+      tool: "openclaw",
+      scope: "project",
+      projectRoot,
+    })).toBe(join(projectRoot, "skills", "safe-skill"));
+
+    const installed = installPublicSkillZip({
+      bytes: skillZip(),
+      slug: "safe-skill",
+      tool: "openclaw",
+      scope: "project",
+      projectRoot,
+      confirmInstall: true,
+    });
+    expect(installed.destination).toBe(join(realpathSync(projectRoot), "skills", "safe-skill"));
+    expect(readFileSync(join(installed.destination, "SKILL.md"), "utf8")).toBe("# Safe\n");
+  });
+
+  it("resolves OpenClaw global skills in its managed user directory", () => {
+    expect(resolvePublicSkillDestination({
+      slug: "safe-skill",
+      tool: "openclaw",
+      scope: "global",
+    })).toBe(join(homedir(), ".openclaw", "skills", "safe-skill"));
+  });
+
   it("requires explicit replacement consent and swaps only the selected package", async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "companion-public-install-"));
     const first = installPublicSkillZip({

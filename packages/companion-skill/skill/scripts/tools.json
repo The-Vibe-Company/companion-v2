@@ -19,6 +19,12 @@
       "detect": ["~/.config/opencode"],
       "skillsDir": { "user": "~/.agents/skills", "project": ".agents/skills" },
       "format": "skill-md"
+    },
+    "openclaw": {
+      "displayName": "OpenClaw",
+      "detect": ["~/.openclaw"],
+      "skillsDir": { "user": "~/.openclaw/skills", "project": "skills" },
+      "format": "skill-md"
     }
   }
 }

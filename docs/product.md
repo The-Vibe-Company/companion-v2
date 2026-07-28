@@ -173,10 +173,11 @@ next run. Versioning lets members **pin** or **upgrade**.
 A creator or Owner/Admin opens an organization skill → explicitly pins its current version → shares
 the stable `/s/{token}` link. A visitor can inspect the pinned public metadata without signing in,
 then either downloads the exact ZIP with a verified account or copies an install prompt. The prompt
-connects Claude Code or Codex through delegated device approval, verifies the ZIP, asks for global or
-project scope and replacement consent, and installs only that root skill without executing scripts or
-resolving dependencies/secrets. A later publish leaves the old public release active until an explicit
-promotion; unpublishing removes package access without changing the URL.
+connects Claude Code, Codex, OpenCode, or OpenClaw through delegated device approval, verifies the
+ZIP, asks for global or project/workspace scope and replacement consent, and installs only that root
+skill without executing scripts or resolving dependencies/secrets. A later publish leaves the old
+public release active until an explicit promotion; unpublishing removes package access without
+changing the URL.
 Renaming is unavailable while a release is pinned, because the stable page identity must continue to
 match the immutable package. The creator or an Owner/Admin first removes the release, renames the
 skill, publishes a version with the new name, and explicitly makes that version public.

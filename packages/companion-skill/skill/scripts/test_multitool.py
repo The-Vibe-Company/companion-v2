@@ -37,6 +37,12 @@ REGISTRY = {
         "skillsDir": {"user": "~/.agents/skills", "project": ".agents/skills"},
         "format": "skill-md",
     },
+    "openclaw": {
+        "displayName": "OpenClaw",
+        "detect": ["~/.openclaw"],
+        "skillsDir": {"user": "~/.openclaw/skills", "project": "skills"},
+        "format": "skill-md",
+    },
 }
 
 
@@ -65,15 +71,19 @@ class EnvSandbox(unittest.TestCase):
 
 
 class RegistryTests(EnvSandbox):
-    def test_shipped_registry_loads_claude_codex_and_opencode(self) -> None:
+    def test_shipped_registry_loads_supported_tools(self) -> None:
         registry = companion_lib.load_tool_registry()
         self.assertIn("claude-code", registry)
         self.assertIn("codex", registry)
         self.assertIn("opencode", registry)
+        self.assertIn("openclaw", registry)
         self.assertEqual(registry["claude-code"]["skillsDir"]["user"], "~/.claude/skills")
         self.assertEqual(registry["opencode"]["detect"], ["~/.config/opencode"])
         self.assertEqual(registry["opencode"]["skillsDir"]["user"], "~/.agents/skills")
         self.assertEqual(registry["opencode"]["skillsDir"]["project"], ".agents/skills")
+        self.assertEqual(registry["openclaw"]["detect"], ["~/.openclaw"])
+        self.assertEqual(registry["openclaw"]["skillsDir"]["user"], "~/.openclaw/skills")
+        self.assertEqual(registry["openclaw"]["skillsDir"]["project"], "skills")
 
     def test_detect_tools_finds_only_present_tools(self) -> None:
         (self.home / ".claude").mkdir()
@@ -82,6 +92,11 @@ class RegistryTests(EnvSandbox):
         self.assertEqual(companion_lib.detect_tools(REGISTRY), ["claude-code", "codex"])
         (self.home / ".config" / "opencode").mkdir(parents=True)
         self.assertEqual(companion_lib.detect_tools(REGISTRY), ["claude-code", "codex", "opencode"])
+        (self.home / ".openclaw").mkdir()
+        self.assertEqual(
+            companion_lib.detect_tools(REGISTRY),
+            ["claude-code", "codex", "openclaw", "opencode"],
+        )
 
     def test_resolve_target_dir_user_and_project(self) -> None:
         user_dir = companion_lib.resolve_target_dir("claude-code", "user", "demo", None, REGISTRY)
@@ -93,21 +108,35 @@ class RegistryTests(EnvSandbox):
         self.assertEqual(project_dir, project_root / ".codex" / "skills" / "demo")
         opencode_project_dir = companion_lib.resolve_target_dir("opencode", "project", "demo", project_root, REGISTRY)
         self.assertEqual(opencode_project_dir, project_root / ".agents" / "skills" / "demo")
+        openclaw_user_dir = companion_lib.resolve_target_dir("openclaw", "user", "demo", None, REGISTRY)
+        self.assertEqual(openclaw_user_dir, self.home / ".openclaw" / "skills" / "demo")
+        openclaw_project_dir = companion_lib.resolve_target_dir("openclaw", "project", "demo", project_root, REGISTRY)
+        self.assertEqual(openclaw_project_dir, project_root / "skills" / "demo")
 
     def test_resolve_target_dir_rejects_unknown_tool(self) -> None:
         with self.assertRaises(SystemExit):
             companion_lib.resolve_target_dir("cursor", "user", "demo", None, REGISTRY)
 
+    def test_non_git_openclaw_workspace_defaults_to_current_directory(self) -> None:
+        workspace = self.root / "plain-openclaw-workspace"
+        workspace.mkdir()
+
+        self.assertIsNone(companion_lib.find_project_root(workspace))
+        self.assertEqual(install_skill.default_project_or_workspace_root(workspace), workspace)
+
 
 class ConfigTests(EnvSandbox):
     def test_round_trip_tool_config(self) -> None:
         self.assertEqual(companion_lib.load_tool_config(), [])
-        path = companion_lib.save_tool_config(["opencode", "codex", "claude-code", "codex"], detected_at="2026-06-26T00:00:00Z")
+        path = companion_lib.save_tool_config(
+            ["opencode", "openclaw", "codex", "claude-code", "codex"],
+            detected_at="2026-06-26T00:00:00Z",
+        )
         self.assertTrue(path.exists())
         saved = json.loads(path.read_text())
-        self.assertEqual(saved["tools"], ["claude-code", "codex", "opencode"])  # sorted + deduped
+        self.assertEqual(saved["tools"], ["claude-code", "codex", "openclaw", "opencode"])  # sorted + deduped
         self.assertEqual(saved["detectedAt"], "2026-06-26T00:00:00Z")
-        self.assertEqual(companion_lib.load_tool_config(), ["claude-code", "codex", "opencode"])
+        self.assertEqual(companion_lib.load_tool_config(), ["claude-code", "codex", "openclaw", "opencode"])
 
 
 class CredentialResolutionTests(EnvSandbox):
@@ -388,6 +417,7 @@ class FanOutTests(EnvSandbox):
     def test_installs_into_every_planned_target(self) -> None:
         pkg = self._package()
         project_root = self.root / "repo"
+        project_root.mkdir()
         plan = [("claude-code", "user"), ("codex", "user"), ("opencode", "user"), ("claude-code", "project"), ("opencode", "project")]
         results = install_skill.fan_out_install(pkg, "demo", plan, REGISTRY, project_root, {}, {}, force=False)
         self.assertTrue(all(row["status"] == "installed" for row in results))
@@ -415,14 +445,14 @@ class FanOutTests(EnvSandbox):
         Path.rename = flaky_rename
         try:
             with self.assertRaises(OSError):
-                install_skill.deploy_to_target(pkg, target)
+                install_skill.deploy_to_target(pkg, target, self.home)
         finally:
             Path.rename = original_rename
 
         self.assertEqual((target / "SKILL.md").read_text(encoding="utf-8"), "old version\n")
         self.assertEqual([], self._swap_dirs(target.parent))
 
-    def test_deploy_to_target_deletes_backup_symlink(self) -> None:
+    def test_deploy_to_target_rejects_destination_symlink(self) -> None:
         pkg = self._package()
         target = companion_lib.resolve_target_dir("claude-code", "user", "demo", None, REGISTRY)
         real_target = self.root / "real-demo"
@@ -431,11 +461,95 @@ class FanOutTests(EnvSandbox):
         target.parent.mkdir(parents=True)
         target.symlink_to(real_target, target_is_directory=True)
 
-        install_skill.deploy_to_target(pkg, target)
+        with self.assertRaisesRegex(SystemExit, "symbolic-link destination"):
+            install_skill.deploy_to_target(pkg, target, self.home)
 
-        self.assertFalse(target.is_symlink())
-        self.assertEqual((target / "SKILL.md").read_text(encoding="utf-8"), "# demo\n")
+        self.assertTrue(target.is_symlink())
+        self.assertEqual((real_target / "SKILL.md").read_text(encoding="utf-8"), "old version\n")
         self.assertEqual([], self._swap_dirs(target.parent))
+
+    def test_openclaw_project_install_rejects_symlinked_skills_parent(self) -> None:
+        pkg = self._package()
+        workspace = self.root / "workspace"
+        outside = self.root / "outside"
+        workspace.mkdir()
+        outside.mkdir()
+        (workspace / "skills").symlink_to(outside, target_is_directory=True)
+        target = companion_lib.resolve_target_dir("openclaw", "project", "demo", workspace, REGISTRY)
+
+        results = install_skill.fan_out_install(
+            pkg,
+            "demo",
+            [("openclaw", "project")],
+            REGISTRY,
+            workspace,
+            {},
+            {},
+            force=True,
+        )
+
+        self.assertEqual(results[0]["status"], "error")
+        self.assertIn("symbolic-link destination ancestor", results[0]["reason"])
+        self.assertFalse((outside / "demo").exists())
+
+    def test_openclaw_user_install_rejects_symlinked_skills_parent(self) -> None:
+        pkg = self._package()
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.home / ".openclaw").mkdir()
+        (self.home / ".openclaw" / "skills").symlink_to(outside, target_is_directory=True)
+
+        results = install_skill.fan_out_install(
+            pkg,
+            "demo",
+            [("openclaw", "user")],
+            REGISTRY,
+            None,
+            {},
+            {},
+            force=True,
+        )
+
+        self.assertEqual(results[0]["status"], "error")
+        self.assertIn("symbolic-link destination ancestor", results[0]["reason"])
+        self.assertFalse((outside / "demo").exists())
+
+    def test_openclaw_secret_projection_rejects_symlinked_workspace_parent(self) -> None:
+        pkg = self._package()
+        workspace = self.root / "workspace"
+        outside = self.root / "outside"
+        workspace.mkdir()
+        outside.mkdir()
+        (workspace / "skills").symlink_to(outside, target_is_directory=True)
+        node = {
+            "slug": "demo",
+            "version": "1.0.0",
+            "skill": {"name": "demo", "slug": "demo", "version": "1.0.0"},
+        }
+
+        results = install_skill.install_prepared_node(
+            "https://api/v1",
+            "workspace-1",
+            node,
+            pkg,
+            [("openclaw", "project")],
+            REGISTRY,
+            workspace,
+            {},
+            {},
+            True,
+            {
+                "preflight": {
+                    "items": [{"skill": "demo", "env_key": "DEMO_TOKEN", "required": False}],
+                    "tombstones": [],
+                },
+                "redeemed": {"items": [], "tombstones": []},
+            },
+        )
+
+        self.assertEqual(results[0]["status"], "error")
+        self.assertIn("symbolic-link destination ancestor", results[0]["reason"])
+        self.assertFalse((outside / "demo").exists())
 
     def test_skips_customized_target_unless_forced(self) -> None:
         pkg = self._package()
@@ -473,10 +587,10 @@ class FanOutTests(EnvSandbox):
         pkg = self._package()
         original = install_skill.deploy_to_target
 
-        def flaky(package_dir: Path, target_dir: Path) -> None:
+        def flaky(package_dir: Path, target_dir: Path, install_root: Path) -> None:
             if ".codex" in str(target_dir):
                 raise OSError("simulated disk failure")
-            original(package_dir, target_dir)
+            original(package_dir, target_dir, install_root)
 
         install_skill.deploy_to_target = flaky
         try:
@@ -550,6 +664,7 @@ class FanOutTests(EnvSandbox):
     def test_write_lock_records_splits_user_and_project(self) -> None:
         skill = {"name": "demo", "slug": "demo", "skillId": "id-1", "version": "1.0.0", "checksum": "sha256:pkg"}
         project_root = self.root / "repo"
+        project_root.mkdir()
         user_targets = [{"tool": "claude-code", "scope": "user", "path": str(self.home / ".claude/skills/demo"), "checksum": "sha256:u"}]
         project_targets = [{"tool": "codex", "scope": "project", "path": str(project_root / ".codex/skills/demo"), "checksum": "sha256:p"}]
 
@@ -564,6 +679,34 @@ class FanOutTests(EnvSandbox):
         project_record = project_lock["workspaces"]["ws-1"]["skills"]["demo"]
         # Project lockfile stores repo-relative paths so it can be committed and shared.
         self.assertEqual(project_record["targets"][0]["path"], ".codex/skills/demo")
+
+    def test_project_lockfile_rejects_symlinked_companion_parent(self) -> None:
+        skill = {"name": "demo", "slug": "demo", "skillId": "id-1", "version": "1.0.0", "checksum": "sha256:pkg"}
+        project_root = self.root / "workspace"
+        outside = self.root / "outside"
+        project_root.mkdir()
+        outside.mkdir()
+        (project_root / ".companion").symlink_to(outside, target_is_directory=True)
+        targets = [
+            {
+                "tool": "openclaw",
+                "scope": "project",
+                "path": str(project_root / "skills" / "demo"),
+                "checksum": "sha256:demo",
+            }
+        ]
+
+        with self.assertRaisesRegex(SystemExit, "symbolic-link project lockfile ancestor"):
+            companion_lib.upsert_skill_lock_record(
+                companion_lib.project_lockfile_path(project_root),
+                "ws-1",
+                "https://api/v1",
+                skill,
+                targets,
+                relative_to=project_root,
+            )
+
+        self.assertFalse((outside / "skills.lock.json").exists())
 
 
 class DependencyInstallPlanTests(EnvSandbox):
@@ -1032,6 +1175,7 @@ class DependencyInstallPlanTests(EnvSandbox):
         dep = {"slug": "dep", "version": "1.0.0", "skill": {"name": "dep", "slug": "dep", "skillId": "id-dep", "version": "1.0.0"}}
         root = {"slug": "root", "version": "1.0.0", "skill": {"name": "root", "slug": "root", "skillId": "id-root", "version": "1.0.0"}}
         project_root = self.root / "repo"
+        project_root.mkdir()
 
         install_skill.api_download_bytes = lambda _api_url, _token, path: self._zip_package("dep" if "/dep/" in path else "root")
         try:

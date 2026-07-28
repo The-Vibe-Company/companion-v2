@@ -264,7 +264,7 @@ Machine values are load-bearing and must remain literal in monospace:
 - env vars and secret names such as `OPENROUTER_API_KEY`
 - resource addresses such as `fly_app.agent.research-agent`
 
-Use sentence case for headings, labels, buttons, navigation, and empty states. Product and technology names keep their canonical casing: Companion, Hermès, Hermes, Granite, Tailscale, Fly, Kubernetes, Modal, OpenRouter, MCP, `SKILL.md`, `SOUL.md`.
+Use sentence case for headings, labels, buttons, navigation, and empty states. Product and technology names keep their canonical casing: Companion, Hermès, Hermes, Granite, Tailscale, Fly, Kubernetes, Modal, OpenRouter, OpenClaw, MCP, `SKILL.md`, `SOUL.md`.
 
 UI copy is terse and operational. Say what happened, what will happen next, or what the user can do. Avoid greeting copy, delight copy, mascot copy, and broad value propositions inside the app.
 

@@ -56,11 +56,12 @@ function fmtSize(bytes: number): string {
   return (bytes / 1024 / 1024).toFixed(1) + " MB";
 }
 
-/** Where a skill gets installed locally (machine / Claude Code / Codex / OpenCode). */
+/** Where a skill gets installed locally (machine / Claude Code / Codex / OpenCode / OpenClaw). */
 const UP_TARGETS = [
   { id: "claude", name: "Claude Code", icon: "sparkles", path: (id: string) => `~/.claude/skills/${id}` },
   { id: "codex", name: "Codex", icon: "code", path: (id: string) => `~/.codex/skills/${id}` },
   { id: "opencode", name: "OpenCode", icon: "terminal", path: (id: string) => `~/.agents/skills/${id}` },
+  { id: "openclaw", name: "OpenClaw", icon: "bot", path: (id: string) => `~/.openclaw/skills/${id}` },
   { id: "local", name: "Local folder", icon: "folder", path: (id: string) => `./skills/${id}` },
 ] as const;
 type TargetId = (typeof UP_TARGETS)[number]["id"];
@@ -1823,7 +1824,7 @@ Agent Auth is mandatory for this prompt. Do not mint a PAT, inject a bearer toke
               ) : (
                 <>
                   {actionVerb} <span className="mono">{id}@{version}</span> on your machine, Claude Code,
-                  Codex, or OpenCode.
+                  Codex, OpenCode, or OpenClaw.
                 </>
               )}
             </p>
