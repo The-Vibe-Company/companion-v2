@@ -1,5 +1,9 @@
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk";
-import type { RunChatEvent, RunChatHistoryItem } from "@companion/contracts";
+import type {
+  RunActivityPhase,
+  RunChatEvent,
+  RunChatHistoryItem,
+} from "@companion/contracts";
 import {
   OPENCODE_SERVER_USERNAME,
   RunRuntimeError,
@@ -155,10 +159,27 @@ export interface OpencodeStreamState {
   assistantMessages: Set<string>;
   startedTools: Set<string>;
   doneTools: Set<string>;
+  /** Latest Project tool phase, used to deduplicate pending→running cumulative updates. */
+  toolPhases: Map<string, "pending" | "running">;
+  /** Latest Project progress summary, used to suppress identical cumulative progress events. */
+  toolProgress: Map<string, string>;
+  /** Project-only metadata retained across richer and cumulative OpenCode tool events. */
+  projectTools: Map<string, {
+    messageId: string;
+    tool: string;
+    skill: string | null;
+    title: string | null;
+    input: string;
+    startedAt: number | null;
+  }>;
   doneTexts: Set<string>;
   textEmitted: Map<string, number>;
   reasoningEmitted: Map<string, number>;
   doneReasoning: Set<string>;
+  /** Last explanatory Project activity; the authoritative working state remains separate. */
+  activity: RunActivityPhase | null;
+  askedQuestions: Set<string>;
+  resolvedQuestions: Set<string>;
 }
 
 export function createOpencodeStreamState(): OpencodeStreamState {
@@ -166,10 +187,16 @@ export function createOpencodeStreamState(): OpencodeStreamState {
     assistantMessages: new Set(),
     startedTools: new Set(),
     doneTools: new Set(),
+    toolPhases: new Map(),
+    toolProgress: new Map(),
+    projectTools: new Map(),
     doneTexts: new Set(),
     textEmitted: new Map(),
     reasoningEmitted: new Map(),
     doneReasoning: new Set(),
+    activity: null,
+    askedQuestions: new Set(),
+    resolvedQuestions: new Set(),
   };
 }
 

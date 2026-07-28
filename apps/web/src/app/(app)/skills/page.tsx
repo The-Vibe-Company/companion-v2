@@ -9,10 +9,19 @@ import type {
 import { loadOrgContext } from "@/lib/currentOrg";
 import { serverApiFetch } from "@/lib/apiServer";
 import { SkillsApp } from "@/components/skills/SkillsApp";
-import { parseSkillsRoute, skillsRouteSource } from "@/components/skills/route";
+import {
+  parseSkillsRoute,
+  skillsRouteHref,
+  skillsRouteSource,
+  skillsRouteWithoutRun,
+} from "@/components/skills/route";
 import { AuthUnavailable, WorkspaceLoadError } from "@/components/org/WorkspaceLoadError";
 import { loadServerAuth } from "@/lib/serverAuth";
 import { mapSkill, type MeVM } from "@/lib/types";
+import {
+  projectsFeatureEnabled,
+  runSkillFeatureEnabled,
+} from "@/lib/projectsFeature";
 
 export const dynamic = "force-dynamic";
 
@@ -37,6 +46,15 @@ export default async function SkillsPage({
   if (authState.status === "unavailable") return <AuthUnavailable />;
   const whoami = authState.user;
   if (whoami.needsOnboarding) redirect("/onboarding");
+  const projectsEnabled = projectsFeatureEnabled(whoami.email);
+  const runSkillEnabled = runSkillFeatureEnabled(whoami.email);
+  if (
+    !runSkillEnabled &&
+    initialRoute.kind !== "local" &&
+    initialRoute.run
+  ) {
+    redirect(skillsRouteHref(skillsRouteWithoutRun(initialRoute)));
+  }
 
   const orgContext = await loadOrgContext().catch(() => null);
   if (!orgContext) return <WorkspaceLoadError />;
@@ -91,6 +109,8 @@ export default async function SkillsPage({
       currentOrg={current}
       initialRoute={initialRoute}
       initialRouteSource={initialRouteSource}
+      projectsEnabled={projectsEnabled}
+      runSkillEnabled={runSkillEnabled}
     />
   );
 }

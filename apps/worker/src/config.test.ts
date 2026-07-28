@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { boundedInteger, runWorkerConfig } from "./config";
+import { boundedInteger, projectWorkerConfig, runWorkerConfig } from "./config";
 
 describe("run worker configuration", () => {
   it("rejects fractional, non-numeric and out-of-range values", () => {
@@ -36,5 +36,32 @@ describe("run worker configuration", () => {
     expect(config.recorderUnavailableMs).toBe(15_000);
     expect(runWorkerConfig({ COMPANION_SANDBOX_MAX_SESSION_MS: "3600001" }).sandboxMaxSessionMs)
       .toBe(3_600_000);
+  });
+});
+
+describe("Project worker configuration", () => {
+  it("is disabled by default and suspends after ten idle minutes", () => {
+    const config = projectWorkerConfig({});
+    expect(config.enabled).toBe(false);
+    expect(config.idleMs).toBe(600_000);
+    expect(config.maxActivationMs).toBe(24 * 60 * 60 * 1_000);
+    expect(config.heartbeatMs).toBeLessThan(config.leaseSeconds * 1_000);
+  });
+
+  it("accepts an explicit feature flag and bounded runtime settings", () => {
+    const config = projectWorkerConfig({
+      COMPANION_PROJECTS_ENABLED: "true",
+      COMPANION_PROJECT_WORKER_CONCURRENCY: "4",
+      COMPANION_PROJECT_IDLE_MS: "60000",
+      COMPANION_PROJECT_SANDBOX_TIMEOUT_MS: "7200000",
+      COMPANION_PROJECT_MAX_ACTIVATION_MS: "172800000",
+    });
+    expect(config).toMatchObject({
+      enabled: true,
+      concurrency: 4,
+      idleMs: 60_000,
+      sandboxTimeoutMs: 7_200_000,
+      maxActivationMs: 172_800_000,
+    });
   });
 });

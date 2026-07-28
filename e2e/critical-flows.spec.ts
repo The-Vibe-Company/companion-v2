@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const EMAIL = process.env.COMPANION_SEED_EMAIL ?? "admin@tvc.dev";
+const EMAIL = process.env.COMPANION_SEED_EMAIL ?? "admin@thevibecompany.co";
 const PASSWORD = process.env.COMPANION_SEED_PASSWORD ?? "adminadmin";
 
 const browserFailures = new WeakMap<Page, string[]>();

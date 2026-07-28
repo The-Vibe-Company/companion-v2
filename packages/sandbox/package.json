@@ -11,6 +11,7 @@
     "test": "vitest run",
     "golden": "tsx scripts/create-golden-sandbox.ts",
     "smoke:vercel": "tsx scripts/smoke-vercel.ts",
+    "smoke:project-vercel": "tsx scripts/smoke-project-vercel.ts",
     "probe": "tsx scripts/probe.ts"
   },
   "dependencies": {

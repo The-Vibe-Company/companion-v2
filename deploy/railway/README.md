@@ -37,21 +37,58 @@ worker communicate through Postgres and external providers. Deploy `api` once be
 supervisor so
 the first database migration has completed; later API deploys run migrations before replacing the live process.
 
-Run the API and worker with a dedicated `NOSUPERUSER NOBYPASSRLS` login that neither owns database
-objects nor belongs to the migration-owner role. Keep the Railway Postgres owner URL only in
-`DATABASE_MIGRATION_URL` on the API (for its pre-deploy migration). Set `DATABASE_RUNTIME_ROLE` to the
-runtime login name: the migration hook then applies the versioned least-privilege grants immediately
-after every migration while it still holds the advisory lock. The checked-in script remains a manual
-recovery/fallback path:
+**Deploy `api` before `worker` on every release, not only the first.** Only the API carries a
+pre-deploy migration hook (`api.railway.json`), so a worker started ahead of it runs new code against
+the old schema. A worker released before migration `0058`, for example, selects `attempt` from
+`companion_claim_project_workspaces` and every claim fails with `42703`; the supervisor logs
+`project workspace claim will retry (...)` once per claim interval and processes no Project until the
+migration lands, then recovers on its own. Nothing is lost, but Projects stall for the window.
+
+Run the API and worker with two distinct `LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT` roles that neither
+own database objects nor belong to the migration-owner role. Keep the Railway Postgres owner URL only
+in `DATABASE_MIGRATION_URL` on the API (for its pre-deploy migration). Create both logins from the
+owner connection and store their generated passwords as separate Railway secrets:
 
 ```bash
-psql "$DATABASE_MIGRATION_URL" -v runtime_role=companion_runtime \
+psql "$DATABASE_MIGRATION_URL" <<'SQL'
+CREATE ROLE companion_api LOGIN PASSWORD '<generated-api-password>'
+  NOSUPERUSER NOBYPASSRLS NOINHERIT;
+CREATE ROLE companion_worker LOGIN PASSWORD '<generated-worker-password>'
+  NOSUPERUSER NOBYPASSRLS NOINHERIT;
+SQL
+```
+
+Set `DATABASE_API_ROLE` and `DATABASE_WORKER_ROLE` on the API migration service. The migration hook
+then applies common RLS table access plus separate function capabilities while it still holds the
+advisory lock. The checked-in script remains a manual recovery/fallback path:
+
+```bash
+psql "$DATABASE_MIGRATION_URL" \
+  -v api_role=companion_api \
+  -v worker_role=companion_worker \
   -f packages/db/runtime-role-grants.sql
 ```
 
-Set `DATABASE_URL` on API and worker to that runtime login's URL. This separation is required for
-forced creator-only RLS; using the table owner, a superuser, or a `BYPASSRLS` role at runtime disables
-that security boundary.
+Set the API's `DATABASE_URL` to the `companion_api` login URL and the worker's `DATABASE_URL` to the
+`companion_worker` login URL. This separation prevents an API compromise from claiming or forging a
+Project worker lease. Using the table owner, a superuser, a `BYPASSRLS` role, or one shared production
+role disables part of that security boundary. `DATABASE_RUNTIME_ROLE` remains a local/simple-install
+compatibility option only and grants the union of both capability sets.
+
+For an existing installation that used `companion_runtime`, cut over in two phases:
+
+1. Create the two roles above. Remove `DATABASE_RUNTIME_ROLE`, set `DATABASE_API_ROLE` and
+   `DATABASE_WORKER_ROLE`, update each service's `DATABASE_URL`, and deploy both services.
+2. Once the new worker heartbeat and API health check are green, run the migration hook once with
+   `DATABASE_RETIRED_RUNTIME_ROLE=companion_runtime` (or pass
+   `-v retired_runtime_role=companion_runtime` to the manual command). This revokes the old union
+   role's current table/function grants and its table/sequence default privileges. Then run
+   `ALTER ROLE companion_runtime NOLOGIN`; remove `DATABASE_RETIRED_RUNTIME_ROLE`, and drop the role
+   after confirming no old service still uses it.
+
+If an active API or worker deliberately reuses the former role name, the hook only removes the
+opposite process's function capabilities and preserves the active role's common/default grants. The
+hook also rejects API↔worker role membership because `NOINHERIT` alone does not prevent `SET ROLE`.
 
 ## 2. Configure variables
 
@@ -64,9 +101,10 @@ below assume the services are named exactly `web`, `api`, and `Postgres`.
 NODE_ENV=production
 PORT=3001
 COMPANION_API_HOST=0.0.0.0
-DATABASE_URL=<companion_runtime NOSUPERUSER/NOBYPASSRLS URL>
+DATABASE_URL=<companion_api LOGIN/NOSUPERUSER/NOBYPASSRLS/NOINHERIT URL>
 DATABASE_MIGRATION_URL=${{Postgres.DATABASE_URL}}
-DATABASE_RUNTIME_ROLE=companion_runtime
+DATABASE_API_ROLE=companion_api
+DATABASE_WORKER_ROLE=companion_worker
 COMPANION_WEB_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
 COMPANION_API_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
 BETTER_AUTH_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
@@ -105,6 +143,8 @@ STRIPE_PORTAL_CONFIGURATION_ID=<live portal configuration id>
 # The API exposes run readiness/options but never receives Vercel credentials.
 COMPANION_RUNS_ENABLED=true
 COMPANION_RUN_PREWARM_ENABLED=true
+# Projects stays off until the matching web, API, migration, and worker release is live.
+COMPANION_PROJECTS_ENABLED=false
 COMPANION_GOLDEN_SNAPSHOT_ID=<same pinned OpenCode snapshot as worker>
 OPENCODE_VERSION=1.17.13
 COMPANION_SANDBOX_REGION=iad1
@@ -133,6 +173,9 @@ PORT=3000
 COMPANION_API_URL=http://${{api.RAILWAY_PRIVATE_DOMAIN}}:3001
 COMPANION_WEB_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
 NEXT_PUBLIC_COMPANION_API_BASE=https://${{web.RAILWAY_PUBLIC_DOMAIN}}/v1
+COMPANION_RUNS_ENABLED=true
+# Keep this identical on web, API, and worker during the coordinated Projects rollout.
+COMPANION_PROJECTS_ENABLED=false
 NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN=<public project token, optional>
 NEXT_PUBLIC_POSTHOG_HOST=https://us.i.posthog.com
 ```
@@ -140,12 +183,16 @@ NEXT_PUBLIC_POSTHOG_HOST=https://us.i.posthog.com
 `COMPANION_API_URL` is consumed while Next.js builds its rewrites, so add it before the first web build. Railway's
 private DNS is not reachable from a browser; browser requests intentionally stay on the public web origin. The
 `NEXT_PUBLIC_*` values are public by definition and are baked into the browser bundle.
+`COMPANION_RUNS_ENABLED` and `COMPANION_PROJECTS_ENABLED` are server-only rollout gates and must
+carry the same value on web, API, and worker. Flip Projects to `true` on all three services in one
+coordinated release; a mismatched web value intentionally hides the surface even when the backend is
+ready.
 
 ### `worker`
 
 ```dotenv
 NODE_ENV=production
-DATABASE_URL=<same companion_runtime URL as api>
+DATABASE_URL=<companion_worker LOGIN/NOSUPERUSER/NOBYPASSRLS/NOINHERIT URL>
 COMPANION_WEB_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
 COMPANION_BILLING_MODE=stripe
 COMPANION_ENTITLEMENTS_MODE=observe
@@ -187,11 +234,22 @@ COMPANION_RUN_RECORDER_RECONNECT_MIN_MS=250
 COMPANION_RUN_RECORDER_RECONNECT_MAX_MS=5000
 COMPANION_RUN_EVENT_RETENTION_INTERVAL_MS=900000
 COMPANION_RUN_SWEEP_INTERVAL_MS=60000
+
+# Enable only in the coordinated release that also enables it on the API/web service.
+COMPANION_PROJECTS_ENABLED=false
+COMPANION_PROJECT_WORKER_CONCURRENCY=2
+COMPANION_PROJECT_CLAIM_INTERVAL_MS=1000
+COMPANION_PROJECT_LEASE_SECONDS=30
+COMPANION_PROJECT_HEARTBEAT_MS=10000
+COMPANION_PROJECT_IDLE_MS=600000
+COMPANION_PROJECT_SANDBOX_TIMEOUT_MS=3600000
+COMPANION_PROJECT_MAX_ACTIVATION_MS=86400000
 ```
 
-Billing and runs are independent supervisors: disabling billing must not stop run processing, and missing Vercel
-configuration disables only RunSkill. The worker needs all four Stripe variables when Stripe billing is enabled, plus
-the vault, S3, Vercel, and OpenCode settings for runs. It does not need a domain or `PORT`.
+Billing, Skill Runs, and Cowork Projects are independent supervisors: disabling one must not stop the
+others. Missing Vercel configuration disables only the sandbox-backed surfaces. The worker needs all
+four Stripe variables when Stripe billing is enabled, plus the vault, S3, Vercel, and OpenCode settings
+for runs and Projects. It does not need a domain or `PORT`.
 
 ## 3. Configure Stripe
 

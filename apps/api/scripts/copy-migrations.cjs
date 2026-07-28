@@ -11,7 +11,8 @@ rmSync(migrationsDest, { recursive: true, force: true });
 cpSync(migrationsSource, migrationsDest, { recursive: true });
 
 // The migration entrypoint applies least-privilege runtime grants immediately after migrations
-// when DATABASE_RUNTIME_ROLE is configured (Railway/production path).
+// when the separated DATABASE_API_ROLE + DATABASE_WORKER_ROLE contract (or the legacy single
+// DATABASE_RUNTIME_ROLE fallback) is configured.
 copyFileSync(
   join(repoRoot, "packages", "db", "runtime-role-grants.sql"),
   join(apiRoot, "dist", "runtime-role-grants.sql"),

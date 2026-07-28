@@ -162,6 +162,7 @@ PROJECT="$(workspace_slug)"
 # Paths (all workspace state under .conductor-pg/)
 # ---------------------------------------------------------------------------
 STATE_DIR="$REPO_ROOT/.conductor-pg"
+RUN_LOCK="$STATE_DIR/run.lock"
 SECRETS_KEY_FILE="$STATE_DIR/secrets-master-key"
 PG_DATA="$STATE_DIR/postgres/data"
 # Socket lives in a short /tmp path, NOT under the (long) workspace dir: the
@@ -181,10 +182,13 @@ MAILPIT_PID="$STATE_DIR/mailpit/mailpit.pid"
 # ---------------------------------------------------------------------------
 PG_OWNER_USER="companion_owner"
 PG_OWNER_PASS="companion-owner"
-PG_USER="companion"
-PG_PASS="companion"
+PG_API_USER="companion_api"
+PG_API_PASS="companion-api"
+PG_WORKER_USER="companion_worker"
+PG_WORKER_PASS="companion-worker"
 PG_DB="companion"
-DATABASE_URL="postgres://${PG_USER}:${PG_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
+DATABASE_API_URL="postgres://${PG_API_USER}:${PG_API_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
+DATABASE_WORKER_URL="postgres://${PG_WORKER_USER}:${PG_WORKER_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
 DATABASE_MIGRATION_URL="postgres://${PG_OWNER_USER}:${PG_OWNER_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
 
 WEB_URL="http://127.0.0.1:${WEB_PORT}"
@@ -199,6 +203,10 @@ S3_ENDPOINT="http://127.0.0.1:${MINIO_API_PORT}"
 PG_BIN=""
 HAS_MINIO=false
 HAS_MAILPIT=false
+RUN_LOCK_HELD=false
+PG_OWNED=false
+MINIO_OWNED=false
+MAILPIT_OWNED=false
 
 # ---------------------------------------------------------------------------
 # Detection helpers
@@ -229,6 +237,55 @@ is_port_open() {
   lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
 }
 
+launcher_pid_running() {
+  local pid="$1" cwd command
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1 || true)"
+  command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  case "$cwd" in
+    "$REPO_ROOT"|"$REPO_ROOT"/*) ;;
+    *) return 1 ;;
+  esac
+  case "$command" in
+    *dev-conductor.sh*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+acquire_run_lock() {
+  local owner_pid="" attempts=0
+  mkdir -p "$STATE_DIR"
+
+  while ! ln -s "$$" "$RUN_LOCK" 2>/dev/null; do
+    owner_pid="$(readlink "$RUN_LOCK" 2>/dev/null || true)"
+    if launcher_pid_running "$owner_pid"; then
+      die "Companion dev is already starting or running for this workspace (launcher PID $owner_pid). Stop the existing Conductor run before starting it again."
+    fi
+
+    attempts=$((attempts + 1))
+    [ "$attempts" -le 3 ] \
+      || die "Could not acquire workspace launcher lock: $RUN_LOCK"
+    warn "Removing stale workspace launcher lock${owner_pid:+ (PID $owner_pid)}"
+    if [ -L "$RUN_LOCK" ] || [ -f "$RUN_LOCK" ]; then
+      rm -f "$RUN_LOCK"
+    elif [ -d "$RUN_LOCK" ]; then
+      rmdir "$RUN_LOCK" 2>/dev/null \
+        || die "Launcher lock path is a non-empty directory: $RUN_LOCK"
+    fi
+  done
+
+  RUN_LOCK_HELD=true
+}
+
+release_run_lock() {
+  [ "$RUN_LOCK_HELD" = true ] || return 0
+  if [ "$(readlink "$RUN_LOCK" 2>/dev/null || true)" = "$$" ]; then
+    rm -f "$RUN_LOCK"
+  fi
+  RUN_LOCK_HELD=false
+}
+
 # A PID is "ours" when its working directory is inside this repo — i.e. a dev
 # or native-service process this workspace started. We only ever kill our own
 # stale processes; an unrelated process on a derived port is a hard error so a
@@ -246,7 +303,7 @@ free_port() {
   local port="$1" label="$2" pids pid repo_pids="" foreign_pids="" waited=0
   local -a repo_pid_array
   is_port_open "$port" || return 0
-  pids="$(lsof -ti :"$port" 2>/dev/null || true)"
+  pids="$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
   if [ -z "$pids" ]; then
     warn "$label port $port in use but PID not found"; return 0
   fi
@@ -362,6 +419,7 @@ start_postgres() {
   fi
 
   if ! postgres_running; then
+    free_port "$PG_PORT" "postgres"
     info "pg_ctl start → port $PG_PORT"
     "$PG_BIN/pg_ctl" -D "$PG_DATA" -l "$PG_LOG" \
       -o "-p $PG_PORT -k $PG_SOCK -h 127.0.0.1" -w start >/dev/null \
@@ -376,6 +434,7 @@ start_postgres() {
   done
   "$PG_BIN/pg_isready" -h 127.0.0.1 -p "$PG_PORT" -U postgres >/dev/null 2>&1 \
     || die "Postgres not ready on 127.0.0.1:$PG_PORT after 15s. See $PG_LOG"
+  PG_OWNED=true
 
   # Idempotent: ensures role+db exist on every run (self-heals a cluster that
   # was initialised but never bootstrapped).
@@ -383,23 +442,30 @@ start_postgres() {
 }
 
 bootstrap_database() {
-  step "Ensuring migration-owner + NOBYPASSRLS runtime roles"
+  step "Ensuring migration-owner + separate NOBYPASSRLS API/worker roles"
   local PSQL=("$PG_BIN/psql" -h 127.0.0.1 -p "$PG_PORT" -U postgres -d postgres -v ON_ERROR_STOP=1)
   "${PSQL[@]}" -c "DO \$\$ BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$PG_OWNER_USER') THEN
       CREATE ROLE $PG_OWNER_USER LOGIN PASSWORD '$PG_OWNER_PASS' NOSUPERUSER BYPASSRLS;
     END IF;
-    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$PG_USER') THEN
-      CREATE ROLE $PG_USER LOGIN PASSWORD '$PG_PASS' NOSUPERUSER NOBYPASSRLS;
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$PG_API_USER') THEN
+      CREATE ROLE $PG_API_USER LOGIN PASSWORD '$PG_API_PASS' NOSUPERUSER NOBYPASSRLS NOINHERIT;
+    END IF;
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$PG_WORKER_USER') THEN
+      CREATE ROLE $PG_WORKER_USER LOGIN PASSWORD '$PG_WORKER_PASS' NOSUPERUSER NOBYPASSRLS NOINHERIT;
     END IF;
   END \$\$;" >/dev/null
   "${PSQL[@]}" -c "ALTER ROLE $PG_OWNER_USER NOSUPERUSER BYPASSRLS;" >/dev/null
-  "${PSQL[@]}" -c "ALTER ROLE $PG_USER NOSUPERUSER NOBYPASSRLS NOINHERIT;" >/dev/null
+  "${PSQL[@]}" -c "ALTER ROLE $PG_API_USER NOSUPERUSER NOBYPASSRLS NOINHERIT;" >/dev/null
+  "${PSQL[@]}" -c "ALTER ROLE $PG_WORKER_USER NOSUPERUSER NOBYPASSRLS NOINHERIT;" >/dev/null
   "${PSQL[@]}" -c "CREATE DATABASE $PG_DB OWNER $PG_OWNER_USER;" 2>/dev/null || true
   "${PSQL[@]}" -c "ALTER DATABASE $PG_DB OWNER TO $PG_OWNER_USER;" >/dev/null
   # Upgrade old Conductor clusters whose application role used to own every migrated object.
-  "${PSQL[@]}" -d "$PG_DB" -c "REASSIGN OWNED BY $PG_USER TO $PG_OWNER_USER;" >/dev/null
-  ok "Owner '$PG_OWNER_USER' + runtime '$PG_USER' + database '$PG_DB' ready"
+  if "${PSQL[@]}" -tAc "select 1 from pg_roles where rolname = 'companion'" | grep -qx 1; then
+    "${PSQL[@]}" -d "$PG_DB" -c "REASSIGN OWNED BY companion TO $PG_OWNER_USER;" >/dev/null
+    "${PSQL[@]}" -c "ALTER ROLE companion NOLOGIN;" >/dev/null
+  fi
+  ok "Owner '$PG_OWNER_USER' + API '$PG_API_USER' + worker '$PG_WORKER_USER' + database '$PG_DB' ready"
 }
 
 # ---------------------------------------------------------------------------
@@ -415,6 +481,7 @@ start_minio() {
   mkdir -p "$MINIO_DATA" "$(dirname "$MINIO_LOG")"
 
   if minio_running && is_port_open "$MINIO_API_PORT"; then
+    MINIO_OWNED=true
     ok "MinIO already running on :$MINIO_API_PORT (PID $(cat "$MINIO_PID"))"
   else
     if minio_running; then
@@ -430,6 +497,7 @@ start_minio() {
         --console-address "127.0.0.1:${MINIO_CONSOLE_PORT}" \
         >"$MINIO_LOG" 2>&1 &
     echo $! >"$MINIO_PID"
+    MINIO_OWNED=true
     ok "MinIO started (PID $(cat "$MINIO_PID"))"
   fi
 
@@ -464,6 +532,7 @@ start_mailpit() {
   step "Starting Mailpit (native, optional)"
   mkdir -p "$(dirname "$MAILPIT_LOG")"
   if mailpit_running && is_port_open "$MAILPIT_SMTP_PORT"; then
+    MAILPIT_OWNED=true
     ok "Mailpit already running on :$MAILPIT_SMTP_PORT (PID $(cat "$MAILPIT_PID"))"
     return 0
   fi
@@ -479,12 +548,30 @@ start_mailpit() {
     --listen "127.0.0.1:${MAILPIT_UI_PORT}" \
     >"$MAILPIT_LOG" 2>&1 &
   echo $! >"$MAILPIT_PID"
+  MAILPIT_OWNED=true
   ok "Mailpit started (PID $(cat "$MAILPIT_PID"))"
 }
 
 # ---------------------------------------------------------------------------
 # Cleanup trap — stop native services when concurrently exits.
 # ---------------------------------------------------------------------------
+stop_owned_services() {
+  if [ "$MAILPIT_OWNED" = true ] && mailpit_running; then
+    kill "$(cat "$MAILPIT_PID")" 2>/dev/null || true
+    rm -f "$MAILPIT_PID"
+  fi
+  if [ "$MINIO_OWNED" = true ] && minio_running; then
+    kill "$(cat "$MINIO_PID")" 2>/dev/null || true
+    rm -f "$MINIO_PID"
+  fi
+  if [ "$PG_OWNED" = true ] && [ -n "$PG_BIN" ] && postgres_running; then
+    "$PG_BIN/pg_ctl" -D "$PG_DATA" -m fast stop >/dev/null 2>&1 || true
+  fi
+  if [ "$PG_OWNED" = true ]; then
+    rm -rf "$PG_SOCK"
+  fi
+}
+
 stop_services() {
   if mailpit_running; then kill "$(cat "$MAILPIT_PID")" 2>/dev/null || true; rm -f "$MAILPIT_PID"; fi
   if minio_running;   then kill "$(cat "$MINIO_PID")"   2>/dev/null || true; rm -f "$MINIO_PID";   fi
@@ -495,9 +582,10 @@ stop_services() {
 }
 
 cleanup() {
-  trap - INT TERM EXIT
+  trap - HUP INT TERM EXIT
   printf '\n%s%sShutting down…%s\n' "$BOLD" "$YELLOW" "$RESET"
-  stop_services
+  stop_owned_services
+  release_run_lock
   ok "Native services stopped"
 }
 
@@ -509,12 +597,25 @@ migrate_and_seed() {
   env DATABASE_URL="$DATABASE_MIGRATION_URL" DATABASE_MIGRATION_URL="$DATABASE_MIGRATION_URL" \
     pnpm db:migrate || die "Migrations failed"
   local OWNER_PSQL=("$PG_BIN/psql" "$DATABASE_MIGRATION_URL" -v ON_ERROR_STOP=1)
-  "${OWNER_PSQL[@]}" -v runtime_role="$PG_USER" \
-    -f "$REPO_ROOT/packages/db/runtime-role-grants.sql" >/dev/null || die "Runtime database grants failed"
+  local retired_role=""
+  if "${OWNER_PSQL[@]}" -tAc \
+    "select 1 from pg_roles where rolname = 'companion'" | grep -qx 1; then
+    retired_role="companion"
+  fi
+  if [ -n "$retired_role" ]; then
+    "${OWNER_PSQL[@]}" -v api_role="$PG_API_USER" -v worker_role="$PG_WORKER_USER" \
+      -v retired_runtime_role="$retired_role" \
+      -f "$REPO_ROOT/packages/db/runtime-role-grants.sql" >/dev/null \
+      || die "Runtime database grants failed"
+  else
+    "${OWNER_PSQL[@]}" -v api_role="$PG_API_USER" -v worker_role="$PG_WORKER_USER" \
+      -f "$REPO_ROOT/packages/db/runtime-role-grants.sql" >/dev/null \
+      || die "Runtime database grants failed"
+  fi
   ok "Migrations applied"
 
   local seed_env=(
-    DATABASE_URL="$DATABASE_URL"
+    DATABASE_URL="$DATABASE_API_URL"
     BETTER_AUTH_URL="$API_URL"
     COMPANION_API_URL="$API_URL"
   )
@@ -530,7 +631,7 @@ migrate_and_seed() {
   fi
 
   if env "${seed_env[@]}" pnpm --filter @companion/api seed:test-user; then
-    ok "Seed complete — login: admin@tvc.dev / adminadmin"
+    ok "Seed complete — login: ${COMPANION_SEED_EMAIL:-admin@thevibecompany.co} / adminadmin"
   else
     warn "Seed failed (database still usable)"
   fi
@@ -578,8 +679,8 @@ launch_apps() {
 
   # The master key is exported by ensure_secrets_master_key and inherited by API + worker. Never
   # interpolate it into concurrently's command argument, where process listings could expose it.
-  local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" $shared_storage_env $api_email_env pnpm --filter @companion/api dev"
-  local worker_cmd="DATABASE_URL=\"$DATABASE_URL\" COMPANION_WEB_URL=\"$WEB_URL\" $shared_storage_env pnpm --filter @companion/worker dev"
+  local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_API_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" $shared_storage_env $api_email_env pnpm --filter @companion/api dev"
+  local worker_cmd="DATABASE_URL=\"$DATABASE_WORKER_URL\" COMPANION_WEB_URL=\"$WEB_URL\" $shared_storage_env pnpm --filter @companion/worker dev"
   local web_cmd="COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" pnpm --filter @companion/web dev --hostname 127.0.0.1 --port $WEB_PORT"
 
   free_port "$API_PORT" "api"
@@ -601,7 +702,16 @@ launch_apps() {
 # Commands
 # ---------------------------------------------------------------------------
 cmd_run() {
-  trap cleanup INT TERM EXIT
+  # Acquire ownership before installing cleanup traps. A duplicate invocation
+  # must never tear down the services owned by the already-running launcher.
+  require_command lsof "brew install lsof (macOS) / apt-get install lsof (Debian)"
+  acquire_run_lock
+  trap cleanup EXIT
+  # Conductor stops run scripts with SIGHUP before its final SIGKILL. Exiting
+  # here routes every supported stop signal through the EXIT cleanup.
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   check_prerequisites
   ensure_secrets_master_key
   start_postgres

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { OrgRole } from "@companion/contracts";
 import {
+  canAccessProject,
   canAccessRun,
   canAccessSkill,
   canManageOrg,
@@ -194,5 +195,15 @@ describe("canAccessRun — creator-only run privacy (no admin override)", () => 
     // The load-bearing assertion — a member never sees another member's runs, admins included.
     expect(canAccessRun("u-admin", { creatorId: "u-dev" })).toBe(false);
     expect(canAccessRun("u-dev", { creatorId: "u-dev" })).toBe(true);
+  });
+});
+
+describe("canAccessProject — creator-only project privacy (no admin override)", () => {
+  const project = { creatorId: "u-creator" };
+
+  it("allows only the creator regardless of organization role", () => {
+    expect(canAccessProject("u-creator", project)).toBe(true);
+    expect(canAccessProject("u-admin", project)).toBe(false);
+    expect(canAccessProject("u-owner", project)).toBe(false);
   });
 });

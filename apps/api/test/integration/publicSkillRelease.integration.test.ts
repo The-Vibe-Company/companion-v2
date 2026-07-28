@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { and, eq, sql } from "drizzle-orm";
 import { schema } from "@companion/db";
 import {
   archiveSkill,
@@ -233,6 +233,33 @@ describe("authenticated public skill releases", () => {
       ...v2Transport,
       database: integrationDb,
     })).rejects.toThrow("not a member");
+  });
+
+  it("caps ticket expiry at the database TTL when the API clock is ahead", async () => {
+    const beforeRows = await integrationDb.execute(sql<{ now_ms: string }>`
+      select extract(epoch from clock_timestamp()) * 1000 as now_ms
+    `);
+    const databaseNow = Number(Array.from(beforeRows)[0]?.now_ms);
+    expect(databaseNow).toBeGreaterThan(0);
+
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(databaseNow + 5_000);
+    const issued = await createPublicSkillTransferTicket({
+      token,
+      version: "2.0.0",
+      userId: fixture.outsider.id,
+      agentId: "agent-integration",
+      agentGrantId: "grant-integration",
+      database: integrationDb,
+    }).finally(() => dateNow.mockRestore());
+
+    const afterRows = await integrationDb.execute(sql<{ now_ms: string }>`
+      select extract(epoch from clock_timestamp()) * 1000 as now_ms
+    `);
+    const databaseAfterIssue = Number(Array.from(afterRows)[0]?.now_ms);
+    const expiresAt = new Date(issued.expires_at).getTime();
+    expect(expiresAt).toBeGreaterThan(databaseAfterIssue + 59_000);
+    expect(expiresAt).toBeLessThanOrEqual(databaseAfterIssue + 60_000);
+    expect(expiresAt).toBeLessThan(databaseNow + 65_000);
   });
 
   it("makes tickets one-use and immediately observes expiry, grant revocation, withdrawal, and archive", async () => {

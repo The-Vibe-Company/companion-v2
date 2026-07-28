@@ -51,6 +51,47 @@ export const githubSyncStatusEnum = pgEnum("github_sync_status", [
   "error",
   "disconnected",
 ]);
+export const projectWorkspaceStatusEnum = pgEnum("project_workspace_status", [
+  "queued",
+  "provisioning",
+  "ready",
+  "running",
+  "stopping",
+  "stopped",
+  "needs_attention",
+  "deleting",
+  "deleted",
+  "error",
+]);
+export const projectSessionStatusEnum = pgEnum("project_session_status", [
+  "queued",
+  "working",
+  "idle",
+  "stopping",
+  "stopped",
+  "completed",
+  "error",
+]);
+export const projectPromptStatusEnum = pgEnum("project_prompt_status", [
+  "queued",
+  "dispatching",
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+export const projectQuestionStatusEnum = pgEnum("project_question_status", [
+  "pending",
+  "queued",
+  "delivered",
+  "cancelled",
+  "failed",
+]);
+export const projectAttachmentStatusEnum = pgEnum("project_attachment_status", [
+  "uploaded",
+  "materialized",
+  "failed",
+]);
 
 const now = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 const updatedAt = () => timestamp("updated_at", { withTimezone: true }).notNull().defaultNow();
@@ -908,6 +949,10 @@ export const auditLog = pgTable("audit_log", {
     .notNull()
     .references(() => organizations.id, { onDelete: "cascade" }),
   actorId: text("actor_id").references(() => user.id, { onDelete: "set null" }),
+  /** Creator-private audit visibility for resources whose admins have no override (for example Projects). */
+  privateToUserId: text("private_to_user_id").references(() => user.id, {
+    onDelete: "cascade",
+  }),
   action: text("action").notNull(),
   targetType: text("target_type").notNull(),
   targetId: text("target_id").notNull(),
@@ -1335,6 +1380,1004 @@ export const orgModelPreferences = pgTable(
   }),
 );
 
+/* ----------------------------------- projects ----------------------------------- */
+
+/** A creator-private durable work context backed by one persistent sandbox. */
+export const projects = pgTable(
+  "projects",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    creatorId: text("creator_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    idempotencyKey: text("idempotency_key").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    name: text("name").notNull(),
+    defaultModel: text("default_model").notNull(),
+    revision: integer("revision").notNull().default(1),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    deleteRequestedAt: timestamp("delete_requested_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgId: unique("projects_org_id_id_uq").on(t.orgId, t.id),
+    uniqueOrgIdCreator: unique("projects_org_id_id_creator_uq").on(t.orgId, t.id, t.creatorId),
+    uniqueRequest: unique("projects_idempotency_uq").on(
+      t.orgId,
+      t.creatorId,
+      t.idempotencyKey,
+    ),
+    byCreator: index("projects_creator_idx").on(
+      t.orgId,
+      t.creatorId,
+      t.archivedAt,
+      t.updatedAt,
+    ),
+    idempotencyCheck: check(
+      "projects_idempotency_check",
+      sql`char_length(${t.idempotencyKey}) BETWEEN 8 AND 200`,
+    ),
+    payloadHashCheck: check(
+      "projects_payload_hash_check",
+      sql`char_length(${t.payloadHash}) BETWEEN 32 AND 128`,
+    ),
+    nameCheck: check("projects_name_check", sql`char_length(btrim(${t.name})) BETWEEN 1 AND 120`),
+    modelCheck: check(
+      "projects_default_model_check",
+      sql`char_length(btrim(${t.defaultModel})) BETWEEN 1 AND 240`,
+    ),
+    revisionCheck: check("projects_revision_check", sql`${t.revision} >= 1`),
+  }),
+);
+
+/** Short liveness leases for replicas capable of the Cowork project protocol. */
+export const projectWorkerHeartbeats = pgTable(
+  "project_worker_heartbeats",
+  {
+    workerId: text("worker_id").primaryKey(),
+    protocolVersion: integer("protocol_version").notNull().default(1),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    byExpiry: index("project_worker_heartbeats_expiry_idx").on(t.expiresAt),
+    workerIdCheck: check(
+      "project_worker_heartbeats_worker_id_check",
+      sql`length(btrim(${t.workerId})) BETWEEN 1 AND 512`,
+    ),
+    protocolCheck: check(
+      "project_worker_heartbeats_protocol_check",
+      sql`${t.protocolVersion} >= 1`,
+    ),
+  }),
+);
+
+/**
+ * Transaction-bound proof that companion_enter_project_worker_lease validated an exact lease.
+ * Ordinary roles cannot create or read these rows through RLS; the opaque token prevents callers
+ * from manufacturing authority with custom GUCs alone.
+ */
+export const projectWorkerLeaseContexts = pgTable(
+  "project_worker_lease_contexts",
+  {
+    backendPid: integer("backend_pid").notNull(),
+    transactionId: text("transaction_id").notNull(),
+    token: uuid("token").notNull(),
+    orgId: uuid("org_id").notNull(),
+    projectId: uuid("project_id").notNull(),
+    creatorId: text("creator_id").notNull(),
+    workerId: text("worker_id").notNull(),
+    leaseGeneration: integer("lease_generation").notNull(),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.backendPid, t.transactionId] }),
+    tokenUnique: unique("project_worker_lease_contexts_token_uq").on(t.token),
+    byCreatedAt: index("project_worker_lease_contexts_created_idx").on(t.createdAt),
+  }),
+);
+
+/** Desired state and provider identity for the single sandbox owned by a project. */
+export const projectWorkspaces = pgTable(
+  "project_workspaces",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull(),
+    creatorId: text("creator_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    status: projectWorkspaceStatusEnum("status").notNull().default("queued"),
+    sandboxName: text("sandbox_name").notNull(),
+    sandboxId: text("sandbox_id"),
+    sandboxDomain: text("sandbox_domain"),
+    /** Envelope-encrypted OpenCode server password; all seven columns are write-only worker state. */
+    opencodePasswordCiphertext: text("opencode_password_ciphertext"),
+    opencodePasswordIv: text("opencode_password_iv"),
+    opencodePasswordAuthTag: text("opencode_password_auth_tag"),
+    opencodePasswordWrappedDek: text("opencode_password_wrapped_dek"),
+    opencodePasswordWrapIv: text("opencode_password_wrap_iv"),
+    opencodePasswordWrapAuthTag: text("opencode_password_wrap_auth_tag"),
+    opencodePasswordKeyId: text("opencode_password_key_id"),
+    checkpointId: text("checkpoint_id"),
+    checkpointCreatedAt: timestamp("checkpoint_created_at", { withTimezone: true }),
+    /** Skill generation actually captured by checkpointId; zero for the golden snapshot. */
+    checkpointGeneration: integer("checkpoint_generation").notNull().default(0),
+    desiredGeneration: integer("desired_generation").notNull().default(1),
+    appliedGeneration: integer("applied_generation").notNull().default(0),
+    /**
+     * Creator uploads are durable before they touch the provider. This independent fence lets a
+     * warm runtime swap the complete files/ projection only between turns without manufacturing a
+     * skill generation (whose closure snapshots are generation-specific).
+     */
+    desiredFileRevision: integer("desired_file_revision").notNull().default(0),
+    appliedFileRevision: integer("applied_file_revision").notNull().default(0),
+    activationRevision: integer("activation_revision").notNull().default(0),
+    authorityRevision: text("authority_revision"),
+    /**
+     * Short-lived, durable provider-admission fence. A non-null token linearizes a secretless
+     * create/resume before billing and provider I/O; authority is pinned only after activate.
+     */
+    activationAdmissionToken: uuid("activation_admission_token"),
+    activationAdmissionRevision: integer("activation_admission_revision"),
+    activationAdmissionAuthorityRevision: text("activation_admission_authority_revision"),
+    activationAdmittedAt: timestamp("activation_admitted_at", { withTimezone: true }),
+    /** Conservative fence persisted before an external start request can expose decrypted values. */
+    environmentExposureAttemptedAt: timestamp("environment_exposure_attempted_at", {
+      withTimezone: true,
+    }),
+    /** Set immediately after server start for the current activation, even with zero credentials. */
+    environmentInjectedAt: timestamp("environment_injected_at", { withTimezone: true }),
+    recycleRequestedAt: timestamp("recycle_requested_at", { withTimezone: true }),
+    recycleReason: text("recycle_reason"),
+    /** Durable publisher-side intent consumed by the lease owner at a quiescent boundary. */
+    skillSyncErrorAt: timestamp("skill_sync_error_at", { withTimezone: true }),
+    skillSyncErrorCode: text("skill_sync_error_code"),
+    skillSyncErrorMessage: text("skill_sync_error_message"),
+    availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
+    lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
+    idleDeadlineAt: timestamp("idle_deadline_at", { withTimezone: true }),
+    attempt: integer("attempt").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(5),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
+    leaseGeneration: integer("lease_generation").notNull().default(0),
+    lastErrorCode: text("last_error_code"),
+    lastErrorMessage: text("last_error_message"),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.projectId] }),
+    projectFk: foreignKey({
+      columns: [t.orgId, t.projectId, t.creatorId],
+      foreignColumns: [projects.orgId, projects.id, projects.creatorId],
+      name: "project_workspaces_project_creator_fk",
+    }).onDelete("cascade"),
+    uniqueSandbox: unique("project_workspaces_sandbox_name_uq").on(t.sandboxName),
+    byClaim: index("project_workspaces_claim_idx").on(t.status, t.availableAt, t.leaseExpiresAt),
+    byIdle: index("project_workspaces_idle_idx").on(t.status, t.idleDeadlineAt),
+    generationCheck: check(
+      "project_workspaces_generation_check",
+      sql`${t.desiredGeneration} >= 1
+        AND ${t.appliedGeneration} >= 0
+        AND ${t.appliedGeneration} <= ${t.desiredGeneration}
+        AND ${t.checkpointGeneration} >= 0
+        AND ${t.checkpointGeneration} <= ${t.desiredGeneration}
+        AND (${t.checkpointId} IS NOT NULL OR ${t.checkpointGeneration} = 0)`,
+    ),
+    fileRevisionCheck: check(
+      "project_workspaces_file_revision_check",
+      sql`${t.desiredFileRevision} >= 0
+        AND ${t.appliedFileRevision} >= 0
+        AND ${t.appliedFileRevision} <= ${t.desiredFileRevision}`,
+    ),
+    activationCheck: check("project_workspaces_activation_check", sql`${t.activationRevision} >= 0`),
+    activationAdmissionCheck: check(
+      "project_workspaces_activation_admission_check",
+      sql`(
+        ${t.activationAdmissionToken} IS NULL
+        AND ${t.activationAdmissionRevision} IS NULL
+        AND ${t.activationAdmissionAuthorityRevision} IS NULL
+        AND ${t.activationAdmittedAt} IS NULL
+      ) OR (
+        ${t.activationAdmissionToken} IS NOT NULL
+        AND ${t.activationAdmissionRevision} = ${t.activationRevision} + 1
+        AND ${t.activationAdmissionAuthorityRevision} IS NOT NULL
+        AND ${t.activationAdmittedAt} IS NOT NULL
+      )`,
+    ),
+    exposureCheck: check(
+      "project_workspaces_exposure_check",
+      sql`${t.environmentInjectedAt} IS NULL OR ${t.environmentExposureAttemptedAt} IS NOT NULL`,
+    ),
+    attemptCheck: check(
+      "project_workspaces_attempt_check",
+      sql`${t.attempt} >= 0 AND ${t.maxAttempts} BETWEEN 1 AND 20`,
+    ),
+    leaseCheck: check(
+      "project_workspaces_lease_check",
+      sql`(${t.leaseOwner} IS NULL) = (${t.leaseExpiresAt} IS NULL)`,
+    ),
+    leaseGenerationCheck: check(
+      "project_workspaces_lease_generation_check",
+      sql`${t.leaseGeneration} >= 0`,
+    ),
+    skillSyncErrorCheck: check(
+      "project_workspaces_skill_sync_error_check",
+      sql`(${t.skillSyncErrorAt} IS NULL) = (${t.skillSyncErrorCode} IS NULL)
+        AND (${t.skillSyncErrorAt} IS NULL) = (${t.skillSyncErrorMessage} IS NULL)`,
+    ),
+    opencodePasswordCheck: check(
+      "project_workspaces_opencode_password_check",
+      sql`(
+        ${t.opencodePasswordCiphertext} IS NULL
+        AND ${t.opencodePasswordIv} IS NULL
+        AND ${t.opencodePasswordAuthTag} IS NULL
+        AND ${t.opencodePasswordWrappedDek} IS NULL
+        AND ${t.opencodePasswordWrapIv} IS NULL
+        AND ${t.opencodePasswordWrapAuthTag} IS NULL
+        AND ${t.opencodePasswordKeyId} IS NULL
+      ) OR (
+        ${t.opencodePasswordCiphertext} IS NOT NULL
+        AND ${t.opencodePasswordIv} IS NOT NULL
+        AND ${t.opencodePasswordAuthTag} IS NOT NULL
+        AND ${t.opencodePasswordWrappedDek} IS NOT NULL
+        AND ${t.opencodePasswordWrapIv} IS NOT NULL
+        AND ${t.opencodePasswordWrapAuthTag} IS NOT NULL
+        AND ${t.opencodePasswordKeyId} IS NOT NULL
+      )`,
+    ),
+  }),
+);
+
+/** Explicit root skills selected for a project. */
+export const projectSkills = pgTable(
+  "project_skills",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull(),
+    creatorId: text("creator_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id").notNull(),
+    desiredVersionId: uuid("desired_version_id").notNull(),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.projectId, t.skillId] }),
+    projectFk: foreignKey({
+      columns: [t.orgId, t.projectId, t.creatorId],
+      foreignColumns: [projects.orgId, projects.id, projects.creatorId],
+      name: "project_skills_project_creator_fk",
+    }).onDelete("cascade"),
+    skillFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "project_skills_skill_org_fk",
+    }).onDelete("cascade"),
+    versionFk: foreignKey({
+      columns: [t.orgId, t.skillId, t.desiredVersionId],
+      foreignColumns: [skillVersions.orgId, skillVersions.skillId, skillVersions.id],
+      name: "project_skills_version_org_fk",
+    }).onDelete("restrict"),
+    bySkill: index("project_skills_skill_idx").on(t.orgId, t.skillId),
+  }),
+);
+
+/** Immutable dependency closures retained by generation until a newer projection applies. */
+export const projectSkillSnapshots = pgTable(
+  "project_skill_snapshots",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull(),
+    creatorId: text("creator_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    generation: integer("generation").notNull(),
+    rootSkillId: uuid("root_skill_id").notNull(),
+    skillId: uuid("skill_id").notNull(),
+    skillVersionId: uuid("skill_version_id").notNull(),
+    mountOrder: integer("mount_order").notNull(),
+    isRoot: boolean("is_root").notNull().default(false),
+    checksum: text("checksum").notNull(),
+    storagePath: text("storage_path").notNull(),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({
+      columns: [t.orgId, t.projectId, t.generation, t.rootSkillId, t.skillId],
+    }),
+    projectFk: foreignKey({
+      columns: [t.orgId, t.projectId, t.creatorId],
+      foreignColumns: [projects.orgId, projects.id, projects.creatorId],
+      name: "project_skill_snapshots_project_creator_fk",
+    }).onDelete("cascade"),
+    rootSkillFk: foreignKey({
+      columns: [t.orgId, t.rootSkillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "project_skill_snapshots_root_skill_org_fk",
+    }).onDelete("cascade"),
+    versionFk: foreignKey({
+      columns: [t.orgId, t.skillId, t.skillVersionId],
+      foreignColumns: [skillVersions.orgId, skillVersions.skillId, skillVersions.id],
+      name: "project_skill_snapshots_version_org_fk",
+    }).onDelete("restrict"),
+    uniqueMountOrder: unique("project_skill_snapshots_mount_order_uq").on(
+      t.orgId,
+      t.projectId,
+      t.generation,
+      t.rootSkillId,
+      t.mountOrder,
+    ),
+    generationCheck: check("project_skill_snapshots_generation_check", sql`${t.generation} >= 1`),
+    mountOrderCheck: check("project_skill_snapshots_mount_order_check", sql`${t.mountOrder} >= 0`),
+    checksumCheck: check(
+      "project_skill_snapshots_checksum_check",
+      sql`char_length(${t.checksum}) BETWEEN 32 AND 128`,
+    ),
+  }),
+);
+
+/** One durable OpenCode session. Model selection is fixed after creation. */
+export const projectSessions = pgTable(
+  "project_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull(),
+    creatorId: text("creator_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    model: text("model").notNull(),
+    modelProvider: text("model_provider").notNull(),
+    /**
+     * Immutable catalog snapshot taken with the model selection. An empty list explicitly means
+     * that the catalog declared this model credentialless; otherwise one effective connection for
+     * the model provider is required at every queued-to-send admission boundary.
+     */
+    modelCredentialEnvKeys: text("model_credential_env_keys")
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+    status: projectSessionStatusEnum("status").notNull().default("queued"),
+    opencodeSessionId: text("opencode_session_id"),
+    stopRequestedAt: timestamp("stop_requested_at", { withTimezone: true }),
+    lastActiveAt: timestamp("last_active_at", { withTimezone: true }).notNull().defaultNow(),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    lastViewedAt: timestamp("last_viewed_at", { withTimezone: true }).notNull().defaultNow(),
+    errorCode: text("error_code"),
+    userMessage: text("user_message"),
+    transcript: jsonb("transcript").$type<unknown[]>().notNull().default([]),
+    /** Monotonic allocator for durable session events. */
+    transcriptSequence: integer("transcript_sequence").notNull().default(0),
+    /** Event prefix already represented by the durable transcript snapshot. */
+    transcriptEventSequence: integer("transcript_event_sequence").notNull().default(0),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgProjectId: unique("project_sessions_org_project_id_uq").on(t.orgId, t.projectId, t.id),
+    uniqueIdentity: unique("project_sessions_identity_uq").on(t.orgId, t.projectId, t.id, t.creatorId),
+    projectFk: foreignKey({
+      columns: [t.orgId, t.projectId, t.creatorId],
+      foreignColumns: [projects.orgId, projects.id, projects.creatorId],
+      name: "project_sessions_project_creator_fk",
+    }).onDelete("cascade"),
+    byProject: index("project_sessions_project_idx").on(
+      t.orgId,
+      t.projectId,
+      t.archivedAt,
+      t.createdAt,
+      t.id,
+    ),
+    uniqueOpencodeSession: uniqueIndex("project_sessions_opencode_session_uq")
+      .on(t.orgId, t.projectId, t.opencodeSessionId)
+      .where(sql`${t.opencodeSessionId} IS NOT NULL`),
+    titleCheck: check(
+      "project_sessions_title_check",
+      sql`char_length(btrim(${t.title})) BETWEEN 1 AND 160`,
+    ),
+    modelCheck: check(
+      "project_sessions_model_check",
+      sql`char_length(btrim(${t.model})) BETWEEN 1 AND 240`,
+    ),
+    modelProviderCheck: check(
+      "project_sessions_model_provider_check",
+      sql`char_length(btrim(${t.modelProvider})) BETWEEN 1 AND 120`,
+    ),
+    modelCredentialEnvKeysCheck: check(
+      "project_sessions_model_credential_env_keys_check",
+      sql`array_position(${t.modelCredentialEnvKeys}, NULL) IS NULL
+        AND cardinality(${t.modelCredentialEnvKeys}) <= 16`,
+    ),
+    transcriptCheck: check(
+      "project_sessions_transcript_check",
+      sql`jsonb_typeof(${t.transcript}) = 'array'
+        AND octet_length(${t.transcript}::text) <= 786432
+        AND ${t.transcriptSequence} >= 0
+        AND ${t.transcriptEventSequence} >= 0
+        AND ${t.transcriptEventSequence} <= ${t.transcriptSequence}`,
+    ),
+  }),
+);
+
+/** Durable, idempotent prompt commands. Each session is ordered by sequence. */
+export const projectPrompts = pgTable(
+  "project_prompts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    creatorId: text("creator_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    sequence: integer("sequence").notNull(),
+    text: text("text").notNull(),
+    status: projectPromptStatusEnum("status").notNull().default("queued"),
+    idempotencyKey: text("idempotency_key").notNull(),
+    payloadHash: text("payload_hash").notNull(),
+    /** Exact activation budget admission committed atomically with this accepted command. */
+    usageActivationRevision: integer("usage_activation_revision").notNull(),
+    usageReservationMs: integer("usage_reservation_ms").notNull(),
+    /** Deterministic identity allocated with the command, before any worker can claim it. */
+    opencodeMessageId: text("opencode_message_id").notNull(),
+    availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
+    attempt: integer("attempt").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(5),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
+    /**
+     * Fenced immediately before promptAsync. Once set, absence of a native message is ambiguous:
+     * a replacement worker must fail closed instead of sending the command again.
+     */
+    sendAttemptedAt: timestamp("send_attempted_at", { withTimezone: true }),
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    /**
+     * Durable completion fence for the post-turn Files reconciliation. A completed prompt remains
+     * pending until its idempotent artifacts.updated barrier has been committed at this sequence.
+     */
+    fileReconciliationEventSequence: integer("file_reconciliation_event_sequence"),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueIdentity: unique("project_prompts_identity_uq").on(
+      t.orgId,
+      t.projectId,
+      t.sessionId,
+      t.id,
+      t.creatorId,
+    ),
+    sessionFk: foreignKey({
+      columns: [t.orgId, t.projectId, t.sessionId, t.creatorId],
+      foreignColumns: [
+        projectSessions.orgId,
+        projectSessions.projectId,
+        projectSessions.id,
+        projectSessions.creatorId,
+      ],
+      name: "project_prompts_session_creator_fk",
+    }).onDelete("cascade"),
+    uniqueSequence: unique("project_prompts_sequence_uq").on(
+      t.orgId,
+      t.sessionId,
+      t.sequence,
+    ),
+    uniqueRequest: unique("project_prompts_idempotency_uq").on(
+      t.orgId,
+      t.creatorId,
+      t.idempotencyKey,
+    ),
+    uniqueOpencodeMessage: unique("project_prompts_opencode_message_uq").on(
+      t.orgId,
+      t.opencodeMessageId,
+    ),
+    byClaim: index("project_prompts_claim_idx").on(t.status, t.availableAt, t.leaseExpiresAt),
+    byPendingFileReconciliation: index("project_prompts_file_reconciliation_idx")
+      .on(t.orgId, t.projectId, t.completedAt, t.id)
+      .where(
+        sql`${t.status} = 'completed' AND ${t.fileReconciliationEventSequence} IS NULL`,
+      ),
+    textCheck: check(
+      "project_prompts_text_check",
+      sql`char_length(btrim(${t.text})) BETWEEN 1 AND 8000`,
+    ),
+    sequenceCheck: check("project_prompts_sequence_check", sql`${t.sequence} >= 1`),
+    attemptCheck: check(
+      "project_prompts_attempt_check",
+      sql`${t.attempt} >= 0 AND ${t.maxAttempts} BETWEEN 1 AND 20`,
+    ),
+    leaseCheck: check(
+      "project_prompts_lease_check",
+      sql`(${t.leaseOwner} IS NULL) = (${t.leaseExpiresAt} IS NULL)`,
+    ),
+    idempotencyCheck: check(
+      "project_prompts_idempotency_check",
+      sql`char_length(${t.idempotencyKey}) BETWEEN 8 AND 200`,
+    ),
+    payloadHashCheck: check(
+      "project_prompts_payload_hash_check",
+      sql`char_length(${t.payloadHash}) BETWEEN 32 AND 128`,
+    ),
+    usageAdmissionCheck: check(
+      "project_prompts_usage_admission_check",
+      sql`${t.usageActivationRevision} >= 1 AND ${t.usageReservationMs} >= 0`,
+    ),
+    fileReconciliationCheck: check(
+      "project_prompts_file_reconciliation_check",
+      sql`${t.fileReconciliationEventSequence} IS NULL
+        OR ${t.fileReconciliationEventSequence} >= 1`,
+    ),
+  }),
+);
+
+/** Replayable public session events. Payloads are redacted before this boundary. */
+export const projectSessionEvents = pgTable(
+  "project_session_events",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    creatorId: text("creator_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    sequence: integer("sequence").notNull(),
+    event: jsonb("event").$type<Record<string, unknown>>().notNull(),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.sessionId, t.sequence] }),
+    sessionFk: foreignKey({
+      columns: [t.orgId, t.projectId, t.sessionId, t.creatorId],
+      foreignColumns: [
+        projectSessions.orgId,
+        projectSessions.projectId,
+        projectSessions.id,
+        projectSessions.creatorId,
+      ],
+      name: "project_session_events_session_creator_fk",
+    }).onDelete("cascade"),
+    bySession: index("project_session_events_session_idx").on(t.orgId, t.sessionId, t.sequence),
+    sequenceCheck: check("project_session_events_sequence_check", sql`${t.sequence} >= 1`),
+    eventCheck: check(
+      "project_session_events_event_check",
+      sql`jsonb_typeof(${t.event}) = 'object'
+        AND octet_length(${t.event}::text) <= 65536`,
+    ),
+  }),
+);
+
+/**
+ * Durable member responses to native OpenCode questions.
+ *
+ * The normalized question payload has already crossed the Project event redaction boundary. API
+ * mutations only queue a response; the exact Project worker lease delivers it to OpenCode.
+ */
+export const projectQuestions = pgTable(
+  "project_questions",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    promptId: uuid("prompt_id").notNull(),
+    creatorId: text("creator_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    requestId: text("request_id").notNull(),
+    protocol: text("protocol").notNull(),
+    questions: jsonb("questions").$type<
+      Array<{
+        header: string;
+        question: string;
+        options: Array<{ label: string; description: string }>;
+        multiple: boolean;
+        custom: boolean;
+      }>
+    >().notNull(),
+    status: projectQuestionStatusEnum("status").notNull().default("pending"),
+    responseKind: text("response_kind"),
+    answers: jsonb("answers").$type<string[][] | null>(),
+    responseRequestedAt: timestamp("response_requested_at", {
+      withTimezone: true,
+    }),
+    deliveryAttemptedAt: timestamp("delivery_attempted_at", {
+      withTimezone: true,
+    }),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.projectId, t.requestId] }),
+    promptFk: foreignKey({
+      columns: [
+        t.orgId,
+        t.projectId,
+        t.sessionId,
+        t.promptId,
+        t.creatorId,
+      ],
+      foreignColumns: [
+        projectPrompts.orgId,
+        projectPrompts.projectId,
+        projectPrompts.sessionId,
+        projectPrompts.id,
+        projectPrompts.creatorId,
+      ],
+      name: "project_questions_prompt_creator_fk",
+    }).onDelete("cascade"),
+    byDelivery: index("project_questions_delivery_idx").on(
+      t.orgId,
+      t.projectId,
+      t.status,
+      t.responseRequestedAt,
+    ),
+    requestCheck: check(
+      "project_questions_request_check",
+      sql`char_length(${t.requestId}) BETWEEN 1 AND 512`,
+    ),
+    protocolCheck: check(
+      "project_questions_protocol_check",
+      sql`${t.protocol} IN ('question', 'question.v2')`,
+    ),
+    questionsCheck: check(
+      "project_questions_payload_check",
+      sql`jsonb_typeof(${t.questions}) = 'array'
+        AND jsonb_array_length(${t.questions}) BETWEEN 1 AND 8
+        AND octet_length(${t.questions}::text) <= 65536`,
+    ),
+    responseCheck: check(
+      "project_questions_response_check",
+      sql`(${t.responseKind} IS NULL OR ${t.responseKind} IN ('reply', 'reject'))
+        AND (${t.answers} IS NULL OR (
+          jsonb_typeof(${t.answers}) = 'array'
+          AND jsonb_array_length(${t.answers}) BETWEEN 1 AND 8
+          AND octet_length(${t.answers}::text) <= 32768
+        ))
+        AND (${t.responseKind} IS DISTINCT FROM 'reply' OR ${t.answers} IS NOT NULL)
+        AND (${t.responseKind} IS DISTINCT FROM 'reject' OR ${t.answers} IS NULL)`,
+    ),
+  }),
+);
+
+/**
+ * Durable ownership ledger for every S3 object written on behalf of a Project.
+ *
+ * Rows are created before the external PUT and retained after metadata commits. Deliberately, there
+ * is no Project foreign key: deletion can race an in-flight PUT, so the cleanup proof must outlive
+ * the Project row and be removed only after an age-gated, idempotent S3 delete.
+ */
+export const projectAttachmentUploads = pgTable(
+  "project_attachment_uploads",
+  {
+    storageKey: text("storage_key").primaryKey(),
+    orgId: uuid("org_id").notNull(),
+    projectId: uuid("project_id").notNull(),
+    creatorId: text("creator_id").notNull(),
+    kind: text("kind").notNull().default("attachment"),
+    committedAt: timestamp("committed_at", { withTimezone: true }),
+    deleteRequestedAt: timestamp("delete_requested_at", { withTimezone: true }),
+    touchedAt: timestamp("touched_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    byAge: index("project_attachment_uploads_age_idx").on(t.touchedAt),
+    byProject: index("project_attachment_uploads_project_idx").on(
+      t.orgId,
+      t.projectId,
+      t.creatorId,
+    ),
+    kindCheck: check(
+      "project_attachment_uploads_kind_check",
+      sql`${t.kind} IN ('attachment', 'file')`,
+    ),
+  }),
+);
+
+/** Uploaded prompt inputs, stored in S3 and materialized into the managed files/ directory. */
+export const projectAttachments = pgTable(
+  "project_attachments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    promptId: uuid("prompt_id").notNull(),
+    creatorId: text("creator_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    fileName: text("file_name").notNull(),
+    contentType: text("content_type").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    checksum: text("checksum").notNull(),
+    storageKey: text("storage_key").notNull(),
+    workspacePath: text("workspace_path").notNull(),
+    status: projectAttachmentStatusEnum("status").notNull().default("uploaded"),
+    createdAt: now(),
+  },
+  (t) => ({
+    uniqueStorageKey: unique("project_attachments_storage_key_uq").on(t.storageKey),
+    promptFk: foreignKey({
+      columns: [t.orgId, t.projectId, t.sessionId, t.promptId, t.creatorId],
+      foreignColumns: [
+        projectPrompts.orgId,
+        projectPrompts.projectId,
+        projectPrompts.sessionId,
+        projectPrompts.id,
+        projectPrompts.creatorId,
+      ],
+      name: "project_attachments_prompt_creator_fk",
+    }).onDelete("cascade"),
+    byPrompt: index("project_attachments_prompt_idx").on(t.orgId, t.promptId),
+    fileNameCheck: check(
+      "project_attachments_file_name_check",
+      sql`char_length(btrim(${t.fileName})) BETWEEN 1 AND 255
+        AND ${t.fileName} !~ '[[:cntrl:]/\\\\]'`,
+    ),
+    workspacePathCheck: check(
+      "project_attachments_workspace_path_check",
+      sql`${t.workspacePath} ~ '^files/[^[:cntrl:]]+$'
+        AND ${t.workspacePath} !~ '(^|/)\\.\\.(/|$)'
+        AND lower(${t.workspacePath}) !~ '^files/\\.(claude|opencode|companion|git)(/|$)'`,
+    ),
+    byteSizeCheck: check(
+      "project_attachments_byte_size_check",
+      sql`${t.byteSize} BETWEEN 1 AND 10485760`,
+    ),
+    checksumCheck: check(
+      "project_attachments_checksum_check",
+      sql`char_length(${t.checksum}) BETWEEN 32 AND 128`,
+    ),
+  }),
+);
+
+/** Current file index for the only UI-visible workspace subtree: files/. */
+export const projectFiles = pgTable(
+  "project_files",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull(),
+    creatorId: text("creator_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    currentVersion: integer("current_version").notNull().default(1),
+    contentType: text("content_type").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    checksum: text("checksum").notNull(),
+    storageKey: text("storage_key").notNull(),
+    modifiedBySessionId: uuid("modified_by_session_id"),
+    modifiedByPromptId: uuid("modified_by_prompt_id"),
+    conflictDetected: boolean("conflict_detected").notNull().default(false),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueIdentity: unique("project_files_identity_uq").on(
+      t.orgId,
+      t.projectId,
+      t.id,
+      t.creatorId,
+    ),
+    uniquePath: unique("project_files_path_uq").on(t.orgId, t.projectId, t.path),
+    projectFk: foreignKey({
+      columns: [t.orgId, t.projectId, t.creatorId],
+      foreignColumns: [projects.orgId, projects.id, projects.creatorId],
+      name: "project_files_project_creator_fk",
+    }).onDelete("cascade"),
+    // Migration 0054 uses column-targeted ON DELETE SET NULL for modified_by_session_id. Drizzle's
+    // FK builder cannot express a SET NULL column list without also nulling the non-null identity
+    // columns, so the runtime schema keeps the same reference shape here.
+    modifiedBySessionFk: foreignKey({
+      columns: [t.orgId, t.projectId, t.modifiedBySessionId, t.creatorId],
+      foreignColumns: [
+        projectSessions.orgId,
+        projectSessions.projectId,
+        projectSessions.id,
+        projectSessions.creatorId,
+      ],
+      name: "project_files_modified_by_session_fk",
+    }),
+    // Migration 0054 sets only modified_by_prompt_id to null when a prompt is removed.
+    modifiedByPromptFk: foreignKey({
+      columns: [
+        t.orgId,
+        t.projectId,
+        t.modifiedBySessionId,
+        t.modifiedByPromptId,
+        t.creatorId,
+      ],
+      foreignColumns: [
+        projectPrompts.orgId,
+        projectPrompts.projectId,
+        projectPrompts.sessionId,
+        projectPrompts.id,
+        projectPrompts.creatorId,
+      ],
+      name: "project_files_modified_by_prompt_fk",
+    }),
+    byProject: index("project_files_project_idx").on(t.orgId, t.projectId, t.updatedAt),
+    pathCheck: check(
+      "project_files_path_check",
+      sql`${t.path} ~ '^files/[^[:cntrl:]]+$'
+        AND ${t.path} !~ '(^|/)\\.\\.(/|$)'
+        AND lower(${t.path}) !~ '^files/\\.(claude|opencode|companion|git)(/|$)'`,
+    ),
+    versionCheck: check("project_files_version_check", sql`${t.currentVersion} >= 1`),
+    byteSizeCheck: check("project_files_byte_size_check", sql`${t.byteSize} >= 0`),
+    checksumCheck: check(
+      "project_files_checksum_check",
+      sql`char_length(${t.checksum}) BETWEEN 32 AND 128`,
+    ),
+  }),
+);
+
+/** Immutable S3-backed history retained for last-writer-wins conflict recovery. */
+export const projectFileVersions = pgTable(
+  "project_file_versions",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull(),
+    fileId: uuid("file_id").notNull(),
+    creatorId: text("creator_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    version: integer("version").notNull(),
+    contentType: text("content_type").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    checksum: text("checksum").notNull(),
+    storageKey: text("storage_key").notNull(),
+    modifiedBySessionId: uuid("modified_by_session_id"),
+    modifiedByPromptId: uuid("modified_by_prompt_id"),
+    baseVersion: integer("base_version"),
+    conflictDetected: boolean("conflict_detected").notNull().default(false),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.fileId, t.version] }),
+    fileFk: foreignKey({
+      columns: [t.orgId, t.projectId, t.fileId, t.creatorId],
+      foreignColumns: [
+        projectFiles.orgId,
+        projectFiles.projectId,
+        projectFiles.id,
+        projectFiles.creatorId,
+      ],
+      name: "project_file_versions_file_creator_fk",
+    }).onDelete("cascade"),
+    // See project_files above: migration 0054 nulls only modified_by_session_id on session delete.
+    modifiedBySessionFk: foreignKey({
+      columns: [t.orgId, t.projectId, t.modifiedBySessionId, t.creatorId],
+      foreignColumns: [
+        projectSessions.orgId,
+        projectSessions.projectId,
+        projectSessions.id,
+        projectSessions.creatorId,
+      ],
+      name: "project_file_versions_modified_by_session_fk",
+    }),
+    // Migration 0054 sets only modified_by_prompt_id to null when a prompt is removed.
+    modifiedByPromptFk: foreignKey({
+      columns: [
+        t.orgId,
+        t.projectId,
+        t.modifiedBySessionId,
+        t.modifiedByPromptId,
+        t.creatorId,
+      ],
+      foreignColumns: [
+        projectPrompts.orgId,
+        projectPrompts.projectId,
+        projectPrompts.sessionId,
+        projectPrompts.id,
+        projectPrompts.creatorId,
+      ],
+      name: "project_file_versions_modified_by_prompt_fk",
+    }),
+    byStorageKey: index("project_file_versions_storage_key_idx").on(t.storageKey),
+    byProject: index("project_file_versions_project_idx").on(t.orgId, t.projectId, t.createdAt),
+    byPrompt: index("project_file_versions_prompt_idx").on(
+      t.orgId,
+      t.projectId,
+      t.modifiedByPromptId,
+      t.createdAt,
+    ),
+    versionCheck: check(
+      "project_file_versions_version_check",
+      sql`${t.version} >= 1 AND (${t.baseVersion} IS NULL OR ${t.baseVersion} >= 0)`,
+    ),
+  }),
+);
+
+/** Redacted immutable pins to generic secret versions injected for one activation generation. */
+export const projectSecretInputs = pgTable(
+  "project_secret_inputs",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull(),
+    creatorId: text("creator_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    activationRevision: integer("activation_revision").notNull(),
+    envKey: text("env_key").notNull(),
+    secretId: uuid("secret_id").notNull(),
+    secretVersion: integer("secret_version").notNull(),
+    secretNameSnapshot: text("secret_name_snapshot").notNull(),
+    /** Null while prepared; set immediately after the runtime confirms server start. */
+    injectedAt: timestamp("injected_at", { withTimezone: true }),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({
+      columns: [t.orgId, t.projectId, t.activationRevision, t.envKey],
+    }),
+    projectFk: foreignKey({
+      columns: [t.orgId, t.projectId, t.creatorId],
+      foreignColumns: [projects.orgId, projects.id, projects.creatorId],
+      name: "project_secret_inputs_project_creator_fk",
+    }).onDelete("cascade"),
+    secretVersionFk: foreignKey({
+      columns: [t.orgId, t.secretId, t.secretVersion],
+      foreignColumns: [secretVersions.orgId, secretVersions.secretId, secretVersions.version],
+      name: "project_secret_inputs_secret_version_org_fk",
+    }).onDelete("restrict"),
+    revisionCheck: check(
+      "project_secret_inputs_activation_check",
+      sql`${t.activationRevision} >= 1`,
+    ),
+    envKeyCheck: check(
+      "project_secret_inputs_key_check",
+      sql`${t.envKey} ~ '^[A-Za-z_][A-Za-z0-9_]*$' AND ${t.envKey} !~ '^OPENCODE_SERVER_'`,
+    ),
+  }),
+);
+
+/** Redacted immutable pins to model-provider credential versions for one activation. */
+export const projectModelProviderInputs = pgTable(
+  "project_model_provider_inputs",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull(),
+    creatorId: text("creator_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    activationRevision: integer("activation_revision").notNull(),
+    provider: text("provider").notNull(),
+    envKey: text("env_key").notNull(),
+    connectionId: uuid("connection_id").notNull(),
+    credentialVersion: integer("credential_version").notNull(),
+    connectionScope: modelProviderConnectionScopeEnum("connection_scope").notNull(),
+    /** Null while prepared; set immediately after the runtime confirms server start. */
+    injectedAt: timestamp("injected_at", { withTimezone: true }),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({
+      columns: [t.orgId, t.projectId, t.activationRevision, t.provider],
+    }),
+    projectFk: foreignKey({
+      columns: [t.orgId, t.projectId, t.creatorId],
+      foreignColumns: [projects.orgId, projects.id, projects.creatorId],
+      name: "project_model_inputs_project_creator_fk",
+    }).onDelete("cascade"),
+    activationCheck: check(
+      "project_model_inputs_activation_check",
+      sql`${t.activationRevision} >= 1`,
+    ),
+    versionCheck: check(
+      "project_model_inputs_version_check",
+      sql`${t.credentialVersion} >= 1`,
+    ),
+    envKeyCheck: check(
+      "project_model_inputs_key_check",
+      sql`${t.envKey} ~ '^[A-Za-z_][A-Za-z0-9_]*$' AND ${t.envKey} !~ '^OPENCODE_SERVER_'`,
+    ),
+  }),
+);
+
 /* ---------------------------------- skill runs ---------------------------------- */
 
 export const skillRunStatusEnum = pgEnum("skill_run_status", [
@@ -1396,7 +2439,11 @@ export const skillRunPrewarmPhaseEnum = pgEnum("skill_run_prewarm_phase", [
   "cleanup",
   "complete",
 ]);
-export const sandboxUsageKindEnum = pgEnum("sandbox_usage_kind", ["prewarm", "run"]);
+export const sandboxUsageKindEnum = pgEnum("sandbox_usage_kind", [
+  "prewarm",
+  "run",
+  "project",
+]);
 export const sandboxUsageRuntimePolicyEnum = pgEnum("sandbox_usage_runtime_policy", [
   "safety_capped",
   "budgeted",

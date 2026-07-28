@@ -902,7 +902,7 @@ describe("RunChatView generated files", () => {
     expect(container.querySelector('a[href$="11111111-1111-4111-8111-111111111102?download=1"]')).not.toBeNull();
   });
 
-  it("forces a verified PDF MIME and sandboxes the preview frame", async () => {
+  it("forces a verified PDF MIME and leaves the preview frame unsandboxed so it renders", async () => {
     vi.mocked(URL.createObjectURL).mockReturnValueOnce("about:blank#pdf");
     queryMocks.fetchRun.mockResolvedValue({
       ...runDetail(),
@@ -920,8 +920,11 @@ describe("RunChatView generated files", () => {
     const container = await mount();
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 
+    // Forcing the Blob type is what stops a mislabelled artifact executing as markup. The frame
+    // itself must carry no sandbox attribute: any value disables the browser's PDF viewer, which
+    // renders the broken-file icon instead of the document.
     expect(URL.createObjectURL).toHaveBeenCalledWith(expect.objectContaining({ type: "application/pdf" }));
-    expect(container.querySelector(".run-canvas-pdf")?.getAttribute("sandbox")).toBe("");
+    expect(container.querySelector(".run-canvas-pdf")?.hasAttribute("sandbox")).toBe(false);
     await act(async () => button(container, "Close files").click());
     await act(async () => { await new Promise((resolve) => requestAnimationFrame(resolve)); });
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("about:blank#pdf");

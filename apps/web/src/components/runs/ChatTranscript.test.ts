@@ -2,7 +2,7 @@
 
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SkillRunDetail } from "@companion/contracts";
 import { ChatTranscript } from "./ChatTranscript";
 import type { ChatState } from "./chatStream";
@@ -14,6 +14,7 @@ afterEach(() => {
   act(() => root?.unmount());
   root = null;
   document.body.innerHTML = "";
+  vi.useRealTimers();
 });
 
 function runDetail(): SkillRunDetail {
@@ -66,6 +67,123 @@ function chatState(): ChatState {
 }
 
 describe("ChatTranscript scroller", () => {
+  it("shows a truthful retry countdown and only a validated provider action", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-24T10:00:00.000Z"));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const retryAt = Date.now() + 3_000;
+    await act(async () => {
+      root?.render(
+        React.createElement(ChatTranscript, {
+          run: null,
+          chat: {
+            ...chatState(),
+            working: {
+              active: true,
+              label: "Retrying · attempt 2",
+              retryAt,
+              retryAction: {
+                reason: "quota",
+                provider: "OpenAI",
+                title: "Reconnect OpenAI",
+                message: "The provider asked Companion to wait.",
+                label: "Open provider",
+                link: "https://example.com/provider",
+              },
+            },
+          },
+          showPromptBubble: false,
+          showWorking: true,
+          streamDead: false,
+          rowExpanded: () => false,
+          onToggleRow: () => undefined,
+          onReconnect: () => undefined,
+          onOpenFiles: () => undefined,
+        }),
+      );
+    });
+
+    const status = container.querySelector(".run-working--retrying");
+    expect(status?.textContent).toContain("Retrying in 3s");
+    expect(
+      status?.querySelector<HTMLAnchorElement>("a")?.getAttribute("href"),
+    ).toBe("https://example.com/provider");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(status?.textContent).toContain("Retrying in 2s");
+  });
+
+  it("announces a detailed preparation state without replacing normal working copy", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        React.createElement(ChatTranscript, {
+          run: null,
+          chat: chatState(),
+          showPromptBubble: false,
+          showWorking: true,
+          workingLabel: "Preparing your Project",
+          workingDetail:
+            "Loading files, Skills, and access before your task starts.",
+          workingVariant: "preparing",
+          streamDead: false,
+          rowExpanded: () => false,
+          onToggleRow: () => undefined,
+          onReconnect: () => undefined,
+          onOpenFiles: () => undefined,
+        }),
+      );
+    });
+
+    const status = container.querySelector<HTMLElement>(
+      ".run-working--preparing",
+    );
+    expect(status?.getAttribute("role")).toBe("status");
+    expect(status?.getAttribute("aria-live")).toBe("polite");
+    expect(status?.textContent).toContain("Preparing your Project");
+    expect(status?.textContent).toContain(
+      "Loading files, Skills, and access before your task starts.",
+    );
+  });
+
+  it("anchors a pending interaction so its complete card is visible on resume", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        React.createElement(ChatTranscript, {
+          run: null,
+          chat: chatState(),
+          showPromptBubble: false,
+          showWorking: false,
+          streamDead: false,
+          rowExpanded: () => false,
+          onToggleRow: () => undefined,
+          onReconnect: () => undefined,
+          onOpenFiles: () => undefined,
+          pendingInteraction: React.createElement(
+            "form",
+            { "aria-label": "Question from the agent" },
+            "Choose a format",
+          ),
+        }),
+      );
+    });
+
+    const interaction = container.querySelector(
+      '[data-message-id="project:pending-interaction"]',
+    );
+    expect(interaction?.getAttribute("data-scroll-anchor")).toBe("true");
+    expect(interaction?.textContent).toContain("Choose a format");
+  });
+
   it("marks user turns as anchors and exposes the shadcn jump-to-latest control", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -142,5 +260,101 @@ describe("ChatTranscript scroller", () => {
       await Promise.resolve();
     });
     expect(viewport.scrollTop).toBe(220);
+  });
+
+  it("places each Project file result after its exact turn and opens that version", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const onOpenFiles = vi.fn();
+    const chat = {
+      ...chatState(),
+      error: "OpenCode provider diagnostic",
+    };
+
+    await act(async () => {
+      root?.render(
+        React.createElement(ChatTranscript, {
+          run: null,
+          chat,
+          showPromptBubble: false,
+          showWorking: false,
+          streamDead: false,
+          rowExpanded: () => false,
+          onToggleRow: () => undefined,
+          onReconnect: () => undefined,
+          onOpenFiles,
+          showChatError: false,
+          generatedFileTurns: [
+            {
+              messageId: "user-0",
+              files: [
+                {
+                  id: "file-1",
+                  path: "files/launch.md",
+                  name: "launch.md",
+                  version: 3,
+                  contentType: "text/markdown",
+                  byteSize: 320,
+                  action: "updated",
+                },
+                {
+                  id: "file-2",
+                  path: "files/summary.pdf",
+                  name: "summary.pdf",
+                  version: 1,
+                  contentType: "application/pdf",
+                  byteSize: 640,
+                  action: "created",
+                },
+              ],
+            },
+          ],
+        }),
+      );
+    });
+
+    const messageIds = Array.from(
+      container.querySelectorAll<HTMLElement>("[data-message-id]"),
+    ).map((item) => item.dataset.messageId);
+    expect(messageIds.slice(0, 4)).toEqual([
+      "user:0",
+      "assistant:1",
+      "project:generated-files:user-0",
+      "user:2",
+    ]);
+    const marker = container.querySelector<HTMLElement>(
+      ".run-generated-marker--project",
+    )!;
+    expect(marker.textContent).toContain("Files from this task");
+    expect(marker.textContent).toContain("Updated · v3");
+    expect(marker.textContent).toContain("Created · v1");
+    expect(marker.textContent).toContain("launch.md");
+    expect(marker.textContent).toContain("summary.pdf");
+    expect(container.textContent).not.toContain("OpenCode provider diagnostic");
+    const fileButtons = Array.from(
+      marker.querySelectorAll<HTMLButtonElement>("[data-project-file-id]"),
+    );
+    expect(fileButtons).toHaveLength(2);
+    act(() => fileButtons[0]?.click());
+    expect(onOpenFiles).toHaveBeenCalledWith(
+      "file-1",
+      3,
+      expect.objectContaining({
+        path: "files/launch.md",
+        contentType: "text/markdown",
+        byteSize: 320,
+      }),
+    );
+    act(() => fileButtons[1]?.click());
+    expect(onOpenFiles).toHaveBeenLastCalledWith(
+      "file-2",
+      1,
+      expect.objectContaining({
+        path: "files/summary.pdf",
+        contentType: "application/pdf",
+        byteSize: 640,
+      }),
+    );
   });
 });

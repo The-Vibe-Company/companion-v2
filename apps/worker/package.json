@@ -17,6 +17,7 @@
     "@companion/db": "workspace:*",
     "@companion/github": "workspace:*",
     "@companion/sandbox": "workspace:*",
+    "@companion/skills": "workspace:*",
     "@companion/storage": "workspace:*",
     "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.5",
