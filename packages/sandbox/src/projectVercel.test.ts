@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { execFile } from "node:child_process";
-import { link, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { link, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -23,9 +24,33 @@ import {
   createVercelProjectWorkspaceRuntime,
   isHealthyProjectHealthResponse,
   SAFE_PROJECT_CAPTURE_SCRIPT,
+  SAFE_PROJECT_WRITE_SCRIPT,
 } from "./projectVercel";
 
 const execFileAsync = promisify(execFile);
+
+const ROOT_STAT_MUTATION_WRAPPER = String.raw`
+import base64, os, sys
+
+script = base64.b64decode(sys.argv.pop(1)).decode("utf-8")
+mutation = sys.argv.pop(1)
+root = sys.argv[1]
+real_stat = os.stat
+
+def mutated_stat(path, *args, **kwargs):
+    result = real_stat(path, *args, **kwargs)
+    if path == root and kwargs.get("follow_symlinks") is False:
+        values = list(result)
+        if mutation == "inode":
+            values[1] += 1
+        elif mutation == "mode":
+            values[0] ^= 0o002
+        return os.stat_result(values)
+    return result
+
+os.stat = mutated_stat
+exec(script)
+`;
 
 const ref = {
   sandboxName: "project-org00000-proj0000",
@@ -646,6 +671,95 @@ describe("persistent Vercel Project workspace", () => {
         ref,
         files: [{ path: `${reserved}/hidden`, data: Buffer.from("no") }],
       })).rejects.toThrow("Companion-reserved path");
+    }
+  });
+
+  it.each([
+    ["a root attachment", "report.pdf"],
+    ["an attachment in a new directory", "reports/2026/report.pdf"],
+  ])("safely writes %s without mistaking its own directory changes for a root swap", async (
+    _description,
+    relativePath,
+  ) => {
+    const directory = await mkdtemp(path.join(tmpdir(), "companion-project-write-"));
+    const root = path.join(directory, "files");
+    const stage = path.join(directory, "stage");
+    const bytes = Buffer.from("%PDF-1.7\nsafe attachment");
+    const checksum = createHash("sha256").update(bytes).digest("hex");
+    try {
+      await mkdir(root);
+      await mkdir(path.dirname(path.join(stage, relativePath)), { recursive: true });
+      await writeFile(path.join(stage, relativePath), bytes);
+      await execFileAsync("python3", [
+        "-c",
+        SAFE_PROJECT_WRITE_SCRIPT,
+        root,
+        stage,
+        Buffer.from(JSON.stringify([{
+          path: relativePath,
+          sha256: checksum,
+          mode: 0o644,
+        }])).toString("base64"),
+      ]);
+      const written = await readFile(path.join(root, relativePath));
+      expect(written).toEqual(bytes);
+      expect(createHash("sha256").update(written).digest("hex")).toBe(checksum);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the staged attachment checksum does not match its manifest", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "companion-project-write-checksum-"));
+    const root = path.join(directory, "files");
+    const stage = path.join(directory, "stage");
+    try {
+      await mkdir(root);
+      await mkdir(stage);
+      await writeFile(path.join(stage, "report.pdf"), "%PDF-1.7\nsafe attachment");
+      await expect(execFileAsync("python3", [
+        "-c",
+        SAFE_PROJECT_WRITE_SCRIPT,
+        root,
+        stage,
+        Buffer.from(JSON.stringify([{
+          path: "report.pdf",
+          sha256: "0".repeat(64),
+          mode: 0o644,
+        }])).toString("base64"),
+      ])).rejects.toThrow("upload source checksum changed");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["inode", "mode"])("fails closed when the managed root %s changes during a write", async (
+    mutation,
+  ) => {
+    const directory = await mkdtemp(path.join(tmpdir(), "companion-project-write-root-"));
+    const root = path.join(directory, "files");
+    const stage = path.join(directory, "stage");
+    const bytes = Buffer.from("%PDF-1.7\nsafe attachment");
+    const checksum = createHash("sha256").update(bytes).digest("hex");
+    try {
+      await mkdir(root);
+      await mkdir(stage);
+      await writeFile(path.join(stage, "report.pdf"), bytes);
+      await expect(execFileAsync("python3", [
+        "-c",
+        ROOT_STAT_MUTATION_WRAPPER,
+        Buffer.from(SAFE_PROJECT_WRITE_SCRIPT).toString("base64"),
+        mutation,
+        root,
+        stage,
+        Buffer.from(JSON.stringify([{
+          path: "report.pdf",
+          sha256: checksum,
+          mode: 0o644,
+        }])).toString("base64"),
+      ])).rejects.toThrow("managed root changed during upload");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
   });
 

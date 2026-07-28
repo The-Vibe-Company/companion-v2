@@ -49,9 +49,12 @@ def open_dir(parent_fd, name):
 def stat_identity(value):
     return (value.st_dev, value.st_ino, value.st_mode, value.st_size, value.st_mtime_ns, value.st_nlink)
 
+def directory_identity(value):
+    return (value.st_dev, value.st_ino, value.st_mode)
+
 root_fd = os.open(root, os.O_RDONLY | DIRECTORY | NOFOLLOW)
 stage_fd = os.open(stage, os.O_RDONLY | DIRECTORY | NOFOLLOW)
-root_identity = stat_identity(os.fstat(root_fd))
+root_identity = directory_identity(os.fstat(root_fd))
 try:
     for index, item in enumerate(items):
         parts = item["path"].split("/")
@@ -152,7 +155,7 @@ try:
             os.close(destination_parent)
 
     current_root = os.stat(root, follow_symlinks=False)
-    if stat_identity(current_root) != root_identity:
+    if not stat.S_ISDIR(current_root.st_mode) or directory_identity(current_root) != root_identity:
         raise RuntimeError("managed root changed during upload")
 finally:
     os.close(stage_fd)
