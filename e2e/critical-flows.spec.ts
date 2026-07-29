@@ -1,9 +1,10 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 
 const EMAIL = process.env.COMPANION_SEED_EMAIL ?? "admin@thevibecompany.co";
 const PASSWORD = process.env.COMPANION_SEED_PASSWORD ?? "adminadmin";
 
 const browserFailures = new WeakMap<Page, string[]>();
+let signedInCookies: Awaited<ReturnType<BrowserContext["cookies"]>> | null = null;
 
 test.beforeEach(async ({ page }) => {
   const failures: string[] = [];
@@ -40,6 +41,13 @@ test.afterEach(async ({ page }) => {
 });
 
 async function signIn(page: Page): Promise<void> {
+  if (signedInCookies) {
+    await page.context().addCookies(signedInCookies);
+    await page.goto("/skills");
+    await expect(page).toHaveURL(/\/skills(?:\?|$)/);
+    await page.waitForLoadState("networkidle");
+    return;
+  }
   await page.goto("/login");
   await page.locator("#si-email").fill(EMAIL);
   await page.locator("#si-pw").fill(PASSWORD);
@@ -48,6 +56,7 @@ async function signIn(page: Page): Promise<void> {
   // The URL changes before the App Router client has necessarily hydrated. Waiting for the idle
   // boundary prevents a click on server-rendered markup from being accepted visually but lost.
   await page.waitForLoadState("networkidle");
+  signedInCookies = await page.context().cookies();
 }
 
 /**
@@ -80,7 +89,12 @@ test("getting started persists dismissal across contexts and resumes from Accoun
   await page.reload();
   await expect(page.locator(".gs-card")).toHaveCount(0);
 
-  const secondContext = await browser.newContext();
+  const secondContext = await browser.newContext({
+    storageState: {
+      cookies: await page.context().cookies(),
+      origins: [],
+    },
+  });
   const secondPage = await secondContext.newPage();
   await secondPage.route("https://www.gravatar.com/**", async (route) => {
     await route.fulfill({
@@ -90,7 +104,9 @@ test("getting started persists dismissal across contexts and resumes from Accoun
     });
   });
   try {
-    await signIn(secondPage);
+    await secondPage.goto("/skills");
+    await expect(secondPage).toHaveURL(/\/skills(?:\?|$)/);
+    await secondPage.waitForLoadState("networkidle");
     await expect(secondPage.locator(".gs-card")).toHaveCount(0);
     await secondPage.getByRole("button", { name: "Settings", exact: true }).click();
     await expect(secondPage.getByRole("button", { name: "Resume onboarding", exact: true })).toBeVisible();
