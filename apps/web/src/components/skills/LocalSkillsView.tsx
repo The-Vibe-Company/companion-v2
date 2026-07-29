@@ -7,6 +7,7 @@ import { apiBase, fetchLocalSkills } from "@/lib/queries";
 import { REQUIRED_LOCAL_SKILL_KEY } from "@/lib/companionSkillGate";
 import { Icon } from "../Icon";
 import { CodeBlock, useModalA11y } from "./UploadDialog";
+import { fillPrompt, promptFor } from "./prompts";
 
 const STATUS_META: Record<LocalSkillStatus, { label: string; badge: string; action: string }> = {
   none: { label: "Not installed", badge: "ls-badge--neutral", action: "Install" },
@@ -36,12 +37,6 @@ function versionLine(skill: LocalSkillRow): string {
   )}`;
 }
 
-function promptFor(skill: LocalSkillRow): string {
-  if (skill.status === "update") return skill.prompts.update;
-  if (skill.status === "installed") return skill.prompts.use;
-  return skill.prompts.install;
-}
-
 type PromptMode = "default" | "reinstall";
 type CopiedKind = "prompt" | "reinstall";
 
@@ -53,30 +48,6 @@ const ASSISTANTS: Record<AssistantId, { name: string; vendor: string; hint: stri
   opencode: { name: "OpenCode", vendor: "opencode", hint: "paste into OpenCode" },
   openclaw: { name: "OpenClaw", vendor: "openclaw", hint: "paste into OpenClaw" },
 };
-
-/**
- * Fill the assistant-prompt placeholders. `agent` substitutes the `<your assistant>` slot the API leaves
- * in the report-back step; it defaults to that literal so callers without an assistant chooser (the detail
- * drawer, the CLI) get byte-identical output to before.
- */
-function fillPrompt(
-  template: string,
-  base: string,
-  workspaceId: string,
-  agent = "<your assistant>",
-): string {
-  return template
-    .split("{base}")
-    .join(base)
-    .split("{workspaceId}")
-    .join(workspaceId)
-    // A mixed-version API may still return an old PAT template. Never mint or inject a credential
-    // silently; leave an explicit instruction instead until the API rollout completes.
-    .split("{token}")
-    .join("[PAT intentionally omitted; use Agent Auth]")
-    .split("<your assistant>")
-    .join(agent);
-}
 
 /** Anthropic mark, shown on the Claude Code chooser tile (copied from the design). */
 function ClaudeLogo() {

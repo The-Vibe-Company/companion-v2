@@ -21,6 +21,7 @@ import type {
   SkillPublicVersionResult,
   ValidationResult,
   FrontmatterWarning,
+  GettingStartedState,
 } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
 
@@ -364,6 +365,26 @@ export async function saveSkillFilterPreferences(
   return apiFetch<SkillFilterPreferences>("/v1/skill-filter-preferences", {
     method: "PUT",
     body: JSON.stringify(preferences),
+  });
+}
+
+export async function fetchGettingStarted(orgId: string): Promise<GettingStartedState> {
+  return apiFetch<GettingStartedState>("/v1/getting-started", {
+    headers: { "x-companion-org": orgId },
+  });
+}
+
+export async function dismissGettingStarted(orgId: string): Promise<GettingStartedState> {
+  return apiFetch<GettingStartedState>("/v1/getting-started/dismiss", {
+    method: "POST",
+    headers: { "x-companion-org": orgId },
+  });
+}
+
+export async function reopenGettingStarted(orgId: string): Promise<GettingStartedState> {
+  return apiFetch<GettingStartedState>("/v1/getting-started/reopen", {
+    method: "POST",
+    headers: { "x-companion-org": orgId },
   });
 }
 

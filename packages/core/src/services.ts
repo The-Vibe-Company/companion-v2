@@ -55,6 +55,7 @@ import { listOrgAccessDomains } from "./domainAccess";
 import { classifyEmailDomain } from "./email-domains";
 import { canManageOrg, canManagePersonalSkill, canManagePublicSkill, canTouchOwner, isLastOwner } from "./authz";
 import { disableSecretsForDepartingMember, persistSkillSecretSlots } from "./secrets";
+import { recordGettingStartedStep } from "./gettingStarted";
 import {
   assertOrgSkillMutationEntitled,
   assertPersonalSkillsEntitled,
@@ -118,6 +119,7 @@ export {
 // everything from `@companion/core/services`. `onboarding.ts` only imports `uniqueSlug` (a hoisted
 // function declaration) and the `ActorContext` type from here, so the cycle is load-order safe.
 export * from "./onboarding";
+export * from "./gettingStarted";
 export {
   addOrgAccessDomain,
   listJoinableOrgsByDomain,
@@ -4427,6 +4429,15 @@ export async function reportLocalSkillInstall(input: {
     targetId: input.skillKey,
     metadata: { version: input.version, agent: agentLabel },
   });
+  if (input.skillKey === "companion") {
+    await recordGettingStartedStep({
+      actor: input.actor,
+      orgId: input.orgId,
+      step: "companion_install",
+      agent: agentLabel,
+      database,
+    });
+  }
   return {
     skillKey: row.skillKey,
     installedVersion: row.installedVersion,

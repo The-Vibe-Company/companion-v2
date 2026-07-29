@@ -86,6 +86,7 @@ export function SettingsController({
   const [apiKeys, setApiKeys] = useState<ApiKeyVM[]>(data.apiKeys);
   const [invites, setInvites] = useState<Invite[]>(data.invites);
   const [billing, setBilling] = useState(data.billing);
+  const [gettingStarted, setGettingStarted] = useState(data.gettingStarted);
   useEffect(() => {
     router.prefetch("/skills");
   }, [router]);
@@ -96,6 +97,7 @@ export function SettingsController({
     setApiKeys(data.apiKeys);
     setInvites(data.invites);
     setBilling(data.billing);
+    setGettingStarted(data.gettingStarted);
   }, [data]);
   useEffect(() => {
     document.cookie = `companion_org=${encodeURIComponent(data.current.id)}; path=/; SameSite=Lax`;
@@ -183,6 +185,7 @@ export function SettingsController({
       setApiKeys(next.apiKeys);
       setInvites(next.invites);
       setBilling(next.billing);
+      setGettingStarted(next.gettingStarted);
     } catch (error) {
       setErr((error as Error).message);
     }
@@ -213,6 +216,7 @@ export function SettingsController({
     ownerCount: (org) => org.members.filter((m) => m.role === "owner" && !m.pending).length,
     domainJoin,
     billing,
+    gettingStarted,
     prefs,
     setTheme,
     setAccent,

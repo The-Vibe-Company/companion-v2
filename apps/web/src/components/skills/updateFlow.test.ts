@@ -76,6 +76,8 @@ function localSkill(status: LocalSkillRow["status"], overrides: Partial<LocalSki
       install: "install {base} {workspaceId} {token}",
       update: "update {base} {workspaceId} {token}",
       use: "use {base} {workspaceId} {token}",
+      onboarding: "onboard {base} {workspaceId} {tool}",
+      resume: "resume {base} {workspaceId} {tool}",
     },
     ...overrides,
   };

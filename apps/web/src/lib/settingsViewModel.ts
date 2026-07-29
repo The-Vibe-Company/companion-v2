@@ -5,6 +5,7 @@ import {
   TEAM_BRAND_COLORS,
   type ApiTokenRow,
   type BillingOverview,
+  type GettingStartedState,
   type OrgSettingsResponse,
 } from "@companion/contracts";
 import type { ApiKeyVM, Invite, OrgFull, SeedUser, SettingsAppData } from "@/components/org/model";
@@ -74,8 +75,9 @@ export function buildSettingsAppData(input: {
   settings: OrgSettingsResponse;
   tokens?: ApiTokenRow[];
   billing?: BillingOverview | null;
+  gettingStarted?: GettingStartedState | null;
 }): SettingsAppData {
-  const { me, current, settings, tokens = [], billing = null } = input;
+  const { me, current, settings, tokens = [], billing = null, gettingStarted = null } = input;
   const users: Record<string, SeedUser> = {
     [me.id]: { id: me.id, name: me.name, email: me.email, initials: me.initials, avatarUrl: me.avatarUrl },
   };
@@ -142,5 +144,6 @@ export function buildSettingsAppData(input: {
     invites,
     apiKeys: tokens.map(mapApiKey),
     billing,
+    gettingStarted,
   };
 }

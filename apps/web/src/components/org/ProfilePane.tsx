@@ -6,6 +6,7 @@ import { Icon } from "../Icon";
 import { UserAvatar } from "../UserAvatar";
 import { PaneHead, EditField } from "./paneKit";
 import type { OrgCtx } from "./model";
+import { reopenGettingStarted } from "@/lib/queries";
 
 /**
  * The big profile avatar + its picker (upload a custom photo, or remove it to fall back to the
@@ -120,11 +121,23 @@ function ProfileAvatarPicker({ ctx }: { ctx: OrgCtx }) {
  */
 export function ProfilePane({ ctx }: { ctx: OrgCtx }) {
   const me = ctx.user(ctx.myId);
+  const [resuming, setResuming] = useState(false);
   // Sign out via a full-page form POST to /v1/auth/logout (mirrors OnboardingFlow): the
   // route handler clears the session cookie and 303s to /login in one shot. A client-side
   // `fetch` + `router.push` races the redirect — the still-live cookie bounces back to /skills.
   const logoutForm = useRef<HTMLFormElement>(null);
   const signOut = () => logoutForm.current?.submit();
+  const resumeOnboarding = async () => {
+    if (resuming) return;
+    setResuming(true);
+    try {
+      await reopenGettingStarted(ctx.currentOrg.id);
+      window.location.assign("/skills");
+    } catch (error) {
+      ctx.setError(error instanceof Error ? error.message : String(error));
+      setResuming(false);
+    }
+  };
 
   return (
     <div className="sx-pane">
@@ -163,6 +176,24 @@ export function ProfilePane({ ctx }: { ctx: OrgCtx }) {
           Your email is managed by your identity provider and can&apos;t be changed here.
         </span>
       </div>
+
+      {ctx.gettingStarted && !ctx.gettingStarted.completed_at ? (
+        <div className="sx-sec">
+          <h2 className="sx-sec__h">Getting started</h2>
+          <p className="sx-sec__d">
+            Bring the checklist back to My Skills and continue with your coding agent.
+          </p>
+          <button
+            className="btn-sec"
+            type="button"
+            onClick={() => void resumeOnboarding()}
+            disabled={resuming}
+          >
+            <Icon name="arrow-right" size={14} />
+            {resuming ? "Opening" : "Resume onboarding"}
+          </button>
+        </div>
+      ) : null}
 
       <div className="sx-sec">
         <h2 className="sx-sec__h">Sessions</h2>

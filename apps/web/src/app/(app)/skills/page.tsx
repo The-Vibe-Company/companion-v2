@@ -5,6 +5,7 @@ import type {
   SkillFilterPreferences,
   SkillListRow,
   BillingOverview,
+  GettingStartedState,
 } from "@companion/contracts";
 import { loadOrgContext } from "@/lib/currentOrg";
 import { serverApiFetch } from "@/lib/apiServer";
@@ -70,7 +71,7 @@ export default async function SkillsPage({
 
   const billing = await serverApiFetch<BillingOverview>("/v1/billing", { headers: orgHeaders }).catch(() => null);
   if (!billing) return <WorkspaceLoadError />;
-  const [mineResult, orgResult, filterPreferences, personalLabelsResult, labelsResult] =
+  const [mineResult, orgResult, filterPreferences, personalLabelsResult, labelsResult, gettingStarted] =
     await Promise.all([
       // "My Skills": the caller's authored personal skills + org skills they installed.
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=mine", { headers: orgHeaders }).catch(() => null),
@@ -82,6 +83,7 @@ export default async function SkillsPage({
         ? serverApiFetch<LabelsResponse>("/v1/personal-labels", { headers: orgHeaders }).catch(() => EMPTY_LABELS)
         : Promise.resolve(EMPTY_LABELS),
       serverApiFetch<LabelsResponse>("/v1/labels", { headers: orgHeaders }).catch(() => EMPTY_LABELS),
+      serverApiFetch<GettingStartedState>("/v1/getting-started", { headers: orgHeaders }).catch(() => null),
     ]);
   if (!mineResult || !orgResult || !filterPreferences) return <WorkspaceLoadError />;
   const mineSkills = mineResult.map(mapSkill);
@@ -104,6 +106,7 @@ export default async function SkillsPage({
       initialPersonalLabels={personalLabelsResult ?? EMPTY_LABELS}
       initialLabels={labelsResult ?? EMPTY_LABELS}
       initialBilling={billing}
+      initialGettingStarted={gettingStarted}
       me={me}
       orgs={orgs}
       currentOrg={current}

@@ -1,4 +1,4 @@
-import type { BillingOverview, OrgRole } from "@companion/contracts";
+import type { BillingOverview, GettingStartedState, OrgRole } from "@companion/contracts";
 import type { MeVM } from "@/lib/types";
 
 /** Display fields for any user referenced by a membership. */
@@ -81,6 +81,7 @@ export interface SettingsAppData {
   invites: Invite[];
   apiKeys: ApiKeyVM[];
   billing: BillingOverview | null;
+  gettingStarted: GettingStartedState | null;
 }
 
 /** Which settings pane is mounted. */
@@ -168,6 +169,7 @@ export interface OrgCtx {
   /** Signed-in actor context for the domain access editor (Workspace › General). */
   domainJoin: DomainJoinVM;
   billing: BillingOverview | null;
+  gettingStarted: GettingStartedState | null;
   setTheme: (theme: "light" | "dark" | "system") => void;
   setAccent: (accent: string) => void;
   setMyName: (name: string) => void;

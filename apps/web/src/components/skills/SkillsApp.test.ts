@@ -188,7 +188,7 @@ const localSkills: LocalSkillRow[] = [
     commands: [],
     changes: [],
     integrity: { packageChecksum: `sha256:${"a".repeat(64)}`, files: { "SKILL.md": `sha256:${"b".repeat(64)}` } },
-    prompts: { install: "install", update: "update", use: "use" },
+    prompts: { install: "install", update: "update", use: "use", onboarding: "onboarding", resume: "resume" },
   },
 ];
 
@@ -506,6 +506,27 @@ afterEach(() => {
 });
 
 describe("SkillsApp initial route", () => {
+  it("hides getting started when its server-generated Companion prompts are unavailable", () => {
+    const gettingStarted = {
+      companion_installed_at: null,
+      local_reviewed_at: null,
+      org_reviewed_at: null,
+      completed_at: null,
+      dismissed_at: null,
+      completed: false,
+      first_incomplete_step: "companion_install" as const,
+    };
+
+    expect(render(
+      { lib: "mine", kind: "all" },
+      { initialGettingStarted: gettingStarted, initialLocalSkills: [] },
+    )).not.toContain("Getting started");
+    expect(render(
+      { lib: "mine", kind: "all" },
+      { initialGettingStarted: gettingStarted, initialLocalSkills: localSkills },
+    )).toContain("Getting started");
+  });
+
   it("shows the Projects switch only when the server feature flag is enabled", async () => {
     const { container } = await mountSkillsApp(
       { lib: "mine", kind: "all" },
@@ -2080,6 +2101,8 @@ describe("Companion skills install gate", () => {
         install: "install {base} {workspaceId} with Agent Auth",
         update: "update {base} {workspaceId} with Agent Auth",
         use: "use {base} {workspaceId} with Agent Auth",
+        onboarding: "onboard {base} {workspaceId} in {tool}",
+        resume: "resume {base} {workspaceId} in {tool}",
       },
       ...extra,
     };

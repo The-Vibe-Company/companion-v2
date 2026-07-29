@@ -80,6 +80,7 @@ and `approval_request`; `agent_auth_ephemeral` is its shared PostgreSQL TTL/rate
 Companion adds `profiles`, `organizations`, `memberships`, `invitations`,
 `skills`, `skill_versions`, `skill_version_dependencies`, `labels`, `skill_labels`,
 `skill_filter_preferences`, `skill_comments`, `skill_comment_images`, `local_skill_installs`,
+`getting_started_states`,
 `api_tokens`, `github_connections`, `github_sync_destinations`,
 `github_sync_destination_skills`, `billing_subscriptions`, `stripe_webhook_events`, `audit_log`, the secret-vault
 tables, the creator-private Project workspace/session/file tables, and the Skill Run tables described
@@ -340,6 +341,17 @@ reparent operation, which remains shared for org labels. Rename preserves the ca
 prunes the removed subtree, and reparent appends the moved subtree under its new parent. The grouped Skills list
 mirrors the same sibling order at the root and at every visible subfolder level.
 
+`getting_started_states` stores the optional My Skills checklist for one `(org_id, user_id)`.
+`companion_installed_at`, `local_reviewed_at`, `org_reviewed_at`, and `completed_at` are
+first-write-wins timestamps; `dismissed_at` is the only reversible field. The Core service never
+accepts a foreign user id and keys every read/write to the actor, with tenant RLS as defense in depth.
+It sets a step and the derived completion timestamp in one transaction, so retries are idempotent and
+a failed final write cannot expose partial completion. The bundled Companion install report records
+the first step; the guided skill records local and organization reviews only after every offered item
+is published/installed or explicitly declined. Existing memberships are migration-backfilled as
+dismissed, while a missing row is the eligible all-null default for a new member or a member joining
+a new organization.
+
 The My Skills and Organization lists use a flat Rhythm grouping by default. A section represents the
 first segment of a folder path; a skill is deduplicated inside that root and repeated only when assigned
 under distinct roots. Rows show at most two most-specific relative subpaths (ancestors are suppressed),
@@ -486,6 +498,11 @@ requires a verified email when `COMPANION_REQUIRE_VERIFIED_DOMAIN_JOIN` is on (d
 Org owners/admins can later add or remove access domains from Workspace settings, but adding a domain
 requires the admin's own verified corporate email domain to match the requested domain. `ensureUserBootstrap` now only upserts the `profiles` row — the legacy
 "first user owns the seeded Acme org" auto-bootstrap was removed in favor of this flow.
+
+After this required organization onboarding, My Skills may show the separate non-blocking **Getting
+started** checklist. It does not change or gate `profiles.onboarded_at`, signup, invitation, domain
+joining, or app-shell redirects. The checklist can be hidden and resumed from Settings → Account,
+persists across devices, and is conducted conversationally by Companion in English or French.
 
 ## Authorization
 
@@ -761,6 +778,10 @@ persisting so delivery order cannot corrupt local state.
   domain-access orgs), `POST /v1/onboarding/join` (join a selected org after server-side domain
   revalidation),
   `POST /v1/onboarding/create` (create org + invites, finish onboarding).
+- Getting started: `GET /v1/getting-started` (`skills:read`) and
+  `POST /v1/getting-started/steps` (`skills:write`) are self-scoped and available to sessions,
+  delegated Agent Auth, and explicit legacy PATs. Session-only
+  `POST /v1/getting-started/dismiss` and `/reopen` hide or resume the optional web checklist.
 - Billing: session-only `GET /v1/billing` for any member; session-only
   `POST /v1/billing/checkout` and `/portal` for Owners/Admins; public
   `POST /v1/billing/webhooks/stripe` authenticated only by the Stripe signature. Billing endpoints
