@@ -16,6 +16,8 @@ describe("Companion Agent Auth operation registry", () => {
       sensitive: true,
     });
     expect(resolveOperation("GET", "/skills/hello/download")).toMatchObject({ capability: "skills:read" });
+    expect(resolveOperation("GET", "/getting-started")).toMatchObject({ capability: "skills:read" });
+    expect(resolveOperation("POST", "/getting-started/steps")).toMatchObject({ capability: "skills:write" });
     expect(resolveOperation("POST", "/skills/hello/install")).toMatchObject({ capability: "skills:read" });
     expect(resolveOperation("DELETE", "/skills/hello/install")).toMatchObject({ capability: "skills:read" });
     expect(resolveOperation("GET", "/skills/hello/versions/1.2.3/files/content?path=SKILL.md")).toMatchObject({

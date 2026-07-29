@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type {
+  GettingStartedState,
   LabelColor,
   LabelIcon,
   LabelsResponse,
@@ -42,6 +43,7 @@ import { DetailView } from "./DetailView";
 import { RunChatView } from "../runs/RunChatView";
 import { withRunDraft, type RunLauncherDraft } from "../runs/launcherState";
 import { LocalSkillsView } from "./LocalSkillsView";
+import { GettingStartedCard } from "./GettingStartedCard";
 import { CommandPalette } from "./CommandPalette";
 import { UploadDialog, InstallDialog } from "./UploadDialog";
 import {
@@ -202,6 +204,7 @@ export function SkillsApp({
   initialPersonalLabels,
   initialLabels,
   initialBilling,
+  initialGettingStarted = null,
   me,
   orgs,
   currentOrg,
@@ -217,6 +220,7 @@ export function SkillsApp({
   initialPersonalLabels: LabelsResponse;
   initialLabels: LabelsResponse;
   initialBilling: BillingOverview;
+  initialGettingStarted?: GettingStartedState | null;
   me: MeVM;
   orgs: OrgVM[];
   currentOrg: OrgVM;
@@ -236,6 +240,10 @@ export function SkillsApp({
   const [personalLabels, setPersonalLabels] = useState<LabelVM[]>(initialPersonalLabels.flat);
   const [orgLabels, setOrgLabels] = useState<LabelVM[]>(initialLabels.flat);
   const [localSkills, setLocalSkills] = useState<LocalSkillRow[]>(initialLocalSkills);
+  const companionLocalSkill = useMemo(
+    () => localSkills.find((row) => row.key === "companion") ?? null,
+    [localSkills],
+  );
   const [currentView, setCurrentView] = useState<SkillsView>(() => skillsViewForRoute(initialRoute));
   const [archivedSkills, setArchivedSkills] = useState<SkillVM[]>([]);
   const [archivedLoaded, setArchivedLoaded] = useState(false);
@@ -1793,41 +1801,52 @@ export function SkillsApp({
             onPrimaryAction={runSkillAction}
           />
         ) : (
-          <ListView
-            skills={filtered}
-            labels={labels}
-            workspaceId={currentOrg.id}
-            library={selection.lib}
-            categoryOrder={activeTreePaths}
-            scopeKind={selection.kind}
-            activeLabel={activeLabel}
-            breadcrumb={breadcrumb}
-            groupBy={groupBy}
-            onGroupByChange={setGroupBy}
-            onOpen={open}
-            onUpload={openUpload}
-            actorId={me.id}
-            onPrimaryAction={runSkillAction}
-            lastId={lastId}
-            filters={filters}
-            onToggleFilter={toggleFilter}
-            onRemoveFilter={removeFilter}
-            onClearFilters={clearFilters}
-            preferenceStatus={preferenceStatus}
-            onRetryPreferences={retryPreferenceSave}
-            dragSkillId={drag?.kind === "skill" && drag.lib === selection.lib ? drag.skillId : null}
-            onSkillStartDrag={startSkillDrag}
-            upgradeNotice={
-              !personalSkillsEnabled && selection.lib === "mine"
-                ? `${initialBilling.hiddenPersonalSkillCount} personal skill${initialBilling.hiddenPersonalSkillCount === 1 ? " is" : "s are"} preserved but hidden on Free. Organization skills you install remain available here.`
-                : orgCreateBlocked && selection.lib === "org"
-                  ? initialBilling.entitlements.catalogFrozen
-                    ? `This catalog has ${initialBilling.orgSkillCount} skills and is read-only on Free.`
-                    : `Free includes ${orgSkillLimit} organization skills. Upgrade to add another.`
-                  : null
-            }
-            onUpgrade={() => openSettings({ view: "billing" })}
-          />
+          <>
+            {selection.lib === "mine"
+            && initialGettingStarted
+            && companionLocalSkill ? (
+              <GettingStartedCard
+                initialState={initialGettingStarted}
+                companionSkill={companionLocalSkill}
+                workspaceId={currentOrg.id}
+              />
+            ) : null}
+            <ListView
+              skills={filtered}
+              labels={labels}
+              workspaceId={currentOrg.id}
+              library={selection.lib}
+              categoryOrder={activeTreePaths}
+              scopeKind={selection.kind}
+              activeLabel={activeLabel}
+              breadcrumb={breadcrumb}
+              groupBy={groupBy}
+              onGroupByChange={setGroupBy}
+              onOpen={open}
+              onUpload={openUpload}
+              actorId={me.id}
+              onPrimaryAction={runSkillAction}
+              lastId={lastId}
+              filters={filters}
+              onToggleFilter={toggleFilter}
+              onRemoveFilter={removeFilter}
+              onClearFilters={clearFilters}
+              preferenceStatus={preferenceStatus}
+              onRetryPreferences={retryPreferenceSave}
+              dragSkillId={drag?.kind === "skill" && drag.lib === selection.lib ? drag.skillId : null}
+              onSkillStartDrag={startSkillDrag}
+              upgradeNotice={
+                !personalSkillsEnabled && selection.lib === "mine"
+                  ? `${initialBilling.hiddenPersonalSkillCount} personal skill${initialBilling.hiddenPersonalSkillCount === 1 ? " is" : "s are"} preserved but hidden on Free. Organization skills you install remain available here.`
+                  : orgCreateBlocked && selection.lib === "org"
+                    ? initialBilling.entitlements.catalogFrozen
+                      ? `This catalog has ${initialBilling.orgSkillCount} skills and is read-only on Free.`
+                      : `Free includes ${orgSkillLimit} organization skills. Upgrade to add another.`
+                    : null
+              }
+              onUpgrade={() => openSettings({ view: "billing" })}
+            />
+          </>
         )}
       </div>
       {(currentView !== "workspace" || skill) && preferenceStatus !== "idle" ? (

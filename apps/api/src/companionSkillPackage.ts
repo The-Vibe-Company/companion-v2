@@ -153,7 +153,30 @@ export function buildCompanionSkillPrompts(version: string): LocalSkillPrompts {
     "python3 scripts/bootstrap.py --json --auto-update-companion",
   ].join("\n");
 
-  return { install, update, use };
+  const onboarding = [
+    install,
+    "",
+    "11. Start the Companion guided onboarding described in SKILL.md under \"Guided onboarding",
+    "    (getting started)\". Continue in my conversation language (English or French), read",
+    "    GET /getting-started, and resume from first_incomplete_step. Review local skills first,",
+    "    then the complete organization library, asking for every required confirmation. A step is",
+    "    complete only after its POST /getting-started/steps call returns 2xx.",
+    "    If the newly installed Companion skill can be loaded now, continue in this conversation.",
+    "    If the Companion skill cannot be loaded in this conversation, start a new conversation in {tool} and say:",
+    "    'Use the companion skill and resume my Companion getting started onboarding.'",
+  ].join("\n");
+
+  const resume = [
+    "Use the Companion skill to resume my Companion getting started onboarding for workspace",
+    "{workspaceId} at {base}. Run python3 scripts/bootstrap.py --json --auto-update-companion once,",
+    "then GET /getting-started and resume from first_incomplete_step in my conversation language",
+    "(English or French). If the skill is not installed locally, direct me back to the Install step.",
+    "Treat a step as complete only after its POST /getting-started/steps call returns 2xx.",
+    "If the Companion skill cannot be loaded in this conversation, start a new conversation in {tool} and say:",
+    "'Use the companion skill and resume my Companion getting started onboarding.'",
+  ].join("\n");
+
+  return { install, update, use, onboarding, resume };
 }
 
 /** Compose the read row for the Companion skills view from the caller's install record. */

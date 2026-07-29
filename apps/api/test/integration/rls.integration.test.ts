@@ -276,6 +276,43 @@ describe("Postgres tenant isolation", () => {
     ).resolves.not.toMatchObject({ description: "cross-tenant-write" });
   });
 
+  it("keeps getting-started rows tenant-isolated for a non-bypass role", async () => {
+    await integrationSql`
+      insert into getting_started_states (org_id, user_id, local_reviewed_at)
+      values
+        (${fixture.orgA}::uuid, ${fixture.owner.id}, now()),
+        (${fixture.orgB}::uuid, ${fixture.outsider.id}, now())
+      on conflict (org_id, user_id) do update set local_reviewed_at = excluded.local_reviewed_at
+    `;
+
+    const result = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${role}`);
+      await tx`
+        select set_config('app.org_id', ${fixture.orgA}, true),
+               set_config('app.user_id', ${fixture.owner.id}, true)
+      `;
+      const visible = await tx<Array<{ org_id: string }>>`
+        select org_id from getting_started_states order by org_id
+      `;
+      const changed = await tx`
+        update getting_started_states
+        set org_reviewed_at = now()
+        where org_id = ${fixture.orgB}::uuid
+        returning org_id
+      `;
+      return { visible, changed };
+    });
+
+    expect(result.visible).toEqual([{ org_id: fixture.orgA }]);
+    expect(result.changed).toEqual([]);
+    const [foreign] = await integrationSql<Array<{ org_reviewed_at: string | null }>>`
+      select org_reviewed_at
+      from getting_started_states
+      where org_id = ${fixture.orgB}::uuid and user_id = ${fixture.outsider.id}
+    `;
+    expect(foreign?.org_reviewed_at).toBeNull();
+  });
+
   it("keeps owner-scoped personal folders private even inside the same organization", async () => {
     const paths = await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${role}`);

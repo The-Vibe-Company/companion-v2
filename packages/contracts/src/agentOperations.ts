@@ -87,6 +87,8 @@ export const COMPANION_AGENT_OPERATION_REGISTRY = [
     transport: "transfer-ticket-download",
   },
   { method: "POST", path: "/local-skills/:key/installed", capability: "skills:write", transport: "rest" },
+  { method: "GET", path: "/getting-started", capability: "skills:read", transport: "rest" },
+  { method: "POST", path: "/getting-started/steps", capability: "skills:write", transport: "rest" },
   { method: "GET", path: "/secrets", capability: "secrets:read", transport: "rest", sensitive: true },
   { method: "POST", path: "/secrets", capability: "secrets:write", transport: "rest", sensitive: true },
   { method: "GET", path: "/secrets/:id", capability: "secrets:read", transport: "rest", sensitive: true },

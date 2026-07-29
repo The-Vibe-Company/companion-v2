@@ -38,6 +38,7 @@ import {
   getLocalSkillInstall,
   getOnboardingContext,
   getOnboardingState,
+  getGettingStartedState,
   getSkillBySlug,
   getSkillById,
   getSkillDependencies,
@@ -66,6 +67,9 @@ import {
   renameSkill,
   renameLabel,
   reportLocalSkillInstall,
+  recordGettingStartedStep,
+  dismissGettingStarted,
+  reopenGettingStarted,
   removeOrgAccessDomain,
   removeMember,
   revokeApiToken,
@@ -219,6 +223,7 @@ import {
   renameSkillInputSchema,
   renameLabelInputSchema,
   reportLocalSkillInstallInputSchema,
+  recordGettingStartedStepInputSchema,
   reportSkillInstallInputSchema,
   setCommentDeprecatedInputSchema,
   setLabelColorInputSchema,
@@ -2048,6 +2053,70 @@ app.put("/v1/skill-filter-preferences", async (c) => {
       await withTenant(c, ({ actor, orgId, database }) =>
         setSkillFilterPreferences({ actor, orgId, preferences: body, database }),
       ),
+    );
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.get("/v1/getting-started", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
+    return c.json(
+      await withTenant(
+        c,
+        ({ actor, orgId, database }) => getGettingStartedState({ actor, orgId, database }),
+        true,
+      ),
+    );
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.post("/v1/getting-started/steps", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:write");
+    const input = recordGettingStartedStepInputSchema.parse(await c.req.json());
+    return c.json(
+      await withTenant(
+        c,
+        ({ actor, orgId, database }) =>
+          recordGettingStartedStep({
+            actor,
+            orgId,
+            step: input.step,
+            agent: input.agent,
+            database,
+          }),
+        true,
+      ),
+    );
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+app.post("/v1/getting-started/dismiss", async (c) => {
+  try {
+    actorFromContext(c);
+    return c.json(
+      await withTenant(c, ({ actor, orgId, database }) =>
+        dismissGettingStarted({ actor, orgId, database })),
+    );
+  } catch (error) {
+    return jsonError(c, error, 401);
+  }
+});
+
+app.post("/v1/getting-started/reopen", async (c) => {
+  try {
+    actorFromContext(c);
+    return c.json(
+      await withTenant(c, ({ actor, orgId, database }) =>
+        reopenGettingStarted({ actor, orgId, database })),
     );
   } catch (error) {
     return jsonError(c, error, 401);

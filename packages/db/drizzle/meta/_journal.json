@@ -414,6 +414,13 @@
       "when": 1784998800000,
       "tag": "0058_project_workspace_retry_backoff",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1785257600000,
+      "tag": "0059_getting_started_states",
+      "breakpoints": true
     }
   ]
 }

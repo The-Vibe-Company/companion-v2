@@ -1,5 +1,6 @@
 "use client";
 
+import { gettingStartedStateSchema } from "@companion/contracts";
 import type { SettingsAppData } from "@/components/org/model";
 import type { MeVM, OrgVM } from "./types";
 import { apiFetch } from "./apiClient";
@@ -13,14 +14,24 @@ export async function fetchSettingsAppData(input: {
   // Tokens are a separate, user-scoped endpoint — fetch alongside the org settings (mirrors the
   // server loader) so the in-app drawer's API-keys pane/count isn't empty. Token errors are
   // tolerated (empty list) so a token hiccup can't blank the whole drawer.
-  const [raw, tokensRaw, billingRaw] = await Promise.all([
+  const [raw, tokensRaw, billingRaw, gettingStartedRaw] = await Promise.all([
     apiFetch<unknown>("/v1/orgs/current/settings", { headers }),
     apiFetch<unknown>("/v1/tokens", { headers }).catch(() => null),
     apiFetch<unknown>("/v1/billing", { headers }).catch(() => null),
+    apiFetch<unknown>("/v1/getting-started", { headers }).catch(() => null),
   ]);
   const settings = parseOrgSettingsResponse(raw);
   if (!settings) return null;
   const tokens = parseApiTokensResponse(tokensRaw);
   const billing = parseBillingOverview(billingRaw);
-  return buildSettingsAppData({ me: input.me, current: input.currentOrg, settings, tokens, billing });
+  const gettingStartedResult = gettingStartedStateSchema.safeParse(gettingStartedRaw);
+  const gettingStarted = gettingStartedResult.success ? gettingStartedResult.data : null;
+  return buildSettingsAppData({
+    me: input.me,
+    current: input.currentOrg,
+    settings,
+    tokens,
+    billing,
+    gettingStarted,
+  });
 }

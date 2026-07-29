@@ -113,6 +113,10 @@ legacy PAT:
 | Unfile a personal skill from a personal folder | `DELETE /skills/{slug}/personal-labels` | `skills:write` |
 | Read personal Skills UI preferences | `GET /skill-filter-preferences` | Browser session only |
 | Replace personal Skills UI preferences | `PUT /skill-filter-preferences` | Browser session only |
+| Read guided onboarding progress | `GET /getting-started` | `skills:read` |
+| Record a guided onboarding step | `POST /getting-started/steps` | `skills:write` |
+| Hide guided onboarding | `POST /getting-started/dismiss` | Browser session only |
+| Resume guided onboarding | `POST /getting-started/reopen` | Browser session only |
 | Current bundled Companion skill status + workspace id | `GET /local-skills/companion` | `skills:read` |
 | Download bundled Companion skill package | `GET /local-skills/companion/package` | `skills:read` |
 | Confirm this skill installed | `POST /local-skills/companion/installed` | `skills:write` |
@@ -130,6 +134,38 @@ legacy PAT:
 | Create a 60-second retrieval grant | `POST /secret-retrievals/{planId}/grant` | `secrets:read`; bundled Agent client only through private `secret-redeem` action |
 | Redeem a grant once | `POST /secret-grants/redeem` | `secrets:read`; bundled Agent client only through private `secret-redeem` action |
 | Fetch companion.json v2 schema | `GET /v1/schemas/companion-manifest.v2.schema.json` | Public |
+
+## Guided onboarding
+
+`GET /getting-started` returns the current member's state in the active workspace:
+
+```json
+{
+  "companion_installed_at": "2026-07-28T12:00:00.000Z",
+  "local_reviewed_at": null,
+  "org_reviewed_at": null,
+  "completed_at": null,
+  "dismissed_at": null,
+  "completed": false,
+  "first_incomplete_step": "local_review"
+}
+```
+
+Resume from `first_incomplete_step`. Record a review only after every item was resolved, where a
+decline and an empty result are both valid resolutions:
+
+```http
+POST /getting-started/steps
+Content-Type: application/json
+
+{ "step": "local_review", "agent": "Codex" }
+```
+
+The allowed steps are `companion_install`, `local_review`, and `org_review`. Step timestamps and
+`completed_at` are first-write-wins; retrying a successful request is safe. Treat progress as
+recorded only after a 2xx response. A 404 means the instance does not support guided onboarding, so
+continue normal Companion use. Dismiss and reopen are intentionally browser-session-only; an agent
+must not call them.
 
 ## Secret bindings and retrieval
 

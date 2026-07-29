@@ -855,6 +855,32 @@ export const skillFilterPreferences = pgTable(
   }),
 );
 
+/**
+ * Per-workspace, per-member progress for the dismissible My Skills getting-started checklist.
+ * Step timestamps and completion are first-write-wins; dismissal is the only reversible field.
+ */
+export const gettingStartedStates = pgTable(
+  "getting_started_states",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    companionInstalledAt: timestamp("companion_installed_at", { withTimezone: true }),
+    localReviewedAt: timestamp("local_reviewed_at", { withTimezone: true }),
+    orgReviewedAt: timestamp("org_reviewed_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    dismissedAt: timestamp("dismissed_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.userId] }),
+  }),
+);
+
 export const skillComments = pgTable(
   "skill_comments",
   {

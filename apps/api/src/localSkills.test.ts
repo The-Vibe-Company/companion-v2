@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.28.1");
+    expect(pkg.version).toBe("1.29.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -76,6 +76,7 @@ describe("companion skill package + row", () => {
       "scripts/companion_lib.py",
       "scripts/create_secret.py",
       "scripts/install_skill.py",
+      "scripts/onboarding_scan.py",
       "scripts/secrets_runtime.py",
       "scripts/skill_guard.py",
       "scripts/sync_companion.py",
@@ -125,8 +126,8 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("standalone Agent Auth client");
-    expect(changelog).toContain("without changing the supported Skills API operations");
+    expect(changelog).toContain("guided onboarding");
+    expect(changelog).toContain("registered user and current-project roots");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
@@ -184,6 +185,11 @@ describe("companion skill package + row", () => {
     expect(prompts.update).toContain("do not use it silently");
     expect(prompts.use).toContain("Never fall back to a PAT unless I explicitly select legacy-pat mode");
     expect(prompts.install).toContain("/local-skills/companion/installed");
+    expect(prompts.onboarding).toContain("Guided onboarding");
+    expect(prompts.onboarding).toContain("GET /getting-started");
+    expect(prompts.onboarding).toContain("new conversation in {tool}");
+    expect(prompts.resume).toContain("first_incomplete_step");
+    expect(prompts.resume).toContain("English or French");
   });
 
   it("bundles mandatory self-update and explicit publish placement instructions", async () => {

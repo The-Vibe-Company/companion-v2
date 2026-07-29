@@ -23,7 +23,7 @@ describe("localSkillRowSchema", () => {
           "scripts/bootstrap.py": `sha256:${"c".repeat(64)}`,
         },
       },
-      prompts: { install: "install", update: "update", use: "use" },
+      prompts: { install: "install", update: "update", use: "use", onboarding: "onboarding", resume: "resume" },
     });
 
     expect(parsed.integrity.packageChecksum).toMatch(/^sha256:/);
@@ -51,7 +51,7 @@ describe("localSkillRowSchema", () => {
             "../SKILL.md": `sha256:${"b".repeat(64)}`,
           },
         },
-        prompts: { install: "install", update: "update", use: "use" },
+        prompts: { install: "install", update: "update", use: "use", onboarding: "onboarding", resume: "resume" },
       }),
     ).toThrow();
   });

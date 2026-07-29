@@ -21,13 +21,16 @@ export type LocalSkillCommand = z.infer<typeof localSkillCommandSchema>;
 
 /**
  * Prompt templates handed to the assistant. The client fills `{base}` (the API base URL),
- * `{workspaceId}` (organizations.id), and `{token}` (a freshly minted personal access token) before
- * copying or sending.
+ * `{workspaceId}` (organizations.id), and `{tool}` (the selected assistant) before copying or
+ * sending. `{token}` remains supported as a mixed-version safety placeholder but is never filled
+ * with a credential by the web client.
  */
 export const localSkillPromptsSchema = z.object({
   install: z.string(),
   update: z.string(),
   use: z.string(),
+  onboarding: z.string(),
+  resume: z.string(),
 });
 export type LocalSkillPrompts = z.infer<typeof localSkillPromptsSchema>;
 

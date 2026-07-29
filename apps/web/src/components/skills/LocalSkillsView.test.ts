@@ -42,6 +42,8 @@ const baseSkill: LocalSkillRow = {
     install: 'install {base} {workspaceId} with Agent Auth agent=<your assistant>',
     update: "update {base} {workspaceId} with Agent Auth",
     use: "use {base} {workspaceId} with Agent Auth",
+    onboarding: "onboard {base} {workspaceId} in {tool}",
+    resume: "resume {base} {workspaceId} in {tool}",
   },
 };
 

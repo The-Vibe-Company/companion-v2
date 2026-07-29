@@ -31,6 +31,16 @@ describe("SettingsController", () => {
       },
       invites: [],
       apiKeys: [],
+      billing: null,
+      gettingStarted: {
+        companion_installed_at: null,
+        local_reviewed_at: null,
+        org_reviewed_at: null,
+        completed_at: null,
+        dismissed_at: "2026-07-28T12:00:00.000Z",
+        completed: false,
+        first_incomplete_step: "companion_install",
+      },
       current: {
         id: "org_1",
         name: "Acme",
@@ -45,15 +55,14 @@ describe("SettingsController", () => {
       },
     } as unknown as SettingsAppData;
 
-    expect(() =>
-      renderToString(
+    const html = renderToString(
         React.createElement(SettingsController, {
           data,
-          initialRoute: { view: "general" },
+          initialRoute: { view: "profile" },
           initialDialog: null,
           onClose: vi.fn(),
         }),
-      ),
-    ).not.toThrow();
+      );
+    expect(html).toContain("Resume onboarding");
   });
 });

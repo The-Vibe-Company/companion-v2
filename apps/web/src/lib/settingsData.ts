@@ -14,6 +14,7 @@ import { parseSettingsView } from "@/components/org/model";
 import type { SettingsAppData, SettingsDialog, SettingsRoute, SettingsView } from "@/components/org/model";
 import type { MeVM } from "@/lib/types";
 import { loadServerAuth } from "@/lib/serverAuth";
+import { gettingStartedStateSchema } from "@companion/contracts";
 
 export type SettingsSearchParams = Promise<Record<string, string | string[] | undefined>>;
 export { parseOrgSettingsResponse } from "@/lib/settingsViewModel";
@@ -68,16 +69,19 @@ export async function loadSettingsPageData(searchParams: SettingsSearchParams): 
   if (!settings) return null;
 
   // Personal access tokens live on their own endpoint; a failed fetch degrades to an empty list.
-  const [tokensRaw, billingRaw] = await Promise.all([
+  const [tokensRaw, billingRaw, gettingStartedRaw] = await Promise.all([
     serverApiFetch<unknown>("/v1/tokens", { headers: orgHeaders }).catch(() => null),
     serverApiFetch<unknown>("/v1/billing", { headers: orgHeaders }).catch(() => null),
+    serverApiFetch<unknown>("/v1/getting-started", { headers: orgHeaders }).catch(() => null),
   ]);
   const tokens = parseApiTokensResponse(tokensRaw);
   const billing = parseBillingOverview(billingRaw);
+  const gettingStartedResult = gettingStartedStateSchema.safeParse(gettingStartedRaw);
+  const gettingStarted = gettingStartedResult.success ? gettingStartedResult.data : null;
 
   const state = parseSettingsState(await searchParams);
   return {
     ...state,
-    data: buildSettingsAppData({ me, current, settings, tokens, billing }),
+    data: buildSettingsAppData({ me, current, settings, tokens, billing, gettingStarted }),
   };
 }
