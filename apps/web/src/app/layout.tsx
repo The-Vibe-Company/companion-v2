@@ -6,6 +6,7 @@ export const metadata: Metadata = {
   metadataBase: new URL(process.env.COMPANION_WEB_URL ?? "http://localhost:3000"),
   title: "Companion · Skills",
   description: "A versioned registry of SKILL.md packages.",
+  authors: [{ name: "The Vibe Company", url: "https://thevibecompany.co" }],
   openGraph: {
     title: "Companion · Skills",
     description: "A versioned registry of SKILL.md packages.",

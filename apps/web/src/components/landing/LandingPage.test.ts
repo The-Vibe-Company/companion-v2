@@ -156,11 +156,17 @@ describe("LandingPage portal preview", () => {
     const github = Array.from(container.querySelectorAll("a")).find(
       (candidate) => candidate.textContent?.trim() === "GitHub ↗",
     );
+    const vibeCompany = Array.from(container.querySelectorAll("a")).find(
+      (candidate) => candidate.textContent?.trim() === "The Vibe Company",
+    );
 
     expect(share?.getAttribute("href")).toBe("/login");
     expect(howItWorks?.getAttribute("href")).toBe("#problem");
     expect(github?.getAttribute("href")).toBe("https://github.com/The-Vibe-Company/companion");
     expect(github?.getAttribute("target")).toBe("_blank");
+    expect(vibeCompany?.getAttribute("href")).toBe("https://thevibecompany.co");
+    expect(vibeCompany?.getAttribute("target")).toBe("_blank");
+    expect(container.textContent).toContain("an open source tool by The Vibe Company");
     expect(container.textContent).toContain("governance stays on infrastructure you control");
     expect(container.textContent).not.toContain("your data never leave the building");
   });

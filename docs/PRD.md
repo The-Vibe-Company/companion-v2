@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Status** | Draft v0.1 — pre-MVP |
-| **Owner** | The Vibe Company |
+| **Owner** | [The Vibe Company](https://thevibecompany.co) |
 | **License** | MIT (open-source, self-host first) |
 | **Related** | [`vision.md`](vision.md) · [`product.md`](product.md) · [`design.md`](design.md) |
 
