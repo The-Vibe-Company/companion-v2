@@ -549,6 +549,9 @@
 .v10-footer__links { margin-left: auto; display: flex; align-items: center; gap: var(--space-4); }
 .v10-footer__links a { color: var(--v10-ink-faint); text-decoration: none; }
 .v10-footer__links a:hover { color: var(--v10-ink); }
+.v10-footer__by a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.v10-footer__by a:hover { color: var(--v10-ink); }
+.v10-footer__by a:focus-visible { outline-color: var(--color-accent-ink); }
 
 /* --- reveals (staggered) ------------------------------------------------------------ */
 @media (prefers-reduced-motion: no-preference) {

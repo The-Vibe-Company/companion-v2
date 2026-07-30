@@ -13,6 +13,7 @@ import { Icon } from "@/components/Icon";
 
 const GITHUB_URL = "https://github.com/The-Vibe-Company/companion";
 const SKILL_MD_URL = "https://github.com/anthropics/skills";
+const VIBE_COMPANY_URL = "https://thevibecompany.co";
 
 /* ---------------------------------------------------------------- copy --- */
 
@@ -122,7 +123,8 @@ const COPY = {
   finaleSub: "Set up takes an afternoon. The first skills can be shared today.",
   finaleSmall: "Free and open source · runs on your own infrastructure if you want",
   finaleCta: "Get started",
-  footerBy: "an open source tool by The Vibe Company",
+  footerByPre: "an open source tool by ",
+  footerByCompany: "The Vibe Company",
   footerDocs: "Documentation",
 };
 
@@ -677,7 +679,12 @@ function Footer({ c }: { c: Copy }) {
         <span className="v5-brand">
           <span className="v10-wordmark v10-wordmark--sm" role="img" aria-label="Companion" />
         </span>
-        <span>{c.footerBy}</span>
+        <span className="v10-footer__by">
+          {c.footerByPre}
+          <a href={VIBE_COMPANY_URL} target="_blank" rel="noreferrer">
+            {c.footerByCompany}
+          </a>
+        </span>
         <span className="v10-footer__links">
           <a href={GITHUB_URL} target="_blank" rel="noreferrer">
             GitHub ↗

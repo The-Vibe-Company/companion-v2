@@ -155,4 +155,4 @@ import bridge for existing fleets.
 
 ## License
 
-[MIT](LICENSE) © The Vibe Company and contributors.
+[MIT](LICENSE) © [The Vibe Company](https://thevibecompany.co) and contributors.
