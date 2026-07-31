@@ -177,10 +177,14 @@ inspect_conductor_network() {
   local conductor_port="$2"
   shift 2
   if [ "$conductor_port" = "unset" ]; then
+    # The inner shell must expand variables defined by the sourced launcher, not this process.
+    # shellcheck disable=SC2016
     env -u CONDUCTOR_PORT CONDUCTOR_IS_LOCAL="$is_local" COMPANION_DEV_SKIP_ENV_FILE=1 \
       bash -c 'script="$1"; shift; source "$script" "$@"; printf "%s|%s|%s|%s" "$BASE" "$WEB_BIND_HOST" "$WEB_URL" "$API_URL"' \
       _ "$ROOT/scripts/dev-conductor.sh" "$@"
   else
+    # The inner shell must expand variables defined by the sourced launcher, not this process.
+    # shellcheck disable=SC2016
     env CONDUCTOR_PORT="$conductor_port" CONDUCTOR_IS_LOCAL="$is_local" COMPANION_DEV_SKIP_ENV_FILE=1 \
       bash -c 'script="$1"; shift; source "$script" "$@"; printf "%s|%s|%s|%s" "$BASE" "$WEB_BIND_HOST" "$WEB_URL" "$API_URL"' \
       _ "$ROOT/scripts/dev-conductor.sh" "$@"
