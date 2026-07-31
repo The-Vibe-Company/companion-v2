@@ -123,6 +123,15 @@ export const skillDatabaseTableSchema = z
         seen.add(name);
       }
     }
+    for (const name of table.primary_key) {
+      if (table.columns[name]?.nullable) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["primary_key"],
+          message: `primary-key column must be non-nullable: ${name}`,
+        });
+      }
+    }
   });
 export type SkillDatabaseTable = z.infer<typeof skillDatabaseTableSchema>;
 
@@ -188,11 +197,20 @@ function utf8ByteLength(value: string): number {
 export const skillDatabaseStatementInputSchema = z
   .object({
     audience: skillDatabaseAudienceSchema.default("organization"),
+    /** Opaque selector for a materialized personal realm shared with the caller. */
+    realm_id: z.string().uuid().optional(),
     sql: z.string().min(1).max(SKILL_DB_MAX_SQL_LENGTH),
     params: z.array(skillDatabaseParamSchema).max(SKILL_DB_MAX_PARAMS).default([]),
   })
   .strip()
   .superRefine((value, ctx) => {
+    if (value.realm_id && value.audience !== "personal") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["realm_id"],
+        message: "realm_id is only valid for personal database realms",
+      });
+    }
     if (utf8ByteLength(JSON.stringify(value.params)) > SKILL_DB_MAX_PARAM_BYTES) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -356,3 +374,79 @@ export interface SkillDatabaseStatementResult {
   db_size_bytes: number;
   schema_generation: number;
 }
+
+export const skillDatabaseMemberSchema = z.object({
+  user_id: z.string(),
+  name: z.string(),
+  initials: z.string(),
+  avatar_url: z.string().nullable(),
+});
+export type SkillDatabaseMember = z.infer<typeof skillDatabaseMemberSchema>;
+
+export const skillDatabaseDescribeColumnSchema = z.object({
+  name: z.string(),
+  type: skillDatabaseColumnTypeSchema,
+  nullable: z.boolean(),
+  default: skillDatabaseDefaultSchema.optional(),
+});
+export type SkillDatabaseDescribeColumn = z.infer<typeof skillDatabaseDescribeColumnSchema>;
+
+export const skillDatabaseDescribeTableSchema = z.object({
+  name: z.string(),
+  audience: skillDatabaseAudienceSchema,
+  columns: z.array(skillDatabaseDescribeColumnSchema),
+  primary_key: z.array(z.string()),
+  unique: z.array(z.array(z.string())),
+});
+export type SkillDatabaseDescribeTable = z.infer<typeof skillDatabaseDescribeTableSchema>;
+
+export const skillDatabaseRealmAccessSchema = z.enum(["organization", "owner", "shared"]);
+export type SkillDatabaseRealmAccess = z.infer<typeof skillDatabaseRealmAccessSchema>;
+
+export const skillDatabaseDescribeRealmSchema = z.object({
+  id: z.string().uuid(),
+  audience: skillDatabaseAudienceSchema,
+  owner: skillDatabaseMemberSchema.nullable(),
+  access: skillDatabaseRealmAccessSchema,
+  size_bytes: z.number().int().nonnegative(),
+  schema_generation: z.number().int().nonnegative(),
+  last_accessed_at: z.string(),
+});
+export type SkillDatabaseDescribeRealm = z.infer<typeof skillDatabaseDescribeRealmSchema>;
+
+export const skillDatabaseDescribeResponseSchema = z.object({
+  skill_id: z.string(),
+  slug: z.string(),
+  schema_generation: z.number().int().positive(),
+  limits: z.object({
+    maxBytes: z.number().int().positive(),
+    statementTimeoutMs: z.number().int().positive(),
+    maxResultRows: z.number().int().positive(),
+    maxResultBytes: z.number().int().positive(),
+  }),
+  tables: z.array(skillDatabaseDescribeTableSchema),
+  realms: z.array(skillDatabaseDescribeRealmSchema),
+});
+export type SkillDatabaseDescribeResponse = z.infer<typeof skillDatabaseDescribeResponseSchema>;
+
+export const skillDatabaseSharesInputSchema = z
+  .object({
+    user_ids: z.array(z.string()).max(1_000),
+  })
+  .strip()
+  .superRefine((value, ctx) => {
+    if (new Set(value.user_ids).size !== value.user_ids.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["user_ids"],
+        message: "database share members must be unique",
+      });
+    }
+  });
+export type SkillDatabaseSharesInput = z.infer<typeof skillDatabaseSharesInputSchema>;
+
+export const skillDatabaseSharesResponseSchema = z.object({
+  realm_id: z.string().uuid().nullable(),
+  members: z.array(skillDatabaseMemberSchema.extend({ shared: z.boolean() })),
+});
+export type SkillDatabaseSharesResponse = z.infer<typeof skillDatabaseSharesResponseSchema>;

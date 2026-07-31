@@ -45,6 +45,8 @@ function row(over: Partial<SkillListRow> = {}): SkillListRow {
     dep_warn: false,
     archived: false,
     referenced: false,
+    database_table_count: 0,
+    database_available: false,
     created_at: "2026-06-09T12:00:00.000Z",
     updated_at: "2026-06-09T12:00:00.000Z",
     ...over,

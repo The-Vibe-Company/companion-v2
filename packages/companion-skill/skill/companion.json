@@ -1,7 +1,7 @@
 {
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.30.0",
+  "version": "1.31.0",
   "icon": "boxes",
   "title": "Companion",
   "description": "Manage and safely install SKILL.md packages through delegated Agent Auth, including publishing, dependencies, secrets, hosted Skill Databases, local install tracking, public releases, and Companion self-update.",
@@ -28,6 +28,15 @@
       "evals/evals.json"
     ],
     "changelog": [
+      {
+        "version": "1.31.0",
+        "date": "2026-07-31",
+        "changes": [
+          "Adds explicit read-write sharing of a complete personal Skill Database realm with current organization members.",
+          "Documents opaque realm selectors, visible realm ownership, revocation, and sensitive share-management routes.",
+          "Extends the reusable Python helpers for shared-realm statements and idempotent member grant management."
+        ]
+      },
       {
         "version": "1.30.0",
         "date": "2026-07-30",
@@ -415,7 +424,7 @@
     { "name": "Sync companion.json", "desc": "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog." },
     { "name": "Manage skill API calls", "desc": "Use the supported skills API surface without crossing into workspace admin." },
     { "name": "Manage and retrieve secrets", "desc": "Create and bind write-only personal or shared secrets without a browser, manage their lifecycle, then retrieve authorized values through one-time grants." },
-    { "name": "Use hosted Skill Databases", "desc": "Declare organization or personal SQLite tables in companion.json and run parameterized queries through the scoped database API." },
+    { "name": "Use hosted Skill Databases", "desc": "Declare hosted SQLite tables, query an organization or personal realm, and explicitly share a personal realm with current members." },
     { "name": "Update Companion skill", "desc": "Check and synchronize the latest bundled Companion skill across every existing registered tool installation." },
     { "name": "Guard against duplicates", "desc": "Preflight the local inventory and workspace catalog before create/update/install to block duplicate slugs and skill-id retargets." },
     { "name": "Check for updates", "desc": "Compare installed skills and dependencies against the workspace registry." },

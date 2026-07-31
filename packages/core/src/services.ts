@@ -1186,6 +1186,10 @@ export async function listSkills(input: {
       dep_warn: depWarn,
       archived: r.archived_at != null,
       referenced: referencedIds.has(r.id) || referencedSlugs.has(r.slug),
+      database_table_count: Object.keys(companion.database?.tables ?? {}).length,
+      database_available:
+        process.env.COMPANION_SKILL_DATABASES_ENABLED?.trim().toLowerCase() === "true"
+        && Object.keys(companion.database?.tables ?? {}).length > 0,
       created_at: r.created_at.toISOString(),
       updated_at: r.updated_at.toISOString(),
     };

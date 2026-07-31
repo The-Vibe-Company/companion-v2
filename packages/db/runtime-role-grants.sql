@@ -79,6 +79,7 @@ DECLARE
     'public.companion_skill_share_target(text,text)'::regprocedure,
     'public.companion_billing_org_for_stripe_event(text,text)'::regprocedure,
     'public.companion_request_member_project_deletion(uuid,text)'::regprocedure,
+    'public.companion_revoke_inactive_skill_database_realm_shares(uuid,uuid)'::regprocedure,
     'public.companion_project_skill_refresh_targets(uuid,uuid)'::regprocedure,
     'public.companion_signal_project_secret_change(uuid,uuid,text,text,text,public.secret_audience,text[])'::regprocedure,
     'public.companion_signal_project_provider_change(uuid,text,uuid,public.model_provider_connection_scope,text,text)'::regprocedure
@@ -354,6 +355,7 @@ BEGIN
       public.companion_skill_share_target(text, text),
       public.companion_billing_org_for_stripe_event(text, text),
       public.companion_request_member_project_deletion(uuid, text),
+      public.companion_revoke_inactive_skill_database_realm_shares(uuid, uuid),
       public.companion_project_skill_refresh_targets(uuid, uuid),
       public.companion_signal_project_secret_change(uuid, uuid, text, text, text, public.secret_audience, text[]),
       public.companion_signal_project_provider_change(uuid, text, uuid, model_provider_connection_scope, text, text)

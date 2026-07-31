@@ -802,14 +802,18 @@ explicit retrieval outside a skill, use
 
 Declare durable state in `companion.json`; never ship runtime DDL or migration scripts. An
 `organization` table shares one SQLite realm across workspace members. A `personal` table gives each
-member a separate realm with no administrator override. One request targets one audience, so
+member a separate realm with no administrator override. On an organization skill, the owner may
+explicitly share that whole personal realm read-write with current workspace members. A beneficiary
+uses the opaque `realm_id` returned by the description endpoint; omitting it still targets the
+caller's own personal realm. Beneficiaries cannot re-share it. One request targets one realm, so
 cross-realm joins are unavailable.
 
 Publish changes additively. New tables and nullable/defaulted columns are accepted. Types, audience,
 primary keys, unique constraints, and existing column definitions are immutable. Removed tables or
 columns retain their physical data. For a breaking change, declare a new table (for example
 `events_v2`) and copy data with normal DML. String defaults are limited to 4 KiB; a non-null column
-without a default cannot be retired, a non-null column cannot have a null default, and each
+without a default cannot be retired, every primary-key column must set `nullable: false`, a non-null
+column cannot have a null default, and each
 generated table definition must fit the 8 KiB SQL limit.
 
 Use parameter placeholders and pass values in `params`:
@@ -829,6 +833,11 @@ api_skill_database_statement(
 )
 ```
 
+Manage the caller's own personal-realm grants with
+`GET /skills/{slug}/database/shares` and idempotent
+`PUT /skills/{slug}/database/shares` using `{"user_ids":["<member-id>"]}`. Both require
+`database:write`. Revocation blocks future requests without copying or deleting the SQLite file.
+
 Always give `INSERT` an explicit active-column list. Companion rejects implicit physical-column
 order and columns retired by a later declaration.
 
@@ -840,11 +849,10 @@ silently truncated: add `LIMIT` after `result_too_large`.
 
 Read archived skill databases, but do not write them. Handle `forbidden_statement` (403), `timeout`
 (408), `database_full` or `result_too_large` (413), missing skill/declaration/realm (404),
-`skill_database_disabled` (404), `skill_database_archived` (409),
-`skill_database_rate_limited` (429), `conflict` (409),
-`overloaded` or `storage_unavailable` (503), and
-`sql_error` (400) without retrying unsafe
-writes automatically.
+`skill_database_disabled` (404), `skill_database_invalid_share` or `sql_error` (400),
+`skill_database_archived`, `skill_database_sharing_unavailable`, or `conflict` (409),
+`skill_database_rate_limited` (429), and `overloaded` or `storage_unavailable` (503) without
+retrying unsafe writes automatically.
 
 ### Publish a skill
 
@@ -1269,7 +1277,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.30.0","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.31.0","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 

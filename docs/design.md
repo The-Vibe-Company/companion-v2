@@ -32,8 +32,11 @@ Conductor workspaces use a separate, **native (Docker-free)** entrypoint, `scrip
 (modeled on `~/Dev/monkapps`). It starts a per-workspace Postgres cluster — plus optional native MinIO
 and Mailpit — under `.conductor-pg/`, applies migrations, seeds the test user, and runs only the
 long-running API, worker, and web processes via `concurrently`. All services are allocated from
-`CONDUCTOR_PORT`: web `+0`, API `+1`, Postgres `+2`, MinIO API `+3`, MinIO console `+4`, Mailpit SMTP
-`+5`, and Mailpit UI `+6`. It injects workspace-specific `DATABASE_URL`, API URLs, S3 endpoint,
+the workspace base port: local workspaces use `CONDUCTOR_PORT`, while isolated cloud workspaces use
+`3000` because Conductor intentionally leaves `CONDUCTOR_PORT` unset there. Web uses `+0`, API `+1`,
+Postgres `+2`, MinIO API `+3`, MinIO console `+4`, Mailpit SMTP `+5`, and Mailpit UI `+6`. The web
+process binds `0.0.0.0` only in cloud so Conductor can forward its preview port; every internal service
+remains on `127.0.0.1`. The launcher injects workspace-specific `DATABASE_URL`, API URLs, S3 endpoint,
 Mailpit ports, and a `companion-<workspace>` Better Auth cookie prefix inline — without mutating
 `.env`. It also creates a persistent, gitignored 32-byte `COMPANION_SECRETS_MASTER_KEY` under the
 workspace state directory (mode `0600`). The Docker-backed local script uses the same pattern under
@@ -82,6 +85,7 @@ Companion adds `profiles`, `organizations`, `memberships`, `invitations`,
 `skill_filter_preferences`, `skill_comments`, `skill_comment_images`, `local_skill_installs`,
 `getting_started_states`,
 `skill_database_schemas`, `skill_database_tables`, `skill_database_realms`,
+`skill_database_realm_shares`,
 `skill_database_rate_windows`,
 `api_tokens`, `github_connections`, `github_sync_destinations`,
 `github_sync_destination_skills`, `billing_subscriptions`, `stripe_webhook_events`, `audit_log`, the secret-vault
@@ -197,7 +201,8 @@ column or a column with a default. Removed columns and tables are retired in met
 dropped from SQLite; a required column without a default cannot be retired because its physical
 constraint would break future inserts, and a retired table may only be restored unchanged. This makes publication the
 compatibility gate and defers physical additive migration until a realm is next opened. Publication
-rejects null defaults on non-null columns, string defaults over 4 KiB, and generated `CREATE TABLE`
+requires every primary-key column to be non-nullable and rejects null defaults on non-null columns,
+string defaults over 4 KiB, and generated `CREATE TABLE`
 statements over SQLite's configured 8 KiB SQL limit, so an accepted declaration cannot make every
 future realm open fail.
 
@@ -208,10 +213,19 @@ rolling deployment. Do not roll back to a build that predates this gate while an
 declarations exist.
 
 A realm is one hosted SQLite file: an organization realm has `owner_id = null` and is shared by every
-current organization member; a personal realm has `owner_id = user.id` and is private to that member
-with no Owner/Admin override. `skill_database_realms` records the applied schema generation, object
-key, byte size, and last observed ETag, while the object bytes live in S3 at a tenant- and
-skill-scoped key. The object is created lazily on the first statement. Each mutation holds a
+current organization member; a personal realm has `owner_id = user.id`. Personal realms are private
+by default, with no Owner/Admin override, but the owner of an organization skill may grant current
+members read/write access to the whole realm through `skill_database_realm_shares`. Grants never copy
+the SQLite object, cannot be delegated by a recipient, and are unavailable on personal skills. Realm
+ids are opaque UUID selectors; callers without `realm_id` continue to address their own personal
+realm. RLS exposes a personal realm only to its owner and active recipients, while Core deliberately
+maps unknown, cross-tenant, and unauthorized realm selectors to the same not-found response.
+Revocation serializes against statement execution on the realm registry row, so it blocks new work
+without deleting data. Removing the last active personal table revokes every now-inactive grant.
+Archived skills remain readable and allow revocation, but reject row mutations and new recipients.
+`skill_database_realms` records the applied schema generation, object key, byte size, and last
+observed ETag, while the object bytes live in S3 at a tenant- and skill-scoped key. The object is
+created lazily on the first statement or first non-empty share. Each mutation holds a
 transaction-scoped advisory lock for the realm, reads the current object and ETag, executes in an
 isolated SQLite WASM worker, and conditionally writes with `If-Match` (or `If-None-Match: *` for the
 first write). An ETag conflict fails closed so concurrent requests cannot silently overwrite each
@@ -891,11 +905,17 @@ persisting so delivery order cannot corrupt local state.
 - Skill Databases: `GET /v1/skills/:slug/database` describes the declaration, visible realms,
   generations, and limits; `POST /v1/skills/:slug/database/query` runs one parameterized read
   statement, and `POST /v1/skills/:slug/database/execute` runs one parameterized write statement.
-  The body is `{ audience, sql, params }`. Session, Agent Auth, and explicit legacy PAT callers use
-  `database:read` for description/query and `database:write` for execute. Database write is explicitly
-  a superset of database read because DML can observe state through predicates, subqueries, conflict
-  clauses, and returned rows; Core still applies normal skill visibility and organization-versus-personal
-  realm ownership.
+  The body is `{ audience, realm_id?, sql, params }`; `realm_id` is valid only with the `personal`
+  audience and defaults to the caller's own realm when omitted. Describe returns every materialized
+  realm visible to the caller with its opaque id, owner profile, and `organization | owner | shared`
+  access. `GET /v1/skills/:slug/database/shares` returns eligible members plus the owner's current
+  recipients, and `PUT /v1/skills/:slug/database/shares` atomically replaces that list with
+  `{ user_ids }`. Both share routes require `database:write`, are sensitive Agent Auth operations, and
+  create the personal realm registry only when the first recipient is added. Session, Agent Auth, and
+  explicit legacy PAT callers use `database:read` for description/query and `database:write` for
+  execute and sharing. Database write is explicitly a superset of database read because DML can
+  observe state through predicates, subqueries, conflict clauses, and returned rows; Core still
+  applies normal skill visibility, realm ownership, and recipient grants.
 - Public skill releases: `GET /v1/public/skills/:token` is unauthenticated and returns the narrow
   metadata-only preview for a live org skill share token, including nullable `public_release`.
   `GET /v1/public/skills/:token/versions/:version/package` returns bytes only for the exact active

@@ -253,6 +253,7 @@ def api_skill_database_statement(
     params: list[Any] | None = None,
     *,
     audience: str = "organization",
+    realm_id: str | None = None,
     write: bool = False,
 ) -> Any:
     """Run one parameterized statement against a declared hosted skill database realm."""
@@ -260,6 +261,8 @@ def api_skill_database_statement(
         fail("invalid skill slug for Skill Database request")
     if audience not in {"organization", "personal"}:
         fail("Skill Database audience must be organization or personal")
+    if realm_id is not None and audience != "personal":
+        fail("Skill Database realm_id is only valid with the personal audience")
     if not isinstance(sql, str) or not sql.strip():
         fail("Skill Database SQL must be a non-empty string")
     values = params or []
@@ -271,7 +274,12 @@ def api_skill_database_statement(
         base,
         token,
         f"/skills/{quoted_slug}/database/{action}",
-        {"audience": audience, "sql": sql, "params": values},
+        {
+            "audience": audience,
+            **({"realm_id": realm_id} if realm_id else {}),
+            "sql": sql,
+            "params": values,
+        },
     )
 
 
@@ -280,6 +288,32 @@ def api_skill_database_description(base: str, token: str, slug: str) -> Any:
     if not slug or "/" in slug or "\\" in slug:
         fail("invalid skill slug for Skill Database request")
     return api_get(base, token, f"/skills/{urllib.parse.quote(slug, safe='')}/database")
+
+
+def api_skill_database_shares(base: str, token: str, slug: str) -> Any:
+    """List eligible members and grants for the caller's personal realm."""
+    if not slug or "/" in slug or "\\" in slug:
+        fail("invalid skill slug for Skill Database request")
+    return api_get(base, token, f"/skills/{urllib.parse.quote(slug, safe='')}/database/shares")
+
+
+def api_set_skill_database_shares(
+    base: str,
+    token: str,
+    slug: str,
+    user_ids: list[str],
+) -> Any:
+    """Replace the explicit member grants for the caller's personal realm."""
+    if not slug or "/" in slug or "\\" in slug:
+        fail("invalid skill slug for Skill Database request")
+    if len(set(user_ids)) != len(user_ids):
+        fail("Skill Database share recipients must be unique")
+    return api_put_json(
+        base,
+        token,
+        f"/skills/{urllib.parse.quote(slug, safe='')}/database/shares",
+        {"user_ids": user_ids},
+    )
 
 
 def api_redeem_secret_plan(base: str, token: str, plan_id: str) -> dict[str, Any]:

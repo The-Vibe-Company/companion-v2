@@ -165,9 +165,14 @@ describe("secret ACL — audience plus owner, never org role", () => {
 });
 
 describe("skill database realm ACL — personal files have no admin override", () => {
-  it("allows every member to use the organization realm and only the owner to use a personal realm", () => {
+  it("allows organization, owner, or an explicit grantee and denies an ungranted admin", () => {
     expect(canAccessSkillDatabaseRealm("u-admin", { audience: "organization", ownerId: null })).toBe(true);
     expect(canAccessSkillDatabaseRealm("u-owner", { audience: "personal", ownerId: "u-owner" })).toBe(true);
+    expect(canAccessSkillDatabaseRealm("u-member", {
+      audience: "personal",
+      ownerId: "u-owner",
+      sharedWithActor: true,
+    })).toBe(true);
     expect(canAccessSkillDatabaseRealm("u-admin", { audience: "personal", ownerId: "u-owner" })).toBe(false);
   });
 });

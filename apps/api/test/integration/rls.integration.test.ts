@@ -89,6 +89,7 @@ describe("Postgres tenant isolation", () => {
   const githubDestinationB = randomUUID();
   const projectA = randomUUID();
   const projectB = randomUUID();
+  const sharedPersonalRealmA = randomUUID();
   const githubTokenSentinel = "github-user-token-MUST-NOT-PERSIST";
   const personalProviderId = randomUUID();
   const orgProviderId = randomUUID();
@@ -140,18 +141,27 @@ describe("Postgres tenant isolation", () => {
       values
         (${fixture.orgA}::uuid, ${skillA.id}::uuid, 'private_notes', 'personal', '[]'::jsonb),
         (${fixture.orgA}::uuid, ${mirrorSkillA.id}::uuid, 'shared_notes', 'organization', '[]'::jsonb),
+        (${fixture.orgA}::uuid, ${mirrorSkillA.id}::uuid, 'member_notes', 'personal', '[]'::jsonb),
         (${fixture.orgB}::uuid, ${skillB.id}::uuid, 'foreign_notes', 'organization', '[]'::jsonb)
     `;
     await integrationSql`
       insert into skill_database_realms
-        (org_id, skill_id, audience, owner_id, storage_key)
+        (id, org_id, skill_id, audience, owner_id, storage_key)
       values
-        (${fixture.orgA}::uuid, ${skillA.id}::uuid, 'personal', ${fixture.owner.id},
+        (gen_random_uuid(), ${fixture.orgA}::uuid, ${skillA.id}::uuid, 'personal', ${fixture.owner.id},
          ${`${fixture.orgA}/skill-databases/${skillA.id}/personal/${fixture.owner.id}.sqlite`}),
-        (${fixture.orgA}::uuid, ${mirrorSkillA.id}::uuid, 'organization', null,
+        (gen_random_uuid(), ${fixture.orgA}::uuid, ${mirrorSkillA.id}::uuid, 'organization', null,
          ${`${fixture.orgA}/skill-databases/${mirrorSkillA.id}/organization.sqlite`}),
-        (${fixture.orgB}::uuid, ${skillB.id}::uuid, 'organization', null,
+        (${sharedPersonalRealmA}::uuid, ${fixture.orgA}::uuid, ${mirrorSkillA.id}::uuid, 'personal', ${fixture.owner.id},
+         ${`${fixture.orgA}/skill-databases/${mirrorSkillA.id}/personal/shared.sqlite`}),
+        (gen_random_uuid(), ${fixture.orgB}::uuid, ${skillB.id}::uuid, 'organization', null,
          ${`${fixture.orgB}/skill-databases/${skillB.id}/organization.sqlite`})
+    `;
+    await integrationSql`
+      insert into skill_database_realm_shares
+        (org_id, realm_id, owner_id, grantee_id)
+      values
+        (${fixture.orgA}::uuid, ${sharedPersonalRealmA}::uuid, ${fixture.owner.id}, ${fixture.developer.id})
     `;
     await seedPersonalLabel({ orgId: fixture.orgA, owner: fixture.owner, skillId: skillA.id, path: "private/rls" });
     await integrationSql`
@@ -349,7 +359,7 @@ describe("Postgres tenant isolation", () => {
     expect(paths).toEqual([]);
   });
 
-  it("keeps personal Skill Database declarations and realms private without an admin override", async () => {
+  it("keeps personal Skill Database realms private except for explicit same-org grants", async () => {
     const readAs = (orgId: string, userId: string) =>
       integrationSql.begin(async (tx) => {
         await tx.unsafe(`set local role ${role}`);
@@ -363,31 +373,50 @@ describe("Postgres tenant isolation", () => {
         const tables = await tx<Array<{ table_name: string }>>`
           select table_name from skill_database_tables order by table_name
         `;
+        // Core holds this realm-row lock while it revalidates the recipient grant with a plain
+        // SELECT. Locking the share row would invoke its owner-only UPDATE policy and hide it.
         const realms = await tx<Array<{ skill_id: string; owner_id: string | null }>>`
-          select skill_id, owner_id from skill_database_realms order by skill_id
+          select skill_id, owner_id from skill_database_realms order by skill_id, owner_id nulls first
+          for update
         `;
-        return { declarations, tables, realms };
+        const shares = await tx<Array<{ realm_id: string; owner_id: string; grantee_id: string }>>`
+          select realm_id, owner_id, grantee_id from skill_database_realm_shares order by realm_id
+        `;
+        return { declarations, tables, realms, shares };
       });
 
     await expect(readAs(fixture.orgA, fixture.owner.id)).resolves.toEqual({
       declarations: [{ skill_id: skillA.id }, { skill_id: mirrorSkillA.id }].sort((a, b) =>
         a.skill_id.localeCompare(b.skill_id)
       ),
-      tables: [{ table_name: "private_notes" }, { table_name: "shared_notes" }],
+      tables: [{ table_name: "member_notes" }, { table_name: "private_notes" }, { table_name: "shared_notes" }],
       realms: [
         { skill_id: skillA.id, owner_id: fixture.owner.id },
         { skill_id: mirrorSkillA.id, owner_id: null },
-      ].sort((a, b) => a.skill_id.localeCompare(b.skill_id)),
+        { skill_id: mirrorSkillA.id, owner_id: fixture.owner.id },
+      ].sort((a, b) => a.skill_id.localeCompare(b.skill_id) || (a.owner_id ?? "").localeCompare(b.owner_id ?? "")),
+      shares: [{ realm_id: sharedPersonalRealmA, owner_id: fixture.owner.id, grantee_id: fixture.developer.id }],
     });
     await expect(readAs(fixture.orgA, fixture.admin.id)).resolves.toEqual({
       declarations: [{ skill_id: mirrorSkillA.id }],
-      tables: [{ table_name: "shared_notes" }],
+      tables: [{ table_name: "member_notes" }, { table_name: "shared_notes" }],
       realms: [{ skill_id: mirrorSkillA.id, owner_id: null }],
+      shares: [],
+    });
+    await expect(readAs(fixture.orgA, fixture.developer.id)).resolves.toEqual({
+      declarations: [{ skill_id: mirrorSkillA.id }],
+      tables: [{ table_name: "member_notes" }, { table_name: "shared_notes" }],
+      realms: [
+        { skill_id: mirrorSkillA.id, owner_id: null },
+        { skill_id: mirrorSkillA.id, owner_id: fixture.owner.id },
+      ],
+      shares: [{ realm_id: sharedPersonalRealmA, owner_id: fixture.owner.id, grantee_id: fixture.developer.id }],
     });
     await expect(readAs(fixture.orgB, fixture.outsider.id)).resolves.toEqual({
       declarations: [{ skill_id: skillB.id }],
       tables: [{ table_name: "foreign_notes" }],
       realms: [{ skill_id: skillB.id, owner_id: null }],
+      shares: [],
     });
   });
 

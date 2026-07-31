@@ -28,6 +28,16 @@ describe("closed Companion Agent Auth operation registry", () => {
       capability: "skills:read",
       transport: "transfer-ticket-download",
     });
+    expect(matchCompanionAgentOperation("GET", "/skills/demo/database/shares")).toMatchObject({
+      capability: "database:write",
+      sensitive: true,
+      transport: "rest",
+    });
+    expect(matchCompanionAgentOperation("PUT", "/skills/demo/database/shares")).toMatchObject({
+      capability: "database:write",
+      sensitive: true,
+      transport: "rest",
+    });
   });
 
   it("marks package byte routes as ticket-only and rejects arbitrary operations", () => {

@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.30.0");
+    expect(pkg.version).toBe("1.31.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -126,8 +126,8 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("Companion-hosted SQLite state tables");
-    expect(changelog).toContain("database:read and database:write");
+    expect(changelog).toContain("read-write sharing");
+    expect(changelog).toContain("opaque realm selectors");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };

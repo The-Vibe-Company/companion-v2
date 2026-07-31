@@ -75,6 +75,8 @@ export interface SkillVM {
   depWarn: boolean; // any declared dependency is not satisfied
   archived: boolean; // hidden from normal lists
   referenced?: boolean; // referenced by ANY published version (gates archived download)
+  databaseTableCount?: number;
+  databaseAvailable?: boolean;
 }
 
 function mapModifier(row: SkillModifier): SkillContributorVM {
@@ -136,6 +138,8 @@ export function mapSkill(row: SkillListRow): SkillVM {
     depWarn: row.dep_warn ?? false,
     archived: row.archived ?? false,
     referenced: row.referenced ?? false,
+    databaseTableCount: row.database_table_count ?? 0,
+    databaseAvailable: row.database_available ?? false,
   };
 }
 

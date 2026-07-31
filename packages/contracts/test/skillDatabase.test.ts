@@ -3,6 +3,9 @@ import {
   gateSkillDatabaseSql,
   generateSkillDatabaseCreateTableSql,
   skillDatabaseDeclarationSchema,
+  skillDatabaseDescribeResponseSchema,
+  skillDatabaseSharesInputSchema,
+  skillDatabaseSharesResponseSchema,
   skillDatabaseStatementInputSchema,
 } from "../src/skillDatabase";
 import type { SkillDatabaseStatementResult } from "../src/skillDatabase";
@@ -43,6 +46,14 @@ describe("skill database contracts", () => {
         },
       },
     })).toThrow(/invalid SQLite column name|undeclared column/);
+    expect(() => skillDatabaseDeclarationSchema.parse({
+      tables: {
+        state: {
+          columns: { id: { type: "text", nullable: true } },
+          primary_key: ["id"],
+        },
+      },
+    })).toThrow(/primary-key column must be non-nullable/);
   });
 
   it("rejects defaults that cannot be applied by the bounded lazy migration", () => {
@@ -79,6 +90,92 @@ describe("skill database contracts", () => {
       sql: "SELECT ?",
       params: ["x".repeat(65 * 1024)],
     })).toThrow(/parameters/);
+  });
+
+  it("accepts an opaque personal realm selector and rejects it for organization data", () => {
+    const realmId = "3da39fa7-a8a4-4d91-a5fc-b09baf73447d";
+    expect(skillDatabaseStatementInputSchema.parse({
+      audience: "personal",
+      realm_id: realmId,
+      sql: "SELECT 1",
+    }).realm_id).toBe(realmId);
+    expect(() => skillDatabaseStatementInputSchema.parse({
+      audience: "organization",
+      realm_id: realmId,
+      sql: "SELECT 1",
+    })).toThrow(/only valid for personal/);
+    expect(() => skillDatabaseStatementInputSchema.parse({
+      audience: "personal",
+      realm_id: "predictable-owner-id",
+      sql: "SELECT 1",
+    })).toThrow();
+  });
+
+  it("rejects duplicate realm share recipients", () => {
+    expect(skillDatabaseSharesInputSchema.parse({ user_ids: ["u-a", "u-b"] }).user_ids).toEqual(["u-a", "u-b"]);
+    expect(() => skillDatabaseSharesInputSchema.parse({ user_ids: ["u-a", "u-a"] })).toThrow(/must be unique/);
+  });
+
+  it("validates visible realm ownership and sharing responses", () => {
+    const realmId = "3da39fa7-a8a4-4d91-a5fc-b09baf73447d";
+    const member = {
+      user_id: "user-a",
+      name: "Ada Lovelace",
+      initials: "AL",
+      avatar_url: null,
+    };
+    expect(skillDatabaseDescribeResponseSchema.parse({
+      skill_id: "skill-a",
+      slug: "stateful-skill",
+      schema_generation: 2,
+      limits: {
+        maxBytes: 16_777_216,
+        statementTimeoutMs: 2_000,
+        maxResultRows: 1_000,
+        maxResultBytes: 1_048_576,
+      },
+      tables: [{
+        name: "notes",
+        audience: "personal",
+        columns: [{ name: "id", type: "integer", nullable: false }],
+        primary_key: ["id"],
+        unique: [],
+      }],
+      realms: [{
+        id: realmId,
+        audience: "personal",
+        owner: member,
+        access: "shared",
+        size_bytes: 8_192,
+        schema_generation: 2,
+        last_accessed_at: "2026-07-31T12:00:00.000Z",
+      }],
+    }).realms[0]?.access).toBe("shared");
+    expect(skillDatabaseSharesResponseSchema.parse({
+      realm_id: realmId,
+      members: [{ ...member, shared: true }],
+    }).members[0]?.shared).toBe(true);
+    expect(() => skillDatabaseDescribeResponseSchema.parse({
+      skill_id: "skill-a",
+      slug: "stateful-skill",
+      schema_generation: 1,
+      limits: {
+        maxBytes: 1,
+        statementTimeoutMs: 1,
+        maxResultRows: 1,
+        maxResultBytes: 1,
+      },
+      tables: [],
+      realms: [{
+        id: "not-a-uuid",
+        audience: "personal",
+        owner: member,
+        access: "shared",
+        size_bytes: 0,
+        schema_generation: 0,
+        last_accessed_at: "now",
+      }],
+    })).toThrow();
   });
 
   it("keeps the exported statement result aligned with the REST wire shape", () => {

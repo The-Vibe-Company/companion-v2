@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { and, eq, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import {
   gateSkillDatabaseSql,
   SKILL_DB_MAX_BYTES,
@@ -14,6 +14,7 @@ import {
   type SkillDatabaseStatementInput,
   type SkillDatabaseStatementMode,
   type SkillDatabaseStatementResult,
+  type SkillDatabaseSharesResponse,
   type SkillDatabaseTable,
 } from "@companion/contracts";
 import { db, schema, withTenantContext, type Db, type SkillDatabaseStoredColumn } from "@companion/db";
@@ -36,6 +37,8 @@ export type SkillDatabaseServiceErrorCode =
   | "skill_database_no_realm"
   | "skill_database_rate_limited"
   | "skill_database_archived"
+  | "skill_database_invalid_share"
+  | "skill_database_sharing_unavailable"
   | "skill_database_disabled";
 
 export class SkillDatabaseServiceError extends Error {
@@ -286,6 +289,15 @@ export async function persistSkillDatabaseDeclarations(input: {
         ));
     }
   }
+
+  if (!Object.values(declaration.tables).some((table) => table.audience === "personal")) {
+    await input.database.execute(sql`
+      select companion_revoke_inactive_skill_database_realm_shares(
+        ${input.orgId}::uuid,
+        ${input.skillId}::uuid
+      )
+    `);
+  }
 }
 
 function positiveEnv(name: string, fallback: number): number {
@@ -387,6 +399,38 @@ function tableFromStored(row: typeof schema.skillDatabaseTables.$inferSelect): S
   };
 }
 
+async function actorShareForRealm(
+  database: Db,
+  orgId: string,
+  realmId: string,
+  actorId: string,
+) {
+  const rows = await database
+    .select()
+    .from(schema.skillDatabaseRealmShares)
+    .where(and(
+      eq(schema.skillDatabaseRealmShares.orgId, orgId),
+      eq(schema.skillDatabaseRealmShares.realmId, realmId),
+      eq(schema.skillDatabaseRealmShares.granteeId, actorId),
+    ))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+async function databaseMembers(database: Db, orgId: string) {
+  return database
+    .select({
+      userId: schema.memberships.userId,
+      name: schema.profiles.name,
+      initials: schema.profiles.initials,
+      avatarUrl: schema.profiles.avatarUrl,
+    })
+    .from(schema.memberships)
+    .innerJoin(schema.profiles, eq(schema.profiles.id, schema.memberships.userId))
+    .where(eq(schema.memberships.orgId, orgId))
+    .orderBy(asc(schema.profiles.name), asc(schema.memberships.userId));
+}
+
 export async function describeSkillDatabase(input: {
   actor: SkillDatabaseActor;
   orgId: string;
@@ -420,22 +464,80 @@ export async function describeSkillDatabase(input: {
       eq(schema.skillDatabaseRealms.orgId, input.orgId),
       eq(schema.skillDatabaseRealms.skillId, skill.id),
     ));
+  const personalRealmIds = realms
+    .filter((realm) => realm.audience === "personal")
+    .map((realm) => realm.id);
+  const shares = personalRealmIds.length
+    ? await database
+      .select()
+      .from(schema.skillDatabaseRealmShares)
+      .where(and(
+        eq(schema.skillDatabaseRealmShares.orgId, input.orgId),
+        inArray(schema.skillDatabaseRealmShares.realmId, personalRealmIds),
+      ))
+    : [];
+  const sharedRealmIds = new Set(
+    shares
+      .filter((share) => share.granteeId === input.actor.id)
+      .map((share) => share.realmId),
+  );
+  const ownerIds = [...new Set(realms.map((realm) => realm.ownerId).filter((id): id is string => Boolean(id)))];
+  const owners = ownerIds.length
+    ? await database
+      .select({
+        userId: schema.profiles.id,
+        name: schema.profiles.name,
+        initials: schema.profiles.initials,
+        avatarUrl: schema.profiles.avatarUrl,
+      })
+      .from(schema.profiles)
+      .where(inArray(schema.profiles.id, ownerIds))
+    : [];
+  const ownerById = new Map(owners.map((owner) => [owner.userId, owner]));
   return {
     skill_id: skill.id,
     slug: skill.slug,
     schema_generation: databaseSchema.generation,
     limits: skillDatabaseLimitsFromEnv(),
-    tables: tables.map((table) => ({
-      name: table.tableName,
-      audience: table.audience,
-      columns: table.columns.filter((column) => !("retiredAt" in column)),
-      primary_key: table.primaryKey,
-      unique: table.uniqueConstraints,
-    })),
+    tables: tables.map((table) => {
+      const activeColumns = table.columns.filter((column) => !("retiredAt" in column));
+      const hasNullablePrimaryKey = table.primaryKey.some(
+        (name) => activeColumns.find((column) => column.name === name)?.nullable,
+      );
+      return {
+        name: table.tableName,
+        audience: table.audience,
+        columns: activeColumns,
+        // Legacy declarations could create nullable SQLite primary keys. They are not a stable row
+        // identity, so expose those tables as browse-only until republished with a valid schema.
+        primary_key: hasNullablePrimaryKey ? [] : table.primaryKey,
+        unique: table.uniqueConstraints,
+      };
+    }),
     realms: realms
-      .filter((realm) => canAccessSkillDatabaseRealm(input.actor.id, realm))
+      .filter((realm) => canAccessSkillDatabaseRealm(input.actor.id, {
+        ...realm,
+        sharedWithActor: sharedRealmIds.has(realm.id),
+      }))
       .map((realm) => ({
+        id: realm.id,
         audience: realm.audience,
+        owner: realm.ownerId
+          ? (() => {
+            const owner = ownerById.get(realm.ownerId);
+            return {
+              user_id: realm.ownerId,
+              name: owner?.name ?? "Unknown member",
+              initials: owner?.initials ?? "?",
+              avatar_url: owner?.avatarUrl ?? null,
+            };
+          })()
+          : null,
+        access: realm.audience === "organization"
+          ? "organization" as const
+          : realm.ownerId === input.actor.id
+            ? "owner" as const
+            : "shared" as const,
         size_bytes: realm.sizeBytes,
         schema_generation: realm.schemaGeneration,
         last_accessed_at: realm.lastAccessedAt.toISOString(),
@@ -450,6 +552,244 @@ type SkillDatabaseStorageKey = (input: {
   audience: SkillDatabaseAudience;
   userId?: string;
 }) => string;
+
+function assertShareableSkill(
+  skill: Awaited<ReturnType<typeof accessibleSkill>>,
+  hasPersonalTables: boolean,
+): void {
+  if (skill.scope !== "org" || !hasPersonalTables) {
+    throw new SkillDatabaseServiceError(
+      "skill_database_sharing_unavailable",
+      "only personal tables on organization skills can be shared",
+    );
+  }
+}
+
+async function shareableSkillContext(
+  database: Db,
+  actor: SkillDatabaseActor,
+  orgId: string,
+  slug: string,
+) {
+  const skill = await accessibleSkill(database, actor, orgId, slug);
+  const personalTable = await database.query.skillDatabaseTables.findFirst({
+    where: and(
+      eq(schema.skillDatabaseTables.orgId, orgId),
+      eq(schema.skillDatabaseTables.skillId, skill.id),
+      eq(schema.skillDatabaseTables.audience, "personal"),
+      isNull(schema.skillDatabaseTables.retiredAt),
+    ),
+  });
+  assertShareableSkill(skill, Boolean(personalTable));
+  return skill;
+}
+
+export async function getSkillDatabaseShares(input: {
+  actor: SkillDatabaseActor;
+  orgId: string;
+  slug: string;
+  database?: Db;
+}): Promise<SkillDatabaseSharesResponse> {
+  assertSkillDatabasesEnabled();
+  const database = input.database ?? db;
+  const skill = await shareableSkillContext(database, input.actor, input.orgId, input.slug);
+  const realm = await database.query.skillDatabaseRealms.findFirst({
+    where: and(
+      eq(schema.skillDatabaseRealms.orgId, input.orgId),
+      eq(schema.skillDatabaseRealms.skillId, skill.id),
+      eq(schema.skillDatabaseRealms.audience, "personal"),
+      eq(schema.skillDatabaseRealms.ownerId, input.actor.id),
+    ),
+  });
+  const existing = realm
+    ? await database
+      .select({ userId: schema.skillDatabaseRealmShares.granteeId })
+      .from(schema.skillDatabaseRealmShares)
+      .where(and(
+        eq(schema.skillDatabaseRealmShares.orgId, input.orgId),
+        eq(schema.skillDatabaseRealmShares.realmId, realm.id),
+        eq(schema.skillDatabaseRealmShares.ownerId, input.actor.id),
+      ))
+    : [];
+  const shared = new Set(existing.map((row) => row.userId));
+  return {
+    realm_id: realm?.id ?? null,
+    members: (await databaseMembers(database, input.orgId))
+      .filter((member) => member.userId !== input.actor.id)
+      .map((member) => ({
+        user_id: member.userId,
+        name: member.name,
+        initials: member.initials,
+        avatar_url: member.avatarUrl ?? null,
+        shared: shared.has(member.userId),
+      })),
+  };
+}
+
+export async function setSkillDatabaseShares(input: {
+  actor: SkillDatabaseActor;
+  orgId: string;
+  slug: string;
+  userIds: string[];
+  storageKey: SkillDatabaseStorageKey;
+  database?: Db;
+}): Promise<SkillDatabaseSharesResponse> {
+  assertSkillDatabasesEnabled();
+  const database = input.database ?? db;
+  const skill = await accessibleSkill(database, input.actor, input.orgId, input.slug);
+  // Match publication's lock order: it writes the skill row before taking the schema lock.
+  // Holding the row also serializes additions with archiveSkill; re-reading it closes the stale
+  // archivedAt window while removals remain allowed after archival.
+  const [lockedSkill] = await database
+    .select()
+    .from(schema.skills)
+    .where(and(eq(schema.skills.orgId, input.orgId), eq(schema.skills.id, skill.id)))
+    .limit(1)
+    .for("update");
+  if (!lockedSkill) {
+    throw new SkillDatabaseServiceError("skill_not_found", "skill not found");
+  }
+  // Publication owns the exclusive form of this lock while retiring declarations and grants.
+  // Sharing holds the shared form from eligibility validation through replacement, preventing a
+  // stale grant from being inserted after the last personal table is retired.
+  await database.execute(
+    sql`select pg_advisory_xact_lock_shared(hashtextextended(${`skilldb-schema:${skill.id}`}, 0))`,
+  );
+  const personalTable = await database.query.skillDatabaseTables.findFirst({
+    where: and(
+      eq(schema.skillDatabaseTables.orgId, input.orgId),
+      eq(schema.skillDatabaseTables.skillId, lockedSkill.id),
+      eq(schema.skillDatabaseTables.audience, "personal"),
+      isNull(schema.skillDatabaseTables.retiredAt),
+    ),
+  });
+  assertShareableSkill(lockedSkill, Boolean(personalTable));
+  if (input.userIds.includes(input.actor.id)) {
+    throw new SkillDatabaseServiceError(
+      "skill_database_invalid_share",
+      "a personal database realm cannot be shared with its owner",
+    );
+  }
+  const requested = [...new Set(input.userIds)];
+  const members = await databaseMembers(database, input.orgId);
+  const eligibleIds = new Set(members.map((member) => member.userId));
+  if (requested.some((userId) => !eligibleIds.has(userId))) {
+    throw new SkillDatabaseServiceError(
+      "skill_database_invalid_share",
+      "every database share recipient must be a current organization member",
+    );
+  }
+
+  let realm = await database.query.skillDatabaseRealms.findFirst({
+    where: and(
+      eq(schema.skillDatabaseRealms.orgId, input.orgId),
+      eq(schema.skillDatabaseRealms.skillId, skill.id),
+      eq(schema.skillDatabaseRealms.audience, "personal"),
+      eq(schema.skillDatabaseRealms.ownerId, input.actor.id),
+    ),
+  });
+  if (lockedSkill.archivedAt && !realm && requested.length > 0) {
+    throw new SkillDatabaseServiceError(
+      "skill_database_archived",
+      "archived skill databases cannot add new shares",
+    );
+  }
+
+  if (!realm && requested.length > 0) {
+    const realmId = randomUUID();
+    await database
+      .insert(schema.skillDatabaseRealms)
+      .values({
+        id: realmId,
+        orgId: input.orgId,
+        skillId: skill.id,
+        audience: "personal",
+        ownerId: input.actor.id,
+        storageKey: input.storageKey({
+          orgId: input.orgId,
+          skillId: skill.id,
+          realmId,
+          audience: "personal",
+          userId: input.actor.id,
+        }),
+      })
+      .onConflictDoNothing();
+    realm = await database.query.skillDatabaseRealms.findFirst({
+      where: and(
+        eq(schema.skillDatabaseRealms.orgId, input.orgId),
+        eq(schema.skillDatabaseRealms.skillId, skill.id),
+        eq(schema.skillDatabaseRealms.audience, "personal"),
+        eq(schema.skillDatabaseRealms.ownerId, input.actor.id),
+      ),
+    });
+  }
+
+  if (realm) {
+    await database
+      .select({ id: schema.skillDatabaseRealms.id })
+      .from(schema.skillDatabaseRealms)
+      .where(eq(schema.skillDatabaseRealms.id, realm.id))
+      .for("update");
+    const currentRows = await database
+      .select()
+      .from(schema.skillDatabaseRealmShares)
+      .where(and(
+        eq(schema.skillDatabaseRealmShares.orgId, input.orgId),
+        eq(schema.skillDatabaseRealmShares.realmId, realm.id),
+        eq(schema.skillDatabaseRealmShares.ownerId, input.actor.id),
+      ));
+    const current = new Set(currentRows.map((row) => row.granteeId));
+    const additions = requested.filter((userId) => !current.has(userId));
+    const removals = [...current].filter((userId) => !requested.includes(userId));
+    if (lockedSkill.archivedAt && additions.length > 0) {
+      throw new SkillDatabaseServiceError(
+        "skill_database_archived",
+        "archived skill databases cannot add new shares",
+      );
+    }
+    await database
+      .delete(schema.skillDatabaseRealmShares)
+      .where(and(
+        eq(schema.skillDatabaseRealmShares.orgId, input.orgId),
+        eq(schema.skillDatabaseRealmShares.realmId, realm.id),
+        eq(schema.skillDatabaseRealmShares.ownerId, input.actor.id),
+      ));
+    if (requested.length > 0) {
+      await database.insert(schema.skillDatabaseRealmShares).values(
+        requested.map((granteeId) => ({
+          orgId: input.orgId,
+          realmId: realm!.id,
+          ownerId: input.actor.id,
+          granteeId,
+        })),
+      );
+    }
+    if (additions.length > 0 || removals.length > 0) {
+      await database.insert(schema.auditLog).values({
+        orgId: input.orgId,
+        actorId: input.actor.id,
+        action: "skill.database.shares.set",
+        targetType: "skill_database_realm",
+        targetId: realm.id,
+        metadata: { skillId: lockedSkill.id, added: additions, removed: removals },
+      });
+    }
+  }
+
+  const requestedSet = new Set(requested);
+  return {
+    realm_id: realm?.id ?? null,
+    members: members
+      .filter((member) => member.userId !== input.actor.id)
+      .map((member) => ({
+        user_id: member.userId,
+        name: member.name,
+        initials: member.initials,
+        avatar_url: member.avatarUrl ?? null,
+        shared: requestedSet.has(member.userId),
+      })),
+  };
+}
 
 type SkillDatabaseExecutionInput = {
   actor: SkillDatabaseActor;
@@ -496,6 +836,27 @@ async function ensureSkillDatabaseRealm(
       "skill_database_no_realm",
       `skill does not declare ${input.statement.audience} database tables`,
     );
+  }
+
+  if (input.statement.realm_id) {
+    const realm = await database.query.skillDatabaseRealms.findFirst({
+      where: and(
+        eq(schema.skillDatabaseRealms.id, input.statement.realm_id),
+        eq(schema.skillDatabaseRealms.orgId, input.orgId),
+        eq(schema.skillDatabaseRealms.skillId, skill.id),
+        eq(schema.skillDatabaseRealms.audience, "personal"),
+      ),
+    });
+    const share = realm && realm.ownerId !== input.actor.id
+      ? await actorShareForRealm(database, input.orgId, realm.id, input.actor.id)
+      : null;
+    if (!realm || !canAccessSkillDatabaseRealm(input.actor.id, {
+      ...realm,
+      sharedWithActor: Boolean(share),
+    })) {
+      throw new SkillDatabaseServiceError("skill_database_no_realm", "skill database realm not found");
+    }
+    return realm.id;
   }
 
   const ownerId = input.statement.audience === "personal" ? input.actor.id : null;
@@ -612,7 +973,19 @@ async function executeSkillDatabaseStatementInTenant(input: SkillDatabaseExecuti
     throw error;
   }
   if (!realm || !canAccessSkillDatabaseRealm(input.actor.id, realm)) {
-    throw new SkillDatabaseServiceError("skill_database_no_realm", "skill database realm not found");
+    // The realm row is already locked FOR UPDATE. Share replacement takes that same lock before
+    // deleting grants, so a fresh RLS-visible lookup both revalidates the grant and keeps it stable
+    // until this transaction finishes. Locking the grant row itself would invoke its owner-only
+    // UPDATE policy and incorrectly hide the row from the recipient.
+    const share = realm?.ownerId !== input.actor.id
+      ? await actorShareForRealm(database, input.orgId, input.realmId, input.actor.id)
+      : null;
+    if (!realm || !canAccessSkillDatabaseRealm(input.actor.id, {
+      ...realm,
+      sharedWithActor: Boolean(share),
+    })) {
+      throw new SkillDatabaseServiceError("skill_database_no_realm", "skill database realm not found");
+    }
   }
   // Keep the database connection and realm lock bounded even when object storage stalls. One
   // deadline covers both reads and writes, including SQLite execution between them.
@@ -672,9 +1045,9 @@ async function executeSkillDatabaseStatementInTenant(input: SkillDatabaseExecuti
   const [updatedRealm] = await database
     .update(schema.skillDatabaseRealms)
     .set({
-      ...(runtimeResult.image
+      ...(runtimeResult.image || stored
         ? {
-          sizeBytes: runtimeResult.dbSizeBytes,
+          sizeBytes: runtimeResult.image ? runtimeResult.dbSizeBytes : stored!.body.byteLength,
           etag,
           schemaGeneration: databaseSchema.generation,
         }

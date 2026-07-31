@@ -152,9 +152,11 @@ export function canManageSecret(actorId: string, secret: Pick<SecretAccessRef, "
 export interface SkillDatabaseRealmRef {
   audience: "organization" | "personal";
   ownerId: string | null;
+  /** True only after Core/RLS has resolved an explicit grant for this actor. */
+  sharedWithActor?: boolean;
 }
 
-/** Personal database realms are owner-only, deliberately without an administrator override. */
+/** Personal database realms are owner-or-explicit-grantee, deliberately without an administrator override. */
 export function canAccessSkillDatabaseRealm(actorId: string, realm: SkillDatabaseRealmRef): boolean {
-  return realm.audience === "organization" || realm.ownerId === actorId;
+  return realm.audience === "organization" || realm.ownerId === actorId || realm.sharedWithActor === true;
 }

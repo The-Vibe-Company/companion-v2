@@ -3642,6 +3642,8 @@ export const skillDatabaseRealms = pgTable(
     uniquePersonalRealm: uniqueIndex("skill_database_realms_personal_uq")
       .on(t.orgId, t.skillId, t.ownerId)
       .where(sql`${t.audience} = 'personal' and ${t.ownerId} is not null`),
+    uniqueRealmOwner: unique("skill_database_realms_org_id_id_owner_id_uq")
+      .on(t.orgId, t.id, t.ownerId),
     skillOrgFk: foreignKey({
       columns: [t.orgId, t.skillId],
       foreignColumns: [skills.orgId, skills.id],
@@ -3658,6 +3660,41 @@ export const skillDatabaseRealms = pgTable(
     ),
     nonnegativeSize: check("skill_database_realms_size_check", sql`${t.sizeBytes} >= 0`),
     nonnegativeGeneration: check("skill_database_realms_generation_check", sql`${t.schemaGeneration} >= 0`),
+  }),
+);
+
+/** Member grants for a complete personal SQLite realm. Owner/Admin roles never override these rows. */
+export const skillDatabaseRealmShares = pgTable(
+  "skill_database_realm_shares",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    realmId: uuid("realm_id").notNull(),
+    ownerId: text("owner_id").notNull(),
+    granteeId: text("grantee_id").notNull(),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.realmId, t.granteeId] }),
+    realmOwnerFk: foreignKey({
+      columns: [t.orgId, t.realmId, t.ownerId],
+      foreignColumns: [skillDatabaseRealms.orgId, skillDatabaseRealms.id, skillDatabaseRealms.ownerId],
+      name: "skill_database_realm_shares_realm_owner_fk",
+    }).onDelete("cascade"),
+    ownerMembershipFk: foreignKey({
+      columns: [t.orgId, t.ownerId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "skill_database_realm_shares_owner_membership_fk",
+    }).onDelete("cascade"),
+    granteeMembershipFk: foreignKey({
+      columns: [t.orgId, t.granteeId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "skill_database_realm_shares_grantee_membership_fk",
+    }).onDelete("cascade"),
+    differentMembers: check(
+      "skill_database_realm_shares_different_members_check",
+      sql`${t.ownerId} <> ${t.granteeId}`,
+    ),
   }),
 );
 

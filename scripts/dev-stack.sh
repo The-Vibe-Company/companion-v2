@@ -126,6 +126,9 @@ configure_conductor_env() {
   export S3_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY:-companion-secret}"
   export S3_BUCKET_SKILL_ARCHIVES="${S3_BUCKET_SKILL_ARCHIVES:-skill-archives}"
   export S3_FORCE_PATH_STYLE="${S3_FORCE_PATH_STYLE:-true}"
+  # Local demo content includes hosted database declarations. Keep production's default-off flag,
+  # but enable the feature for local development unless the developer explicitly opted out.
+  export COMPANION_SKILL_DATABASES_ENABLED="${COMPANION_SKILL_DATABASES_ENABLED:-true}"
 
   export EMAIL_PROVIDER="${EMAIL_PROVIDER:-mailpit}"
   export EMAIL_FROM="${EMAIL_FROM:-Companion <noreply@companion.local>}"

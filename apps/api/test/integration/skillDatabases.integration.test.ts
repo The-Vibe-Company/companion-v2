@@ -21,8 +21,11 @@ import type { SkillDatabaseDeclaration } from "@companion/contracts";
 import {
   claimSkillDatabaseObjectDeletions,
   completeSkillDatabaseObjectDeletion,
+  describeSkillDatabase,
   executeSkillDatabaseStatement,
+  getSkillDatabaseShares,
   persistSkillDatabaseDeclarations,
+  setSkillDatabaseShares,
   type SkillDatabaseRuntime,
   type SkillDatabaseStorage,
 } from "@companion/core";
@@ -223,6 +226,256 @@ describe("Skill Database lifecycle", () => {
         "read",
       ),
     ).resolves.toMatchObject({ rows: [["owner-only"]] });
+  });
+
+  it("shares one personal realm read-write, hides it from third members, and revokes future access", async () => {
+    const before = await withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => getSkillDatabaseShares({
+        actor: fixture.owner,
+        orgId: fixture.orgA,
+        slug: skill.slug,
+        database,
+      }),
+    );
+    expect(before.members.find((member) => member.user_id === fixture.admin.id)?.shared).toBe(false);
+
+    const shared = await withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => setSkillDatabaseShares({
+        actor: fixture.owner,
+        orgId: fixture.orgA,
+        slug: skill.slug,
+        userIds: [fixture.admin.id],
+        storageKey: skillDatabaseKey,
+        database,
+      }),
+    );
+    expect(shared.realm_id).toMatch(/[0-9a-f-]{36}/);
+
+    const adminDescription = await withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.admin.id },
+      (database) => describeSkillDatabase({
+        actor: fixture.admin,
+        orgId: fixture.orgA,
+        slug: skill.slug,
+        database,
+      }),
+    );
+    expect(adminDescription.realms).toContainEqual(expect.objectContaining({
+      id: shared.realm_id,
+      audience: "personal",
+      access: "shared",
+      owner: expect.objectContaining({ user_id: fixture.owner.id }),
+    }));
+
+    const sharedStatement = (
+      actor: TestActor,
+      sqlText: string,
+      params: Array<string | number | boolean | null>,
+      mode: "read" | "write",
+      statementStorage: SkillDatabaseStorage = storage,
+    ) => executeSkillDatabaseStatement({
+      actor,
+      orgId: fixture.orgA,
+      slug: skill.slug,
+      statement: {
+        audience: "personal",
+        realm_id: shared.realm_id!,
+        sql: sqlText,
+        params,
+      },
+      mode,
+      runtime,
+      storage: statementStorage,
+      storageKey: skillDatabaseKey,
+    });
+
+    await expect(sharedStatement(
+      fixture.admin,
+      "SELECT body FROM private_notes ORDER BY id",
+      [],
+      "read",
+    )).resolves.toMatchObject({ rows: [["owner-only"]] });
+    await sharedStatement(
+      fixture.admin,
+      "INSERT INTO private_notes(body) VALUES (?)",
+      ["written-by-admin"],
+      "write",
+    );
+    await expect(statement(
+      fixture.owner,
+      "personal",
+      "SELECT body FROM private_notes ORDER BY id",
+      [],
+      "read",
+    )).resolves.toMatchObject({ rows: [["owner-only"], ["written-by-admin"]] });
+    await expect(sharedStatement(
+      fixture.developer,
+      "SELECT body FROM private_notes",
+      [],
+      "read",
+    )).rejects.toMatchObject({ code: "skill_database_no_realm" });
+
+    let announceGet!: () => void;
+    const getStarted = new Promise<void>((resolve) => {
+      announceGet = resolve;
+    });
+    let releaseGet!: () => void;
+    const getReleased = new Promise<void>((resolve) => {
+      releaseGet = resolve;
+    });
+    const blockedStorage: SkillDatabaseStorage = {
+      async get(key, signal) {
+        announceGet();
+        await getReleased;
+        if (signal?.aborted) throw signal.reason;
+        return storage.get(key);
+      },
+      put: storage.put.bind(storage),
+      delete: storage.delete.bind(storage),
+    };
+    const inFlightRead = sharedStatement(
+      fixture.admin,
+      "SELECT body FROM private_notes ORDER BY id",
+      [],
+      "read",
+      blockedStorage,
+    );
+    await getStarted;
+    let revocationCompleted = false;
+    const revocation = withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => setSkillDatabaseShares({
+        actor: fixture.owner,
+        orgId: fixture.orgA,
+        slug: skill.slug,
+        userIds: [],
+        storageKey: skillDatabaseKey,
+        database,
+      }),
+    ).then(() => {
+      revocationCompleted = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(revocationCompleted).toBe(false);
+    releaseGet();
+    await expect(inFlightRead).resolves.toMatchObject({
+      rows: [["owner-only"], ["written-by-admin"]],
+    });
+    await revocation;
+    await expect(sharedStatement(
+      fixture.admin,
+      "SELECT body FROM private_notes",
+      [],
+      "read",
+    )).rejects.toMatchObject({ code: "skill_database_no_realm" });
+
+    const auditRows = await integrationDb
+      .select({ metadata: schema.auditLog.metadata })
+      .from(schema.auditLog)
+      .where(and(
+        eq(schema.auditLog.action, "skill.database.shares.set"),
+        eq(schema.auditLog.targetId, shared.realm_id!),
+      ));
+    expect(auditRows.map((row) => row.metadata)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ added: [fixture.admin.id], removed: [] }),
+      expect.objectContaining({ added: [], removed: [fixture.admin.id] }),
+    ]));
+  });
+
+  it("rejects self, unknown, and cross-tenant share recipients", async () => {
+    const setRecipients = (userIds: string[]) => withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => setSkillDatabaseShares({
+        actor: fixture.owner,
+        orgId: fixture.orgA,
+        slug: skill.slug,
+        userIds,
+        storageKey: skillDatabaseKey,
+        database,
+      }),
+    );
+    await expect(setRecipients([fixture.owner.id]))
+      .rejects.toMatchObject({ code: "skill_database_invalid_share" });
+    await expect(setRecipients(["missing-member"]))
+      .rejects.toMatchObject({ code: "skill_database_invalid_share" });
+    await expect(setRecipients([fixture.outsider.id]))
+      .rejects.toMatchObject({ code: "skill_database_invalid_share" });
+  });
+
+  it("never shares a realm belonging to a personal skill", async () => {
+    const personal = await seedSkill({
+      orgId: fixture.orgA,
+      creator: fixture.owner,
+      slug: `database-personal-${fixture.suffix}`,
+      scope: "personal",
+    });
+    await withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => persistSkillDatabaseDeclarations({
+        orgId: fixture.orgA,
+        skillId: personal.id,
+        frontmatter: frontmatter(personal.slug, initialDeclaration),
+        database,
+      }),
+    );
+    await expect(withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => setSkillDatabaseShares({
+        actor: fixture.owner,
+        orgId: fixture.orgA,
+        slug: personal.slug,
+        userIds: [fixture.admin.id],
+        storageKey: skillDatabaseKey,
+        database,
+      }),
+    )).rejects.toMatchObject({ code: "skill_database_sharing_unavailable" });
+  });
+
+  it("revokes recipients when publication removes the last active personal table", async () => {
+    const retiring = await seedSkill({
+      orgId: fixture.orgA,
+      creator: fixture.owner,
+      slug: `database-retire-personal-${fixture.suffix}`,
+      scope: "org",
+    });
+    await withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => persistSkillDatabaseDeclarations({
+        orgId: fixture.orgA,
+        skillId: retiring.id,
+        frontmatter: frontmatter(retiring.slug, {
+          tables: { personal_state: initialDeclaration.tables.private_notes! },
+        }),
+        database,
+      }),
+    );
+    const granted = await withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => setSkillDatabaseShares({
+        actor: fixture.owner,
+        orgId: fixture.orgA,
+        slug: retiring.slug,
+        userIds: [fixture.admin.id],
+        storageKey: skillDatabaseKey,
+        database,
+      }),
+    );
+    await withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => persistSkillDatabaseDeclarations({
+        orgId: fixture.orgA,
+        skillId: retiring.id,
+        frontmatter: frontmatter(retiring.slug, { tables: {} }),
+        database,
+      }),
+    );
+    const remaining = await integrationDb
+      .select()
+      .from(schema.skillDatabaseRealmShares)
+      .where(eq(schema.skillDatabaseRealmShares.realmId, granted.realm_id!));
+    expect(remaining).toEqual([]);
   });
 
   it("applies additive migrations without losing rows and rejects destructive drift", async () => {
@@ -778,6 +1031,44 @@ describe("Skill Database lifecycle", () => {
     );
     expect(realm).toBeDefined();
     expect(storage.has(realm!.storageKey)).toBe(true);
+    const recoveryRuntime: SkillDatabaseRuntime = {
+      async execute(input) {
+        return {
+          columns: ["ok"],
+          rows: [[1]],
+          changes: 0,
+          lastInsertRowid: null,
+          readOnly: true,
+          image: null,
+          dbSizeBytes: input.image?.byteLength ?? 0,
+        };
+      },
+    };
+    await expect(executeSkillDatabaseStatement({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      slug: undeclared.slug,
+      statement: {
+        audience: "organization",
+        sql: "SELECT 1",
+        params: [],
+      },
+      mode: "read",
+      runtime: recoveryRuntime,
+      storage,
+      storageKey: skillDatabaseKey,
+    })).resolves.toMatchObject({ rows: [[1]] });
+    const healed = await withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => database.query.skillDatabaseRealms.findFirst({
+        where: eq(schema.skillDatabaseRealms.id, realm!.id),
+      }),
+    );
+    expect(healed).toMatchObject({
+      etag: expect.any(String),
+      sizeBytes: Buffer.byteLength("uploaded-before-database-failure"),
+      schemaGeneration: 1,
+    });
     await withTenantContext(
       { orgId: fixture.orgA, userId: fixture.owner.id },
       (database) => database
@@ -1000,6 +1291,17 @@ describe("Skill Database lifecycle", () => {
   });
 
   it("allows archived reads but rejects archived writes", async () => {
+    await withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => setSkillDatabaseShares({
+        actor: fixture.owner,
+        orgId: fixture.orgA,
+        slug: skill.slug,
+        userIds: [fixture.developer.id],
+        storageKey: skillDatabaseKey,
+        database,
+      }),
+    );
     await integrationDb
       .update(schema.skills)
       .set({ archivedAt: new Date() })
@@ -1024,6 +1326,32 @@ describe("Skill Database lifecycle", () => {
       ),
     ).rejects.toMatchObject({
       code: "skill_database_archived",
+    });
+    await expect(withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => setSkillDatabaseShares({
+        actor: fixture.owner,
+        orgId: fixture.orgA,
+        slug: skill.slug,
+        userIds: [fixture.developer.id, fixture.admin.id],
+        storageKey: skillDatabaseKey,
+        database,
+      }),
+    )).rejects.toMatchObject({ code: "skill_database_archived" });
+    await expect(withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => setSkillDatabaseShares({
+        actor: fixture.owner,
+        orgId: fixture.orgA,
+        slug: skill.slug,
+        userIds: [],
+        storageKey: skillDatabaseKey,
+        database,
+      }),
+    )).resolves.toMatchObject({
+      members: expect.arrayContaining([
+        expect.objectContaining({ user_id: fixture.developer.id, shared: false }),
+      ]),
     });
   });
 });

@@ -131,6 +131,7 @@ describe("separated API and worker database grants", () => {
       profilesTable: boolean;
       agentsTable: boolean;
       skillDatabaseTable: boolean;
+      skillDatabaseShareTable: boolean;
       projectHeartbeatTable: boolean;
       runHeartbeatTable: boolean;
       tableDefaults: boolean;
@@ -167,6 +168,11 @@ describe("separated API and worker database grants", () => {
           'public.skill_database_realms',
           'SELECT,INSERT,UPDATE,DELETE'
         ) as "skillDatabaseTable",
+        has_table_privilege(
+          rolname,
+          'public.skill_database_realm_shares',
+          'SELECT,INSERT,UPDATE,DELETE'
+        ) as "skillDatabaseShareTable",
         has_table_privilege(
           rolname,
           'public.project_worker_heartbeats',
@@ -210,6 +216,7 @@ describe("separated API and worker database grants", () => {
         profilesTable: true,
         agentsTable: true,
         skillDatabaseTable: true,
+        skillDatabaseShareTable: true,
         projectHeartbeatTable: false,
         runHeartbeatTable: false,
         tableDefaults: false,
@@ -226,6 +233,7 @@ describe("separated API and worker database grants", () => {
         profilesTable: false,
         agentsTable: false,
         skillDatabaseTable: true,
+        skillDatabaseShareTable: true,
         projectHeartbeatTable: false,
         runHeartbeatTable: false,
         tableDefaults: false,
@@ -517,6 +525,7 @@ describe("separated API and worker database grants", () => {
   it("keeps API service functions away from the worker while sharing RLS predicates and readiness", async () => {
     const apiFunctions = [
       "public.companion_list_user_orgs(text)",
+      "public.companion_revoke_inactive_skill_database_realm_shares(uuid,uuid)",
       "public.companion_project_skill_refresh_targets(uuid,uuid)",
       "public.companion_signal_project_secret_change(uuid,uuid,text,text,text,secret_audience,text[])",
     ];

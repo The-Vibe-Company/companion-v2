@@ -203,6 +203,8 @@ import {
   describeSkillDatabase,
   executeSkillDatabaseStatement,
   getCurrentSkillDatabaseDeclaration,
+  getSkillDatabaseShares,
+  setSkillDatabaseShares,
   SecretConfigurationError,
   SkillDatabaseError,
   SkillDatabaseServiceError,
@@ -287,6 +289,7 @@ import {
   requestGitHubDestinationSyncInputSchema,
   updateGitHubDestinationInputSchema,
   skillDatabaseStatementInputSchema,
+  skillDatabaseSharesInputSchema,
 } from "@companion/contracts";
 import { GitHubOAuthClient, githubOAuthConfig, githubSyncEnabled } from "@companion/github";
 import { createModelCatalog } from "@companion/sandbox";
@@ -704,6 +707,8 @@ function skillDatabaseRouteError(c: Context, error: unknown): Response {
       skill_database_no_realm: 404,
       skill_database_rate_limited: 429,
       skill_database_archived: 409,
+      skill_database_invalid_share: 400,
+      skill_database_sharing_unavailable: 409,
       skill_database_disabled: 404,
     }[error.code];
     return jsonError(c, error, status);
@@ -3569,6 +3574,61 @@ app.get("/v1/skills/:slug/database", async (c) => {
     return skillDatabaseRouteError(c, error);
   }
 });
+
+app.get("/v1/skills/:slug/database/shares", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "database:write");
+    return c.json(await withTenant(
+      c,
+      ({ actor, orgId, database }) => getSkillDatabaseShares({
+        actor,
+        orgId,
+        slug: c.req.param("slug"),
+        database,
+      }),
+      true,
+    ));
+  } catch (error) {
+    return skillDatabaseRouteError(c, error);
+  }
+});
+
+app.put(
+  "/v1/skills/:slug/database/shares",
+  async (c, next) => {
+    try {
+      actorFromContext(c, true);
+      requireScope(c, "database:write");
+      await next();
+    } catch (error) {
+      return skillDatabaseRouteError(c, error);
+    }
+  },
+  bodyLimit({
+    maxSize: 256 * 1024,
+    onError: (c) => jsonError(c, Object.assign(new Error("skill database share request exceeds 256 KiB"), { code: "result_too_large" }), 413),
+  }),
+  async (c) => {
+    try {
+      const input = skillDatabaseSharesInputSchema.parse(await c.req.json());
+      return c.json(await withTenant(
+        c,
+        ({ actor, orgId, database }) => setSkillDatabaseShares({
+          actor,
+          orgId,
+          slug: c.req.param("slug"),
+          userIds: input.user_ids,
+          storageKey: skillDatabaseKey,
+          database,
+        }),
+        true,
+      ));
+    } catch (error) {
+      return skillDatabaseRouteError(c, error);
+    }
+  },
+);
 
 app.post(
   "/v1/skills/:slug/database/query",
