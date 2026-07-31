@@ -128,7 +128,7 @@ function configureDatabase(db, limits) {
   sqlite3.capi.sqlite3_db_config(db, sqlite3.capi.SQLITE_DBCONFIG_DEFENSIVE, 1);
   sqlite3.capi.sqlite3_limit(db, sqlite3.capi.SQLITE_LIMIT_SQL_LENGTH, 8_192);
   sqlite3.capi.sqlite3_limit(db, sqlite3.capi.SQLITE_LIMIT_LENGTH, limits.maxResultBytes);
-  sqlite3.capi.sqlite3_limit(db, sqlite3.capi.SQLITE_LIMIT_VARIABLE_NUMBER, 32);
+  sqlite3.capi.sqlite3_limit(db, sqlite3.capi.SQLITE_LIMIT_VARIABLE_NUMBER, 64);
   sqlite3.capi.sqlite3_limit(db, sqlite3.capi.SQLITE_LIMIT_ATTACHED, 0);
   const pageSize = Number(db.selectValue("PRAGMA page_size") ?? 4096);
   const maxPages = Math.max(1, Math.floor(limits.maxBytes / pageSize));

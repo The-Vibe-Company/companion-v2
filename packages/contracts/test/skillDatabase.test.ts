@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   gateSkillDatabaseSql,
   generateSkillDatabaseCreateTableSql,
+  SKILL_DB_MAX_PARAMS,
   skillDatabaseDeclarationSchema,
   skillDatabaseDescribeResponseSchema,
   skillDatabaseSharesInputSchema,
@@ -90,6 +91,14 @@ describe("skill database contracts", () => {
       sql: "SELECT ?",
       params: ["x".repeat(65 * 1024)],
     })).toThrow(/parameters/);
+    expect(skillDatabaseStatementInputSchema.parse({
+      sql: "SELECT 1",
+      params: Array.from({ length: SKILL_DB_MAX_PARAMS }, () => null),
+    }).params).toHaveLength(64);
+    expect(() => skillDatabaseStatementInputSchema.parse({
+      sql: "SELECT 1",
+      params: Array.from({ length: SKILL_DB_MAX_PARAMS + 1 }, () => null),
+    })).toThrow();
   });
 
   it("accepts an opaque personal realm selector and rejects it for organization data", () => {

@@ -166,7 +166,7 @@ BLOBs are base64; `json` and `timestamp` columns remain text.
 The query route permits `SELECT`, `VALUES`, and read-only `WITH`. Execute additionally permits
 `INSERT`, `UPDATE`, and `DELETE`. Use `?` placeholders: DDL, PRAGMA, ATTACH, VACUUM, multiple
 statements, and non-terminal semicolons are forbidden. Defaults: 16 MiB per realm, 2-second timeout,
-1,000 rows, 1 MiB result bytes, 8,192 SQL characters, 32 parameters, 64 KiB parameter JSON, and 120
+1,000 rows, 1 MiB result bytes, 8,192 SQL characters, 64 parameters, 64 KiB parameter JSON, and 120
 requests/minute/member/workspace. Manifest string defaults are limited to 4 KiB, non-null columns
 without defaults cannot be retired, every primary-key column must be non-nullable, non-null columns
 cannot declare null defaults, and generated table definitions are limited to 8 KiB. Limits return

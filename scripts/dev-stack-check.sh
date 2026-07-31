@@ -47,6 +47,7 @@ env_output="$(
   -u NEXT_PUBLIC_COMPANION_API_URL \
   -u BETTER_AUTH_URL \
   -u S3_ENDPOINT \
+  -u COMPANION_SKILL_DATABASES_ENABLED \
   POSTGRES_PORT=15432 \
   COMPANION_API_PORT=13001 \
   COMPANION_WEB_PORT=13000 \
@@ -70,6 +71,18 @@ require_env "COMPANION_WEB_URL=http://127.0.0.1:13000"
 require_env "NEXT_PUBLIC_COMPANION_API_URL=http://127.0.0.1:13001"
 require_env "BETTER_AUTH_URL=http://127.0.0.1:13001"
 require_env "S3_ENDPOINT=http://127.0.0.1:19000"
+require_env "COMPANION_SKILL_DATABASES_ENABLED=true"
+
+disabled_database_env_output="$(
+  env -u CONDUCTOR_PORT -u CONDUCTOR_WORKSPACE_NAME \
+  COMPANION_DEV_SKIP_ENV_FILE=1 \
+  COMPANION_SKILL_DATABASES_ENABLED=false \
+  bash scripts/dev-stack.sh print-env
+)"
+if ! printf '%s\n' "$disabled_database_env_output" | grep -Fxq "COMPANION_SKILL_DATABASES_ENABLED=false"; then
+  printf '[dev-stack-check] an explicit local database feature opt-out must be preserved\n' >&2
+  exit 1
+fi
 
 conductor_env_output="$(
   env -u COMPOSE_PROJECT_NAME \
@@ -80,6 +93,7 @@ conductor_env_output="$(
   -u NEXT_PUBLIC_COMPANION_API_URL \
   -u BETTER_AUTH_URL \
   -u S3_ENDPOINT \
+  -u COMPANION_SKILL_DATABASES_ENABLED \
   CONDUCTOR_PORT=55100 \
   CONDUCTOR_WORKSPACE_NAME=montpellier-v1 \
   bash scripts/dev-stack.sh print-env
@@ -101,6 +115,7 @@ require_conductor_env "COMPANION_WEB_URL=http://127.0.0.1:55100"
 require_conductor_env "NEXT_PUBLIC_COMPANION_API_URL=http://127.0.0.1:55101"
 require_conductor_env "BETTER_AUTH_URL=http://127.0.0.1:55101"
 require_conductor_env "S3_ENDPOINT=http://127.0.0.1:55103"
+require_conductor_env "COMPANION_SKILL_DATABASES_ENABLED=true"
 require_conductor_env "POSTGRES_PORT=55102"
 require_conductor_env "MINIO_PORT=55103"
 require_conductor_env "MINIO_CONSOLE_PORT=55104"

@@ -154,7 +154,7 @@ RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, public
-SET row_security = off
+SET row_security = on
 AS $$
 DECLARE
   deleted_count integer;
@@ -188,5 +188,30 @@ BEGIN
   RETURN deleted_count;
 END;
 $$;
+--> statement-breakpoint
+-- FORCE RLS also applies to a NOSUPERUSER/NOBYPASSRLS migration owner. These narrowly scoped
+-- maintenance policies let only this SECURITY DEFINER function's current owner inspect realms and
+-- delete stale grants; ordinary API sessions continue to use the member-facing policies above.
+CREATE POLICY "skill_database_realms_inactive_share_maintenance_rls"
+  ON "skill_database_realms"
+  FOR SELECT
+  USING (
+    current_user = pg_get_userbyid((
+      SELECT p.proowner
+      FROM pg_proc p
+      WHERE p.oid = 'public.companion_revoke_inactive_skill_database_realm_shares(uuid,uuid)'::regprocedure
+    ))
+  );
+--> statement-breakpoint
+CREATE POLICY "skill_database_realm_shares_inactive_maintenance_rls"
+  ON "skill_database_realm_shares"
+  FOR DELETE
+  USING (
+    current_user = pg_get_userbyid((
+      SELECT p.proowner
+      FROM pg_proc p
+      WHERE p.oid = 'public.companion_revoke_inactive_skill_database_realm_shares(uuid,uuid)'::regprocedure
+    ))
+  );
 --> statement-breakpoint
 REVOKE ALL ON FUNCTION companion_revoke_inactive_skill_database_realm_shares(uuid, uuid) FROM PUBLIC;

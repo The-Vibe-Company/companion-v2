@@ -350,6 +350,7 @@ class SkillDatabaseHelperTests(EnvSandbox):
                 "INSERT INTO tasks(title) VALUES (?)",
                 ["Ship it"],
                 audience="personal",
+                realm_id="00000000-0000-4000-8000-000000000011",
                 write=True,
             )
         finally:
@@ -364,11 +365,32 @@ class SkillDatabaseHelperTests(EnvSandbox):
                 "/skills/task-tracker/database/execute",
                 {
                     "audience": "personal",
+                    "realm_id": "00000000-0000-4000-8000-000000000011",
                     "sql": "INSERT INTO tasks(title) VALUES (?)",
                     "params": ["Ship it"],
                 },
             )],
         )
+
+    def test_statement_does_not_silently_omit_an_empty_realm_selector(self) -> None:
+        calls: list[dict[str, object]] = []
+        original_post = companion_lib.api_post_json
+        companion_lib.api_post_json = (
+            lambda _base, _token, _path, payload: calls.append(payload) or {}
+        )
+        try:
+            companion_lib.api_skill_database_statement(
+                "https://api/v1",
+                "token",
+                "task-tracker",
+                "SELECT 1",
+                audience="personal",
+                realm_id="",
+            )
+        finally:
+            companion_lib.api_post_json = original_post
+
+        self.assertEqual(calls[0]["realm_id"], "")
 
     def test_description_quotes_slug_and_rejects_unsafe_values(self) -> None:
         calls: list[tuple[str, str, str]] = []

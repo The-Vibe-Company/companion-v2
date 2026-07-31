@@ -330,6 +330,49 @@ describe("SkillDatabaseTab", () => {
     );
   });
 
+  it("keeps full-row conflict detection within the bounded request for a 32-column table", async () => {
+    const columns = Array.from({ length: 32 }, (_, index) => ({
+      name: index === 0 ? "id" : `value_${index}`,
+      type: "text" as const,
+      nullable: false,
+    }));
+    const row = columns.map((_, index) => index === 0 ? "row-1" : `before-${index}`);
+    rpc.fetchSkillDatabase.mockResolvedValue({
+      ...description,
+      tables: [{
+        name: "wide_rows",
+        audience: "personal",
+        columns,
+        primary_key: ["id"],
+        unique: [],
+      }],
+    });
+    rpc.querySkillDatabase.mockResolvedValue({
+      columns: columns.map((column) => column.name),
+      rows: [row],
+      row_count: 1,
+      changes: 0,
+      last_insert_rowid: null,
+      read_only: true,
+      db_size_bytes: 8192,
+      schema_generation: 2,
+    });
+    const container = await mount();
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[aria-label="Edit row 1"]')!.click();
+      await Promise.resolve();
+    });
+    await changeValue(container.querySelector<HTMLInputElement>("#sdb-field-value_31")!, "after-31");
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('button[form="sdb-row-form"]')!.click();
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const params = rpc.executeSkillDatabase.mock.calls.at(-1)?.[3];
+    expect(params).toHaveLength(33);
+    expect(params).toEqual(["after-31", ...row]);
+  });
+
   it("keeps primary keys immutable and reports a one-row mutation conflict", async () => {
     rpc.executeSkillDatabase.mockResolvedValueOnce({
       columns: [],

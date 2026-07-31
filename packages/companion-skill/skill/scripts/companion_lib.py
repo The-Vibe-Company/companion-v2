@@ -276,7 +276,7 @@ def api_skill_database_statement(
         f"/skills/{quoted_slug}/database/{action}",
         {
             "audience": audience,
-            **({"realm_id": realm_id} if realm_id else {}),
+            **({"realm_id": realm_id} if realm_id is not None else {}),
             "sql": sql,
             "params": values,
         },

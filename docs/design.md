@@ -222,6 +222,10 @@ realm. RLS exposes a personal realm only to its owner and active recipients, whi
 maps unknown, cross-tenant, and unauthorized realm selectors to the same not-found response.
 Revocation serializes against statement execution on the realm registry row, so it blocks new work
 without deleting data. Removing the last active personal table revokes every now-inactive grant.
+That publication cleanup runs through a `SECURITY DEFINER` function with row security enabled. Two
+narrow FORCE-RLS maintenance policies identify the function's current owner dynamically and permit
+only realm inspection plus stale-share deletion, so a non-superuser migration owner does not need
+`BYPASSRLS` and runtime sessions retain the member-facing policies.
 Archived skills remain readable and allow revocation, but reject row mutations and new recipients.
 `skill_database_realms` records the applied schema generation, object key, byte size, and last
 observed ETag, while the object bytes live in S3 at a tenant- and skill-scoped key. The object is

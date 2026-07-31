@@ -31,7 +31,7 @@ export function querySkillDatabase(
     method: "POST",
     body: JSON.stringify({
       audience: target.audience,
-      ...(target.realmId ? { realm_id: target.realmId } : {}),
+      ...(target.realmId !== undefined ? { realm_id: target.realmId } : {}),
       sql,
       params,
     }),
@@ -48,7 +48,7 @@ export function executeSkillDatabase(
     method: "POST",
     body: JSON.stringify({
       audience: target.audience,
-      ...(target.realmId ? { realm_id: target.realmId } : {}),
+      ...(target.realmId !== undefined ? { realm_id: target.realmId } : {}),
       sql,
       params,
     }),

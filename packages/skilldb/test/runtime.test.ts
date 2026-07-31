@@ -69,6 +69,20 @@ describe("SQLite WASM skill database runtime", () => {
     })).resolves.toMatchObject({ rows: [[1]] });
   });
 
+  it("accepts the 64 variables required by a widest-table optimistic update", async () => {
+    const params = Array.from({ length: 64 }, (_, index) => index);
+    await expect(runtime.execute({
+      image: null,
+      tables: { state: stateTable },
+      schemaGeneration: 1,
+      fileSchemaGeneration: 0,
+      sql: `SELECT ${params.map((_, index) => `? AS value_${index}`).join(", ")}`,
+      params,
+      mode: "read",
+      limits,
+    })).resolves.toMatchObject({ rows: [params] });
+  });
+
   it("migrates an existing realm additively on open", async () => {
     const first = await runtime.execute({
       image: null,

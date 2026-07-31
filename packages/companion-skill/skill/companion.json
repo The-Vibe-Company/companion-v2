@@ -34,7 +34,8 @@
         "changes": [
           "Adds explicit read-write sharing of a complete personal Skill Database realm with current organization members.",
           "Documents opaque realm selectors, visible realm ownership, revocation, and sensitive share-management routes.",
-          "Extends the reusable Python helpers for shared-realm statements and idempotent member grant management."
+          "Extends the reusable Python helpers for shared-realm statements and idempotent member grant management.",
+          "Supports up to 64 statement parameters so optimistic edits remain bounded for every valid 32-column table."
         ]
       },
       {
