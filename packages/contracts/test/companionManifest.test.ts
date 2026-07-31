@@ -34,6 +34,15 @@ describe("companionManifestSchema", () => {
           },
         },
       },
+      database: {
+        tables: {
+          processed_tickets: {
+            audience: "organization",
+            columns: { ticket_id: { type: "text", nullable: false } },
+            primary_key: ["ticket_id"],
+          },
+        },
+      },
       dependencies: { "markdown-report": "84d8bee1-5ad3-4676-8c16-730e2a15ba70" },
       commands: [{ name: "Publish", desc: "Publish safely." }],
       checks: { updates: { runtime: "python", script: "scripts/check_updates.py", timeoutSeconds: 30 } },
@@ -52,9 +61,11 @@ describe("companionManifestSchema", () => {
       "df80d275-30c9-5f0d-9a46-d77e6fca8448",
     );
     expect(parsed.notes).toBe("## Notes\n\nMarkdown notes.");
+    expect(parsed.database.tables.processed_tickets?.primary_key).toEqual(["ticket_id"]);
     expect(parsed.display.summary).toBe("Generate clean incident handoffs from raw notes.");
     expect(companionManifestJson(parsed)).toMatchObject({
       icon: "bot",
+      database: { tables: { processed_tickets: { audience: "organization" } } },
       checks: { updates: { runtime: "python", script: "scripts/check_updates.py", timeoutSeconds: 30 } },
     });
     expect(parsed.display.description).toBeUndefined();
@@ -161,5 +172,39 @@ describe("companionManifestSchema", () => {
     expect(manifest.icon).toBe("terminal");
     expect(manifest.requirements.map((r) => r.key)).toEqual(["SOME_TOKEN"]);
     expect(manifest.dependencies).toEqual({});
+  });
+
+  it("preserves database declarations through fallback reconstruction and JSON serialization", () => {
+    const manifest = fallbackCompanionManifest({
+      summary: "Keeps state.",
+      database: {
+        tables: {
+          member_state: {
+            audience: "personal",
+            columns: { key: { type: "text", nullable: false }, value: { type: "json", nullable: true } },
+            primary_key: ["key"],
+            unique: [],
+          },
+        },
+      },
+    });
+
+    expect(companionManifestSchema.parse(companionManifestJson(manifest)).database).toEqual(manifest.database);
+  });
+
+  it("documents and enforces database constraint references beyond static JSON Schema", () => {
+    expect(() => companionManifestSchema.parse({
+      database: {
+        tables: {
+          notes: {
+            columns: { id: { type: "integer" } },
+            primary_key: ["missing"],
+          },
+        },
+      },
+    })).toThrow(/constraint references undeclared column/);
+    const table = companionManifestV2JsonSchema.$defs.databaseTable.properties;
+    expect(table.primary_key.description).toContain("semantic enforcement");
+    expect(table.unique.description).toContain("semantic enforcement");
   });
 });

@@ -130,6 +130,7 @@ describe("separated API and worker database grants", () => {
       authUserTable: boolean;
       profilesTable: boolean;
       agentsTable: boolean;
+      skillDatabaseTable: boolean;
       projectHeartbeatTable: boolean;
       runHeartbeatTable: boolean;
       tableDefaults: boolean;
@@ -161,6 +162,11 @@ describe("separated API and worker database grants", () => {
           'public.agent',
           'SELECT,INSERT,UPDATE,DELETE'
         ) as "agentsTable",
+        has_table_privilege(
+          rolname,
+          'public.skill_database_realms',
+          'SELECT,INSERT,UPDATE,DELETE'
+        ) as "skillDatabaseTable",
         has_table_privilege(
           rolname,
           'public.project_worker_heartbeats',
@@ -203,6 +209,7 @@ describe("separated API and worker database grants", () => {
         authUserTable: true,
         profilesTable: true,
         agentsTable: true,
+        skillDatabaseTable: true,
         projectHeartbeatTable: false,
         runHeartbeatTable: false,
         tableDefaults: false,
@@ -218,6 +225,7 @@ describe("separated API and worker database grants", () => {
         authUserTable: false,
         profilesTable: false,
         agentsTable: false,
+        skillDatabaseTable: true,
         projectHeartbeatTable: false,
         runHeartbeatTable: false,
         tableDefaults: false,
@@ -310,6 +318,9 @@ describe("separated API and worker database grants", () => {
 
   it("grants Project claim and lease mutation functions only to the worker", async () => {
     const functions = [
+      "public.companion_claim_skill_database_object_deletions(integer,integer)",
+      "public.companion_complete_skill_database_object_deletion(text,uuid)",
+      "public.companion_defer_skill_database_object_deletion(text,uuid)",
       "public.companion_claim_project_workspaces(text,integer,integer)",
       "public.companion_enter_project_worker_lease(uuid,uuid,text,text,integer)",
       "public.companion_heartbeat_project_worker(text,integer,integer)",

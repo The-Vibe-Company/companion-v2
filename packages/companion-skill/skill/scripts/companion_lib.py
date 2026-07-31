@@ -245,6 +245,43 @@ def api_post_json(base: str, token: str, path: str, payload: dict[str, Any] | No
         fail(f"POST {url} failed: {exc.reason}")
 
 
+def api_skill_database_statement(
+    base: str,
+    token: str,
+    slug: str,
+    sql: str,
+    params: list[Any] | None = None,
+    *,
+    audience: str = "organization",
+    write: bool = False,
+) -> Any:
+    """Run one parameterized statement against a declared hosted skill database realm."""
+    if not slug or "/" in slug or "\\" in slug:
+        fail("invalid skill slug for Skill Database request")
+    if audience not in {"organization", "personal"}:
+        fail("Skill Database audience must be organization or personal")
+    if not isinstance(sql, str) or not sql.strip():
+        fail("Skill Database SQL must be a non-empty string")
+    values = params or []
+    if not isinstance(values, list):
+        fail("Skill Database params must be a list")
+    quoted_slug = urllib.parse.quote(slug, safe="")
+    action = "execute" if write else "query"
+    return api_post_json(
+        base,
+        token,
+        f"/skills/{quoted_slug}/database/{action}",
+        {"audience": audience, "sql": sql, "params": values},
+    )
+
+
+def api_skill_database_description(base: str, token: str, slug: str) -> Any:
+    """Describe one skill's declared tables, visible realms, generations, and limits."""
+    if not slug or "/" in slug or "\\" in slug:
+        fail("invalid skill slug for Skill Database request")
+    return api_get(base, token, f"/skills/{urllib.parse.quote(slug, safe='')}/database")
+
+
 def api_redeem_secret_plan(base: str, token: str, plan_id: str) -> dict[str, Any]:
     """Redeem a plan without exposing plaintext through the Agent Auth JSON transport."""
     if _is_agent_credential(token):

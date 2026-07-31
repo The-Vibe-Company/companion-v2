@@ -162,7 +162,14 @@ export async function seedAgentAuthIdentity(input: {
   user: TestActor;
   agentId: string;
   grantId: string;
-  capability: "skills:read" | "skills:write" | "public-skills:install";
+  capability:
+    | "skills:read"
+    | "skills:write"
+    | "secrets:read"
+    | "secrets:write"
+    | "database:read"
+    | "database:write"
+    | "public-skills:install";
   workspaceId?: string;
 }): Promise<void> {
   const hostId = `host-${input.agentId}`;

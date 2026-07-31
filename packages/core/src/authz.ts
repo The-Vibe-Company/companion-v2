@@ -148,3 +148,13 @@ export function canAccessSecret(actorId: string, secret: SecretAccessRef): boole
 export function canManageSecret(actorId: string, secret: Pick<SecretAccessRef, "ownerId">): boolean {
   return secret.ownerId === actorId;
 }
+
+export interface SkillDatabaseRealmRef {
+  audience: "organization" | "personal";
+  ownerId: string | null;
+}
+
+/** Personal database realms are owner-only, deliberately without an administrator override. */
+export function canAccessSkillDatabaseRealm(actorId: string, realm: SkillDatabaseRealmRef): boolean {
+  return realm.audience === "organization" || realm.ownerId === actorId;
+}

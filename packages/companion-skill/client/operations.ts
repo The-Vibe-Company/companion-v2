@@ -1,5 +1,6 @@
 import {
   COMPANION_AGENT_OPERATION_REGISTRY,
+  companionCapabilityAllows,
   matchCompanionAgentOperation,
   type CompanionAgentHttpMethod,
   type CompanionAgentTenantCapability,
@@ -7,6 +8,27 @@ import {
 
 export type CompanionCapability = CompanionAgentTenantCapability | "public-skills:install";
 export type CompanionHttpMethod = CompanionAgentHttpMethod;
+
+/** True when an active grant can authorize the requested client operation. */
+export function companionGrantAllows(
+  granted: string,
+  required: CompanionCapability,
+): granted is CompanionCapability {
+  if (granted === "public-skills:install" || required === "public-skills:install") {
+    return granted === required;
+  }
+  if (
+    granted !== "skills:read"
+    && granted !== "skills:write"
+    && granted !== "secrets:read"
+    && granted !== "secrets:write"
+    && granted !== "database:read"
+    && granted !== "database:write"
+  ) {
+    return false;
+  }
+  return companionCapabilityAllows(granted, required);
+}
 
 /** Derived compatibility export; contracts owns the only operation list. */
 export const COMPANION_OPERATION_REGISTRY = COMPANION_AGENT_OPERATION_REGISTRY;

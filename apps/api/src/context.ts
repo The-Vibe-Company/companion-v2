@@ -1,6 +1,6 @@
 import { getCookie } from "hono/cookie";
 import type { Context } from "hono";
-import type { TokenScope } from "@companion/contracts";
+import { companionCapabilityAllows, type TokenScope } from "@companion/contracts";
 import { auth, authenticateAgentRequest, type AgentCapabilityName } from "@companion/auth";
 import {
   ensureUserBootstrap,
@@ -160,7 +160,9 @@ export function isAgentRequest(c: Context<{ Variables: ApiVariables }>): boolean
 export function requireScope(c: Context<{ Variables: ApiVariables }>, scope: TokenScope): void {
   const scopes = c.get("tokenScopes");
   if (scopes === null) return; // cookie session → full access
-  if (!scopes.includes(scope)) throw new Error(`token is missing the ${scope} scope`);
+  if (!scopes.some((granted) => companionCapabilityAllows(granted, scope))) {
+    throw new Error(`token is missing the ${scope} scope`);
+  }
 }
 
 export async function orgIdFromContext(c: Context<{ Variables: ApiVariables }>): Promise<string> {

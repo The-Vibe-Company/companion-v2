@@ -34,6 +34,7 @@ import {
   MAX_COMMENT_IMAGES,
   MAX_COMMENT_IMAGE_BYTES,
   companionManifestSchema,
+  expandTokenScopes,
   fallbackCompanionManifest,
   parseAllowedTools,
   parseStoredSkillFrontmatter,
@@ -55,6 +56,7 @@ import { listOrgAccessDomains } from "./domainAccess";
 import { classifyEmailDomain } from "./email-domains";
 import { canManageOrg, canManagePersonalSkill, canManagePublicSkill, canTouchOwner, isLastOwner } from "./authz";
 import { disableSecretsForDepartingMember, persistSkillSecretSlots } from "./secrets";
+import { persistSkillDatabaseDeclarations } from "./skillDatabases";
 import { recordGettingStartedStep } from "./gettingStarted";
 import {
   assertOrgSkillMutationEntitled,
@@ -210,6 +212,7 @@ function parseStoredCompanionManifest(frontmatter: string, fallbackSummary: stri
         companionSkillId: parsed.data.metadata.companionSkillId,
         changelog: parsed.data.metadata.changelog,
         environment: parsed.data.environment,
+        database: parsed.data.database,
         notes: parsed.data.notes,
         requirements: parsed.data.requirements,
         dependencies: parsed.data.dependencies,
@@ -2951,6 +2954,12 @@ async function writeSkillVersion(input: {
     frontmatter: payload.frontmatter,
     database,
   });
+  await persistSkillDatabaseDeclarations({
+    orgId: input.orgId,
+    skillId: skill.id,
+    frontmatter: payload.frontmatter,
+    database,
+  });
 
   await database
     .update(schema.skills)
@@ -4156,6 +4165,7 @@ export async function issueApiToken(input: {
 }): Promise<{ id: string; token: string; prefix: string; scopes: TokenScope[]; expiresAt: Date }> {
   const database = input.database ?? db;
   if (!input.scopes.length) throw new Error("at least one scope is required");
+  const scopes = expandTokenScopes(input.scopes);
   const role = await getOrgRole(input.orgId, input.actor.id, database);
   if (!role) throw new Error("not a member of this organization");
   const secret = randomBytes(24).toString("hex");
@@ -4167,15 +4177,15 @@ export async function issueApiToken(input: {
     .values({
       orgId: input.orgId,
       userId: input.actor.id,
-      name: input.name?.trim() || defaultTokenName(input.scopes),
+      name: input.name?.trim() || defaultTokenName(scopes),
       tokenPrefix: prefix,
       tokenHash: hashApiToken(token),
-      scopes: input.scopes,
+      scopes,
       expiresAt,
     })
     .returning({ id: schema.apiTokens.id });
   if (!row) throw new Error("could not issue token");
-  return { id: row.id, token, prefix, scopes: input.scopes, expiresAt };
+  return { id: row.id, token, prefix, scopes, expiresAt };
 }
 
 /**
@@ -4196,7 +4206,7 @@ export async function refreshApiToken(rawToken: string, database: Db = db): Prom
 
     const parsedScopes = tokenScopesSchema.safeParse(candidate.scopes);
     if (!parsedScopes.success) throw new ApiTokenRefreshError();
-    const scopes: TokenScope[] = parsedScopes.data;
+    const scopes = expandTokenScopes(parsedScopes.data);
     if (!candidate.is_expired) {
       return {
         status: "current" as const,
@@ -4296,7 +4306,7 @@ export async function listApiTokens(input: {
     user_id: r.userId,
     name: r.name,
     prefix: r.tokenPrefix,
-    scopes: (r.scopes ?? []) as TokenScope[],
+    scopes: expandTokenScopes((r.scopes ?? []) as TokenScope[]),
     expires_at: r.expiresAt.toISOString(),
     last_used_at: r.lastUsedAt ? r.lastUsedAt.toISOString() : null,
     revoked_at: r.revokedAt ? r.revokedAt.toISOString() : null,
@@ -4323,7 +4333,7 @@ export async function resolveApiToken(
       name: row.name,
     },
     orgId: row.org_id,
-    scopes: (row.scopes ?? []) as TokenScope[],
+    scopes: expandTokenScopes((row.scopes ?? []) as TokenScope[]),
   };
 }
 

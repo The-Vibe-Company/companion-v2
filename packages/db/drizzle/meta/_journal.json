@@ -421,6 +421,13 @@
       "when": 1785257600000,
       "tag": "0059_getting_started_states",
       "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1785445500000,
+      "tag": "0060_skill_databases",
+      "breakpoints": true
     }
   ]
 }

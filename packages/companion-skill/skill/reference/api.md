@@ -4,8 +4,10 @@ Base URL is `COMPANION_API_URL` (ends in `/v1`). The active workspace id is
 `COMPANION_WORKSPACE_ID` (`organizations.id`). Agent Auth is the default management identity. The
 bundled `scripts/companion-agent-client.mjs` discovers the instance, uses delegated device approval,
 and signs one 60-second request-bound JWT at a time. Its closed operation registry maps only the
-documented REST operations to `skills:read`, `skills:write`, `secrets:read`, or `secrets:write`, each
-constrained to the exact workspace id. The public install flow uses the instance-wide
+documented REST operations to `skills:read`, `skills:write`, `secrets:read`, `secrets:write`,
+`database:read`, or `database:write`, each
+constrained to the exact workspace id. `database:write` includes `database:read` because DML can observe
+state through predicates, subqueries, conflict handling, and returned rows. The public install flow uses the instance-wide
 `public-skills:install` capability.
 
 Resolve those values from the environment first. If either variable is missing, read the dedicated
@@ -115,6 +117,9 @@ legacy PAT:
 | Replace personal Skills UI preferences | `PUT /skill-filter-preferences` | Browser session only |
 | Read guided onboarding progress | `GET /getting-started` | `skills:read` |
 | Record a guided onboarding step | `POST /getting-started/steps` | `skills:write` |
+| Describe declared Skill Database tables and visible realms | `GET /skills/{slug}/database` | `database:read` |
+| Run a read-only parameterized Skill Database statement | `POST /skills/{slug}/database/query` | `database:read` |
+| Run parameterized Skill Database DML | `POST /skills/{slug}/database/execute` | `database:write` |
 | Hide guided onboarding | `POST /getting-started/dismiss` | Browser session only |
 | Resume guided onboarding | `POST /getting-started/reopen` | Browser session only |
 | Current bundled Companion skill status + workspace id | `GET /local-skills/companion` | `skills:read` |
@@ -134,6 +139,39 @@ legacy PAT:
 | Create a 60-second retrieval grant | `POST /secret-retrievals/{planId}/grant` | `secrets:read`; bundled Agent client only through private `secret-redeem` action |
 | Redeem a grant once | `POST /secret-grants/redeem` | `secrets:read`; bundled Agent client only through private `secret-redeem` action |
 | Fetch companion.json v2 schema | `GET /v1/schemas/companion-manifest.v2.schema.json` | Public |
+
+## Skill Databases
+
+Both statement routes accept:
+
+```json
+{
+  "audience": "organization",
+  "sql": "SELECT ticket_id, processed_at FROM processed_tickets WHERE ticket_id = ? LIMIT 1",
+  "params": ["LIN-42"]
+}
+```
+
+`audience` defaults to `organization`; use `personal` for the caller's private realm. A response
+contains `columns`, array-shaped `rows`, `row_count`, `changes`, `last_insert_rowid`, `read_only`,
+`db_size_bytes`, and `schema_generation`. Large integers outside JavaScript's safe range are strings;
+BLOBs are base64; `json` and `timestamp` columns remain text.
+
+The query route permits `SELECT`, `VALUES`, and read-only `WITH`. Execute additionally permits
+`INSERT`, `UPDATE`, and `DELETE`. Use `?` placeholders: DDL, PRAGMA, ATTACH, VACUUM, multiple
+statements, and non-terminal semicolons are forbidden. Defaults: 16 MiB per realm, 2-second timeout,
+1,000 rows, 1 MiB result bytes, 8,192 SQL characters, 32 parameters, 64 KiB parameter JSON, and 120
+requests/minute/member/workspace. Manifest string defaults are limited to 4 KiB, non-null columns
+without defaults cannot be retired, non-null columns cannot declare null defaults, and generated
+table definitions are limited to 8 KiB. Limits return
+explicit errors rather than truncated results. `INSERT` must use an explicit column list containing
+only active declared columns; implicit physical-column order and retired columns are forbidden.
+
+Error codes and statuses: `forbidden_statement` 403; `timeout` 408; `database_full` and
+`result_too_large` 413; `skill_not_found`, `skill_database_not_declared`, and
+`skill_database_no_realm` and `skill_database_disabled` 404; `skill_database_archived` and
+`conflict` 409; `skill_database_rate_limited` 429;
+`overloaded` and `storage_unavailable` 503; `sql_error` 400.
 
 ## Guided onboarding
 

@@ -12,8 +12,9 @@ describe("worker supervisor isolation", () => {
       runs: vi.fn(async () => runs),
       github: vi.fn(async () => null),
       projects: vi.fn(async () => null),
+      skillDatabases: vi.fn(async () => null),
     });
-    expect(result).toEqual({ billing: null, runs, github: null, projects: null });
+    expect(result).toEqual({ billing: null, runs, github: null, projects: null, skillDatabases: null });
   });
 
   it("starts RunSkill maintenance even when billing startup fails", async () => {
@@ -24,8 +25,9 @@ describe("worker supervisor isolation", () => {
       runs: vi.fn(async () => runs),
       github: vi.fn(async () => null),
       projects: vi.fn(async () => null),
+      skillDatabases: vi.fn(async () => null),
     });
-    expect(result).toEqual({ billing: null, runs, github: null, projects: null });
+    expect(result).toEqual({ billing: null, runs, github: null, projects: null, skillDatabases: null });
     expect(error).toHaveBeenCalledWith("billing supervisor failed to start");
     error.mockRestore();
   });

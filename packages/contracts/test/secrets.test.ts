@@ -5,12 +5,21 @@ import {
   secretRowSchema,
   secretRetrievalPreflightInputSchema,
 } from "../src/secrets";
-import { TOKEN_SCOPES, tokenScopeSchema } from "../src/token";
+import { expandTokenScopes, TOKEN_SCOPES, tokenScopeSchema } from "../src/token";
 
 describe("secret contracts", () => {
-  it("exposes separate read and write scopes for Companion automation", () => {
+  it("exposes automation scopes and makes database write a read superset", () => {
     expect(tokenScopeSchema.parse("secrets:write")).toBe("secrets:write");
-    expect(TOKEN_SCOPES).toEqual(["skills:read", "skills:write", "secrets:read", "secrets:write"]);
+    expect(TOKEN_SCOPES).toEqual([
+      "skills:read",
+      "skills:write",
+      "secrets:read",
+      "secrets:write",
+      "database:read",
+      "database:write",
+    ]);
+    expect(expandTokenScopes(["database:write"])).toEqual(["database:read", "database:write"]);
+    expect(expandTokenScopes(["database:read"])).toEqual(["database:read"]);
   });
 
   it("validates audiences and recipient rules", () => {

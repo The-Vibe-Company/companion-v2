@@ -1,6 +1,6 @@
 ---
 name: companion
-description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, declare the secrets and environment variables a skill needs, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
+description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, resolve dependencies, declare secrets, environment variables, or hosted SQLite state tables, query skill state, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
 license: MIT
 compatibility: claude-code codex opencode openclaw
 allowed-tools: read_file write_file run_shell
@@ -27,7 +27,10 @@ You need two non-secret values, supplied by the web app's **Use with an agent** 
 
 The first connection requests only `skills:read` constrained to the exact workspace id. The first
 write requests `skills:write`; the first Secrets read or write requests `secrets:read` or
-`secrets:write`. Approvals are persistent until revoked, while every request JWT lasts 60 seconds.
+`secrets:write`; Skill Database descriptions and queries request `database:read`, while DML requests
+`database:write`. Database write includes read because DML can observe state through predicates,
+subqueries, conflict handling, and returned rows. Approvals are persistent until revoked, while every
+request JWT lasts 60 seconds.
 Never request a broader workspace constraint.
 
 Resolve the active workspace before any network call:
@@ -105,6 +108,7 @@ explicitly requests that compatibility path.
 - `metadata.companionSkillId` — the published skill's stable id in the workspace registry.
 - `metadata.changelog` — release notes for each published version.
 - `environment.env` and `environment.secrets` — declarations only, never values.
+- `database.tables` — hosted SQLite state tables, provisioned from additive declarations at publish.
 - `dependencies` — `{ "<skill-name>": "<skill-id>" }`.
 - `notes` — Markdown-compatible free-form notes.
 
@@ -259,6 +263,18 @@ Companion-specific declarations in `companion.json` at the package root:
   "dependencies": {
     "markdown-report": "84d8bee1-5ad3-4676-8c16-730e2a15ba70"
   },
+  "database": {
+    "tables": {
+      "processed_tickets": {
+        "audience": "organization",
+        "columns": {
+          "ticket_id": { "type": "text", "nullable": false },
+          "processed_at": { "type": "timestamp" }
+        },
+        "primary_key": ["ticket_id"]
+      }
+    }
+  },
   "commands": [],
   "checks": {
     "updates": {
@@ -283,6 +299,11 @@ checksum/current version with the local `~/.companion/skills.lock.json` snapshot
 
 Do not put dependencies, required env vars, secrets, changelog, package version, Companion skill id,
 or rich display copy in `SKILL.md` frontmatter. Keep them in `companion.json`.
+
+Database declarations support at most 16 tables and 32 columns per table. Names use lowercase
+letters, digits, and underscores; `sqlite_`, `rowid`, `oid`, and `_rowid_` are reserved. Column types
+are `text`, `integer`, `real`, `boolean`, `json`, and `timestamp`. Store JSON as JSON text and
+timestamps as ISO-8601 text.
 
 Always **analyze the whole skill package before you validate, publish, or update**, even when
 `companion.json` already exists. Treat `companion.json` as the persisted declaration to verify, not
@@ -777,6 +798,54 @@ explicit retrieval outside a skill, use
 `python3 scripts/sync_secrets.py manual <profile> <secret-id> <ENV_KEY> --confirm`; it writes under
 `~/.companion/secrets/<workspace>/_manual/<profile>/.env`.
 
+### Use hosted Skill Databases
+
+Declare durable state in `companion.json`; never ship runtime DDL or migration scripts. An
+`organization` table shares one SQLite realm across workspace members. A `personal` table gives each
+member a separate realm with no administrator override. One request targets one audience, so
+cross-realm joins are unavailable.
+
+Publish changes additively. New tables and nullable/defaulted columns are accepted. Types, audience,
+primary keys, unique constraints, and existing column definitions are immutable. Removed tables or
+columns retain their physical data. For a breaking change, declare a new table (for example
+`events_v2`) and copy data with normal DML. String defaults are limited to 4 KiB; a non-null column
+without a default cannot be retired, a non-null column cannot have a null default, and each
+generated table definition must fit the 8 KiB SQL limit.
+
+Use parameter placeholders and pass values in `params`:
+
+```python
+from scripts.companion_lib import api_skill_database_statement, resolve_credentials
+
+base, credential, _workspace = resolve_credentials()
+api_skill_database_statement(
+    base,
+    credential,
+    "ticket-triage",
+    "INSERT INTO processed_tickets(ticket_id, processed_at) VALUES (?, ?)",
+    ["LIN-42", "2026-07-30T21:00:00Z"],
+    audience="organization",
+    write=True,
+)
+```
+
+Always give `INSERT` an explicit active-column list. Companion rejects implicit physical-column
+order and columns retired by a later declaration.
+
+The query endpoint accepts read-only `SELECT`, `VALUES`, and `WITH`; the execute endpoint also
+accepts `INSERT`, `UPDATE`, and `DELETE`. Companion rejects multiple statements, DDL, `PRAGMA`,
+`ATTACH`, and `VACUUM`. Defaults are a 16 MiB database, 2-second statement timeout, 1,000 result
+rows, 1 MiB result payload, and 120 requests per minute per member/workspace. Results are never
+silently truncated: add `LIMIT` after `result_too_large`.
+
+Read archived skill databases, but do not write them. Handle `forbidden_statement` (403), `timeout`
+(408), `database_full` or `result_too_large` (413), missing skill/declaration/realm (404),
+`skill_database_disabled` (404), `skill_database_archived` (409),
+`skill_database_rate_limited` (429), `conflict` (409),
+`overloaded` or `storage_unavailable` (503), and
+`sql_error` (400) without retrying unsafe
+writes automatically.
+
 ### Publish a skill
 
 After a clean validation **and** a resolved dependency plan, publish a brand-new skill only after the
@@ -1200,7 +1269,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.29.0","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.30.0","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 

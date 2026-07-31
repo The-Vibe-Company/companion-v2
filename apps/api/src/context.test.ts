@@ -22,7 +22,7 @@ vi.mock("@companion/auth", () => ({
 
 vi.mock("@companion/core/services", () => serviceMocks);
 
-import { attachSession, jsonError, type ApiVariables } from "./context";
+import { attachSession, jsonError, requireScope, type ApiVariables } from "./context";
 
 describe("jsonError", () => {
   it("includes stable service error codes in structured responses", async () => {
@@ -37,6 +37,29 @@ describe("jsonError", () => {
       error: "reconnecting",
       code: "run_runtime_degraded",
     });
+  });
+});
+
+describe("requireScope", () => {
+  it("accepts database write for reads but never read for writes", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    app.get("/read-with-write", (c) => {
+      c.set("tokenScopes", ["database:write"]);
+      requireScope(c, "database:read");
+      return c.json({ ok: true });
+    });
+    app.get("/write-with-read", (c) => {
+      c.set("tokenScopes", ["database:read"]);
+      try {
+        requireScope(c, "database:write");
+        return c.json({ ok: true });
+      } catch (error) {
+        return jsonError(c, error, 403);
+      }
+    });
+
+    expect((await app.request("/read-with-write")).status).toBe(200);
+    expect((await app.request("/write-with-read")).status).toBe(403);
   });
 });
 

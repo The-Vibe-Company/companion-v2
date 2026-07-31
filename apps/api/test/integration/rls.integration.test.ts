@@ -126,6 +126,33 @@ describe("Postgres tenant isolation", () => {
       slug: `mirror-a-third-${fixture.suffix}`,
       scope: "org",
     });
+    await integrationSql`
+      insert into skill_database_schemas
+        (org_id, skill_id, generation, declarations_checksum)
+      values
+        (${fixture.orgA}::uuid, ${skillA.id}::uuid, 1, 'sha256:personal'),
+        (${fixture.orgA}::uuid, ${mirrorSkillA.id}::uuid, 1, 'sha256:organization'),
+        (${fixture.orgB}::uuid, ${skillB.id}::uuid, 1, 'sha256:foreign')
+    `;
+    await integrationSql`
+      insert into skill_database_tables
+        (org_id, skill_id, table_name, audience, columns)
+      values
+        (${fixture.orgA}::uuid, ${skillA.id}::uuid, 'private_notes', 'personal', '[]'::jsonb),
+        (${fixture.orgA}::uuid, ${mirrorSkillA.id}::uuid, 'shared_notes', 'organization', '[]'::jsonb),
+        (${fixture.orgB}::uuid, ${skillB.id}::uuid, 'foreign_notes', 'organization', '[]'::jsonb)
+    `;
+    await integrationSql`
+      insert into skill_database_realms
+        (org_id, skill_id, audience, owner_id, storage_key)
+      values
+        (${fixture.orgA}::uuid, ${skillA.id}::uuid, 'personal', ${fixture.owner.id},
+         ${`${fixture.orgA}/skill-databases/${skillA.id}/personal/${fixture.owner.id}.sqlite`}),
+        (${fixture.orgA}::uuid, ${mirrorSkillA.id}::uuid, 'organization', null,
+         ${`${fixture.orgA}/skill-databases/${mirrorSkillA.id}/organization.sqlite`}),
+        (${fixture.orgB}::uuid, ${skillB.id}::uuid, 'organization', null,
+         ${`${fixture.orgB}/skill-databases/${skillB.id}/organization.sqlite`})
+    `;
     await seedPersonalLabel({ orgId: fixture.orgA, owner: fixture.owner, skillId: skillA.id, path: "private/rls" });
     await integrationSql`
       insert into model_provider_connections
@@ -320,6 +347,48 @@ describe("Postgres tenant isolation", () => {
       return tx<Array<{ path: string }>>`select path from personal_labels order by path`;
     });
     expect(paths).toEqual([]);
+  });
+
+  it("keeps personal Skill Database declarations and realms private without an admin override", async () => {
+    const readAs = (orgId: string, userId: string) =>
+      integrationSql.begin(async (tx) => {
+        await tx.unsafe(`set local role ${role}`);
+        await tx`
+          select set_config('app.org_id', ${orgId}, true),
+                 set_config('app.user_id', ${userId}, true)
+        `;
+        const declarations = await tx<Array<{ skill_id: string }>>`
+          select skill_id from skill_database_schemas order by skill_id
+        `;
+        const tables = await tx<Array<{ table_name: string }>>`
+          select table_name from skill_database_tables order by table_name
+        `;
+        const realms = await tx<Array<{ skill_id: string; owner_id: string | null }>>`
+          select skill_id, owner_id from skill_database_realms order by skill_id
+        `;
+        return { declarations, tables, realms };
+      });
+
+    await expect(readAs(fixture.orgA, fixture.owner.id)).resolves.toEqual({
+      declarations: [{ skill_id: skillA.id }, { skill_id: mirrorSkillA.id }].sort((a, b) =>
+        a.skill_id.localeCompare(b.skill_id)
+      ),
+      tables: [{ table_name: "private_notes" }, { table_name: "shared_notes" }],
+      realms: [
+        { skill_id: skillA.id, owner_id: fixture.owner.id },
+        { skill_id: mirrorSkillA.id, owner_id: null },
+      ].sort((a, b) => a.skill_id.localeCompare(b.skill_id)),
+    });
+    await expect(readAs(fixture.orgA, fixture.admin.id)).resolves.toEqual({
+      declarations: [{ skill_id: mirrorSkillA.id }],
+      tables: [{ table_name: "shared_notes" }],
+      realms: [{ skill_id: mirrorSkillA.id, owner_id: null }],
+    });
+    await expect(readAs(fixture.orgB, fixture.outsider.id)).resolves.toEqual({
+      declarations: [{ skill_id: skillB.id }],
+      tables: [{ table_name: "foreign_notes" }],
+      realms: [{ skill_id: skillB.id, owner_id: null }],
+    });
   });
 
   it("keeps projects and their attached skills private from same-org admins", async () => {

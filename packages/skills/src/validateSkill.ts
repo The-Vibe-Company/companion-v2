@@ -111,6 +111,7 @@ function parseCompanionManifest(f: RawFindings, fallback: { summary: string; req
       display: result.data.display,
       requirements: result.data.requirements,
       environment: result.data.environment,
+      database: result.data.database,
       dependencies: result.data.legacyDependencySlugs.length ? companionDependencySlugs(result.data) : result.data.dependencies,
       changelog: result.data.metadata.changelog,
       commands: result.data.commands,

@@ -84,6 +84,9 @@ DECLARE
     'public.companion_signal_project_provider_change(uuid,text,uuid,public.model_provider_connection_scope,text,text)'::regprocedure
   ];
   worker_functions regprocedure[] := ARRAY[
+    'public.companion_claim_skill_database_object_deletions(integer,integer)'::regprocedure,
+    'public.companion_complete_skill_database_object_deletion(text,uuid)'::regprocedure,
+    'public.companion_defer_skill_database_object_deletion(text,uuid)'::regprocedure,
     'public.companion_heartbeat_skill_run_worker(text,integer)'::regprocedure,
     'public.companion_heartbeat_skill_run_worker(text,integer,integer)'::regprocedure,
     'public.companion_heartbeat_skill_run_worker(text,integer,integer,integer)'::regprocedure,
@@ -361,6 +364,9 @@ BEGIN
   -- Claims, exact-lease admission, heartbeats, cleanup and discovery belong only to the worker.
   EXECUTE format(
     'GRANT EXECUTE ON FUNCTION
+      public.companion_claim_skill_database_object_deletions(integer, integer),
+      public.companion_complete_skill_database_object_deletion(text, uuid),
+      public.companion_defer_skill_database_object_deletion(text, uuid),
       public.companion_heartbeat_skill_run_worker(text, integer),
       public.companion_heartbeat_skill_run_worker(text, integer, integer),
       public.companion_heartbeat_skill_run_worker(text, integer, integer, integer),

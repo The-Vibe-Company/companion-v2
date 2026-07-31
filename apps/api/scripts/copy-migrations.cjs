@@ -18,6 +18,13 @@ copyFileSync(
   join(apiRoot, "dist", "runtime-role-grants.sql"),
 );
 
+// Skill Databases run in an isolated worker. tsup bundles the pool but cannot discover the
+// URL-constructed worker module, so copy that runtime next to the API bundle.
+copyFileSync(
+  join(repoRoot, "packages", "skilldb", "src", "worker.mjs"),
+  join(apiRoot, "dist", "worker.mjs"),
+);
+
 // Bundled Companion skill: tsup inlines @companion/* into dist/index.js, so the skill source must
 // sit next to the bundle for companionSkillDir() to find it (it probes ./companion-skill).
 const skillSource = join(repoRoot, "packages", "companion-skill", "skill");
