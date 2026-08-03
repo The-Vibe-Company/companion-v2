@@ -55,8 +55,10 @@ describe("buildPublicInstallPrompt", () => {
     expect(prompt).toContain("Claude Code, Codex, OpenCode, OpenClaw, or Hermes");
     expect(prompt).toContain("~/.openclaw/skills/<slug>");
     expect(prompt).toContain("~/.hermes/skills/<slug>");
+    expect(prompt).toContain("Hermes is global-only");
     expect(prompt).toContain("do not offer project scope for Hermes");
     expect(prompt).toContain("<workspace>/skills/<slug>");
+    expect(prompt).not.toContain("and whether to install globally or in the current project, then show");
   });
 });
 
