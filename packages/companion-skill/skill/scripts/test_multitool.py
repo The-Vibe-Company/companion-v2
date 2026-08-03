@@ -43,6 +43,13 @@ REGISTRY = {
         "skillsDir": {"user": "~/.openclaw/skills", "project": "skills"},
         "format": "skill-md",
     },
+    "hermes": {
+        "displayName": "Hermes",
+        "detect": ["~/.hermes"],
+        "skillsDir": {"user": "~/.hermes/skills"},
+        "recursive": True,
+        "format": "skill-md",
+    },
 }
 
 
@@ -77,6 +84,7 @@ class RegistryTests(EnvSandbox):
         self.assertIn("codex", registry)
         self.assertIn("opencode", registry)
         self.assertIn("openclaw", registry)
+        self.assertIn("hermes", registry)
         self.assertEqual(registry["claude-code"]["skillsDir"]["user"], "~/.claude/skills")
         self.assertEqual(registry["opencode"]["detect"], ["~/.config/opencode"])
         self.assertEqual(registry["opencode"]["skillsDir"]["user"], "~/.agents/skills")
@@ -84,6 +92,9 @@ class RegistryTests(EnvSandbox):
         self.assertEqual(registry["openclaw"]["detect"], ["~/.openclaw"])
         self.assertEqual(registry["openclaw"]["skillsDir"]["user"], "~/.openclaw/skills")
         self.assertEqual(registry["openclaw"]["skillsDir"]["project"], "skills")
+        self.assertEqual(registry["hermes"]["detect"], ["~/.hermes"])
+        self.assertEqual(registry["hermes"]["skillsDir"], {"user": "~/.hermes/skills"})
+        self.assertTrue(registry["hermes"]["recursive"])
 
     def test_detect_tools_finds_only_present_tools(self) -> None:
         (self.home / ".claude").mkdir()
@@ -96,6 +107,11 @@ class RegistryTests(EnvSandbox):
         self.assertEqual(
             companion_lib.detect_tools(REGISTRY),
             ["claude-code", "codex", "openclaw", "opencode"],
+        )
+        (self.home / ".hermes").mkdir()
+        self.assertEqual(
+            companion_lib.detect_tools(REGISTRY),
+            ["claude-code", "codex", "hermes", "openclaw", "opencode"],
         )
 
     def test_resolve_target_dir_user_and_project(self) -> None:
@@ -112,6 +128,29 @@ class RegistryTests(EnvSandbox):
         self.assertEqual(openclaw_user_dir, self.home / ".openclaw" / "skills" / "demo")
         openclaw_project_dir = companion_lib.resolve_target_dir("openclaw", "project", "demo", project_root, REGISTRY)
         self.assertEqual(openclaw_project_dir, project_root / "skills" / "demo")
+        hermes_user_dir = companion_lib.resolve_target_dir("hermes", "user", "demo", None, REGISTRY)
+        self.assertEqual(hermes_user_dir, self.home / ".hermes" / "skills" / "demo")
+        with self.assertRaisesRegex(SystemExit, "no 'project' skills directory"):
+            companion_lib.resolve_target_dir("hermes", "project", "demo", project_root, REGISTRY)
+
+    def test_plan_targets_skips_unsupported_hermes_project_scope(self) -> None:
+        project_root = self.root / "repo"
+        project_root.mkdir()
+        self.assertEqual(
+            install_skill.plan_targets(
+                ["hermes", "claude-code"],
+                ["user", "project"],
+                project_root,
+                REGISTRY,
+            ),
+            [
+                ("hermes", "user"),
+                ("claude-code", "user"),
+                ("claude-code", "project"),
+            ],
+        )
+        with self.assertRaisesRegex(SystemExit, "none of the selected tools support"):
+            install_skill.plan_targets(["hermes"], ["project"], project_root, REGISTRY)
 
     def test_resolve_target_dir_rejects_unknown_tool(self) -> None:
         with self.assertRaises(SystemExit):
@@ -129,14 +168,14 @@ class ConfigTests(EnvSandbox):
     def test_round_trip_tool_config(self) -> None:
         self.assertEqual(companion_lib.load_tool_config(), [])
         path = companion_lib.save_tool_config(
-            ["opencode", "openclaw", "codex", "claude-code", "codex"],
+            ["opencode", "openclaw", "hermes", "codex", "claude-code", "codex"],
             detected_at="2026-06-26T00:00:00Z",
         )
         self.assertTrue(path.exists())
         saved = json.loads(path.read_text())
-        self.assertEqual(saved["tools"], ["claude-code", "codex", "openclaw", "opencode"])  # sorted + deduped
+        self.assertEqual(saved["tools"], ["claude-code", "codex", "hermes", "openclaw", "opencode"])  # sorted + deduped
         self.assertEqual(saved["detectedAt"], "2026-06-26T00:00:00Z")
-        self.assertEqual(companion_lib.load_tool_config(), ["claude-code", "codex", "openclaw", "opencode"])
+        self.assertEqual(companion_lib.load_tool_config(), ["claude-code", "codex", "hermes", "openclaw", "opencode"])
 
 
 class CredentialResolutionTests(EnvSandbox):
@@ -418,17 +457,19 @@ class FanOutTests(EnvSandbox):
         pkg = self._package()
         project_root = self.root / "repo"
         project_root.mkdir()
-        plan = [("claude-code", "user"), ("codex", "user"), ("opencode", "user"), ("claude-code", "project"), ("opencode", "project")]
+        plan = [("claude-code", "user"), ("codex", "user"), ("opencode", "user"), ("hermes", "user"), ("claude-code", "project"), ("opencode", "project")]
         results = install_skill.fan_out_install(pkg, "demo", plan, REGISTRY, project_root, {}, {}, force=False)
         self.assertTrue(all(row["status"] == "installed" for row in results))
         self.assertTrue((self.home / ".claude" / "skills" / "demo" / "SKILL.md").exists())
         self.assertTrue((self.home / ".codex" / "skills" / "demo" / "SKILL.md").exists())
         self.assertTrue((self.home / ".agents" / "skills" / "demo" / "SKILL.md").exists())
+        self.assertTrue((self.home / ".hermes" / "skills" / "demo" / "SKILL.md").exists())
         self.assertTrue((project_root / ".claude" / "skills" / "demo" / "SKILL.md").exists())
         self.assertTrue((project_root / ".agents" / "skills" / "demo" / "SKILL.md").exists())
         self.assertEqual([], self._swap_dirs(self.home / ".claude" / "skills"))
         self.assertEqual([], self._swap_dirs(self.home / ".codex" / "skills"))
         self.assertEqual([], self._swap_dirs(self.home / ".agents" / "skills"))
+        self.assertEqual([], self._swap_dirs(self.home / ".hermes" / "skills"))
 
     def test_deploy_to_target_restores_and_deletes_backup_after_rename_failure(self) -> None:
         pkg = self._package()

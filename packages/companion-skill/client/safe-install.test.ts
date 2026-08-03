@@ -194,6 +194,21 @@ describe("atomic public skill install", () => {
     })).toBe(join(homedir(), ".openclaw", "skills", "safe-skill"));
   });
 
+  it("resolves Hermes skills in its global source of truth only", () => {
+    expect(resolvePublicSkillDestination({
+      slug: "safe-skill",
+      tool: "hermes",
+      scope: "global",
+    })).toBe(join(homedir(), ".hermes", "skills", "safe-skill"));
+
+    expect(() => resolvePublicSkillDestination({
+      slug: "safe-skill",
+      tool: "hermes",
+      scope: "project",
+      projectRoot: "/tmp/project",
+    })).toThrow(/project scope is unsupported/);
+  });
+
   it("requires explicit replacement consent and swaps only the selected package", async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "companion-public-install-"));
     const first = installPublicSkillZip({

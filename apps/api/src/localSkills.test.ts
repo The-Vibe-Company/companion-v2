@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.29.0");
+    expect(pkg.version).toBe("1.30.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -126,8 +126,9 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("guided onboarding");
-    expect(changelog).toContain("registered user and current-project roots");
+    expect(changelog).toContain("Hermes");
+    expect(changelog).toContain("~/.hermes/skills");
+    expect(changelog).toContain("nested Hermes category skills");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
@@ -150,7 +151,10 @@ describe("companion skill package + row", () => {
     expect(row.prompts.install).toContain("{workspaceId}");
     expect(row.prompts.install).not.toContain("{token}");
     expect(row.prompts.install).toContain("@auth/agent-cli@0.5.1");
-    expect(row.prompts.install).toContain("Claude Code, Codex, OpenCode, or OpenClaw");
+    expect(row.prompts.install).toContain("Claude Code, Codex, OpenCode, OpenClaw, or Hermes");
+    expect(row.prompts.install).toContain("Hermes is global-only");
+    expect(row.prompts.install).toContain("do not offer project scope for Hermes");
+    expect(row.prompts.install).toContain("~/.hermes/skills/<slug>");
     expect(row.prompts.install).toContain("OpenCode");
     expect(row.prompts.install).toContain("OpenClaw");
     expect(row.prompts.install).toContain(pkg.version);

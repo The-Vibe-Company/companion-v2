@@ -33,7 +33,7 @@ const CENTRAL_SIGNATURE = 0x02014b50;
 const LOCAL_SIGNATURE = 0x04034b50;
 const WIN32_RESERVED_BASENAME = /^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])$/i;
 
-export type PublicInstallTool = "claude-code" | "codex" | "opencode" | "openclaw";
+export type PublicInstallTool = "claude-code" | "codex" | "opencode" | "openclaw" | "hermes";
 export type PublicInstallScope = "global" | "project";
 
 export interface PublicInstallPrerequisites {
@@ -328,6 +328,12 @@ function libraryParts(tool: PublicInstallTool, scope: PublicInstallScope): strin
   if (tool === "claude-code") return [".claude", "skills"];
   if (tool === "codex") return [".codex", "skills"];
   if (tool === "openclaw") return scope === "global" ? [".openclaw", "skills"] : ["skills"];
+  if (tool === "hermes") {
+    if (scope === "project") {
+      throw new Error("Hermes skills use the global ~/.hermes/skills directory; project scope is unsupported");
+    }
+    return [".hermes", "skills"];
+  }
   return [".agents", "skills"];
 }
 

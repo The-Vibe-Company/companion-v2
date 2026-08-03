@@ -25,6 +25,13 @@
       "detect": ["~/.openclaw"],
       "skillsDir": { "user": "~/.openclaw/skills", "project": "skills" },
       "format": "skill-md"
+    },
+    "hermes": {
+      "displayName": "Hermes",
+      "detect": ["~/.hermes"],
+      "skillsDir": { "user": "~/.hermes/skills" },
+      "recursive": true,
+      "format": "skill-md"
     }
   }
 }

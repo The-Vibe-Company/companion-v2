@@ -2,7 +2,7 @@
 name: companion
 description: "Use when managing local SKILL.md packages with Companion: validate, publish, update, resolve skill dependencies, declare the secrets and environment variables a skill needs, install updates, audit skills, check workspace versions, or self-update this Companion skill through the Companion workspace API."
 license: MIT
-compatibility: claude-code codex opencode openclaw
+compatibility: claude-code codex opencode openclaw hermes
 allowed-tools: read_file write_file run_shell
 ---
 
@@ -149,7 +149,8 @@ with `workspace`, `companion`, `integrity`, `skills`, `actions`, and `errors`.
 
 Self-update covers every existing user-global Companion copy in the registered tool locations
 (`~/.claude/skills/companion`, `~/.codex/skills/companion`, `~/.agents/skills/companion`,
-`~/.openclaw/skills/companion`, and future entries in `scripts/tools.json`). It does not silently add
+`~/.openclaw/skills/companion`, `~/.hermes/skills/companion`, and future entries in
+`scripts/tools.json`). It does not silently add
 Companion to a tool where the folder is absent. The bootstrap verifies every existing copy against
 its own installed integrity baseline, downloads and verifies the official package once, stages every
 outdated target, and swaps all targets as one transaction. A failure rolls every swapped target back;
@@ -348,8 +349,9 @@ For `local_review`:
 1. Preserve the absolute root of the user's current project before entering this Companion package
    directory, then run `python3 scripts/onboarding_scan.py --project "<absolute current project root>"`.
    Never substitute the Companion package directory or a nested working directory. The scanner
-   reads only the Claude Code, Codex, and OpenCode global directories from `scripts/tools.json` plus
-   those tools' directories under that explicit project root. It labels untracked folders as
+   reads only the Claude Code, Codex, OpenCode, and Hermes global directories from
+   `scripts/tools.json` plus supported project directories under that explicit project root. Hermes
+   category directories are traversed within `~/.hermes/skills` only. It labels untracked folders as
    candidates; it does not prove who authored them.
 2. Review every returned candidate with the user. When the same slug has different checksums, the
    entries have `status: "conflict"`: stop and have the user choose the intended copy before any
@@ -420,8 +422,9 @@ treat a close-named skill as its replacement.
 record that only has a single `installPath` is read as one `claude-code`/`user` target. There are two
 lockfile levels, same shape:
 
-- **User-scope** installs (`~/.claude/skills`, `~/.codex/skills`, `~/.agents/skills` for OpenCode, and
-  `~/.openclaw/skills` for OpenClaw) live in `~/.companion/skills.lock.json`.
+- **User-scope** installs (`~/.claude/skills`, `~/.codex/skills`, `~/.agents/skills` for OpenCode,
+  `~/.openclaw/skills` for OpenClaw, and `~/.hermes/skills` for Hermes) live in
+  `~/.companion/skills.lock.json`.
 - **Project-scope** installs (`.claude/skills`, `.codex/skills`, `.agents/skills` for OpenCode, or
   `skills` for OpenClaw inside a repo/workspace) live in a **per-project**
   `<repo>/.companion/skills.lock.json`, one per project, with repo-relative paths so it can optionally
@@ -429,14 +432,15 @@ lockfile levels, same shape:
   this lockfile.
 
 The set of tools this machine uses is recorded in `~/.companion/config.json`
-(`{ "schemaVersion": 1, "tools": ["claude-code", "codex", "opencode", "openclaw"] }` — never any
+(`{ "schemaVersion": 1, "tools": ["claude-code", "codex", "opencode", "openclaw", "hermes"] }` — never any
 secret). The supported tools and their on-disk skill directories are declared in this skill's
 `scripts/tools.json` registry, which is extensible: adding a tool there is enough to make it an
 install target. The OpenCode target uses the shared Agent Skills paths (`~/.agents/skills` and
 `.agents/skills`) so the same installed package is discoverable by OpenCode's agent-compatible
 loader. OpenClaw uses `~/.openclaw/skills` for user-global installs and `<workspace>/skills` for
-workspace installs. `scripts/tools.schema.json` is the registry's JSON Schema (referenced via
-`$schema`).
+workspace installs. Hermes uses `~/.hermes/skills` as its recursive, user-global source of truth and
+does not expose a canonical project scope. `scripts/tools.schema.json` is the registry's JSON Schema
+(referenced via `$schema`).
 
 ### List workspace and local skills
 
@@ -553,6 +557,7 @@ secrets, creates `skill_installs`, or runs scripts. Surface declared prerequisit
 5. Ask **Global** or **This project** before writing. Resolve the selected tool's canonical skills
    directory, reject a symlink in the chosen root or either destination ancestor, and prove the
    physical destination remains inside that root before staging and again before replacement.
+   Hermes is global-only: use `~/.hermes/skills/<slug>` and do not offer project scope for it.
    Confirm before replacing an existing folder, stage on the same filesystem, then use an atomic
    rename with rollback. Do not install dependencies.
 6. Report the installed slug/version/checksum and list required and optional env/secrets plus
@@ -583,7 +588,7 @@ python3 scripts/bootstrap.py --summary
 Run that script from this skill's package root. It only reads local Companion state and calls the
 skills API with `skills:read`; it does not write files, publish, install, or update anything.
 
-### Install a skill into your tools (Claude Code, Codex, OpenCode, OpenClaw, …)
+### Install a skill into your tools (Claude Code, Codex, OpenCode, OpenClaw, Hermes, …)
 
 Installing a skill deploys its package into **every tool the user works with**, not just the one in
 use right now. Resolve the target tools, confirm with the user, then fan out:
@@ -613,7 +618,7 @@ use right now. Resolve the target tools, confirm with the user, then fan out:
    python3 scripts/install_skill.py <slug> --scope user            # all configured tools, user-global
    python3 scripts/install_skill.py <slug> --scope both            # user-global + the current project/workspace
    python3 scripts/install_skill.py <slug> --scope project --project /path/to/openclaw-workspace
-   python3 scripts/install_skill.py <slug> --tools claude-code,codex,opencode,openclaw --json
+   python3 scripts/install_skill.py <slug> --tools claude-code,codex,opencode,openclaw,hermes --json
    python3 scripts/install_skill.py <slug> --confirm-secrets --report
    ```
 
@@ -630,7 +635,7 @@ use right now. Resolve the target tools, confirm with the user, then fan out:
 4. **Report once.** After the dependency-first fan-out, send a single aggregate
    `POST /skills/{slug}/install` for the requested root skill with the
    installed version and an `agent` label listing the tools (for example
-   `"Claude Code, Codex, OpenCode, OpenClaw"`). The workspace tracks installs per user, not per tool,
+   `"Claude Code, Codex, OpenCode, OpenClaw, Hermes"`). The workspace tracks installs per user, not per tool,
    so this stays one call even across multiple tools and projects. (`install_skill.py --report` can
    send it for you.)
 
@@ -1200,7 +1205,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.29.0","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.30.0","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 
