@@ -62,6 +62,12 @@ class OnboardingScanTests(unittest.TestCase):
                                 "project": "skills",
                             }
                         },
+                        "hermes": {
+                            "skillsDir": {
+                                "user": str(self.home / ".hermes" / "skills"),
+                            },
+                            "recursive": True,
+                        },
                     }
                 }
             ),
@@ -140,6 +146,25 @@ class OnboardingScanTests(unittest.TestCase):
 
         self.assertEqual(2, len(rows))
         self.assertEqual({"conflict"}, {row["status"] for row in rows})
+
+    def test_discovers_nested_hermes_skills_but_ignores_hub_state(self):
+        nested = self.skill(
+            self.home / ".hermes/skills/research/web-search",
+            "web-search",
+        )
+        self.skill(self.home / ".hermes/skills/.hub/quarantine/blocked", "blocked")
+
+        rows = self.run_scan()
+
+        self.assertEqual(["web-search"], [row["slug"] for row in rows])
+        self.assertEqual(
+            {
+                "tool": "hermes",
+                "scope": "user",
+                "path": str(nested),
+            },
+            rows[0]["copies"][0],
+        )
 
     def test_excludes_companion_and_lockfile_tracked_by_path_or_slug_checksum(self):
         self.skill(self.home / ".claude/skills/companion", "different", skill_id="COMPANION-ID")

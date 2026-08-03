@@ -150,7 +150,8 @@ describe("companion skill package + row", () => {
     expect(row.prompts.install).toContain("{workspaceId}");
     expect(row.prompts.install).not.toContain("{token}");
     expect(row.prompts.install).toContain("@auth/agent-cli@0.5.1");
-    expect(row.prompts.install).toContain("Claude Code, Codex, OpenCode, or OpenClaw");
+    expect(row.prompts.install).toContain("Claude Code, Codex, OpenCode, OpenClaw, or Hermes");
+    expect(row.prompts.install).toContain("Hermes is global-only");
     expect(row.prompts.install).toContain("OpenCode");
     expect(row.prompts.install).toContain("OpenClaw");
     expect(row.prompts.install).toContain(pkg.version);

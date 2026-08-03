@@ -41,12 +41,13 @@ type PromptMode = "default" | "reinstall";
 type CopiedKind = "prompt" | "reinstall";
 
 /** The assistants the install dialog can target. Their display name is reported as the install agent. */
-type AssistantId = "claude-code" | "codex" | "opencode" | "openclaw";
+type AssistantId = "claude-code" | "codex" | "opencode" | "openclaw" | "hermes";
 const ASSISTANTS: Record<AssistantId, { name: string; vendor: string; hint: string }> = {
   "claude-code": { name: "Claude Code", vendor: "anthropic", hint: "paste into Claude Code" },
   codex: { name: "Codex", vendor: "openai", hint: "paste into Codex" },
   opencode: { name: "OpenCode", vendor: "opencode", hint: "paste into OpenCode" },
   openclaw: { name: "OpenClaw", vendor: "openclaw", hint: "paste into OpenClaw" },
+  hermes: { name: "Hermes", vendor: "nous-research", hint: "paste into Hermes" },
 };
 
 /** Anthropic mark, shown on the Claude Code chooser tile (copied from the design). */
@@ -95,11 +96,20 @@ function OpenClawLogo() {
   );
 }
 
+function HermesLogo() {
+  return (
+    <span className="ls-tile__logo" style={{ background: "#5b4b7f" }} aria-hidden="true">
+      <Icon name="bot" size={18} style={{ color: "#fff" }} />
+    </span>
+  );
+}
+
 function AssistantLogo({ id }: { id: AssistantId }) {
   if (id === "claude-code") return <ClaudeLogo />;
   if (id === "codex") return <CodexLogo />;
   if (id === "opencode") return <OpenCodeLogo />;
-  return <OpenClawLogo />;
+  if (id === "openclaw") return <OpenClawLogo />;
+  return <HermesLogo />;
 }
 
 function MarkdownNotes({ value }: { value: string }) {
@@ -269,7 +279,7 @@ export function LocalSkillsView({
         <div className="ls-banner ls-banner--ok" role="status">
           <Icon name="check-circle-2" size={16} className="ls-banner__ico" />
           <span className="ls-banner__text">
-            <strong>Connected.</strong> Claude Code, Codex, OpenCode, OpenClaw, and your agents can manage the
+            <strong>Connected.</strong> Claude Code, Codex, OpenCode, OpenClaw, Hermes, and your agents can manage the
             skills on this machine.
           </span>
         </div>
@@ -283,7 +293,7 @@ export function LocalSkillsView({
           <span className="ls-banner__stack">
             <span className="ls-banner__title">Companion is not connected to your assistant</span>
             <span className="ls-banner__sub">
-              Claude Code, Codex, OpenCode, and OpenClaw can&rsquo;t manage the skills on this machine yet.
+              Claude Code, Codex, OpenCode, OpenClaw, and Hermes can&rsquo;t manage the skills on this machine yet.
               It takes about a minute.
             </span>
           </span>
@@ -480,7 +490,7 @@ function InstallGate({
 
         <div className="ls-gate__body">
           <p className="ls-gate__lede">
-            Install the skill on this machine so Claude Code, Codex, OpenCode, OpenClaw, and your
+            Install the skill on this machine so Claude Code, Codex, OpenCode, OpenClaw, Hermes, and your
             agents can manage the skills here. You give it a short prompt once. It only acts after
             confirming changes with you.
           </p>

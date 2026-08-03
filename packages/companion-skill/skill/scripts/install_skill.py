@@ -2,7 +2,8 @@
 """Install (or update) a published workspace skill into every local tool at once.
 
 This is the deterministic fan-out behind multi-tool installs. Given a skill slug it downloads the
-package once and deploys it into each configured tool (Claude Code, Codex, OpenCode, OpenClaw, …) at
+package once and deploys it into each configured tool (Claude Code, Codex, OpenCode, OpenClaw,
+Hermes, …) at
 the requested scope (user-global and/or the current project or workspace), then records every install
 location in the right lockfile so updates and audits stay tool-aware:
 
@@ -209,13 +210,23 @@ def deploy_to_target(package_dir: Path, target_dir: Path, install_root: Path) ->
                 remove_swap_path(backup)
 
 
-def plan_targets(tools: list[str], scopes: list[str], project_root: Path | None) -> list[tuple[str, str]]:
+def plan_targets(
+    tools: list[str],
+    scopes: list[str],
+    project_root: Path | None,
+    registry: dict[str, Any],
+) -> list[tuple[str, str]]:
     plan: list[tuple[str, str]] = []
     for scope in scopes:
         if scope == "project" and project_root is None:
             fail("project scope requested but no project or workspace root was found (pass --project)")
         for tool in tools:
-            plan.append((tool, scope))
+            if (registry.get(tool, {}).get("skillsDir") or {}).get(scope):
+                plan.append((tool, scope))
+    if not plan:
+        fail(
+            f"none of the selected tools support the requested scope(s): {', '.join(scopes)}"
+        )
     return plan
 
 
@@ -713,7 +724,7 @@ def resolve_tools(args_tools: str | None, registry: dict[str, Any]) -> list[str]
         fail(
             "no tools configured. Detected on this machine: "
             f"{hint}. Confirm the set with the user, then write {config_path()} "
-            "(or pass --tools claude-code,codex,opencode,openclaw)."
+            "(or pass --tools claude-code,codex,opencode,openclaw,hermes)."
         )
     unknown = [tool for tool in wanted if tool not in registry]
     if unknown:
@@ -767,7 +778,7 @@ def main() -> None:
             else default_project_or_workspace_root()
         )
 
-    install_target_plan = plan_targets(tools, scopes, project_root)
+    install_target_plan = plan_targets(tools, scopes, project_root, registry)
 
     # Resolve prior records through workspace_lock_entry so customization detection still works on
     # activeWorkspaceId-, legacy URL-, or flat-keyed lockfiles (not only workspace_id/api_url keys).
