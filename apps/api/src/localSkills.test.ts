@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.31.0");
+    expect(pkg.version).toBe("1.33.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -126,11 +126,21 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("read-write sharing");
-    expect(changelog).toContain("opaque realm selectors");
+    expect(changelog).toContain("Hermes");
+    expect(changelog).toContain("project-only install target");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
+    const databaseChanges = manifest.metadata?.changelog
+      ?.find((entry) => entry.version === "1.31.0")
+      ?.changes?.join("\n") ?? "";
+    expect(databaseChanges).toContain("read-write sharing");
+    expect(databaseChanges).toContain("opaque realm selectors");
+    const hermesChanges = manifest.metadata?.changelog
+      ?.find((entry) => entry.version === "1.32.0")
+      ?.changes?.join("\n") ?? "";
+    expect(hermesChanges).toContain("~/.hermes/skills");
+    expect(hermesChanges).toContain("nested Hermes category skills");
     const lockChanges = manifest.metadata?.changelog?.find((entry) => entry.version === "1.26.4")?.changes?.join("\n") ?? "";
     expect(lockChanges).toContain("credential-lock acquisition");
     expect(lockChanges).toContain("another process releases the shared lock");
@@ -150,7 +160,10 @@ describe("companion skill package + row", () => {
     expect(row.prompts.install).toContain("{workspaceId}");
     expect(row.prompts.install).not.toContain("{token}");
     expect(row.prompts.install).toContain("@auth/agent-cli@0.5.1");
-    expect(row.prompts.install).toContain("Claude Code, Codex, OpenCode, or OpenClaw");
+    expect(row.prompts.install).toContain("Claude Code, Codex, OpenCode, OpenClaw, or Hermes");
+    expect(row.prompts.install).toContain("Hermes is global-only");
+    expect(row.prompts.install).toContain("do not offer project scope for Hermes");
+    expect(row.prompts.install).toContain("~/.hermes/skills/<slug>");
     expect(row.prompts.install).toContain("OpenCode");
     expect(row.prompts.install).toContain("OpenClaw");
     expect(row.prompts.install).toContain(pkg.version);

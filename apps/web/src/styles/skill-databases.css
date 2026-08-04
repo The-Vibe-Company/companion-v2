@@ -290,8 +290,8 @@
   flex: none;
   align-items: center;
   margin: 10px;
-  border-color: var(--color-warning-line);
-  background: var(--color-warning-tint);
+  border-color: var(--color-warn-line);
+  background: var(--color-warn-tint);
 }
 .sdb-notice--revoked span { flex: 1; }
 .sdb-error {

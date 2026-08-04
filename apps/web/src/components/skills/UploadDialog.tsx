@@ -56,12 +56,13 @@ function fmtSize(bytes: number): string {
   return (bytes / 1024 / 1024).toFixed(1) + " MB";
 }
 
-/** Where a skill gets installed locally (machine / Claude Code / Codex / OpenCode / OpenClaw). */
+/** Where a skill gets installed locally (machine / Claude Code / Codex / OpenCode / OpenClaw / Hermes). */
 const UP_TARGETS = [
   { id: "claude", name: "Claude Code", icon: "sparkles", path: (id: string) => `~/.claude/skills/${id}` },
   { id: "codex", name: "Codex", icon: "code", path: (id: string) => `~/.codex/skills/${id}` },
   { id: "opencode", name: "OpenCode", icon: "terminal", path: (id: string) => `~/.agents/skills/${id}` },
   { id: "openclaw", name: "OpenClaw", icon: "bot", path: (id: string) => `~/.openclaw/skills/${id}` },
+  { id: "hermes", name: "Hermes", icon: "bot", path: (id: string) => `~/.hermes/skills/${id}` },
   { id: "local", name: "Local folder", icon: "folder", path: (id: string) => `./skills/${id}` },
 ] as const;
 type TargetId = (typeof UP_TARGETS)[number]["id"];
@@ -1752,7 +1753,7 @@ Use the installed Companion helper skill and its bundled scripts/companion-agent
 
 Workflow:
 1. From the installed Companion helper root, connect with {"action":"connect","apiUrl":"${base}","workspaceId":"${workspaceId}","name":"<the agent you are>"}. The delegated device flow requests skills:read constrained to workspace ${workspaceId} and stores only the non-secret {issuer, agentId} reference in credentials.json.
-2. Use the helper's install_skill.py workflow to install exactly ${id}@${version}. Ask which tools and whether global, project, or both before writing. The helper downloads through the bundled client's one-use skills:read transfer ticket, verifies the package, and performs the atomic install.
+2. Use the helper's install_skill.py workflow to install exactly ${id}@${version}. Ask which tools before writing. For Claude Code, Codex, OpenCode, and OpenClaw, also ask whether global, project, or both. Hermes is global-only at ~/.hermes/skills/<slug>; do not offer project scope for Hermes. The helper downloads through the bundled client's one-use skills:read transfer ticket, verifies the package, and performs the atomic install.
 3. Run the server secret preflight before downloading or mutating local files. The first secret operation must request secrets:read constrained to workspace ${workspaceId}; stop if required configuration is missing and report optional warnings.
 4. Show the metadata-only plan once and ask for one global confirmation. Redeem the one-time secret grant only after confirmation, through the helper's private pipe, and commit the package with its .env projection atomically. Never print, log, pass through argv, or persist a secret anywhere else.
 5. Confirm SKILL.md is at the package root and report the ${updating ? "updated" : "installed"} locations. Use install_skill.py --report (or the bundled client's registered POST /skills/${encodeURIComponent(id)}/install operation) with {"version":"${version}","agent":"<the agent you are>","source":"agent"} so Companion records the install.
@@ -1824,7 +1825,7 @@ Agent Auth is mandatory for this prompt. Do not mint a PAT, inject a bearer toke
               ) : (
                 <>
                   {actionVerb} <span className="mono">{id}@{version}</span> on your machine, Claude Code,
-                  Codex, OpenCode, or OpenClaw.
+                  Codex, OpenCode, OpenClaw, or Hermes.
                 </>
               )}
             </p>

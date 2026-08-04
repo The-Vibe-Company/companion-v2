@@ -206,6 +206,57 @@ describe("SQLite WASM skill database runtime", () => {
     })).resolves.toMatchObject({ rows: [[1]] });
   });
 
+  it("classifies a shared-deadline abort as a retryable timeout", async () => {
+    await expect(runtime.execute({
+      image: null,
+      tables: { state: stateTable },
+      schemaGeneration: 1,
+      fileSchemaGeneration: 0,
+      sql: "WITH RECURSIVE loop(x) AS (VALUES(1) UNION ALL SELECT x + 1 FROM loop) SELECT max(x) FROM loop",
+      params: [],
+      mode: "read",
+      limits,
+      signal: AbortSignal.timeout(20),
+    })).rejects.toEqual(expect.objectContaining<Partial<SkillDatabaseError>>({ code: "timeout" }));
+
+    await expect(runtime.execute({
+      image: null,
+      tables: { state: stateTable },
+      schemaGeneration: 1,
+      fileSchemaGeneration: 0,
+      sql: "SELECT 1",
+      params: [],
+      mode: "read",
+      limits,
+    })).resolves.toMatchObject({ rows: [[1]] });
+  });
+
+  it("classifies an in-flight worker crash as retryable unavailability", async () => {
+    const source = `
+      import { parentPort } from "node:worker_threads";
+      parentPort.postMessage({ ready: true });
+      parentPort.on("message", () => { throw new Error("intentional worker crash"); });
+    `;
+    const crashing = new SqliteWasmSkillDatabaseRuntime(1, {
+      workerUrl: new URL(`data:text/javascript,${encodeURIComponent(source)}`),
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await expect(crashing.execute({
+        image: null,
+        tables: { state: stateTable },
+        schemaGeneration: 1,
+        fileSchemaGeneration: 0,
+        sql: "SELECT 1",
+        params: [],
+        mode: "read",
+        limits,
+      })).rejects.toEqual(expect.objectContaining<Partial<SkillDatabaseError>>({ code: "overloaded" }));
+    } finally {
+      await crashing.close();
+    }
+  });
+
   it("bounds queued tasks while a worker is occupied", async () => {
     const constrained = new SqliteWasmSkillDatabaseRuntime(1, {
       maxQueuedTasks: 1,

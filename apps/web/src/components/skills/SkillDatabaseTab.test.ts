@@ -190,6 +190,13 @@ describe("SkillDatabaseTab", () => {
     const add = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
       .find((button) => button.textContent?.includes("Add row"));
     expect(add?.disabled).toBe(true);
+    const view = container.querySelector<HTMLButtonElement>('[aria-label="View row 1"]')!;
+    await act(async () => {
+      view.click();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("View shared_log");
+    expect(container.textContent).toContain("This row is read-only");
   });
 
   it("pages by 50 rows without interpolating the offset into SQL", async () => {
@@ -415,6 +422,12 @@ describe("SkillDatabaseTab", () => {
     expect(add?.disabled).toBe(true);
     expect(container.textContent).toContain("Archived skill databases are read-only");
     expect(container.textContent).toContain("Manage sharing");
+    const view = container.querySelector<HTMLButtonElement>('[aria-label="View row 1"]')!;
+    await act(async () => {
+      view.click();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("View private_notes");
   });
 
   it("saves an explicit member selection from the sharing drawer", async () => {
@@ -454,6 +467,32 @@ describe("SkillDatabaseTab", () => {
       await Promise.resolve();
     });
     expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
+  it("moves focus into delete confirmation when it replaces the trigger", async () => {
+    const container = await mount();
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[aria-label="Edit row 1"]')!.click();
+      await Promise.resolve();
+    });
+    const deleteRow = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.includes("Delete row"))!;
+    await act(async () => {
+      deleteRow.click();
+      await Promise.resolve();
+    });
+    const keepRow = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.includes("Keep row"))!;
+    expect(document.activeElement).toBe(keepRow);
+    expect(container.querySelector('[role="dialog"]')?.contains(document.activeElement)).toBe(true);
+    await act(async () => {
+      keepRow.click();
+      await Promise.resolve();
+    });
+    const returnedDeleteRow = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.includes("Delete row"))!;
+    expect(document.activeElement).toBe(returnedDeleteRow);
+    expect(container.querySelector('[role="dialog"]')?.contains(document.activeElement)).toBe(true);
   });
 
   it("returns to My data when a shared realm is revoked during consultation", async () => {

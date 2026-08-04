@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Discover untracked local skills for Companion's guided onboarding.
 
-The scan is intentionally bounded to the three agent roots declared by tools.json
-for the current user and current project. It never searches parent projects or
-the rest of the filesystem.
+The scan is intentionally bounded to registered agent roots in tools.json for
+the current user and current project. It never searches parent projects or the
+rest of the filesystem.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from typing import Any
 
 import companion_lib
 
-ONBOARDING_TOOLS = ("claude-code", "codex", "opencode")
+ONBOARDING_TOOLS = ("claude-code", "codex", "opencode", "hermes")
 COMPANION_SLUG = "companion"
 COMPANION_MANIFEST = Path(__file__).resolve().parent.parent / "companion.json"
 MAX_SKILL_FILES = 2_000
@@ -152,6 +152,40 @@ def _bounded_registry_children(root: Path) -> list[Path]:
     return sorted(children, key=lambda item: item.name)
 
 
+def _bounded_registry_skills(root: Path, recursive: bool) -> list[Path]:
+    """Find package roots without allowing recursive registries to grow unboundedly."""
+    if not recursive:
+        return _bounded_registry_children(root)
+
+    skills: list[Path] = []
+    entry_count = 0
+    pending = [(root, 0)]
+    while pending:
+        current, depth = pending.pop()
+        if depth > MAX_SKILL_DEPTH:
+            raise ScanLimitError("registry_depth_limit")
+        try:
+            with os.scandir(current) as iterator:
+                children = []
+                for entry in iterator:
+                    entry_count += 1
+                    if entry_count > MAX_REGISTRY_ENTRIES:
+                        raise ScanLimitError("registry_entry_limit")
+                    if entry.name.startswith(".") or entry.is_symlink():
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        children.append(Path(entry.path))
+        except OSError as exc:
+            raise UnsafeSkillDirectory("registry root cannot be read") from exc
+
+        for child in sorted(children, key=lambda item: item.name, reverse=True):
+            if (child / "SKILL.md").is_file():
+                skills.append(child)
+            else:
+                pending.append((child, depth + 1))
+    return sorted(skills, key=lambda item: item.as_posix())
+
+
 def _bounded_dir_checksum(path: Path, root: Path) -> str:
     """Match compute_dir_checksum for normal packages while enforcing onboarding scan limits."""
     digest = hashlib.sha256()
@@ -264,7 +298,7 @@ def scan(
         if not root.is_dir() or root.is_symlink():
             continue
         try:
-            root_children = _bounded_registry_children(root)
+            root_children = _bounded_registry_skills(root, bool(registry[tool].get("recursive")))
         except ScanLimitError as exc:
             blocked.append(
                 {

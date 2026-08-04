@@ -35,6 +35,22 @@ function deserializeResult(result: SkillDatabaseRuntimeResult & { image: Uint8Ar
   };
 }
 
+function timeoutFailure(cause: unknown): SkillDatabaseError {
+  return cause instanceof SkillDatabaseError
+    ? cause
+    : new SkillDatabaseError("timeout", "skill database statement timed out", { cause });
+}
+
+function workerFailure(cause: unknown): SkillDatabaseError {
+  return cause instanceof SkillDatabaseError
+    ? cause
+    : new SkillDatabaseError(
+      "overloaded",
+      "skill database worker became unavailable; retry later",
+      { cause },
+    );
+}
+
 export class SqliteWasmSkillDatabaseRuntime implements SkillDatabaseRuntime {
   private readonly slots: WorkerSlot[] = [];
   private readonly queue: QueuedTask[] = [];
@@ -129,10 +145,10 @@ export class SqliteWasmSkillDatabaseRuntime implements SkillDatabaseRuntime {
       else task.reject(new SkillDatabaseError(message.error?.code ?? "sql_error", message.error?.message ?? "SQLite worker failed"));
       this.dispatch();
     });
-    slot.worker.on("error", (error) => this.replaceFailedSlot(slot, error));
+    slot.worker.on("error", (error) => this.replaceFailedSlot(slot, workerFailure(error)));
     slot.worker.on("exit", (code) => {
       if (!this.closed && code !== 0 && this.slots.includes(slot)) {
-        this.replaceFailedSlot(slot, new Error(`SQLite worker exited with code ${code}`));
+        this.replaceFailedSlot(slot, workerFailure(new Error(`SQLite worker exited with code ${code}`)));
       }
     });
     return slot;
@@ -226,11 +242,11 @@ export class SqliteWasmSkillDatabaseRuntime implements SkillDatabaseRuntime {
         const queuedIndex = this.queue.indexOf(task);
         if (queuedIndex >= 0) {
           this.queue.splice(queuedIndex, 1);
-          reject(input.signal?.reason ?? new Error("skill database statement aborted"));
+          reject(timeoutFailure(input.signal?.reason));
           return;
         }
         const slot = this.slots.find((candidate) => candidate.task === task);
-        if (slot) this.replaceFailedSlot(slot, input.signal?.reason ?? new Error("skill database statement aborted"));
+        if (slot) this.replaceFailedSlot(slot, timeoutFailure(input.signal?.reason));
       };
       if (input.signal?.aborted) {
         abort();

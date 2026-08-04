@@ -315,7 +315,20 @@ function RowDrawer({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const keepRowRef = useRef<HTMLButtonElement>(null);
+  const deleteRowRef = useRef<HTMLButtonElement>(null);
+  const wasConfirmingDeleteRef = useRef(false);
   const primary = new Set(table.primary_key);
+
+  useEffect(() => {
+    if (confirmDelete) {
+      wasConfirmingDeleteRef.current = true;
+      keepRowRef.current?.focus();
+    } else if (wasConfirmingDeleteRef.current) {
+      wasConfirmingDeleteRef.current = false;
+      deleteRowRef.current?.focus();
+    }
+  }, [confirmDelete]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -388,11 +401,11 @@ function RowDrawer({
             confirmDelete ? (
               <div className="sdb-delete-confirm" role="alert">
                 <span>Delete this row permanently?</span>
-                <button type="button" className="btn-sec" disabled={saving} onClick={() => setConfirmDelete(false)}>Keep row</button>
+                <button ref={keepRowRef} type="button" className="btn-sec" disabled={saving} onClick={() => setConfirmDelete(false)}>Keep row</button>
                 <button type="button" className="btn-danger" disabled={saving} onClick={remove}>Delete</button>
               </div>
             ) : (
-              <button type="button" className="btn-ghost sdb-danger-link" onClick={() => setConfirmDelete(true)}>
+              <button ref={deleteRowRef} type="button" className="btn-ghost sdb-danger-link" onClick={() => setConfirmDelete(true)}>
                 <Icon name="trash-2" size={14} />Delete row
               </button>
             )
@@ -904,11 +917,14 @@ export function SkillDatabaseTab({
                           <button
                             className="iconbtn"
                             type="button"
-                            aria-label={`Edit row ${page * PAGE_SIZE + rowIndex + 1}`}
-                            disabled={!editable}
-                            onClick={() => setDrawer({ kind: "row", mode: "edit", row })}
+                            aria-label={`${editable ? "Edit" : "View"} row ${page * PAGE_SIZE + rowIndex + 1}`}
+                            onClick={() => setDrawer({
+                              kind: "row",
+                              mode: editable ? "edit" : "view",
+                              row,
+                            })}
                           >
-                            <Icon name="pencil" size={14} />
+                            <Icon name={editable ? "pencil" : "eye"} size={14} />
                           </button>
                         </td>
                       </tr>

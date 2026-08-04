@@ -72,4 +72,36 @@ describe("InstallDialog", () => {
     expect(openClaw?.getAttribute("aria-checked")).toBe("true");
     expect(container.textContent).toContain("~/.openclaw/skills/research-agent");
   });
+
+  it("selects Hermes and shows its global source-of-truth destination", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+
+    await act(async () => {
+      root.render(
+        React.createElement(InstallDialog, {
+          skill,
+          workspaceId: "org-1",
+          onClose: vi.fn(),
+          onReported: vi.fn(),
+        }),
+      );
+    });
+
+    const manual = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Download package"),
+    );
+    await act(async () => manual?.click());
+
+    const hermes = Array.from(container.querySelectorAll<HTMLElement>('[role="radio"]')).find((radio) =>
+      radio.textContent?.includes("Hermes"),
+    );
+    expect(hermes).toBeTruthy();
+    await act(async () => hermes?.click());
+
+    expect(hermes?.getAttribute("aria-checked")).toBe("true");
+    expect(container.textContent).toContain("~/.hermes/skills/research-agent");
+  });
 });
