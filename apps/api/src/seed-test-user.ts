@@ -128,6 +128,7 @@ async function seedSkill(
       display: spec.title ? { name: spec.title, summary: spec.description } : undefined,
       icon: spec.icon,
       notes: spec.notes,
+      database: spec.database,
       name: skill.slug,
       version: spec.version,
       changelog: [{ version: spec.version, date: "2026-06-24", changes: [`Seed ${skill.slug} ${spec.version}.`] }],

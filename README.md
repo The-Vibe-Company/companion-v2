@@ -110,22 +110,24 @@ to Companion previews and brand assets.
 Conductor's Run button calls `bash scripts/dev-conductor.sh` — a **native, Docker-free** launcher
 (modeled on `~/Dev/monkapps`). It starts a per-workspace Postgres cluster, plus optional native MinIO
 and Mailpit, under `.conductor-pg/`, applies migrations, seeds the test user, then runs the API + worker + web
-with `concurrently`. All ports derive from `CONDUCTOR_PORT` (fallback `3000` outside Conductor):
+with `concurrently`. Local workspace ports derive from `CONDUCTOR_PORT`; isolated cloud workspaces, where
+`CONDUCTOR_PORT` is intentionally absent, use the fixed range beginning at `3000`:
 
 | Service | Port |
 |---|---|
-| Web | `CONDUCTOR_PORT` |
-| API | `CONDUCTOR_PORT + 1` |
-| Postgres | `CONDUCTOR_PORT + 2` |
-| MinIO API | `CONDUCTOR_PORT + 3` |
-| MinIO console | `CONDUCTOR_PORT + 4` |
-| Mailpit SMTP | `CONDUCTOR_PORT + 5` |
-| Mailpit UI | `CONDUCTOR_PORT + 6` |
+| Web | `BASE` |
+| API | `BASE + 1` |
+| Postgres | `BASE + 2` |
+| MinIO API | `BASE + 3` |
+| MinIO console | `BASE + 4` |
+| Mailpit SMTP | `BASE + 5` |
+| Mailpit UI | `BASE + 6` |
 
 Auth cookies are namespaced with a `companion-<workspace>` prefix so sessions never leak between
-workspaces. If `minio`/`mailpit` aren't installed (the `setup` step best-effort `brew install`s them),
-the stack still runs — S3 uploads are disabled and email falls back to `EMAIL_PROVIDER=log`. A cleanup
-trap stops every native service on Ctrl+C. Archiving a workspace runs
+workspaces. In cloud the web process binds `0.0.0.0` so Conductor can forward its preview port; the API,
+Postgres, MinIO, and Mailpit remain loopback-only. If `minio`/`mailpit` aren't installed (the `setup` step
+best-effort `brew install`s them), the stack still runs — S3 uploads are disabled and email falls back to
+`EMAIL_PROVIDER=log`. A cleanup trap stops every native service on Ctrl+C. Archiving a workspace runs
 `bash scripts/dev-conductor.sh archive`, which stops the services and removes `.conductor-pg/`.
 
 The non-Conductor `pnpm dev` path is unchanged and still uses Docker Compose (`scripts/dev-stack.sh`).

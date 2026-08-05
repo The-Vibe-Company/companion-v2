@@ -24,6 +24,7 @@ import {
   type PublicInstallTool,
 } from "./safe-install.js";
 import {
+  companionGrantAllows,
   resolveOperation,
   resolveTicketedDownloadTarget,
   type CompanionCapability,
@@ -181,16 +182,16 @@ async function ensureCapability(
   client: AgentAuthClient,
   context: WorkspaceContext,
   capability: CompanionCapability,
-): Promise<void> {
+): Promise<CompanionCapability> {
   const agentId = agentReference(context).agentId;
   const status = await client.agentStatus(agentId);
   const existing = status.agent_capability_grants.find(
     (grant) =>
-      grant.capability === capability &&
+      companionGrantAllows(grant.capability, capability) &&
       grant.status === "active" &&
       (capability === "public-skills:install" || constraintMatches(grant.constraints, context.workspaceId)),
   );
-  if (existing) return;
+  if (existing && companionGrantAllows(existing.capability, capability)) return existing.capability;
 
   const requested =
     capability === "public-skills:install"
@@ -208,6 +209,7 @@ async function ensureCapability(
   if (!result.granted.includes(capability)) {
     throw new Error(`capability ${capability} was not approved`);
   }
+  return capability;
 }
 
 async function agentFetch(input: {
@@ -219,11 +221,11 @@ async function agentFetch(input: {
   body?: Uint8Array | string;
   contentType?: string;
 }): Promise<Response> {
-  await ensureCapability(input.client, input.context, input.capability);
+  const grantedCapability = await ensureCapability(input.client, input.context, input.capability);
   const url = `${input.context.workspace.apiUrl.replace(/\/$/, "")}${input.path}`;
   const signed = await input.client.signJwt({
     agentId: agentReference(input.context).agentId,
-    capabilities: [input.capability],
+    capabilities: [grantedCapability],
     audience: agentReference(input.context).issuer,
   });
   return fetch(url, {

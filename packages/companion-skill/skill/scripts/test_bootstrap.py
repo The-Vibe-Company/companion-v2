@@ -31,6 +31,7 @@ TEST_BASELINE_FILES = [
     "scripts/companion_lib.py",
     "scripts/skill_guard.py",
 ]
+TEST_BOOTSTRAP_BYTES = b"# bootstrap\n"
 
 
 def skill_row(version="1.0.0", integrity=None):
@@ -520,13 +521,16 @@ class BootstrapTests(unittest.TestCase):
             skill_md = "---\nname: companion\n---\n"
             manifest = json.dumps({"version": "1.1.0"})
             bootstrap_script = "# bootstrap\n"
+            check_script = "# check\n"
+            companion_lib = "# lib\n"
+            skill_guard = "# guard\n"
             files = {
                 "SKILL.md": f"sha256:{sha256(skill_md.encode('utf-8')).hexdigest()}",
                 "companion.json": f"sha256:{sha256(manifest.encode('utf-8')).hexdigest()}",
                 "scripts/bootstrap.py": f"sha256:{sha256(bootstrap_script.encode('utf-8')).hexdigest()}",
-                "scripts/check_updates.py": f"sha256:{sha256(b'# check\n').hexdigest()}",
-                "scripts/companion_lib.py": f"sha256:{sha256(b'# lib\n').hexdigest()}",
-                "scripts/skill_guard.py": f"sha256:{sha256(b'# guard\n').hexdigest()}",
+                "scripts/check_updates.py": f"sha256:{sha256(check_script.encode('utf-8')).hexdigest()}",
+                "scripts/companion_lib.py": f"sha256:{sha256(companion_lib.encode('utf-8')).hexdigest()}",
+                "scripts/skill_guard.py": f"sha256:{sha256(skill_guard.encode('utf-8')).hexdigest()}",
             }
             baseline = json.dumps({"schemaVersion": 1, "version": "1.1.0", "files": files})
             official_files.update(files)
@@ -535,9 +539,9 @@ class BootstrapTests(unittest.TestCase):
                 zf.writestr("SKILL.md", skill_md)
                 zf.writestr("companion.json", manifest)
                 zf.writestr("scripts/bootstrap.py", bootstrap_script)
-                zf.writestr("scripts/check_updates.py", "# check\n")
-                zf.writestr("scripts/companion_lib.py", "# lib\n")
-                zf.writestr("scripts/skill_guard.py", "# guard\n")
+                zf.writestr("scripts/check_updates.py", check_script)
+                zf.writestr("scripts/companion_lib.py", companion_lib)
+                zf.writestr("scripts/skill_guard.py", skill_guard)
                 zf.writestr(bootstrap.INTEGRITY_BASELINE_FILE, baseline)
 
         with (
@@ -561,7 +565,7 @@ class BootstrapTests(unittest.TestCase):
             files = {
                 "SKILL.md": f"sha256:{sha256(skill_md.encode('utf-8')).hexdigest()}",
                 "companion.json": f"sha256:{sha256(manifest.encode('utf-8')).hexdigest()}",
-                "scripts/bootstrap.py": f"sha256:{sha256(b'# bootstrap\n').hexdigest()}",
+                "scripts/bootstrap.py": f"sha256:{sha256(TEST_BOOTSTRAP_BYTES).hexdigest()}",
             }
             baseline = json.dumps({"schemaVersion": 1, "version": "1.1.0", "files": files})
             official_files.update(files)
@@ -597,7 +601,7 @@ class BootstrapTests(unittest.TestCase):
             files = {
                 "SKILL.md": f"sha256:{sha256(skill_md.encode('utf-8')).hexdigest()}",
                 "companion.json": f"sha256:{sha256(manifest.encode('utf-8')).hexdigest()}",
-                "scripts/bootstrap.py": f"sha256:{sha256(b'# bootstrap\n').hexdigest()}",
+                "scripts/bootstrap.py": f"sha256:{sha256(TEST_BOOTSTRAP_BYTES).hexdigest()}",
             }
             baseline = json.dumps({"schemaVersion": 1, "version": "1.1.0", "files": files})
             official_files.update(files)
@@ -882,7 +886,7 @@ class BootstrapTests(unittest.TestCase):
             files = {
                 "SKILL.md": f"sha256:{sha256(skill_md.encode('utf-8')).hexdigest()}",
                 "companion.json": f"sha256:{sha256(manifest.encode('utf-8')).hexdigest()}",
-                "scripts/bootstrap.py": f"sha256:{sha256(b'# bootstrap\n').hexdigest()}",
+                "scripts/bootstrap.py": f"sha256:{sha256(TEST_BOOTSTRAP_BYTES).hexdigest()}",
             }
             with zipfile.ZipFile(destination, "w") as zf:
                 zf.writestr("SKILL.md", skill_md)

@@ -16,7 +16,8 @@
       "postcss": "8.5.18",
       "sharp": "0.35.3",
       "vite": "6.4.3",
-      "shell-quote": "1.10.0"
+      "shell-quote": "1.10.0",
+      "undici@>=7.0.0 <7.29.0": "7.29.0"
     }
   },
   "scripts": {

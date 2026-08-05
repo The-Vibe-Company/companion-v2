@@ -36,6 +36,7 @@ import { FileExplorer } from "./fileview";
 import { MarkdownView } from "./markdown";
 import { Discussion } from "./discussion";
 import { SkillSecretConfiguration } from "../secrets/SkillSecretConfiguration";
+import { SkillDatabaseTab } from "./SkillDatabaseTab";
 import {
   SKILL_ACTIONS,
   resolveSkillActions,
@@ -141,7 +142,7 @@ function DetailMoreMenu({
 }
 
 /** The detail page's top-level sections, shown as a tab bar under the breadcrumb. */
-type DetailTab = "overview" | "files" | "dependencies" | "activity" | "discussion" | "sessions";
+type DetailTab = "overview" | "files" | "tables" | "dependencies" | "activity" | "discussion" | "sessions";
 
 // Only the active tabpanel is mounted (the Files explorer + scroll-spy shouldn't run
 // hidden). All tabs therefore point `aria-controls` at one stable panel id so no tab
@@ -498,6 +499,9 @@ export function DetailView({
   const tabs: TabDef[] = [
     { id: "overview", label: "Overview", icon: "package" },
     { id: "files", label: "Files", icon: "file-text", count: files.length },
+    ...(skill.databaseAvailable && (skill.databaseTableCount ?? 0) > 0
+      ? [{ id: "tables" as const, label: "Tables", icon: "database", count: skill.databaseTableCount }]
+      : []),
     ...(showDeps
       ? [{ id: "dependencies" as const, label: "Dependencies", icon: "layers", count: reqN + usedN }]
       : []),
@@ -509,7 +513,9 @@ export function DetailView({
   ];
   // Guard against tabs becoming unavailable while this detail remains mounted.
   const activeTab: DetailTab =
-    (tab === "dependencies" && !showDeps) || (tab === "sessions" && !runSkillEnabled)
+    (tab === "dependencies" && !showDeps)
+    || (tab === "sessions" && !runSkillEnabled)
+    || (tab === "tables" && (!skill.databaseAvailable || (skill.databaseTableCount ?? 0) === 0))
       ? "overview"
       : tab;
 
@@ -584,7 +590,13 @@ export function DetailView({
       <DetailTabs tabs={tabs} active={activeTab} onSelect={setTab} />
 
       <div
-        className={"dpanel " + (activeTab === "files" ? "dpanel--files" : "dpanel--doc")}
+        className={"dpanel " + (
+          activeTab === "files"
+            ? "dpanel--files"
+            : activeTab === "tables"
+              ? "dpanel--database"
+              : "dpanel--doc"
+        )}
         role="tabpanel"
         id={DETAIL_PANEL_ID}
         aria-labelledby={`dtab-${activeTab}`}
@@ -696,6 +708,15 @@ export function DetailView({
             files={files}
             requestedPath={null}
             contentUrlForPath={currentVersion ? (path) => skillFileContentUrl(skill.id, currentVersion, path) : undefined}
+          />
+        )}
+
+        {activeTab === "tables" && (
+          <SkillDatabaseTab
+            slug={skill.id}
+            meId={me.id}
+            scope={skill.scope}
+            archived={skill.archived}
           />
         )}
 

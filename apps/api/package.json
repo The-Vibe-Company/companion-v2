@@ -12,9 +12,10 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "coverage": "vitest run --coverage --coverage.reporter=text-summary --coverage.reporter=json-summary",
-    "test:integration": "COMPANION_INTEGRATION_TESTS=1 vitest run --config vitest.integration.config.ts --exclude test/integration/rls.integration.test.ts && COMPANION_INTEGRATION_TESTS=1 COMPANION_DATABASE_POOL_MAX=1 vitest run --config vitest.integration.config.ts test/integration/rls.integration.test.ts"
+    "test:integration": "COMPANION_INTEGRATION_TESTS=1 vitest run --config vitest.integration.config.ts --exclude test/integration/rls.integration.test.ts --exclude test/integration/skillDatabases.integration.test.ts && COMPANION_INTEGRATION_TESTS=1 COMPANION_DATABASE_POOL_MAX=10 vitest run --config vitest.integration.config.ts test/integration/skillDatabases.integration.test.ts && COMPANION_INTEGRATION_TESTS=1 COMPANION_DATABASE_POOL_MAX=1 vitest run --config vitest.integration.config.ts test/integration/rls.integration.test.ts test/integration/skillDatabases.integration.test.ts"
   },
   "dependencies": {
+    "@sqlite.org/sqlite-wasm": "3.50.4-build1",
     "@aws-sdk/client-s3": "^3.744.0",
     "@aws-sdk/s3-request-presigner": "^3.744.0",
     "@better-auth/drizzle-adapter": "^1.6.23",
@@ -27,6 +28,7 @@
     "@companion/email": "workspace:*",
     "@companion/github": "workspace:*",
     "@companion/sandbox": "workspace:*",
+    "@companion/skilldb": "workspace:*",
     "@companion/skills": "workspace:*",
     "@companion/storage": "workspace:*",
     "@hono/node-server": "^1.18.2",

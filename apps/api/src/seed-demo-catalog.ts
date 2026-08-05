@@ -1,4 +1,4 @@
-import type { SkillIcon, SkillRequirement } from "@companion/contracts";
+import type { SkillDatabaseDeclaration, SkillIcon, SkillRequirement } from "@companion/contracts";
 
 export interface SeedSkillFile {
   path: string;
@@ -16,6 +16,7 @@ export interface SeedSkillVersionSpec {
   title?: string;
   icon?: SkillIcon;
   notes?: string;
+  database?: SkillDatabaseDeclaration;
   files?: SeedSkillFile[];
 }
 
@@ -223,6 +224,57 @@ export const DEMO_SKILL_CATALOG: SeedSkillSpec[] = [
     { scope: "org", labels: ["qa/web"] },
   ),
   singleVersion(
+    "feedback-tracker",
+    {
+      version: "1.0.0",
+      description: "Track organization feedback while keeping each member's triage notes private.",
+      body: "# feedback-tracker\n\nStores shared feedback and personal triage state in hosted SQLite tables.",
+      license: "MIT",
+      title: "Feedback tracker",
+      icon: "square-stack",
+      notes: "## Tables\n\nUse Organization for shared feedback and My data for private triage notes.",
+      database: {
+        tables: {
+          feedback_items: {
+            audience: "organization",
+            columns: {
+              id: { type: "integer", nullable: false },
+              title: { type: "text", nullable: false },
+              status: { type: "text", nullable: false, default: "new" },
+              score: { type: "real", nullable: true },
+              metadata: { type: "json", nullable: true },
+              created_at: { type: "timestamp", nullable: false },
+            },
+            primary_key: ["id"],
+            unique: [],
+          },
+          my_triage: {
+            audience: "personal",
+            columns: {
+              id: { type: "integer", nullable: false },
+              note: { type: "text", nullable: false },
+              priority: { type: "integer", nullable: false, default: 0 },
+              resolved: { type: "boolean", nullable: false, default: false },
+              context: { type: "json", nullable: true },
+              updated_at: { type: "timestamp", nullable: false },
+            },
+            primary_key: ["id"],
+            unique: [],
+          },
+          triage_scratchpad: {
+            audience: "personal",
+            columns: {
+              message: { type: "text", nullable: false },
+            },
+            primary_key: [],
+            unique: [],
+          },
+        },
+      },
+    },
+    { scope: "org", labels: ["growth/feedback", "testing/tables"] },
+  ),
+  singleVersion(
     "legacy-import",
     {
       version: "1.0.0",
@@ -276,6 +328,36 @@ export const DEMO_SKILL_CATALOG: SeedSkillSpec[] = [
       license: "MIT",
     },
     { scope: "personal" },
+  ),
+  singleVersion(
+    "private-research-ledger",
+    {
+      version: "1.0.0",
+      description: "Keep a private structured ledger of research sources and confidence notes.",
+      body: "# private-research-ledger\n\nMaintains a creator-private SQLite ledger for local database testing.",
+      tools: ["read_file"],
+      license: "MIT",
+      title: "Private research ledger",
+      icon: "file-text",
+      database: {
+        tables: {
+          sources: {
+            audience: "personal",
+            columns: {
+              id: { type: "integer", nullable: false },
+              url: { type: "text", nullable: false },
+              summary: { type: "text", nullable: true },
+              confidence: { type: "real", nullable: false, default: 0.5 },
+              reviewed: { type: "boolean", nullable: false, default: false },
+              captured_at: { type: "timestamp", nullable: false },
+            },
+            primary_key: ["id"],
+            unique: [["url"]],
+          },
+        },
+      },
+    },
+    { scope: "personal", labels: ["research/data"] },
   ),
 ];
 

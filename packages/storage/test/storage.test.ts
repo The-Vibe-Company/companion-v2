@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   deleteSkillArchive,
   headSkillArchive,
+  getSkillArchiveWithEtag,
   InvalidSkillArchiveRangeError,
   isStoragePreconditionFailure,
   publicSkillReleaseKey,
@@ -10,6 +11,7 @@ import {
   putPublicSkillReleaseSnapshot,
   resolveSkillArchiveByteRange,
   skillArchiveKey,
+  skillDatabaseKey,
   streamSkillArchive,
 } from "../src";
 
@@ -27,6 +29,44 @@ describe("skillArchiveKey", () => {
     expect(skillArchiveKey({ orgId: "org-1", slug: "pdf-extract", version: "1.2.3" })).toBe(
       "org-1/pdf-extract/1.2.3.tar.gz",
     );
+  });
+});
+
+describe("skillDatabaseKey", () => {
+  it("separates organization and member realms below the owning skill", () => {
+    expect(skillDatabaseKey({
+      orgId: "org-1",
+      skillId: "skill-1",
+      realmId: "realm-1",
+      audience: "organization",
+    })).toBe("org-1/skill-databases/skill-1/organization/realm-1.db");
+    expect(skillDatabaseKey({
+      orgId: "org-1",
+      skillId: "skill-1",
+      realmId: "realm-2",
+      audience: "personal",
+      userId: "user-1",
+    })).toBe("org-1/skill-databases/skill-1/personal/user-1/realm-2.db");
+  });
+});
+
+describe("getSkillArchiveWithEtag", () => {
+  it("returns exact mutable bytes with their observed ETag and maps missing objects to null", async () => {
+    await expect(getSkillArchiveWithEtag({
+      key: "org-1/skill-databases/skill-1/org.db",
+      client: {
+        send: async () => ({
+          ETag: '"generation-1"',
+          Body: { transformToByteArray: async () => new Uint8Array([1, 2, 3]) },
+        }),
+      } as never,
+      config: storageConfig,
+    })).resolves.toEqual({ body: Buffer.from([1, 2, 3]), etag: '"generation-1"' });
+    await expect(getSkillArchiveWithEtag({
+      key: "missing",
+      client: { send: async () => { throw Object.assign(new Error("missing"), { name: "NoSuchKey" }); } } as never,
+      config: storageConfig,
+    })).resolves.toBeNull();
   });
 });
 

@@ -51,6 +51,32 @@ export function skillArchiveKey(input: { orgId: string; slug: string; version: s
   return `${input.orgId}/${input.slug}/${input.version}.tar.gz`;
 }
 
+function assertStorageKeySegment(value: string, label: string): void {
+  if (!value || value.includes("/") || value.includes("\\") || value.includes("..")) {
+    throw new Error(`${label} is invalid`);
+  }
+}
+
+/** Mutable SQLite file for one skill database realm. */
+export function skillDatabaseKey(input: {
+  orgId: string;
+  skillId: string;
+  realmId: string;
+  audience: "organization" | "personal";
+  userId?: string;
+}): string {
+  assertStorageKeySegment(input.orgId, "skill database org id");
+  assertStorageKeySegment(input.skillId, "skill database skill id");
+  assertStorageKeySegment(input.realmId, "skill database realm id");
+  if (input.audience === "organization") {
+    if (input.userId !== undefined) throw new Error("organization skill database key must not include a user");
+    return `${input.orgId}/skill-databases/${input.skillId}/organization/${input.realmId}.db`;
+  }
+  if (!input.userId) throw new Error("personal skill database key requires a user");
+  assertStorageKeySegment(input.userId, "skill database user id");
+  return `${input.orgId}/skill-databases/${input.skillId}/personal/${input.userId}/${input.realmId}.db`;
+}
+
 const SHA256_CHECKSUM_PATTERN = /^sha256:([0-9a-f]{64})$/;
 
 /**
@@ -386,6 +412,33 @@ export async function getSkillArchive(input: {
   if (!res.Body) throw new Error(`object not found: ${input.key}`);
   const bytes = await res.Body.transformToByteArray();
   return Buffer.from(bytes);
+}
+
+/** Read mutable bytes and the exact ETag used for the next conditional PUT. */
+export async function getSkillArchiveWithEtag(input: {
+  key: string;
+  signal?: AbortSignal;
+  client?: S3Client;
+  config?: StorageConfig;
+}): Promise<{ body: Buffer; etag: string } | null> {
+  const config = input.config ?? getStorageConfig();
+  const client = input.client ?? createStorageClient(config);
+  try {
+    const response = await client.send(
+      new GetObjectCommand({ Bucket: config.bucket, Key: input.key }),
+      { abortSignal: input.signal },
+    );
+    if (!response.Body || !response.ETag) return null;
+    const bytes = await response.Body.transformToByteArray();
+    return { body: Buffer.from(bytes), etag: response.ETag };
+  } catch (error) {
+    const status = typeof error === "object" && error !== null && "$metadata" in error
+      ? (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode
+      : undefined;
+    const name = error instanceof Error ? error.name : "";
+    if (status === 404 || name === "NotFound" || name === "NoSuchKey") return null;
+    throw error;
+  }
 }
 
 export interface SkillArchiveByteRange {

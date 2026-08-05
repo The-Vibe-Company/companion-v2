@@ -2,6 +2,7 @@ import { startBillingSupervisor, type Supervisor } from "./billingSupervisor";
 import { startRunSupervisor } from "./runSupervisor";
 import { startGitHubSupervisor } from "./githubSupervisor";
 import { startProjectSupervisor } from "./projectSupervisor";
+import { startSkillDatabaseCleanupSupervisor } from "./skillDatabaseCleanup";
 
 type SupervisorStart = () => Promise<Supervisor | null>;
 
@@ -20,19 +21,22 @@ export async function startWorkerSupervisors(input: {
   runs?: SupervisorStart;
   github?: SupervisorStart;
   projects?: SupervisorStart;
+  skillDatabases?: SupervisorStart;
 } = {}): Promise<{
   billing: Supervisor | null;
   runs: Supervisor | null;
   github: Supervisor | null;
   projects: Supervisor | null;
+  skillDatabases: Supervisor | null;
 }> {
-  const [billing, runs, github, projects] = await Promise.all([
+  const [billing, runs, github, projects, skillDatabases] = await Promise.all([
     startSafely("billing", input.billing ?? startBillingSupervisor),
     startSafely("run", input.runs ?? startRunSupervisor),
     startSafely("GitHub sync", input.github ?? startGitHubSupervisor),
     startSafely("Project", input.projects ?? startProjectSupervisor),
+    startSafely("Skill Database cleanup", input.skillDatabases ?? startSkillDatabaseCleanupSupervisor),
   ]);
-  return { billing, runs, github, projects };
+  return { billing, runs, github, projects, skillDatabases };
 }
 
 /**
@@ -44,7 +48,8 @@ export function keepWorkerProcessAliveWhenIdle(input: {
   runs: Supervisor | null;
   github?: Supervisor | null;
   projects?: Supervisor | null;
+  skillDatabases?: Supervisor | null;
 }): ReturnType<typeof setInterval> | null {
-  if (input.billing || input.runs || input.github || input.projects) return null;
+  if (input.billing || input.runs || input.github || input.projects || input.skillDatabases) return null;
   return setInterval(() => undefined, 60_000);
 }

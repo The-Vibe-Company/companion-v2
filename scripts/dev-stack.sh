@@ -126,6 +126,9 @@ configure_conductor_env() {
   export S3_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY:-companion-secret}"
   export S3_BUCKET_SKILL_ARCHIVES="${S3_BUCKET_SKILL_ARCHIVES:-skill-archives}"
   export S3_FORCE_PATH_STYLE="${S3_FORCE_PATH_STYLE:-true}"
+  # Local demo content includes hosted database declarations. Keep production's default-off flag,
+  # but enable the feature for local development unless the developer explicitly opted out.
+  export COMPANION_SKILL_DATABASES_ENABLED="${COMPANION_SKILL_DATABASES_ENABLED:-true}"
 
   export EMAIL_PROVIDER="${EMAIL_PROVIDER:-mailpit}"
   export EMAIL_FROM="${EMAIL_FROM:-Companion <noreply@companion.local>}"
@@ -201,6 +204,9 @@ configure_local_env() {
   export S3_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY:-companion-secret}"
   export S3_BUCKET_SKILL_ARCHIVES="${S3_BUCKET_SKILL_ARCHIVES:-skill-archives}"
   export S3_FORCE_PATH_STYLE="${S3_FORCE_PATH_STYLE:-true}"
+  # Local demo content includes hosted database declarations. Keep production's default-off flag,
+  # but enable the feature for local development unless the developer explicitly opted out.
+  export COMPANION_SKILL_DATABASES_ENABLED="${COMPANION_SKILL_DATABASES_ENABLED:-true}"
 
   export EMAIL_PROVIDER="${EMAIL_PROVIDER:-mailpit}"
   export EMAIL_FROM="${EMAIL_FROM:-Companion <noreply@companion.local>}"
@@ -548,6 +554,7 @@ print_env() {
   printf 'NEXT_PUBLIC_COMPANION_API_URL=%s\n' "$NEXT_PUBLIC_COMPANION_API_URL"
   printf 'BETTER_AUTH_URL=%s\n' "$BETTER_AUTH_URL"
   printf 'S3_ENDPOINT=%s\n' "$S3_ENDPOINT"
+  printf 'COMPANION_SKILL_DATABASES_ENABLED=%s\n' "$COMPANION_SKILL_DATABASES_ENABLED"
   printf 'POSTGRES_PORT=%s\n' "$POSTGRES_PORT"
   printf 'MINIO_PORT=%s\n' "$MINIO_PORT"
   printf 'MINIO_CONSOLE_PORT=%s\n' "$MINIO_CONSOLE_PORT"

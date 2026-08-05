@@ -7,6 +7,7 @@ import {
   type CompanionManifest,
   type SkillIcon,
   type SkillRequirement,
+  type SkillDatabaseDeclaration,
 } from "@companion/contracts";
 
 export function uploadDependencyValues(input: {
@@ -37,6 +38,7 @@ export function buildInlineCompanionManifest(input: {
   carriedIcon?: SkillIcon | null;
   carriedRequirements: SkillRequirement[];
   carriedDependencies: string[] | Record<string, string>;
+  carriedDatabase?: SkillDatabaseDeclaration;
   name?: string;
   version?: string;
   companionSkillId?: string;
@@ -54,6 +56,7 @@ export function buildInlineCompanionManifest(input: {
     notes: carriedNotes,
     requirements: input.carriedRequirements,
     dependencies: input.carriedDependencies,
+    database: input.carriedDatabase,
     name: input.name,
     version: input.version,
     icon: input.carriedIcon ?? undefined,

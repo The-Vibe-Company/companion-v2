@@ -117,6 +117,8 @@ GITHUB_APP_CLIENT_SECRET=<secret>
 GITHUB_APP_NAME=<user-facing App name>
 COMPANION_GITHUB_SYNC_ENABLED=true
 COMPANION_GITHUB_APP_MANAGED=false
+# Keep false until this flag-aware API and the matching worker are live on every replica.
+COMPANION_SKILL_DATABASES_ENABLED=false
 
 EMAIL_PROVIDER=resend
 EMAIL_FROM=Companion <noreply@your-domain.example>
@@ -188,6 +190,12 @@ carry the same value on web, API, and worker. Flip Projects to `true` on all thr
 coordinated release; a mismatched web value intentionally hides the surface even when the backend is
 ready.
 
+Skill Databases use a two-phase rollout because `companion.json` normalization is a write path.
+First deploy the migration plus flag-aware API and worker with
+`COMPANION_SKILL_DATABASES_ENABLED=false` to every replica. After that deployment is complete, set
+it to `true` on API and worker and redeploy both. Never mix an enabled API with a replica that
+predates the gate, and do not roll back to a pre-gate build while database declarations exist.
+
 ### `worker`
 
 ```dotenv
@@ -202,6 +210,7 @@ STRIPE_PRO_PRICE_ID=<same live price id as api>
 STRIPE_PORTAL_CONFIGURATION_ID=<same live portal configuration id as api>
 
 COMPANION_SECRETS_MASTER_KEY=<exactly the same key as api>
+COMPANION_SKILL_DATABASES_ENABLED=false
 GITHUB_APP_ID=<GitHub App id>
 GITHUB_APP_PRIVATE_KEY=<base64-encoded PEM; worker only>
 S3_ENDPOINT=<same endpoint as api>

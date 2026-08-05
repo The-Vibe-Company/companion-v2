@@ -200,7 +200,16 @@ import {
   SkillPublicReleaseValidationError,
 } from "@companion/core/services";
 import {
+  describeSkillDatabase,
+  executeSkillDatabaseStatement,
+  getCurrentSkillDatabaseDeclaration,
+  getSkillDatabaseShares,
+  setSkillDatabaseShares,
   SecretConfigurationError,
+  SkillDatabaseError,
+  SkillDatabaseServiceError,
+  type SkillDatabaseRuntime,
+  type SkillDatabaseStorage,
   hasInternalProductAccess,
   loadSecretsMasterKey,
 } from "@companion/core";
@@ -279,6 +288,8 @@ import {
   createGitHubRepositoryInputSchema,
   requestGitHubDestinationSyncInputSchema,
   updateGitHubDestinationInputSchema,
+  skillDatabaseStatementInputSchema,
+  skillDatabaseSharesInputSchema,
 } from "@companion/contracts";
 import { GitHubOAuthClient, githubOAuthConfig, githubSyncEnabled } from "@companion/github";
 import { createModelCatalog } from "@companion/sandbox";
@@ -289,9 +300,10 @@ import {
   runAttachmentKey,
   deleteSkillArchive,
   getSkillArchive,
+  getSkillArchiveWithEtag,
+  isStoragePreconditionFailure,
   headSkillArchive,
   InvalidSkillArchiveRangeError,
-  isStoragePreconditionFailure,
   getOrgLogo,
   publicSkillReleaseKey,
   putPublicSkillReleaseSnapshot,
@@ -300,11 +312,13 @@ import {
   getUserAvatar,
   deleteUserAvatar,
   skillArchiveKey,
+  skillDatabaseKey,
   putSkillArchive,
   resolveSkillArchiveByteRange,
   signedSkillArchiveUrl,
   streamSkillArchive,
 } from "@companion/storage";
+import { SqliteWasmSkillDatabaseRuntime } from "@companion/skilldb";
 import {
   bumpSemver,
   compareSemver,
@@ -381,6 +395,48 @@ import {
 const app = new Hono<{ Variables: ApiVariables }>();
 
 export { app };
+
+let skillDatabaseRuntime: SqliteWasmSkillDatabaseRuntime | null = null;
+function getSkillDatabaseRuntime(): SqliteWasmSkillDatabaseRuntime {
+  skillDatabaseRuntime ??= new SqliteWasmSkillDatabaseRuntime();
+  return skillDatabaseRuntime;
+}
+const lazySkillDatabaseRuntime: SkillDatabaseRuntime = {
+  execute(input) {
+    return getSkillDatabaseRuntime().execute(input);
+  },
+};
+
+const skillDatabaseStorage: SkillDatabaseStorage = {
+  async get(key, signal) {
+    try {
+      return await getSkillArchiveWithEtag({ key, signal });
+    } catch (error) {
+      throw new SkillDatabaseError("storage_unavailable", "skill database storage is unavailable", { cause: error });
+    }
+  },
+  async put(key, body, condition, signal) {
+    try {
+      const etag = await putSkillArchive({
+        key,
+        body,
+        contentType: "application/vnd.sqlite3",
+        ...(condition.ifMatch ? { ifMatch: condition.ifMatch } : {}),
+        preventOverwrite: condition.ifNoneMatch === "*",
+        signal,
+      });
+      return { etag };
+    } catch (error) {
+      if (isStoragePreconditionFailure(error)) {
+        throw new SkillDatabaseError("conflict", "skill database changed while the statement was executing", { cause: error });
+      }
+      throw new SkillDatabaseError("storage_unavailable", "skill database storage is unavailable", { cause: error });
+    }
+  },
+  async delete(key, signal) {
+    await deleteSkillArchive({ key, signal });
+  },
+};
 
 function capabilityRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -628,6 +684,43 @@ function setOrgCookie(c: Context<{ Variables: ApiVariables }>, orgId: string): v
 
 function secretRouteError(c: Context, error: unknown, status = 400): Response {
   return jsonError(c, error, error instanceof SecretConfigurationError ? 503 : status);
+}
+
+function skillDatabaseRouteError(c: Context, error: unknown): Response {
+  if (error instanceof SkillDatabaseError) {
+    const status = {
+      forbidden_statement: 403,
+      timeout: 408,
+      database_full: 413,
+      result_too_large: 413,
+      sql_error: 400,
+      conflict: 409,
+      overloaded: 503,
+      storage_unavailable: 503,
+    }[error.code];
+    return jsonError(c, error, status);
+  }
+  if (error instanceof SkillDatabaseServiceError) {
+    const status = {
+      skill_not_found: 404,
+      skill_database_not_declared: 404,
+      skill_database_no_realm: 404,
+      skill_database_rate_limited: 429,
+      skill_database_archived: 409,
+      skill_database_invalid_share: 400,
+      skill_database_sharing_unavailable: 409,
+      skill_database_disabled: 404,
+    }[error.code];
+    return jsonError(c, error, status);
+  }
+  const message = error instanceof Error ? error.message : "";
+  if (message === "not authenticated" || message.startsWith("personal access tokens")) {
+    return jsonError(c, error, 401);
+  }
+  if (message.startsWith("token is missing the database:")) {
+    return jsonError(c, error, 403);
+  }
+  return jsonError(c, error, 400);
 }
 
 function assertSecretsConfigured(): void {
@@ -2935,19 +3028,34 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
     // forward the current version's declared dependencies and requirements (declared secrets/env
     // setup notes) so an inline edit never silently drops them — this path rebuilds the frontmatter
     // from id/description/body alone (there is no companion.json or frontmatter editor here).
-    const { carriedDependencies, carriedRequirements, carriedDisplay, carriedNotes, carriedIcon, exists } = await withTenant(
+    const { carriedDependencies, carriedRequirements, carriedDisplay, carriedNotes, carriedIcon, carriedDatabase, exists } = await withTenant(
       c,
       async ({ actor: a, orgId: o, database }) => {
         const existing = await getSkillBySlug({ actor: a, orgId: o, slug: input.id, database });
         if (!existing?.current_version)
-          return { carriedDependencies: [], carriedRequirements: [], carriedDisplay: null, carriedNotes: null, carriedIcon: null, exists: !!existing };
+          return {
+            carriedDependencies: [],
+            carriedRequirements: [],
+            carriedDisplay: null,
+            carriedNotes: null,
+            carriedIcon: null,
+            carriedDatabase: { tables: {} },
+            exists: !!existing,
+          };
         const deps = await getSkillDependencies({ actor: a, orgId: o, slug: input.id, database });
+        const carriedDatabase = await getCurrentSkillDatabaseDeclaration({
+          actor: a,
+          orgId: o,
+          slug: input.id,
+          database,
+        });
         return {
           carriedDependencies: deps.requires.map((r) => r.slug),
           carriedRequirements: existing.requirements,
           carriedDisplay: existing.display,
           carriedNotes: existing.notes,
           carriedIcon: existing.icon,
+          carriedDatabase,
           exists: true,
         };
       },
@@ -2964,6 +3072,7 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
       carriedIcon,
       carriedRequirements,
       carriedDependencies: preparedCarriedDependencies.manifestDependencies,
+      carriedDatabase,
       name: input.id,
       version: target.version,
       companionSkillId: target.skillId,
@@ -3444,6 +3553,150 @@ app.post("/v1/local-skills/:key/installed", async (c) => {
     return jsonError(c, error);
   }
 });
+
+// Skill Databases are state capabilities, separate from catalog management. Authenticate before
+// buffering the body so anonymous callers cannot consume the 256 KiB request allowance.
+app.get("/v1/skills/:slug/database", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "database:read");
+    return c.json(await withTenant(
+      c,
+      ({ actor, orgId, database }) => describeSkillDatabase({
+        actor,
+        orgId,
+        slug: c.req.param("slug"),
+        database,
+      }),
+      true,
+    ));
+  } catch (error) {
+    return skillDatabaseRouteError(c, error);
+  }
+});
+
+app.get("/v1/skills/:slug/database/shares", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "database:write");
+    return c.json(await withTenant(
+      c,
+      ({ actor, orgId, database }) => getSkillDatabaseShares({
+        actor,
+        orgId,
+        slug: c.req.param("slug"),
+        database,
+      }),
+      true,
+    ));
+  } catch (error) {
+    return skillDatabaseRouteError(c, error);
+  }
+});
+
+app.put(
+  "/v1/skills/:slug/database/shares",
+  async (c, next) => {
+    try {
+      actorFromContext(c, true);
+      requireScope(c, "database:write");
+      await next();
+    } catch (error) {
+      return skillDatabaseRouteError(c, error);
+    }
+  },
+  bodyLimit({
+    maxSize: 256 * 1024,
+    onError: (c) => jsonError(c, Object.assign(new Error("skill database share request exceeds 256 KiB"), { code: "result_too_large" }), 413),
+  }),
+  async (c) => {
+    try {
+      const input = skillDatabaseSharesInputSchema.parse(await c.req.json());
+      return c.json(await withTenant(
+        c,
+        ({ actor, orgId, database }) => setSkillDatabaseShares({
+          actor,
+          orgId,
+          slug: c.req.param("slug"),
+          userIds: input.user_ids,
+          storageKey: skillDatabaseKey,
+          database,
+        }),
+        true,
+      ));
+    } catch (error) {
+      return skillDatabaseRouteError(c, error);
+    }
+  },
+);
+
+app.post(
+  "/v1/skills/:slug/database/query",
+  async (c, next) => {
+    try {
+      actorFromContext(c, true);
+      requireScope(c, "database:read");
+      await next();
+    } catch (error) {
+      return skillDatabaseRouteError(c, error);
+    }
+  },
+  bodyLimit({
+    maxSize: 256 * 1024,
+    onError: (c) => jsonError(c, Object.assign(new Error("skill database request exceeds 256 KiB"), { code: "result_too_large" }), 413),
+  }),
+  async (c) => {
+    try {
+      const statement = skillDatabaseStatementInputSchema.parse(await c.req.json());
+      return c.json(await executeSkillDatabaseStatement({
+        actor: actorFromContext(c, true),
+        orgId: await orgIdFromContext(c),
+        slug: c.req.param("slug"),
+        statement,
+        mode: "read",
+        runtime: lazySkillDatabaseRuntime,
+        storage: skillDatabaseStorage,
+        storageKey: skillDatabaseKey,
+      }));
+    } catch (error) {
+      return skillDatabaseRouteError(c, error);
+    }
+  },
+);
+
+app.post(
+  "/v1/skills/:slug/database/execute",
+  async (c, next) => {
+    try {
+      actorFromContext(c, true);
+      requireScope(c, "database:write");
+      await next();
+    } catch (error) {
+      return skillDatabaseRouteError(c, error);
+    }
+  },
+  bodyLimit({
+    maxSize: 256 * 1024,
+    onError: (c) => jsonError(c, Object.assign(new Error("skill database request exceeds 256 KiB"), { code: "result_too_large" }), 413),
+  }),
+  async (c) => {
+    try {
+      const statement = skillDatabaseStatementInputSchema.parse(await c.req.json());
+      return c.json(await executeSkillDatabaseStatement({
+        actor: actorFromContext(c, true),
+        orgId: await orgIdFromContext(c),
+        slug: c.req.param("slug"),
+        statement,
+        mode: "write",
+        runtime: lazySkillDatabaseRuntime,
+        storage: skillDatabaseStorage,
+        storageKey: skillDatabaseKey,
+      }));
+    } catch (error) {
+      return skillDatabaseRouteError(c, error);
+    }
+  },
+);
 
 // Secrets metadata/retrieval use `secrets:read`; every Secrets mutation uses `secrets:write`.
 // PAT callers have the same Secrets capabilities as their signed-in user inside the token's workspace.

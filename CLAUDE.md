@@ -118,8 +118,10 @@ For Conductor, use the checked-in `.conductor/settings.toml`: setup runs `corepa
 executes `bash scripts/dev-conductor.sh archive`. The Conductor run path is **native — no Docker**:
 `scripts/dev-conductor.sh` (modeled on `~/Dev/monkapps`) starts a per-workspace Postgres cluster, plus
 optional native MinIO + Mailpit, under `.conductor-pg/`, then launches the API + web via `concurrently`.
-All ports derive from `CONDUCTOR_PORT` (fallback `3000`): web `+0`, API `+1`, Postgres `+2`, MinIO API
-`+3`, MinIO console `+4`, Mailpit SMTP `+5`, Mailpit UI `+6`. Better Auth cookies are namespaced by a
+Local ports derive from `CONDUCTOR_PORT`; isolated cloud workspaces use a fixed base of `3000` because
+`CONDUCTOR_PORT` is absent there: web `+0`, API `+1`, Postgres `+2`, MinIO API `+3`, MinIO console `+4`,
+Mailpit SMTP `+5`, Mailpit UI `+6`. Cloud web binds `0.0.0.0` for the Conductor preview while every
+internal service remains loopback-only. Better Auth cookies are namespaced by a
 `companion-<workspace>` prefix. If `minio`/`mailpit` aren't installed the stack still runs (S3 uploads
 disabled; email falls back to `EMAIL_PROVIDER=log`). A cleanup trap stops every native service on Ctrl+C,
 and `archive` stops them then removes `.conductor-pg/`. The non-Conductor `pnpm dev` path is unchanged and

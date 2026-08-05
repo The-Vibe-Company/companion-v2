@@ -241,6 +241,33 @@ describe("POST /v1/skills identity guard", () => {
   });
 });
 
+describe("Skill Database route authorization", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns 401 before reading a database request from an unauthenticated caller", async () => {
+    serviceMocks.resolveApiToken.mockResolvedValue(null);
+    const response = await app.request("/v1/skills/research-agent/database");
+    expect(response.status).toBe(401);
+  });
+
+  it("requires the dedicated database scope instead of accepting a skills scope", async () => {
+    serviceMocks.resolveApiToken.mockResolvedValue({
+      actor: actorA,
+      orgId: "org-1",
+      scopes: ["skills:read"],
+    });
+    const response = await app.request("/v1/skills/research-agent/database", {
+      headers: { Authorization: "Bearer read" },
+    });
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      error: expect.stringContaining("database:read"),
+    });
+  });
+});
+
 describe("POST /v1/skills with Agent Auth upload ticket", () => {
   beforeEach(() => {
     vi.clearAllMocks();
