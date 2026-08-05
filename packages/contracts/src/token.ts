@@ -4,10 +4,36 @@ import { z } from "zod";
 export const API_TOKEN_PREFIX = "cmp_pat_";
 
 /** Capability scopes a personal access token can carry. */
-export const tokenScopeSchema = z.enum(["skills:read", "skills:write", "secrets:read", "secrets:write"]);
+export const tokenScopeSchema = z.enum([
+  "skills:read",
+  "skills:write",
+  "secrets:read",
+  "secrets:write",
+  "database:read",
+  "database:write",
+]);
 export type TokenScope = z.infer<typeof tokenScopeSchema>;
 
-export const TOKEN_SCOPES: readonly TokenScope[] = ["skills:read", "skills:write", "secrets:read", "secrets:write"] as const;
+export const TOKEN_SCOPES: readonly TokenScope[] = [
+  "skills:read",
+  "skills:write",
+  "secrets:read",
+  "secrets:write",
+  "database:read",
+  "database:write",
+] as const;
+
+/**
+ * Return scopes in canonical order with every implied capability made explicit.
+ *
+ * `database:write` includes `database:read` because DML can observe database state through
+ * predicates, subqueries, conflict handling, and returned rows.
+ */
+export function expandTokenScopes(scopes: readonly TokenScope[]): TokenScope[] {
+  const expanded = new Set(scopes);
+  if (expanded.has("database:write")) expanded.add("database:read");
+  return TOKEN_SCOPES.filter((scope) => expanded.has(scope));
+}
 
 /** A non-empty, validated set of capabilities carried by a personal access token. */
 export const tokenScopesSchema = z.array(tokenScopeSchema).min(1);

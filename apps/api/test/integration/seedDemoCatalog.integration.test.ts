@@ -31,6 +31,7 @@ process.env.S3_ENDPOINT = "http://127.0.0.1:1";
 process.env.S3_ACCESS_KEY_ID = "integration";
 process.env.S3_SECRET_ACCESS_KEY = "integration";
 process.env.S3_BUCKET_SKILL_ARCHIVES = "integration";
+process.env.COMPANION_SKILL_DATABASES_ENABLED = "true";
 
 import { seedDemoContent } from "../../src/seed-test-user";
 
@@ -66,14 +67,14 @@ describe("seeded demo catalog persistence", () => {
     const skills = await integrationDb.query.skills.findMany({
       where: eq(schema.skills.orgId, fixture.orgA),
     });
-    expect(skills.filter((skill) => skill.scope === "org")).toHaveLength(15);
-    expect(skills.filter((skill) => skill.scope === "personal")).toHaveLength(3);
+    expect(skills.filter((skill) => skill.scope === "org")).toHaveLength(16);
+    expect(skills.filter((skill) => skill.scope === "personal")).toHaveLength(4);
 
     const versions = await integrationDb.query.skillVersions.findMany({
       where: eq(schema.skillVersions.orgId, fixture.orgA),
     });
-    expect(versions).toHaveLength(19);
-    expect(new Set(versions.map((version) => `${version.skillId}:${version.version}`)).size).toBe(19);
+    expect(versions).toHaveLength(21);
+    expect(new Set(versions.map((version) => `${version.skillId}:${version.version}`)).size).toBe(21);
     const release = skills.find((skill) => skill.slug === "release-notes")!;
     expect(
       versions.filter((version) => version.skillId === release.id).map((version) => version.version).sort(),
@@ -126,7 +127,30 @@ describe("seeded demo catalog persistence", () => {
       where: and(eq(schema.personalLabels.orgId, fixture.orgA), eq(schema.personalLabels.ownerId, fixture.owner.id)),
     });
     expect(labels.map((label) => label.path)).toContain("growth");
-    expect(personalLabels.map((label) => label.path)).toEqual(expect.arrayContaining(["ideas", "research/sources", "drafts/briefs"]));
+    expect(personalLabels.map((label) => label.path)).toEqual(expect.arrayContaining([
+      "ideas",
+      "research/sources",
+      "research/data",
+      "drafts/briefs",
+    ]));
+
+    const databaseSchemas = await integrationDb.query.skillDatabaseSchemas.findMany({
+      where: eq(schema.skillDatabaseSchemas.orgId, fixture.orgA),
+    });
+    const databaseTables = await integrationDb.query.skillDatabaseTables.findMany({
+      where: eq(schema.skillDatabaseTables.orgId, fixture.orgA),
+    });
+    const databaseSkillSlugById = new Map(skills.map((skill) => [skill.id, skill.slug] as const));
+    expect(databaseSchemas.map((row) => databaseSkillSlugById.get(row.skillId)).sort()).toEqual([
+      "feedback-tracker",
+      "private-research-ledger",
+    ]);
+    expect(databaseTables.map((row) => `${databaseSkillSlugById.get(row.skillId)}:${row.audience}:${row.tableName}`).sort()).toEqual([
+      "feedback-tracker:organization:feedback_items",
+      "feedback-tracker:personal:my_triage",
+      "feedback-tracker:personal:triage_scratchpad",
+      "private-research-ledger:personal:sources",
+    ]);
 
     const richArchive = storage.archives.get(`${fixture.orgA}/release-notes/1.1.0.tar.gz`)!;
     const richFiles = await extractArchiveEntryBuffers(toTar(richArchive));
@@ -142,7 +166,7 @@ describe("seeded demo catalog persistence", () => {
     const auditBeforeChoice = await integrationDb.query.auditLog.findMany({
       where: eq(schema.auditLog.orgId, fixture.orgA),
     });
-    expect(auditBeforeChoice.filter((entry) => entry.action === "skill.publish")).toHaveLength(19);
+    expect(auditBeforeChoice.filter((entry) => entry.action === "skill.publish")).toHaveLength(21);
     expect(auditBeforeChoice.filter((entry) => entry.action === "skill.install")).toHaveLength(3);
 
     const markdown = skills.find((skill) => skill.slug === "markdown-report")!;
@@ -195,6 +219,6 @@ describe("seeded demo catalog persistence", () => {
       where: eq(schema.auditLog.orgId, fixture.orgA),
     });
     expect(auditAfterChoice.filter((entry) => entry.action === "skill.install")).toHaveLength(3);
-    expect(auditAfterChoice.filter((entry) => entry.action === "skill.publish")).toHaveLength(20);
+    expect(auditAfterChoice.filter((entry) => entry.action === "skill.publish")).toHaveLength(22);
   });
 });

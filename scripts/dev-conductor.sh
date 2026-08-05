@@ -2,8 +2,9 @@
 # =============================================================================
 # scripts/dev-conductor.sh — Conductor dev launcher for Companion v2, WITHOUT
 # Docker. Runs Postgres + MinIO + Mailpit as native per-workspace services and
-# launches the API + web apps via concurrently, deriving every port from the
-# Conductor port range (CONDUCTOR_PORT + offset). All state lives in
+# launches the API + web apps via concurrently. Local workspaces derive every
+# port from the Conductor port range (CONDUCTOR_PORT + offset); isolated cloud
+# workspaces use the fixed fallback range starting at 3000. All state lives in
 # .conductor-pg/ and is torn down by `archive`.
 #
 # Modeled on ~/Dev/monkapps/scripts/dev-conductor.sh.
@@ -14,7 +15,7 @@
 #   bash scripts/dev-conductor.sh --reset-db      # purge .conductor-pg/ then run
 #   bash scripts/dev-conductor.sh --base 13000    # override CONDUCTOR_PORT
 #
-# Port allocation (BASE = CONDUCTOR_PORT, fallback 3000):
+# Port allocation (BASE = CONDUCTOR_PORT locally, fixed fallback 3000 in cloud):
 #   +0  web (Next.js)            ← Conductor's "Run" opens this
 #   +1  api (Hono)
 #   +2  Postgres (native cluster)
@@ -33,7 +34,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # API and worker without depending on the launcher's environment. dotenv semantics: never overrides variables
 # already in the environment, and skips empty assignments (a copied .env.example full of empty
 # values must not nuke exported shell vars).
-if [ -f "$REPO_ROOT/.env" ]; then
+if [ "${COMPANION_DEV_SKIP_ENV_FILE:-0}" != "1" ] && [ -f "$REPO_ROOT/.env" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|\#*) continue ;; esac
     key="${line%%=*}"
@@ -112,14 +113,21 @@ while [ $# -gt 0 ]; do
 done
 
 # ---------------------------------------------------------------------------
-# Resolve BASE port + derive the workspace port range
+# Resolve environment, BASE port + derive the workspace port range
 # ---------------------------------------------------------------------------
+CONDUCTOR_IS_CLOUD=false
+if [ "${CONDUCTOR_IS_LOCAL:-}" = "0" ]; then
+  CONDUCTOR_IS_CLOUD=true
+fi
+
 if [ -n "$BASE_OVERRIDE" ]; then
   BASE="$BASE_OVERRIDE"
 elif [ -n "${CONDUCTOR_PORT:-}" ]; then
   BASE="$CONDUCTOR_PORT"
 else
-  warn "CONDUCTOR_PORT absent — fallback BASE=3000 (workspace not isolated by port)"
+  if [ "$CONDUCTOR_IS_CLOUD" = false ]; then
+    warn "CONDUCTOR_PORT absent — fallback BASE=3000 (workspace not isolated by port)"
+  fi
   BASE=3000
 fi
 
@@ -143,6 +151,13 @@ MINIO_API_PORT=$((BASE + 3))
 MINIO_CONSOLE_PORT=$((BASE + 4))
 MAILPIT_SMTP_PORT=$((BASE + 5))
 MAILPIT_UI_PORT=$((BASE + 6))
+
+# Only the web process is reachable through Conductor's cloud port forward.
+# API, Postgres, MinIO, and Mailpit stay bound to loopback.
+WEB_BIND_HOST="127.0.0.1"
+if [ "$CONDUCTOR_IS_CLOUD" = true ]; then
+  WEB_BIND_HOST="0.0.0.0"
+fi
 
 # ---------------------------------------------------------------------------
 # Workspace identity (cookie prefix isolation) — mirrors the old
@@ -198,6 +213,7 @@ S3_ACCESS_KEY_ID="companion"
 S3_SECRET_ACCESS_KEY="companion-secret"
 S3_BUCKET="skill-archives"
 S3_ENDPOINT="http://127.0.0.1:${MINIO_API_PORT}"
+SKILL_DATABASES_ENABLED="${COMPANION_SKILL_DATABASES_ENABLED:-true}"
 
 # Detected at runtime
 PG_BIN=""
@@ -360,6 +376,16 @@ check_prerequisites() {
   require_command lsof "brew install lsof (macOS) / apt-get install lsof (Debian)"
   ok "node $(node -v)"
   ok "pnpm $(pnpm --version)"
+
+  # Cloud-to-Mac workspace sync (and ordinary branch updates) can introduce a
+  # new pnpm workspace package after Conductor's one-time setup script ran.
+  # Refresh the workspace links on every Run so imports do not fail merely
+  # because node_modules predates the current checkout. With an unchanged
+  # lockfile this is a fast, resolution-free operation.
+  info "Synchronising workspace dependencies"
+  pnpm install --frozen-lockfile --prefer-offline \
+    || die "Workspace dependency sync failed. Check that pnpm-lock.yaml matches the workspace manifests."
+  ok "Workspace dependencies ready"
 
   PG_BIN="$(detect_pg_bin || true)"
   [ -n "$PG_BIN" ] || die "Postgres binaries not found. Install: brew install postgresql@17"
@@ -618,6 +644,7 @@ migrate_and_seed() {
     DATABASE_URL="$DATABASE_API_URL"
     BETTER_AUTH_URL="$API_URL"
     COMPANION_API_URL="$API_URL"
+    COMPANION_SKILL_DATABASES_ENABLED="$SKILL_DATABASES_ENABLED"
   )
   if [ "$HAS_MINIO" = true ]; then
     seed_env+=(
@@ -644,7 +671,12 @@ print_header() {
   printf '\n  %s%sCompanion v2 — Conductor dev (native, no Docker)%s\n' "$BOLD" "$CYAN" "$RESET"
   printf '  %sWorkspace%s  %s\n' "$DIM" "$RESET" "${CONDUCTOR_WORKSPACE_NAME:-(hors-conductor)}"
   printf '  %sBase port%s  %s (range %s-%s)\n' "$DIM" "$RESET" "$BASE" "$BASE" "$((BASE + 9))"
-  printf '  %sWeb%s        %s\n' "$DIM" "$RESET" "$WEB_URL"
+  if [ "$CONDUCTOR_IS_CLOUD" = true ]; then
+    printf '  %sWeb%s        %s (internal)\n' "$DIM" "$RESET" "$WEB_URL"
+    printf '  %sWeb bind%s   %s:%s (Conductor cloud preview)\n' "$DIM" "$RESET" "$WEB_BIND_HOST" "$WEB_PORT"
+  else
+    printf '  %sWeb%s        %s\n' "$DIM" "$RESET" "$WEB_URL"
+  fi
   printf '  %sAPI%s        %s\n' "$DIM" "$RESET" "$API_URL"
   printf '  %sPostgres%s   127.0.0.1:%s\n' "$DIM" "$RESET" "$PG_PORT"
   if [ "$HAS_MINIO" = true ]; then
@@ -679,9 +711,9 @@ launch_apps() {
 
   # The master key is exported by ensure_secrets_master_key and inherited by API + worker. Never
   # interpolate it into concurrently's command argument, where process listings could expose it.
-  local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_API_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" $shared_storage_env $api_email_env pnpm --filter @companion/api dev"
+  local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_API_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" COMPANION_SKILL_DATABASES_ENABLED=\"$SKILL_DATABASES_ENABLED\" $shared_storage_env $api_email_env pnpm --filter @companion/api dev"
   local worker_cmd="DATABASE_URL=\"$DATABASE_WORKER_URL\" COMPANION_WEB_URL=\"$WEB_URL\" $shared_storage_env pnpm --filter @companion/worker dev"
-  local web_cmd="COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" pnpm --filter @companion/web dev --hostname 127.0.0.1 --port $WEB_PORT"
+  local web_cmd="COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" pnpm --filter @companion/web dev --hostname $WEB_BIND_HOST --port $WEB_PORT"
 
   free_port "$API_PORT" "api"
   free_port "$WEB_PORT" "web"
@@ -730,8 +762,16 @@ cmd_archive() {
   ok "Removed $STATE_DIR"
 }
 
-case "$COMMAND" in
-  run)     cmd_run ;;
-  archive) cmd_archive ;;
-  *)       usage; exit 64 ;;
-esac
+main() {
+  case "$COMMAND" in
+    run)     cmd_run ;;
+    archive) cmd_archive ;;
+    *)       usage; exit 64 ;;
+  esac
+}
+
+# Allow the lightweight network-resolution checks to source this file without
+# starting native services. Normal direct execution remains unchanged.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main
+fi

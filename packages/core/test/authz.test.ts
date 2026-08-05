@@ -4,6 +4,7 @@ import {
   canAccessProject,
   canAccessRun,
   canAccessSkill,
+  canAccessSkillDatabaseRealm,
   canManageOrg,
   canAccessSecret,
   canManageSecret,
@@ -160,6 +161,19 @@ describe("secret ACL — audience plus owner, never org role", () => {
     const expected = member && (owner || audience === "organization" || audience === "restricted");
     expect(allowed).toBe(expected);
     expect(member && canManageSecret(actorId, base)).toBe(member && owner);
+  });
+});
+
+describe("skill database realm ACL — personal files have no admin override", () => {
+  it("allows organization, owner, or an explicit grantee and denies an ungranted admin", () => {
+    expect(canAccessSkillDatabaseRealm("u-admin", { audience: "organization", ownerId: null })).toBe(true);
+    expect(canAccessSkillDatabaseRealm("u-owner", { audience: "personal", ownerId: "u-owner" })).toBe(true);
+    expect(canAccessSkillDatabaseRealm("u-member", {
+      audience: "personal",
+      ownerId: "u-owner",
+      sharedWithActor: true,
+    })).toBe(true);
+    expect(canAccessSkillDatabaseRealm("u-admin", { audience: "personal", ownerId: "u-owner" })).toBe(false);
   });
 });
 

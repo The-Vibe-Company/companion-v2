@@ -47,6 +47,7 @@ env_output="$(
   -u NEXT_PUBLIC_COMPANION_API_URL \
   -u BETTER_AUTH_URL \
   -u S3_ENDPOINT \
+  -u COMPANION_SKILL_DATABASES_ENABLED \
   POSTGRES_PORT=15432 \
   COMPANION_API_PORT=13001 \
   COMPANION_WEB_PORT=13000 \
@@ -70,6 +71,18 @@ require_env "COMPANION_WEB_URL=http://127.0.0.1:13000"
 require_env "NEXT_PUBLIC_COMPANION_API_URL=http://127.0.0.1:13001"
 require_env "BETTER_AUTH_URL=http://127.0.0.1:13001"
 require_env "S3_ENDPOINT=http://127.0.0.1:19000"
+require_env "COMPANION_SKILL_DATABASES_ENABLED=true"
+
+disabled_database_env_output="$(
+  env -u CONDUCTOR_PORT -u CONDUCTOR_WORKSPACE_NAME \
+  COMPANION_DEV_SKIP_ENV_FILE=1 \
+  COMPANION_SKILL_DATABASES_ENABLED=false \
+  bash scripts/dev-stack.sh print-env
+)"
+if ! printf '%s\n' "$disabled_database_env_output" | grep -Fxq "COMPANION_SKILL_DATABASES_ENABLED=false"; then
+  printf '[dev-stack-check] an explicit local database feature opt-out must be preserved\n' >&2
+  exit 1
+fi
 
 conductor_env_output="$(
   env -u COMPOSE_PROJECT_NAME \
@@ -80,6 +93,7 @@ conductor_env_output="$(
   -u NEXT_PUBLIC_COMPANION_API_URL \
   -u BETTER_AUTH_URL \
   -u S3_ENDPOINT \
+  -u COMPANION_SKILL_DATABASES_ENABLED \
   CONDUCTOR_PORT=55100 \
   CONDUCTOR_WORKSPACE_NAME=montpellier-v1 \
   bash scripts/dev-stack.sh print-env
@@ -101,6 +115,7 @@ require_conductor_env "COMPANION_WEB_URL=http://127.0.0.1:55100"
 require_conductor_env "NEXT_PUBLIC_COMPANION_API_URL=http://127.0.0.1:55101"
 require_conductor_env "BETTER_AUTH_URL=http://127.0.0.1:55101"
 require_conductor_env "S3_ENDPOINT=http://127.0.0.1:55103"
+require_conductor_env "COMPANION_SKILL_DATABASES_ENABLED=true"
 require_conductor_env "POSTGRES_PORT=55102"
 require_conductor_env "MINIO_PORT=55103"
 require_conductor_env "MINIO_CONSOLE_PORT=55104"
@@ -165,6 +180,53 @@ assert_conductor_rejects "unknown argument" --bogus-flag
 
 if ! bash scripts/dev-conductor.sh --help >/dev/null 2>&1; then
   printf '[dev-stack-check] dev-conductor.sh --help should exit 0\n' >&2
+  exit 1
+fi
+
+# Cloud workspaces intentionally have no CONDUCTOR_PORT. The web listener must
+# still be reachable by Conductor's port forward, while local workspaces remain
+# loopback-only. Reverting the cloud bind to 127.0.0.1 makes this regression
+# check fail without starting Postgres or any long-running process.
+inspect_conductor_network() {
+  local is_local="$1"
+  local conductor_port="$2"
+  shift 2
+  if [ "$conductor_port" = "unset" ]; then
+    # The inner shell must expand variables defined by the sourced launcher, not this process.
+    # shellcheck disable=SC2016
+    env -u CONDUCTOR_PORT CONDUCTOR_IS_LOCAL="$is_local" COMPANION_DEV_SKIP_ENV_FILE=1 \
+      bash -c 'script="$1"; shift; source "$script" "$@"; printf "%s|%s|%s|%s" "$BASE" "$WEB_BIND_HOST" "$WEB_URL" "$API_URL"' \
+      _ "$ROOT/scripts/dev-conductor.sh" "$@"
+  else
+    # The inner shell must expand variables defined by the sourced launcher, not this process.
+    # shellcheck disable=SC2016
+    env CONDUCTOR_PORT="$conductor_port" CONDUCTOR_IS_LOCAL="$is_local" COMPANION_DEV_SKIP_ENV_FILE=1 \
+      bash -c 'script="$1"; shift; source "$script" "$@"; printf "%s|%s|%s|%s" "$BASE" "$WEB_BIND_HOST" "$WEB_URL" "$API_URL"' \
+      _ "$ROOT/scripts/dev-conductor.sh" "$@"
+  fi
+}
+
+cloud_network="$(inspect_conductor_network 0 unset)"
+if [ "$cloud_network" != "3000|0.0.0.0|http://127.0.0.1:3000|http://127.0.0.1:3001" ]; then
+  printf '[dev-stack-check] unexpected cloud Conductor network config: %s\n' "$cloud_network" >&2
+  exit 1
+fi
+
+local_network="$(inspect_conductor_network 1 4310)"
+if [ "$local_network" != "4310|127.0.0.1|http://127.0.0.1:4310|http://127.0.0.1:4311" ]; then
+  printf '[dev-stack-check] unexpected local Conductor network config: %s\n' "$local_network" >&2
+  exit 1
+fi
+
+cloud_override_network="$(inspect_conductor_network 0 4310 --base 4520)"
+if [ "$cloud_override_network" != "4520|0.0.0.0|http://127.0.0.1:4520|http://127.0.0.1:4521" ]; then
+  printf '[dev-stack-check] cloud --base must override CONDUCTOR_PORT: %s\n' "$cloud_override_network" >&2
+  exit 1
+fi
+
+local_override_network="$(inspect_conductor_network 1 4310 --base 4530)"
+if [ "$local_override_network" != "4530|127.0.0.1|http://127.0.0.1:4530|http://127.0.0.1:4531" ]; then
+  printf '[dev-stack-check] local --base must override CONDUCTOR_PORT: %s\n' "$local_override_network" >&2
   exit 1
 fi
 

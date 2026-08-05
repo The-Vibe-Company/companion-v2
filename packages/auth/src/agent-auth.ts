@@ -7,6 +7,7 @@ import type {
 } from "@better-auth/agent-auth";
 import {
   COMPANION_AGENT_OPERATION_REGISTRY,
+  companionCapabilityAllows,
   matchCompanionAgentOperation,
   type CompanionAgentTenantCapability,
 } from "@companion/contracts/agent-operations";
@@ -16,6 +17,8 @@ export const AGENT_CAPABILITY_NAMES = [
   "skills:write",
   "secrets:read",
   "secrets:write",
+  "database:read",
+  "database:write",
   "public-skills:install",
 ] as const;
 
@@ -100,6 +103,18 @@ export const AGENT_AUTH_CAPABILITIES = [
     requiredConstraints: ["workspaceId"],
   },
   {
+    name: "database:read",
+    description: "Describe and query a skill's Companion-hosted SQLite state in one workspace.",
+    input: workspaceInputSchema,
+    requiredConstraints: ["workspaceId"],
+  },
+  {
+    name: "database:write",
+    description: "Describe, query, and execute parameterized DML against a skill's Companion-hosted SQLite state in one workspace.",
+    input: workspaceInputSchema,
+    requiredConstraints: ["workspaceId"],
+  },
+  {
     name: "public-skills:install",
     description: "Request a short-lived, one-use ticket for the exact public release behind a known share token.",
     input: {
@@ -118,6 +133,10 @@ const CAPABILITY_SET = new Set<string>(AGENT_CAPABILITY_NAMES);
 
 export function isAgentCapabilityName(value: string): value is AgentCapabilityName {
   return CAPABILITY_SET.has(value);
+}
+
+function isAgentTenantCapabilityName(value: string): value is AgentTenantCapability {
+  return value !== "public-skills:install" && isAgentCapabilityName(value);
 }
 
 /** Derived compatibility export; the contracts package owns the only operation list. */
@@ -173,7 +192,8 @@ export function authorizeAgentOperation(input: {
   const grant = input.session.agent.capabilityGrants.find(
     (candidate) =>
       candidate.status === "active" &&
-      candidate.capability === capability &&
+      isAgentTenantCapabilityName(candidate.capability) &&
+      companionCapabilityAllows(candidate.capability, capability) &&
       constraintEqualsWorkspace(candidate.constraints, input.workspaceId!),
   );
   if (!grant) return null;

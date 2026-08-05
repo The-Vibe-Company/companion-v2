@@ -476,6 +476,20 @@ describe("issueApiToken", () => {
     expect(expiresAt.getTime()).toBeGreaterThanOrEqual(before + ttlMs);
     expect(expiresAt.getTime()).toBeLessThan(before + API_TOKEN_TTL_MS);
   });
+
+  it("persists and returns database read when database write is requested", async () => {
+    const { database, calls } = fakeDb({ role: "developer" });
+
+    const issued = await issueApiToken({
+      actor: developer,
+      orgId: ORG_A,
+      scopes: ["database:write"],
+      database,
+    });
+
+    expect(tokenInsertValues(calls).scopes).toEqual(["database:read", "database:write"]);
+    expect(issued.scopes).toEqual(["database:read", "database:write"]);
+  });
 });
 
 /* ---- listApiTokens --------------------------------------------------------- */
@@ -531,6 +545,16 @@ describe("listApiTokens", () => {
     // The mapped shape must satisfy the shared contract.
     expect(() => apiTokenRowSchema.parse(row)).not.toThrow();
     expect(row).toMatchObject({ id: "tok-1", org_id: ORG_A, user_id: developer.id, prefix: "cmp_pat_abc123" });
+  });
+
+  it("expands legacy database-write-only token metadata", async () => {
+    const { database } = fakeDb({
+      role: "developer",
+      tokenRows: [{ ...tokenRow, scopes: ["database:write"] }],
+    });
+
+    const rows = await listApiTokens({ actor: developer, orgId: ORG_A, database });
+    expect(rows[0]?.scopes).toEqual(["database:read", "database:write"]);
   });
 });
 

@@ -82,6 +82,20 @@ describe("refreshApiToken", () => {
     expect(calls.updates).toHaveLength(0);
   });
 
+  it("expands a legacy database-write-only token without rotating it", async () => {
+    preTenantMocks.lockPreTenantApiTokenForRefresh.mockResolvedValue({
+      ...candidate,
+      scopes: ["database:write"],
+    });
+    const { database } = fakeDb();
+
+    await expect(refreshApiToken("cmp_pat_active", database)).resolves.toEqual({
+      status: "current",
+      scopes: ["database:read", "database:write"],
+      expires_at: "2026-07-22T00:00:00.000Z",
+    });
+  });
+
   it("replaces an expired token with the same name and scopes in one transaction", async () => {
     preTenantMocks.lockPreTenantApiTokenForRefresh.mockResolvedValue({ ...candidate, is_expired: true });
     const { database, calls } = fakeDb();

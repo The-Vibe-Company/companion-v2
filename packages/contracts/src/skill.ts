@@ -238,6 +238,10 @@ export const skillListRowSchema = z.object({
   archived: z.boolean().default(false),
   /** True when ANY published version (current or older) references this skill — gates archived download. */
   referenced: z.boolean().default(false),
+  /** Active hosted SQLite tables declared by the current version. */
+  database_table_count: z.number().int().nonnegative().default(0),
+  /** True only when the deployment flag is enabled and at least one table is declared. */
+  database_available: z.boolean().default(false),
   created_at: z.string(),
   updated_at: z.string(),
 });

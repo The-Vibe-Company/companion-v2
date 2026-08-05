@@ -31,8 +31,8 @@ describe("seed demo catalog contract", () => {
     const personal = DEMO_SKILL_CATALOG.filter((skill) => skill.scope === "personal");
     const slugs = DEMO_SKILL_CATALOG.map((skill) => skill.slug);
 
-    expect(org).toHaveLength(15);
-    expect(FREE_ORG_SKILL_LIMIT - org.length).toBe(5);
+    expect(org).toHaveLength(16);
+    expect(FREE_ORG_SKILL_LIMIT - org.length).toBe(4);
     expect(new Set(slugs).size).toBe(slugs.length);
     expect(org.map((skill) => skill.slug)).toEqual([
       "markdown-report",
@@ -48,10 +48,16 @@ describe("seed demo catalog contract", () => {
       "release-notes",
       "postmortem-review",
       "browser-check",
+      "feedback-tracker",
       "legacy-import",
       "manifest-invalid",
     ]);
-    expect(personal.map((skill) => skill.slug)).toEqual(["private-source", "private-brief", "research-draft"]);
+    expect(personal.map((skill) => skill.slug)).toEqual([
+      "private-source",
+      "private-brief",
+      "research-draft",
+      "private-research-ledger",
+    ]);
     expect(personal.find((skill) => skill.slug === "research-draft")?.labels).toBeUndefined();
     expect(DEMO_EMPTY_ORG_LABELS).toEqual(["growth"]);
     expect(DEMO_EMPTY_PERSONAL_LABELS).toEqual(["ideas"]);
@@ -125,5 +131,17 @@ describe("seed demo catalog contract", () => {
     expect(DEMO_INVALID_SKILLS).toEqual([
       expect.objectContaining({ slug: "manifest-invalid", error: expect.stringContaining("intentionally invalid") }),
     ]);
+
+    const feedbackDatabase = bySlug.get("feedback-tracker")?.versions[0]?.database;
+    expect(feedbackDatabase?.tables).toMatchObject({
+      feedback_items: { audience: "organization", primary_key: ["id"] },
+      my_triage: { audience: "personal", primary_key: ["id"] },
+      triage_scratchpad: { audience: "personal", primary_key: [] },
+    });
+    expect(bySlug.get("private-research-ledger")?.versions[0]?.database?.tables.sources).toMatchObject({
+      audience: "personal",
+      primary_key: ["id"],
+      unique: [["url"]],
+    });
   });
 });

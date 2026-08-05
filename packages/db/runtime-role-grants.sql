@@ -79,11 +79,15 @@ DECLARE
     'public.companion_skill_share_target(text,text)'::regprocedure,
     'public.companion_billing_org_for_stripe_event(text,text)'::regprocedure,
     'public.companion_request_member_project_deletion(uuid,text)'::regprocedure,
+    'public.companion_revoke_inactive_skill_database_realm_shares(uuid,uuid)'::regprocedure,
     'public.companion_project_skill_refresh_targets(uuid,uuid)'::regprocedure,
     'public.companion_signal_project_secret_change(uuid,uuid,text,text,text,public.secret_audience,text[])'::regprocedure,
     'public.companion_signal_project_provider_change(uuid,text,uuid,public.model_provider_connection_scope,text,text)'::regprocedure
   ];
   worker_functions regprocedure[] := ARRAY[
+    'public.companion_claim_skill_database_object_deletions(integer,integer)'::regprocedure,
+    'public.companion_complete_skill_database_object_deletion(text,uuid)'::regprocedure,
+    'public.companion_defer_skill_database_object_deletion(text,uuid)'::regprocedure,
     'public.companion_heartbeat_skill_run_worker(text,integer)'::regprocedure,
     'public.companion_heartbeat_skill_run_worker(text,integer,integer)'::regprocedure,
     'public.companion_heartbeat_skill_run_worker(text,integer,integer,integer)'::regprocedure,
@@ -351,6 +355,7 @@ BEGIN
       public.companion_skill_share_target(text, text),
       public.companion_billing_org_for_stripe_event(text, text),
       public.companion_request_member_project_deletion(uuid, text),
+      public.companion_revoke_inactive_skill_database_realm_shares(uuid, uuid),
       public.companion_project_skill_refresh_targets(uuid, uuid),
       public.companion_signal_project_secret_change(uuid, uuid, text, text, text, public.secret_audience, text[]),
       public.companion_signal_project_provider_change(uuid, text, uuid, model_provider_connection_scope, text, text)
@@ -361,6 +366,9 @@ BEGIN
   -- Claims, exact-lease admission, heartbeats, cleanup and discovery belong only to the worker.
   EXECUTE format(
     'GRANT EXECUTE ON FUNCTION
+      public.companion_claim_skill_database_object_deletions(integer, integer),
+      public.companion_complete_skill_database_object_deletion(text, uuid),
+      public.companion_defer_skill_database_object_deletion(text, uuid),
       public.companion_heartbeat_skill_run_worker(text, integer),
       public.companion_heartbeat_skill_run_worker(text, integer, integer),
       public.companion_heartbeat_skill_run_worker(text, integer, integer, integer),

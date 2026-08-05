@@ -39,6 +39,9 @@ describe("separated API and worker database grants", () => {
   const projectId = randomUUID();
   const privateProjectId = randomUUID();
   const privateUsageId = randomUUID();
+  const databaseMaintenanceSkillId = randomUUID();
+  const databaseMaintenanceRealmId = randomUUID();
+  const databaseMaintenanceGranteeId = `runtime-grants-grantee-${suffix}`;
   const userId = `runtime-grants-user-${suffix}`;
   let grantBlock = "";
 
@@ -106,6 +109,7 @@ describe("separated API and worker database grants", () => {
   afterAll(async () => {
     await sql`delete from organizations where id = ${orgId}::uuid`;
     await sql`delete from "user" where id = ${userId}`;
+    await sql`delete from "user" where id = ${databaseMaintenanceGranteeId}`;
     await sql.unsafe(`drop owned by ${apiRole}`);
     await sql.unsafe(`drop owned by ${workerRole}`);
     await sql.unsafe(`drop owned by ${retiredRole}`);
@@ -130,6 +134,8 @@ describe("separated API and worker database grants", () => {
       authUserTable: boolean;
       profilesTable: boolean;
       agentsTable: boolean;
+      skillDatabaseTable: boolean;
+      skillDatabaseShareTable: boolean;
       projectHeartbeatTable: boolean;
       runHeartbeatTable: boolean;
       tableDefaults: boolean;
@@ -161,6 +167,16 @@ describe("separated API and worker database grants", () => {
           'public.agent',
           'SELECT,INSERT,UPDATE,DELETE'
         ) as "agentsTable",
+        has_table_privilege(
+          rolname,
+          'public.skill_database_realms',
+          'SELECT,INSERT,UPDATE,DELETE'
+        ) as "skillDatabaseTable",
+        has_table_privilege(
+          rolname,
+          'public.skill_database_realm_shares',
+          'SELECT,INSERT,UPDATE,DELETE'
+        ) as "skillDatabaseShareTable",
         has_table_privilege(
           rolname,
           'public.project_worker_heartbeats',
@@ -203,6 +219,8 @@ describe("separated API and worker database grants", () => {
         authUserTable: true,
         profilesTable: true,
         agentsTable: true,
+        skillDatabaseTable: true,
+        skillDatabaseShareTable: true,
         projectHeartbeatTable: false,
         runHeartbeatTable: false,
         tableDefaults: false,
@@ -218,6 +236,8 @@ describe("separated API and worker database grants", () => {
         authUserTable: false,
         profilesTable: false,
         agentsTable: false,
+        skillDatabaseTable: true,
+        skillDatabaseShareTable: true,
         projectHeartbeatTable: false,
         runHeartbeatTable: false,
         tableDefaults: false,
@@ -310,6 +330,9 @@ describe("separated API and worker database grants", () => {
 
   it("grants Project claim and lease mutation functions only to the worker", async () => {
     const functions = [
+      "public.companion_claim_skill_database_object_deletions(integer,integer)",
+      "public.companion_complete_skill_database_object_deletion(text,uuid)",
+      "public.companion_defer_skill_database_object_deletion(text,uuid)",
       "public.companion_claim_project_workspaces(text,integer,integer)",
       "public.companion_enter_project_worker_lease(uuid,uuid,text,text,integer)",
       "public.companion_heartbeat_project_worker(text,integer,integer)",
@@ -506,6 +529,7 @@ describe("separated API and worker database grants", () => {
   it("keeps API service functions away from the worker while sharing RLS predicates and readiness", async () => {
     const apiFunctions = [
       "public.companion_list_user_orgs(text)",
+      "public.companion_revoke_inactive_skill_database_realm_shares(uuid,uuid)",
       "public.companion_project_skill_refresh_targets(uuid,uuid)",
       "public.companion_signal_project_secret_change(uuid,uuid,text,text,text,secret_audience,text[])",
     ];
@@ -539,6 +563,107 @@ describe("separated API and worker database grants", () => {
         ) as worker
     `;
     expect(exactLeasePredicate).toEqual({ api: true, worker: true });
+  });
+
+  it("revokes inactive realm shares with a NOBYPASSRLS function owner", async () => {
+    const [originalOwner] = await sql<{ owner: string }[]>`
+      select pg_get_userbyid(proowner) as owner
+      from pg_proc
+      where oid = 'public.companion_revoke_inactive_skill_database_realm_shares(uuid,uuid)'::regprocedure
+    `;
+    expect(originalOwner?.owner).toBeTruthy();
+
+    await sql`
+      insert into "user" (id, name, email, email_verified)
+      values (
+        ${databaseMaintenanceGranteeId},
+        'Runtime grants database grantee',
+        ${`${databaseMaintenanceGranteeId}@example.test`},
+        true
+      )
+    `;
+    await sql`
+      insert into memberships (org_id, user_id, org_role)
+      values (${orgId}::uuid, ${databaseMaintenanceGranteeId}, 'developer')
+    `;
+    await sql`
+      insert into skills (id, org_id, slug, description, creator_id, scope)
+      values (
+        ${databaseMaintenanceSkillId}::uuid,
+        ${orgId}::uuid,
+        ${`runtime-database-maintenance-${suffix}`},
+        'Runtime database maintenance fixture',
+        ${userId},
+        'org'
+      )
+    `;
+    await sql`
+      insert into skill_database_schemas (org_id, skill_id, generation, declarations_checksum)
+      values (${orgId}::uuid, ${databaseMaintenanceSkillId}::uuid, 1, ${`sha256:${"a".repeat(64)}`})
+    `;
+    await sql`
+      insert into skill_database_tables (
+        org_id, skill_id, table_name, audience, columns, primary_key, unique_constraints, retired_at
+      ) values (
+        ${orgId}::uuid,
+        ${databaseMaintenanceSkillId}::uuid,
+        'personal_state',
+        'personal',
+        ${sql.json({ id: { type: "text", nullable: false } })},
+        ${sql.json(["id"])},
+        ${sql.json([])},
+        now()
+      )
+    `;
+    await sql`
+      insert into skill_database_realms (
+        id, org_id, skill_id, audience, owner_id, storage_key, schema_generation
+      ) values (
+        ${databaseMaintenanceRealmId}::uuid,
+        ${orgId}::uuid,
+        ${databaseMaintenanceSkillId}::uuid,
+        'personal',
+        ${userId},
+        ${`skill-databases/${orgId}/${databaseMaintenanceSkillId}/personal/${userId}.sqlite3`},
+        1
+      )
+    `;
+    await sql`
+      insert into skill_database_realm_shares (org_id, realm_id, owner_id, grantee_id)
+      values (
+        ${orgId}::uuid,
+        ${databaseMaintenanceRealmId}::uuid,
+        ${userId},
+        ${databaseMaintenanceGranteeId}
+      )
+    `;
+
+    await sql`alter function public.companion_revoke_inactive_skill_database_realm_shares(uuid, uuid)
+      owner to ${sql(apiRole)}`;
+    try {
+      const result = await sql.begin(async (tx) => {
+        await tx.unsafe(`set local role ${apiRole}`);
+        await tx`select set_config('app.org_id', ${orgId}, true)`;
+        await tx`select set_config('app.user_id', ${userId}, true)`;
+        return tx<{ revoked: number }[]>`
+          select companion_revoke_inactive_skill_database_realm_shares(
+            ${orgId}::uuid,
+            ${databaseMaintenanceSkillId}::uuid
+          ) as revoked
+        `;
+      });
+      expect(result).toEqual([{ revoked: 1 }]);
+    } finally {
+      await sql`alter function public.companion_revoke_inactive_skill_database_realm_shares(uuid, uuid)
+        owner to ${sql(originalOwner!.owner)}`;
+    }
+
+    const [remaining] = await sql<{ count: number }[]>`
+      select count(*)::int as count
+      from skill_database_realm_shares
+      where realm_id = ${databaseMaintenanceRealmId}::uuid
+    `;
+    expect(remaining?.count).toBe(0);
   });
 
   it("lets Project activation read the creator-scoped secret projection without API authority", async () => {

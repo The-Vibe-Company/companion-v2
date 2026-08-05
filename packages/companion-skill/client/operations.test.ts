@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { COMPANION_AGENT_OPERATION_REGISTRY } from "@companion/contracts/agent-operations";
 
-import { resolveOperation, resolveTicketedDownloadTarget } from "./operations.js";
+import { companionGrantAllows, resolveOperation, resolveTicketedDownloadTarget } from "./operations.js";
 
 describe("Companion Agent Auth operation registry", () => {
   it("maps documented operations to least-privilege capabilities", () => {
@@ -46,6 +46,13 @@ describe("Companion Agent Auth operation registry", () => {
   it("uses the binary transport for package uploads and downloads", () => {
     expect(resolveOperation("POST", "/skills?scope=org").binary).toBe("upload");
     expect(resolveOperation("GET", "/skills/example/versions/1.2.3/package").binary).toBe("download");
+  });
+
+  it("uses a database write grant for reads without broadening other capabilities", () => {
+    expect(companionGrantAllows("database:write", "database:read")).toBe(true);
+    expect(companionGrantAllows("database:read", "database:write")).toBe(false);
+    expect(companionGrantAllows("skills:write", "skills:read")).toBe(false);
+    expect(companionGrantAllows("public-skills:install", "database:read")).toBe(false);
   });
 
   it("parses package, exact-file, and local-skill ticket exchanges", () => {

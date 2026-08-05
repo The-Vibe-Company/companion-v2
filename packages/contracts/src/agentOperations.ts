@@ -7,7 +7,23 @@ export type CompanionAgentTenantCapability =
   | "skills:read"
   | "skills:write"
   | "secrets:read"
-  | "secrets:write";
+  | "secrets:write"
+  | "database:read"
+  | "database:write";
+
+/**
+ * Test whether one granted tenant capability satisfies an operation capability.
+ *
+ * Database writes deliberately include reads: even constrained DML can observe state through
+ * predicates, subqueries, conflict clauses, and `RETURNING`. Treating the two as independent
+ * security boundaries would therefore promise isolation that SQLite cannot enforce.
+ */
+export function companionCapabilityAllows(
+  granted: CompanionAgentTenantCapability,
+  required: CompanionAgentTenantCapability,
+): boolean {
+  return granted === required || (granted === "database:write" && required === "database:read");
+}
 
 export type CompanionAgentHttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
@@ -89,6 +105,11 @@ export const COMPANION_AGENT_OPERATION_REGISTRY = [
   { method: "POST", path: "/local-skills/:key/installed", capability: "skills:write", transport: "rest" },
   { method: "GET", path: "/getting-started", capability: "skills:read", transport: "rest" },
   { method: "POST", path: "/getting-started/steps", capability: "skills:write", transport: "rest" },
+  { method: "GET", path: "/skills/:slug/database", capability: "database:read", transport: "rest" },
+  { method: "GET", path: "/skills/:slug/database/shares", capability: "database:write", transport: "rest", sensitive: true },
+  { method: "PUT", path: "/skills/:slug/database/shares", capability: "database:write", transport: "rest", sensitive: true },
+  { method: "POST", path: "/skills/:slug/database/query", capability: "database:read", transport: "rest" },
+  { method: "POST", path: "/skills/:slug/database/execute", capability: "database:write", transport: "rest" },
   { method: "GET", path: "/secrets", capability: "secrets:read", transport: "rest", sensitive: true },
   { method: "POST", path: "/secrets", capability: "secrets:write", transport: "rest", sensitive: true },
   { method: "GET", path: "/secrets/:id", capability: "secrets:read", transport: "rest", sensitive: true },

@@ -32,6 +32,7 @@ export const invitationStatusEnum = pgEnum("invitation_status", [
   "expired",
 ]);
 export const secretAudienceEnum = pgEnum("secret_audience", ["personal", "restricted", "organization"]);
+export const skillDatabaseAudienceEnum = pgEnum("skill_database_audience", ["organization", "personal"]);
 export const secretBindingSourceEnum = pgEnum("secret_binding_source", ["manual", "suggestion"]);
 export const secretSlotStatusEnum = pgEnum("secret_slot_status", [
   "personal",
@@ -3555,5 +3556,196 @@ export const secretRetrievalGrants = pgTable(
       foreignColumns: [memberships.orgId, memberships.userId],
       name: "secret_retrieval_grants_member_org_fk",
     }).onDelete("cascade"),
+  }),
+);
+
+/** Current database declaration generation for one skill manifest. */
+export const skillDatabaseSchemas = pgTable(
+  "skill_database_schemas",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id").notNull(),
+    generation: integer("generation").notNull().default(1),
+    declarationsChecksum: text("declarations_checksum").notNull(),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.skillId] }),
+    skillOrgFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "skill_database_schemas_skill_org_fk",
+    }).onDelete("cascade"),
+    positiveGeneration: check("skill_database_schemas_generation_check", sql`${t.generation} >= 1`),
+  }),
+);
+
+export interface SkillDatabaseStoredColumn {
+  name: string;
+  type: "text" | "integer" | "real" | "boolean" | "json" | "timestamp";
+  nullable: boolean;
+  default?: string | number | boolean | null;
+  retiredAt?: string;
+}
+
+/** Projection of the current manifest tables. Retired declarations are retained for lazy files. */
+export const skillDatabaseTables = pgTable(
+  "skill_database_tables",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id").notNull(),
+    tableName: text("table_name").notNull(),
+    audience: skillDatabaseAudienceEnum("audience").notNull(),
+    columns: jsonb("columns").$type<SkillDatabaseStoredColumn[]>().notNull(),
+    primaryKey: jsonb("primary_key").$type<string[]>().notNull().default([]),
+    uniqueConstraints: jsonb("unique_constraints").$type<string[][]>().notNull().default([]),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.skillId, t.tableName] }),
+    schemaFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skillDatabaseSchemas.orgId, skillDatabaseSchemas.skillId],
+      name: "skill_database_tables_schema_fk",
+    }).onDelete("cascade"),
+    validName: check(
+      "skill_database_tables_name_check",
+      sql`${t.tableName} ~ '^[a-z][a-z0-9_]{0,62}$' and ${t.tableName} !~ '^sqlite_'`,
+    ),
+  }),
+);
+
+/** Registry entry for one immutable-addressed SQLite file in object storage. */
+export const skillDatabaseRealms = pgTable(
+  "skill_database_realms",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id").notNull(),
+    audience: skillDatabaseAudienceEnum("audience").notNull(),
+    ownerId: text("owner_id"),
+    storageKey: text("storage_key").notNull().unique(),
+    sizeBytes: integer("size_bytes").notNull().default(0),
+    etag: text("etag"),
+    schemaGeneration: integer("schema_generation").notNull().default(0),
+    lastAccessedAt: timestamp("last_accessed_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgRealm: uniqueIndex("skill_database_realms_org_uq")
+      .on(t.orgId, t.skillId)
+      .where(sql`${t.audience} = 'organization' and ${t.ownerId} is null`),
+    uniquePersonalRealm: uniqueIndex("skill_database_realms_personal_uq")
+      .on(t.orgId, t.skillId, t.ownerId)
+      .where(sql`${t.audience} = 'personal' and ${t.ownerId} is not null`),
+    uniqueRealmOwner: unique("skill_database_realms_org_id_id_owner_id_uq")
+      .on(t.orgId, t.id, t.ownerId),
+    skillOrgFk: foreignKey({
+      columns: [t.orgId, t.skillId],
+      foreignColumns: [skills.orgId, skills.id],
+      name: "skill_database_realms_skill_org_fk",
+    }).onDelete("cascade"),
+    ownerMembershipFk: foreignKey({
+      columns: [t.orgId, t.ownerId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "skill_database_realms_owner_membership_fk",
+    }).onDelete("cascade"),
+    audienceOwner: check(
+      "skill_database_realms_audience_owner_check",
+      sql`(${t.audience} = 'organization' and ${t.ownerId} is null) or (${t.audience} = 'personal' and ${t.ownerId} is not null)`,
+    ),
+    nonnegativeSize: check("skill_database_realms_size_check", sql`${t.sizeBytes} >= 0`),
+    nonnegativeGeneration: check("skill_database_realms_generation_check", sql`${t.schemaGeneration} >= 0`),
+  }),
+);
+
+/** Member grants for a complete personal SQLite realm. Owner/Admin roles never override these rows. */
+export const skillDatabaseRealmShares = pgTable(
+  "skill_database_realm_shares",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    realmId: uuid("realm_id").notNull(),
+    ownerId: text("owner_id").notNull(),
+    granteeId: text("grantee_id").notNull(),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.realmId, t.granteeId] }),
+    realmOwnerFk: foreignKey({
+      columns: [t.orgId, t.realmId, t.ownerId],
+      foreignColumns: [skillDatabaseRealms.orgId, skillDatabaseRealms.id, skillDatabaseRealms.ownerId],
+      name: "skill_database_realm_shares_realm_owner_fk",
+    }).onDelete("cascade"),
+    ownerMembershipFk: foreignKey({
+      columns: [t.orgId, t.ownerId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "skill_database_realm_shares_owner_membership_fk",
+    }).onDelete("cascade"),
+    granteeMembershipFk: foreignKey({
+      columns: [t.orgId, t.granteeId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "skill_database_realm_shares_grantee_membership_fk",
+    }).onDelete("cascade"),
+    differentMembers: check(
+      "skill_database_realm_shares_different_members_check",
+      sql`${t.ownerId} <> ${t.granteeId}`,
+    ),
+  }),
+);
+
+/** Fixed one-minute counters avoid one audit row per SQL statement. */
+export const skillDatabaseRateWindows = pgTable(
+  "skill_database_rate_windows",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull(),
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    queryCount: integer("query_count").notNull().default(1),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.userId, t.windowStart] }),
+    memberOrgFk: foreignKey({
+      columns: [t.orgId, t.userId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "skill_database_rate_windows_member_org_fk",
+    }).onDelete("cascade"),
+    positiveCount: check("skill_database_rate_windows_count_check", sql`${t.queryCount} >= 1`),
+  }),
+);
+
+/**
+ * Durable object-deletion outbox populated by the realm delete trigger. It intentionally has no
+ * organization FK: an organization cascade must leave its object cleanup work behind.
+ */
+export const skillDatabaseObjectDeletions = pgTable(
+  "skill_database_object_deletions",
+  {
+    storageKey: text("storage_key").primaryKey(),
+    orgId: uuid("org_id").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
+    claimToken: uuid("claim_token"),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    createdAt: now(),
+  },
+  (t) => ({
+    byAvailability: index("skill_database_object_deletions_available_idx").on(
+      t.availableAt,
+      t.claimExpiresAt,
+    ),
+    nonnegativeAttempts: check(
+      "skill_database_object_deletions_attempts_check",
+      sql`${t.attempts} >= 0`,
+    ),
+    completeClaim: check(
+      "skill_database_object_deletions_claim_check",
+      sql`(${t.claimToken} is null and ${t.claimExpiresAt} is null)
+        or (${t.claimToken} is not null and ${t.claimExpiresAt} is not null)`,
+    ),
   }),
 );

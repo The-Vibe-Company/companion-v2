@@ -56,6 +56,7 @@
 .dpanel { flex: 1; min-height: 0; }
 .dpanel--doc { overflow-y: auto; background: var(--color-canvas); }
 .dpanel--files { display: flex; overflow: hidden; }
+.dpanel--database { display: flex; overflow: hidden; }
 
 .dbody--full { grid-template-columns: 1fr; }
 .dcontent--flush { padding: 0; overflow: hidden; display: flex; min-height: 0; }

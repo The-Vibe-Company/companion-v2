@@ -423,6 +423,20 @@ display title. Skill icons resolve from the package manifest, then the deepest c
 color for that occurrence, then a neutral package glyph. Keep this rhythm dense on mobile by wrapping
 controls and metadata, not by turning rows or groups into cards.
 
+**Skill Tables** is a conditional detail tab shown only when hosted databases are enabled and the
+selected Skill declares tables. Use one compact master-detail workspace, not a dashboard: the first
+rail selects `My data`, `Shared with me`, or `Organization`; shared data adds an owner selector; the
+second rail selects a table; and the main pane shows a 50-row page ordered by primary key. Keep schema
+information and add/edit forms in the standard slide-over drawer. Primary keys are visible but
+immutable during edit, mutations must report exactly one changed row, and tables without a primary key
+are explicitly read-only. Typed controls cover text, numbers, booleans, JSON, and timestamps; optional
+values can be omitted so SQLite defaults or `NULL` still apply. `Manage sharing` appears only for the
+caller's `My data` realm and opens a searchable member checklist with an explicit Save action. Shared
+and organization realms retain data editing but never expose sharing controls. Loading uses skeleton
+rows; empty, revoked, conflicted, failed, and archived-read-only states explain the consequence and
+offer Retry where useful. On narrow screens preserve every capability through progressive
+table → rows → full-screen panel navigation rather than shrinking the grid or removing actions.
+
 **Status dot plus label** is mandatory for health and lifecycle state. Dots are static 6px to 8px circles. No pulse, no glow, no animation.
 
 **Badges** are compact chips for scope, lifecycle, role, provider, and status. Use mono only for machine-like values. Status badges use low-tint backgrounds and borders; neutral badges use raised surface and muted text.

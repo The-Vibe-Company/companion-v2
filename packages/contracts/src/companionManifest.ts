@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { SEMVER_RE, SKILL_NAME_RE, SKILL_REQUIREMENT_KEY_RE, skillRequirementSchema, type SkillRequirement } from "./frontmatter";
+import { skillDatabaseDeclarationSchema, type SkillDatabaseDeclaration } from "./skillDatabase";
 
 export const COMPANION_MANIFEST_SCHEMA_URL = "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json";
 
@@ -274,6 +275,7 @@ export const companionManifestSchema = z
     notes: z.string().max(8000).optional(),
     metadata: companionMetadataSchema,
     environment: companionEnvironmentSchema,
+    database: skillDatabaseDeclarationSchema,
     dependencies: companionDependenciesInputSchema,
     commands: z.array(companionCommandSchema).max(64, "at most 64 commands are allowed").default([]),
     checks: companionChecksSchema,
@@ -322,6 +324,7 @@ export const companionManifestSchema = z
         changelog: [...value.metadata.changelog].sort((a, b) => b.version.localeCompare(a.version)),
       },
       environment,
+      database: value.database,
       dependencies,
       legacyDependencySlugs,
       commands: value.commands,
@@ -355,6 +358,7 @@ export function companionManifestJson(manifest: CompanionManifest): Record<strin
   if (manifest.notes) out.notes = manifest.notes;
   out.metadata = manifest.metadata;
   out.environment = manifest.environment;
+  if (Object.keys(manifest.database.tables).length) out.database = manifest.database;
   out.dependencies = manifest.dependencies;
   out.commands = manifest.commands;
   if (manifest.checks.updates) out.checks = manifest.checks;
@@ -372,6 +376,7 @@ export function fallbackCompanionManifest(input: {
   companionSkillId?: string;
   changelog?: CompanionChangelogEntry[];
   environment?: CompanionEnvironment;
+  database?: SkillDatabaseDeclaration;
   commands?: CompanionCommand[];
   checks?: CompanionChecks;
   notes?: string;
@@ -396,6 +401,7 @@ export function fallbackCompanionManifest(input: {
       changelog: input.changelog ?? [],
     },
     environment: input.environment ?? requirementsToEnvironment(input.requirements),
+    database: input.database ?? { tables: {} },
     dependencies: dependencies ?? {},
     commands: input.commands ?? [],
     checks: input.checks ?? {},

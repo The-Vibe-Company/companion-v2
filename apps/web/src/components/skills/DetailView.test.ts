@@ -107,6 +107,27 @@ describe("DetailView tabbed detail layout", () => {
     expect(html).not.toContain("Personal");
   });
 
+  it("shows Tables only for a declared database enabled by the deployment", () => {
+    const available = renderDetailFor({
+      ...skill,
+      databaseAvailable: true,
+      databaseTableCount: 3,
+    });
+    expect(available).toContain('id="dtab-tables"');
+    expect(available).toContain("Tables");
+
+    expect(renderDetailFor({
+      ...skill,
+      databaseAvailable: false,
+      databaseTableCount: 3,
+    })).not.toContain('id="dtab-tables"');
+    expect(renderDetailFor({
+      ...skill,
+      databaseAvailable: true,
+      databaseTableCount: 0,
+    })).not.toContain('id="dtab-tables"');
+  });
+
   it("shows both 'Created by' and 'Updated by' in the byline when the last updater differs", () => {
     const html = renderDetailFor({
       ...skill,

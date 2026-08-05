@@ -21,3 +21,4 @@ export * from "./secrets";
 export * from "./billing";
 export * from "./github";
 export * from "./agentOperations";
+export * from "./skillDatabase";

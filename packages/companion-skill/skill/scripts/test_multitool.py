@@ -371,6 +371,88 @@ class SecretCreationTests(EnvSandbox):
         self.assertEqual(provided_stdin.tell(), 0)
 
 
+class SkillDatabaseHelperTests(EnvSandbox):
+    def test_statement_uses_scoped_parameterized_route(self) -> None:
+        calls: list[tuple[str, str, str, dict[str, object]]] = []
+        original_post = companion_lib.api_post_json
+
+        def fake_post(base: str, token: str, path: str, payload: dict[str, object]):
+            calls.append((base, token, path, payload))
+            return {"rows_affected": 1}
+
+        companion_lib.api_post_json = fake_post
+        try:
+            result = companion_lib.api_skill_database_statement(
+                "https://api/v1",
+                "token",
+                "task-tracker",
+                "INSERT INTO tasks(title) VALUES (?)",
+                ["Ship it"],
+                audience="personal",
+                realm_id="00000000-0000-4000-8000-000000000011",
+                write=True,
+            )
+        finally:
+            companion_lib.api_post_json = original_post
+
+        self.assertEqual(result, {"rows_affected": 1})
+        self.assertEqual(
+            calls,
+            [(
+                "https://api/v1",
+                "token",
+                "/skills/task-tracker/database/execute",
+                {
+                    "audience": "personal",
+                    "realm_id": "00000000-0000-4000-8000-000000000011",
+                    "sql": "INSERT INTO tasks(title) VALUES (?)",
+                    "params": ["Ship it"],
+                },
+            )],
+        )
+
+    def test_statement_does_not_silently_omit_an_empty_realm_selector(self) -> None:
+        calls: list[dict[str, object]] = []
+        original_post = companion_lib.api_post_json
+        companion_lib.api_post_json = (
+            lambda _base, _token, _path, payload: calls.append(payload) or {}
+        )
+        try:
+            companion_lib.api_skill_database_statement(
+                "https://api/v1",
+                "token",
+                "task-tracker",
+                "SELECT 1",
+                audience="personal",
+                realm_id="",
+            )
+        finally:
+            companion_lib.api_post_json = original_post
+
+        self.assertEqual(calls[0]["realm_id"], "")
+
+    def test_description_quotes_slug_and_rejects_unsafe_values(self) -> None:
+        calls: list[tuple[str, str, str]] = []
+        original_get = companion_lib.api_get
+        companion_lib.api_get = lambda base, token, path: calls.append((base, token, path)) or {"tables": []}
+        try:
+            result = companion_lib.api_skill_database_description(
+                "https://api/v1", "token", "task tracker"
+            )
+            with self.assertRaisesRegex(SystemExit, "invalid skill slug"):
+                companion_lib.api_skill_database_description(
+                    "https://api/v1", "token", "../task-tracker"
+                )
+        finally:
+            companion_lib.api_get = original_get
+
+        self.assertEqual(result, {"tables": []})
+        self.assertEqual(
+            calls,
+            [("https://api/v1", "token", "/skills/task%20tracker/database")],
+        )
+
+
 class LockRecordTests(EnvSandbox):
     def test_normalize_targets_reads_modern_and_legacy(self) -> None:
         modern = companion_lib.normalize_targets(

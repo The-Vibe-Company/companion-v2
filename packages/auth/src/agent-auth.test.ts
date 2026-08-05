@@ -25,7 +25,10 @@ afterAll(async () => {
   await Promise.all(tempPaths.map((path) => rm(path, { recursive: true, force: true })));
 });
 
-function sessionWithGrant(constraints: Constraints): AgentSession {
+function sessionWithGrant(
+  constraints: Constraints,
+  capability = "skills:read",
+): AgentSession {
   return {
     type: "delegated",
     agentId: "agent-1",
@@ -42,7 +45,7 @@ function sessionWithGrant(constraints: Constraints): AgentSession {
       metadata: null,
       capabilityGrants: [
         {
-          capability: "skills:read",
+          capability,
           constraints,
           grantedBy: "user-1",
           status: "active",
@@ -98,12 +101,14 @@ describe("Agent Auth operation registry", () => {
     expect(adapter.update).toHaveBeenCalled();
   });
 
-  it("is closed over the five configured capabilities", () => {
+  it("is closed over the seven configured capabilities", () => {
     expect(AGENT_AUTH_CAPABILITIES.map((capability) => capability.name)).toEqual([
       "skills:read",
       "skills:write",
       "secrets:read",
       "secrets:write",
+      "database:read",
+      "database:write",
       "public-skills:install",
     ]);
     expect(capabilityForAgentOperation("GET", "/v1/skills/example")).toBe("skills:read");
@@ -155,6 +160,26 @@ describe("Agent Auth operation registry", () => {
         session: sessionWithGrant({ workspaceId: { eq: workspaceId, in: [workspaceId] } }),
         method: "GET",
         pathname: "/v1/skills/example",
+        workspaceId,
+      }),
+    ).toBeNull();
+  });
+
+  it("treats database write as a read superset within the exact workspace only", () => {
+    const workspaceId = "169b768e-b1d0-4dde-a62e-575022debe88";
+    expect(
+      authorizeAgentOperation({
+        session: sessionWithGrant({ workspaceId }, "database:write"),
+        method: "POST",
+        pathname: "/v1/skills/example/database/query",
+        workspaceId,
+      }),
+    ).toMatchObject({ capability: "database:read", workspaceId });
+    expect(
+      authorizeAgentOperation({
+        session: sessionWithGrant({ workspaceId }, "database:read"),
+        method: "POST",
+        pathname: "/v1/skills/example/database/execute",
         workspaceId,
       }),
     ).toBeNull();
