@@ -13,17 +13,18 @@ Use this file as a routing layer. Keep durable product and system knowledge in i
 ## Supported workflow
 
 - Use Node 20+ and the repository-pinned `pnpm@9.12.0` through Corepack.
+- In a Conductor workspace, use the lifecycle in `.conductor/settings.toml` and `scripts/dev-conductor.sh`; do not run `pnpm dev`, which starts the Docker-backed stack outside Conductor's per-workspace services and cleanup lifecycle.
 - Before claiming a change is ready, run `pnpm verify:change -- --plan`, then `pnpm verify:change`. Exit code 2 means the fast checks passed but the listed environment-dependent gates are still required; run or report each one rather than treating the change as fully verified.
 - Use an explicitly disposable, migrated Postgres database for integration tests. Never point test commands at production or an unconfirmed developer database.
 
 ## Decision boundaries
 
 - When changing tenant isolation, ownership, RBAC, RLS, secrets, migrations, or runtime-role grants, preserve the promises in `docs/testing.md` and run the disposable-Postgres integration suite; mocked or unit-only coverage cannot prove those boundaries.
-- When changing the public UI, run the design checks and affected browser flow selected by `pnpm verify:change`; do not invent tokens or patterns outside `DESIGN.md` and the existing component layer.
+- When changing the public UI, run the design checks and browser smoke selected by `pnpm verify:change`, then manually exercise every changed or risky path with `agent-browser` and report the result; do not invent tokens or patterns outside `DESIGN.md` and the existing component layer.
 - The web application calls the API. Do not introduce direct browser or Next.js access to Postgres or MinIO.
 - Keep `packages/core` framework-free. Put HTTP, Next.js, provider SDK, and runtime composition in the owning app or adapter rather than importing those concerns into core services.
 - Never commit credentials, `.env` files, production data, plaintext secret values, or sensitive values in fixtures, logs, URLs, argv, or audit metadata.
 - Before modifying `packages/companion-skill/`, read its nested `AGENTS.md`; that package has a generated client and an integrity/version protocol.
-- When a public skills API endpoint, request/response contract, or workflow changes, update the affected bundled Companion skill docs and behavior under `packages/companion-skill/` in the same change.
+- When any public API or auth contract consumed by the bundled Companion skill changes—including Skills, local-skill, Secret/retrieval-grant, or Agent Auth workflows—update its docs and behavior under `packages/companion-skill/` in the same change.
 
 Keep pull requests focused and use a Commitizen title such as `feat(skills): add dependency status`.
