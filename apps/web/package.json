@@ -18,7 +18,7 @@
     "@companion/skills": "workspace:*",
     "@posthog/react": "^1.10.3",
     "@shadcn/react": "0.2.1",
-    "@trpc/client": "^10.45.2",
+    "@trpc/client": "^11.18.0",
     "lucide-react": "^0.469.0",
     "next": "15.5.21",
     "posthog-js": "^1.396.4",
