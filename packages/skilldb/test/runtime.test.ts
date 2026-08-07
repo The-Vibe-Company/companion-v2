@@ -1,3 +1,20 @@
+/**
+ * Product promise:
+ * Skill Database SQL can reach only the currently declared schema, stays within resource bounds,
+ * and recovers cleanly when a SQLite worker times out or crashes.
+ *
+ * Regression caught:
+ * Retired data could remain readable through its physical column or SQLite metadata, while a
+ * non-yielding query, oversized result, or failed worker could exhaust the shared runtime.
+ *
+ * Why this test uses the real runtime:
+ * Parser-only tests cannot prove the SQLite authorizer, WASM limits, serialized image migrations,
+ * or worker-pool recovery behavior.
+ *
+ * Failure proof:
+ * Widening the authorizer to physical schema, removing a runtime bound, or disabling worker
+ * replacement makes the retirement, limit, timeout, or recovery scenarios fail.
+ */
 import { afterAll, describe, expect, it } from "vitest";
 import type { SkillDatabaseTable } from "@companion/contracts";
 import { SkillDatabaseError } from "@companion/core";
@@ -131,6 +148,16 @@ describe("SQLite WASM skill database runtime", () => {
       tables: { state: stateTable },
       schemaGeneration: 1,
       fileSchemaGeneration: 0,
+      sql: "SELECT SQLITE_AUTH",
+      params: [],
+      mode: "read",
+      limits,
+    })).rejects.toMatchObject({ code: "sql_error" });
+    await expect(runtime.execute({
+      image: null,
+      tables: { state: stateTable },
+      schemaGeneration: 1,
+      fileSchemaGeneration: 0,
       sql: "INSERT INTO state(id) VALUES ('no')",
       params: [],
       mode: "read",
@@ -180,6 +207,78 @@ describe("SQLite WASM skill database runtime", () => {
       ...retiredInput,
       sql: "INSERT INTO state VALUES (?, ?)",
     })).rejects.toMatchObject({ code: "forbidden_statement" });
+  });
+
+  it("keeps retired physical data unreadable until its exact declaration is restored", async () => {
+    const created = await runtime.execute({
+      image: null,
+      tables: { state: stateTable },
+      schemaGeneration: 1,
+      fileSchemaGeneration: 0,
+      sql: "INSERT INTO state(id, value) VALUES (?, ?)",
+      params: ["retired-row", "preserved-but-hidden"],
+      mode: "write",
+      limits,
+    });
+    const withoutRetiredValue: SkillDatabaseTable = {
+      ...stateTable,
+      columns: { id: stateTable.columns.id! },
+    };
+    const retiredColumn = {
+      image: created.image,
+      tables: { state: withoutRetiredValue },
+      schemaGeneration: 2,
+      fileSchemaGeneration: 1,
+      params: [],
+      mode: "read" as const,
+      limits,
+    };
+
+    const visible = await runtime.execute({
+      ...retiredColumn,
+      sql: "SELECT id FROM state",
+    });
+    expect(visible).toMatchObject({ rows: [["retired-row"]], readOnly: true });
+    expect(visible.image).toBeInstanceOf(Buffer);
+    await expect(runtime.execute({
+      ...retiredColumn,
+      sql: "SELECT value FROM state",
+    })).rejects.toMatchObject({
+      code: "forbidden_statement",
+      message: "SQL statement is not authorized",
+    });
+    await expect(runtime.execute({
+      ...retiredColumn,
+      sql: "SELECT * FROM state",
+    })).rejects.toMatchObject({
+      code: "forbidden_statement",
+      message: "SQL statement is not authorized",
+    });
+    await expect(runtime.execute({
+      ...retiredColumn,
+      sql: "SELECT sql FROM sqlite_schema",
+    })).rejects.toMatchObject({
+      code: "forbidden_statement",
+      message: "SQL statement is not authorized",
+    });
+    await expect(runtime.execute({
+      ...retiredColumn,
+      image: visible.image,
+      tables: {},
+      schemaGeneration: 3,
+      fileSchemaGeneration: 2,
+      sql: "SELECT id FROM state",
+    })).rejects.toMatchObject({ code: "forbidden_statement" });
+
+    await expect(runtime.execute({
+      ...retiredColumn,
+      image: visible.image,
+      tables: { state: stateTable },
+      schemaGeneration: 3,
+      fileSchemaGeneration: 2,
+      sql: "SELECT value FROM state WHERE id = ?",
+      params: ["retired-row"],
+    })).resolves.toMatchObject({ rows: [["preserved-but-hidden"]] });
   });
 
   it("terminates non-yielding recursive work and respawns the worker", async () => {
