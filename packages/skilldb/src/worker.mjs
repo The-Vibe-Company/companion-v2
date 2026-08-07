@@ -95,12 +95,24 @@ function resultBytes(value) {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
+function isSqliteAuthorizerError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return error?.resultCode === sqlite3.capi.SQLITE_AUTH
+    || /^(?:SQLITE_AUTH\b|not authorized\b|authorization denied\b)/i.test(message);
+}
+
 function errorCode(error) {
   const message = error instanceof Error ? error.message : String(error);
-  if (/not authorized|authorization denied/i.test(message)) return "forbidden_statement";
+  if (isSqliteAuthorizerError(error)) return "forbidden_statement";
   if (/database or disk is full|SQLITE_FULL/i.test(message)) return "database_full";
   if (/string or blob too big|SQLITE_TOOBIG/i.test(message)) return "result_too_large";
   return error?.code ?? "sql_error";
+}
+
+function errorMessage(error) {
+  return isSqliteAuthorizerError(error)
+    ? "SQL statement is not authorized"
+    : error instanceof Error ? error.message : String(error);
 }
 
 function deserialize(db, image, maxBytes) {
@@ -283,7 +295,7 @@ parentPort.on("message", async ({ id, input }) => {
       ok: false,
       error: {
         code: errorCode(error),
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
       },
     });
   }
