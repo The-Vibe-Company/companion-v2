@@ -153,7 +153,7 @@ import bridge for existing fleets.
 - **[Product](docs/product.md)** — personas, positioning, journeys, the three pillars.
 - **[Architecture](docs/design.md)** — data model, RBAC, provider abstraction, runtime.
 - **[PRD](docs/PRD.md)** — MVP scope, requirements, roadmap, metrics, risks.
-- **[CLAUDE.md](CLAUDE.md)** — guide for contributors and Claude Code agents.
+- **[AGENTS.md](AGENTS.md)** — concise repository guidance for contributors and coding agents.
 
 ## License
 

@@ -1,7 +1,7 @@
 # Contributing to Companion
 
 Companion is pre-MVP. Start with `docs/vision.md`, `docs/product.md`, `docs/design.md`, `docs/PRD.md`, and
-the repository guidance in `CLAUDE.md`. `docs/design.md` is authoritative for architecture and
+the repository guidance in `AGENTS.md`. `docs/design.md` is authoritative for architecture and
 `docs/testing.md` defines what a valuable test protects.
 
 ## Local setup
@@ -21,7 +21,7 @@ pnpm db:migrate
 DATABASE_URL=postgres://companion:companion@127.0.0.1:5432/companion pnpm test:integration
 ```
 
-Frontend changes require `pnpm browser:smoke` and a manual browser check as described in `CLAUDE.md`.
+Frontend changes require `pnpm browser:smoke` and a manual browser check as described in `AGENTS.md`.
 
 ## Pull requests
 
