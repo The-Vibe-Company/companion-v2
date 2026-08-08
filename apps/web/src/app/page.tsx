@@ -1,10 +1,11 @@
 import { redirect } from "next/navigation";
-import { serverApiFetch } from "@/lib/apiServer";
 import { LandingPage } from "@/components/landing/LandingPage";
-import { projectsFeatureEnabled } from "@/lib/projectsFeature";
+import { AuthUnavailable } from "@/components/org/WorkspaceLoadError";
+import { loadServerAuth } from "@/lib/serverAuth";
 
 export default async function Home() {
-  const user = await serverApiFetch<{ email: string }>("/v1/auth/whoami").catch(() => null);
-  if (user) redirect(projectsFeatureEnabled(user.email) ? "/projects" : "/skills");
+  const authState = await loadServerAuth();
+  if (authState.status === "authenticated") redirect("/skills");
+  if (authState.status === "unavailable") return <AuthUnavailable />;
   return <LandingPage />;
 }
