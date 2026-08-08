@@ -1081,10 +1081,25 @@ function startProjectRecorder(input: {
   const eventRedactor = createProjectEventRedactor(input.redactor);
   let failure: Error | null = null;
   let connected = false;
+  let startedSettled = false;
   let resolveStarted!: () => void;
-  const started = new Promise<void>((resolve) => {
+  let rejectStarted!: (reason: Error) => void;
+  const started = new Promise<void>((resolve, reject) => {
     resolveStarted = resolve;
+    rejectStarted = reject;
   });
+  function settleStarted(error?: Error): void {
+    if (startedSettled) return;
+    startedSettled = true;
+    signal.removeEventListener("abort", onStartedAbort);
+    if (error) rejectStarted(error);
+    else resolveStarted();
+  }
+  function onStartedAbort(): void {
+    settleStarted(abortReason(signal));
+  }
+  signal.addEventListener("abort", onStartedAbort, { once: true });
+  if (signal.aborted) onStartedAbort();
 
   const loop = (async () => {
     let retryMs = 250;
@@ -1096,7 +1111,7 @@ function startProjectRecorder(input: {
           () => {
             if (!connected) {
               connected = true;
-              resolveStarted();
+              settleStarted();
             }
           },
           cursorKey,
@@ -1131,7 +1146,7 @@ function startProjectRecorder(input: {
         if (signal.aborted) break;
         if (!connected && retryMs >= 5_000) {
           failure = new RunRuntimeError("Project event recorder could not connect");
-          resolveStarted();
+          settleStarted();
           break;
         }
         await wait(retryMs, signal).catch(() => undefined);
@@ -1139,14 +1154,23 @@ function startProjectRecorder(input: {
       }
     }
   })();
+  let stopPromise: Promise<void> | null = null;
 
   return {
     started,
     error: () => failure,
-    async stop() {
-      abort.abort();
-      await loop.catch(() => undefined);
-      eventRedactor.clear();
+    stop() {
+      stopPromise ??= (async () => {
+        abort.abort();
+        if (signal.aborted) onStartedAbort();
+        try {
+          await loop.catch(() => undefined);
+        } finally {
+          signal.removeEventListener("abort", onStartedAbort);
+          eventRedactor.clear();
+        }
+      })();
+      return stopPromise;
     },
   };
 }
