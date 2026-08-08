@@ -545,6 +545,67 @@ project_run_picker_mobile_smoke() {
     "mobile Project run picker did not close without choosing a project"
 }
 
+skill_detail_mobile_tabs_smoke() {
+  log "Checking stable mobile skill detail tabs"
+  agent-browser set viewport 390 420
+  agent-browser open "$APP_URL/skills?lib=org&skill=$SMOKE_SKILL"
+  wait_for_contextual_action "Install skill" "Install"
+  agent-browser wait 300
+
+  assert_eval_true "(() => {
+    const tabs = document.querySelector('.dtabs');
+    const panel = document.querySelector('.dpanel');
+    if (!tabs || !panel) return false;
+    const tabsRect = tabs.getBoundingClientRect();
+    const panelRect = panel.getBoundingClientRect();
+    window.__skillDetailMobilePositions = {
+      tabsTop: tabsRect.top,
+      panelTop: panelRect.top,
+    };
+    tabs.scrollLeft = tabs.scrollWidth;
+    panel.scrollTop = panel.scrollHeight;
+    return getComputedStyle(tabs).overflowX === 'auto' &&
+      getComputedStyle(tabs).overflowY === 'hidden' &&
+      tabs.scrollWidth > tabs.clientWidth &&
+      tabs.scrollLeft > 0 &&
+      panel.scrollHeight > panel.clientHeight &&
+      getComputedStyle(panel).overflowY === 'auto' &&
+      panel.scrollTop > 0;
+  })()" "mobile skill detail tabs or panel do not use the intended scroll axes"
+  agent-browser wait 200
+  assert_eval_true "(() => {
+    const tabs = document.querySelector('.dtabs');
+    const panel = document.querySelector('.dpanel');
+    const before = window.__skillDetailMobilePositions;
+    if (!tabs || !panel || !before) return false;
+    return Math.abs(tabs.getBoundingClientRect().top - before.tabsTop) < 0.5 &&
+      Math.abs(panel.getBoundingClientRect().top - before.panelTop) < 0.5 &&
+      tabs.scrollTop === 0 &&
+      panel.scrollTop > 0;
+  })()" "mobile skill detail tabs moved while the detail panel scrolled"
+
+  agent-browser eval "(() => {
+    const tabs = document.querySelector('.dtabs');
+    const first = tabs?.querySelector('[role=\"tab\"]');
+    if (!tabs || !first) return false;
+    tabs.scrollLeft = 0;
+    first.focus();
+    return true;
+  })()" >/dev/null
+  agent-browser press End
+  agent-browser wait 200
+  assert_eval_true "(() => {
+    const tabs = document.querySelector('.dtabs');
+    const available = tabs ? Array.from(tabs.querySelectorAll('[role=\"tab\"]')) : [];
+    const last = available.at(-1);
+    return !!tabs && !!last &&
+      document.activeElement === last &&
+      last.getAttribute('aria-selected') === 'true' &&
+      tabs.scrollLeft > 0 &&
+      tabs.scrollTop === 0;
+  })()" "mobile skill detail tabs lost keyboard or horizontal access"
+}
+
 # Center point (x y) of an element's bounding box, from real layout.
 box_center() {
   # A skill can legitimately appear in more than one label group. `agent-browser get box` resolves
@@ -912,6 +973,7 @@ assert_body_contains "Add skill"
 assert_body_contains "$SMOKE_SKILL"
 
 projects_mobile_smoke
+skill_detail_mobile_tabs_smoke
 
 log "Checking mobile run launcher"
 agent-browser set viewport 390 420

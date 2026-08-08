@@ -56,6 +56,8 @@ function registryRow(over: Partial<SkillListRow> = {}): SkillListRow {
     requires_count: 0,
     used_by_count: 0,
     dep_warn: false,
+    database_table_count: 0,
+    database_available: false,
     archived: false,
     referenced: false,
     created_at: "2026-06-09T12:00:00.000Z",
