@@ -110,7 +110,8 @@ Each requirement has user stories with acceptance criteria. Priorities: **P0** =
   withdrawal/rename only a new current version whose immutable name matches the new slug can be promoted.
 - As a visitor, I can inspect a stable, `noindex` public skill page and install its pinned release after
   authenticating. *AC:* preview metadata is anonymous; ZIP bytes require a verified Better Auth
-  session or an approved delegated agent, reject PAT/anonymous/mismatched/archive requests, and match
+  session, an approved delegated agent, or a PAT carrying `public-skills:install`; reject anonymous,
+  under-scoped PAT, mismatched, and archived requests, and match
   the advertised ZIP checksum and size from an immutable content-addressed snapshot (never a ZIP
   regenerated at download time). The installer rejects traversal/symlinks, requires root
   `SKILL.md`, confirms scope/replacement, performs an atomic swap, executes no scripts, and does not

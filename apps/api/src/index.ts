@@ -17,6 +17,7 @@ import {
   assignLabel,
   buildDependencyPlan,
   buildSkillSharePlan,
+  authorizePublicSkillPackageForApiToken,
   authorizePublicSkillPackageForSession,
   clearSkillPublicVersion,
   completeOnboarding,
@@ -52,7 +53,10 @@ import {
   getSkillPublicPreviewByShareToken,
   getSkillShareTargetByShareToken,
   ApiTokenRefreshError,
+  AGENT_DELEGATION_TOKEN_MAX_TTL_MS,
+  AGENT_DELEGATION_TOKEN_TTL_MS,
   issueApiToken,
+  snapshotAgentApiTokenGrants,
   joinOrgByDomain,
   listApiTokens,
   listLabels,
@@ -915,7 +919,7 @@ app.use(
   "*",
   cors({
     origin: [process.env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000"],
-    allowHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "Last-Event-ID", "x-companion-org", "x-companion-workspace-id", "x-companion-transfer-ticket"],
+    allowHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "Last-Event-ID", "x-companion-org", "x-companion-workspace-id", "x-companion-transfer-ticket", "x-companion-delegation-target"],
     allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   }),
@@ -3134,9 +3138,9 @@ app.get("/v1/skills/:slug/download", async (c) => {
 });
 
 /**
- * Download the exact pinned public release. Anonymous requests and PATs are deliberately rejected:
- * callers need either a verified Better Auth browser session or a one-use Agent Auth transfer
- * ticket supplied in a header (never in the URL).
+ * Download the exact pinned public release. Callers need a verified Better Auth browser session,
+ * a PAT carrying `public-skills:install`, or a one-use Agent Auth transfer ticket. Every path resolves
+ * the same immutable release and the response remains private/no-store.
  */
 app.get("/v1/public/skills/:token/versions/:version/package", async (c) => {
   try {
@@ -3150,12 +3154,17 @@ app.get("/v1/public/skills/:token/versions/:version/package", async (c) => {
       if (!user.emailVerified) return jsonError(c, "a verified account is required", 401);
       found = await authorizePublicSkillPackageForSession({ token, version, userId: user.id });
       if (!found) return jsonError(c, "public skill release not found", 404);
+    } else if (isTokenRequest(c)) {
+      const actor = actorFromContext(c, true);
+      requireScope(c, "public-skills:install");
+      found = await authorizePublicSkillPackageForApiToken({ token, version, userId: actor.id });
+      if (!found) return jsonError(c, "public skill release not found", 404);
     } else if (transferTicket) {
       found = await consumePublicSkillTransferTicket({ ticket: transferTicket, token, version });
       if (!found) return jsonError(c, "transfer ticket is invalid, expired, revoked, or already used", 401);
       consumedAgentTicket = transferTicket;
     } else {
-      return jsonError(c, "sign in or use an approved Agent Auth transfer ticket", 401);
+      return jsonError(c, "sign in or use an authorized programmatic credential", 401);
     }
 
     const zip = await getSkillArchive({
@@ -3912,23 +3921,67 @@ app.post("/v1/tokens/refresh", async (c) => {
 });
 
 /**
- * Issue a scoped personal access token for the guided-prompt / install flows.
- * Cookie session only — ordinary PATs cannot mint arbitrary tokens. The dedicated refresh route
- * above can only preserve an eligible token's existing name and scopes. Plaintext is returned once.
+ * Issue a scoped personal access token. Browser sessions retain the existing caller-selected form.
+ * A validated Agent Auth request can use only the inheritance form: scopes are an exact snapshot of
+ * its active grants for this workspace (plus active instance-wide public install), and lifetime is
+ * capped by both the delegation ceiling and the earliest finite source expiry. Plaintext is returned
+ * once. A PAT can never enter either issuance path.
  */
 app.post("/v1/tokens", async (c) => {
   try {
     if (isTokenRequest(c)) throw new Error("personal access tokens cannot issue tokens");
     const input = issueTokenInputSchema.parse(await c.req.json());
-    const issued = await withTenant(c, ({ actor, orgId, database }) =>
-      issueApiToken({ actor, orgId, scopes: input.scopes, name: input.name, database }),
-    );
+    const inheritance = input.inherit_agent_grants === true;
+    let issued;
+    if (isAgentRequest(c)) {
+      if (!inheritance) throw new Error("Agent Auth can only inherit its active grants");
+      const session = c.get("agentSession");
+      const agentId = c.get("agentId");
+      if (!session || !agentId) throw new Error("Agent Auth session is unavailable");
+      issued = await withTenant(c, async ({ actor, orgId, database }) => {
+        const snapshot = await snapshotAgentApiTokenGrants({ actor, orgId, agentId, database });
+        if (!snapshot.scopes.includes("skills:read")) {
+          throw new Error("Agent Auth grant snapshot is no longer eligible for delegation");
+        }
+        const requestedTtl = input.ttl_seconds
+          ? input.ttl_seconds * 1_000
+          : AGENT_DELEGATION_TOKEN_TTL_MS;
+        const now = Date.now();
+        const expiresAtMs = Math.min(
+          now + requestedTtl,
+          now + AGENT_DELEGATION_TOKEN_MAX_TTL_MS,
+          snapshot.expiresAt?.getTime() ?? Number.POSITIVE_INFINITY,
+        );
+        if (expiresAtMs <= now) {
+          throw new Error("Agent Auth grants expire too soon to delegate");
+        }
+        return issueApiToken({
+          actor,
+          orgId,
+          scopes: snapshot.scopes,
+          name: input.name,
+          expiresAt: new Date(expiresAtMs),
+          source: {
+            type: "agent_auth",
+            agentId,
+            ...(input.target_workspace_id ? { targetWorkspaceId: input.target_workspace_id } : {}),
+          },
+          database,
+        });
+      }, true);
+    } else {
+      if (inheritance) throw new Error("Agent Auth is required to inherit grants");
+      issued = await withTenant(c, ({ actor, orgId, database }) =>
+        issueApiToken({ actor, orgId, scopes: input.scopes, name: input.name, database }),
+      );
+    }
     return c.json({
       id: issued.id,
       token: issued.token,
       prefix: issued.prefix,
       scopes: issued.scopes,
       expires_at: issued.expiresAt.toISOString(),
+      ...(issued.targetWorkspaceId ? { target_workspace_id: issued.targetWorkspaceId } : {}),
     });
   } catch (error) {
     return jsonError(c, error);

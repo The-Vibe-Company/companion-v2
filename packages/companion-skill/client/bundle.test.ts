@@ -1,19 +1,25 @@
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { zipSync } from "fflate";
 
 const clientPath = fileURLToPath(new URL("../skill/scripts/companion-agent-client.mjs", import.meta.url));
 
 function runClient(
   input: unknown,
   env: NodeJS.ProcessEnv,
+  extraPipe = false,
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [clientPath], { env, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [clientPath], {
+      env,
+      stdio: extraPipe ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => { stdout += String(chunk); });
@@ -89,6 +95,237 @@ describe("compiled Companion agent client", () => {
       expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, error: expect.stringContaining("download checksum mismatch") });
       expect(result.stderr).toBe("");
       expect(existsSync(outputPath)).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("uses COMPANION_DELEGATION_TOKEN without credentials or approval output", async () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "companion-delegation-env-"));
+    const requests: Array<{ authorization?: string; target?: string }> = [];
+    const server = createServer((request, response) => {
+      requests.push({
+        authorization: request.headers.authorization,
+        target: request.headers["x-companion-delegation-target"] as string | undefined,
+      });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ skills: [] }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+
+    const syntheticToken = "cmp_pat_synthetic_delegation_env";
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("test server has no TCP address");
+      const result = await runClient({ action: "api", method: "GET", path: "/skills" }, {
+        ...process.env,
+        HOME: fixtureRoot,
+        COMPANION_API_URL: `http://127.0.0.1:${address.port}/v1`,
+        COMPANION_WORKSPACE_ID: "00000000-0000-4000-8000-000000000001",
+        COMPANION_DELEGATION_TOKEN: syntheticToken,
+        COMPANION_DELEGATION_TARGET_ID: "conductor-workspace-1",
+      });
+
+      expect(result.status, result.stdout).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ ok: true, data: { skills: [] } });
+      expect(result.stdout).not.toContain(syntheticToken);
+      expect(result.stderr).toBe("");
+      expect(requests).toEqual([{
+        authorization: `Bearer ${syntheticToken}`,
+        target: "conductor-workspace-1",
+      }]);
+      expect(existsSync(join(fixtureRoot, ".companion", "credentials.json"))).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("never starts connect/device approval while delegation env mode is active", async () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "companion-delegation-no-connect-"));
+    const syntheticToken = "cmp_pat_synthetic_no_connect";
+    try {
+      const result = await runClient({
+        action: "connect",
+        apiUrl: "https://companion.invalid/v1",
+        workspaceId: "00000000-0000-4000-8000-000000000001",
+      }, {
+        ...process.env,
+        HOME: fixtureRoot,
+        COMPANION_DELEGATION_TOKEN: syntheticToken,
+        COMPANION_API_URL: "https://companion.invalid/v1",
+        COMPANION_WORKSPACE_ID: "00000000-0000-4000-8000-000000000001",
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).not.toContain(syntheticToken);
+      expect(result.stdout).not.toContain("approval_required");
+      expect(existsSync(join(fixtureRoot, ".companion", "credentials.json"))).toBe(false);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("requires the workspace environment variable even when the request carries a workspace id", async () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "companion-delegation-workspace-env-"));
+    const syntheticToken = "cmp_pat_synthetic_workspace_env";
+    try {
+      const result = await runClient({
+        action: "api",
+        method: "GET",
+        path: "/skills",
+        workspaceId: "00000000-0000-4000-8000-000000000001",
+      }, {
+        ...process.env,
+        HOME: fixtureRoot,
+        COMPANION_API_URL: "https://companion.invalid/v1",
+        COMPANION_DELEGATION_TOKEN: syntheticToken,
+        COMPANION_WORKSPACE_ID: undefined,
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain("requires COMPANION_API_URL and COMPANION_WORKSPACE_ID");
+      expect(result.stdout).not.toContain(syntheticToken);
+      expect(result.stderr).toBe("");
+      expect(existsSync(join(fixtureRoot, ".companion", "credentials.json"))).toBe(false);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a socket descriptor for delegation before reading credentials or issuing a token", async () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "companion-delegation-socket-"));
+    try {
+      const result = await runClient({
+        action: "delegate",
+        outputFd: 3,
+        targetWorkspaceId: "conductor-workspace-1",
+      }, {
+        ...process.env,
+        HOME: fixtureRoot,
+      }, true);
+
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain("requires a private owner-only FIFO");
+      expect(result.stdout).not.toContain("cmp_pat_");
+      expect(result.stdout).not.toContain("approval_required");
+      expect(result.stderr).toBe("");
+      expect(existsSync(join(fixtureRoot, ".companion", "credentials.json"))).toBe(false);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("redacts delegation credentials from sensitive HTTP errors and all output", async () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "companion-delegation-redaction-"));
+    const syntheticToken = "cmp_pat_synthetic_sensitive_error";
+    const server = createServer((_request, response) => {
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: `unexpected ${syntheticToken}` }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("test server has no TCP address");
+      const result = await runClient({
+        action: "api",
+        method: "POST",
+        path: "/tokens",
+        body: { inherit_agent_grants: true },
+      }, {
+        ...process.env,
+        HOME: fixtureRoot,
+        COMPANION_API_URL: `http://127.0.0.1:${address.port}/v1`,
+        COMPANION_WORKSPACE_ID: "00000000-0000-4000-8000-000000000001",
+        COMPANION_DELEGATION_TOKEN: syntheticToken,
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stdout).not.toContain(syntheticToken);
+      expect(result.stdout).toContain("response body withheld");
+      expect(result.stderr).toBe("");
+      expect(existsSync(join(fixtureRoot, ".companion", "credentials.json"))).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("installs a checksum-pinned public release directly with the delegated PAT", async () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "companion-delegation-public-install-"));
+    const projectRoot = join(fixtureRoot, "project");
+    mkdirSync(projectRoot, { recursive: true });
+    const zip = zipSync({
+      "SKILL.md": new TextEncoder().encode(
+        "---\nname: delegated-public\ndescription: Delegated public install fixture.\n---\n\n# Delegated public install\n",
+      ),
+    });
+    const checksum = `sha256:${createHash("sha256").update(zip).digest("hex")}`;
+    const packageHeaders: Array<Record<string, string | undefined>> = [];
+    const server = createServer((request, response) => {
+      if (request.url === "/v1/public/skills/share-token") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          slug: "delegated-public",
+          public_release: { version: "1.0.0", checksum, size_bytes: zip.byteLength },
+        }));
+        return;
+      }
+      packageHeaders.push({
+        authorization: request.headers.authorization,
+        target: request.headers["x-companion-delegation-target"] as string | undefined,
+      });
+      response.writeHead(200, {
+        "content-type": "application/zip",
+        "cache-control": "private, no-store",
+        "x-companion-public-version": "1.0.0",
+      });
+      response.end(Buffer.from(zip));
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+
+    const syntheticToken = "cmp_pat_synthetic_public_install";
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("test server has no TCP address");
+      const result = await runClient({
+        action: "public-install",
+        token: "share-token",
+        version: "1.0.0",
+        checksum,
+        sizeBytes: zip.byteLength,
+        tool: "codex",
+        scope: "project",
+        projectRoot,
+        confirmInstall: true,
+      }, {
+        ...process.env,
+        HOME: fixtureRoot,
+        COMPANION_API_URL: `http://127.0.0.1:${address.port}/v1`,
+        COMPANION_WORKSPACE_ID: "00000000-0000-4000-8000-000000000001",
+        COMPANION_DELEGATION_TOKEN: syntheticToken,
+        COMPANION_DELEGATION_TARGET_ID: "conductor-workspace-1",
+      });
+
+      expect(result.status, result.stdout).toBe(0);
+      expect(result.stdout).not.toContain(syntheticToken);
+      expect(result.stderr).toBe("");
+      expect(packageHeaders).toEqual([{
+        authorization: `Bearer ${syntheticToken}`,
+        target: "conductor-workspace-1",
+      }]);
+      expect(existsSync(join(projectRoot, ".codex", "skills", "delegated-public", "SKILL.md"))).toBe(true);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       rmSync(fixtureRoot, { recursive: true, force: true });

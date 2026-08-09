@@ -171,6 +171,7 @@ describe("attachSession", () => {
         actorId: c.get("tokenActor")?.id,
         workspaceId: c.get("tokenOrgId"),
         capability: c.get("agentCapability"),
+        hasSession: Boolean(c.get("agentSession")),
         kind: c.get("programmaticAuthKind"),
       }),
     );
@@ -187,6 +188,7 @@ describe("attachSession", () => {
       actorId: "user-1",
       workspaceId: "169b768e-b1d0-4dde-a62e-575022debe88",
       capability: "skills:read",
+      hasSession: true,
       kind: "agent",
     });
     expect(authMocks.authenticateAgentRequest).toHaveBeenCalledWith(
@@ -195,6 +197,31 @@ describe("attachSession", () => {
         pathname: "/v1/skills",
         workspaceId: "169b768e-b1d0-4dde-a62e-575022debe88",
       }),
+    );
+  });
+
+  it("passes the explicit delegation target to PAT resolution", async () => {
+    serviceMocks.resolveApiToken.mockResolvedValue({
+      actor: { id: "user-1", email: "user@example.test", name: "User" },
+      orgId: "169b768e-b1d0-4dde-a62e-575022debe88",
+      scopes: ["skills:read"],
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    app.use("*", attachSession);
+    app.get("/v1/skills", (c) => c.json({ kind: c.get("programmaticAuthKind") }));
+
+    const response = await app.request("/v1/skills", {
+      headers: {
+        authorization: "Bearer cmp_pat_synthetic",
+        "x-companion-delegation-target": "conductor-workspace-1",
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(serviceMocks.resolveApiToken).toHaveBeenCalledWith(
+      "cmp_pat_synthetic",
+      undefined,
+      "conductor-workspace-1",
     );
   });
 });

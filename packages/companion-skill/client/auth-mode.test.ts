@@ -22,6 +22,19 @@ describe("Companion authentication mode", () => {
     });
   });
 
+  it("gives an environment delegation token first-class precedence with optional target binding", () => {
+    expect(selectWorkspaceAuthentication(
+      workspace,
+      undefined,
+      "cmp_pat_synthetic_delegation",
+      "conductor-workspace-1",
+    )).toEqual({
+      kind: "delegation-token",
+      token: "cmp_pat_synthetic_delegation",
+      targetWorkspaceId: "conductor-workspace-1",
+    });
+  });
+
   it("never treats an Agent Auth failure as permission to fall back", () => {
     expect(() => selectWorkspaceAuthentication({ apiUrl: workspace.apiUrl, legacyPat: workspace.legacyPat }, undefined))
       .toThrow(/not connected with Agent Auth/);

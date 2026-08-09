@@ -144,7 +144,7 @@ describe("getting-started lifecycle", () => {
       method: "POST",
       body,
     });
-    expect(first.status).toBe(200);
+    expect(first.status, await first.clone().text()).toBe(200);
     const afterFirst = await sessionRequest(fixture.admin, fixture.orgA, "/v1/getting-started");
     const firstState = await afterFirst.json() as Record<string, unknown>;
     expect(firstState).toMatchObject({ first_incomplete_step: "local_review" });

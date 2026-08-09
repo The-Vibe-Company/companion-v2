@@ -943,8 +943,8 @@ export const skillCommentImages = pgTable(
 /**
  * Personal access tokens for programmatic publish/install over the API. The plaintext
  * `cmp_pat_<hex>` is shown to the caller once; only its sha256 `token_hash` is stored.
- * `scopes` gates capability (`skills:read` / `skills:write` / `secrets:read` / `secrets:write`); tokens expire
- * (90 days by default) and can be revoked.
+ * `scopes` gates capability; tokens expire and can be revoked. Agent-derived rows keep only
+ * value-free provenance plus an optional explicit runtime target binding.
  */
 export const apiTokens = pgTable(
   "api_tokens",
@@ -960,6 +960,9 @@ export const apiTokens = pgTable(
     tokenPrefix: text("token_prefix").notNull(),
     tokenHash: text("token_hash").notNull().unique(),
     scopes: jsonb("scopes").$type<string[]>().notNull().default([]),
+    sourceType: text("source_type").notNull().default("human"),
+    sourceAgentId: text("source_agent_id"),
+    targetWorkspaceId: text("target_workspace_id"),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
