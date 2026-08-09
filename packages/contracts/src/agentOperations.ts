@@ -105,6 +105,7 @@ export const COMPANION_AGENT_OPERATION_REGISTRY = [
   { method: "POST", path: "/local-skills/:key/installed", capability: "skills:write", transport: "rest" },
   { method: "GET", path: "/getting-started", capability: "skills:read", transport: "rest" },
   { method: "POST", path: "/getting-started/steps", capability: "skills:write", transport: "rest" },
+  { method: "POST", path: "/tokens", capability: "skills:read", transport: "rest", sensitive: true },
   { method: "GET", path: "/skills/:slug/database", capability: "database:read", transport: "rest" },
   { method: "GET", path: "/skills/:slug/database/shares", capability: "database:write", transport: "rest", sensitive: true },
   { method: "PUT", path: "/skills/:slug/database/shares", capability: "database:write", transport: "rest", sensitive: true },

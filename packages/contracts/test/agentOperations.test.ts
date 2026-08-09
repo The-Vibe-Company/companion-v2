@@ -38,6 +38,11 @@ describe("closed Companion Agent Auth operation registry", () => {
       sensitive: true,
       transport: "rest",
     });
+    expect(matchCompanionAgentOperation("POST", "/tokens")).toMatchObject({
+      capability: "skills:read",
+      sensitive: true,
+      transport: "rest",
+    });
   });
 
   it("marks package byte routes as ticket-only and rejects arbitrary operations", () => {

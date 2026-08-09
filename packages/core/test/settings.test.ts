@@ -4,6 +4,7 @@ import { apiTokenRowSchema, TEAM_BRAND_COLORS } from "@companion/contracts";
 import {
   API_TOKEN_TTL_MS,
   addOrgAccessDomain,
+  deriveAgentApiTokenGrantSnapshot,
   getSkillNamingPolicy,
   issueApiToken,
   listApiTokens,
@@ -489,6 +490,83 @@ describe("issueApiToken", () => {
 
     expect(tokenInsertValues(calls).scopes).toEqual(["database:read", "database:write"]);
     expect(issued.scopes).toEqual(["database:read", "database:write"]);
+  });
+
+  it("stores value-free Agent Auth provenance, target binding, and audit metadata", async () => {
+    const { database, calls } = fakeDb({ role: "developer" });
+
+    const issued = await issueApiToken({
+      actor: developer,
+      orgId: ORG_A,
+      scopes: ["skills:read", "public-skills:install"],
+      ttlMs: 15 * 60_000,
+      source: {
+        type: "agent_auth",
+        agentId: "agent-1",
+        targetWorkspaceId: "conductor-workspace-1",
+      },
+      database,
+    });
+
+    expect(tokenInsertValues(calls)).toMatchObject({
+      sourceType: "agent_auth",
+      sourceAgentId: "agent-1",
+      targetWorkspaceId: "conductor-workspace-1",
+    });
+    expect(issued.targetWorkspaceId).toBe("conductor-workspace-1");
+    const audit = calls.inserts.find((entry) => entry.values?.action === "api_token.issue_agent_delegation");
+    expect(audit?.values?.metadata).toMatchObject({
+      sourceAgentId: "agent-1",
+      targetWorkspaceId: "conductor-workspace-1",
+      scopes: ["skills:read", "public-skills:install"],
+    });
+    expect(JSON.stringify(calls.inserts.map((entry) => entry.values))).not.toContain(issued.token);
+  });
+});
+
+describe("deriveAgentApiTokenGrantSnapshot", () => {
+  it("inherits only live exact-workspace grants plus public install and caps at the earliest expiry", () => {
+    const now = new Date("2026-08-09T12:00:00.000Z");
+    const snapshot = deriveAgentApiTokenGrantSnapshot([
+      {
+        capability: "skills:read",
+        constraints: JSON.stringify({ workspaceId: { eq: ORG_A } }),
+        grantExpiresAt: null,
+        agentExpiresAt: new Date("2026-08-10T12:00:00.000Z"),
+      },
+      {
+        capability: "database:write",
+        constraints: { workspaceId: ORG_A },
+        grantExpiresAt: new Date("2026-08-09T12:30:00.000Z"),
+        agentExpiresAt: null,
+      },
+      {
+        capability: "public-skills:install",
+        constraints: null,
+        grantExpiresAt: new Date("2026-08-09T13:00:00.000Z"),
+        agentExpiresAt: null,
+      },
+      {
+        capability: "skills:write",
+        constraints: { workspaceId: { eq: ORG_B } },
+        grantExpiresAt: null,
+        agentExpiresAt: null,
+      },
+      {
+        capability: "secrets:write",
+        constraints: { workspaceId: ORG_A },
+        grantExpiresAt: new Date("2026-08-09T11:59:59.000Z"),
+        agentExpiresAt: null,
+      },
+    ], ORG_A, now);
+
+    expect(snapshot.scopes).toEqual([
+      "skills:read",
+      "database:read",
+      "database:write",
+      "public-skills:install",
+    ]);
+    expect(snapshot.expiresAt?.toISOString()).toBe("2026-08-09T12:30:00.000Z");
   });
 });
 

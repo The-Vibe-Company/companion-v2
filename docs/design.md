@@ -373,7 +373,8 @@ Companion-reported install state; exact disk inventory remains local in `~/.comp
 
 `api_tokens` holds scoped personal access tokens for backward-compatible programmatic workflows.
 Only the `sha256` `token_hash` is stored (the plaintext `cmp_pat_…` is shown once); each row carries
-`scopes` (`skills:read` / `skills:write` / `secrets:read` / `secrets:write`), an `expires_at`
+`scopes` (`skills:read` / `skills:write` / `secrets:read` / `secrets:write` /
+`database:read` / `database:write` / `public-skills:install`), an `expires_at`
 (90-day default), and `revoked_at`. `POST /v1/tokens/refresh` is the single expired-PAT exception to
 normal authentication: it leaves active tokens unchanged and lets an unrevoked token expired no more
 than 30 days ago create exactly one 90-day successor with the same user, organization, name, and
@@ -386,6 +387,18 @@ updates the active workspace entry under the same inter-process lock used by the
 environment-provided tokens require manual replacement. The bundled Companion client never selects
 these credentials unless the user explicitly sets `COMPANION_AUTH_MODE=legacy-pat`; Agent Auth
 failure has no silent PAT fallback.
+An already-authenticated Agent Auth identity may instead call the sensitive registered
+`POST /v1/tokens` operation with `{inherit_agent_grants:true}`. This creates an opaque child PAT whose
+scopes are a server-side snapshot of every active exact-workspace tenant grant plus an active
+instance-wide `public-skills:install` grant; request bodies cannot select scopes or another Companion
+organization. `database:write` is expanded to `database:read`. These rows retain value-free
+`source_type=agent_auth`, `source_agent_id`, and optional `target_workspace_id` provenance, emit a
+value-free audit entry, default to 24 hours, are capped at seven days and at the earliest finite
+source grant/agent expiry, and cannot use PAT refresh to create a successor. A target-bound token is
+accepted only with the same `X-Companion-Delegation-Target` value. This is deliberate bearer-token
+binding, not Conductor workspace attestation: a thief who obtains both values can still replay them
+until expiry or revocation, so deployments should use the shortest practical TTL and revoke the PAT
+when the Cloud workspace is archived.
 `secrets:write` gives a PAT the same metadata and binding mutation
 capabilities as its signed-in user: create, rename, rotate, change audience/recipients, bind/unbind,
 manage suggestions, and delete. The service still enforces workspace membership, secret
@@ -532,7 +545,7 @@ and the pinned unstable Agent Auth plugin (`@better-auth/agent-auth@0.6.2`). The
   state cookie before redirecting to Google; otherwise the API callback cannot validate `state`. The
   callback itself still lands on `/auth/*` through the web origin's rewrite. The reused 6-digit OTP UI is a
   single client state machine in `(auth)/login/LoginForm.tsx`.
-- **Delegated agents.** Agent Auth is delegated-only, device-authorization-only, permits dynamic host
+- **Delegated agents.** Agent Auth is delegated-only and new grants use device authorization. It permits dynamic host
   registration with inline public JWKs (remote JWKS URLs are rejected before the pinned plugin and by
   database constraints), grants nothing automatically, signs 60-second JWTs, and keeps approved grants until
   explicit revocation. `/.well-known/agent-configuration` is public instance discovery. The approval
@@ -623,8 +636,9 @@ framework-free service layer remains the primary authorization boundary.
 The public skill preview service is the only intentional unauthenticated skill read. It does not take
 an actor or org id, resolves only by `share_token`, and hard-filters to non-archived org skills before
 returning the narrow metadata shape described above. Public package bytes are a separate boundary:
-they require either a verified browser session (membership in the publishing org is not required) or
-a consumed `public-skills:install` Agent Auth transfer ticket; anonymous requests and PATs are denied.
+they require a verified browser session (membership in the publishing org is not required), a
+consumed `public-skills:install` Agent Auth transfer ticket, or a PAT carrying the exact
+`public-skills:install` scope; anonymous requests and other PATs are denied.
 The signed-in web deep link uses a separate authenticated resolver,
 `GET /v1/skills/share-target/:token`, which returns `{org_id, slug}` only when the user is already a
 member of the token's workspace; `/s/:token/go` then sets `companion_org` before redirecting to the
@@ -882,7 +896,8 @@ persisting so delivery order cannot corrupt local state.
 - Tokens: `GET /v1/tokens` (list the caller's own active keys, no plaintext — it backs the personal
   Account pane, so it is caller-scoped even for admins), `POST /v1/tokens` (issue a scoped `cmp_pat_…`,
   plaintext returned once), `DELETE /v1/tokens/:id` (an org admin may revoke any token by id).
-  Session-authenticated only — a token cannot mint another.
+  Human scope selection remains session-only. Agent Auth may call only the sensitive inheritance
+  form, which snapshots its current exact-workspace grants; a PAT cannot mint another.
 - Skills: `/v1/skills` (the list accepts `lib`, `label`, `nolabel`, `installed`, and `archived`
   filters; no `owner` or `visibility` filters),
   `/v1/skills/:slug`, `/v1/skills/:slug/versions`,
@@ -983,7 +998,8 @@ accepted **only** on the PAT-enabled skills endpoints (`GET /v1/skills`, `GET /v
 surfaces, the three Skill Database routes, `GET /v1/orgs/current/skill-naming-policy`,
 the `/v1/local-skills*` endpoints, and the
 Secrets metadata, configuration, retrieval, vault, binding, and suggestion routes listed above); every
-other endpoint rejects tokens. Public release package download explicitly rejects PATs. The one
+other endpoint rejects tokens. Public release package download additionally accepts only a PAT with
+`public-skills:install`. The one
 recovery-only exception is `POST /v1/tokens/refresh`, which
 reads the bearer directly because an eligible token may already be expired and cannot authenticate
 elsewhere. Token requests are scope-gated (`skills:write` to publish/create/rename/mutate,

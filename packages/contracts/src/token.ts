@@ -11,6 +11,7 @@ export const tokenScopeSchema = z.enum([
   "secrets:write",
   "database:read",
   "database:write",
+  "public-skills:install",
 ]);
 export type TokenScope = z.infer<typeof tokenScopeSchema>;
 
@@ -21,6 +22,7 @@ export const TOKEN_SCOPES: readonly TokenScope[] = [
   "secrets:write",
   "database:read",
   "database:write",
+  "public-skills:install",
 ] as const;
 
 /**
@@ -38,11 +40,29 @@ export function expandTokenScopes(scopes: readonly TokenScope[]): TokenScope[] {
 /** A non-empty, validated set of capabilities carried by a personal access token. */
 export const tokenScopesSchema = z.array(tokenScopeSchema).min(1);
 
-/** Body of `POST /v1/tokens` — request a scoped token. */
-export const issueTokenInputSchema = z.object({
+/** Existing browser-session form of `POST /v1/tokens`. */
+export const issueHumanTokenInputSchema = z.object({
   scopes: tokenScopesSchema,
   name: z.string().min(1).max(120).optional(),
+  /** Prevent this branch from silently accepting the Agent Auth-only discriminator. */
+  inherit_agent_grants: z.never().optional(),
 });
+
+/** Agent Auth-only form. Scopes and tenant identity are derived server-side, never caller-selected. */
+export const issueInheritedTokenInputSchema = z.object({
+  inherit_agent_grants: z.literal(true),
+  name: z.string().min(1).max(120).optional(),
+  ttl_seconds: z.number().int().min(300).max(60 * 60 * 24 * 7).optional(),
+  target_workspace_id: z.string().trim().min(1).max(200).optional(),
+  /** Make a mixed inheritance + arbitrary-scopes request fail rather than strip `scopes`. */
+  scopes: z.never().optional(),
+});
+
+/** Body of `POST /v1/tokens` — human-selected scopes or an exact Agent Auth grant snapshot. */
+export const issueTokenInputSchema = z.union([
+  issueHumanTokenInputSchema,
+  issueInheritedTokenInputSchema,
+]);
 export type IssueTokenInput = z.infer<typeof issueTokenInputSchema>;
 
 /** Response of `POST /v1/tokens` — the plaintext `token` is returned exactly once. */
@@ -52,6 +72,7 @@ export const issuedTokenSchema = z.object({
   prefix: z.string().startsWith(API_TOKEN_PREFIX),
   scopes: tokenScopesSchema,
   expires_at: z.string(),
+  target_workspace_id: z.string().nullable().optional(),
 });
 export type IssuedToken = z.infer<typeof issuedTokenSchema>;
 
