@@ -217,7 +217,7 @@ from code intentionally executed inside that sandbox.
   feels at home, and aims to provide an **import bridge** for v1 fleets.
 - **Open standards.** `SKILL.md`, MCP, OpenRouter, OCI — Companion connects open pieces.
 - **Contribution.** The provider abstraction and the runtime layer are designed as clean seams so the
-  community can add new deploy targets and (later) new agent runtimes. See [`CLAUDE.md`](../CLAUDE.md).
+  community can add new deploy targets and (later) new agent runtimes. See [`AGENTS.md`](../AGENTS.md).
 - **Commercialization** (later, optional, open-core): a hosted/managed offering and enterprise
   features (SSO/SAML, compliance) — never at the expense of the self-host experience. Tracked as an
   [open question](PRD.md#10-open-questions).
