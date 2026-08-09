@@ -1112,6 +1112,78 @@ describe("Project workspace lifecycle", () => {
     expect(projectRuntime.activate).toHaveBeenCalledOnce();
   });
 
+  it("exits recorder startup when abort precedes event-stream connection", async () => {
+    const controller = new AbortController();
+    const reason = new Error("Project recorder startup aborted");
+    let cleanupCount = 0;
+    let markStreamEntered!: () => void;
+    const streamEntered = new Promise<void>((resolve) => {
+      markStreamEntered = resolve;
+    });
+    const withinDeadline = async <T>(promise: Promise<T>): Promise<T> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          promise,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error("Project recorder did not settle within one second")),
+              1_000,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
+    const chat = quietChat();
+    chat.streamEvents = vi.fn(async function* (_target, signal) {
+      let onAbort: (() => void) | null = null;
+      try {
+        await new Promise<void>((resolve) => {
+          onAbort = resolve;
+          signal.addEventListener("abort", onAbort, { once: true });
+          markStreamEntered();
+        });
+      } finally {
+        if (onAbort) signal.removeEventListener("abort", onAbort);
+        cleanupCount += 1;
+      }
+    });
+    const store = baseStore();
+    const projectRuntime = runtime();
+    const running = runProjectWorkspaceJob({
+      job: {
+        ...job,
+        status: "ready",
+        sandboxId: job.sandboxName,
+        sandboxDomain: "https://project.invalid",
+        activationRevision: 1,
+        authorityRevision: "authority-1",
+        environmentExposureAttemptedAt: new Date(),
+        lastActivityAt: new Date(),
+        idleDeadlineAt: new Date(Date.now() + 60_000),
+      },
+      workerId: "worker",
+      store,
+      runtime: projectRuntime,
+      chat,
+      usage: usage(),
+      storage: emptyStorage,
+      goldenSnapshotId: "golden",
+      config: { ...config, idleMs: 60_000 },
+      signal: controller.signal,
+    });
+
+    await withinDeadline(streamEntered);
+    controller.abort(reason);
+    await expect(withinDeadline(running)).rejects.toBe(reason);
+
+    expect(chat.streamEvents).toHaveBeenCalledOnce();
+    expect(cleanupCount).toBe(1);
+    expect(store.releaseProjectWorkspaceLease).toHaveBeenCalledOnce();
+  });
+
   it("reattaches two follow-ups to the same healthy warm OpenCode server", async () => {
     // Product promise: a follow-up inside the ten-minute warm window starts on the existing
     // Project server. This two-lease scenario fails if either lease re-enters provider activation,
