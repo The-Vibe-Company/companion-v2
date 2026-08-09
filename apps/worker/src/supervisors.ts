@@ -1,7 +1,5 @@
 import { startBillingSupervisor, type Supervisor } from "./billingSupervisor";
-import { startRunSupervisor } from "./runSupervisor";
 import { startGitHubSupervisor } from "./githubSupervisor";
-import { startProjectSupervisor } from "./projectSupervisor";
 import { startSkillDatabaseCleanupSupervisor } from "./skillDatabaseCleanup";
 
 type SupervisorStart = () => Promise<Supervisor | null>;
@@ -18,38 +16,30 @@ async function startSafely(name: string, start: SupervisorStart): Promise<Superv
 
 export async function startWorkerSupervisors(input: {
   billing?: SupervisorStart;
-  runs?: SupervisorStart;
   github?: SupervisorStart;
-  projects?: SupervisorStart;
   skillDatabases?: SupervisorStart;
 } = {}): Promise<{
   billing: Supervisor | null;
-  runs: Supervisor | null;
   github: Supervisor | null;
-  projects: Supervisor | null;
   skillDatabases: Supervisor | null;
 }> {
-  const [billing, runs, github, projects, skillDatabases] = await Promise.all([
+  const [billing, github, skillDatabases] = await Promise.all([
     startSafely("billing", input.billing ?? startBillingSupervisor),
-    startSafely("run", input.runs ?? startRunSupervisor),
     startSafely("GitHub sync", input.github ?? startGitHubSupervisor),
-    startSafely("Project", input.projects ?? startProjectSupervisor),
     startSafely("Skill Database cleanup", input.skillDatabases ?? startSkillDatabaseCleanupSupervisor),
   ]);
-  return { billing, runs, github, projects, skillDatabases };
+  return { billing, github, skillDatabases };
 }
 
 /**
  * An unresolved Promise does not keep Node's event loop alive. Keep an intentionally idle worker
- * process available for health/deployment supervision when every optional subsystem is disabled.
+ * process available for health checks when every optional Skills Hub subsystem is disabled.
  */
 export function keepWorkerProcessAliveWhenIdle(input: {
   billing: Supervisor | null;
-  runs: Supervisor | null;
   github?: Supervisor | null;
-  projects?: Supervisor | null;
   skillDatabases?: Supervisor | null;
 }): ReturnType<typeof setInterval> | null {
-  if (input.billing || input.runs || input.github || input.projects || input.skillDatabases) return null;
+  if (input.billing || input.github || input.skillDatabases) return null;
   return setInterval(() => undefined, 60_000);
 }

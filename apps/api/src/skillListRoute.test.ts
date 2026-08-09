@@ -158,6 +158,17 @@ vi.mock("@companion/skills", async (importActual) => ({
 
 import { app } from "./index";
 
+describe("Skills Hub-only API registry", () => {
+  it("does not register any removed execution endpoint", () => {
+    const paths = app.routes.map((route) => route.path);
+    expect(paths.some((path) =>
+      /^\/v1\/(projects|runs|models|model-preferences|org-model-preferences|provider-connections|org-provider-connections)(\/|$)/.test(path)
+      || /^\/v1\/skills\/[^/]+\/runs(\/|$)/.test(path),
+    )).toBe(false);
+    expect(paths).toContain("/v1/skills");
+  });
+});
+
 const actorA = { id: "user-a", email: "a@example.test", name: "User A" };
 const actorB = { id: "user-b", email: "b@example.test", name: "User B" };
 

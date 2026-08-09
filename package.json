@@ -2,7 +2,7 @@
   "name": "companion-v2",
   "version": "0.0.0",
   "private": true,
-  "description": "Companion v2 — self-hostable portal to deploy, govern, and share AI agents, containers, and skills.",
+  "description": "Companion v2 — self-hostable Skills Hub for organizations and coding agents.",
   "license": "MIT",
   "packageManager": "pnpm@9.12.0",
   "engines": {
@@ -14,6 +14,7 @@
       "brace-expansion@>=3.0.0 <5.0.7": "5.0.7",
       "js-yaml@>=4.0.0 <4.3.0": "4.3.0",
       "postcss": "8.5.18",
+      "nanoid@<3.3.17": "3.3.17",
       "sharp": "0.35.3",
       "vite": "6.4.3",
       "shell-quote": "1.10.0",

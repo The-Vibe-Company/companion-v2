@@ -187,7 +187,6 @@ export function SecretsApp({
   currentOrg,
   initialCreateKey,
   navigation,
-  projectsEnabled = false,
 }: {
   initialSecrets: SecretRow[];
   members: OrgSettingsMember[];
@@ -205,7 +204,6 @@ export function SecretsApp({
     localUpdateCount: number;
     archivedCount: number;
   };
-  projectsEnabled?: boolean;
 }) {
   const router = useRouter();
   const orgActions = useOrgActions();
@@ -250,8 +248,7 @@ export function SecretsApp({
 
   useEffect(() => {
     router.prefetch("/skills");
-    if (projectsEnabled) router.prefetch("/projects");
-  }, [projectsEnabled, router]);
+  }, [router]);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -382,7 +379,6 @@ export function SecretsApp({
         localUpdateCount={navigation.localUpdateCount}
         archivedActive={false}
         archivedCount={navigation.archivedCount}
-        projectsEnabled={projectsEnabled}
         mobileOpen={mobileSidebarOpen}
         onToggleMobile={() => setMobileSidebarOpen((open) => !open)}
         onCloseMobile={() => setMobileSidebarOpen(false)}
@@ -396,7 +392,7 @@ export function SecretsApp({
           <div>
             <p className="sec-kicker">Workspace vault</p>
             <h1>Secrets</h1>
-            <p>Store skill credentials here. Model provider keys stay separate in Settings → Models.</p>
+            <p>Store and share the credentials declared by your skills.</p>
           </div>
           <button className="cds-btn cds-btn--md cds-btn--primary" onClick={(event) => { drawerOpenerRef.current = event.currentTarget; setCreating(true); setSelectedId(null); setForm(EMPTY_FORM); }}>
             <Icon name="plus" size={15} /> New secret

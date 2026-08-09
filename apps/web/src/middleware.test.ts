@@ -1,8 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
-import { agentAuthProxyHeaders, canonicalAliasRedirect, middleware } from "./middleware";
+import { agentAuthProxyHeaders, canonicalAliasRedirect, legacyRuntimeRedirect, middleware } from "./middleware";
 
 describe("canonical host middleware", () => {
+  it.each(["/projects", "/projects/legacy/session", "/runs/legacy"])(
+    "permanently redirects removed runtime URL %s to Skills without preserving runtime state",
+    (path) => {
+      const request = new NextRequest(`https://thecompanion.sh${path}?run=stale`);
+      expect(legacyRuntimeRedirect(request)?.toString()).toBe("https://thecompanion.sh/skills");
+      const response = middleware(request);
+      expect(response.status).toBe(308);
+      expect(response.headers.get("location")).toBe("https://thecompanion.sh/skills");
+    },
+  );
+
   it("redirects www to the configured apex while preserving path and query", () => {
     const request = new NextRequest("https://www.thecompanion.sh/skills?lib=mine&skill=demo");
 

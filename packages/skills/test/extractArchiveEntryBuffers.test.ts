@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { extractArchiveEntryBuffers } from "../src/index";
 import { VALID_SKILL_MD, buildTar } from "./helpers";
 
-describe("extractArchiveEntryBuffers — deploy-path extraction", () => {
+describe("extractArchiveEntryBuffers — full archive extraction", () => {
   it("returns full bytes for every file (binary included) with executable bits", async () => {
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02]);
     const tar = await buildTar([

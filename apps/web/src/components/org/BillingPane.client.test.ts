@@ -55,17 +55,6 @@ const managedBilling: BillingOverview = {
   lastError: null,
   orgSkillCount: 4,
   hiddenPersonalSkillCount: 0,
-  sandboxUsage: {
-    enabled: true,
-    enforced: true,
-    limit_minutes: 1_000,
-    used_minutes: 620,
-    reserved_minutes: 10,
-    remaining_minutes: 370,
-    minutes_per_seat: 250,
-    period_start: "2026-07-01T00:00:00.000Z",
-    period_end: "2026-08-01T00:00:00.000Z",
-  },
   checkoutEnabled: false,
   portalEnabled: true,
 };
@@ -134,7 +123,7 @@ describe("managed Billing ledger", () => {
     const { container } = await mount(context());
     expect(container.textContent).toContain("Payment details are temporarily unavailable");
     expect(container.textContent).toContain("Manage billing");
-    expect(container.textContent).toContain("Sandbox usage");
+    expect(container.textContent).not.toContain("Sandbox usage");
   });
 
   it("never requests or renders payment details for a Developer", async () => {

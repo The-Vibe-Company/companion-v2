@@ -5,7 +5,6 @@ import type {
   SkillCommentRow,
   SkillDependenciesResponse,
   SkillFile,
-  SkillRunRow,
   SkillVersionRow,
 } from "@companion/contracts";
 import { Icon } from "../Icon";
@@ -27,11 +26,6 @@ import {
   Section,
 } from "./detailParts";
 import { DependenciesTab } from "./DependenciesTab";
-import { RunSessionsTab } from "../runs/RunSessionsTab";
-import { RunLauncherDialog } from "../runs/RunLauncherDialog";
-import { ProjectRunPicker } from "../projects/ProjectRunPicker";
-import type { RunLauncherDraft } from "../runs/launcherState";
-import { fetchRuns } from "@/lib/runQueries";
 import { FileExplorer } from "./fileview";
 import { MarkdownView } from "./markdown";
 import { Discussion } from "./discussion";
@@ -142,7 +136,7 @@ function DetailMoreMenu({
 }
 
 /** The detail page's top-level sections, shown as a tab bar under the breadcrumb. */
-type DetailTab = "overview" | "files" | "tables" | "dependencies" | "activity" | "discussion" | "sessions";
+type DetailTab = "overview" | "files" | "tables" | "dependencies" | "activity" | "discussion";
 
 // Only the active tabpanel is mounted (the Files explorer + scroll-spy shouldn't run
 // hidden). All tabs therefore point `aria-controls` at one stable panel id so no tab
@@ -255,18 +249,9 @@ export function DetailView({
   onSelectLabel,
   onAction,
   onOpenSkill,
-  onOpenRun,
-  onOpenModelSettings,
-  initialTab,
-  runDraft,
-  onRunDraftChange,
-  runAgainRequested,
-  onRunAgainConsumed,
   orgId = "",
   historyEnabled = true,
   onUpgrade = () => {},
-  projectsEnabled = false,
-  runSkillEnabled = false,
 }: {
   skill: SkillVM;
   index: number;
@@ -285,47 +270,21 @@ export function DetailView({
   onSelectLabel: (path: string) => void;
   onAction: (action: SkillAction) => void;
   onOpenSkill: (slug: string) => void;
-  /** Open a run transcript/chat (`?skill=…&run=…`). */
-  onOpenRun: (runId: string) => void;
-  /** Open Settings → Models (the launcher's "Add more models" — the shell owns the surface). */
-  onOpenModelSettings?: () => void;
-  /** Land on this tab when opening the skill (Back from a run returns to Sessions). */
-  initialTab?: "overview" | "sessions";
-  /** Full per-skill draft, including the one-shot Run again snapshot. */
-  runDraft?: RunLauncherDraft | null;
-  onRunDraftChange?: (draft: RunLauncherDraft | null) => void;
-  runAgainRequested?: boolean;
-  /** Consume the one-shot launcher-open request (run-again). */
-  onRunAgainConsumed?: () => void;
   historyEnabled?: boolean;
   onUpgrade?: () => void;
-  projectsEnabled?: boolean;
-  runSkillEnabled?: boolean;
 }) {
   const invalid = skill.validation === "invalid";
   const [versions, setVersions] = useState<SkillVersionRow[]>([]);
   const [comments, setComments] = useState<SkillCommentRow[]>([]);
   const [files, setFiles] = useState<SkillFile[]>([]);
   const [deps, setDeps] = useState<SkillDependenciesResponse | null>(null);
-  const [runs, setRuns] = useState<SkillRunRow[]>([]);
-  const [runsLoading, setRunsLoading] = useState(true);
-  const [runsError, setRunsError] = useState<string | null>(null);
-  const [runsReload, setRunsReload] = useState(0);
-  const [launcherOpen, setLauncherOpen] = useState(false);
-  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
-  const [tab, setTab] = useState<DetailTab>(initialTab ?? "overview");
+  const [tab, setTab] = useState<DetailTab>("overview");
 
-  // Reset to the initial tab when opening a different skill (not on a version bump).
+  // Reset to the overview when opening a different skill (not on a version bump).
   useEffect(() => {
-    setTab(initialTab ?? "overview");
+    setTab("overview");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [skill.id, initialTab]);
-
-  // The "Run again" path (from a frozen/errored transcript) opens the launcher prefilled.
-  useEffect(() => {
-    if (!runSkillEnabled || !runAgainRequested) return;
-    setLauncherOpen(true);
-  }, [runAgainRequested, runSkillEnabled]);
+  }, [skill.id]);
 
   useEffect(() => {
     let active = true;
@@ -376,40 +335,6 @@ export function DetailView({
       active = false;
     };
   }, [skill.id, skill.version]);
-
-  useEffect(() => {
-    setRuns([]);
-    setRunsError(null);
-  }, [skill.id]);
-
-  // The caller's runs of this skill (Sessions tab + tab count). A failed first load is distinct
-  // from a legitimate empty history; retries preserve any last valid snapshot.
-  useEffect(() => {
-    if (!runSkillEnabled) {
-      setRuns([]);
-      setRunsLoading(false);
-      setRunsError(null);
-      return;
-    }
-    let active = true;
-    setRunsLoading(true);
-    setRunsError(null);
-    fetchRuns(skill.id)
-      .then((r) => {
-        if (!active) return;
-        setRuns(r.runs);
-        setRunsError(null);
-      })
-      .catch((cause) => {
-        if (active) setRunsError(cause instanceof Error ? cause.message : "Could not load your run history.");
-      })
-      .finally(() => {
-        if (active) setRunsLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [runSkillEnabled, skill.id, runsReload]);
 
   // Flat model: skills carry no owner/visibility axis — every member can do anything to any skill.
   const canModifySkill = true;
@@ -507,14 +432,10 @@ export function DetailView({
       : []),
     { id: "activity", label: "Activity", icon: "activity", count: versions.length },
     { id: "discussion", label: "Discussion", icon: "message-square", count: comments.length },
-    ...(runSkillEnabled
-      ? [{ id: "sessions" as const, label: "Sessions", icon: "play", count: runs.length }]
-      : []),
   ];
   // Guard against tabs becoming unavailable while this detail remains mounted.
   const activeTab: DetailTab =
     (tab === "dependencies" && !showDeps)
-    || (tab === "sessions" && !runSkillEnabled)
     || (tab === "tables" && (!skill.databaseAvailable || (skill.databaseTableCount ?? 0) === 0))
       ? "overview"
       : tab;
@@ -551,26 +472,6 @@ export function DetailView({
         <span className="count tnum">
           {index + 1} / {total}
         </span>
-        {runSkillEnabled && !skill.archived && (
-          <button
-            type="button"
-            className="btn-ghost"
-            disabled={invalid || !skill.version}
-            onClick={() => projectsEnabled ? setProjectPickerOpen(true) : setLauncherOpen(true)}
-            title={
-              invalid
-                ? "Resolve validation errors first"
-                : !skill.version
-                  ? "No published version yet"
-                  : projectsEnabled
-                    ? "Run this skill in a project"
-                    : "Run this skill in a sandboxed session"
-            }
-          >
-            <Icon name="play" size={14} />
-            Run skill
-          </button>
-        )}
         {actionModel.primary && (
           <button
             className="btn-primary"
@@ -764,63 +665,7 @@ export function DetailView({
           </div>
         )}
 
-        {runSkillEnabled && activeTab === "sessions" && (
-          <RunSessionsTab
-            runs={runs}
-            loading={runsLoading}
-            error={runsError}
-            onRetry={() => setRunsReload((value) => value + 1)}
-            onOpen={onOpenRun}
-          />
-        )}
       </div>
-
-      {runSkillEnabled && launcherOpen && (
-        <RunLauncherDialog
-          key={skill.id}
-          slug={skill.id}
-          orgId={orgId}
-          initialDraft={runDraft}
-          onOpenModelSettings={onOpenModelSettings}
-          onStashDraft={(draft) => onRunDraftChange?.(draft)}
-          onLaunched={(run) => {
-            setLauncherOpen(false);
-            onRunDraftChange?.(null);
-            onRunAgainConsumed?.();
-            setRuns((prev) => [
-              {
-                id: run.id,
-                skill_slug: run.skill_slug,
-                skill_version: run.skill_version,
-                model: run.model,
-                prompt_excerpt: run.prompt_excerpt,
-                status: run.status,
-                status_detail: run.status_detail,
-                phase: run.phase,
-                error_code: run.error_code,
-                error_message: run.error_message,
-                run_config_id: run.run_config_id,
-                run_config_name_snapshot: run.run_config_name_snapshot,
-                created_at: run.created_at,
-                last_active_at: run.last_active_at,
-              },
-              ...prev,
-            ]);
-            onOpenRun(run.id);
-          }}
-          onClose={() => {
-            setLauncherOpen(false);
-            onRunAgainConsumed?.();
-          }}
-        />
-      )}
-      {runSkillEnabled && projectPickerOpen && (
-        <ProjectRunPicker
-          skillSlug={skill.id}
-          skillName={skill.display?.name ?? skill.id}
-          onClose={() => setProjectPickerOpen(false)}
-        />
-      )}
     </div>
   );
 }

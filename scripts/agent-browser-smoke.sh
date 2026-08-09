@@ -11,8 +11,6 @@ SMOKE_SKILL="incident-summary"
 SMOKE_SKILL_TITLE=""
 SMOKE_SKILL_DIR=""
 SMOKE_PROFILE=""
-PROJECTS_UI_AVAILABLE=0
-RUN_SKILL_SURFACE=""
 # Filed under a NESTED label so the sidebar has a collapsed parent ("engineering") with a child
 # ("engineering/tools") — required to exercise the 650ms folder dwell auto-open during a drag.
 SMOKE_SKILL_LABEL="engineering/tools"
@@ -70,26 +68,7 @@ wait_for_skills() {
   exit 1
 }
 
-wait_for_projects() {
-  local body url ready
-
-  for _ in $(seq 1 30); do
-    url="$(agent-browser get url || true)"
-    body="$(body_text || true)"
-    ready="$(agent-browser eval "!!document.querySelector('.cowork-home')" || true)"
-    if [[ "$url" == */projects* ]] && [ "$ready" = "true" ] && printf '%s' "$body" | grep -F "New project" >/dev/null; then
-      return 0
-    fi
-    sleep 1
-  done
-
-  printf '[agent-browser-smoke] Timed out waiting for the Projects home\n' >&2
-  agent-browser get url >&2 || true
-  body_text >&2 || true
-  exit 1
-}
-
-wait_for_login() {
+ wait_for_login() {
   local url
 
   for _ in $(seq 1 30); do
@@ -105,22 +84,7 @@ wait_for_login() {
   exit 1
 }
 
-projects_switch_available() {
-  local result
-  result="$(
-    agent-browser eval "(() => {
-      const nav = document.querySelector('nav[aria-label=\"Workspace space\"]');
-      if (!nav) return false;
-      return Array.from(nav.querySelectorAll('a')).some((link) =>
-        (link.textContent || '').trim() === 'Projects' &&
-        new URL(link.href, location.href).pathname === '/projects'
-      );
-    })()" || true
-  )"
-  [ "$result" = "true" ]
-}
-
-assert_no_browser_errors() {
+ assert_no_browser_errors() {
   local errors
   errors="$(agent-browser errors || true)"
   if [ -n "$errors" ]; then
@@ -129,165 +93,7 @@ assert_no_browser_errors() {
   fi
 }
 
-projects_desktop_smoke() {
-  if ! projects_switch_available; then
-    log "Projects switch not rendered; skipping feature-flagged Projects checks"
-    return 0
-  fi
-
-  PROJECTS_UI_AVAILABLE=1
-  log "Checking Skills | Projects workspace switch"
-  assert_eval_true "(() => {
-    const nav = document.querySelector('nav[aria-label=\"Workspace space\"]');
-    const links = nav ? Array.from(nav.querySelectorAll('a')) : [];
-    const labels = links.map((link) => (link.textContent || '').trim());
-    const skills = links.find((link) => (link.textContent || '').trim() === 'Skills');
-    const projects = links.find((link) => (link.textContent || '').trim() === 'Projects');
-    return links.length === 2 && labels.join('|') === 'Skills|Projects' &&
-      skills?.getAttribute('aria-current') === 'page' &&
-      !projects?.hasAttribute('aria-current');
-  })()" "Skills | Projects switch is missing or Skills is not active"
-  assert_eval_true "(() => {
-    const nav = document.querySelector('nav[aria-label=\"Workspace space\"]');
-    const link = nav && Array.from(nav.querySelectorAll('a'))
-      .find((candidate) => (candidate.textContent || '').trim() === 'Projects');
-    if (!link) return false;
-    link.click();
-    return true;
-  })()" "could not navigate to Projects from the workspace switch"
-  wait_for_projects
-
-  log "Checking Projects home controls"
-  assert_eval_true "(() => {
-    const nav = document.querySelector('nav[aria-label=\"Workspace space\"]');
-    const links = nav ? Array.from(nav.querySelectorAll('a')) : [];
-    const projects = links.find((link) => (link.textContent || '').trim() === 'Projects');
-    return projects?.getAttribute('aria-current') === 'page' &&
-      !!document.querySelector('.cowork-search input[placeholder=\"Search projects…\"]') &&
-      !!document.querySelector('[role=\"group\"][aria-label=\"Filter projects by status\"]') &&
-      !!document.querySelector('[role=\"table\"][aria-label=\"Projects\"]');
-  })()" "Projects home is missing its active switch, search, filters, or table"
-  assert_body_contains "Projects"
-  assert_body_contains "New project"
-
-  local can_create
-  can_create="$(agent-browser eval "(() => {
-    const button = document.querySelector('.cowork-page-head button');
-    return !!button && !button.disabled;
-  })()" || true)"
-  if [ "$can_create" = "true" ]; then
-    log "Checking New project dialog"
-    assert_eval_true "(() => {
-      const button = document.querySelector('.cowork-page-head button');
-      if (!button || button.disabled) return false;
-      button.click();
-      return true;
-    })()" "could not open the New project dialog"
-    wait_for_body_contains "A persistent space where conversations share files, Skills, and Access."
-    assert_eval_true "(() => {
-      const dialog = document.querySelector('[role=\"dialog\"][aria-modal=\"true\"]');
-      if (!dialog) return false;
-      const labels = Array.from(dialog.querySelectorAll('.cds-field__label'))
-        .map((label) => (label.textContent || '').trim());
-      return dialog.querySelector('h2')?.textContent?.trim() === 'New project' &&
-        labels.includes('Name') &&
-        labels.includes('Default model') &&
-        labels.includes('Skills to sync') &&
-        !!dialog.querySelector('input[placeholder=\"e.g. Q4 planning\"]') &&
-        !!dialog.querySelector('select') &&
-        (dialog.textContent || '').includes(
-          'Your available secrets and model connections sync automatically.'
-        );
-    })()" "New project dialog is missing name, model, skills, or secrets summary"
-    agent-browser find role button click --name "Cancel"
-    agent-browser wait 250
-    assert_eval_true "!document.querySelector('[role=\"dialog\"][aria-modal=\"true\"]')" \
-      "New project dialog did not close"
-  else
-    log "Projects runtime is offline; New project is correctly unavailable"
-    assert_eval_true "document.querySelector('.cowork-page-head button')?.disabled === true" \
-      "New project should be disabled while the Projects runtime is offline"
-  fi
-
-  assert_no_browser_errors
-  assert_eval_true "(() => {
-    const nav = document.querySelector('nav[aria-label=\"Workspace space\"]');
-    const link = nav && Array.from(nav.querySelectorAll('a'))
-      .find((candidate) => (candidate.textContent || '').trim() === 'Skills');
-    if (!link) return false;
-    link.click();
-    return true;
-  })()" "could not return to Skills from the workspace switch"
-  wait_for_skills
-  # The switch intentionally lands on the default Skills library. Restore the org fixture view
-  # expected by the existing row, filter, detail, and drag checks below.
-  agent-browser open "$APP_URL/skills?lib=org"
-  wait_for_skills
-}
-
-projects_mobile_smoke() {
-  if [ "$PROJECTS_UI_AVAILABLE" != "1" ]; then
-    return 0
-  fi
-
-  log "Checking mobile Projects navigation"
-  assert_eval_true "(() => {
-    const nav = document.querySelector('nav[aria-label=\"Workspace space\"]');
-    const projects = nav && Array.from(nav.querySelectorAll('a'))
-      .find((candidate) => (candidate.textContent || '').trim() === 'Projects');
-    if (!projects) return false;
-    const rect = projects.getBoundingClientRect();
-    return rect.width >= 44 && rect.height >= 44;
-  })()" "collapsed mobile workspace switch is not a 44px touch target"
-  assert_eval_true "(() => {
-    const nav = document.querySelector('nav[aria-label=\"Workspace space\"]');
-    const link = nav && Array.from(nav.querySelectorAll('a'))
-      .find((candidate) => (candidate.textContent || '').trim() === 'Projects');
-    if (!link) return false;
-    link.click();
-    return true;
-  })()" "could not open Projects from the mobile workspace switch"
-  wait_for_projects
-  assert_eval_true "document.documentElement.scrollWidth <= document.documentElement.clientWidth" \
-    "Projects home introduced horizontal overflow on mobile"
-  assert_eval_true "!!document.querySelector('.projects-side:not(.side--mobile-open) nav[aria-label=\"Workspace space\"]')" \
-    "Projects mobile rail or workspace switch is missing"
-
-  agent-browser find role button click --name "Expand navigation"
-  agent-browser wait 250
-  assert_eval_true "(() => {
-    const side = document.querySelector('.projects-side.side--mobile-open');
-    const list = side?.querySelector('.projects-side__list');
-    const nav = side?.querySelector('nav[aria-label=\"Workspace space\"]');
-    if (!side || !list || !nav) return false;
-    const labels = Array.from(nav.querySelectorAll('a'))
-      .map((link) => (link.textContent || '').trim());
-    return labels.join('|') === 'Skills|Projects' &&
-      getComputedStyle(list).overflowY === 'auto' &&
-      side.getBoundingClientRect().width <= window.innerWidth;
-  })()" "expanded mobile Projects sidebar is missing the switch or scrollable project list"
-  assert_eval_true "document.documentElement.scrollWidth <= document.documentElement.clientWidth" \
-    "expanded Projects sidebar introduced horizontal overflow on mobile"
-  agent-browser find role button click --name "Collapse navigation"
-  agent-browser wait 200
-  assert_eval_true "!document.querySelector('.projects-side.side--mobile-open')" \
-    "Projects mobile sidebar did not collapse"
-  assert_no_browser_errors
-
-  assert_eval_true "(() => {
-    const nav = document.querySelector('nav[aria-label=\"Workspace space\"]');
-    const link = nav && Array.from(nav.querySelectorAll('a'))
-      .find((candidate) => (candidate.textContent || '').trim() === 'Skills');
-    if (!link) return false;
-    link.click();
-    return true;
-  })()" "could not return to Skills from mobile Projects"
-  wait_for_skills
-}
-
-# Assert a JS expression evaluates to boolean true in the page. We query the DOM AFTER a real
-# action, so production's own logic is under test — never the value we fed in.
-assert_eval_true() {
+ assert_eval_true() {
   local expr="$1" msg="$2" result
   result="$(agent-browser eval "$expr" || true)"
   if [ "$result" != "true" ]; then
@@ -392,159 +198,6 @@ click_button_text() {
   fi
 }
 
-# Opening a portal dialog can race a responsive/detail refresh in Next dev. Retry only until the
-# feature-flagged Project picker or legacy launcher DOM is mounted; subsequent assertions still
-# exercise the real dialog behavior.
-open_run_launcher() {
-  local result selector
-  for _ in $(seq 1 10); do
-    result="$(
-      agent-browser eval "(() => {
-        if (document.querySelector('.cowork-project-picker')) return 2;
-        if (document.querySelector('.run-launcher')) return 1;
-        return 0;
-      })()" || true
-    )"
-    if [ "$result" = "2" ] || [ "$result" = "1" ]; then
-      agent-browser wait 400 >/dev/null
-      selector=".run-launcher"
-      RUN_SKILL_SURFACE="legacy"
-      if [ "$result" = "2" ]; then
-        selector=".cowork-project-picker"
-        RUN_SKILL_SURFACE="projects"
-      fi
-      if [ "$(agent-browser eval "!!document.querySelector('$selector')" || true)" = "true" ]; then
-        # Chrome-for-Testing can leave CSS animations at virtual time 0 between CLI commands. Finish
-        # only the mounted dialog's entrance animation before asserting its final geometry.
-        agent-browser eval "document.querySelector('$selector')?.closest('[role=\"dialog\"]')?.getAnimations().forEach((animation) => animation.finish())" >/dev/null
-        return 0
-      fi
-    fi
-    click_button_text "Run skill"
-    agent-browser wait 150 >/dev/null
-  done
-  printf '[agent-browser-smoke] Run launcher did not open after the detail became interactive\n' >&2
-  agent-browser get url >&2 || true
-  body_text >&2 || true
-  exit 1
-}
-
-wait_for_project_run_picker() {
-  local ready
-
-  for _ in $(seq 1 30); do
-    ready="$(
-      agent-browser eval "(() => {
-        const body = document.querySelector('.cowork-project-picker');
-        if (!body || body.querySelector('.cowork-project-picker__loading')) return false;
-        return !!body.querySelector('.cowork-project-picker__list[aria-label=\"Projects\"]') ||
-          !!body.querySelector('.cowork-project-picker__empty');
-      })()" || true
-    )"
-    if [ "$ready" = "true" ]; then
-      return 0
-    fi
-    sleep 1
-  done
-
-  printf '[agent-browser-smoke] Timed out waiting for the Project run picker\n' >&2
-  body_text >&2 || true
-  exit 1
-}
-
-assert_project_run_picker_common() {
-  local expected_title expected_title_js
-  expected_title="Run $SMOKE_SKILL_TITLE"
-  expected_title_js="$(json_string "$expected_title")"
-
-  wait_for_project_run_picker
-  assert_eval_true "(() => {
-    const body = document.querySelector('.cowork-project-picker');
-    const dialog = body?.closest('[role=\"dialog\"][aria-modal=\"true\"]');
-    const footer = dialog?.querySelector('.cowork-project-picker__foot');
-    const buttons = footer ? Array.from(footer.querySelectorAll('button')) : [];
-    const cancel = buttons.find((button) => (button.textContent || '').trim() === 'Cancel');
-    const create = buttons.find((button) => (button.textContent || '').trim() === 'New project');
-    const list = body?.querySelector('.cowork-project-picker__list[aria-label=\"Projects\"]');
-    const empty = body?.querySelector('.cowork-project-picker__empty');
-    const projectState = list
-      ? list.querySelectorAll(':scope > button').length > 0
-      : !!empty && !(empty.textContent || '').includes('Projects could not be loaded.');
-    const description = dialog?.querySelector('.cowork-dialog__head p');
-    return dialog?.querySelector('h2')?.textContent?.trim() === ${expected_title_js} &&
-      description?.textContent?.trim() ===
-        'Choose the Project whose files, Skills, and Access this conversation should use.' &&
-      projectState &&
-      !!cancel &&
-      !!create &&
-      !!dialog.querySelector('button[aria-label=\"Close dialog\"]');
-  })()" "Project run picker is missing its title, description, project list state, or actions"
-}
-
-project_run_picker_desktop_smoke() {
-  log "Checking Project run picker at a short desktop viewport"
-  assert_project_run_picker_common
-  assert_eval_true "(() => {
-    const body = document.querySelector('.cowork-project-picker');
-    const dialog = body?.closest('[role=\"dialog\"]');
-    const footer = dialog?.querySelector('.cowork-project-picker__foot');
-    const rows = body
-      ? Array.from(body.querySelectorAll('.cowork-project-picker__list > button'))
-      : [];
-    if (!body || !dialog || !footer) return false;
-    const dialogRect = dialog.getBoundingClientRect();
-    const footerRect = footer.getBoundingClientRect();
-    return dialogRect.top >= 0 &&
-      dialogRect.left >= 0 &&
-      dialogRect.right <= window.innerWidth &&
-      dialogRect.bottom <= window.innerHeight &&
-      footerRect.top >= dialogRect.top &&
-      footerRect.bottom <= dialogRect.bottom &&
-      body.scrollWidth <= body.clientWidth &&
-      rows.every((row) => {
-        const rect = row.getBoundingClientRect();
-        return rect.height >= 44 &&
-          rect.left >= dialogRect.left &&
-          rect.right <= dialogRect.right;
-      });
-  })()" "Project run picker is not contained or its project choices are undersized on desktop"
-  agent-browser press Escape
-  agent-browser wait 200
-  assert_eval_true "!document.querySelector('.cowork-project-picker')" \
-    "Project run picker did not close without choosing a project"
-}
-
-project_run_picker_mobile_smoke() {
-  log "Checking mobile Project run picker"
-  assert_project_run_picker_common
-  assert_eval_true "(() => {
-    const body = document.querySelector('.cowork-project-picker');
-    const dialog = body?.closest('[role=\"dialog\"]');
-    const rows = body
-      ? Array.from(body.querySelectorAll('.cowork-project-picker__list > button'))
-      : [];
-    if (!body || !dialog) return false;
-    const dialogRect = dialog.getBoundingClientRect();
-    return Math.abs(dialogRect.left) < 0.5 &&
-      Math.abs(dialogRect.width - window.innerWidth) < 0.5 &&
-      dialogRect.top >= 0 &&
-      dialogRect.bottom <= window.innerHeight + 0.5 &&
-      document.documentElement.scrollWidth <= document.documentElement.clientWidth &&
-      body.scrollWidth <= body.clientWidth &&
-      rows.every((row) => {
-        const rect = row.getBoundingClientRect();
-        return rect.width >= 44 &&
-          rect.height >= 44 &&
-          rect.left >= dialogRect.left &&
-          rect.right <= dialogRect.right;
-      });
-  })()" "mobile Project run picker is not contained or its project choices are not touch targets"
-  agent-browser press Escape
-  agent-browser wait 200
-  assert_eval_true "!document.querySelector('.cowork-project-picker')" \
-    "mobile Project run picker did not close without choosing a project"
-}
-
 skill_detail_mobile_tabs_smoke() {
   log "Checking stable mobile skill detail tabs"
   agent-browser set viewport 390 420
@@ -636,7 +289,7 @@ drag_and_drop_smoke() {
   agent-browser open "$APP_URL/skills?lib=org"
   wait_for_skills
 
-  local src_sel dst_sel child_sel sx sy dx dy
+  local src_sel dst_sel child_sel src_center dst_center sx sy dx dy
   src_sel=".crow[data-skill-slug=\"${SMOKE_SKILL}\"] .crow__hit"
   dst_sel='[data-skill-drop-kind="label"][data-skill-drop-path="engineering"]'
   child_sel='[data-skill-drop-path="engineering/tools"]'
@@ -644,8 +297,12 @@ drag_and_drop_smoke() {
   assert_eval_true "!!document.querySelector('$dst_sel')" "engineering folder row not found"
   assert_eval_true "!document.querySelector('$child_sel')" "engineering should start collapsed"
 
-  read -r sx sy < <(box_center "$src_sel")
-  read -r dx dy < <(box_center "$dst_sel")
+  src_center="$(box_center "$src_sel")"
+  dst_center="$(box_center "$dst_sel")"
+  sx="${src_center%% *}"
+  sy="${src_center##* }"
+  dx="${dst_center%% *}"
+  dy="${dst_center##* }"
 
   # Press on the skill, cross the 4px threshold, then step the cursor onto the folder.
   agent-browser mouse move "$sx" "$sy"
@@ -845,7 +502,8 @@ assert_body_contains "Add skill"
 # Shared label folder tree (replaces the old owner/visibility sidebar): the smoke skill is filed under "engineering".
 assert_body_contains "engineering"
 
-projects_desktop_smoke
+assert_eval_true "!Array.from(document.querySelectorAll('a,button')).some((el) => ['Projects', 'Run skill'].includes((el.textContent || '').trim()))" \
+  "removed Projects or Run skill affordance is still visible"
 
 log "Checking contextual row-action alignment"
 for width in 1024 760; do
@@ -894,55 +552,6 @@ agent-browser wait 1000
 assert_body_contains "$SMOKE_SKILL_TITLE"
 wait_for_contextual_action "Install skill" "Install"
 
-log "Checking run launcher scrolling at a short desktop viewport"
-agent-browser set viewport 1024 420
-# Reload the deep link after the viewport transition. This gives the layout and the browser's
-# connection pool one settled navigation before the launcher issues its Strict Mode option reads.
-agent-browser open "$APP_URL/skills?lib=org&skill=$SMOKE_SKILL"
-wait_for_contextual_action "Install skill" "Install"
-open_run_launcher
-if [ "$RUN_SKILL_SURFACE" = "projects" ]; then
-  project_run_picker_desktop_smoke
-else
-  wait_for_body_contains "Configuration"
-  agent-browser wait 300
-  assert_eval_true "(() => {
-    const dialog = document.querySelector('.run-launcher');
-    const head = dialog?.querySelector('.og-dialog__head');
-    const body = dialog?.querySelector('.og-dialog__body');
-    const foot = dialog?.querySelector('.og-dialog__foot');
-    if (!dialog || !head || !body || !foot) return false;
-    const dialogRect = dialog.getBoundingClientRect();
-    const headRect = head.getBoundingClientRect();
-    const footRect = foot.getBoundingClientRect();
-    const contained = dialogRect.top >= 0 && dialogRect.bottom <= window.innerHeight;
-    const pinned = headRect.top >= dialogRect.top && headRect.bottom <= dialogRect.bottom &&
-      footRect.top >= dialogRect.top && footRect.bottom <= dialogRect.bottom;
-    const sectionsUnclipped = Array.from(body.children).every((section) =>
-      section.scrollHeight <= section.clientHeight + 1
-    );
-    window.__runLauncherPinnedPositions = { headTop: headRect.top, footTop: footRect.top };
-    return contained && pinned && sectionsUnclipped && body.scrollHeight > body.clientHeight;
-  })()" "run launcher is not contained, scrollable, and pinned at a short viewport"
-  agent-browser eval "(() => { const body = document.querySelector('.run-launcher .og-dialog__body'); if (body) body.scrollTop = body.scrollHeight; })()" >/dev/null
-  agent-browser wait 200
-  assert_eval_true "document.querySelector('.run-launcher .og-dialog__body')?.scrollTop > 0" \
-    "run launcher body did not scroll"
-  assert_eval_true "(() => {
-    const dialog = document.querySelector('.run-launcher');
-    const head = dialog?.querySelector('.og-dialog__head');
-    const foot = dialog?.querySelector('.og-dialog__foot');
-    const before = window.__runLauncherPinnedPositions;
-    if (!dialog || !head || !foot || !before) return false;
-    const dialogRect = dialog.getBoundingClientRect();
-    const headRect = head.getBoundingClientRect();
-    const footRect = foot.getBoundingClientRect();
-    return headRect.top >= dialogRect.top && headRect.bottom <= dialogRect.bottom &&
-      footRect.top >= dialogRect.top && footRect.bottom <= dialogRect.bottom &&
-      Math.abs(headRect.top - before.headTop) < 0.5 && Math.abs(footRect.top - before.footTop) < 0.5;
-  })()" "run launcher header or footer moved outside the dialog after scrolling"
-  agent-browser press Escape
-fi
 agent-browser set viewport 1440 1000
 
 agent-browser open "$APP_URL/skills?lib=org"
@@ -972,55 +581,8 @@ wait_for_skills
 assert_body_contains "Add skill"
 assert_body_contains "$SMOKE_SKILL"
 
-projects_mobile_smoke
 skill_detail_mobile_tabs_smoke
 
-log "Checking mobile run launcher"
-agent-browser set viewport 390 420
-agent-browser open "$APP_URL/skills?lib=org&skill=$SMOKE_SKILL"
-wait_for_contextual_action "Install skill" "Install"
-open_run_launcher
-if [ "$RUN_SKILL_SURFACE" = "projects" ]; then
-  project_run_picker_mobile_smoke
-else
-  wait_for_body_contains "Configuration"
-  agent-browser wait 300
-  assert_eval_true "(() => {
-    const dialog = document.querySelector('.run-launcher');
-    const head = dialog?.querySelector('.og-dialog__head');
-    const body = dialog?.querySelector('.og-dialog__body');
-    const foot = dialog?.querySelector('.og-dialog__foot');
-    if (!dialog || !head || !body || !foot) return false;
-    const dialogRect = dialog.getBoundingClientRect();
-    const headRect = head.getBoundingClientRect();
-    const footRect = foot.getBoundingClientRect();
-    const style = getComputedStyle(dialog);
-    const sectionsUnclipped = Array.from(body.children).every((section) =>
-      section.scrollHeight <= section.clientHeight + 1
-    );
-    window.__runLauncherMobilePinnedPositions = { headTop: headRect.top, footTop: footRect.top };
-    return Math.abs(dialogRect.top) < 0.5 && Math.abs(dialogRect.left) < 0.5 &&
-      Math.abs(dialogRect.width - window.innerWidth) < 0.5 &&
-      Math.abs(dialogRect.height - window.innerHeight) < 0.5 &&
-      style.borderWidth === '0px' && style.borderRadius === '0px' &&
-      getComputedStyle(body).overflowY === 'auto' && sectionsUnclipped &&
-      body.scrollHeight > body.clientHeight &&
-      headRect.top >= dialogRect.top && footRect.bottom <= dialogRect.bottom;
-  })()" "mobile run launcher is not fullscreen with a pinned, scrollable body"
-  agent-browser eval "(() => { const body = document.querySelector('.run-launcher .og-dialog__body'); if (body) body.scrollTop = body.scrollHeight; })()" >/dev/null
-  agent-browser wait 200
-  assert_eval_true "(() => {
-    const dialog = document.querySelector('.run-launcher');
-    const head = dialog?.querySelector('.og-dialog__head');
-    const body = dialog?.querySelector('.og-dialog__body');
-    const foot = dialog?.querySelector('.og-dialog__foot');
-    const before = window.__runLauncherMobilePinnedPositions;
-    if (!dialog || !head || !body || !foot || !before || body.scrollTop <= 0) return false;
-    return Math.abs(head.getBoundingClientRect().top - before.headTop) < 0.5 &&
-      Math.abs(foot.getBoundingClientRect().top - before.footTop) < 0.5;
-  })()" "mobile run launcher did not scroll with pinned header and footer"
-  agent-browser press Escape
-fi
 agent-browser set device "iPhone 14"
 
 log "Checking mobile install targets"

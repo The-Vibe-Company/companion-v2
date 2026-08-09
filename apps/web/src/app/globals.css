@@ -2,7 +2,6 @@
 @import "../styles/cds.css";
 @import "../styles/auth.css";
 @import "../styles/skills.css";
-@import "../styles/runs.css";
 @import "../styles/app.css";
 @import "../styles/skill-databases.css";
 @import "../styles/org.css";
@@ -13,5 +12,3 @@
 @import "../styles/landing.css";
 @import "../styles/share.css";
 @import "../styles/secrets.css";
-@import "../styles/projects.css";
-@import "../styles/project-session-cowork.css";

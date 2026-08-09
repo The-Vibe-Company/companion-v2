@@ -161,11 +161,6 @@ export function BillingPane({ ctx }: { ctx: OrgCtx }) {
 
   const plan = billing.entitlements.computedPlan;
   const delinquent = billing.stripeStatus === "past_due" || billing.stripeStatus === "unpaid";
-  const usage = billing.sandboxUsage;
-  const committedMinutes = usage.used_minutes + usage.reserved_minutes;
-  const usagePercent = usage.limit_minutes === null || usage.limit_minutes === 0
-    ? null
-    : Math.min(100, Math.round((committedMinutes / usage.limit_minutes) * 100));
   const renewal = !billing.billingEnabled
     ? "Not required"
     : billing.cancelAtPeriodEnd
@@ -182,7 +177,7 @@ export function BillingPane({ ctx }: { ctx: OrgCtx }) {
       <PaneHead
         title="Billing"
         desc={billing.billingEnabled
-          ? "Review your plan, workspace seats, usage, and Stripe billing details."
+          ? "Review your plan, workspace seats, and Stripe billing details."
           : "This self-hosted workspace includes every Pro entitlement without managed billing."}
         action={<span className={`badge ${plan === "pro" ? "badge--accent" : ""}`}>{billing.billingEnabled ? (plan === "pro" ? "Pro" : "Free") : "Pro included"}</span>}
       />
@@ -234,39 +229,6 @@ export function BillingPane({ ctx }: { ctx: OrgCtx }) {
               </button>
             )}
           </div>
-        )}
-      </section>
-
-      <section className="sx-billing-usage" aria-labelledby="billing-usage-title">
-        <div className="sx-billing-usage__head">
-          <span>
-            <b id="billing-usage-title">Sandbox usage</b>
-            <small>
-              {usage.limit_minutes === null
-                ? "Unlimited in this workspace"
-                : `${usage.used_minutes} min used${usage.reserved_minutes ? ` · ${usage.reserved_minutes} min reserved` : ""}`}
-            </small>
-          </span>
-          <span className="sx-billing-usage__value">
-            <b>{usage.remaining_minutes === null ? "Unlimited" : `${usage.remaining_minutes} min remaining`}</b>
-            <small>Resets {date(usage.period_end, "UTC")}</small>
-          </span>
-        </div>
-        {usagePercent !== null && (
-          <div
-            className="sx-billing-meter"
-            role="progressbar"
-            aria-label="Sandbox minutes used or reserved"
-            aria-valuemin={0}
-            aria-valuemax={usage.limit_minutes ?? undefined}
-            aria-valuenow={Math.min(committedMinutes, usage.limit_minutes ?? committedMinutes)}
-            aria-valuetext={`${committedMinutes} of ${usage.limit_minutes} minutes used or reserved`}
-          >
-            <span style={{ width: `${usagePercent}%` }} />
-          </div>
-        )}
-        {usage.enforced && usage.limit_minutes !== null && (
-          <p className="sx-billing-usage__note">New sandbox work is blocked when the monthly pool is exhausted.</p>
         )}
       </section>
 

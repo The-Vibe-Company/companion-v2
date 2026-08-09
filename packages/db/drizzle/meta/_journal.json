@@ -435,6 +435,13 @@
       "when": 1785456000000,
       "tag": "0061_skill_database_realm_shares",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1786233600000,
+      "tag": "0062_skills_hub_only",
+      "breakpoints": true
     }
   ]
 }

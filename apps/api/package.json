@@ -27,7 +27,6 @@
     "@companion/db": "workspace:*",
     "@companion/email": "workspace:*",
     "@companion/github": "workspace:*",
-    "@companion/sandbox": "workspace:*",
     "@companion/skilldb": "workspace:*",
     "@companion/skills": "workspace:*",
     "@companion/storage": "workspace:*",

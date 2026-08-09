@@ -99,36 +99,6 @@ export function canManagePublicSkill(
   return skill.scope === "org" && (skill.creatorId === actor.id || isOrgAdmin(actor.orgRole));
 }
 
-/* ---- Per-run privacy gate (skill runs) --------------------------------------- */
-
-/** The minimal run shape the privacy gate needs: who launched it. */
-export interface RunScopeRef {
-  creatorId: string;
-}
-
-/**
- * Skill runs are PRIVATE to their creator — like personal skills, there is deliberately NO admin
- * override. Any member may launch a run of any skill they can see; only the launcher ever reads it.
- */
-export function canAccessRun(actorId: string, run: RunScopeRef): boolean {
-  return run.creatorId === actorId;
-}
-
-/* ---- Per-project privacy gate ----------------------------------------------- */
-
-/** The minimal project shape the privacy gate needs: who created it. */
-export interface ProjectScopeRef {
-  creatorId: string;
-}
-
-/**
- * Projects are private to their creator. Organization administrators deliberately receive no
- * override, matching personal skills and skill-run conversations.
- */
-export function canAccessProject(actorId: string, project: ProjectScopeRef): boolean {
-  return project.creatorId === actorId;
-}
-
 export interface SecretAccessRef {
   ownerId: string;
   audience: SecretAudience;

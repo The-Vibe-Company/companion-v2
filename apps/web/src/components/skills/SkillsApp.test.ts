@@ -265,17 +265,6 @@ function appProps(
       lastError: null,
       orgSkillCount: 0,
       hiddenPersonalSkillCount: 0,
-      sandboxUsage: {
-        enabled: false,
-        enforced: false,
-        limit_minutes: null,
-        used_minutes: 0,
-        reserved_minutes: 0,
-        remaining_minutes: null,
-        minutes_per_seat: 250,
-        period_start: "2026-07-01T00:00:00.000Z",
-        period_end: "2026-08-01T00:00:00.000Z",
-      },
       checkoutEnabled: false,
       portalEnabled: false,
     },
@@ -527,75 +516,11 @@ describe("SkillsApp initial route", () => {
     )).toContain("Getting started");
   });
 
-  it("shows the Projects switch only when the server feature flag is enabled", async () => {
-    const { container } = await mountSkillsApp(
-      { lib: "mine", kind: "all" },
-      { props: { projectsEnabled: true } },
-    );
-    const primary = container.querySelector<HTMLElement>('nav[aria-label="Primary"]')!;
-    const switcher = container.querySelector<HTMLElement>('nav[aria-label="Workspace space"]')!;
-    const projects = switcher.querySelector<HTMLAnchorElement>('a[href="/projects"]')!;
-    const skills = switcher.querySelector<HTMLAnchorElement>('a[href="/skills"]')!;
-
-    expect(projects.textContent).toContain("Projects");
-    expect(skills.getAttribute("aria-current")).toBe("page");
-    expect(primary.textContent).toContain("My Skills");
-    expect(primary.textContent).toContain("Organization");
-  });
-
-  it("keeps the Projects switch out of the shell when the rollout is unavailable", async () => {
-    const { container } = await mountSkillsApp(
-      { lib: "mine", kind: "all" },
-      { props: { projectsEnabled: false } },
-    );
-
-    expect(container.querySelector('nav[aria-label="Workspace space"]')).toBeNull();
+  it("never renders removed runtime navigation or launch affordances", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all", skill: "seo-helper" });
     expect(container.querySelector('a[href="/projects"]')).toBeNull();
-  });
-
-  it("removes direct Run Skill transcripts when the rollout is unavailable", async () => {
-    const route = {
-      lib: "org" as const,
-      kind: "all" as const,
-      skill: "seo-helper",
-      run: "run-private",
-    };
-    const { container } = await mountSkillsApp(route, {
-      url: "/skills?lib=org&skill=seo-helper&run=run-private",
-      props: { runSkillEnabled: false },
-    });
-    await flushEffects();
-
-    expect(container.textContent).toContain("seo-helper");
     expect(container.textContent).not.toContain("Run skill");
-    expect(container.querySelector("#dtab-sessions")).toBeNull();
-    expect(window.location.pathname + window.location.search).toBe(
-      "/skills?lib=org&skill=seo-helper",
-    );
-  });
-
-  it("scrubs a Run Skill transcript introduced through browser history", async () => {
-    const route = {
-      lib: "org" as const,
-      kind: "all" as const,
-      skill: "seo-helper",
-    };
-    const { container } = await mountSkillsApp(route, {
-      url: "/skills?lib=org&skill=seo-helper",
-      props: { runSkillEnabled: false },
-    });
-
-    act(() => {
-      window.history.pushState({}, "", "/skills?lib=org&skill=seo-helper&run=run-private");
-      window.dispatchEvent(new PopStateEvent("popstate"));
-    });
-    await flushEffects();
-
-    expect(container.textContent).toContain("seo-helper");
-    expect(container.querySelector("#dtab-sessions")).toBeNull();
-    expect(window.location.pathname + window.location.search).toBe(
-      "/skills?lib=org&skill=seo-helper",
-    );
+    expect(container.textContent).not.toContain("Sessions");
   });
 
   it("renders All skills (every org skill, ignoring saved filters) from the default route", () => {
@@ -1761,6 +1686,36 @@ describe("SkillsApp drag-and-drop label reparenting", () => {
 });
 
 describe("SkillsApp navigation", () => {
+  it("scrubs retired runtime state when browser history restores a Skills entry", async () => {
+    const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
+    await flushEffects();
+
+    window.history.replaceState(
+      {},
+      "",
+      "/skills?lib=org&skill=loose-skill&run=retired&prompt=should-not-survive",
+    );
+    await act(async () => {
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    expect(window.location.pathname + window.location.search).toBe("/skills?lib=org&skill=loose-skill");
+    expectContextualInstallButton(container);
+  });
+
+  it("scrubs a bare retired runtime history entry back to the default Skills route", async () => {
+    const { container } = await mountSkillsApp({ lib: "mine", kind: "all" });
+    await flushEffects();
+
+    window.history.replaceState({}, "", "/skills?run=retired&prompt=should-not-survive");
+    await act(async () => {
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    expect(window.location.pathname + window.location.search).toBe("/skills");
+    expect(container.querySelector(".dpage")).toBeNull();
+  });
+
   it("preserves unsaved filters when browser Back closes a pushed detail", async () => {
     const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
     await flushEffects();

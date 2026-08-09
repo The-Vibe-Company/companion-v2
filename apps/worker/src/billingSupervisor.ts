@@ -50,7 +50,7 @@ interface BillingSupervisorOptions {
   reconcileIntervalMs?: number;
 }
 
-/** Billing is an independent supervisor: disabled billing never idles the run worker. */
+/** Billing is independent: disabling it does not stop other Skills Hub maintenance. */
 export async function startBillingSupervisor(input: BillingSupervisorOptions = {}): Promise<Supervisor | null> {
   const config = input.config ?? billingRuntimeConfig();
   if (config.billingMode !== "stripe") {

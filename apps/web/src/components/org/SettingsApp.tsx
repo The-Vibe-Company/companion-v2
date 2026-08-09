@@ -63,6 +63,17 @@ export function settingsHref(route: SettingsRoute, dialog: SettingsDialog): stri
   return `/settings?${qs.toString()}`;
 }
 
+export function canonicalSettingsReplacement(
+  pathname: string,
+  search: string,
+  route: SettingsRoute,
+  dialog: SettingsDialog,
+): string | null {
+  if (pathname !== "/settings") return null;
+  const canonical = settingsHref(route, dialog);
+  return `${pathname}${search}` === canonical ? null : canonical;
+}
+
 export function SettingsController({
   data,
   initialRoute,
@@ -110,9 +121,13 @@ export function SettingsController({
   useEffect(() => {
     const nextRoute = canonicalizeSettingsRoute(initialRoute, canManage);
     setRoute(nextRoute);
-    if (nextRoute.view !== initialRoute.view) {
-      window.history.replaceState(window.history.state, "", settingsHref(nextRoute, initialDialog));
-    }
+    const replacement = canonicalSettingsReplacement(
+      window.location.pathname,
+      window.location.search,
+      nextRoute,
+      initialDialog,
+    );
+    if (replacement) window.history.replaceState(window.history.state, "", replacement);
   }, [canManage, initialDialog, initialRoute]);
   useEffect(() => setDialog(initialDialog), [initialDialog]);
 

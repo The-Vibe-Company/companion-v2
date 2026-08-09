@@ -94,7 +94,6 @@ export function classifyFiles(files, { forceFull = false } = {}) {
             "packages/core/",
             "packages/db/",
             "packages/email/",
-            "packages/sandbox/",
             "packages/skills/",
             "packages/storage/",
             "scripts/ci-rsc-smoke.sh",

@@ -190,17 +190,6 @@ export async function seedDemoContent(actor: ActorContext): Promise<void> {
       .insert(schema.personalLabels)
       .values(DEMO_EMPTY_PERSONAL_LABELS.map((path) => ({ orgId, ownerId: actor.id, path })))
       .onConflictDoNothing();
-
-    // Default workspace-activated models (ids from the sandbox catalog's offline fallback registry)
-    // so the hard createRun activation gate never bricks a fresh dev workspace.
-    await database
-      .insert(schema.orgModelPreferences)
-      .values({
-        orgId,
-        activatedModels: ["anthropic/claude-haiku-4-5", "anthropic/claude-opus-4-5", "anthropic/claude-sonnet-4-5"],
-        createdBy: actor.id,
-      })
-      .onConflictDoNothing();
   });
 
   if (!storageConfigured()) {

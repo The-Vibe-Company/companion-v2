@@ -39,14 +39,8 @@ docker run --rm "${network_args[@]}" \
 
 worker_id="$(docker run -d "${network_args[@]}" \
   -e COMPANION_BILLING_MODE=off \
-  -e COMPANION_RUNS_ENABLED=true \
-  -e COMPANION_PROJECTS_ENABLED=true \
-  -e COMPANION_GOLDEN_SNAPSHOT_ID=ci-placeholder-snapshot \
   -e COMPANION_SECRETS_MASTER_KEY=CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk= \
   -e DATABASE_URL="$container_worker_url" \
-  -e VERCEL_TOKEN=ci-placeholder-token \
-  -e VERCEL_TEAM_ID=ci-placeholder-team \
-  -e VERCEL_PROJECT_ID=ci-placeholder-project \
   companion-worker:ci)"
 api_id=""
 web_id=""
@@ -63,32 +57,12 @@ for _ in $(seq 1 20); do
 done
 test "$(docker inspect --format '{{.State.Running}}' "$worker_id")" = "true"
 
-workers_ready=""
-for _ in $(seq 1 20); do
-  workers_ready="$(
-    docker run --rm "${network_args[@]}" postgres:16-alpine \
-      psql "$container_migration_url" -Atc \
-        "select companion_skill_run_worker_ready() and companion_project_worker_ready()" \
-        2>/dev/null || true
-  )"
-  if [ "$workers_ready" = "t" ]; then
-    break
-  fi
-  sleep 0.25
-done
-if [ "$workers_ready" != "t" ]; then
-  docker logs "$worker_id" >&2
-  exit 1
-fi
-
 sleep 2
 test "$(docker inspect --format '{{.State.Running}}' "$worker_id")" = "true"
 
 api_id="$(docker run -d "${network_args[@]}" "${api_publish_args[@]}" \
   -e PORT=18082 \
   -e COMPANION_API_HOST=0.0.0.0 \
-  -e COMPANION_RUNS_ENABLED=true \
-  -e COMPANION_PROJECTS_ENABLED=true \
   -e DATABASE_URL="$container_api_url" \
   -e COMPANION_WEB_URL=http://127.0.0.1:18080 \
   -e COMPANION_API_URL=http://127.0.0.1:18080 \
@@ -108,8 +82,6 @@ curl -fsS http://127.0.0.1:18082/health
 web_id="$(docker run -d "${network_args[@]}" "${web_publish_args[@]}" \
   -e PORT=18080 \
   -e HOSTNAME=0.0.0.0 \
-  -e COMPANION_RUNS_ENABLED=true \
-  -e COMPANION_PROJECTS_ENABLED=true \
   companion-web:ci)"
 
 for _ in $(seq 1 60); do
