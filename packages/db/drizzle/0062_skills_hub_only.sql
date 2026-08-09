@@ -1,4 +1,71 @@
 -- Companion is now a Skills Hub only. Runtime records are intentionally and irreversibly removed.
+--
+-- This migration must never erase the only durable references to provider or object-storage
+-- resources. Operators first quiesce the old release and drain its cleanup workers; the guard then
+-- fails closed until every externally backed runtime record is gone or marked cleaned.
+DO $ensure_runtime_resources_drained$
+DECLARE
+  pending_storage bigint;
+  pending_projects bigint;
+  pending_sandboxes bigint;
+  active_usage bigint;
+BEGIN
+  SELECT
+    (SELECT count(*) FROM public.project_attachment_uploads)
+    + (SELECT count(*) FROM public.project_attachments)
+    + (SELECT count(*) FROM public.project_files)
+    + (SELECT count(*) FROM public.project_file_versions)
+    + (SELECT count(*) FROM public.skill_run_attachment_uploads)
+    + (SELECT count(*) FROM public.skill_run_attachments)
+    + (SELECT count(*) FROM public.skill_run_artifacts)
+  INTO pending_storage;
+
+  -- Every Project owns a deterministic provider identity and a durable S3 projection. Requiring
+  -- the old release to finish Project deletion also proves its checkpoints and upload ledger were
+  -- cleaned before their ownership graph disappears.
+  SELECT count(*)
+  INTO pending_projects
+  FROM public.projects;
+
+  SELECT
+    (
+      SELECT count(*)
+      FROM public.skill_runs
+      WHERE sandbox_cleaned_at IS NULL
+        AND (sandbox_name IS NOT NULL OR sandbox_id IS NOT NULL)
+    )
+    + (
+      SELECT count(*)
+      FROM public.skill_run_prewarms
+      WHERE sandbox_cleaned_at IS NULL
+        AND (sandbox_name IS NOT NULL OR sandbox_id IS NOT NULL)
+    )
+  INTO pending_sandboxes;
+
+  SELECT count(*)
+  INTO active_usage
+  FROM public.sandbox_usage_sessions
+  WHERE ended_at IS NULL;
+
+  IF pending_storage > 0
+    OR pending_projects > 0
+    OR pending_sandboxes > 0
+    OR active_usage > 0 THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '55000',
+      MESSAGE = 'Skills Hub-only migration requires runtime resource cleanup first',
+      DETAIL = format(
+        'pending storage records=%s, Projects=%s, sandboxes=%s, active usage sessions=%s',
+        pending_storage,
+        pending_projects,
+        pending_sandboxes,
+        active_usage
+      ),
+      HINT = 'Keep the previous release quiesced with its cleanup worker and provider/storage credentials until the Skills Hub cutover preflight in deploy/railway/README.md passes.';
+  END IF;
+END
+$ensure_runtime_resources_drained$;--> statement-breakpoint
+
 -- Drop the shared helper first because its previous body referenced a run-configuration table.
 DROP FUNCTION IF EXISTS public.companion_secret_usage_count(uuid, uuid);
 

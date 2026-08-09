@@ -10,6 +10,7 @@ Prefer the lowest level that proves the boundary, but use real PostgreSQL, objec
 |---|---|---|---|
 | Personal skills and personal database realms remain creator-only; org skills remain member-wide | Same-org admin override or cross-tenant disclosure | Core + PostgreSQL + HTTP | Remove the creator or tenant predicate |
 | Runtime execution is absent and cannot be feature-flagged back on | Old Projects/Run route, API, DB object, supervisor, or launch control returns | Contracts + route/component + migrated PostgreSQL + browser | Restore a runtime route/table/flag or `Run skill` label |
+| Skills Hub cutover preserves external cleanup ownership until deletion succeeds | Migration drops S3 keys or provider identities before old cleanup drains | Historical PostgreSQL migration replay | Seed a legacy storage ownership row and let migration 0062 continue |
 | Uploads and public packages are archive-safe and checksum-bound | Traversal, link, collision, oversized archive, or substituted release | Package + storage + HTTP integration | Relax one ZIP or checksum guard |
 | Share is the only personal-to-org transition and carries required private dependencies | Partial dependency closure or unauthorized share | Core + PostgreSQL + HTTP | Skip the owner or dependency-plan gate |
 | GitHub mirrors are deterministic, tenant-scoped, and idempotent | Duplicate writes, credential leak, or cross-org destination | Core + worker + provider contract + PostgreSQL | Remove digest/fence/tenant checks |
