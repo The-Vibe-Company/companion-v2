@@ -9,7 +9,7 @@
  *
  * Why integrated:
  * This is an upgrade-only guarantee. It depends on replaying the real migration history through
- * 0061, seeding an old durable ownership row, and executing the exact 0062 PostgreSQL guard.
+ * 0062, seeding an old durable ownership row, and executing the exact 0063 PostgreSQL guard.
  *
  * Failure proof:
  * Removing or moving the guard after the first DROP lets the populated migration succeed or lose
@@ -43,13 +43,13 @@ async function applyMigrationFile(name: string): Promise<void> {
   }
 }
 
-describe("0062 Skills Hub-only resource cutover", () => {
+describe("0063 Skills Hub-only resource cutover", () => {
   beforeAll(async () => {
     await adminSql.unsafe(`create database "${databaseName}"`);
     upgradeSql = postgres(upgradeUrl.toString(), { max: 1 });
 
     const historicalMigrations = (await readdir(migrationsDir))
-      .filter((name) => /^\d{4}_.+\.sql$/.test(name) && name < "0062_skills_hub_only.sql")
+      .filter((name) => /^\d{4}_.+\.sql$/.test(name) && name < "0063_skills_hub_only.sql")
       .sort();
     for (const migration of historicalMigrations) await applyMigrationFile(migration);
   }, 30_000);
@@ -74,7 +74,7 @@ describe("0062 Skills Hub-only resource cutover", () => {
       )
     `;
 
-    await expect(applyMigrationFile("0062_skills_hub_only.sql")).rejects.toThrow(
+    await expect(applyMigrationFile("0063_skills_hub_only.sql")).rejects.toThrow(
       "Skills Hub-only migration requires runtime resource cleanup first",
     );
 
@@ -92,7 +92,7 @@ describe("0062 Skills Hub-only resource cutover", () => {
     // This row may be removed only after the operator has deleted the named external object. The
     // migration then proves no database-owned cleanup obligation remains before dropping tables.
     await upgradeSql`delete from project_attachment_uploads`;
-    await applyMigrationFile("0062_skills_hub_only.sql");
+    await applyMigrationFile("0063_skills_hub_only.sql");
 
     const [removed] = await upgradeSql<{ tableName: string | null }[]>`
       select to_regclass('public.project_attachment_uploads')::text as "tableName"

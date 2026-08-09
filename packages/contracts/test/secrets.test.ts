@@ -17,6 +17,7 @@ describe("secret contracts", () => {
       "secrets:write",
       "database:read",
       "database:write",
+      "public-skills:install",
     ]);
     expect(expandTokenScopes(["database:write"])).toEqual(["database:read", "database:write"]);
     expect(expandTokenScopes(["database:read"])).toEqual(["database:read"]);

@@ -10,6 +10,8 @@ import { join } from "node:path";
 const serviceMocks = vi.hoisted(() => {
   const noop = vi.fn(async () => undefined);
   return {
+    AGENT_DELEGATION_TOKEN_MAX_TTL_MS: 7 * 24 * 60 * 60_000,
+    AGENT_DELEGATION_TOKEN_TTL_MS: 24 * 60 * 60_000,
     ApiTokenRefreshError: class ApiTokenRefreshError extends Error {},
     acceptInvitation: noop,
     addComment: noop,
@@ -17,6 +19,8 @@ const serviceMocks = vi.hoisted(() => {
     addOrgAccessDomain: noop,
     archiveSkill: noop,
     assignLabel: noop,
+    authorizePublicSkillPackageForApiToken: noop,
+    authorizePublicSkillPackageForSession: noop,
     buildDependencyPlan: noop,
     buildSkillSharePlan: noop,
     completeOnboarding: noop,
@@ -44,11 +48,12 @@ const serviceMocks = vi.hoisted(() => {
     getDownloadVersion: noop,
     getCommentImageAsset: noop,
     getOrgLogoAsset: noop,
-    issueApiToken: noop,
+    issueApiToken: vi.fn(),
+    snapshotAgentApiTokenGrants: vi.fn(),
     joinOrgByDomain: noop,
     listApiTokens: noop,
     listLabels: noop,
-    listOrgs: noop,
+    listOrgs: vi.fn(),
     listSkillComments: noop,
     listSkills: vi.fn(async () => []),
     listSkillVersions: noop,
@@ -112,9 +117,14 @@ const skillsMocks = vi.hoisted(() => ({ validateSkillArchive: vi.fn() }));
 
 vi.mock("@hono/node-server", () => ({ serve: vi.fn() }));
 
+const authMocks = vi.hoisted(() => ({
+  getSession: vi.fn(async (): Promise<unknown | null> => null),
+  authenticateAgentRequest: vi.fn(async (): Promise<unknown | null> => null),
+}));
+
 vi.mock("@companion/auth", () => ({
-  auth: { api: { getSession: vi.fn(async () => null) }, handler: vi.fn(), $Infer: {} },
-  authenticateAgentRequest: vi.fn(async () => null),
+  auth: { api: { getSession: authMocks.getSession }, handler: vi.fn(), $Infer: {} },
+  authenticateAgentRequest: authMocks.authenticateAgentRequest,
   registerAgentCapabilityExecutor: vi.fn(() => () => undefined),
 }));
 
@@ -492,5 +502,145 @@ describe("POST /v1/tokens/refresh", () => {
     expect(missing.status).toBe(401);
     await expect(ineligible.json()).resolves.toEqual({ ok: false, error: "token cannot be refreshed" });
     await expect(missing.json()).resolves.toEqual({ ok: false, error: "token cannot be refreshed" });
+  });
+});
+
+describe("POST /v1/tokens", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    authMocks.getSession.mockResolvedValue(null);
+    authMocks.authenticateAgentRequest.mockResolvedValue(null);
+    serviceMocks.resolveApiToken.mockResolvedValue(null);
+  });
+
+  it("keeps human scoped issuance unchanged", async () => {
+    authMocks.getSession.mockResolvedValueOnce({
+      user: { ...actorA, emailVerified: true },
+      session: { id: "session-1", userId: actorA.id },
+    });
+    serviceMocks.listOrgs.mockResolvedValueOnce([{ org_id: "org-1" }]);
+    serviceMocks.issueApiToken.mockResolvedValueOnce({
+      id: "token-1",
+      token: "cmp_pat_synthetic_human",
+      prefix: "cmp_pat_synthe",
+      scopes: ["skills:read"],
+      expiresAt: new Date("2026-11-01T00:00:00.000Z"),
+      targetWorkspaceId: null,
+    });
+
+    const response = await app.request("/v1/tokens", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ scopes: ["skills:read"], name: "existing flow" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      id: "token-1",
+      token: "cmp_pat_synthetic_human",
+      prefix: "cmp_pat_synthe",
+      scopes: ["skills:read"],
+      expires_at: "2026-11-01T00:00:00.000Z",
+    });
+    expect(serviceMocks.issueApiToken).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: "org-1",
+      scopes: ["skills:read"],
+      name: "existing flow",
+    }));
+  });
+
+  it("issues the exact active Agent Auth snapshot with org, TTL, provenance, and target binding", async () => {
+    const workspaceId = "00000000-0000-4000-8000-000000000001";
+    authMocks.authenticateAgentRequest.mockResolvedValueOnce({
+      actor: actorA,
+      workspaceId,
+      capability: "skills:read",
+      session: { agentId: "agent-1", agent: { capabilityGrants: [] }, user: actorA },
+    });
+    serviceMocks.snapshotAgentApiTokenGrants.mockResolvedValueOnce({
+      scopes: ["skills:read", "database:read", "database:write", "public-skills:install"],
+      expiresAt: new Date(Date.now() + 10 * 60_000),
+    });
+    serviceMocks.issueApiToken.mockImplementationOnce(async (input: Record<string, unknown>) => ({
+      id: "token-agent",
+      token: "cmp_pat_synthetic_agent",
+      prefix: "cmp_pat_synthe",
+      scopes: input.scopes,
+      expiresAt: input.expiresAt,
+      targetWorkspaceId: "conductor-workspace-1",
+    }));
+
+    const response = await app.request("/v1/tokens", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer synthetic.agent.jwt",
+        "x-companion-workspace-id": workspaceId,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        inherit_agent_grants: true,
+        ttl_seconds: 3600,
+        target_workspace_id: "conductor-workspace-1",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(serviceMocks.snapshotAgentApiTokenGrants).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: workspaceId,
+      agentId: "agent-1",
+    }));
+    expect(serviceMocks.issueApiToken).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: workspaceId,
+      scopes: ["skills:read", "database:read", "database:write", "public-skills:install"],
+      expiresAt: expect.any(Date),
+      source: {
+        type: "agent_auth",
+        agentId: "agent-1",
+        targetWorkspaceId: "conductor-workspace-1",
+      },
+    }));
+    const issuedCall = serviceMocks.issueApiToken.mock.calls.at(-1)?.[0] as { expiresAt: Date };
+    expect(issuedCall.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    expect(issuedCall.expiresAt.getTime()).toBeLessThanOrEqual(Date.now() + 10 * 60_000);
+  });
+
+  it("rejects PAT-to-PAT, human inheritance, and Agent Auth-selected scopes", async () => {
+    serviceMocks.resolveApiToken.mockResolvedValueOnce({ actor: actorA, orgId: "org-1", scopes: ["skills:read"] });
+    const pat = await app.request("/v1/tokens", {
+      method: "POST",
+      headers: { authorization: "Bearer cmp_pat_parent", "content-type": "application/json" },
+      body: JSON.stringify({ inherit_agent_grants: true }),
+    });
+    expect(pat.status).toBe(400);
+
+    authMocks.getSession.mockResolvedValueOnce({
+      user: { ...actorA, emailVerified: true },
+      session: { id: "session-1", userId: actorA.id },
+    });
+    const human = await app.request("/v1/tokens", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ inherit_agent_grants: true }),
+    });
+    expect(human.status).toBe(400);
+
+    const workspaceId = "00000000-0000-4000-8000-000000000001";
+    authMocks.authenticateAgentRequest.mockResolvedValueOnce({
+      actor: actorA,
+      workspaceId,
+      capability: "skills:read",
+      session: { agentId: "agent-1", agent: { capabilityGrants: [] }, user: actorA },
+    });
+    const selected = await app.request("/v1/tokens", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer synthetic.agent.jwt",
+        "x-companion-workspace-id": workspaceId,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ inherit_agent_grants: true, scopes: ["skills:write"] }),
+    });
+    expect(selected.status).toBe(400);
+    expect(serviceMocks.issueApiToken).not.toHaveBeenCalled();
   });
 });

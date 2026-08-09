@@ -338,29 +338,49 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
     `;
     expect(before).toEqual([{ used: false }]);
 
-    const resolved = await withRuntimeRole((tx) => tx<{
-      orgId: string;
-      userId: string;
-      email: string;
-      name: string;
-      scopes: string[];
-    }[]>`
-      select
-        org_id::text as "orgId",
-        user_id as "userId",
-        email,
-        name,
-        scopes
-      from companion_resolve_api_token(${apiTokenHash})
-    `);
+    const resolved = await withRuntimeRole(async (tx) => {
+      const legacy = await tx<{
+        orgId: string;
+        userId: string;
+        email: string;
+        name: string;
+        scopes: string[];
+      }[]>`
+        select
+          org_id::text as "orgId",
+          user_id as "userId",
+          email,
+          name,
+          scopes
+        from companion_resolve_api_token(${apiTokenHash})
+      `;
+      const targetAware = await tx<{
+        orgId: string;
+        userId: string;
+        email: string;
+        name: string;
+        scopes: string[];
+      }[]>`
+        select
+          org_id::text as "orgId",
+          user_id as "userId",
+          email,
+          name,
+          scopes
+        from companion_resolve_api_token(${apiTokenHash}, null)
+      `;
+      return { legacy, targetAware };
+    });
 
-    expect(resolved).toEqual([{
+    const expected = [{
       orgId: orgA,
       userId: owner.id,
       email: owner.email,
       name: "Pre-tenant Owner",
       scopes: ["skills:read"],
-    }]);
+    }];
+    expect(resolved.legacy).toEqual(expected);
+    expect(resolved.targetAware).toEqual(expected);
     expect(JSON.stringify(resolved)).not.toContain(apiTokenHash);
     const after = await sql<{ used: boolean }[]>`
       select last_used_at is not null as used from api_tokens where token_hash = ${apiTokenHash}
@@ -449,6 +469,12 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
         select version, checksum, size_bytes::int as "sizeBytes"
         from companion_authorize_public_skill_package(${shareToken}, '1.0.0', ${outsider.id})
       `;
+      const apiTokenPackage = await tx<{ version: string; checksum: string; sizeBytes: number }[]>`
+        select version, checksum, size_bytes::int as "sizeBytes"
+        from companion_authorize_public_skill_package(
+          ${shareToken}, '1.0.0', ${outsider.id}, 'api_token'
+        )
+      `;
       const wrongVersion = await tx`
         select * from companion_authorize_public_skill_package(${shareToken}, '0.9.0', ${outsider.id})
       `;
@@ -469,16 +495,29 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
       const directlyVisible = await tx<{ count: number }[]>`
         select count(*)::int as count from agent_transfer_tickets
       `;
-      return { sessionPackage, wrongVersion, issued, first, replay, directlyVisible };
+      return { sessionPackage, apiTokenPackage, wrongVersion, issued, first, replay, directlyVisible };
     });
 
     const transport = { version: "1.0.0", checksum: `sha256:${"b".repeat(64)}`, sizeBytes: 987 };
     expect(result.sessionPackage).toEqual([transport]);
+    expect(result.apiTokenPackage).toEqual([transport]);
     expect(result.wrongVersion).toEqual([]);
     expect(result.issued).toEqual([{ checksum: transport.checksum, sizeBytes: 987 }]);
     expect(result.first).toEqual([transport]);
     expect(result.replay).toEqual([]);
     expect(result.directlyVisible).toEqual([{ count: 0 }]);
+
+    const authorizationAudits = await sql<{ auth: string }[]>`
+      select metadata->>'auth' as auth
+      from audit_log
+      where org_id = ${orgA}
+        and actor_id = ${outsider.id}
+        and action = 'skill.public_package.download_authorized'
+    `;
+    expect(authorizationAudits).toEqual(expect.arrayContaining([
+      { auth: "session" },
+      { auth: "api_token" },
+    ]));
   });
 
   it("consumes a tenant skill transfer ticket through the narrow runtime grant and still hides its row", async () => {

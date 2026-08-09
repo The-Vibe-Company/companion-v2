@@ -91,9 +91,10 @@ export interface PreTenantApiTokenRow {
 export async function resolvePreTenantApiToken(
   database: Db,
   tokenHash: string,
+  targetWorkspaceId: string | null = null,
 ): Promise<PreTenantApiTokenRow | null> {
   const result = await database.execute(sql`
-    select * from companion_resolve_api_token(${tokenHash})
+    select * from companion_resolve_api_token(${tokenHash}, ${targetWorkspaceId})
   `);
   return resultRows<PreTenantApiTokenRow>(result)[0] ?? null;
 }
@@ -162,14 +163,20 @@ export interface PreTenantPublicSkillPackageRow {
   size_bytes: number;
 }
 
-/** Session authorization also writes the tenant-owned audit entry inside the DB function. */
+/** Authorization also writes the tenant-owned audit entry inside the DB function. */
 export async function authorizePreTenantPublicSkillPackage(
   database: Db,
-  input: { token: string; version: string; userId: string },
+  input: { token: string; version: string; userId: string; authKind?: "session" | "api_token" },
 ): Promise<PreTenantPublicSkillPackageRow | null> {
-  const result = await database.execute(sql`
-    select * from companion_authorize_public_skill_package(${input.token}, ${input.version}, ${input.userId})
-  `);
+  const result = input.authKind === "api_token"
+    ? await database.execute(sql`
+        select * from companion_authorize_public_skill_package(
+          ${input.token}, ${input.version}, ${input.userId}, 'api_token'
+        )
+      `)
+    : await database.execute(sql`
+        select * from companion_authorize_public_skill_package(${input.token}, ${input.version}, ${input.userId})
+      `);
   return resultRows<PreTenantPublicSkillPackageRow>(result)[0] ?? null;
 }
 

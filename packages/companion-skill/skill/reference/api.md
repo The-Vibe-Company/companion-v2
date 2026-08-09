@@ -10,6 +10,12 @@ constrained to the exact workspace id. `database:write` includes `database:read`
 state through predicates, subqueries, conflict handling, and returned rows. The public install flow uses the instance-wide
 `public-skills:install` capability.
 
+When `COMPANION_DELEGATION_TOKEN` is present, the client requires `COMPANION_API_URL` and
+`COMPANION_WORKSPACE_ID`, skips `credentials.json` and every connect/device-flow path, and uses the
+opaque child PAT on PAT-enabled routes. If `COMPANION_DELEGATION_TARGET_ID` is set, every bearer
+request includes the matching target header. This explicit id binding is not Conductor attestation;
+possession of both values remains sufficient until expiry or revocation.
+
 Resolve those values from the environment first. If either variable is missing, read the dedicated
 local credentials file written by the Companion install/use prompt:
 
@@ -60,6 +66,13 @@ dynamic host registration, and the device-approval flow, writes value-free statu
 and persists the resulting non-secret workspace reference. Rerun the requested API action after
 approval.
 
+Use `action: "delegate"` only with an existing local Agent Auth identity and an inherited owner-only
+FIFO descriptor `outputFd >= 3`. Sockets and regular files are refused. Optional `ttlSeconds` is bounded to seven days and
+`targetWorkspaceId` records the intended runtime target. The action uses an already-active
+workspace-bound `skills:read` grant without approval, calls `POST /tokens` with
+`inherit_agent_grants:true`, writes the returned plaintext only to the descriptor, and prints only
+metadata. It never stores the child PAT or copies an Agent Auth private key.
+
 Uploads use `action: "upload"` plus `inputPath` and an exact query containing
 `action=publish|validate`, `expect_slug`, and `version`; existing skills also require
 `expect_skill_id`. Downloads use `action: "download"` plus `outputPath`. Neither a PAT, JWT,
@@ -74,6 +87,7 @@ legacy PAT:
 | Action | Method & path | Capability |
 | --- | --- | --- |
 | Connect/discover Agent Auth | `/.well-known/agent-configuration`, plugin device flow | Public discovery, delegated approval |
+| Issue a child delegation PAT | `POST /tokens` `{inherit_agent_grants:true,…}` | Existing Agent Auth `skills:read`; sensitive, no new approval |
 | Explicit legacy PAT refresh | `POST /tokens/refresh` | Legacy mode only, preserves existing scopes |
 | List org library skills | `GET /skills?lib=org` | `skills:read` |
 | List My Skills | `GET /skills?lib=mine` | `skills:read` |
@@ -96,7 +110,7 @@ legacy PAT:
 | Set/promote the pinned public version | `PUT /skills/{slug}/public-version` `{version}` | `skills:write` |
 | Remove the pinned public version | `DELETE /skills/{slug}/public-version` | `skills:write` |
 | Read public preview metadata | `GET /public/skills/{shareToken}` | Public |
-| Install the exact public release package | `GET /public/skills/{shareToken}/versions/{version}/package` | Verified session or one-use `public-skills:install` ticket; PAT rejected |
+| Install the exact public release package | `GET /public/skills/{shareToken}/versions/{version}/package` | Verified session, one-use Agent Auth ticket, or PAT with `public-skills:install` |
 | List the label (folder) tree | `GET /labels` | `skills:read` |
 | Create a label (folder) | `POST /labels` | `skills:write` |
 | Rename a label (cascades) | `PUT /labels/rename` | `skills:write` |
@@ -361,8 +375,9 @@ GET /public/skills/{share_token}/versions/{version}/package
 X-Companion-Transfer-Ticket: cmp_xfer_...
 ```
 
-The route accepts a verified Better Auth browser session or a 60-second, one-use Agent Auth transfer
-ticket. It rejects PATs and anonymous requests. `public-skills:install` is instance-wide but its
+The route accepts a verified Better Auth browser session, a 60-second one-use Agent Auth transfer
+ticket, or a PAT carrying `public-skills:install`. It rejects anonymous and under-scoped PAT requests.
+`public-skills:install` is instance-wide but its
 execution accepts only a known public token/version, then binds the hashed ticket to the approving
 user, agent, action, workspace, version, checksum, and size. Consumption revalidates all current
 state. The ticket never belongs in a URL, argv, output, or log.

@@ -21,6 +21,11 @@ You need two non-secret values, supplied by the web app's **Use with an agent** 
 - `COMPANION_API_URL` — the workspace API base, e.g. `https://companion.acme.dev/v1`.
 - `COMPANION_WORKSPACE_ID` — the Companion workspace id (`organizations.id`), used to key local
   credentials and install inventory.
+- `COMPANION_DELEGATION_TOKEN` — optional short-lived child PAT for a non-interactive workspace. If
+  present, the client uses it directly and does not read `credentials.json` or start connect/device
+  approval. `COMPANION_API_URL` and `COMPANION_WORKSPACE_ID` are then both mandatory.
+- `COMPANION_DELEGATION_TARGET_ID` — optional explicit runtime target binding. It must match the id
+  recorded at issuance and is sent only in `X-Companion-Delegation-Target`.
 - an Agent Auth reference `{ issuer, agentId }` for that workspace. The bundled client discovers the
   instance, dynamically registers the host, opens the device-approval page, and requests short-lived
   JWTs when a capability is needed.
@@ -33,11 +38,36 @@ subqueries, conflict handling, and returned rows. Approvals are persistent until
 request JWT lasts 60 seconds.
 Never request a broader workspace constraint.
 
+### Delegate existing Agent Auth rights to a Cloud workspace
+
+Use the client's `delegate` action only from an already-connected local Agent Auth identity. It calls
+the sensitive `POST /tokens` inheritance form with the already-active `skills:read` grant and never
+requests a missing capability or starts device approval. Companion snapshots all active grants for
+the exact selected Companion workspace, includes `public-skills:install` only when already active,
+expands database write to read, and issues an opaque child PAT with a 24-hour default, seven-day hard
+maximum, and an earlier source-expiry cap.
+
+The caller must provide `outputFd >= 3` backed by an owner-only FIFO and should pass the intended
+Conductor workspace id as `targetWorkspaceId`. The client writes the plaintext PAT only to that
+descriptor, closes it, and returns only id/prefix/scopes/expiry/target metadata on stdout. It refuses
+stdout, stderr, sockets, regular files, Agent Auth private-key copying, and PAT-to-PAT issuance. The receiver
+sets the pipe value as `COMPANION_DELEGATION_TOKEN` plus the non-secret API/workspace values and the
+same `COMPANION_DELEGATION_TARGET_ID`; it never writes the token to `credentials.json` or a normal
+file.
+
+The target id is not native Conductor attestation. It prevents accidental use under a different
+declared runtime id, but anyone who steals both bearer token and target id can replay them until the
+short expiry or explicit revocation. Use the shortest TTL practical and revoke the child PAT when the
+workspace is archived. Never place either credential in argv, prompts, repositories, logs, fixtures,
+or ordinary output.
+
 Resolve the active workspace before any network call:
 
-1. If `COMPANION_API_URL` and `COMPANION_WORKSPACE_ID` are set, use them to select the matching
+1. If `COMPANION_DELEGATION_TOKEN` is set, require `COMPANION_API_URL` and
+   `COMPANION_WORKSPACE_ID`, use direct env mode, and do not read local credentials or connect.
+2. If `COMPANION_API_URL` and `COMPANION_WORKSPACE_ID` are set, use them to select the matching
    Agent Auth reference.
-2. Otherwise read the dedicated local credentials index:
+3. Otherwise read the dedicated local credentials index:
    - macOS/Linux: `~/.companion/credentials.json`
    - Windows: `$HOME\.companion\credentials.json`
 
@@ -555,11 +585,13 @@ The exact public package endpoint is:
 GET /public/skills/{share_token}/versions/{public_release.version}/package
 ```
 
-It rejects anonymous requests and PATs. A verified browser session may download directly. An agent
-must hold the instance-wide `public-skills:install` grant and exchange it for a 60-second, one-use
-transfer ticket. The ticket travels only in the `X-Companion-Transfer-Ticket` header, never a URL,
-argv, output, or log. The server revalidates the public pointer, archive state, version, checksum,
-agent, user, and revocation when consuming it.
+It rejects anonymous and under-scoped PAT requests. A verified browser session may download directly.
+An env delegation PAT whose inherited snapshot includes `public-skills:install` downloads directly;
+the client still verifies the exact reviewed version, size, and checksum. An Agent Auth caller must
+hold the instance-wide `public-skills:install` grant and exchange it for a 60-second, one-use transfer
+ticket. The ticket travels only in the `X-Companion-Transfer-Ticket` header, never a URL, argv, output,
+or log. The server revalidates the public pointer, archive state, version, checksum, agent, user, and
+revocation when consuming it.
 
 ### Install from a public release link
 
@@ -567,9 +599,11 @@ Public installation is intentionally root-package-only. It never follows depende
 secrets, creates `skill_installs`, or runs scripts. Surface declared prerequisites as warnings.
 
 1. Fetch anonymous preview metadata and require non-null `public_release`.
-2. Reuse an existing `public-skills:install` grant for this instance. Otherwise use
-   `@auth/agent-cli@0.5.1` discovery and device approval once. Capture the returned transfer ticket in
-   memory without printing it and immediately download the exact version.
+2. In delegation env mode, require `public-skills:install` in the inherited PAT and use the bundled
+   client's direct bearer path without connect or device approval. In Agent Auth mode, reuse an
+   existing `public-skills:install` grant or use `@auth/agent-cli@0.5.1` discovery and device approval
+   once, then capture the returned transfer ticket in memory without printing it and immediately
+   download the exact version.
 3. Verify both `size_bytes` and the `sha256:` checksum before extraction.
 4. Reject absolute paths, `..`, backslashes, archive symlinks, hard links, devices, special files,
    NTFS alternate-data-stream syntax, DOS device names, trailing-dot/space aliases, and portable
@@ -594,9 +628,10 @@ preview's exact release metadata; for project scope, `projectRoot` is mandatory.
 {"action":"public-install","token":"<share-token>","version":"<public-version>","checksum":"sha256:<digest>","sizeBytes":1234,"tool":"codex","scope":"project","projectRoot":"<absolute-project-root>","confirmInstall":true,"confirmReplace":false}
 ```
 
-The client re-fetches the anonymous preview, exchanges the grant for a ticket, verifies the exact
-bytes, rejects unsafe ZIP metadata and destination links, extracts without executable bits, and
-performs the physically contained atomic swap.
+The client re-fetches the anonymous preview. In delegation env mode it downloads directly with the
+scoped PAT and never starts a ticket/device flow; in Agent Auth mode it exchanges an existing grant
+for a ticket. It then verifies the exact bytes, rejects unsafe ZIP metadata and destination links,
+extracts without executable bits, and performs the physically contained atomic swap.
 
 For real local inventory, read the active workspace entry in `~/.companion/skills.lock.json` and
 fall back to `~/.companion/skills.log.json` only when the lockfile is absent. The bundled update
@@ -1131,8 +1166,9 @@ update.
 ### Manage skill API calls
 
 Use the workspace API only for skills-management tasks. Do not use this skill to manage workspace
-members, invitations, org settings mutation, or tokens. The only org-settings read this skill uses is
-`GET /orgs/current/skill-naming-policy`.
+members, invitations, org settings mutation, or general token administration. The sole token action
+is the private-pipe Agent Auth inheritance flow documented above. The only org-settings read this
+skill uses is `GET /orgs/current/skill-naming-policy`.
 
 Allowed skills API tasks:
 
@@ -1149,8 +1185,9 @@ Allowed skills API tasks:
 - Set or promote the current org-skill version with `PUT /skills/$SLUG/public-version` only after the
   creator or Owner/Admin explicitly chooses to make it public. Remove the pointer idempotently with
   `DELETE /skills/$SLUG/public-version`. Both use `skills:write`; never infer consent after publish.
-- Install the exact pinned public release with the instance-wide `public-skills:install` grant and a
-  one-use transfer ticket. Do not use a PAT or anonymous package request.
+- Install the exact pinned public release with either the instance-wide Agent Auth
+  `public-skills:install` grant and one-use transfer ticket, or an env delegation PAT whose inherited
+  snapshot includes that exact scope. Anonymous and under-scoped PAT package requests are rejected.
 - Validate, publish, or update a skill with `POST /skills` after full local analysis and a synced
   `companion.json`. Use `dependency=` parameters only for old packages that have no manifest yet.
   For new skills, send explicit `scope=personal` or `scope=org` after the user chooses the library;
@@ -1286,7 +1323,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.34.0","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.35.0","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 

@@ -15,6 +15,7 @@ const serviceMocks = vi.hoisted(() => {
     addOrgAccessDomain: noop,
     archiveSkill: noop,
     assignLabel: noop,
+    authorizePublicSkillPackageForApiToken: vi.fn(),
     authorizePublicSkillPackageForSession: vi.fn(),
     buildDependencyPlan: noop,
     buildSkillSharePlan: noop,
@@ -172,6 +173,9 @@ const actorA = { id: "user-a", email: "a@example.test", name: "User A" };
 function tokenFor(header: string | undefined) {
   if (header === "read-a") return { actor: actorA, orgId: "org-1", scopes: ["skills:read"] };
   if (header === "write-only") return { actor: actorA, orgId: "org-1", scopes: ["skills:write"] };
+  if (header === "public-install-a") {
+    return { actor: actorA, orgId: "org-1", scopes: ["public-skills:install"] };
+  }
   return null;
 }
 
@@ -483,15 +487,40 @@ describe("GET /v1/public/skills/:token/versions/:version/package", () => {
     storageMocks.getSkillArchive.mockResolvedValue(zip);
   });
 
-  it("delivers no package bytes to anonymous requests or PATs", async () => {
+  it("rejects anonymous and ordinary PAT downloads", async () => {
     const anonymous = await app.request("/v1/public/skills/share-token/versions/1.0.0/package");
     expect(anonymous.status).toBe(401);
 
     const pat = await app.request("/v1/public/skills/share-token/versions/1.0.0/package", {
       headers: { authorization: "Bearer read-a" },
     });
-    expect(pat.status).toBe(401);
+    expect(pat.status).toBe(400);
     expect(storageMocks.getSkillArchive).not.toHaveBeenCalled();
+  });
+
+  it("downloads with an exact public-skills:install PAT and keeps delivery no-store", async () => {
+    serviceMocks.authorizePublicSkillPackageForApiToken.mockResolvedValue(descriptor);
+
+    const response = await app.request("/v1/public/skills/share-token/versions/1.0.0/package", {
+      headers: {
+        authorization: "Bearer public-install-a",
+        "x-companion-delegation-target": "conductor-workspace-1",
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("x-companion-public-version")).toBe("1.0.0");
+    expect(serviceMocks.resolveApiToken).toHaveBeenCalledWith(
+      "public-install-a",
+      undefined,
+      "conductor-workspace-1",
+    );
+    expect(serviceMocks.authorizePublicSkillPackageForApiToken).toHaveBeenCalledWith({
+      token: "share-token",
+      version: "1.0.0",
+      userId: actorA.id,
+    });
   });
 
   it("downloads the exact public release for a verified browser session", async () => {

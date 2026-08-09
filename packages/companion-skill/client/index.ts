@@ -41,6 +41,15 @@ type ClientInput =
       name?: string;
     }
   | {
+      action: "delegate";
+      workspaceId?: string;
+      name?: string;
+      ttlSeconds?: number;
+      targetWorkspaceId?: string;
+      /** Inherited anonymous pipe descriptor. stdout/stderr and regular files are refused. */
+      outputFd: number;
+    }
+  | {
       action: "api";
       workspaceId?: string;
       method: CompanionHttpMethod;
@@ -108,9 +117,11 @@ function readInput(): ClientInput {
 }
 
 function redact(value: string): string {
-  return value
+  const delegationToken = process.env.COMPANION_DELEGATION_TOKEN?.trim();
+  const redacted = value
     .replace(/cmp_(?:pat|grant|xfer)_[A-Za-z0-9._-]+/g, "cmp_[redacted]")
     .replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]");
+  return delegationToken ? redacted.replaceAll(delegationToken, "[REDACTED]") : redacted;
 }
 
 function writeResult(value: unknown): void {
@@ -153,6 +164,25 @@ function createClient(storage = new PrivateFileStorage()): AgentAuthClient {
 }
 
 function workspaceContext(requested?: string): WorkspaceContext {
+  const delegationToken = process.env.COMPANION_DELEGATION_TOKEN?.trim();
+  if (delegationToken) {
+    const apiUrl = process.env.COMPANION_API_URL?.trim();
+    const workspaceId = process.env.COMPANION_WORKSPACE_ID?.trim();
+    if (!apiUrl || !workspaceId) {
+      throw new Error(
+        "COMPANION_DELEGATION_TOKEN requires COMPANION_API_URL and COMPANION_WORKSPACE_ID",
+      );
+    }
+    if (requested && requested !== workspaceId) {
+      throw new Error("workspaceId must match COMPANION_WORKSPACE_ID in delegation env mode");
+    }
+    const workspace: WorkspaceCredentialV3 = { apiUrl };
+    return {
+      workspaceId,
+      workspace,
+      authentication: selectWorkspaceAuthentication(workspace),
+    };
+  }
   const credentials = loadCredentialsV3();
   const workspaceId = requested || process.env.COMPANION_WORKSPACE_ID || credentials.activeWorkspaceId;
   const workspace = credentials.workspaces[workspaceId];
@@ -182,6 +212,7 @@ async function ensureCapability(
   client: AgentAuthClient,
   context: WorkspaceContext,
   capability: CompanionCapability,
+  allowApproval = true,
 ): Promise<CompanionCapability> {
   const agentId = agentReference(context).agentId;
   const status = await client.agentStatus(agentId);
@@ -192,6 +223,10 @@ async function ensureCapability(
       (capability === "public-skills:install" || constraintMatches(grant.constraints, context.workspaceId)),
   );
   if (existing && companionGrantAllows(existing.capability, capability)) return existing.capability;
+
+  if (!allowApproval) {
+    throw new Error(`an active ${capability} grant is required; no approval was attempted`);
+  }
 
   const requested =
     capability === "public-skills:install"
@@ -220,8 +255,14 @@ async function agentFetch(input: {
   path: string;
   body?: Uint8Array | string;
   contentType?: string;
+  allowApproval?: boolean;
 }): Promise<Response> {
-  const grantedCapability = await ensureCapability(input.client, input.context, input.capability);
+  const grantedCapability = await ensureCapability(
+    input.client,
+    input.context,
+    input.capability,
+    input.allowApproval ?? true,
+  );
   const url = `${input.context.workspace.apiUrl.replace(/\/$/, "")}${input.path}`;
   const signed = await input.client.signJwt({
     agentId: agentReference(input.context).agentId,
@@ -241,7 +282,6 @@ async function agentFetch(input: {
 }
 
 async function authenticatedRestFetch(input: {
-  client: AgentAuthClient;
   context: WorkspaceContext;
   capability: Exclude<CompanionCapability, "public-skills:install">;
   method: CompanionHttpMethod;
@@ -249,18 +289,38 @@ async function authenticatedRestFetch(input: {
   body?: Uint8Array | string;
   contentType?: string;
 }): Promise<Response> {
-  if (input.context.authentication.kind === "agent") return agentFetch(input);
+  if (input.context.authentication.kind === "agent") {
+    return agentFetch({ ...input, client: createClient() });
+  }
   const url = `${input.context.workspace.apiUrl.replace(/\/$/, "")}${input.path}`;
   return fetch(url, {
     method: input.method,
     headers: {
       Authorization: `Bearer ${input.context.authentication.token}`,
       "X-Companion-Workspace-Id": input.context.workspaceId,
+      ...(input.context.authentication.kind === "delegation-token"
+        && input.context.authentication.targetWorkspaceId
+        ? { "X-Companion-Delegation-Target": input.context.authentication.targetWorkspaceId }
+        : {}),
       ...(input.contentType ? { "Content-Type": input.contentType } : {}),
     },
     ...(input.body !== undefined ? { body: input.body } : {}),
     redirect: "error",
   });
+}
+
+function programmaticBearerHeaders(context: WorkspaceContext): Record<string, string> {
+  if (context.authentication.kind === "agent") {
+    throw new Error("a direct bearer route requires a PAT authentication mode");
+  }
+  return {
+    Authorization: `Bearer ${context.authentication.token}`,
+    "X-Companion-Workspace-Id": context.workspaceId,
+    ...(context.authentication.kind === "delegation-token"
+      && context.authentication.targetWorkspaceId
+      ? { "X-Companion-Delegation-Target": context.authentication.targetWorkspaceId }
+      : {}),
+  };
 }
 
 async function responseError(response: Response, sensitive: boolean): Promise<never> {
@@ -311,6 +371,9 @@ function atomicWrite(path: string, bytes: Uint8Array): void {
 }
 
 async function connect(input: Extract<ClientInput, { action: "connect" }>): Promise<unknown> {
+  if (process.env.COMPANION_DELEGATION_TOKEN?.trim()) {
+    throw new Error("connect is disabled while COMPANION_DELEGATION_TOKEN is active");
+  }
   const client = createClient();
   const provider = new URL(input.apiUrl).origin;
   const result = await client.connectAgent({
@@ -346,9 +409,7 @@ async function apiRequest(input: Extract<ClientInput, { action: "api" }>): Promi
   if (pathname === "/secret-grants/redeem" || /^\/secret-retrievals\/[^/]+\/grant$/.test(pathname)) {
     throw new Error("secret grants and redeemed values must use the private secret-redeem pipe action");
   }
-  const client = createClient();
   const response = await authenticatedRestFetch({
-    client,
     context,
     capability: operation.capability,
     method: input.method,
@@ -374,9 +435,8 @@ async function upload(input: Extract<ClientInput, { action: "upload" }>): Promis
   }
   const bytes = new Uint8Array(readFileSync(resolve(input.inputPath)));
   const checksum = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-  if (context.authentication.kind === "legacy-pat") {
+  if (context.authentication.kind !== "agent") {
     const response = await authenticatedRestFetch({
-      client: createClient(),
       context,
       capability: "skills:write",
       method: input.method,
@@ -418,10 +478,8 @@ async function download(input: Extract<ClientInput, { action: "download" }>): Pr
   const operation = resolveOperation("GET", input.path);
   if (operation.binary !== "download") throw new Error("operation is not a registered binary download");
   if (operation.capability !== "skills:read") throw new Error("binary download requires skills:read");
-  const client = createClient();
-  if (context.authentication.kind === "legacy-pat") {
+  if (context.authentication.kind !== "agent") {
     const response = await authenticatedRestFetch({
-      client,
       context,
       capability: "skills:read",
       method: "GET",
@@ -445,6 +503,7 @@ async function download(input: Extract<ClientInput, { action: "download" }>): Pr
     atomicWrite(input.outputPath, bytes);
     return { ok: true, outputPath: resolve(input.outputPath), sizeBytes: bytes.byteLength, checksum: expectedChecksum ?? null };
   }
+  const client = createClient();
   const ticketed = resolveTicketedDownloadTarget(input.path);
   const slug = ticketed.slug;
   let version: string;
@@ -500,8 +559,6 @@ async function download(input: Extract<ClientInput, { action: "download" }>): Pr
 
 async function publicInstall(input: Extract<ClientInput, { action: "public-install" }>): Promise<unknown> {
   const context = workspaceContext(input.workspaceId);
-  agentReference(context);
-  const client = createClient();
   const previewUrl = `${context.workspace.apiUrl.replace(/\/$/, "")}/public/skills/${encodeURIComponent(input.token)}`;
   const previewResponse = await fetch(previewUrl, { redirect: "error" });
   if (!previewResponse.ok) return responseError(previewResponse, false);
@@ -517,22 +574,35 @@ async function publicInstall(input: Extract<ClientInput, { action: "public-insta
   ) {
     throw new Error("public release metadata changed; review the public page before installing");
   }
-  const transfer = await requestTransferTicket({
-    client,
-    context,
-    capability: "public-skills:install",
-    arguments: { token: input.token, version: input.version },
-  });
-  if (transfer.version !== input.version || transfer.checksum !== input.checksum || transfer.size_bytes !== input.sizeBytes) {
-    throw new Error("public install transfer binding does not match the reviewed release");
-  }
   const path = `/public/skills/${encodeURIComponent(input.token)}/versions/${encodeURIComponent(input.version)}/package`;
   const url = `${context.workspace.apiUrl.replace(/\/$/, "")}${path}`;
-  const response = await fetch(url, {
-    headers: { "X-Companion-Transfer-Ticket": transfer.ticket as string },
-    redirect: "error",
-  });
+  let response: Response;
+  if (context.authentication.kind === "agent") {
+    const client = createClient();
+    const transfer = await requestTransferTicket({
+      client,
+      context,
+      capability: "public-skills:install",
+      arguments: { token: input.token, version: input.version },
+    });
+    if (transfer.version !== input.version || transfer.checksum !== input.checksum || transfer.size_bytes !== input.sizeBytes) {
+      throw new Error("public install transfer binding does not match the reviewed release");
+    }
+    response = await fetch(url, {
+      headers: { "X-Companion-Transfer-Ticket": transfer.ticket as string },
+      redirect: "error",
+    });
+  } else {
+    response = await fetch(url, {
+      headers: programmaticBearerHeaders(context),
+      redirect: "error",
+    });
+  }
   if (!response.ok) return responseError(response, true);
+  const deliveredVersion = response.headers.get("x-companion-public-version");
+  if (deliveredVersion && deliveredVersion !== input.version) {
+    throw new Error("public package version does not match the reviewed release");
+  }
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (bytes.byteLength !== input.sizeBytes) {
     throw new Error(`download size mismatch: expected ${input.sizeBytes}, received ${bytes.byteLength}`);
@@ -559,20 +629,71 @@ async function publicInstall(input: Extract<ClientInput, { action: "public-insta
   };
 }
 
+function assertPrivateOutputDescriptor(outputFd: number, action: string): void {
+  if (!Number.isSafeInteger(outputFd) || outputFd < 3) {
+    throw new Error(`${action} requires an inherited private pipe descriptor`);
+  }
+  const descriptor = fstatSync(outputFd);
+  const currentUid = typeof process.getuid === "function" ? process.getuid() : null;
+  const ownerOnly = (descriptor.mode & 0o077) === 0;
+  if (!descriptor.isFIFO() || !ownerOnly || (currentUid !== null && descriptor.uid !== currentUid)) {
+    throw new Error(`${action} requires a private owner-only FIFO and refuses sockets or regular files`);
+  }
+}
+
+async function delegate(input: Extract<ClientInput, { action: "delegate" }>): Promise<unknown> {
+  assertPrivateOutputDescriptor(input.outputFd, "delegate");
+  try {
+    const context = workspaceContext(input.workspaceId);
+    agentReference(context);
+    const response = await agentFetch({
+      client: createClient(),
+      context,
+      capability: "skills:read",
+      method: "POST",
+      path: "/tokens",
+      body: JSON.stringify({
+        inherit_agent_grants: true,
+        ...(input.name ? { name: input.name } : {}),
+        ...(input.ttlSeconds !== undefined ? { ttl_seconds: input.ttlSeconds } : {}),
+        ...(input.targetWorkspaceId ? { target_workspace_id: input.targetWorkspaceId } : {}),
+      }),
+      contentType: "application/json",
+      // Delegation can use only an already-active skills:read grant. Never start approval/device flow.
+      allowApproval: false,
+    });
+    if (!response.ok) return responseError(response, true);
+    const issued = (await response.json()) as unknown;
+    if (
+      !isRecord(issued)
+      || typeof issued.token !== "string"
+      || typeof issued.id !== "string"
+      || typeof issued.expires_at !== "string"
+      || !Array.isArray(issued.scopes)
+    ) {
+      throw new Error("Companion returned invalid delegation metadata");
+    }
+    writeFileSync(input.outputFd, issued.token, { encoding: "utf8" });
+    return {
+      id: issued.id,
+      prefix: typeof issued.prefix === "string" ? issued.prefix : null,
+      scopes: issued.scopes,
+      expires_at: issued.expires_at,
+      target_workspace_id: typeof issued.target_workspace_id === "string"
+        ? issued.target_workspace_id
+        : null,
+    };
+  } finally {
+    closeSync(input.outputFd);
+  }
+}
+
 async function secretRedeem(input: Extract<ClientInput, { action: "secret-redeem" }>): Promise<unknown> {
   const context = workspaceContext(input.workspaceId);
-  if (!Number.isSafeInteger(input.outputFd) || input.outputFd < 3) {
-    throw new Error("secret-redeem requires an inherited private pipe descriptor");
-  }
-  const descriptor = fstatSync(input.outputFd);
-  if (!descriptor.isFIFO() && !descriptor.isSocket()) {
-    throw new Error("secret-redeem refuses stdout, stderr, and regular-file output");
-  }
+  assertPrivateOutputDescriptor(input.outputFd, "secret-redeem");
   const planId = input.planId.trim();
   if (!planId || planId.includes("/") || planId.includes("\\")) throw new Error("invalid secret retrieval plan id");
-  const client = createClient();
   const grantResponse = await authenticatedRestFetch({
-    client,
     context,
     capability: "secrets:read",
     method: "POST",
@@ -586,7 +707,6 @@ async function secretRedeem(input: Extract<ClientInput, { action: "secret-redeem
     throw new Error("Companion did not return a secret retrieval grant");
   }
   const redeemResponse = await authenticatedRestFetch({
-    client,
     context,
     capability: "secrets:read",
     method: "POST",
@@ -611,16 +731,15 @@ async function secretRedeem(input: Extract<ClientInput, { action: "secret-redeem
 
 async function status(input: Extract<ClientInput, { action: "status" }>): Promise<unknown> {
   const context = workspaceContext(input.workspaceId);
-  if (context.authentication.kind === "legacy-pat") {
+  if (context.authentication.kind !== "agent") {
     const response = await authenticatedRestFetch({
-      client: createClient(),
       context,
       capability: "skills:read",
       method: "GET",
       path: "/skills?limit=1",
     });
     if (!response.ok) return responseError(response, false);
-    return { mode: "legacy-pat", status: "active", workspaceId: context.workspaceId };
+    return { mode: context.authentication.kind, status: "active", workspaceId: context.workspaceId };
   }
   const result = await createClient().agentStatus(context.authentication.reference.agentId);
   return {
@@ -639,6 +758,8 @@ async function main(): Promise<void> {
   const result =
     input.action === "connect"
       ? await connect(input)
+      : input.action === "delegate"
+        ? await delegate(input)
       : input.action === "api"
         ? await apiRequest(input)
         : input.action === "upload"

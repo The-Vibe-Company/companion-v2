@@ -17,7 +17,13 @@ import { createHash } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { schema } from "@companion/db";
-import { ApiTokenRefreshError, refreshApiToken, resolveApiToken } from "@companion/core/services";
+import {
+  ApiTokenRefreshError,
+  issueApiToken,
+  refreshApiToken,
+  resolveApiToken,
+  revokeApiToken,
+} from "@companion/core/services";
 import { createIntegrationFixture, integrationDb, integrationSql, type IntegrationFixture } from "./testDatabase";
 
 describe("expired API token refresh", () => {
@@ -87,5 +93,69 @@ describe("expired API token refresh", () => {
     });
     expect(audit?.metadata).toEqual({ replacementTokenId: result.id });
     expect(JSON.stringify(audit)).not.toContain(result.token);
+  });
+
+  it("enforces delegated target binding, expiry, revocation, and no PAT refresh successor", async () => {
+    const issued = await issueApiToken({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      scopes: ["skills:read", "database:write", "public-skills:install"],
+      ttlMs: 5 * 60_000,
+      source: {
+        type: "agent_auth",
+        agentId: "agent-delegation-integration",
+        targetWorkspaceId: "conductor-workspace-1",
+      },
+      database: integrationDb,
+    });
+
+    await expect(resolveApiToken(issued.token, integrationDb)).resolves.toBeNull();
+    await expect(resolveApiToken(issued.token, integrationDb, "conductor-workspace-2")).resolves.toBeNull();
+    await expect(resolveApiToken(issued.token, integrationDb, "conductor-workspace-1")).resolves.toMatchObject({
+      orgId: fixture.orgA,
+      scopes: ["skills:read", "database:read", "database:write", "public-skills:install"],
+    });
+
+    const issuedHash = createHash("sha256").update(issued.token).digest("hex");
+    const legacyResolution = await integrationSql`
+      SELECT * FROM companion_resolve_api_token(${issuedHash})
+    `;
+    expect(legacyResolution).toHaveLength(0);
+
+    await revokeApiToken({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      tokenId: issued.id,
+      database: integrationDb,
+    });
+    await expect(resolveApiToken(issued.token, integrationDb, "conductor-workspace-1")).resolves.toBeNull();
+
+    const expiredRaw = `cmp_pat_${"d".repeat(48)}`;
+    await integrationDb.insert(schema.apiTokens).values({
+      orgId: fixture.orgA,
+      userId: fixture.developer.id,
+      name: "Expired delegated token",
+      tokenPrefix: expiredRaw.slice(0, 14),
+      tokenHash: createHash("sha256").update(expiredRaw).digest("hex"),
+      scopes: ["skills:read"],
+      sourceType: "agent_auth",
+      sourceAgentId: "agent-delegation-integration",
+      expiresAt: new Date(Date.now() - 60_000),
+    });
+    await expect(resolveApiToken(expiredRaw, integrationDb)).resolves.toBeNull();
+    await expect(refreshApiToken(expiredRaw, integrationDb)).rejects.toBeInstanceOf(ApiTokenRefreshError);
+
+    const audit = await integrationDb.query.auditLog.findFirst({
+      where: and(
+        eq(schema.auditLog.orgId, fixture.orgA),
+        eq(schema.auditLog.action, "api_token.issue_agent_delegation"),
+        eq(schema.auditLog.targetId, issued.id),
+      ),
+    });
+    expect(audit?.metadata).toMatchObject({
+      sourceAgentId: "agent-delegation-integration",
+      targetWorkspaceId: "conductor-workspace-1",
+    });
+    expect(JSON.stringify(audit)).not.toContain(issued.token);
   });
 });

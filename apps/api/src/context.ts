@@ -20,6 +20,9 @@ export interface ApiVariables {
   programmaticAuthKind: "pat" | "agent" | null;
   agentId: string | null;
   agentCapability: AgentCapabilityName | null;
+  agentSession: Awaited<ReturnType<typeof authenticateAgentRequest>> extends infer Result
+    ? NonNullable<Result> extends { session: infer Session } ? Session | null : null
+    : null;
 }
 
 function responseSetCookies(headers: Headers | undefined): string[] {
@@ -66,6 +69,7 @@ export async function attachSession(c: Context<{ Variables: ApiVariables }>, nex
   c.set("programmaticAuthKind", null);
   c.set("agentId", null);
   c.set("agentCapability", null);
+  c.set("agentSession", null);
   if (session?.user) {
     await ensureUserBootstrap({
       id: session.user.id,
@@ -76,7 +80,11 @@ export async function attachSession(c: Context<{ Variables: ApiVariables }>, nex
     // No cookie session — try a personal access token (programmatic publish/install).
     const bearer = bearerFromHeader(c.req.header("authorization"));
     if (bearer) {
-      const resolved = await resolveApiToken(bearer);
+      const resolved = await resolveApiToken(
+        bearer,
+        undefined,
+        c.req.header("x-companion-delegation-target")?.trim() || null,
+      );
       if (resolved) {
         c.set("tokenActor", resolved.actor);
         c.set("tokenOrgId", resolved.orgId);
@@ -98,6 +106,7 @@ export async function attachSession(c: Context<{ Variables: ApiVariables }>, nex
           c.set("programmaticAuthKind", "agent");
           c.set("agentId", agent.session.agentId);
           c.set("agentCapability", agent.capability);
+          c.set("agentSession", agent.session);
         }
       }
     }
@@ -160,7 +169,14 @@ export function isAgentRequest(c: Context<{ Variables: ApiVariables }>): boolean
 export function requireScope(c: Context<{ Variables: ApiVariables }>, scope: TokenScope): void {
   const scopes = c.get("tokenScopes");
   if (scopes === null) return; // cookie session → full access
-  if (!scopes.some((granted) => companionCapabilityAllows(granted, scope))) {
+  if (!scopes.some((granted) =>
+    granted === scope
+    || (
+      granted !== "public-skills:install"
+      && scope !== "public-skills:install"
+      && companionCapabilityAllows(granted, scope)
+    )
+  )) {
     throw new Error(`token is missing the ${scope} scope`);
   }
 }

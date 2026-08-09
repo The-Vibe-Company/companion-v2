@@ -43,6 +43,7 @@ import {
   skillFilterPreferencesInputSchema,
   skillFilterPreferencesSchema,
   tokenScopesSchema,
+  tokenScopeSchema,
   userAvatarPublicPath,
   type CompanionManifest,
   type PublishSkillInput,
@@ -1545,6 +1546,33 @@ export async function authorizePublicSkillPackageForSession(input: {
   const version = input.version.trim();
   if (!token || !version || !input.userId) return null;
   const row = await authorizePreTenantPublicSkillPackage(input.database ?? db, { token, version, userId: input.userId });
+  return row
+    ? {
+        orgId: row.org_id,
+        slug: row.slug,
+        version: row.version,
+        checksum: row.checksum,
+        sizeBytes: Number(row.size_bytes),
+      }
+    : null;
+}
+
+/** Authorize an exact public package for a scoped PAT with truthful audit provenance. */
+export async function authorizePublicSkillPackageForApiToken(input: {
+  token: string;
+  version: string;
+  userId: string;
+  database?: Db;
+}): Promise<PublicSkillPackageDescriptor | null> {
+  const token = input.token.trim();
+  const version = input.version.trim();
+  if (!token || !version || !input.userId) return null;
+  const row = await authorizePreTenantPublicSkillPackage(input.database ?? db, {
+    token,
+    version,
+    userId: input.userId,
+    authKind: "api_token",
+  });
   return row
     ? {
         orgId: row.org_id,
@@ -4102,6 +4130,9 @@ async function assertCanModifySkillRow(input: {
 
 /** Default lifetime of an issued token (90 days), unless overridden by the caller. */
 export const API_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 90;
+/** Short-lived default and hard ceiling for an Agent Auth-derived child PAT. */
+export const AGENT_DELEGATION_TOKEN_TTL_MS = 1000 * 60 * 60 * 24;
+export const AGENT_DELEGATION_TOKEN_MAX_TTL_MS = 1000 * 60 * 60 * 24 * 7;
 
 /** Generic public failure for refresh-ineligible credentials; callers must not reveal which rule failed. */
 export class ApiTokenRefreshError extends Error {
@@ -4118,7 +4149,112 @@ function hashApiToken(raw: string): string {
 function defaultTokenName(scopes: TokenScope[]): string {
   if (scopes.includes("skills:write")) return "skill publish token";
   if (scopes.includes("skills:read")) return "skill install token";
+  if (scopes.includes("public-skills:install")) return "public skill install token";
   return "api token";
+}
+
+export interface AgentGrantTokenSnapshot {
+  scopes: TokenScope[];
+  /** Earliest finite expiry across the source agent and every inherited grant. */
+  expiresAt: Date | null;
+}
+
+export interface AgentGrantTokenSnapshotRow {
+  capability: string;
+  constraints: unknown;
+  grantExpiresAt: Date | null;
+  agentExpiresAt: Date | null;
+}
+
+function storedAgentConstraints(value: unknown): Record<string, unknown> | null {
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function grantHasExactWorkspace(value: unknown, orgId: string): boolean {
+  const constraints = storedAgentConstraints(value);
+  const workspace = constraints?.workspaceId;
+  if (workspace === orgId) return true;
+  return Boolean(
+    workspace
+    && typeof workspace === "object"
+    && !Array.isArray(workspace)
+    && Object.keys(workspace).length === 1
+    && (workspace as { eq?: unknown }).eq === orgId,
+  );
+}
+
+/**
+ * Snapshot every live grant belonging to one authenticated Agent Auth identity. Tenant grants must
+ * carry the exact Companion workspace constraint; the instance-wide public install grant is the
+ * only exception. No caller-provided scope participates in this conversion.
+ */
+export async function snapshotAgentApiTokenGrants(input: {
+  actor: ActorContext;
+  orgId: string;
+  agentId: string;
+  now?: Date;
+  database?: Db;
+}): Promise<AgentGrantTokenSnapshot> {
+  const database = input.database ?? db;
+  const now = input.now ?? new Date();
+  const rows = await database
+    .select({
+      capability: schema.agentCapabilityGrant.capability,
+      constraints: schema.agentCapabilityGrant.constraints,
+      grantExpiresAt: schema.agentCapabilityGrant.expiresAt,
+      agentExpiresAt: schema.agent.expiresAt,
+    })
+    .from(schema.agentCapabilityGrant)
+    .innerJoin(schema.agent, eq(schema.agentCapabilityGrant.agentId, schema.agent.id))
+    .leftJoin(schema.agentHost, eq(schema.agent.hostId, schema.agentHost.id))
+    .where(and(
+      eq(schema.agent.id, input.agentId),
+      eq(schema.agent.status, "active"),
+      eq(schema.agentCapabilityGrant.status, "active"),
+      or(
+        eq(schema.agent.userId, input.actor.id),
+        and(isNull(schema.agent.userId), eq(schema.agentHost.userId, input.actor.id)),
+      ),
+    ));
+
+  return deriveAgentApiTokenGrantSnapshot(rows, input.orgId, now);
+}
+
+/** Pure grant-to-scope projection used by the DB-backed snapshot and its exhaustive security tests. */
+export function deriveAgentApiTokenGrantSnapshot(
+  rows: readonly AgentGrantTokenSnapshotRow[],
+  orgId: string,
+  now = new Date(),
+): AgentGrantTokenSnapshot {
+  const scopes: TokenScope[] = [];
+  const expiries: Date[] = [];
+  for (const row of rows) {
+    if (row.agentExpiresAt && row.agentExpiresAt.getTime() <= now.getTime()) continue;
+    if (row.grantExpiresAt && row.grantExpiresAt.getTime() <= now.getTime()) continue;
+    const parsed = tokenScopeSchema.safeParse(row.capability);
+    if (!parsed.success) continue;
+    if (parsed.data !== "public-skills:install" && !grantHasExactWorkspace(row.constraints, orgId)) {
+      continue;
+    }
+    scopes.push(parsed.data);
+    if (row.grantExpiresAt) expiries.push(row.grantExpiresAt);
+    if (row.agentExpiresAt) expiries.push(row.agentExpiresAt);
+  }
+  return {
+    scopes: expandTokenScopes(scopes),
+    expiresAt: expiries.length
+      ? new Date(Math.min(...expiries.map((value) => value.getTime())))
+      : null,
+  };
 }
 
 /**
@@ -4131,17 +4267,44 @@ export async function issueApiToken(input: {
   scopes: TokenScope[];
   name?: string;
   ttlMs?: number;
+  expiresAt?: Date;
+  source?: {
+    type: "agent_auth";
+    agentId: string;
+    targetWorkspaceId?: string;
+  };
   database?: Db;
-}): Promise<{ id: string; token: string; prefix: string; scopes: TokenScope[]; expiresAt: Date }> {
+}): Promise<{
+  id: string;
+  token: string;
+  prefix: string;
+  scopes: TokenScope[];
+  expiresAt: Date;
+  targetWorkspaceId: string | null;
+}> {
   const database = input.database ?? db;
   if (!input.scopes.length) throw new Error("at least one scope is required");
+  if (input.ttlMs !== undefined && input.expiresAt) {
+    throw new Error("token lifetime must use either ttlMs or expiresAt");
+  }
+  if (input.ttlMs !== undefined && (!Number.isFinite(input.ttlMs) || input.ttlMs <= 0 || input.ttlMs > API_TOKEN_TTL_MS)) {
+    throw new Error("token lifetime is outside the allowed range");
+  }
   const scopes = expandTokenScopes(input.scopes);
   const role = await getOrgRole(input.orgId, input.actor.id, database);
   if (!role) throw new Error("not a member of this organization");
   const secret = randomBytes(24).toString("hex");
   const token = `${API_TOKEN_PREFIX}${secret}`;
   const prefix = token.slice(0, API_TOKEN_PREFIX.length + 6);
-  const expiresAt = new Date(Date.now() + (input.ttlMs ?? API_TOKEN_TTL_MS));
+  const now = Date.now();
+  const expiresAt = input.expiresAt ?? new Date(now + (input.ttlMs ?? API_TOKEN_TTL_MS));
+  if (
+    !Number.isFinite(expiresAt.getTime())
+    || expiresAt.getTime() <= now
+    || expiresAt.getTime() > now + API_TOKEN_TTL_MS
+  ) {
+    throw new Error("token expiration is outside the allowed range");
+  }
   const [row] = await database
     .insert(schema.apiTokens)
     .values({
@@ -4151,11 +4314,39 @@ export async function issueApiToken(input: {
       tokenPrefix: prefix,
       tokenHash: hashApiToken(token),
       scopes,
+      ...(input.source ? {
+        sourceType: input.source.type,
+        sourceAgentId: input.source.agentId,
+        targetWorkspaceId: input.source.targetWorkspaceId ?? null,
+      } : {}),
       expiresAt,
     })
     .returning({ id: schema.apiTokens.id });
   if (!row) throw new Error("could not issue token");
-  return { id: row.id, token, prefix, scopes, expiresAt };
+  if (input.source) {
+    await database.insert(schema.auditLog).values({
+      orgId: input.orgId,
+      actorId: input.actor.id,
+      action: "api_token.issue_agent_delegation",
+      targetType: "api_token",
+      targetId: row.id,
+      metadata: {
+        sourceType: input.source.type,
+        sourceAgentId: input.source.agentId,
+        scopes,
+        expiresAt: expiresAt.toISOString(),
+        targetWorkspaceId: input.source.targetWorkspaceId ?? null,
+      },
+    });
+  }
+  return {
+    id: row.id,
+    token,
+    prefix,
+    scopes,
+    expiresAt,
+    targetWorkspaceId: input.source?.targetWorkspaceId ?? null,
+  };
 }
 
 /**
@@ -4292,9 +4483,10 @@ export async function listApiTokens(input: {
 export async function resolveApiToken(
   rawToken: string,
   database: Db = db,
+  targetWorkspaceId: string | null = null,
 ): Promise<{ actor: ActorContext; orgId: string; scopes: TokenScope[] } | null> {
   if (!rawToken.startsWith(API_TOKEN_PREFIX)) return null;
-  const row = await resolvePreTenantApiToken(database, hashApiToken(rawToken));
+  const row = await resolvePreTenantApiToken(database, hashApiToken(rawToken), targetWorkspaceId);
   if (!row) return null;
   return {
     actor: {

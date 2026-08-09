@@ -84,7 +84,7 @@ select
   (select count(*) from sandbox_usage_sessions where ended_at is null) as active_usage;
 ```
 
-Migration `0062_skills_hub_only.sql` intentionally deletes historical runtime data. Its first
+Migration `0063_skills_hub_only.sql` intentionally deletes historical runtime data. Its first
 statement repeats the preflight and aborts before any `DROP` when an external cleanup obligation
 remains. It must finish before starting the new API/worker version. Historical migrations are not
 rewritten.

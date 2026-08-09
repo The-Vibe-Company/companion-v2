@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.34.0");
+    expect(pkg.version).toBe("1.35.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -132,6 +132,13 @@ describe("companion skill package + row", () => {
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
+    const delegationChanges = manifest.metadata?.changelog
+      ?.find((entry) => entry.version === "1.34.0")
+      ?.changes?.join("\n") ?? "";
+    expect(delegationChanges).toContain("short-lived child PAT issuance");
+    expect(delegationChanges).toContain("COMPANION_DELEGATION_TOKEN");
+    expect(delegationChanges).toContain("owner-only FIFO");
+    expect(delegationChanges).not.toContain("FIFO/socket");
     const databaseChanges = manifest.metadata?.changelog
       ?.find((entry) => entry.version === "1.31.0")
       ?.changes?.join("\n") ?? "";
