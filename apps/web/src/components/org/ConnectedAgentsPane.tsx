@@ -104,8 +104,8 @@ export function ConnectedAgentsPane() {
   return (
     <div className="sx-pane connected-agents">
       <PaneHead
-        title="Connected agents"
-        desc="Review delegated capabilities and revoke access without exposing agent credentials."
+        title="External agent access"
+        desc="Review delegated Skills Hub capabilities and revoke access without exposing client credentials."
       />
 
       {error && (
@@ -122,8 +122,8 @@ export function ConnectedAgentsPane() {
         <div className="connected-agents__empty">
           <Icon name="bot" size={18} />
           <div>
-            <strong>No connected agents</strong>
-            <p>An agent appears here after you approve its first capability request.</p>
+            <strong>No external clients</strong>
+            <p>A coding agent appears here after you approve its first Skills Hub capability request.</p>
           </div>
         </div>
       ) : (

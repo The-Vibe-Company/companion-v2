@@ -95,6 +95,8 @@ type DeviceApprovalResolution =
 const TENANT_AGENT_CAPABILITIES = new Set([
   "skills:read",
   "skills:write",
+  "database:read",
+  "database:write",
   "secrets:read",
   "secrets:write",
 ]);
@@ -120,7 +122,7 @@ export function agentAuthTimestamp(value: Date | string): string {
 }
 
 /**
- * Project plugin-owned Agent Auth rows without inventing per-capability activity. The plugin stores
+ * Map plugin-owned Agent Auth rows without inventing per-capability activity. The plugin stores
  * `last_used_at` on the agent and host only; a grant has no canonical last-use field in 0.6.2.
  */
 export function projectConnectedAgents(rows: readonly ConnectedAgentRow[]): ConnectedAgentResponse[] {

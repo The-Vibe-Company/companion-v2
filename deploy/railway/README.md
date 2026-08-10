@@ -1,298 +1,102 @@
 # Railway deployment
 
-Companion runs as three Railway services from this repository plus a Railway Postgres service:
+Companion deploys as three services plus managed dependencies:
 
-- `web`: the only public application service; it proxies `/auth`, `/v1`, and `/trpc` to `api`.
-- `api`: private Hono service. Its pre-deploy command applies Drizzle migrations under an advisory lock.
-- `worker`: private process with independent Stripe reconciliation, durable skill-run, and GitHub-mirror supervisors.
-- `Postgres`: Railway's PostgreSQL template.
+- `web`: Next.js Skills Hub
+- `api`: REST/tRPC, authentication, skills, secrets, Skill Databases, public releases
+- `worker`: GitHub sync, billing reconciliation, Skill Database object cleanup
+- PostgreSQL and S3-compatible object storage; email provider as configured
 
-Keeping application traffic on the web origin avoids cross-origin session cookies. Stripe and CLI clients use the
-same public web domain: the Stripe endpoint is `/v1/billing/webhooks/stripe`, and the CLI API base ends in `/v1`.
+There is no sandbox, Project, run, model-provider, or agent-execution service.
 
-The application services build from the checked-in multi-stage Dockerfiles. Each build prunes the pnpm workspace to
-the selected service before installing dependencies; the API and worker ship only their production bundle and the web
-ships the Next.js standalone server. The service names must remain `api`, `worker`, and `web` because the shared backend
-Dockerfile selects its target from Railway's `RAILWAY_SERVICE_NAME` build variable.
+## Order
 
-## 1. Create the services
+1. Back up PostgreSQL and object storage.
+2. While still on the previous release, stop web/API traffic so no Project, run, upload, artifact,
+   prewarm, or sandbox can be created. Keep the old worker and its S3/Vercel credentials running.
+3. With the migration-owner URL, run the lifecycle-only block below to queue every Project for the
+   old worker. This does not read or grant access to private Project content. Wait for Project rows
+   plus `project_attachment_uploads` to drain. Cancel/expire every run and prewarm, wait for
+   `sandbox_cleaned_at` and usage settlement, then delete every key named by
+   `skill_run_attachments`, `skill_run_attachment_uploads`, and `skill_run_artifacts` with the
+   configured object-storage administration tooling. Delete those legacy metadata rows only after
+   the corresponding external delete succeeds.
+4. Verify the cutover preflight query below returns four zeroes. Also remove any shared golden
+   snapshot or provider resource configured outside PostgreSQL; the database cannot discover it.
+5. Deploy the new API image and run `node dist/migrate.js` with the migration-owner URL.
+6. Deploy worker and web from the same commit.
+7. Run health, Skills browser smoke, and public package checks.
 
-Create `Postgres`, `api`, `worker`, and `web` in one Railway project/environment. Connect all three application
-services to the same GitHub repository and leave their root directory at `/`. Configure each service's Railway
-configuration-file path:
+```sql
+begin;
 
-| Service | Railway config path | Public domain |
-| --- | --- | --- |
-| `api` | `/deploy/railway/api.railway.json` | No |
-| `worker` | `/deploy/railway/worker.railway.json` | No |
-| `web` | `/deploy/railway/web.railway.json` | Yes |
+-- Public traffic is already stopped. Temporarily suspend the creator-only policies solely to mark
+-- lifecycle metadata, including Projects whose creator is no longer an organization member.
+alter table public.projects disable row level security;
+alter table public.project_workspaces disable row level security;
 
-The config-file path is required: Railway does not discover these nested files automatically. Confirm the staged
-service settings show the `DOCKERFILE` builder and the matching `deploy/railway/Dockerfile.*` path before deploying.
-The Dockerfiles declare every build-time variable they consume; secrets remain runtime-only variables and must never
-be added as Docker build arguments.
+update public.projects
+set delete_requested_at = clock_timestamp(),
+    revision = revision + 1,
+    updated_at = clock_timestamp()
+where delete_requested_at is null;
 
-Generate the `web` Railway domain before adding variables that reference `web.RAILWAY_PUBLIC_DOMAIN`. The API and
-worker communicate through Postgres and external providers. Deploy `api` once before enabling either worker
-supervisor so
-the first database migration has completed; later API deploys run migrations before replacing the live process.
+update public.project_workspaces workspace
+set status = case
+      when workspace.status = 'deleted' then workspace.status
+      else 'deleting'::public.project_workspace_status
+    end,
+    available_at = clock_timestamp(),
+    idle_deadline_at = null,
+    updated_at = clock_timestamp()
+where exists (
+  select 1
+  from public.projects project
+  where project.org_id = workspace.org_id
+    and project.id = workspace.project_id
+    and project.creator_id = workspace.creator_id
+    and project.delete_requested_at is not null
+);
 
-**Deploy `api` before `worker` on every release, not only the first.** Only the API carries a
-pre-deploy migration hook (`api.railway.json`), so a worker started ahead of it runs new code against
-the old schema. A worker released before migration `0058`, for example, selects `attempt` from
-`companion_claim_project_workspaces` and every claim fails with `42703`; the supervisor logs
-`project workspace claim will retry (...)` once per claim interval and processes no Project until the
-migration lands, then recovers on its own. Nothing is lost, but Projects stall for the window.
-
-Run the API and worker with two distinct `LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT` roles that neither
-own database objects nor belong to the migration-owner role. Keep the Railway Postgres owner URL only
-in `DATABASE_MIGRATION_URL` on the API (for its pre-deploy migration). Create both logins from the
-owner connection and store their generated passwords as separate Railway secrets:
-
-```bash
-psql "$DATABASE_MIGRATION_URL" <<'SQL'
-CREATE ROLE companion_api LOGIN PASSWORD '<generated-api-password>'
-  NOSUPERUSER NOBYPASSRLS NOINHERIT;
-CREATE ROLE companion_worker LOGIN PASSWORD '<generated-worker-password>'
-  NOSUPERUSER NOBYPASSRLS NOINHERIT;
-SQL
+alter table public.projects enable row level security;
+alter table public.projects force row level security;
+alter table public.project_workspaces enable row level security;
+alter table public.project_workspaces force row level security;
+commit;
 ```
 
-Set `DATABASE_API_ROLE` and `DATABASE_WORKER_ROLE` on the API migration service. The migration hook
-then applies common RLS table access plus separate function capabilities while it still holds the
-advisory lock. The checked-in script remains a manual recovery/fallback path:
-
-```bash
-psql "$DATABASE_MIGRATION_URL" \
-  -v api_role=companion_api \
-  -v worker_role=companion_worker \
-  -f packages/db/runtime-role-grants.sql
+```sql
+select
+  (select count(*) from project_attachment_uploads)
+    + (select count(*) from project_attachments)
+    + (select count(*) from project_files)
+    + (select count(*) from project_file_versions)
+    + (select count(*) from skill_run_attachment_uploads)
+    + (select count(*) from skill_run_attachments)
+    + (select count(*) from skill_run_artifacts) as pending_storage,
+  (select count(*) from projects) as pending_projects,
+  (select count(*) from skill_runs
+    where sandbox_cleaned_at is null
+      and (sandbox_name is not null or sandbox_id is not null))
+    + (select count(*) from skill_run_prewarms
+      where sandbox_cleaned_at is null
+        and (sandbox_name is not null or sandbox_id is not null)) as pending_sandboxes,
+  (select count(*) from sandbox_usage_sessions where ended_at is null) as active_usage;
 ```
 
-Set the API's `DATABASE_URL` to the `companion_api` login URL and the worker's `DATABASE_URL` to the
-`companion_worker` login URL. This separation prevents an API compromise from claiming or forging a
-Project worker lease. Using the table owner, a superuser, a `BYPASSRLS` role, or one shared production
-role disables part of that security boundary. `DATABASE_RUNTIME_ROLE` remains a local/simple-install
-compatibility option only and grants the union of both capability sets.
+Migration `0063_skills_hub_only.sql` intentionally deletes historical runtime data. Its first
+statement repeats the preflight and aborts before any `DROP` when an external cleanup obligation
+remains. It must finish before starting the new API/worker version. Historical migrations are not
+rewritten.
 
-For an existing installation that used `companion_runtime`, cut over in two phases:
+## Shared configuration
 
-1. Create the two roles above. Remove `DATABASE_RUNTIME_ROLE`, set `DATABASE_API_ROLE` and
-   `DATABASE_WORKER_ROLE`, update each service's `DATABASE_URL`, and deploy both services.
-2. Once the new worker heartbeat and API health check are green, run the migration hook once with
-   `DATABASE_RETIRED_RUNTIME_ROLE=companion_runtime` (or pass
-   `-v retired_runtime_role=companion_runtime` to the manual command). This revokes the old union
-   role's current table/function grants and its table/sequence default privileges. Then run
-   `ALTER ROLE companion_runtime NOLOGIN`; remove `DATABASE_RETIRED_RUNTIME_ROLE`, and drop the role
-   after confirming no old service still uses it.
+Configure public API/web origins, Better Auth secret/cookie prefix, PostgreSQL role URLs, S3 credentials, and email. Configure `COMPANION_SECRETS_MASTER_KEY` for skill secrets. Optional integrations use GitHub App, Stripe, and PostHog variables documented in `.env.example`.
 
-If an active API or worker deliberately reuses the former role name, the hook only removes the
-opposite process's function capabilities and preserves the active role's common/default grants. The
-hook also rejects API↔worker role membership because `NOINHERIT` alone does not prevent `SET ROLE`.
+API and worker should use distinct `LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT` PostgreSQL roles. Apply `packages/db/runtime-role-grants.sql` after migrations. The API owns request paths; the worker receives only billing, GitHub, and Skill Database cleanup grants.
 
-## 2. Configure variables
+The worker needs no Vercel, OpenCode, model-provider, golden snapshot, or runtime lifecycle variables.
 
-Use Railway reference variables instead of copying generated hostnames or database credentials. The service names
-below assume the services are named exactly `web`, `api`, and `Postgres`.
+## Health and rollback
 
-### `api`
-
-```dotenv
-NODE_ENV=production
-PORT=3001
-COMPANION_API_HOST=0.0.0.0
-DATABASE_URL=<companion_api LOGIN/NOSUPERUSER/NOBYPASSRLS/NOINHERIT URL>
-DATABASE_MIGRATION_URL=${{Postgres.DATABASE_URL}}
-DATABASE_API_ROLE=companion_api
-DATABASE_WORKER_ROLE=companion_worker
-COMPANION_WEB_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
-COMPANION_API_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
-BETTER_AUTH_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
-BETTER_AUTH_COOKIE_PREFIX=companion-production
-BETTER_AUTH_SECRET=<random secret of at least 32 bytes>
-COMPANION_SECRETS_MASTER_KEY=<shared base64 32-byte key; never rotate without a migration>
-GITHUB_APP_SLUG=<GitHub App slug>
-GITHUB_APP_CLIENT_ID=<GitHub App client id>
-GITHUB_APP_CLIENT_SECRET=<secret>
-GITHUB_APP_NAME=<user-facing App name>
-COMPANION_GITHUB_SYNC_ENABLED=true
-COMPANION_GITHUB_APP_MANAGED=false
-# Keep false until this flag-aware API and the matching worker are live on every replica.
-COMPANION_SKILL_DATABASES_ENABLED=false
-
-EMAIL_PROVIDER=resend
-EMAIL_FROM=Companion <noreply@your-domain.example>
-RESEND_API_KEY=<secret>
-
-S3_ENDPOINT=<S3-compatible HTTPS endpoint>
-S3_REGION=<region>
-S3_ACCESS_KEY_ID=<secret>
-S3_SECRET_ACCESS_KEY=<secret>
-S3_BUCKET_SKILL_ARCHIVES=<bucket>
-S3_FORCE_PATH_STYLE=false
-
-COMPANION_BILLING_MODE=stripe
-COMPANION_ENTITLEMENTS_MODE=observe
-COMPANION_ENTITLEMENT_PILOT_ORGS=
-COMPANION_PRO_ORG_ALLOWLIST=
-COMPANION_CHECKOUT_ENABLED=false
-COMPANION_STRIPE_WEBHOOKS_ENABLED=false
-STRIPE_SECRET_KEY=<Stripe live secret key>
-STRIPE_WEBHOOK_SECRET=<endpoint signing secret>
-STRIPE_PRO_PRICE_ID=<live price id>
-STRIPE_PORTAL_CONFIGURATION_ID=<live portal configuration id>
-
-# The API exposes run readiness/options but never receives Vercel credentials.
-COMPANION_RUNS_ENABLED=true
-COMPANION_RUN_PREWARM_ENABLED=true
-# Projects stays off until the matching web, API, migration, and worker release is live.
-COMPANION_PROJECTS_ENABLED=false
-COMPANION_GOLDEN_SNAPSHOT_ID=<same pinned OpenCode snapshot as worker>
-OPENCODE_VERSION=1.17.13
-COMPANION_SANDBOX_REGION=iad1
-COMPANION_SANDBOX_TIMEOUT_MS=300000
-```
-
-`BETTER_AUTH_SECRET` and `BETTER_AUTH_COOKIE_PREFIX` are durable identity settings, not per-deploy
-values. Generate the secret once, store both as fixed Railway variables, and keep them identical across
-all API replicas and replacements. Regenerating the secret or renaming the prefix invalidates every
-existing browser session. Keep `COMPANION_WEB_URL`, `COMPANION_API_URL`, and `BETTER_AUTH_URL` on the
-same canonical public origin; Companion redirects its matching `www`/apex alias before auth begins.
-
-`COMPANION_ENTITLEMENTS_MODE=observe` is the safe first production rollout. Enable webhooks, then Checkout, then use
-`pilot` with explicit organization ids before switching to `enforce` globally.
-
-For sandbox lifecycle v2, start with `COMPANION_SANDBOX_LIFECYCLE_V2=true` and
-`COMPANION_SANDBOX_LIFECYCLE_V2_ORGS=<pilot-org-id>`. Keep the pilot for 24 hours, review usage
-deadlines and the prepared [Railway alerts](./sandbox-lifecycle-alerts.md), then clear the org list
-to enable all organizations. The same document contains the mixed-version rollback transaction.
-
-### `web`
-
-```dotenv
-NODE_ENV=production
-PORT=3000
-COMPANION_API_URL=http://${{api.RAILWAY_PRIVATE_DOMAIN}}:3001
-COMPANION_WEB_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
-NEXT_PUBLIC_COMPANION_API_BASE=https://${{web.RAILWAY_PUBLIC_DOMAIN}}/v1
-COMPANION_RUNS_ENABLED=true
-# Keep this identical on web, API, and worker during the coordinated Projects rollout.
-COMPANION_PROJECTS_ENABLED=false
-NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN=<public project token, optional>
-NEXT_PUBLIC_POSTHOG_HOST=https://us.i.posthog.com
-```
-
-`COMPANION_API_URL` is consumed while Next.js builds its rewrites, so add it before the first web build. Railway's
-private DNS is not reachable from a browser; browser requests intentionally stay on the public web origin. The
-`NEXT_PUBLIC_*` values are public by definition and are baked into the browser bundle.
-`COMPANION_RUNS_ENABLED` and `COMPANION_PROJECTS_ENABLED` are server-only rollout gates and must
-carry the same value on web, API, and worker. Flip Projects to `true` on all three services in one
-coordinated release; a mismatched web value intentionally hides the surface even when the backend is
-ready.
-
-Skill Databases use a two-phase rollout because `companion.json` normalization is a write path.
-First deploy the migration plus flag-aware API and worker with
-`COMPANION_SKILL_DATABASES_ENABLED=false` to every replica. After that deployment is complete, set
-it to `true` on API and worker and redeploy both. Never mix an enabled API with a replica that
-predates the gate, and do not roll back to a pre-gate build while database declarations exist.
-
-### `worker`
-
-```dotenv
-NODE_ENV=production
-DATABASE_URL=<companion_worker LOGIN/NOSUPERUSER/NOBYPASSRLS/NOINHERIT URL>
-COMPANION_WEB_URL=https://${{web.RAILWAY_PUBLIC_DOMAIN}}
-COMPANION_BILLING_MODE=stripe
-COMPANION_ENTITLEMENTS_MODE=observe
-STRIPE_SECRET_KEY=<same live secret key as api>
-STRIPE_WEBHOOK_SECRET=<same endpoint signing secret as api>
-STRIPE_PRO_PRICE_ID=<same live price id as api>
-STRIPE_PORTAL_CONFIGURATION_ID=<same live portal configuration id as api>
-
-COMPANION_SECRETS_MASTER_KEY=<exactly the same key as api>
-COMPANION_SKILL_DATABASES_ENABLED=false
-GITHUB_APP_ID=<GitHub App id>
-GITHUB_APP_PRIVATE_KEY=<base64-encoded PEM; worker only>
-S3_ENDPOINT=<same endpoint as api>
-S3_REGION=<same region as api>
-S3_ACCESS_KEY_ID=<same access key as api>
-S3_SECRET_ACCESS_KEY=<same secret key as api>
-S3_BUCKET_SKILL_ARCHIVES=<same bucket as api>
-S3_FORCE_PATH_STYLE=false
-
-VERCEL_TOKEN=<sandbox token>
-VERCEL_TEAM_ID=<sandbox team id>
-VERCEL_PROJECT_ID=<sandbox project id>
-COMPANION_RUNS_ENABLED=true
-COMPANION_RUN_PREWARM_ENABLED=true
-COMPANION_GOLDEN_SNAPSHOT_ID=<current pinned OpenCode snapshot>
-OPENCODE_VERSION=1.17.13
-COMPANION_SANDBOX_REGION=iad1
-COMPANION_SANDBOX_TIMEOUT_MS=300000
-COMPANION_SANDBOX_LIFECYCLE_V2=false
-COMPANION_SANDBOX_LIFECYCLE_V2_ORGS=
-COMPANION_SANDBOX_MAX_SESSION_MS=3600000
-COMPANION_RUN_CONCURRENCY=2
-COMPANION_RUN_PREWARM_CONCURRENCY=2
-COMPANION_RUN_CLAIM_INTERVAL_MS=1000
-COMPANION_RUN_LEASE_SECONDS=30
-COMPANION_RUN_HEARTBEAT_MS=10000
-COMPANION_RUN_INACTIVITY_MS=120000
-COMPANION_RUN_RECORDER_UNAVAILABLE_MS=300000
-COMPANION_RUN_RECORDER_RECONNECT_MIN_MS=250
-COMPANION_RUN_RECORDER_RECONNECT_MAX_MS=5000
-COMPANION_RUN_EVENT_RETENTION_INTERVAL_MS=900000
-COMPANION_RUN_SWEEP_INTERVAL_MS=60000
-
-# Enable only in the coordinated release that also enables it on the API/web service.
-COMPANION_PROJECTS_ENABLED=false
-COMPANION_PROJECT_WORKER_CONCURRENCY=2
-COMPANION_PROJECT_CLAIM_INTERVAL_MS=1000
-COMPANION_PROJECT_LEASE_SECONDS=30
-COMPANION_PROJECT_HEARTBEAT_MS=10000
-COMPANION_PROJECT_IDLE_MS=600000
-COMPANION_PROJECT_SANDBOX_TIMEOUT_MS=3600000
-COMPANION_PROJECT_MAX_ACTIVATION_MS=86400000
-```
-
-Billing, Skill Runs, and Cowork Projects are independent supervisors: disabling one must not stop the
-others. Missing Vercel configuration disables only the sandbox-backed surfaces. The worker needs all
-four Stripe variables when Stripe billing is enabled, plus the vault, S3, Vercel, and OpenCode settings
-for runs and Projects. It does not need a domain or `PORT`.
-
-## 3. Configure Stripe
-
-Production must use live-mode Stripe resources. Test-mode product, Price, Portal configuration, API keys, and webhook
-secrets cannot be reused in live mode.
-
-1. Create an active recurring Price with `licensed` usage, monthly interval, USD currency, and a unit amount of
-   exactly 1000 cents.
-2. Configure the Customer Portal to allow payment-method changes, invoice history, and cancellation at period end.
-   Disable plan changes, quantity changes, and promotion codes.
-3. Create a webhook endpoint at
-   `https://${{web.RAILWAY_PUBLIC_DOMAIN}}/v1/billing/webhooks/stripe` and subscribe to:
-   `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`,
-   `customer.subscription.deleted`, `invoice.paid`, and `invoice.payment_failed`.
-4. Store that endpoint's `whsec_...` value as `STRIPE_WEBHOOK_SECRET` on both `api` and `worker`.
-5. Enable Stripe Tax registrations appropriate to the business before accepting live payments.
-
-## 4. Validate the deployment
-
-After the first API deploy, confirm its `/health` check is green and that its pre-deploy logs contain
-`Drizzle migrations applied`. Then verify:
-
-1. The public web `/login` page loads and authentication sets cookies on the web domain.
-2. Workspace → Billing loads for a signed-in member.
-3. With Checkout still disabled, the page reports the rollout state without offering a live purchase.
-4. Enable webhooks and send a Stripe test event; the endpoint must return a 2xx response.
-5. Enable Checkout for a pilot org, complete a low-risk live verification, and confirm the worker changes the Stripe
-   subscription quantity after adding or removing an active membership.
-
-For build-performance validation, record the build duration and pushed image size from `railway logs --build`. Run a
-second build from the same source snapshot and confirm the dependency-install layers are cached. The expected outcome
-is a combined image payload at least 50% below the former Railpack baseline (1,089 MB across the three services) and a
-warm web build below 120 seconds.
-
-Rollback is non-destructive: set `COMPANION_CHECKOUT_ENABLED=false`,
-`COMPANION_STRIPE_WEBHOOKS_ENABLED=false`, and `COMPANION_ENTITLEMENTS_MODE=off`. Do not delete Stripe identifiers or
-cancel subscriptions as part of an application rollback.
+Use `/health` for API availability and the Railway process status for worker/web. A rollback across migration 0062 restores code but not intentionally dropped runtime data; restore the pre-deploy database backup only if the product decision itself is rolled back. Skills, organizations, users, auth, Agent Auth, secrets, Skill Databases, GitHub, billing, and public-release data are preserved by the migration.

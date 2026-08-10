@@ -815,7 +815,7 @@ function DonePanel({
         <Icon name="check" size={26} />
       </span>
       <h3 className="up-done__title">{update ? "Update published" : "Skill published"}</h3>
-      <p className="up-done__sub">{result.via}. Run plan &amp; apply to deploy it to your agents.</p>
+      <p className="up-done__sub">{result.via}. It is ready to install from the Skills Hub.</p>
       {result.archiveWarning && (
         <div className="up-errblock" role="alert" style={{ margin: "0 0 14px" }}>
           <Icon name="alert-triangle" size={13} /> {result.archiveWarning}

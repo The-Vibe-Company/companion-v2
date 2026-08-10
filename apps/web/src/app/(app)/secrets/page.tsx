@@ -7,7 +7,6 @@ import { SecretsApp } from "@/components/secrets/SecretsApp";
 import { mapSkill, type MeVM } from "@/lib/types";
 import { deriveTreeRows } from "@/components/skills/sidebarTree";
 import { loadServerAuth } from "@/lib/serverAuth";
-import { projectsFeatureEnabled } from "@/lib/projectsFeature";
 
 export const dynamic = "force-dynamic";
 
@@ -76,7 +75,6 @@ export default async function SecretsPage({ searchParams }: { searchParams: Prom
         localUpdateCount: localSkills.filter((skill) => skill.status === "update").length,
         archivedCount: new Set([...archivedMine, ...archivedOrg].map((skill) => skill.id)).size,
       }}
-      projectsEnabled={projectsFeatureEnabled(whoami.email)}
     />
   );
 }

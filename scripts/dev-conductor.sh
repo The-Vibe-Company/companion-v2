@@ -30,7 +30,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Load the repo-root .env (if present) so secrets like VERCEL_TOKEN / model provider keys reach the
+# Load the repo-root .env (if present) so GitHub, storage, email and skill-secret settings reach the
 # API and worker without depending on the launcher's environment. dotenv semantics: never overrides variables
 # already in the environment, and skips empty assignments (a copied .env.example full of empty
 # values must not nuke exported shell vars).

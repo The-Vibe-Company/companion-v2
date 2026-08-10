@@ -49,17 +49,7 @@ DECLARE
   ];
   protected_function regprocedure;
   shared_functions regprocedure[] := ARRAY[
-    'public.companion_secret_usage_count(uuid,uuid)'::regprocedure,
-    'public.companion_skill_run_worker_ready()'::regprocedure,
-    'public.companion_skill_run_attachment_worker_ready()'::regprocedure,
-    'public.companion_skill_run_attachment_worker_ready(uuid,uuid,text)'::regprocedure,
-    'public.companion_skill_run_turn_stop_worker_ready()'::regprocedure,
-    'public.companion_skill_run_turn_stop_worker_ready(uuid,uuid,text)'::regprocedure,
-    'public.companion_project_policy_definer()'::regprocedure,
-    'public.companion_project_exact_lease_visible(uuid,uuid,text)'::regprocedure,
-    'public.companion_project_row_visible(uuid,uuid,text)'::regprocedure,
-    'public.companion_project_worker_ready()'::regprocedure,
-    'public.companion_sandbox_usage_totals(uuid,timestamp with time zone,timestamp with time zone,timestamp with time zone)'::regprocedure
+    'public.companion_secret_usage_count(uuid,uuid)'::regprocedure
   ];
   api_functions regprocedure[] := ARRAY[
     'public.companion_list_user_orgs(text)'::regprocedure,
@@ -80,53 +70,14 @@ DECLARE
     'public.companion_revoke_agent_transfer_tickets(text,text,text)'::regprocedure,
     'public.companion_skill_share_target(text,text)'::regprocedure,
     'public.companion_billing_org_for_stripe_event(text,text)'::regprocedure,
-    'public.companion_request_member_project_deletion(uuid,text)'::regprocedure,
-    'public.companion_revoke_inactive_skill_database_realm_shares(uuid,uuid)'::regprocedure,
-    'public.companion_project_skill_refresh_targets(uuid,uuid)'::regprocedure,
-    'public.companion_signal_project_secret_change(uuid,uuid,text,text,text,public.secret_audience,text[])'::regprocedure,
-    'public.companion_signal_project_provider_change(uuid,text,uuid,public.model_provider_connection_scope,text,text)'::regprocedure
+    'public.companion_revoke_inactive_skill_database_realm_shares(uuid,uuid)'::regprocedure
   ];
   worker_functions regprocedure[] := ARRAY[
     'public.companion_claim_skill_database_object_deletions(integer,integer)'::regprocedure,
     'public.companion_complete_skill_database_object_deletion(text,uuid)'::regprocedure,
     'public.companion_defer_skill_database_object_deletion(text,uuid)'::regprocedure,
-    'public.companion_heartbeat_skill_run_worker(text,integer)'::regprocedure,
-    'public.companion_heartbeat_skill_run_worker(text,integer,integer)'::regprocedure,
-    'public.companion_heartbeat_skill_run_worker(text,integer,integer,integer)'::regprocedure,
-    'public.companion_remove_skill_run_worker(text)'::regprocedure,
-    'public.companion_lock_skill_run_attachment_orphan(text,timestamp with time zone)'::regprocedure,
-    'public.companion_complete_skill_run_attachment_orphan(text)'::regprocedure,
-    'public.companion_defer_skill_run_attachment_orphan(text,timestamp with time zone)'::regprocedure,
-    'public.companion_list_skill_run_attachment_orphans(timestamp with time zone,integer)'::regprocedure,
-    'public.companion_put_skill_run_artifact_metadata(uuid,uuid,text,text,uuid,text,text,text,integer,boolean,text,boolean,timestamp with time zone)'::regprocedure,
-    'public.companion_put_skill_run_artifact_metadata_v2(uuid,uuid,text,text,uuid,text,text,text,integer,boolean,text,boolean,timestamp with time zone,text)'::regprocedure,
-    'public.companion_reconcile_skill_run_artifact_paths(uuid,uuid,text,text,text[])'::regprocedure,
-    'public.companion_list_expired_skill_run_artifacts(timestamp with time zone,integer)'::regprocedure,
-    'public.companion_lock_expired_skill_run_artifact(uuid,text,timestamp with time zone)'::regprocedure,
-    'public.companion_complete_expired_skill_run_artifact(uuid,text)'::regprocedure,
-    'public.companion_claim_skill_run_jobs(text,integer,integer)'::regprocedure,
-    'public.companion_get_skill_run_worker_control(uuid,uuid,text,text)'::regprocedure,
-    'public.companion_terminalize_revoked_skill_run(uuid,uuid,text,text,boolean)'::regprocedure,
-    'public.companion_claim_skill_run_cleanups(text,integer,integer)'::regprocedure,
-    'public.companion_complete_skill_run_cleanup(uuid,uuid,text)'::regprocedure,
-    'public.companion_claim_skill_run_runtime_reconciliations(text,integer,integer,text)'::regprocedure,
-    'public.companion_complete_skill_run_runtime_reconciliation(uuid,uuid,text,integer,integer,public.sandbox_provider_state,timestamp with time zone)'::regprocedure,
-    'public.companion_settle_terminal_skill_run_usage(integer)'::regprocedure,
-    'public.companion_claim_skill_run_prewarms(text,integer,integer)'::regprocedure,
-    'public.companion_claim_skill_run_prewarm_cleanups(text,integer,integer)'::regprocedure,
-    'public.companion_complete_skill_run_prewarm_cleanup(uuid,uuid,text)'::regprocedure,
-    'public.companion_purge_skill_run_prewarms(integer)'::regprocedure,
-    'public.companion_cleanup_skill_run_events(integer)'::regprocedure,
     'public.companion_list_billing_sync_candidates(timestamp with time zone,boolean,integer)'::regprocedure,
-    'public.companion_claim_github_sync_destinations(text,integer,integer)'::regprocedure,
-    'public.companion_claim_project_workspaces(text,integer,integer)'::regprocedure,
-    'public.companion_enter_project_worker_lease(uuid,uuid,text,text,integer)'::regprocedure,
-    'public.companion_heartbeat_project_worker(text,integer,integer)'::regprocedure,
-    'public.companion_remove_project_worker(text)'::regprocedure,
-    'public.companion_lock_project_attachment_orphan(text,timestamp with time zone)'::regprocedure,
-    'public.companion_complete_project_attachment_orphan(text)'::regprocedure,
-    'public.companion_defer_project_attachment_orphan(text,timestamp with time zone)'::regprocedure,
-    'public.companion_list_project_attachment_orphans(timestamp with time zone,integer)'::regprocedure
+    'public.companion_claim_github_sync_destinations(text,integer,integer)'::regprocedure
   ];
 BEGIN
   IF api_role IS NULL OR worker_role IS NULL THEN
@@ -317,10 +268,7 @@ BEGIN
     );
   END IF;
 
-  -- Read-only creator-scoped projection, readiness and policy helpers are needed by both process
-  -- roles. Keep this list separate from the mutually-exclusive capability sets above: Project
-  -- activation enumerates the creator's accessible secrets and therefore calls the usage helper
-  -- while materializing the worker-owned environment.
+  -- The skill-secret usage helper is needed by both process roles.
   FOREACH protected_function IN ARRAY shared_functions
   LOOP
     EXECUTE format(
@@ -358,11 +306,7 @@ BEGIN
       public.companion_revoke_agent_transfer_tickets(text, text, text),
       public.companion_skill_share_target(text, text),
       public.companion_billing_org_for_stripe_event(text, text),
-      public.companion_request_member_project_deletion(uuid, text),
-      public.companion_revoke_inactive_skill_database_realm_shares(uuid, uuid),
-      public.companion_project_skill_refresh_targets(uuid, uuid),
-      public.companion_signal_project_secret_change(uuid, uuid, text, text, text, public.secret_audience, text[]),
-      public.companion_signal_project_provider_change(uuid, text, uuid, model_provider_connection_scope, text, text)
+      public.companion_revoke_inactive_skill_database_realm_shares(uuid, uuid)
      TO %I',
     api_role
   );
@@ -373,43 +317,8 @@ BEGIN
       public.companion_claim_skill_database_object_deletions(integer, integer),
       public.companion_complete_skill_database_object_deletion(text, uuid),
       public.companion_defer_skill_database_object_deletion(text, uuid),
-      public.companion_heartbeat_skill_run_worker(text, integer),
-      public.companion_heartbeat_skill_run_worker(text, integer, integer),
-      public.companion_heartbeat_skill_run_worker(text, integer, integer, integer),
-      public.companion_remove_skill_run_worker(text),
-      public.companion_lock_skill_run_attachment_orphan(text, timestamp with time zone),
-      public.companion_complete_skill_run_attachment_orphan(text),
-      public.companion_defer_skill_run_attachment_orphan(text, timestamp with time zone),
-      public.companion_list_skill_run_attachment_orphans(timestamp with time zone, integer),
-      public.companion_put_skill_run_artifact_metadata(uuid, uuid, text, text, uuid, text, text, text, integer, boolean, text, boolean, timestamp with time zone),
-      public.companion_put_skill_run_artifact_metadata_v2(uuid, uuid, text, text, uuid, text, text, text, integer, boolean, text, boolean, timestamp with time zone, text),
-      public.companion_reconcile_skill_run_artifact_paths(uuid, uuid, text, text, text[]),
-      public.companion_list_expired_skill_run_artifacts(timestamp with time zone, integer),
-      public.companion_lock_expired_skill_run_artifact(uuid, text, timestamp with time zone),
-      public.companion_complete_expired_skill_run_artifact(uuid, text),
-      public.companion_claim_skill_run_jobs(text, integer, integer),
-      public.companion_get_skill_run_worker_control(uuid, uuid, text, text),
-      public.companion_terminalize_revoked_skill_run(uuid, uuid, text, text, boolean),
-      public.companion_claim_skill_run_cleanups(text, integer, integer),
-      public.companion_complete_skill_run_cleanup(uuid, uuid, text),
-      public.companion_claim_skill_run_runtime_reconciliations(text, integer, integer, text),
-      public.companion_complete_skill_run_runtime_reconciliation(uuid, uuid, text, integer, integer, sandbox_provider_state, timestamp with time zone),
-      public.companion_settle_terminal_skill_run_usage(integer),
-      public.companion_claim_skill_run_prewarms(text, integer, integer),
-      public.companion_claim_skill_run_prewarm_cleanups(text, integer, integer),
-      public.companion_complete_skill_run_prewarm_cleanup(uuid, uuid, text),
-      public.companion_purge_skill_run_prewarms(integer),
-      public.companion_cleanup_skill_run_events(integer),
       public.companion_list_billing_sync_candidates(timestamp with time zone, boolean, integer),
-      public.companion_claim_github_sync_destinations(text, integer, integer),
-      public.companion_claim_project_workspaces(text, integer, integer),
-      public.companion_enter_project_worker_lease(uuid, uuid, text, text, integer),
-      public.companion_heartbeat_project_worker(text, integer, integer),
-      public.companion_remove_project_worker(text),
-      public.companion_lock_project_attachment_orphan(text, timestamp with time zone),
-      public.companion_complete_project_attachment_orphan(text),
-      public.companion_defer_project_attachment_orphan(text, timestamp with time zone),
-      public.companion_list_project_attachment_orphans(timestamp with time zone, integer)
+      public.companion_claim_github_sync_destinations(text, integer, integer)
      TO %I',
     worker_role
   );

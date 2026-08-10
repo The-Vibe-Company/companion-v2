@@ -27,15 +27,15 @@ import { attachSession, jsonError, requireScope, type ApiVariables } from "./con
 describe("jsonError", () => {
   it("includes stable service error codes in structured responses", async () => {
     const app = new Hono();
-    app.get("/", (c) => jsonError(c, Object.assign(new Error("reconnecting"), {
-      code: "run_runtime_degraded",
+    app.get("/", (c) => jsonError(c, Object.assign(new Error("validation failed"), {
+      code: "skill_validation_failed",
     }), 409));
     const response = await app.request("/");
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({
       ok: false,
-      error: "reconnecting",
-      code: "run_runtime_degraded",
+      error: "validation failed",
+      code: "skill_validation_failed",
     });
   });
 });

@@ -40,8 +40,6 @@ import { treeRowKey } from "./dragGeometry";
 import { useSkillDrag, type PointerLike } from "./useSkillDrag";
 import { ArchivedListView } from "./ArchivedListView";
 import { DetailView } from "./DetailView";
-import { RunChatView } from "../runs/RunChatView";
-import { withRunDraft, type RunLauncherDraft } from "../runs/launcherState";
 import { LocalSkillsView } from "./LocalSkillsView";
 import { GettingStartedCard } from "./GettingStartedCard";
 import { CommandPalette } from "./CommandPalette";
@@ -55,8 +53,6 @@ import {
   skillsRouteSource,
   skillsRouteWithSkill,
   skillsRouteWithoutSkill,
-  skillsRouteWithoutRun,
-  skillsRouteWithRun,
   type SkillsLibrary,
   type SkillsRoute,
   type SkillsRouteSource,
@@ -106,7 +102,7 @@ function settingsStateFromIntent(intent?: SettingsIntent): SettingsState {
 
 function settingsStateFromSearch(search: string): SettingsState {
   const params = new URLSearchParams(search);
-  // Shared parser (org/model.ts): whitelist + legacy `providers → models` normalization.
+  // Shared parser (org/model.ts): whitelist settings destinations.
   const view: SettingsView = parseSettingsView(params.get("view"));
   const dialogRaw = params.get("dialog");
   return {
@@ -210,8 +206,6 @@ export function SkillsApp({
   currentOrg,
   initialRoute,
   initialRouteSource,
-  projectsEnabled = false,
-  runSkillEnabled = false,
 }: {
   initialMineSkills: SkillVM[];
   initialOrgSkills: SkillVM[];
@@ -226,8 +220,6 @@ export function SkillsApp({
   currentOrg: OrgVM;
   initialRoute: SkillsRoute;
   initialRouteSource: SkillsRouteSource;
-  projectsEnabled?: boolean;
-  runSkillEnabled?: boolean;
 }) {
   const router = useRouter();
   const orgActions = useOrgActions();
@@ -380,8 +372,6 @@ export function SkillsApp({
   useEffect(() => {
     settingsWarmupRef.current = null;
     setLocalSettings(null);
-    setRunDrafts(new Map());
-    setRunAgainRequest(null);
   }, [currentOrg.id]);
 
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -394,16 +384,6 @@ export function SkillsApp({
   const [openId, setOpenId] = useState<string | null>(() =>
     initialRoute.kind === "local" ? null : initialRoute.skill ?? null,
   );
-  // The open run transcript/chat (`?skill=…&run=…`); rendered instead of the skill detail.
-  const [openRunId, setOpenRunId] = useState<string | null>(() =>
-    !runSkillEnabled || initialRoute.kind === "local" ? null : initialRoute.run ?? null,
-  );
-  // Back from a run lands the detail on its Sessions tab; opening a skill normally resets it.
-  const [detailInitialTab, setDetailInitialTab] = useState<"overview" | "sessions" | undefined>(undefined);
-  // Complete drafts are keyed by skill so prompt/files/model/inputs never bleed across details.
-  const [runDrafts, setRunDrafts] = useState<Map<string, RunLauncherDraft>>(() => new Map());
-  // "Run again" is a one-shot request; its full snapshot also becomes this skill's current draft.
-  const [runAgainRequest, setRunAgainRequest] = useState<{ skillId: string; draft: RunLauncherDraft } | null>(null);
   const [lastId, setLastId] = useState<string | null>(() =>
     initialRoute.kind === "local" ? null : initialRoute.skill ?? null,
   );
@@ -417,16 +397,11 @@ export function SkillsApp({
   const queuedPreferencesRef = useRef<SkillFilterPreferences | null>(null);
   const skipNextDebouncedPersistRef = useRef(false);
   const preferenceKey = JSON.stringify(initialFilterPreferences);
-  const effectiveInitialRoute = useMemo(
-    () => (runSkillEnabled ? initialRoute : skillsRouteWithoutRun(initialRoute)),
-    [initialRoute, runSkillEnabled],
-  );
-  const effectiveInitialRouteKey = skillsRouteKey(effectiveInitialRoute);
+  const effectiveInitialRouteKey = skillsRouteKey(initialRoute);
 
   useEffect(() => {
     router.prefetch("/secrets");
-    if (projectsEnabled) router.prefetch("/projects");
-  }, [projectsEnabled, router]);
+  }, [router]);
 
   const shareableSkillForSlug = useCallback((slug: string): SkillVM | null => {
     const isShareable = (s: SkillVM) => s.id === slug && s.scope === "org" && !s.archived;
@@ -478,22 +453,19 @@ export function SkillsApp({
     setGroupBy(initialFilterPreferences.group_by);
     setSidebarOrder(initialFilterPreferences.sidebar_order);
     sidebarOrderRef.current = initialFilterPreferences.sidebar_order;
-    setSelection(selectionFromRoute(effectiveInitialRoute));
+    setSelection(selectionFromRoute(initialRoute));
     didInitializePersistenceRef.current = false;
     setPreferenceStatus("idle");
-    setOpenId(effectiveInitialRoute.kind === "local" ? null : effectiveInitialRoute.skill ?? null);
-    setOpenRunId(
-      effectiveInitialRoute.kind === "local" ? null : effectiveInitialRoute.run ?? null,
-    );
-    setLastId(effectiveInitialRoute.kind === "local" ? null : effectiveInitialRoute.skill ?? null);
-    setCurrentView(skillsViewForRoute(effectiveInitialRoute));
+    setOpenId(initialRoute.kind === "local" ? null : initialRoute.skill ?? null);
+    setLastId(initialRoute.kind === "local" ? null : initialRoute.skill ?? null);
+    setCurrentView(skillsViewForRoute(initialRoute));
     if (typeof window !== "undefined" && isSkillsClientPath(window.location.pathname)) {
-      replaceSkillsUrl(effectiveInitialRoute);
+      replaceSkillsUrl(initialRoute);
     }
   }, [
     currentOrg.id,
-    effectiveInitialRoute,
     effectiveInitialRouteKey,
+    initialRoute,
     initialFilterPreferences,
     preferenceKey,
     replaceSkillsUrl,
@@ -1235,7 +1207,7 @@ export function SkillsApp({
     });
   }, [orgActions, refreshSkillLibraries]);
 
-  const runSkillAction = useCallback(
+  const executeSkillAction = useCallback(
     (target: SkillVM, action: SkillAction) => {
       switch (action.id) {
         case "share":
@@ -1340,23 +1312,18 @@ export function SkillsApp({
   // --- Selection / navigation ------------------------------------------------
   const applySkillsRoute = useCallback(
     (route: SkillsRoute, history: "push" | "replace" | "none") => {
-      const safeRoute = runSkillEnabled ? route : skillsRouteWithoutRun(route);
-      setCurrentView(skillsViewForRoute(safeRoute));
-      setSelection(selectionFromRoute(safeRoute));
-      const nextOpenId = safeRoute.kind === "local" ? null : safeRoute.skill ?? null;
+      setCurrentView(skillsViewForRoute(route));
+      setSelection(selectionFromRoute(route));
+      const nextOpenId = route.kind === "local" ? null : route.skill ?? null;
       setOpenId(nextOpenId);
       setLastId(nextOpenId);
-      setOpenRunId(safeRoute.kind === "local" ? null : safeRoute.run ?? null);
       if (typeof window === "undefined") return;
       if (history === "none") {
-        if (skillsRouteKey(safeRoute) !== skillsRouteKey(route)) {
-          writeSkillsUrl(safeRoute, "replace");
-        }
         return;
       }
-      writeSkillsUrl(safeRoute, history);
+      writeSkillsUrl(route, history);
     },
-    [runSkillEnabled, writeSkillsUrl],
+    [writeSkillsUrl],
   );
   const selectMineAll = useCallback(() => applySkillsRoute({ lib: "mine", kind: "all" }, "push"), [applySkillsRoute]);
   const selectOrgAll = useCallback(() => applySkillsRoute({ lib: "org", kind: "all" }, "push"), [applySkillsRoute]);
@@ -1427,15 +1394,18 @@ export function SkillsApp({
           if (!openIdRef.current) setFilters(initialFilterPreferences.active_filters);
           setOpenId(null);
           setLastId(null);
+          replaceSkillsUrl(route);
         } else {
           if (route.kind === "archived") void loadArchived();
-          applySkillsRoute(route, "none");
+          // Replace the current history entry as well as applying it. The parser intentionally
+          // ignores retired runtime fields, so this also scrubs them from Back/Forward URLs.
+          applySkillsRoute(route, "replace");
         }
       }
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [applySkillsRoute, initialFilterPreferences.active_filters, loadArchived, showLocalSettings]);
+  }, [applySkillsRoute, initialFilterPreferences.active_filters, loadArchived, replaceSkillsUrl, showLocalSettings]);
 
   // --- Open / navigate -------------------------------------------------------
   const detailPool = currentView === "archived" ? archivedSkills : filtered;
@@ -1447,9 +1417,6 @@ export function SkillsApp({
     const openingFromWorkspace = currentView === "workspace";
     if (!openingFromWorkspace) setCurrentView("workspace");
     setUploadOpen(false);
-    setOpenRunId(null);
-    setDetailInitialTab(undefined);
-    setRunAgainRequest(null);
     setOpenId(id);
     setLastId(id);
     pushSkillsUrl(openingFromWorkspace ? routeForCurrentSurface(id) : { lib: "mine", kind: "all", skill: id });
@@ -1489,9 +1456,6 @@ export function SkillsApp({
     [loadArchived, pushSkillsUrl],
   );
   const back = useCallback(() => {
-    setOpenRunId(null);
-    setDetailInitialTab(undefined);
-    setRunAgainRequest(null);
     if (
       typeof window !== "undefined" &&
       window.history.state &&
@@ -1504,52 +1468,11 @@ export function SkillsApp({
     setOpenId(null);
     replaceSkillsUrl(routeForCurrentSurface());
   }, [replaceSkillsUrl, routeForCurrentSurface]);
-  /** Open one of the current skill's runs (`?skill=…&run=…`) — deep-linkable transcript/chat. */
-  const openRun = useCallback(
-    (runId: string) => {
-      if (!runSkillEnabled) return;
-      const skillId = openIdRef.current;
-      if (!skillId) return;
-      setOpenRunId(runId);
-      pushSkillsUrl(skillsRouteWithRun(routeForCurrentSurface(skillId), skillId, runId));
-    },
-    [pushSkillsUrl, routeForCurrentSurface, runSkillEnabled],
-  );
-
-  /** Back from a run: return to the skill detail on its Sessions tab. */
-  const closeRun = useCallback(() => {
-    setOpenRunId(null);
-    setDetailInitialTab("sessions");
-    const skillId = openIdRef.current;
-    replaceSkillsUrl(routeForCurrentSurface(skillId ?? undefined));
-  }, [replaceSkillsUrl, routeForCurrentSurface]);
-
-  /** "Run again" from a frozen/errored transcript: back to the detail with the launcher prefilled. */
-  const runAgain = useCallback(
-    (draft: RunLauncherDraft) => {
-      if (!runSkillEnabled) return;
-      setOpenRunId(null);
-      setDetailInitialTab("sessions");
-      const skillId = openIdRef.current;
-      if (skillId) {
-        setRunAgainRequest({ skillId, draft });
-        setRunDrafts((current) => withRunDraft(current, skillId, draft));
-      }
-      replaceSkillsUrl(routeForCurrentSurface(skillId ?? undefined));
-    },
-    [replaceSkillsUrl, routeForCurrentSurface, runSkillEnabled],
-  );
-
   const go = useCallback(
     (delta: number) => {
       const i = detailPool.findIndex((row) => row.id === openIdRef.current);
       const n = detailPool[i + delta];
       if (!n) return;
-      // Moving to another skill must also leave the current run route. Otherwise keyboard
-      // navigation can render a creator-only run beneath the wrong skill slug.
-      setOpenRunId(null);
-      setDetailInitialTab(undefined);
-      setRunAgainRequest(null);
       setOpenId(n.id);
       setLastId(n.id);
       replaceSkillsUrl(routeForCurrentSurface(n.id));
@@ -1602,7 +1525,7 @@ export function SkillsApp({
       if (e.defaultPrevented) return;
       if (uploadOpen || updateSkill || installSkill || shareTarget || publicReleaseSkill) return;
       // Modal surfaces own Escape, arrows and Cmd/Ctrl shortcuts. Letting the skill shell handle
-      // them would unmount the launcher and move its prompt/files into another skill's route.
+      // them would unmount the dialog and move its prompt/files into another skill's route.
       if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       if (mobileSidebarOpen && e.key === "Escape") {
         e.preventDefault();
@@ -1749,7 +1672,6 @@ export function SkillsApp({
         onCloseMobile={() => setMobileSidebarOpen(false)}
         personalSkillsEnabled={personalSkillsEnabled}
         onUpgrade={() => openSettings({ view: "billing" })}
-        projectsEnabled={projectsEnabled}
       />
       {mobileSidebarOpen && (
         <button
@@ -1762,8 +1684,6 @@ export function SkillsApp({
       <div className="main" aria-hidden={mobileSidebarOpen || undefined} inert={mobileSidebarOpen ? true : undefined}>
         {currentView === "local" ? (
           <LocalSkillsView skills={localSkills} workspaceId={currentOrg.id} workspaceName={currentOrg.name} />
-        ) : runSkillEnabled && skill && openRunId ? (
-          <RunChatView key={openRunId} runId={openRunId} expectedSkillSlug={skill.id} onBack={closeRun} onRunAgain={runAgain} />
         ) : skill ? (
           <DetailView
             skill={skill}
@@ -1778,19 +1698,10 @@ export function SkillsApp({
             onNext={() => go(1)}
             onToggleLabel={(path) => toggleSkillLabel(detailLib, skill.id, path)}
             onSelectLabel={(path) => selectLabel(detailLib, path)}
-            onAction={(action) => runSkillAction(skill, action)}
+            onAction={(action) => executeSkillAction(skill, action)}
             onOpenSkill={openSkillBySlug}
-            onOpenRun={openRun}
-            onOpenModelSettings={() => openSettings({ view: "models" })}
-            initialTab={detailInitialTab}
-            runDraft={runAgainRequest?.skillId === skill.id ? runAgainRequest.draft : runDrafts.get(skill.id) ?? null}
-            runAgainRequested={runAgainRequest?.skillId === skill.id}
-            onRunDraftChange={(draft) => setRunDrafts((current) => withRunDraft(current, skill.id, draft))}
-            onRunAgainConsumed={() => setRunAgainRequest(null)}
             historyEnabled={initialBilling.entitlements.skillHistory}
             onUpgrade={() => openSettings({ view: "billing" })}
-            projectsEnabled={projectsEnabled}
-            runSkillEnabled={runSkillEnabled}
           />
         ) : currentView === "archived" ? (
           <ArchivedListView
@@ -1798,7 +1709,7 @@ export function SkillsApp({
             onOpen={openArchived}
             onUpload={openUpload}
             actorId={me.id}
-            onPrimaryAction={runSkillAction}
+            onPrimaryAction={executeSkillAction}
           />
         ) : (
           <>
@@ -1825,7 +1736,7 @@ export function SkillsApp({
               onOpen={open}
               onUpload={openUpload}
               actorId={me.id}
-              onPrimaryAction={runSkillAction}
+              onPrimaryAction={executeSkillAction}
               lastId={lastId}
               filters={filters}
               onToggleFilter={toggleFilter}
@@ -1869,7 +1780,7 @@ export function SkillsApp({
           onUpload={openUpload}
           currentSkill={skill}
           actorId={me.id}
-          onPrimaryAction={runSkillAction}
+          onPrimaryAction={executeSkillAction}
         />
       )}
       {uploadOpen && (

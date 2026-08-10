@@ -564,7 +564,7 @@ export async function extractArchiveFiles(
   return { files, oversize: counters.oversize, violations };
 }
 
-/** Default per-file cap when extracting FULL file bytes (deploy path, not display). */
+/** Default per-file cap when extracting full file bytes (not the display preview). */
 const MAX_ENTRY_BUFFER_BYTES = 5 * 1024 * 1024; // 5 MB
 
 export interface ArchiveEntryBuffer {
@@ -582,10 +582,10 @@ export interface ArchiveEntryBuffersResult {
 
 /**
  * Extract EVERY safe entry's full bytes (unlike {@link extractArchiveFiles}, which caps text at the
- * display limit and returns no binary content). Used to push a skill folder into a sandbox: the
- * bytes must be exact and executable bits must survive. Same traversal/symlink/special-entry guards
+ * display limit and returns no binary content). Used for deterministic GitHub and catalog writes:
+ * the bytes must be exact and executable bits must survive. Same traversal/symlink/special-entry guards
  * as every other reader; a file above the per-file cap flags `oversize` and is skipped — callers
- * must refuse to deploy archives with violations or oversize.
+ * must refuse to publish archives with violations or oversize.
  */
 export async function extractArchiveEntryBuffers(
   tar: Buffer,

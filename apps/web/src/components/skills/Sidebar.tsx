@@ -10,7 +10,6 @@ import type { SkillsLibrary } from "./route";
 import type { ResolvedTarget } from "./dragGeometry";
 import type { DragItem } from "./SkillsApp";
 import type { TreeRow } from "./sidebarTree";
-import { SpaceSwitch } from "../projects/SpaceSwitch";
 
 type SidebarSelection = { lib: SkillsLibrary; kind: "all" | "installed" | "label"; label?: string } | null;
 type MoveTarget = { path: string; label: string };
@@ -491,7 +490,6 @@ export function Sidebar({
   asideRef,
   personalSkillsEnabled = true,
   onUpgrade = () => {},
-  projectsEnabled = false,
 }: {
   orgs: OrgVM[];
   currentOrg: OrgVM;
@@ -542,7 +540,6 @@ export function Sidebar({
   asideRef?: Ref<HTMLElement>;
   personalSkillsEnabled?: boolean;
   onUpgrade?: () => void;
-  projectsEnabled?: boolean;
 }) {
   const [menu, setMenu] = useState<{
     row: TreeRow;
@@ -668,7 +665,6 @@ export function Sidebar({
           <Icon name="search" size={14} />
         </button>
       </div>
-      <SpaceSwitch active="skills" onNavigate={onCloseMobile} projectsEnabled={projectsEnabled} />
       <nav className="side__nav" aria-label="Primary">
         {/* ===== MY SKILLS ===== */}
         <div

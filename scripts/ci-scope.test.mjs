@@ -54,14 +54,12 @@ test("API changes run database, browser, and container checks", () => {
   assert.equal(result.containers, true);
 });
 
-test("RunSkill worker and sandbox changes run database and container checks", () => {
-  for (const file of ["apps/worker/src/runSupervisor.ts", "packages/sandbox/src/vercel.ts"]) {
-    const result = classifyFiles([file]);
-    assert.equal(result.quality, true);
-    assert.equal(result.build, true);
-    assert.equal(result.database, true);
-    assert.equal(result.containers, true);
-  }
+test("skill database worker changes run database and container checks", () => {
+  const result = classifyFiles(["apps/worker/src/skillDatabaseCleanup.ts"]);
+  assert.equal(result.quality, true);
+  assert.equal(result.build, true);
+  assert.equal(result.database, true);
+  assert.equal(result.containers, true);
 });
 
 test("database migrations run every integrated surface", () => {

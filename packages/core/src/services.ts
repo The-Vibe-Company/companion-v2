@@ -86,8 +86,6 @@ import {
 
 export * from "./secrets";
 export * from "./githubSync";
-export * from "./projects";
-export * from "./projectJobs";
 
 // Org-wide shared label ("folder") services. Re-exported so callers keep importing everything from
 // `@companion/core/services`. `labels.ts` imports `getOrgRole`/`ActorContext` from here (both hoisted
@@ -740,27 +738,6 @@ export async function removeMember(input: {
       actorId: input.actor.id,
       database: tx,
     });
-    // Project content remains creator-only even for organization managers. A narrow SECURITY DEFINER
-    // RPC marks only lifecycle metadata so the worker can destroy every private runtime, checkpoint,
-    // and cached file before the membership row disappears. This also makes stopped Projects claimable.
-    const priorContext = await tx.execute(sql`
-      select current_setting('app.org_id', true) as "orgId",
-             current_setting('app.user_id', true) as "userId"
-    `);
-    const prior = Array.from(
-      priorContext as unknown as Iterable<{ orgId: string | null; userId: string | null }>,
-    )[0];
-    await tx.execute(sql`
-      select set_config('app.org_id', ${input.orgId}, true),
-             set_config('app.user_id', ${input.actor.id}, true)
-    `);
-    await tx.execute(
-      sql`select companion_request_member_project_deletion(${input.orgId}::uuid, ${input.userId})`,
-    );
-    await tx.execute(sql`
-      select set_config('app.org_id', ${prior?.orgId ?? ""}, true),
-             set_config('app.user_id', ${prior?.userId ?? ""}, true)
-    `);
     await tx
       .delete(schema.memberships)
       .where(and(eq(schema.memberships.orgId, input.orgId), eq(schema.memberships.userId, input.userId)));
@@ -3016,17 +2993,6 @@ async function writeSkillVersion(input: {
     );
   }
 
-  // A Project pins an exact full closure per desired generation. Publishing either a selected root
-  // or any skill in that closure automatically builds the next complete projection; a failed rebuild
-  // retains the prior generation and marks only that private Project as needing attention.
-  const { refreshProjectsForSkillPublication } = await import("./projects");
-  await refreshProjectsForSkillPublication({
-    actor: input.actor,
-    orgId: input.orgId,
-    skillId: skill.id,
-    database,
-  });
-
   await database.insert(schema.auditLog).values({
     orgId: input.orgId,
     actorId: input.actor.id,
@@ -4863,18 +4829,3 @@ export async function uninstallSkill(input: {
     metadata: { slug: skill.slug },
   });
 }
-
-// Saved model-provider connections (API keys). Same load-order reasoning as `./labels`.
-export * from "./providerConnections";
-
-// Activated-model lists (personal + workspace). Same load-order reasoning as `./labels`.
-export * from "./modelPreferences";
-
-// Skill runs (one-shot sandboxed sessions). Same load-order reasoning as `./labels`:
-// `skillRuns.ts` imports only hoisted functions and types from here.
-export * from "./skillRuns";
-export * from "./runConfigurations";
-export * from "./runJobs";
-export * from "./runArtifacts";
-export * from "./runSweeper";
-export * from "./runPrewarms";

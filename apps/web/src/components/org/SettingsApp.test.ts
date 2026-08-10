@@ -1,7 +1,7 @@
 import React from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { SettingsController, settingsHref } from "./SettingsApp";
+import { canonicalSettingsReplacement, SettingsController, settingsHref } from "./SettingsApp";
 import { canonicalizeSettingsRoute, type SettingsAppData } from "./model";
 
 vi.mock("next/navigation", () => ({
@@ -20,6 +20,15 @@ describe("SettingsController", () => {
     expect(settingsHref({ view: "profile" }, null)).toBe("/settings?view=profile");
     expect(settingsHref({ view: "billing" }, null)).toBe("/settings?view=billing");
     expect(settingsHref(canonicalizeSettingsRoute({ view: "github" }, false), null)).toBe("/settings?view=general");
+  });
+
+  it("canonicalizes retired and unknown settings views without changing embedded settings", () => {
+    expect(canonicalSettingsReplacement("/settings", "?view=models", { view: "profile" }, null))
+      .toBe("/settings?view=profile");
+    expect(canonicalSettingsReplacement("/settings", "?view=profile", { view: "profile" }, null))
+      .toBeNull();
+    expect(canonicalSettingsReplacement("/skills", "?view=models", { view: "profile" }, null))
+      .toBeNull();
   });
 
   it("normalizes malformed member collections before rendering", () => {

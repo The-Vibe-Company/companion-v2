@@ -79,7 +79,7 @@ const rows: SecretRow[] = [
 
 const roots: Root[] = [];
 
-async function mount(initialSecrets = rows, projectsEnabled = false) {
+async function mount(initialSecrets = rows) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -92,7 +92,6 @@ async function mount(initialSecrets = rows, projectsEnabled = false) {
       orgs: [{ id: "org-1", name: "Acme", slug: "acme", kind: "team", myRole: "owner", color: null, logoUrl: null }],
       currentOrg: { id: "org-1", name: "Acme", slug: "acme", kind: "team", myRole: "owner", color: null, logoUrl: null },
       initialCreateKey: null,
-      projectsEnabled,
       navigation: {
         mineTreeRows: [],
         orgTreeRows: [],
@@ -130,24 +129,16 @@ describe("SecretsApp", () => {
     document.body.innerHTML = "";
   });
 
-  it("keeps Projects one click away without changing the complete Skills tree", async () => {
-    const container = await mount(rows, true);
-    expect(container.textContent).toContain("Model provider keys stay separate in Settings → Models.");
+  it("keeps the complete Skills tree without runtime navigation", async () => {
+    const container = await mount(rows);
     const primary = container.querySelector('nav[aria-label="Primary"]') as HTMLElement;
-    const switcher = container.querySelector('nav[aria-label="Workspace space"]') as HTMLElement;
-    expect(switcher.querySelector('a[href="/projects"]')?.textContent).toContain("Projects");
-    expect(switcher.querySelector('a[href="/skills"]')?.textContent).toContain("Skills");
+    expect(container.querySelector('a[href="/projects"]')).toBeNull();
     expect(primary.querySelector('[aria-current="page"]')?.textContent).toContain("Secrets");
-    const secrets = primary.querySelector('[title="Secrets"]') as HTMLButtonElement;
-    expect(secrets.classList.contains("navitem--bottom")).toBe(true);
     expect(primary.textContent).toContain("My Skills");
     expect(primary.textContent).toContain("Organization");
     expect(primary.textContent).toContain("Installed");
     expect(primary.textContent).toContain("Companion skills");
     expect(primary.textContent).toContain("Archived");
-    expect(secrets.nextElementSibling?.textContent).toContain("Companion skills");
-    expect(primary.querySelector('[aria-label="New personal folder"]')).toBeNull();
-    expect(primary.querySelector('[title="1 update available"]')).not.toBeNull();
   });
 
   it("closes the shared mobile navigation with Escape", async () => {

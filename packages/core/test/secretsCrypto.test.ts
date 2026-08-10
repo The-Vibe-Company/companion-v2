@@ -26,19 +26,19 @@ describe("secret envelope encryption", () => {
 
   it("binds opaque credentials to purpose and subject", () => {
     const encrypted = encryptOpaqueValue(
-      { orgId: context.orgId, purpose: "opencode-server-password", subjectId: "run-1", value: "sentinel" },
+      { orgId: context.orgId, purpose: "github-installation-token", subjectId: "installation-1", value: "sentinel" },
       key,
     );
     expect(JSON.stringify(encrypted)).not.toContain("sentinel");
     expect(
       decryptOpaqueValue(
-        { orgId: context.orgId, purpose: "opencode-server-password", subjectId: "run-1", ...encrypted },
+        { orgId: context.orgId, purpose: "github-installation-token", subjectId: "installation-1", ...encrypted },
         key,
       ),
     ).toBe("sentinel");
     expect(() =>
       decryptOpaqueValue(
-        { orgId: context.orgId, purpose: "opencode-server-password", subjectId: "run-2", ...encrypted },
+        { orgId: context.orgId, purpose: "github-installation-token", subjectId: "installation-2", ...encrypted },
         key,
       ),
     ).toThrow();

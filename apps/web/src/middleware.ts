@@ -55,9 +55,21 @@ export function agentAuthProxyHeaders(
   return headers;
 }
 
+export function legacyRuntimeRedirect(request: NextRequest): URL | null {
+  const pathname = request.nextUrl.pathname;
+  if (pathname !== "/projects" && !pathname.startsWith("/projects/")
+    && pathname !== "/runs" && !pathname.startsWith("/runs/")) return null;
+  const destination = request.nextUrl.clone();
+  destination.pathname = "/skills";
+  destination.search = "";
+  return destination;
+}
+
 export function middleware(request: NextRequest) {
   const destination = canonicalAliasRedirect(request);
   if (destination) return NextResponse.redirect(destination, 308);
+  const skillsDestination = legacyRuntimeRedirect(request);
+  if (skillsDestination) return NextResponse.redirect(skillsDestination, 308);
   const headers = agentAuthProxyHeaders(request);
   return headers ? NextResponse.next({ request: { headers } }) : NextResponse.next();
 }

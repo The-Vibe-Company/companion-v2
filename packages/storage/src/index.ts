@@ -156,57 +156,6 @@ export function commentImageKey(input: { orgId: string; imageId: string }): stri
   return `${input.orgId}/comments/${input.imageId}`;
 }
 
-/**
- * Stored skill-run attachment (a file the launcher attached to a run). `attachmentId` is globally
- * unique (the `skill_run_attachments.id`), so the key needs no run/skill segment. Uploaded with the
- * generic `putSkillArchive` / read with `getSkillArchive` / removed with `deleteSkillArchive`.
- */
-export function runAttachmentKey(input: { orgId: string; attachmentId: string }): string {
-  return `${input.orgId}/run-attachments/${input.attachmentId}`;
-}
-
-export function runArtifactKey(input: { orgId: string; runId: string; artifactId: string }): string {
-  return `${input.orgId}/run-artifacts/${input.runId}/${input.artifactId}`;
-}
-
-/** Immutable upload attached to one durable Project prompt. */
-export function projectAttachmentKey(input: {
-  orgId: string;
-  projectId: string;
-  attachmentId: string;
-}): string {
-  return `${input.orgId}/project-attachments/${input.projectId}/${input.attachmentId}`;
-}
-
-/** Content-addressed cache key shared by Project uploads and worker-captured deliverables. */
-export function projectFileCacheKey(input: {
-  orgId: string;
-  projectId: string;
-  checksum: string;
-}): string {
-  const digest = /^sha256:([0-9a-f]{64})$/.exec(input.checksum)?.[1];
-  if (!digest) throw new Error("Project file checksum must be sha256");
-  for (const value of [input.orgId, input.projectId]) {
-    if (!value || value.includes("/") || value.includes("\\") || value.includes("..")) {
-      throw new Error("Project file cache identity is invalid");
-    }
-  }
-  return `${input.orgId}/project-files/${input.projectId}/sha256/${digest}`;
-}
-
-/** Content cached from the Project's managed files/ tree for sleep-time access and recovery. */
-export function projectFileVersionKey(input: {
-  orgId: string;
-  projectId: string;
-  fileId: string;
-  version: number;
-}): string {
-  if (!Number.isSafeInteger(input.version) || input.version < 1) {
-    throw new Error("project file version must be positive");
-  }
-  return `${input.orgId}/project-files/${input.projectId}/${input.fileId}/v${input.version}`;
-}
-
 export async function putOrgLogo(input: {
   orgId: string;
   body: Uint8Array;

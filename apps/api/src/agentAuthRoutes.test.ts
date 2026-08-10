@@ -131,6 +131,7 @@ describe("device approval grant binding", () => {
     const workspaceId = "169b768e-b1d0-4dde-a62e-575022debe88";
     expect(resolveDeviceApprovalWorkspace([
       { capability: "skills:read", constraints: { workspaceId: { eq: workspaceId } } },
+      { capability: "database:write", constraints: { workspaceId: { eq: workspaceId } } },
       { capability: "secrets:read", constraints: JSON.stringify({ workspaceId }) },
       { capability: "public-skills:install", constraints: null },
     ])).toEqual({ workspaceId, error: null });

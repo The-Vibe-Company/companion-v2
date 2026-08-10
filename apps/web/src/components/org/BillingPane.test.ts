@@ -36,17 +36,6 @@ const selfHostedBilling: BillingOverview = {
   lastError: null,
   orgSkillCount: 0,
   hiddenPersonalSkillCount: 0,
-  sandboxUsage: {
-    enabled: false,
-    enforced: false,
-    limit_minutes: null,
-    used_minutes: 0,
-    reserved_minutes: 0,
-    remaining_minutes: null,
-    minutes_per_seat: 250,
-    period_start: "2026-07-01T00:00:00.000Z",
-    period_end: "2026-08-01T00:00:00.000Z",
-  },
   checkoutEnabled: false,
   portalEnabled: false,
 };
@@ -116,30 +105,6 @@ describe("Billing navigation", () => {
     expect(html).not.toContain("Manage payment");
   });
 
-  it("shows the managed shared sandbox pool without implying active sessions are stopped", () => {
-    const ctx = selfHostedContext();
-    ctx.billing = {
-      ...selfHostedBilling,
-      billingEnabled: true,
-      entitlements: { ...selfHostedBilling.entitlements, billingMode: "stripe", entitlementMode: "enforce", enforced: true },
-      sandboxUsage: {
-        ...selfHostedBilling.sandboxUsage,
-        enabled: true,
-        enforced: true,
-        limit_minutes: 500,
-        used_minutes: 42,
-        reserved_minutes: 10,
-        remaining_minutes: 448,
-      },
-    };
-    const html = renderToString(React.createElement(BillingPane, { ctx }));
-    expect(html).toContain("Sandbox usage");
-    expect(html).toMatch(/42(?:<!-- -->)? min/);
-    expect(html).toMatch(/448(?:<!-- -->)? min/);
-    expect(html).toContain("New sandbox work is blocked");
-    expect(html).toContain("Aug 1, 2026");
-  });
-
   it("renders the Free ledger with an upgrade action and preserved-data limits", () => {
     const ctx = selfHostedContext();
     ctx.billing = {
@@ -158,13 +123,6 @@ describe("Billing navigation", () => {
       },
       hiddenPersonalSkillCount: 3,
       checkoutEnabled: true,
-      sandboxUsage: {
-        ...selfHostedBilling.sandboxUsage,
-        enabled: true,
-        enforced: true,
-        limit_minutes: 0,
-        remaining_minutes: 0,
-      },
     };
     const html = renderToString(React.createElement(BillingPane, { ctx }));
     expect(html).toContain("Free plan limits");
