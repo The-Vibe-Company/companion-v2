@@ -59,7 +59,7 @@ function fmtSize(bytes: number): string {
 /** Where a skill gets installed locally (machine / Claude Code / Codex / OpenCode / OpenClaw / Hermes). */
 const UP_TARGETS = [
   { id: "claude", name: "Claude Code", icon: "sparkles", path: (id: string) => `~/.claude/skills/${id}` },
-  { id: "codex", name: "Codex", icon: "code", path: (id: string) => `~/.codex/skills/${id}` },
+  { id: "codex", name: "Codex", icon: "code", path: (id: string) => `~/.agents/skills/${id}` },
   { id: "opencode", name: "OpenCode", icon: "terminal", path: (id: string) => `~/.agents/skills/${id}` },
   { id: "openclaw", name: "OpenClaw", icon: "bot", path: (id: string) => `~/.openclaw/skills/${id}` },
   { id: "hermes", name: "Hermes", icon: "bot", path: (id: string) => `~/.hermes/skills/${id}` },

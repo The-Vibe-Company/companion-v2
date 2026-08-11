@@ -134,6 +134,45 @@ jobs:
         if: needs.scope.outputs.design == 'true'
         run: pnpm design:lint
 
+  gateway:
+    name: Gateway ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    needs: scope
+    if: needs.scope.outputs.quality == 'true'
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            go-version: 1.22.x
+          - os: macos-latest
+            # Go 1.22 binaries predate the LC_UUID fix required by macOS 26.
+            go-version: 1.25.x
+          - os: windows-latest
+            go-version: 1.22.x
+    defaults:
+      run:
+        working-directory: clients/companion-gateway
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache-dependency-path: clients/companion-gateway/go.mod
+
+      - name: Test gateway
+        run: go test ./...
+
+      - name: Vet gateway
+        run: go vet ./...
+
+      - name: Build gateway
+        run: go build ./...
+
   quality:
     name: Quality Node 22
     runs-on: ubuntu-latest

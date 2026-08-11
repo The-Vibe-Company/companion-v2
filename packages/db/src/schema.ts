@@ -978,13 +978,10 @@ export const localSkillInstalls = pgTable(
 );
 
 /**
- * Tracks which PUBLISHED Skills Hub skills (the `skills` table) a member has installed, and at which
- * version. The assistant reports a confirmed install via `POST /v1/skills/:slug/install`
- * (source = "agent") at the end of the normal install flow; a member can also mark a skill
- * installed / not-installed by hand from the UI (source = "manual", e.g. installed another way, or
- * correcting a false state). `installed_version` is null when a manual mark didn't supply one. The
- * list view compares `installed_version` against the skill's current published version to show
- * Installed / Update available. One row per member per skill per workspace.
+ * Per-member delivery state for a published Skills Hub skill. Remote catalog exposure and a durable
+ * local copy are independent: either timestamp may be null, but at least one must be present.
+ * `installed_version` describes only the local copy. Existing pre-gateway rows are migrated to both
+ * modes so an upgrade never silently removes a previously added skill from either surface.
  */
 export const skillInstalls = pgTable(
   "skill_installs",
@@ -1004,14 +1001,22 @@ export const skillInstalls = pgTable(
     agentLabel: text("agent_label"),
     /** How the install was recorded: "agent" (reported by the assistant) or "manual" (marked by hand). */
     source: text("source", { enum: ["agent", "manual"] }).notNull().default("manual"),
-    /** First time this member recorded the skill installed. */
+    /** Legacy row-created timestamp retained for compatibility and audit chronology. */
     installedAt: timestamp("installed_at", { withTimezone: true }).notNull().defaultNow(),
     /** Latest report/mark ("last checked"). */
     lastReportedAt: timestamp("last_reported_at", { withTimezone: true }).notNull().defaultNow(),
+    /** When this skill was added to the caller's remote agent catalog. */
+    remoteEnabledAt: timestamp("remote_enabled_at", { withTimezone: true }),
+    /** When a durable physical copy was last reported on one of the caller's machines. */
+    localInstalledAt: timestamp("local_installed_at", { withTimezone: true }),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.orgId, t.userId, t.skillId] }),
     byOrgUser: index("skill_installs_org_user_idx").on(t.orgId, t.userId),
+    hasDelivery: check(
+      "skill_installs_delivery_check",
+      sql`${t.remoteEnabledAt} is not null or ${t.localInstalledAt} is not null`,
+    ),
   }),
 );
 

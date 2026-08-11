@@ -6,6 +6,8 @@ export interface SkillListQuery {
   label: string | undefined;
   nolabel: boolean;
   installedOnly: boolean;
+  remoteOnly: boolean;
+  addedOnly: boolean;
   archived: boolean;
   query: string | undefined;
   limit: number | undefined;
@@ -21,6 +23,8 @@ export function parseSkillListQuery(read: (name: string) => string | undefined):
     label: labelRaw || undefined,
     nolabel: read("nolabel") === "true",
     installedOnly: read("installed") === "true",
+    remoteOnly: read("remote") === "true",
+    addedOnly: read("added") === "true",
     archived: read("archived") === "true",
     query,
     limit: query ? 20 : undefined,

@@ -446,7 +446,7 @@ export function DetailView({
   const libLabel = inMyLibrary ? "My Skills" : orgName;
   const isInstalledCopy = skill.source === "installed";
   const actionModel = resolveSkillActions(skill, skillActionPermissions(skill, me.id));
-  const eyebrow = skill.scope === "personal" ? "Personal skill" : isInstalledCopy ? "Installed skill" : "Organization skill";
+  const eyebrow = skill.scope === "personal" ? "Personal skill" : isInstalledCopy ? "Added skill" : "Organization skill";
   const eyebrowIcon = skill.scope === "personal" ? "user" : isInstalledCopy ? "download" : "building-2";
   const currentVersion = skill.version;
 
@@ -556,8 +556,8 @@ export function DetailView({
                 <div className="ls-confirm dinstalled-note">
                   <Icon name="info" size={15} />
                   <span>
-                    Installed from <b>{orgName}</b>. The original lives in the organization library. Personal
-                    folders do not apply to installed skills.
+                    Added from <b>{orgName}</b>. Delivery is {skill.remoteEnabled && skill.localInstalled ? "Both" : skill.remoteEnabled ? "Remote" : "Local"}.
+                    The original stays in the organization library; personal folders do not apply.
                   </span>
                 </div>
               )}

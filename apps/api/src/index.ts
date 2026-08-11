@@ -92,6 +92,10 @@ import {
   getMyAvatarUrl,
   shareSkill,
   installSkill,
+  enableSkillAgentCatalog,
+  disableSkillAgentCatalog,
+  buildAgentCatalogSnapshot,
+  authorizeAgentCatalogPackage,
   unassignLabel,
   uninstallSkill,
   updateOrg,
@@ -204,6 +208,7 @@ import {
   updateGitHubDestinationInputSchema,
   skillDatabaseStatementInputSchema,
   skillDatabaseSharesInputSchema,
+  agentCatalogSnapshotInputSchema,
 } from "@companion/contracts";
 import { GitHubOAuthClient, githubOAuthConfig, githubSyncEnabled } from "@companion/github";
 import {
@@ -228,6 +233,7 @@ import {
   signedSkillArchiveUrl,
   streamSkillArchive,
 } from "@companion/storage";
+import { signAgentCatalogProof, verifyAgentCatalogProof } from "./agentCatalogProof";
 import { SqliteWasmSkillDatabaseRuntime } from "@companion/skilldb";
 import {
   bumpSemver,
@@ -1760,8 +1766,8 @@ app.get("/v1/skills", async (c) => {
     // `?lib=mine` returns the caller's "My Skills" (authored personal skills + org skills they have
     // installed); `?lib=org` (default) is the flat org-wide library. `?label=marketing/seo` filters to
     // skills filed under that path OR any descendant (personal folders for `mine`, org folders for
-    // `org`); `?nolabel=true` filters to skills with no folder; `?installed=true` narrows to skills
-    // the caller has reported installed.
+    // `org`); `?nolabel=true` filters to skills with no folder; `?installed=true` means a durable
+    // local copy, `?remote=true` means remote catalog exposure, and `?added=true` accepts either.
     const parsed = parseSkillListQuery((name) => c.req.query(name));
     // A label may only reach the LIKE-prefix filter if it is a well-formed path. A malformed/typo
     // `?label=` (e.g. `%`) can't match any validated stored path, so it returns an EMPTY folder —
@@ -1778,6 +1784,8 @@ app.get("/v1/skills", async (c) => {
               label: parsed.label,
               nolabel: parsed.nolabel,
               installedOnly: parsed.installedOnly,
+              remoteOnly: parsed.remoteOnly,
+              addedOnly: parsed.addedOnly,
               archived: parsed.archived,
               query: parsed.query,
               limit: parsed.limit,
@@ -2391,6 +2399,9 @@ app.post("/v1/skills/:slug/install", async (c) => {
       status: result.status,
       installed_version: result.installedVersion,
       current_version: result.currentVersion,
+      remote_enabled: result.remoteEnabled,
+      local_installed: true as const,
+      delivery_modes: result.remoteEnabled ? (["remote", "local"] as const) : (["local"] as const),
     });
   } catch (error) {
     return jsonError(c, error);
@@ -2402,14 +2413,196 @@ app.delete("/v1/skills/:slug/install", async (c) => {
   try {
     actorFromContext(c, true);
     requireScope(c, "skills:read");
-    await withTenant(
+    const result = await withTenant(
       c,
       ({ actor, orgId, database }) => uninstallSkill({ actor, orgId, slug: c.req.param("slug"), database }),
       true,
     );
-    return c.json({ ok: true as const, installed: false as const, status: "none" as const });
+    return c.json({
+      ok: true as const,
+      installed: false as const,
+      status: "none" as const,
+      remote_enabled: result.remoteEnabled,
+      local_installed: false as const,
+      delivery_modes: result.remoteEnabled ? (["remote"] as const) : ([] as const),
+    });
   } catch (error) {
     return jsonError(c, error);
+  }
+});
+
+/** Expose a skill through remote discovery without copying its package onto the agent's machine. */
+app.put("/v1/skills/:slug/agent-catalog", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
+    const result = await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        enableSkillAgentCatalog({ actor, orgId, slug: c.req.param("slug"), database }),
+      true,
+    );
+    return c.json({
+      ok: true as const,
+      added: true,
+      remote_enabled: true,
+      local_installed: result.localInstalled,
+      delivery_modes: result.localInstalled ? (["remote", "local"] as const) : (["remote"] as const),
+    });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/** Remove remote discovery while preserving any independently installed local copy. */
+app.delete("/v1/skills/:slug/agent-catalog", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
+    const result = await withTenant(
+      c,
+      ({ actor, orgId, database }) =>
+        disableSkillAgentCatalog({ actor, orgId, slug: c.req.param("slug"), database }),
+      true,
+    );
+    return c.json({
+      ok: true as const,
+      added: result.localInstalled,
+      remote_enabled: false,
+      local_installed: result.localInstalled,
+      delivery_modes: result.localInstalled ? (["local"] as const) : ([] as const),
+    });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/**
+ * Materialize an immutable, bounded catalog view for an external gateway. No snapshot row is stored:
+ * every package carries its own signed proof and package delivery rechecks live access state.
+ */
+app.post("/v1/agent-catalog/snapshots", async (c) => {
+  try {
+    actorFromContext(c, true);
+    requireScope(c, "skills:read");
+    const agentId = c.get("agentId");
+    if (c.get("programmaticAuthKind") !== "agent" || !agentId) {
+      return jsonError(c, "agent catalog snapshots require Agent Auth", 401);
+    }
+    const raw = await c.req.text();
+    const input = agentCatalogSnapshotInputSchema.parse(raw.trim() ? JSON.parse(raw) : {});
+    const ttlSeconds = input.ttl_seconds ?? 8 * 60 * 60;
+    const createdAt = new Date();
+    const expiresAt = new Date(createdAt.getTime() + ttlSeconds * 1_000);
+    const snapshotId = randomUUID();
+    const { actor, orgId, plans } = await withTenant(
+      c,
+      async ({ actor, orgId, database }) => ({
+        actor,
+        orgId,
+        plans: await buildAgentCatalogSnapshot({ actor, orgId, database }),
+      }),
+      true,
+    );
+    // Convert one archive at a time. A workspace can expose many large packages, and retaining or
+    // converting all of them concurrently would let one request exhaust the API process memory.
+    const preparedPackages: Array<{
+      plan: (typeof plans)[number];
+      checksum: string;
+      sizeBytes: number;
+    }> = [];
+    for (const plan of plans) {
+      const zip = await tarGzToZip(await getSkillArchive({ key: plan.storagePath }));
+      preparedPackages.push({
+        plan,
+        checksum: `sha256:${createHash("sha256").update(zip).digest("hex")}`,
+        sizeBytes: zip.length,
+      });
+    }
+    const origin = new URL(c.req.url).origin;
+    return c.json({
+      snapshot_id: snapshotId,
+      workspace_id: orgId,
+      created_at: createdAt.toISOString(),
+      expires_at: expiresAt.toISOString(),
+      packages: preparedPackages.map(({ plan, checksum, sizeBytes }) => ({
+        skill_id: plan.skillId,
+        version_id: plan.versionId,
+        slug: plan.slug,
+        version: plan.version,
+        checksum,
+        size_bytes: sizeBytes,
+        frontmatter: plan.frontmatter,
+        dependency_slugs: plan.dependencySlugs,
+        root_slugs: plan.rootSlugs,
+        package_url: `${origin}/v1/agent-catalog/packages/${encodeURIComponent(plan.slug)}/${encodeURIComponent(plan.version)}`,
+        proof: signAgentCatalogProof({
+          v: 1,
+          snapshot_id: snapshotId,
+          workspace_id: orgId,
+          user_id: actor.id,
+          agent_id: agentId,
+          skill_id: plan.skillId,
+          version_id: plan.versionId,
+          slug: plan.slug,
+          version: plan.version,
+          checksum,
+          size_bytes: sizeBytes,
+          root_ids: plan.rootIds,
+          exp: Math.floor(expiresAt.getTime() / 1_000),
+        }),
+      })),
+    });
+  } catch (error) {
+    return jsonError(c, error);
+  }
+});
+
+/** Deliver one proof-bound package. Proofs stay in a header so credentials never enter URLs/logs. */
+app.get("/v1/agent-catalog/packages/:slug/:version", async (c) => {
+  try {
+    const proof = c.req.header("x-companion-catalog-proof")?.trim();
+    if (!proof) return jsonError(c, "agent catalog proof is required", 401);
+    const payload = verifyAgentCatalogProof(proof);
+    if (payload.slug !== c.req.param("slug") || payload.version !== c.req.param("version")) {
+      return jsonError(c, "agent catalog proof does not match the requested package", 401);
+    }
+    const actor = { id: payload.user_id, email: "catalog-proof@invalid", name: "Agent catalog" };
+    const found = await withTenantContext(
+      { orgId: payload.workspace_id, userId: payload.user_id },
+      (database) =>
+        authorizeAgentCatalogPackage({
+          actor,
+          orgId: payload.workspace_id,
+          skillId: payload.skill_id,
+          versionId: payload.version_id,
+          rootIds: payload.root_ids,
+          agentId: payload.agent_id,
+          database,
+        }),
+    );
+    if (
+      found.slug !== payload.slug
+      || found.version !== payload.version
+    ) {
+      return jsonError(c, "agent catalog package changed", 409);
+    }
+    const zip = await tarGzToZip(await getSkillArchive({ key: found.storagePath }));
+    const checksum = `sha256:${createHash("sha256").update(zip).digest("hex")}`;
+    if (checksum !== payload.checksum || zip.length !== payload.size_bytes) {
+      return jsonError(c, "agent catalog package bytes do not match the proof", 409);
+    }
+    return new Response(new Uint8Array(zip), {
+      headers: {
+        "content-type": "application/zip",
+        "content-disposition": `attachment; filename="${payload.slug}.zip"`,
+        "content-length": String(zip.length),
+        "cache-control": "private, no-store",
+        "x-companion-package-checksum": checksum,
+      },
+    });
+  } catch (error) {
+    return jsonError(c, error, 401);
   }
 });
 

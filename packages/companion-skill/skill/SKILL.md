@@ -182,7 +182,7 @@ The bootstrap resolves the Agent Auth connection, obtains `skills:read` on deman
 with `workspace`, `companion`, `integrity`, `skills`, `actions`, and `errors`.
 
 Self-update covers every existing user-global Companion copy in the registered tool locations
-(`~/.claude/skills/companion`, `~/.codex/skills/companion`, `~/.agents/skills/companion`,
+(`~/.claude/skills/companion`, `~/.agents/skills/companion`,
 `~/.openclaw/skills/companion`, `~/.hermes/skills/companion`, and future entries in
 `scripts/tools.json`). It does not silently add
 Companion to a tool where the folder is absent. The bootstrap verifies every existing copy against
@@ -473,10 +473,10 @@ treat a close-named skill as its replacement.
 record that only has a single `installPath` is read as one `claude-code`/`user` target. There are two
 lockfile levels, same shape:
 
-- **User-scope** installs (`~/.claude/skills`, `~/.codex/skills`, `~/.agents/skills` for OpenCode,
+- **User-scope** installs (`~/.claude/skills`, `~/.agents/skills` for Codex and OpenCode,
   `~/.openclaw/skills` for OpenClaw, and `~/.hermes/skills` for Hermes) live in
   `~/.companion/skills.lock.json`.
-- **Project-scope** installs (`.claude/skills`, `.codex/skills`, `.agents/skills` for OpenCode, or
+- **Project-scope** installs (`.claude/skills`, `.agents/skills` for Codex and OpenCode, or
   `skills` for OpenClaw inside a repo/workspace) live in a **per-project**
   `<repo>/.companion/skills.lock.json`, one per project, with repo-relative paths so it can optionally
   be committed to share the project's skill set. Never write a PAT, JWT, ticket, or private key to
@@ -486,9 +486,9 @@ The set of tools this machine uses is recorded in `~/.companion/config.json`
 (`{ "schemaVersion": 1, "tools": ["claude-code", "codex", "opencode", "openclaw", "hermes"] }` — never any
 secret). The supported tools and their on-disk skill directories are declared in this skill's
 `scripts/tools.json` registry, which is extensible: adding a tool there is enough to make it an
-install target. The OpenCode target uses the shared Agent Skills paths (`~/.agents/skills` and
-`.agents/skills`) so the same installed package is discoverable by OpenCode's agent-compatible
-loader. OpenClaw uses `~/.openclaw/skills` for user-global installs and `<workspace>/skills` for
+install target. Codex and OpenCode use the shared Agent Skills paths (`~/.agents/skills` and
+`.agents/skills`), so selecting both deploys the physical package once while retaining both logical
+target records. OpenClaw uses `~/.openclaw/skills` for user-global installs and `<workspace>/skills` for
 workspace installs. Hermes uses `~/.hermes/skills` as its recursive, user-global source of truth and
 does not expose a canonical project scope. `scripts/tools.schema.json` is the registry's JSON Schema
 (referenced via `$schema`).
@@ -502,15 +502,37 @@ workspace and signs a separate 60-second JWT for each call:
 printf '%s' '{"action":"api","method":"GET","path":"/skills?lib=org"}' | node scripts/companion-agent-client.mjs
 printf '%s' '{"action":"api","method":"GET","path":"/skills?lib=mine"}' | node scripts/companion-agent-client.mjs
 printf '%s' '{"action":"api","method":"GET","path":"/skills?installed=true"}' | node scripts/companion-agent-client.mjs
+printf '%s' '{"action":"api","method":"GET","path":"/skills?remote=true"}' | node scripts/companion-agent-client.mjs
+printf '%s' '{"action":"api","method":"GET","path":"/skills?added=true"}' | node scripts/companion-agent-client.mjs
 ```
 
 `lib=org` lists the org library. `lib=mine` lists the caller's My Skills: authored personal skills
-plus org skills reported as installed. `installed=true` narrows any list to skills with a
-`skill_installs` record for the current user, which means "reported installed to Companion"; it does
-not prove the files still exist on disk. `GET /skills/{slug}` also requires `skills:read`; the
+plus org skills they Added. `installed=true` means a reported durable Local copy; `remote=true`
+means gateway exposure; `added=true` accepts either. Personal skills are implicitly Remote for their
+creator. A Local report does not prove the files still exist on disk. `GET /skills/{slug}` also requires `skills:read`; the
 installer uses it to resolve the canonical skill metadata before dependency and
 package downloads. Skill rows include `share_token`; for live org skills only, use it to build a
 clean public preview URL such as `/s/$share_token`.
+
+### Use the on-demand agent gateway
+
+`companion-gateway` is an external local client, not an agent launcher. It discovers every connected
+schema-v3 workspace, requests `POST /agent-catalog/snapshots`, merges personal and Remote-enabled
+roots, and writes metadata-only proxies to `~/.claude/skills` and `~/.agents/skills`. Real packages
+and their exact dependency closure are downloaded only after `companion-gateway resolve`, verified,
+and extracted into a private temporary directory. Snapshot lifetime is eight hours by default and
+never more than 24 hours; expiry or offline access fails closed. The originating Agent Auth identity,
+its exact-workspace `skills:read` grant, live membership, personal ownership, Remote state, and archive
+state are rechecked at package delivery, so disconnect or grant revocation wins. Package URLs stay on
+the configured workspace API origin, and native proxies also require a private ownership-registry entry.
+
+Use `PUT /skills/{slug}/agent-catalog` and `DELETE /skills/{slug}/agent-catalog` to toggle Remote
+without changing a Local copy. Use the existing install endpoints only for Local state. A same-name
+root in multiple workspaces blocks gateway sync until `~/.companion/gateway.json` supplies an explicit
+`<workspace-id>/<slug>` alias. The gateway never overwrites an unmanaged native skill folder.
+
+Vercel/FUSE is deferred until the local resolver is validated; do not introduce a mount, sandbox,
+deployment, or agent-launch flow in Companion.
 
 ### Free and Pro workspace gates
 
@@ -1323,7 +1345,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.35.0","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.36.0","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 

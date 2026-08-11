@@ -8,7 +8,8 @@ Companion does not create, launch, host, resume, or execute agents. It has no ch
 
 - Skills are portable files, not opaque hosted behavior.
 - Organization and personal libraries have explicit, predictable ownership.
-- Validation, immutable versions, dependencies, comments, public releases, and install records make reuse trustworthy.
+- Validation, immutable versions, dependencies, comments, public releases, and independent Remote/Local delivery records make reuse trustworthy.
+- An optional external local gateway exposes metadata-only native skill proxies and resolves approved packages on demand; it remains a client, never a Companion runtime.
 - Labels organize skills without changing access.
 - Secrets remain write-only and are disclosed only through scoped, short-lived grants.
 - Skill Databases provide declared, tenant-scoped state without turning Companion into an execution platform.

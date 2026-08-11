@@ -325,7 +325,7 @@ describe("compiled Companion agent client", () => {
         authorization: `Bearer ${syntheticToken}`,
         target: "conductor-workspace-1",
       }]);
-      expect(existsSync(join(projectRoot, ".codex", "skills", "delegated-public", "SKILL.md"))).toBe(true);
+      expect(existsSync(join(projectRoot, ".agents", "skills", "delegated-public", "SKILL.md"))).toBe(true);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       rmSync(fixtureRoot, { recursive: true, force: true });

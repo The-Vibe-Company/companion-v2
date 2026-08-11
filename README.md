@@ -2,7 +2,7 @@
 
 Companion v2 is an open-source, self-hostable, multi-tenant **Skills Hub** for organizations and the coding agents their members already use.
 
-It manages personal and organization `SKILL.md` libraries, labels, safe uploads, validation, immutable versions, dependencies, comments, installs and updates, public releases, GitHub synchronization, write-only skill secrets, and hosted Skill Databases.
+It manages personal and organization `SKILL.md` libraries, labels, safe uploads, validation, immutable versions, dependencies, comments, Remote/Local delivery state, public releases, GitHub synchronization, write-only skill secrets, and hosted Skill Databases.
 
 Companion does **not** create, launch, run, resume, chat with, or deploy agents. External coding agents connect as delegated Skills Hub clients through Agent Auth.
 
@@ -14,7 +14,8 @@ Companion does **not** create, launch, run, resume, chat with, or deploy agents.
 - Organization skills are manageable by every member.
 - Personal skills are creator-only, including against admins.
 - **Share** is the one-way, owner-only `personal → org` transition.
-- Labels organize each library; install rows track organization skills used by a member.
+- Labels organize each library; Added skills independently track Remote gateway exposure and durable Local copies.
+- The external [agent gateway](docs/agent-gateway.md) creates metadata-only native proxies and resolves exact packages on demand.
 
 ## Repository
 

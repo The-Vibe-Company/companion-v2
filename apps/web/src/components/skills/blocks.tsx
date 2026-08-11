@@ -76,6 +76,17 @@ export function InstallMark({ state }: { state: InstallState }) {
   return null;
 }
 
+/** Explicit delivery state; avoids overloading "installed" now that remote skills are on-demand. */
+export function DeliveryMark({ remote, local }: { remote: boolean; local: boolean }) {
+  const label = remote && local ? "Both" : remote ? "Remote" : local ? "Local" : null;
+  if (!label) return null;
+  return (
+    <span className="imark imark--ok" title={`${label} delivery`} aria-label={`${label} delivery`}>
+      {label}
+    </span>
+  );
+}
+
 /** key: value highlighter for the SKILL.md frontmatter preview. */
 export function Frontmatter({ text }: { text: string }) {
   return (
@@ -106,8 +117,8 @@ export function SkillBody({ description }: { description: string }) {
       <p>{description}</p>
       <h4>Usage</h4>
       <p>
-        Install the skill on an agent you can edit. It is delivered as a versioned SKILL.md package and
-        runs against the agent&apos;s declared tools on its next reconcile.
+        Add it to the remote catalog for on-demand use, or keep a durable local copy. Both modes pin a
+        versioned SKILL.md package and use only the agent&apos;s declared tools.
       </p>
     </div>
   );

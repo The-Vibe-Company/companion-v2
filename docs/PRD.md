@@ -15,7 +15,7 @@ Give organizations one secure, self-hostable place to govern reusable AI coding 
 
 - Personal and organization libraries with workspace-unique slugs.
 - Safe ZIP upload, browser authoring, manifest validation, immutable versions, archive/restore, rename, and one-way Share.
-- Dependencies, labels, comments, Activity, install/update reporting, and local inventory.
+- Dependencies, labels, comments, Activity, independent Remote/Local delivery reporting, and local inventory.
 - Pinned public releases and safe package downloads for verified sessions, approved Agent Auth tickets, and exact `public-skills:install` PATs.
 - GitHub App synchronization and REST/CLI workflows.
 
@@ -24,6 +24,7 @@ Give organizations one secure, self-hostable place to govern reusable AI coding 
 - Write-only skill secrets with audience/recipient controls, stable bindings, redaction, preflight, and one-time redemption grants.
 - Declared hosted Skill Databases with organization and personal realms, additive schemas, parameterized statements, and explicit personal-realm shares.
 - Delegated Agent Auth limited to skills, Skill Databases, public installs, and skill secrets. Connected clients are external consumers, never hosted agents.
+- A stateless catalog snapshot API for an external local gateway, with exact dependency closure and revocation-aware package proofs.
 - Short-lived child PATs may inherit only the server-computed active exact-workspace Agent Auth grant snapshot; callers cannot choose broader scopes or organizations.
 
 ### Security
@@ -51,5 +52,6 @@ Give organizations one secure, self-hostable place to govern reusable AI coding 
 
 - Old runtime web URLs redirect to Skills without preserving runtime state; old API paths return not found, and no runtime navigation or action renders.
 - A forward migration removes runtime tables, policies, functions, indexes, and enums without changing historical migrations.
-- Skills list/detail/upload/publish/install/public release and authenticated external-agent workflows pass behavior tests.
+- Skills list/detail/upload/publish/Remote/Local/public release and authenticated external-agent workflows pass behavior tests.
+- The gateway passes resolver safety and build tests on macOS, Linux, and Windows before any Vercel/FUSE phase begins.
 - Typecheck, lint, build, migration/integration tests, browser smoke, and change verification pass.

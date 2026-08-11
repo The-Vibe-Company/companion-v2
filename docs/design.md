@@ -20,6 +20,7 @@ packages/github          GitHub App and deterministic repository writer
 packages/auth            Better Auth
 packages/billing         Stripe integration
 packages/companion-skill bundled external-agent workflow
+clients/companion-gateway external Go resolver and metadata-proxy client
 ```
 
 There is no sandbox/runtime package, provider adapter, deployment reconciler, Project supervisor, run supervisor, model catalog, or agent launcher.
@@ -28,7 +29,7 @@ There is no sandbox/runtime package, provider adapter, deployment reconciler, Pr
 
 Every tenant-owned row carries `org_id`. The current Drizzle schema in `packages/db/src/schema.ts` is the source of truth.
 
-Core entities are organizations, users, memberships, invitations, skills, immutable skill versions/files, dependencies, installs, labels and personal labels, comments/images, public releases and transfer tickets, GitHub connections/destinations, skill-secret declarations/bindings/suggestions, encrypted secrets/versions/recipients, Skill Database declarations/realms/shares/object deletions, audit records, billing, tokens, onboarding/preferences, and Agent Auth identities/grants.
+Core entities are organizations, users, memberships, invitations, skills, immutable skill versions/files, dependencies, Remote/Local delivery records, labels and personal labels, comments/images, public releases and transfer tickets, GitHub connections/destinations, skill-secret declarations/bindings/suggestions, encrypted secrets/versions/recipients, Skill Database declarations/realms/shares/object deletions, audit records, billing, tokens, onboarding/preferences, and Agent Auth identities/grants.
 
 The forward migration `0063_skills_hub_only.sql` intentionally drops all historical Project, skill-run, sandbox-usage, model-provider, prompt, transcript, attachment, artifact, and runtime worker state. The cutover is fail-closed: its first statement refuses to drop ownership rows while Project workspaces, unsettled sandboxes, active usage, or S3-backed runtime metadata remain. Operators must quiesce the old release and drain or explicitly delete those external resources before upgrading. Historical migrations remain immutable so already-migrated databases can upgrade safely.
 
@@ -65,6 +66,16 @@ An authenticated Agent Auth identity may issue a short-lived child PAT only thro
 ## API and fail-closed removal
 
 The API exposes auth, organizations, skills, labels, dependencies, comments, files/versions, installs, public releases, GitHub, secrets, Skill Databases, billing, tokens, onboarding, and skill-facing Agent Auth. Project, run, prompt, transcript, runtime attachment/artifact, model-provider, and launch endpoints are not registered and therefore use the normal not-found response.
+
+The agent catalog is stateless. `skill_installs` holds two independent timestamps: Remote catalog
+exposure and a reported Local copy. Snapshot responses select creator-owned personal roots plus
+Remote-enabled org roots, pin their current dependency closure, and sign each transport package.
+Package delivery revalidates the originating Agent Auth identity and its exact-workspace read grant,
+tenant membership, root delivery state, personal ownership, and archive state. The 0064 migration
+keeps legacy insert writers compatible during rolling deployment while new writers set an explicit
+delivery mode. The external Go gateway stores only snapshot metadata/proofs and native proxy folders; real
+packages exist only in bounded temporary resolver directories. Vercel/FUSE remains a deferred client
+integration and is not part of the control plane.
 
 The web has no `/projects` route and no Run/Session state in the Skills URL grammar. Old query parameters are ignored and canonical navigation returns to the Skills detail. The only product workspace navigation is Skills.
 

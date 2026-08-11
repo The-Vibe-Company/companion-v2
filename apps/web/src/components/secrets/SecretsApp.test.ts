@@ -136,7 +136,7 @@ describe("SecretsApp", () => {
     expect(primary.querySelector('[aria-current="page"]')?.textContent).toContain("Secrets");
     expect(primary.textContent).toContain("My Skills");
     expect(primary.textContent).toContain("Organization");
-    expect(primary.textContent).toContain("Installed");
+    expect(primary.textContent).toContain("Added");
     expect(primary.textContent).toContain("Companion skills");
     expect(primary.textContent).toContain("Archived");
   });
