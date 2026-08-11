@@ -719,12 +719,12 @@ export function Sidebar({
               className={"navitem" + (inWorkspace && selection!.kind === "installed" ? " navitem--active" : "")}
               aria-current={inWorkspace && selection!.kind === "installed" ? "page" : undefined}
               onClick={() => runAndClose(onSelectInstalled)}
-              title={installedUpdateCount > 0 ? `${installedUpdateCount} update${installedUpdateCount === 1 ? "" : "s"} available` : "Installed from the organization"}
+              title={installedUpdateCount > 0 ? `${installedUpdateCount} update${installedUpdateCount === 1 ? "" : "s"} available` : "Added from the organization"}
             >
               <span className="navitem__ico">
                 <Icon name="download" />
               </span>
-              <span className="navitem__label">Installed</span>
+              <span className="navitem__label">Added</span>
               {installedUpdateCount > 0 ? (
                 <span
                   className="ml-updot"

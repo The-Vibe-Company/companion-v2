@@ -15,7 +15,7 @@ import type { LabelVM, SkillGroupBy } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { UserAvatar } from "../UserAvatar";
 import type { SkillContributorVM, SkillVM } from "@/lib/types";
-import { InstallMark } from "./blocks";
+import { DeliveryMark, InstallMark } from "./blocks";
 import { chipParts, type Filter } from "./filters";
 import { FilterAdd } from "./FilterMenu";
 import {
@@ -280,7 +280,8 @@ function SkillRow({
         <span className="crow__name">
           <span className="crow__title">{skill.id}</span>
           <ValidationMarker skill={skill} />
-          <InstallMark state={skill.installStatus} />
+          <DeliveryMark remote={skill.remoteEnabled ?? false} local={skill.localInstalled ?? skill.installStatus !== "none"} />
+          {skill.installStatus === "update" ? <InstallMark state="update" /> : null}
         </span>
         <SkillPaths
           paths={flat ? scopedPaths.map((path) => ({ path, label: path })) : row.relativePaths}
@@ -316,7 +317,7 @@ function SkillRow({
       <span className="crow__mobilemeta">
         <span>{skill.updated}</span>
         <span className="crow__mobile-install">
-          <InstallMark state={skill.installStatus} />
+          <DeliveryMark remote={skill.remoteEnabled ?? false} local={skill.localInstalled ?? skill.installStatus !== "none"} />
         </span>
       </span>
     </div>
@@ -589,7 +590,7 @@ export function ListView({
               {q.trim()
                 ? "No skills match your search. Clear the search or filters to see this view in full."
                 : scopeKind === "installed"
-                  ? "You have not installed any organization skills yet. Open one in Organization to install it."
+                  ? "No organization skills have been added yet. Open one in Organization and enable Remote, install Local, or use both."
                   : library === "mine"
                     ? "No skills in My Skills yet. Add a skill, or install one from the organization library."
                     : "No organization skills match this view. Clear the filters to see them all."}

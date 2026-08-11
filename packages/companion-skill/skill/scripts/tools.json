@@ -11,7 +11,7 @@
     "codex": {
       "displayName": "Codex",
       "detect": ["~/.codex"],
-      "skillsDir": { "user": "~/.codex/skills", "project": ".codex/skills" },
+      "skillsDir": { "user": "~/.agents/skills", "project": ".agents/skills" },
       "format": "skill-md"
     },
     "opencode": {

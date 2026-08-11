@@ -243,17 +243,17 @@ describe("atomic public skill install", () => {
     });
     expect(second.replaced).toBe(true);
     expect(readFileSync(join(second.destination, "SKILL.md"), "utf8")).toBe("# Second\n");
-    expect(readdirSync(join(projectRoot, ".codex", "skills"))).toEqual(["safe-skill"]);
+    expect(readdirSync(join(projectRoot, ".agents", "skills"))).toEqual(["safe-skill"]);
   });
 
   it.each(["tool directory", "skills directory"])("rejects a symbolic-link %s before staging", async (kind) => {
     const projectRoot = await mkdtemp(join(tmpdir(), "companion-public-install-root-"));
     const outside = await mkdtemp(join(tmpdir(), "companion-public-install-outside-"));
     if (kind === "tool directory") {
-      symlinkSync(outside, join(projectRoot, ".codex"), "dir");
+      symlinkSync(outside, join(projectRoot, ".agents"), "dir");
     } else {
-      mkdirSync(join(projectRoot, ".codex"));
-      symlinkSync(outside, join(projectRoot, ".codex", "skills"), "dir");
+      mkdirSync(join(projectRoot, ".agents"));
+      symlinkSync(outside, join(projectRoot, ".agents", "skills"), "dir");
     }
 
     expect(() => installPublicSkillZip({
@@ -283,9 +283,9 @@ describe("atomic public skill install", () => {
       confirmInstall: true,
     })).toThrow(/symbolic-link install root/);
 
-    const destination = join(realRoot, ".codex", "skills", "safe-skill");
+    const destination = join(realRoot, ".agents", "skills", "safe-skill");
     const outside = join(container, "outside-skill");
-    mkdirSync(join(realRoot, ".codex", "skills"), { recursive: true });
+    mkdirSync(join(realRoot, ".agents", "skills"), { recursive: true });
     mkdirSync(outside);
     symlinkSync(outside, destination, "dir");
     expect(() => installPublicSkillZip({

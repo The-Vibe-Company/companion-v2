@@ -362,8 +362,8 @@ describe("ListView grouped rhythm", () => {
       { labels, groupBy: "folder", library: "mine" },
     );
 
-    expect(html.indexOf(">Marketing<")).toBeLessThan(html.indexOf(">Installed<"));
-    expect(html.indexOf(">Installed<")).toBeLessThan(html.indexOf(">Without folder<"));
+    expect(html.indexOf(">Marketing<")).toBeLessThan(html.indexOf(">Added<"));
+    expect(html.indexOf(">Added<")).toBeLessThan(html.indexOf(">Without folder<"));
   });
 
   it("uses category order only for grouped sections", () => {

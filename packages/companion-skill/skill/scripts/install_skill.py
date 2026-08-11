@@ -230,7 +230,14 @@ def plan_targets(
     return plan
 
 
-def existing_target(lock_records: dict[str, Any], skill_name: str, tool: str, scope: str) -> tuple[bool, str | None]:
+def existing_target(
+    lock_records: dict[str, Any],
+    skill_name: str,
+    tool: str,
+    scope: str,
+    target_path: Path | None = None,
+    project_root: Path | None = None,
+) -> tuple[bool, str | None]:
     """Return (is_tracked, folder_checksum) for a (tool, scope) target in the prior lockfile.
 
     `is_tracked` distinguishes "Companion has a record for this target" from a hand-placed folder.
@@ -244,6 +251,15 @@ def existing_target(lock_records: dict[str, Any], skill_name: str, tool: str, sc
     for target in normalize_targets(record):
         if target.get("tool") == tool and target.get("scope") == scope:
             return (True, target.get("checksum"))
+        # Codex and OpenCode intentionally share .agents/skills. Treat a record written under either
+        # client name as ownership of the same physical target, including committed relative paths.
+        stored_path = target.get("path")
+        if target_path is not None and target.get("scope") == scope and isinstance(stored_path, str):
+            stored = Path(stored_path).expanduser()
+            if not stored.is_absolute() and project_root is not None:
+                stored = project_root / stored
+            if os.path.normcase(os.path.abspath(stored)) == os.path.normcase(os.path.abspath(target_path)):
+                return (True, target.get("checksum"))
     return (False, None)
 
 
@@ -276,7 +292,7 @@ def target_conflict(
         return target_dir, None
 
     prior = prior_user if scope == "user" else prior_project
-    tracked, recorded = existing_target(prior, skill_name, tool, scope)
+    tracked, recorded = existing_target(prior, skill_name, tool, scope, target_dir, project_root)
     if not tracked:
         row = {
             "tool": tool,
@@ -317,13 +333,36 @@ def target_preflight_conflicts(
 ) -> list[dict[str, Any]]:
     """Return blocking local target conflicts without mutating the target folders."""
     conflicts: list[dict[str, Any]] = []
-    for tool, scope in plan:
+    for group in physical_target_groups(skill_name, plan, registry, project_root):
+        tool, scope = group[0]
         _target_dir, conflict = target_conflict(
             skill_name, tool, scope, registry, project_root, prior_user, prior_project, force, include_checksum=False
         )
         if conflict:
-            conflicts.append(conflict)
+            conflicts.extend({**conflict, "tool": grouped_tool} for grouped_tool, _scope in group)
     return conflicts
+
+
+def physical_target_groups(
+    skill_name: str,
+    plan: list[tuple[str, str]],
+    registry: dict[str, Any],
+    project_root: Path | None,
+) -> list[list[tuple[str, str]]]:
+    """Group logical clients that resolve to one physical skill directory."""
+    groups: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    order: list[tuple[str, str]] = []
+    for tool, scope in plan:
+        try:
+            target = resolve_target_dir(tool, scope, skill_name, project_root, registry)
+            key = (scope, os.path.normcase(os.path.abspath(target)))
+        except SystemExit:
+            key = (scope, f"unresolved:{tool}")
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append((tool, scope))
+    return [groups[key] for key in order]
 
 
 def fan_out_install(
@@ -338,15 +377,19 @@ def fan_out_install(
 ) -> list[dict[str, Any]]:
     """Deploy `package_dir` into each planned (tool, scope) target. Returns one result row each."""
     results: list[dict[str, Any]] = []
-    for tool, scope in plan:
+    for group in physical_target_groups(skill_name, plan, registry, project_root):
+        tool, scope = group[0]
         target_dir, conflict = target_conflict(
             skill_name, tool, scope, registry, project_root, prior_user, prior_project, force, include_checksum=True
         )
         if conflict:
-            results.append(conflict)
+            results.extend({**conflict, "tool": grouped_tool} for grouped_tool, _scope in group)
             continue
         if target_dir is None:
-            results.append({"tool": tool, "scope": scope, "status": "error", "reason": "target directory could not be resolved", "path": None, "checksum": None})
+            results.extend(
+                {"tool": grouped_tool, "scope": grouped_scope, "status": "error", "reason": "target directory could not be resolved", "path": None, "checksum": None}
+                for grouped_tool, grouped_scope in group
+            )
             continue
 
         # Isolate each target: a copy/remove/rename failure on one must not abort the fan-out, so every
@@ -355,17 +398,21 @@ def fan_out_install(
             deploy_to_target(package_dir, target_dir, install_root_for_scope(scope, project_root))
             checksum = compute_dir_checksum(target_dir)
         except (OSError, SystemExit) as exc:
-            results.append({"tool": tool, "scope": scope, "status": "error", "reason": str(exc), "path": str(target_dir), "checksum": None})
+            results.extend(
+                {"tool": grouped_tool, "scope": grouped_scope, "status": "error", "reason": str(exc), "path": str(target_dir), "checksum": None}
+                for grouped_tool, grouped_scope in group
+            )
             continue
-        results.append(
+        results.extend(
             {
-                "tool": tool,
-                "scope": scope,
+                "tool": grouped_tool,
+                "scope": grouped_scope,
                 "status": "installed",
                 "reason": None,
                 "path": str(target_dir),
                 "checksum": checksum,
             }
+            for grouped_tool, grouped_scope in group
         )
     return results
 
@@ -598,6 +645,7 @@ def install_prepared_node(
     ]
     if workspace_id and node["slug"] in preflight_skills_set:
         target_dirs = [resolve_target_dir(tool, scope, node["skill"]["name"], project_root, registry) for tool, scope in plan]
+        unique_target_dirs = list(dict.fromkeys(target_dirs))
         target_roots = {
             str(target): install_root_for_scope(scope, project_root)
             for (_tool, scope), target in zip(plan, target_dirs)
@@ -609,7 +657,7 @@ def install_prepared_node(
         try:
             projection_path = deploy_packages_with_projection(
                 package_dir,
-                target_dirs,
+                unique_target_dirs,
                 workspace_id,
                 node["slug"],
                 projection_items,

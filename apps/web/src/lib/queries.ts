@@ -19,6 +19,7 @@ import type {
   ShareSkillResult,
   SkillVersionRow,
   SkillPublicVersionResult,
+  SkillAgentCatalogResult,
   ValidationResult,
   FrontmatterWarning,
   GettingStartedState,
@@ -175,6 +176,13 @@ export async function markSkillInstalled(
 /** Mark a published skill as not installed for the current user (uninstall / correct a false state). */
 export async function markSkillUninstalled(slug: string): Promise<SkillUninstallResult> {
   return apiFetch<SkillUninstallResult>(`/v1/skills/${slug}/install`, { method: "DELETE" });
+}
+
+/** Independently enable or disable remote agent discovery for an organization skill. */
+export async function setSkillRemoteEnabled(slug: string, enabled: boolean): Promise<SkillAgentCatalogResult> {
+  return apiFetch<SkillAgentCatalogResult>(`/v1/skills/${encodeURIComponent(slug)}/agent-catalog`, {
+    method: enabled ? "PUT" : "DELETE",
+  });
 }
 
 /** Fetch every file inside a packaged skill version (eager: one fetch per slug+version). */

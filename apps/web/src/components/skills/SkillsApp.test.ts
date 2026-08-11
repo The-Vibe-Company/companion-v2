@@ -25,6 +25,7 @@ const queryMocks = vi.hoisted(() => ({
   issueToken: vi.fn(),
   markSkillInstalled: vi.fn(),
   markSkillUninstalled: vi.fn(),
+  setSkillRemoteEnabled: vi.fn(),
   publishSkillPackage: vi.fn(),
   restoreSkill: vi.fn(),
   saveSkillFilterPreferences: vi.fn(),
@@ -165,6 +166,9 @@ function skillRowFromVM(vm: SkillVM): SkillListRow {
     installed: vm.installStatus !== "none",
     install_status: vm.installStatus,
     installed_version: vm.installedVersion,
+    remote_enabled: vm.remoteEnabled ?? false,
+    local_installed: vm.localInstalled ?? vm.installStatus !== "none",
+    delivery_modes: vm.deliveryModes ?? [],
     requires_count: vm.requiresCount,
     used_by_count: vm.usedByCount,
     dep_warn: vm.depWarn,
@@ -457,8 +461,16 @@ beforeEach(() => {
   queryMocks.archiveSkill.mockResolvedValue(undefined);
   queryMocks.createSkillInline.mockResolvedValue({});
   queryMocks.issueToken.mockResolvedValue({ token: "cmp_pat_test", id: "token-1", name: "Test" });
-  queryMocks.markSkillInstalled.mockResolvedValue({ installed: true, status: "installed", installed_version: "1.0.0" });
-  queryMocks.markSkillUninstalled.mockResolvedValue({ installed: false });
+  queryMocks.markSkillInstalled.mockResolvedValue({
+    ok: true, installed: true, status: "installed", installed_version: "1.0.0", current_version: "1.0.0",
+    remote_enabled: false, local_installed: true, delivery_modes: ["local"],
+  });
+  queryMocks.markSkillUninstalled.mockResolvedValue({
+    ok: true, installed: false, status: "none", remote_enabled: false, local_installed: false, delivery_modes: [],
+  });
+  queryMocks.setSkillRemoteEnabled.mockResolvedValue({
+    ok: true, added: true, remote_enabled: true, local_installed: false, delivery_modes: ["remote"],
+  });
   queryMocks.publishSkillPackage.mockResolvedValue({});
   queryMocks.restoreSkill.mockResolvedValue(undefined);
   queryMocks.saveSkillFilterPreferences.mockResolvedValue(undefined);
@@ -569,7 +581,7 @@ describe("SkillsApp initial route", () => {
         skill({ id: "my-draft", scope: "personal", source: "authored" }),
       ],
     });
-    expect(html).toContain("Installed");
+    expect(html).toContain("Added");
     expect(html).toContain("brand-linter");
     expect(html).not.toContain("Open skill my-draft");
   });
@@ -866,7 +878,7 @@ describe("SkillsApp contextual skill actions", () => {
     clickButton(container, "Done");
     await flushEffects();
     expect(container.querySelector('button[aria-label="Install skill loose-skill"]')).toBeNull();
-    expect(container.textContent).toContain("Installed1");
+    expect(container.textContent).toContain("Added1");
   });
 
   it("refreshes both libraries after an install report so dependency installs are synchronized", async () => {
@@ -889,8 +901,35 @@ describe("SkillsApp contextual skill actions", () => {
 
     expect(queryMocks.fetchSkillLibrary).toHaveBeenCalledWith("mine");
     expect(queryMocks.fetchSkillLibrary).toHaveBeenCalledWith("org");
-    expect(container.textContent).toContain("Installed2");
+    expect(container.textContent).toContain("Added2");
     expect(container.querySelector('button[aria-label="Install skill brand-kit"]')).toBeNull();
+  });
+
+  it("keeps the authoritative Both state when install-report library refresh fails", async () => {
+    const remote = skill({
+      id: "seo-helper", source: "installed", remoteEnabled: true, localInstalled: false, deliveryModes: ["remote"],
+    });
+    const both = {
+      ...remote,
+      installStatus: "installed" as const,
+      installedVersion: "1.0.0",
+      remoteEnabled: true,
+      localInstalled: true,
+      deliveryModes: ["remote", "local"] as Array<"remote" | "local">,
+    };
+    queryMocks.fetchSkillBySlug.mockResolvedValue(skillRowFromVM(both));
+    queryMocks.fetchSkillLibrary.mockRejectedValue(new Error("refresh failed"));
+    const { container } = await mountSkillsApp(
+      { lib: "mine", kind: "all", skill: "seo-helper" },
+      { props: { initialMineSkills: [remote], initialOrgSkills: [{ ...remote, source: null }] } },
+    );
+    clickButton(container, "Install skill");
+    await flushEffects();
+    expect(container.textContent).toContain("Skill installed");
+    clickButton(container, "Done");
+    await flushEffects();
+    expect(container.textContent).toContain("Delivery is Both");
+    expect(container.textContent).toContain("The skill was installed, but its dependency status could not be refreshed");
   });
 
   it("retries install-report polling after a transient error and ignores a stale version", async () => {
@@ -977,7 +1016,10 @@ describe("SkillsApp contextual skill actions", () => {
           rejectFirst = reject;
         }),
       )
-      .mockResolvedValueOnce({ installed: true, status: "installed", installed_version: "1.0.0" });
+      .mockResolvedValueOnce({
+        ok: true, installed: true, status: "installed", installed_version: "1.0.0", current_version: "1.0.0",
+        remote_enabled: false, local_installed: true, delivery_modes: ["local"],
+      });
     const { container } = await mountSkillsApp(
       { lib: "org", kind: "all", skill: "seo-helper" },
       { url: "/skills?lib=org&skill=seo-helper" },
@@ -990,14 +1032,68 @@ describe("SkillsApp contextual skill actions", () => {
     clickButton(container, "More actions");
     clickButton(container, "Mark as installed");
     await flushEffects();
-    expect(container.textContent).toContain("Installed2");
+    expect(container.textContent).toContain("Added2");
 
     rejectFirst(new Error("first correction failed"));
     await flushEffects();
 
-    expect(container.textContent).toContain("Installed1");
+    expect(container.textContent).toContain("Added1");
     clickButton(container, "More actions");
     expect(container.textContent).toContain("Mark as not installed");
+  });
+
+  it("keeps a Remote mirror in My Skills when its Local copy is removed", async () => {
+    const both = skill({
+      id: "seo-helper", source: "installed", installStatus: "installed", installedVersion: "1.0.0",
+      remoteEnabled: true, localInstalled: true, deliveryModes: ["remote", "local"],
+    });
+    queryMocks.markSkillUninstalled.mockResolvedValueOnce({
+      ok: true, installed: false, status: "none", remote_enabled: true, local_installed: false, delivery_modes: ["remote"],
+    });
+    const { container } = await mountSkillsApp(
+      { lib: "mine", kind: "all", skill: "seo-helper" },
+      { props: { initialMineSkills: [both], initialOrgSkills: [{ ...both, source: null }] } },
+    );
+    expect(container.textContent).toContain("Delivery is Both");
+    clickButton(container, "More actions");
+    clickButton(container, "Mark as not installed");
+    await flushEffects();
+    expect(container.textContent).toContain("Delivery is Remote");
+    expect(container.textContent).toContain("Added1");
+  });
+
+  it("adds Local delivery without clearing an existing Remote mode", async () => {
+    const remote = skill({
+      id: "seo-helper", source: "installed", remoteEnabled: true, localInstalled: false, deliveryModes: ["remote"],
+    });
+    queryMocks.markSkillInstalled.mockResolvedValueOnce({
+      ok: true, installed: true, status: "installed", installed_version: "1.0.0", current_version: "1.0.0",
+      remote_enabled: true, local_installed: true, delivery_modes: ["remote", "local"],
+    });
+    const { container } = await mountSkillsApp(
+      { lib: "mine", kind: "all", skill: "seo-helper" },
+      { props: { initialMineSkills: [remote], initialOrgSkills: [{ ...remote, source: null }] } },
+    );
+    expect(container.textContent).toContain("Delivery is Remote");
+    clickButton(container, "More actions");
+    clickButton(container, "Mark as installed");
+    await flushEffects();
+    expect(container.textContent).toContain("Delivery is Both");
+  });
+
+  it("keeps a committed Remote update when the follow-up refresh fails", async () => {
+    queryMocks.fetchSkillLibrary.mockRejectedValue(new Error("refresh failed"));
+    const { container } = await mountSkillsApp(
+      { lib: "org", kind: "all", skill: "seo-helper" },
+      { url: "/skills?lib=org&skill=seo-helper" },
+    );
+    clickButton(container, "More actions");
+    clickButton(container, "Add to remote agents");
+    await flushEffects();
+    expect(queryMocks.setSkillRemoteEnabled).toHaveBeenCalledWith("seo-helper", true);
+    clickButton(container, "More actions");
+    expect(container.textContent).toContain("Remove from remote agents");
+    expect(container.textContent).toContain("Remote delivery was updated");
   });
 
   it("restores an archived detail and its Restore CTA when restore fails", async () => {

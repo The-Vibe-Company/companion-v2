@@ -164,7 +164,7 @@ export function groupSkillsByRoot(
     key: "installed",
     kind: "installed",
     path: null,
-    label: "Installed",
+    label: "Added",
     icon: "package",
     color: null,
     rows: [],

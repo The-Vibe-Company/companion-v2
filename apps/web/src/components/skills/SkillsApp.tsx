@@ -25,6 +25,7 @@ import {
   fetchSkillLibrary,
   markSkillInstalled,
   markSkillUninstalled,
+  setSkillRemoteEnabled,
   renameLabel as renameLabelRpc,
   restoreSkill as restoreSkillRpc,
   saveSkillFilterPreferences,
@@ -548,36 +549,41 @@ export function SkillsApp({
       const orgRow = orgSkillsRef.current.find((s) => s.id === id) ?? mineSkillsRef.current.find((s) => s.id === id);
       if (!orgRow) return;
       const markVersion = orgRow.version ?? null;
-      const prevOrg = { status: orgRow.installStatus, version: orgRow.installedVersion };
+      const prevOrg = orgRow;
       const prevMine = mineSkillsRef.current;
       const prevMineRow = prevMine.find((row) => row.id === id && row.source === "installed");
       const prevMineIndex = prevMine.findIndex((row) => row.id === id && row.source === "installed");
       const operation = Symbol(id);
       installCorrectionOpsRef.current.set(id, operation);
       // Org row: reflect the new install status.
-      const nextOrg = orgSkillsRef.current.map((s) =>
-        s.id === id
-          ? installed
-            ? { ...s, installStatus: "installed" as const, installedVersion: markVersion }
-            : { ...s, installStatus: "none" as const, installedVersion: null }
-          : s,
-      );
+      const remoteEnabled = orgRow.remoteEnabled === true;
+      const optimisticModes = [
+        ...(remoteEnabled ? (["remote"] as const) : []),
+        ...(installed ? (["local"] as const) : []),
+      ];
+      const optimisticRow: SkillVM = {
+        ...orgRow,
+        installStatus: installed ? "installed" : "none",
+        installedVersion: installed ? markVersion : null,
+        remoteEnabled,
+        localInstalled: installed,
+        deliveryModes: [...optimisticModes],
+      };
+      const nextOrg = orgSkillsRef.current.map((s) => s.id === id ? { ...s, ...optimisticRow } : s);
       orgSkillsRef.current = nextOrg;
       setOrgSkills(nextOrg);
       // My-Skills mirror: add an installed copy, or drop it.
-      const nextMine: SkillVM[] = !installed
+      const nextMine: SkillVM[] = !installed && !remoteEnabled
         ? prevMine.filter((s) => !(s.id === id && s.source === "installed"))
-        : prevMine.some((s) => s.id === id)
-          ? prevMine
+        : prevMine.some((s) => s.id === id && s.source === "installed")
+          ? prevMine.map((s) => s.id === id && s.source === "installed" ? { ...s, ...optimisticRow, source: "installed", labels: s.labels } : s)
           : [
               ...prevMine,
               {
-                ...orgRow,
+                ...optimisticRow,
                 scope: "org" as const,
                 source: "installed" as const,
                 labels: [],
-                installStatus: "installed" as const,
-                installedVersion: markVersion,
               },
             ];
       mineSkillsRef.current = nextMine;
@@ -587,30 +593,40 @@ export function SkillsApp({
         .then((res) => {
           if (installCorrectionOpsRef.current.get(id) !== operation) return;
           installCorrectionOpsRef.current.delete(id);
-          if (res.installed && "installed_version" in res) {
-            const v = res.installed_version;
-            const st = res.status;
-            setOrgSkills((arr) => {
-              const next = arr.map((s) => (s.id === id ? { ...s, installStatus: st, installedVersion: v } : s));
-              orgSkillsRef.current = next;
-              return next;
-            });
-            setMineSkills((arr) => {
-              const next = arr.map((s) =>
-                s.id === id && s.source === "installed" ? { ...s, installStatus: st, installedVersion: v } : s,
-              );
-              mineSkillsRef.current = next;
-              return next;
-            });
-          }
-          setToast({ msg: installed ? `Marked ${id} as installed` : `Marked ${id} as not installed` });
+          const serverRow: SkillVM = {
+            ...orgRow,
+            installStatus: res.installed ? res.status : "none",
+            installedVersion: res.installed ? res.installed_version : null,
+            remoteEnabled: res.remote_enabled,
+            localInstalled: res.local_installed,
+            deliveryModes: [...res.delivery_modes],
+          };
+          setOrgSkills((arr) => {
+            const next = arr.map((s) => (s.id === id ? { ...s, ...serverRow } : s));
+            orgSkillsRef.current = next;
+            return next;
+          });
+          setMineSkills((arr) => {
+            const without = arr.filter((row) => !(row.id === id && row.source === "installed"));
+            const next = !res.remote_enabled && !res.local_installed
+              ? without
+              : restoreRowAtSnapshot(without, {
+                  ...serverRow,
+                  scope: "org" as const,
+                  source: "installed" as const,
+                  labels: prevMineRow?.labels ?? [],
+                }, prevMineIndex < 0 ? without.length : prevMineIndex);
+            mineSkillsRef.current = next;
+            return next;
+          });
+          setToast({ msg: installed ? `${id} is available locally` : `Removed the local copy of ${id}` });
         })
         .catch((e) => {
           if (installCorrectionOpsRef.current.get(id) !== operation) return;
           installCorrectionOpsRef.current.delete(id);
           setOrgSkills((arr) => {
             const next = arr.map((s) =>
-              s.id === id ? { ...s, installStatus: prevOrg.status, installedVersion: prevOrg.version } : s,
+              s.id === id ? prevOrg : s,
             );
             orgSkillsRef.current = next;
             return next;
@@ -625,6 +641,52 @@ export function SkillsApp({
         });
     },
     [orgActions],
+  );
+
+  const setRemoteEnabled = useCallback(
+    (id: string, enabled: boolean) => {
+      void (async () => {
+        let result;
+        try {
+          result = await setSkillRemoteEnabled(id, enabled);
+        } catch (error) {
+          orgActions.setError(error instanceof Error ? error.message : "Could not update remote delivery.");
+          return;
+        }
+        const source = orgSkillsRef.current.find((row) => row.id === id)
+          ?? mineSkillsRef.current.find((row) => row.id === id);
+        if (source) {
+          const updated: SkillVM = {
+            ...source,
+            remoteEnabled: result.remote_enabled,
+            localInstalled: result.local_installed,
+            deliveryModes: [...result.delivery_modes],
+          };
+          const nextOrg = orgSkillsRef.current.map((row) => row.id === id ? { ...row, ...updated } : row);
+          orgSkillsRef.current = nextOrg;
+          setOrgSkills(nextOrg);
+          const existingIndex = mineSkillsRef.current.findIndex((row) => row.id === id && row.source === "installed");
+          const without = mineSkillsRef.current.filter((row) => !(row.id === id && row.source === "installed"));
+          const nextMine = !result.remote_enabled && !result.local_installed
+            ? without
+            : restoreRowAtSnapshot(without, {
+                ...updated,
+                scope: "org",
+                source: "installed",
+                labels: existingIndex >= 0 ? mineSkillsRef.current[existingIndex]!.labels : [],
+              }, existingIndex < 0 ? without.length : existingIndex);
+          mineSkillsRef.current = nextMine;
+          setMineSkills(nextMine);
+        }
+        setToast({ msg: enabled ? `Added ${id} to remote agents` : `Removed ${id} from remote agents` });
+        try {
+          await refreshSkillLibraries();
+        } catch {
+          orgActions.setError("Remote delivery was updated, but the skill list could not be refreshed.");
+        }
+      })();
+    },
+    [orgActions, refreshSkillLibraries],
   );
 
   // --- Optimistic label mutations (per library) ------------------------------
@@ -1171,14 +1233,28 @@ export function SkillsApp({
     installCorrectionOpsRef.current.delete(reported.id);
     const nextOrg = orgSkillsRef.current.map((row) =>
       row.id === reported.id
-        ? { ...row, installStatus: reported.installStatus, installedVersion: reported.installedVersion }
+        ? {
+            ...row,
+            installStatus: reported.installStatus,
+            installedVersion: reported.installedVersion,
+            remoteEnabled: reported.remoteEnabled,
+            localInstalled: reported.localInstalled,
+            deliveryModes: reported.deliveryModes ? [...reported.deliveryModes] : [],
+          }
         : row,
     );
     const orgRow = nextOrg.find((row) => row.id === reported.id) ?? reported;
     const nextMine = mineSkillsRef.current.some((row) => row.id === reported.id && row.source === "installed")
       ? mineSkillsRef.current.map((row) =>
           row.id === reported.id && row.source === "installed"
-            ? { ...row, installStatus: reported.installStatus, installedVersion: reported.installedVersion }
+            ? {
+                ...row,
+                installStatus: reported.installStatus,
+                installedVersion: reported.installedVersion,
+                remoteEnabled: reported.remoteEnabled,
+                localInstalled: reported.localInstalled,
+                deliveryModes: reported.deliveryModes ? [...reported.deliveryModes] : [],
+              }
             : row,
         )
       : [
@@ -1190,6 +1266,9 @@ export function SkillsApp({
             labels: [],
             installStatus: reported.installStatus,
             installedVersion: reported.installedVersion,
+            remoteEnabled: reported.remoteEnabled,
+            localInstalled: reported.localInstalled,
+            deliveryModes: reported.deliveryModes ? [...reported.deliveryModes] : [],
           },
         ];
     orgSkillsRef.current = nextOrg;
@@ -1235,6 +1314,12 @@ export function SkillsApp({
         case "mark-not-installed":
           setInstalled(target.id, false);
           return;
+        case "enable-remote":
+          setRemoteEnabled(target.id, true);
+          return;
+        case "disable-remote":
+          setRemoteEnabled(target.id, false);
+          return;
         case "download":
           void fetchSkillDownloadUrl(target.id, target.version)
             .then((url) => {
@@ -1245,7 +1330,7 @@ export function SkillsApp({
             });
       }
     },
-    [archiveSkillById, orgActions, restoreSkillById, setInstalled],
+    [archiveSkillById, orgActions, restoreSkillById, setInstalled, setRemoteEnabled],
   );
 
   // --- Derived ---------------------------------------------------------------
@@ -1277,7 +1362,7 @@ export function SkillsApp({
 
   const activeLabel = selection.kind === "label" ? selection.label ?? null : null;
   const breadcrumb = useMemo(() => {
-    if (selection.kind === "installed") return ["Installed"];
+    if (selection.kind === "installed") return ["Added"];
     if (selection.kind === "label" && selection.label) return selection.label.split("/");
     return selection.lib === "org" ? ["All skills"] : ["My Skills"];
   }, [selection]);

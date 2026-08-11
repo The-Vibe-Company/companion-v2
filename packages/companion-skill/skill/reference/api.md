@@ -91,7 +91,12 @@ legacy PAT:
 | Explicit legacy PAT refresh | `POST /tokens/refresh` | Legacy mode only, preserves existing scopes |
 | List org library skills | `GET /skills?lib=org` | `skills:read` |
 | List My Skills | `GET /skills?lib=mine` | `skills:read` |
-| List reported installed skills | `GET /skills?installed=true` | `skills:read` |
+| List Added skills | `GET /skills?added=true` | `skills:read` |
+| List Remote skills | `GET /skills?remote=true` | `skills:read` |
+| List reported Local copies | `GET /skills?installed=true` | `skills:read` |
+| Enable Remote delivery | `PUT /skills/{slug}/agent-catalog` | `skills:read` |
+| Disable Remote delivery | `DELETE /skills/{slug}/agent-catalog` | `skills:read` |
+| Create immutable gateway snapshot | `POST /agent-catalog/snapshots` | `skills:read` |
 | Get skill metadata | `GET /skills/{slug}` | `skills:read` |
 | Read org skill naming policy | `GET /v1/orgs/current/skill-naming-policy` (or `GET /orgs/current/skill-naming-policy` from `COMPANION_API_URL`) | `skills:read` |
 | Current published version + checksum | `GET /skills/{slug}/download` | `skills:read` |

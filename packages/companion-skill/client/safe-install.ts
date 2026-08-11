@@ -326,7 +326,7 @@ export function inspectPublicSkillZip(bytes: Uint8Array): InspectedPublicSkillZi
 
 function libraryParts(tool: PublicInstallTool, scope: PublicInstallScope): string[] {
   if (tool === "claude-code") return [".claude", "skills"];
-  if (tool === "codex") return [".codex", "skills"];
+  if (tool === "codex") return [".agents", "skills"];
   if (tool === "openclaw") return scope === "global" ? [".openclaw", "skills"] : ["skills"];
   if (tool === "hermes") {
     if (scope === "project") {

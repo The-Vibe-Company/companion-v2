@@ -845,6 +845,10 @@ export async function listSkills(input: {
   nolabel?: boolean;
   /** Return only org skills the caller has recorded as installed. */
   installedOnly?: boolean;
+  /** Return only skills exposed through the caller's remote agent catalog. */
+  remoteOnly?: boolean;
+  /** Return only skills present in either delivery mode. */
+  addedOnly?: boolean;
   /** Return ONLY archived skills (the Archived view). Ignored when `includeArchived` is set. */
   archived?: boolean;
   /** Include both archived and live skills (detail / dependency / download resolution). */
@@ -896,9 +900,37 @@ export async function listSkills(input: {
               eq(schema.skillInstalls.orgId, input.orgId),
               eq(schema.skillInstalls.skillId, schema.skills.id),
               eq(schema.skillInstalls.userId, input.actor.id),
+              not(isNull(schema.skillInstalls.localInstalledAt)),
             ),
           ),
       ),
+    );
+  }
+  if (input.remoteOnly) {
+    predicates.push(
+      sql`(
+        (${schema.skills.scope} = 'personal' and ${schema.skills.creatorId} = ${input.actor.id})
+        or exists (
+          select 1 from ${schema.skillInstalls} remote_install
+          where remote_install.org_id = ${input.orgId}
+            and remote_install.skill_id = ${schema.skills.id}
+            and remote_install.user_id = ${input.actor.id}
+            and remote_install.remote_enabled_at is not null
+        )
+      )`,
+    );
+  }
+  if (input.addedOnly) {
+    predicates.push(
+      sql`(
+        (${schema.skills.scope} = 'personal' and ${schema.skills.creatorId} = ${input.actor.id})
+        or exists (
+          select 1 from ${schema.skillInstalls} added_install
+          where added_install.org_id = ${input.orgId}
+            and added_install.skill_id = ${schema.skills.id}
+            and added_install.user_id = ${input.actor.id}
+        )
+      )`,
     );
   }
 
@@ -992,6 +1024,7 @@ export async function listSkills(input: {
               eq(schema.skillInstalls.orgId, input.orgId),
               eq(schema.skillInstalls.skillId, schema.skills.id),
               eq(schema.skillInstalls.userId, input.actor.id),
+              not(isNull(schema.skillInstalls.localInstalledAt)),
             ),
           ),
       ),
@@ -1051,18 +1084,27 @@ export async function listSkills(input: {
   // The caller's installed version per skill, for status computation. Scoped to the whole org (not
   // just the displayed rows) so dependency-aware roll-up can see installs outside the current filter/
   // view. A separate query (not a join) keeps the grouped main select simple; guarded for mocked DBs.
-  const installBySkill = new Map<string, string | null>();
+  const installBySkill = new Map<
+    string,
+    { installedVersion: string | null; remoteEnabled: boolean; localInstalled: boolean }
+  >();
   const installRows = await database
     .select({
       skill_id: schema.skillInstalls.skillId,
       installed_version: schema.skillInstalls.installedVersion,
+      remote_enabled_at: schema.skillInstalls.remoteEnabledAt,
+      local_installed_at: schema.skillInstalls.localInstalledAt,
     })
     .from(schema.skillInstalls)
     .where(
       and(eq(schema.skillInstalls.orgId, input.orgId), eq(schema.skillInstalls.userId, input.actor.id)),
     );
   for (const row of Array.isArray(installRows) ? installRows : []) {
-    installBySkill.set(row.skill_id, row.installed_version);
+    installBySkill.set(row.skill_id, {
+      installedVersion: row.installed_version,
+      remoteEnabled: row.remote_enabled_at != null,
+      localInstalled: row.local_installed_at != null,
+    });
   }
 
   // Dependency-aware update detection: a skill is "update" if it is behind its own current version,
@@ -1070,7 +1112,7 @@ export async function listSkills(input: {
   // parent re-pulls its dependency set, so a stale dependency means the parent is effectively stale.
   // Current versions come from the org-wide graph so the result is the same in every filtered view.
   const selfBehind = (id: string): boolean => {
-    const installedVersion = installBySkill.get(id);
+    const installedVersion = installBySkill.get(id)?.installedVersion;
     const current = graph.byId.get(id)?.currentVersion ?? null;
     if (installedVersion == null || current == null) return false;
     return compareSemver(installedVersion, current) < 0;
@@ -1146,11 +1188,28 @@ export async function listSkills(input: {
       checksum: r.checksum,
       size_bytes: r.size_bytes,
       installed: Boolean(r.installed),
-      installed_version: installBySkill.get(r.id) ?? null,
+      remote_enabled:
+        (r.scope ?? "org") === "personal"
+          ? r.creator_id === input.actor.id
+          : (installBySkill.get(r.id)?.remoteEnabled ?? false),
+      local_installed: Boolean(r.installed),
+      added:
+        (r.scope ?? "org") === "personal"
+          ? r.creator_id === input.actor.id
+          : installBySkill.has(r.id),
+      delivery_modes: [
+        ...(((r.scope ?? "org") === "personal"
+          ? r.creator_id === input.actor.id
+          : (installBySkill.get(r.id)?.remoteEnabled ?? false))
+          ? (["remote"] as const)
+          : []),
+        ...(Boolean(r.installed) ? (["local"] as const) : []),
+      ],
+      installed_version: installBySkill.get(r.id)?.installedVersion ?? null,
       install_status: (() => {
         const own = computeSkillInstallStatus(
           Boolean(r.installed),
-          installBySkill.get(r.id) ?? null,
+          installBySkill.get(r.id)?.installedVersion ?? null,
           r.current_version,
         );
         // Roll up a stale dependency into an "update" hint on the installed parent.
@@ -4684,6 +4743,214 @@ function depGraphClosureHasUpdate(
   return walk(rootId);
 }
 
+export interface AgentCatalogSnapshotPackagePlan {
+  skillId: string;
+  versionId: string;
+  slug: string;
+  version: string;
+  checksum: string;
+  sizeBytes: number;
+  storagePath: string;
+  frontmatter: string;
+  dependencySlugs: string[];
+  rootIds: string[];
+  rootSlugs: string[];
+}
+
+/**
+ * Build the immutable package set exposed to one delegated client. Personal skills are implicit
+ * roots for their owner; org skills must have Remote enabled. Dependencies are exact current-version
+ * closure members, but do not become catalog roots themselves.
+ */
+export async function buildAgentCatalogSnapshot(input: {
+  actor: ActorContext;
+  orgId: string;
+  database?: Db;
+}): Promise<AgentCatalogSnapshotPackagePlan[]> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const rootsRaw = await database
+    .select({
+      id: schema.skills.id,
+      slug: schema.skills.slug,
+      scope: schema.skills.scope,
+      creatorId: schema.skills.creatorId,
+      currentVersionId: schema.skills.currentVersionId,
+    })
+    .from(schema.skills)
+    .where(
+      and(
+        eq(schema.skills.orgId, input.orgId),
+        isNull(schema.skills.archivedAt),
+        not(isNull(schema.skills.currentVersionId)),
+        sql`(
+          (${schema.skills.scope} = 'personal' and ${schema.skills.creatorId} = ${input.actor.id})
+          or (${schema.skills.scope} = 'org' and exists (
+            select 1 from ${schema.skillInstalls} catalog_root
+            where catalog_root.org_id = ${input.orgId}
+              and catalog_root.user_id = ${input.actor.id}
+              and catalog_root.skill_id = ${schema.skills.id}
+              and catalog_root.remote_enabled_at is not null
+          ))
+        )`,
+      ),
+    );
+  const roots = Array.isArray(rootsRaw) ? rootsRaw : [];
+  if (roots.length === 0) return [];
+
+  const graph = await loadDepGraph(database, input.orgId);
+  const rootRefsByPackage = new Map<string, Map<string, string>>();
+  const visit = (packageId: string, rootId: string, rootSlug: string, visiting: Set<string>) => {
+    if (visiting.has(packageId)) throw new Error(`agent catalog dependency cycle at ${rootSlug}`);
+    const skill = graph.byId.get(packageId);
+    if (!skill || skill.archivedAt || !skill.currentVersionId || !skill.currentVersion) {
+      throw new Error(`agent catalog dependency for ${rootSlug} is unavailable`);
+    }
+    if (skill.scope === "personal" && skill.creatorId !== input.actor.id) {
+      throw new Error(`agent catalog dependency for ${rootSlug} is private`);
+    }
+    const rootsForPackage = rootRefsByPackage.get(packageId) ?? new Map<string, string>();
+    rootsForPackage.set(rootId, rootSlug);
+    rootRefsByPackage.set(packageId, rootsForPackage);
+    const next = new Set(visiting).add(packageId);
+    for (const edge of graph.requiresBySkill.get(packageId) ?? []) {
+      if (depEdgeStatus(graph, packageId, edge) !== "satisfied" || !edge.target) {
+        throw new Error(`agent catalog dependency ${depEdgeDisplaySlug(edge)} for ${rootSlug} is not satisfied`);
+      }
+      visit(edge.target.id, rootId, rootSlug, next);
+    }
+  };
+  for (const root of roots) visit(root.id, root.id, root.slug, new Set());
+
+  const packageRowsRaw = await database
+    .select({
+      skillId: schema.skills.id,
+      slug: schema.skills.slug,
+      versionId: schema.skillVersions.id,
+      version: schema.skillVersions.version,
+      checksum: schema.skillVersions.checksum,
+      sizeBytes: schema.skillVersions.sizeBytes,
+      frontmatter: schema.skillVersions.frontmatter,
+      storagePath: schema.skillVersions.storagePath,
+    })
+    .from(schema.skills)
+    .innerJoin(schema.skillVersions, eq(schema.skillVersions.id, schema.skills.currentVersionId))
+    .where(
+      and(
+        eq(schema.skills.orgId, input.orgId),
+        isNull(schema.skills.archivedAt),
+        inArray(schema.skills.id, [...rootRefsByPackage.keys()]),
+      ),
+    );
+  const packageRows = Array.isArray(packageRowsRaw) ? packageRowsRaw : [];
+  if (packageRows.length !== rootRefsByPackage.size) {
+    throw new Error("agent catalog changed while the snapshot was being prepared");
+  }
+  return packageRows
+    .map((row) => {
+      const graphSkill = graph.byId.get(row.skillId);
+      if (
+        !graphSkill
+        || graphSkill.currentVersionId !== row.versionId
+        || graphSkill.currentVersion !== row.version
+      ) {
+        throw new Error("agent catalog changed while the snapshot was being prepared");
+      }
+      const refs = rootRefsByPackage.get(row.skillId) ?? new Map<string, string>();
+      return {
+        skillId: row.skillId,
+        versionId: row.versionId,
+        slug: row.slug,
+        version: row.version,
+        checksum: row.checksum,
+        sizeBytes: row.sizeBytes,
+        storagePath: row.storagePath,
+        frontmatter: row.frontmatter,
+        dependencySlugs: (graph.requiresBySkill.get(row.skillId) ?? [])
+          .map(depEdgeDisplaySlug)
+          .sort((a, b) => a.localeCompare(b)),
+        rootIds: [...refs.keys()].sort((a, b) => a.localeCompare(b)),
+        rootSlugs: [...refs.values()].sort((a, b) => a.localeCompare(b)),
+      };
+    })
+    .sort((a, b) => a.slug.localeCompare(b.slug));
+}
+
+/** Live authorization gate used after validating a stateless catalog proof. */
+export async function authorizeAgentCatalogPackage(input: {
+  actor: ActorContext;
+  orgId: string;
+  skillId: string;
+  versionId: string;
+  rootIds: string[];
+  agentId: string;
+  database?: Db;
+}): Promise<{ slug: string; version: string; checksum: string; sizeBytes: number; storagePath: string }> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const grants = await snapshotAgentApiTokenGrants({
+    actor: input.actor,
+    orgId: input.orgId,
+    agentId: input.agentId,
+    database,
+  });
+  if (!grants.scopes.includes("skills:read")) {
+    throw new Error("agent catalog access was revoked");
+  }
+  if (input.rootIds.length === 0) throw new Error("catalog proof has no roots");
+  const liveRootsRaw = await database
+    .select({ id: schema.skills.id })
+    .from(schema.skills)
+    .where(
+      and(
+        eq(schema.skills.orgId, input.orgId),
+        inArray(schema.skills.id, input.rootIds),
+        isNull(schema.skills.archivedAt),
+        sql`(
+          (${schema.skills.scope} = 'personal' and ${schema.skills.creatorId} = ${input.actor.id})
+          or (${schema.skills.scope} = 'org' and exists (
+            select 1 from ${schema.skillInstalls} live_catalog_root
+            where live_catalog_root.org_id = ${input.orgId}
+              and live_catalog_root.user_id = ${input.actor.id}
+              and live_catalog_root.skill_id = ${schema.skills.id}
+              and live_catalog_root.remote_enabled_at is not null
+          ))
+        )`,
+      ),
+    );
+  const liveRootIds = new Set((Array.isArray(liveRootsRaw) ? liveRootsRaw : []).map((row) => row.id));
+  if (!input.rootIds.some((id) => liveRootIds.has(id))) {
+    throw new Error("agent catalog access was revoked");
+  }
+  const row = await database
+    .select({
+      slug: schema.skills.slug,
+      archivedAt: schema.skills.archivedAt,
+      version: schema.skillVersions.version,
+      checksum: schema.skillVersions.checksum,
+      sizeBytes: schema.skillVersions.sizeBytes,
+      storagePath: schema.skillVersions.storagePath,
+    })
+    .from(schema.skillVersions)
+    .innerJoin(
+      schema.skills,
+      and(
+        eq(schema.skills.orgId, input.orgId),
+        eq(schema.skills.id, input.skillId),
+        eq(schema.skillVersions.skillId, schema.skills.id),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.skillVersions.orgId, input.orgId),
+        eq(schema.skillVersions.id, input.versionId),
+      ),
+    )
+    .then((rows) => (Array.isArray(rows) ? rows[0] : undefined));
+  if (!row || row.archivedAt) throw new Error("agent catalog package is unavailable");
+  return row;
+}
+
 /**
  * Record (or refresh) the caller's install of a PUBLISHED skill. Idempotent per (org, user, skill):
  * the first call sets `installedAt`; later calls update the version, label, source, and
@@ -4698,7 +4965,12 @@ export async function installSkill(input: {
   agentLabel?: string | null;
   source?: "agent" | "manual";
   database?: Db;
-}): Promise<{ status: LocalSkillStatus; installedVersion: string | null; currentVersion: string | null }> {
+}): Promise<{
+  status: LocalSkillStatus;
+  installedVersion: string | null;
+  currentVersion: string | null;
+  remoteEnabled: boolean;
+}> {
   const database = input.database ?? db;
   const skill = await getSkillBySlug(input);
   if (!skill) throw new Error("skill not found");
@@ -4712,7 +4984,6 @@ export async function installSkill(input: {
   const version = input.version?.trim() ? input.version.trim() : null;
   const agentLabel = input.agentLabel?.trim() ? input.agentLabel.trim() : null;
   const source = input.source ?? "manual";
-
   // Reject a reported version newer than the current published version (mirrors the local-skill
   // guard): a typo/bogus version must not silently suppress future "update" prompts.
   if (version && skill.current_version && compareSemver(version, skill.current_version) > 0) {
@@ -4721,7 +4992,7 @@ export async function installSkill(input: {
     );
   }
 
-  await database
+  const [installRow] = await database
     .insert(schema.skillInstalls)
     .values({
       orgId: input.orgId,
@@ -4732,11 +5003,20 @@ export async function installSkill(input: {
       source,
       installedAt: now,
       lastReportedAt: now,
+      remoteEnabledAt: null,
+      localInstalledAt: now,
     })
     .onConflictDoUpdate({
       target: [schema.skillInstalls.orgId, schema.skillInstalls.userId, schema.skillInstalls.skillId],
-      set: { installedVersion: version, agentLabel, source, lastReportedAt: now },
-    });
+      set: {
+        installedVersion: version,
+        agentLabel,
+        source,
+        lastReportedAt: now,
+        localInstalledAt: now,
+      },
+    })
+    .returning({ remoteEnabledAt: schema.skillInstalls.remoteEnabledAt });
 
   await database.insert(schema.auditLog).values({
     orgId: input.orgId,
@@ -4786,10 +5066,18 @@ export async function installSkill(input: {
           source,
           installedAt: now,
           lastReportedAt: now,
+          remoteEnabledAt: null,
+          localInstalledAt: now,
         })
         .onConflictDoUpdate({
           target: [schema.skillInstalls.orgId, schema.skillInstalls.userId, schema.skillInstalls.skillId],
-          set: { installedVersion: dep.version, agentLabel, source, lastReportedAt: now },
+          set: {
+            installedVersion: dep.version,
+            agentLabel,
+            source,
+            lastReportedAt: now,
+            localInstalledAt: now,
+          },
         });
     }
   }
@@ -4798,34 +5086,157 @@ export async function installSkill(input: {
     status: computeSkillInstallStatus(true, version, skill.current_version),
     installedVersion: version,
     currentVersion: skill.current_version,
+    remoteEnabled: installRow?.remoteEnabledAt != null,
   };
 }
 
-/** Mark a PUBLISHED skill NOT installed for the caller (uninstall / correct a false state). Idempotent. */
+/** Remove only the durable local-copy marker; an independently enabled remote catalog entry survives. */
 export async function uninstallSkill(input: {
   actor: ActorContext;
   orgId: string;
   slug: string;
   database?: Db;
-}): Promise<void> {
+}): Promise<{ remoteEnabled: boolean }> {
   const database = input.database ?? db;
   const skill = await getSkillBySlug(input);
   if (!skill) throw new Error("skill not found");
-  await database
-    .delete(schema.skillInstalls)
-    .where(
-      and(
+  return database.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    const existing = await tx
+      .select({ remoteEnabledAt: schema.skillInstalls.remoteEnabledAt })
+      .from(schema.skillInstalls)
+      .where(and(
         eq(schema.skillInstalls.orgId, input.orgId),
         eq(schema.skillInstalls.userId, input.actor.id),
         eq(schema.skillInstalls.skillId, skill.id),
-      ),
-    );
+      ))
+      .for("update")
+      .then((rows) => rows[0]);
+    if (existing?.remoteEnabledAt != null) {
+      await tx
+        .update(schema.skillInstalls)
+        .set({ installedVersion: null, agentLabel: null, localInstalledAt: null, lastReportedAt: new Date() })
+        .where(and(
+          eq(schema.skillInstalls.orgId, input.orgId),
+          eq(schema.skillInstalls.userId, input.actor.id),
+          eq(schema.skillInstalls.skillId, skill.id),
+        ));
+    } else {
+      await tx
+        .delete(schema.skillInstalls)
+        .where(and(
+          eq(schema.skillInstalls.orgId, input.orgId),
+          eq(schema.skillInstalls.userId, input.actor.id),
+          eq(schema.skillInstalls.skillId, skill.id),
+        ));
+    }
+    await tx.insert(schema.auditLog).values({
+      orgId: input.orgId,
+      actorId: input.actor.id,
+      action: "skill.uninstall",
+      targetType: "skill",
+      targetId: skill.id,
+      metadata: { slug: skill.slug },
+    });
+    return { remoteEnabled: existing?.remoteEnabledAt != null };
+  });
+}
+
+/** Add an org skill to the caller's remote catalog without creating a durable local copy. */
+export async function enableSkillAgentCatalog(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  database?: Db;
+}): Promise<{ remoteEnabled: true; localInstalled: boolean }> {
+  const database = input.database ?? db;
+  const skill = await getSkillBySlug(input);
+  if (!skill) throw new Error("skill not found");
+  if (skill.archived) throw new Error("archived skills cannot be added to the agent catalog");
+  if (skill.scope === "personal") {
+    return { remoteEnabled: true, localInstalled: skill.local_installed };
+  }
+  const now = new Date();
+  const [row] = await database
+    .insert(schema.skillInstalls)
+    .values({
+      orgId: input.orgId,
+      userId: input.actor.id,
+      skillId: skill.id,
+      installedVersion: null,
+      source: "manual",
+      installedAt: now,
+      lastReportedAt: now,
+      remoteEnabledAt: now,
+      localInstalledAt: null,
+    })
+    .onConflictDoUpdate({
+      target: [schema.skillInstalls.orgId, schema.skillInstalls.userId, schema.skillInstalls.skillId],
+      set: { remoteEnabledAt: now, lastReportedAt: now },
+    })
+    .returning({ localInstalledAt: schema.skillInstalls.localInstalledAt });
   await database.insert(schema.auditLog).values({
     orgId: input.orgId,
     actorId: input.actor.id,
-    action: "skill.uninstall",
+    action: "skill.agent_catalog.enable",
     targetType: "skill",
     targetId: skill.id,
     metadata: { slug: skill.slug },
+  });
+  return { remoteEnabled: true, localInstalled: row?.localInstalledAt != null };
+}
+
+/** Remove only remote exposure. Personal authored skills are always remotely available to their owner. */
+export async function disableSkillAgentCatalog(input: {
+  actor: ActorContext;
+  orgId: string;
+  slug: string;
+  database?: Db;
+}): Promise<{ remoteEnabled: false; localInstalled: boolean }> {
+  const database = input.database ?? db;
+  const skill = await getSkillBySlug(input);
+  if (!skill) throw new Error("skill not found");
+  if (skill.scope === "personal") {
+    throw new Error("personal skills are always available in their owner's agent catalog");
+  }
+  return database.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as Db;
+    const existing = await tx
+      .select({ localInstalledAt: schema.skillInstalls.localInstalledAt })
+      .from(schema.skillInstalls)
+      .where(and(
+        eq(schema.skillInstalls.orgId, input.orgId),
+        eq(schema.skillInstalls.userId, input.actor.id),
+        eq(schema.skillInstalls.skillId, skill.id),
+      ))
+      .for("update")
+      .then((rows) => rows[0]);
+    if (existing?.localInstalledAt != null) {
+      await tx
+        .update(schema.skillInstalls)
+        .set({ remoteEnabledAt: null, lastReportedAt: new Date() })
+        .where(and(
+          eq(schema.skillInstalls.orgId, input.orgId),
+          eq(schema.skillInstalls.userId, input.actor.id),
+          eq(schema.skillInstalls.skillId, skill.id),
+        ));
+    } else {
+      await tx
+        .delete(schema.skillInstalls)
+        .where(and(
+          eq(schema.skillInstalls.orgId, input.orgId),
+          eq(schema.skillInstalls.userId, input.actor.id),
+          eq(schema.skillInstalls.skillId, skill.id),
+        ));
+    }
+    await tx.insert(schema.auditLog).values({
+      orgId: input.orgId,
+      actorId: input.actor.id,
+      action: "skill.agent_catalog.disable",
+      targetType: "skill",
+      targetId: skill.id,
+      metadata: { slug: skill.slug },
+    });
+    return { remoteEnabled: false, localInstalled: existing?.localInstalledAt != null };
   });
 }

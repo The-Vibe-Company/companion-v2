@@ -28,7 +28,7 @@ REGISTRY = {
     "codex": {
         "displayName": "Codex",
         "detect": ["~/.codex"],
-        "skillsDir": {"user": "~/.codex/skills", "project": ".codex/skills"},
+        "skillsDir": {"user": "~/.agents/skills", "project": ".agents/skills"},
         "format": "skill-md",
     },
     "opencode": {
@@ -121,7 +121,7 @@ class RegistryTests(EnvSandbox):
         self.assertEqual(opencode_user_dir, self.home / ".agents" / "skills" / "demo")
         project_root = self.root / "repo"
         project_dir = companion_lib.resolve_target_dir("codex", "project", "demo", project_root, REGISTRY)
-        self.assertEqual(project_dir, project_root / ".codex" / "skills" / "demo")
+        self.assertEqual(project_dir, project_root / ".agents" / "skills" / "demo")
         opencode_project_dir = companion_lib.resolve_target_dir("opencode", "project", "demo", project_root, REGISTRY)
         self.assertEqual(opencode_project_dir, project_root / ".agents" / "skills" / "demo")
         openclaw_user_dir = companion_lib.resolve_target_dir("openclaw", "user", "demo", None, REGISTRY)
@@ -540,16 +540,26 @@ class FanOutTests(EnvSandbox):
         project_root = self.root / "repo"
         project_root.mkdir()
         plan = [("claude-code", "user"), ("codex", "user"), ("opencode", "user"), ("hermes", "user"), ("claude-code", "project"), ("opencode", "project")]
-        results = install_skill.fan_out_install(pkg, "demo", plan, REGISTRY, project_root, {}, {}, force=False)
+        original = install_skill.deploy_to_target
+        deployed: list[Path] = []
+
+        def record_deploy(package_dir: Path, target_dir: Path, install_root: Path) -> None:
+            deployed.append(target_dir)
+            original(package_dir, target_dir, install_root)
+
+        install_skill.deploy_to_target = record_deploy
+        try:
+            results = install_skill.fan_out_install(pkg, "demo", plan, REGISTRY, project_root, {}, {}, force=False)
+        finally:
+            install_skill.deploy_to_target = original
         self.assertTrue(all(row["status"] == "installed" for row in results))
+        self.assertEqual(len(deployed), 5)  # Codex and OpenCode share one user target.
         self.assertTrue((self.home / ".claude" / "skills" / "demo" / "SKILL.md").exists())
-        self.assertTrue((self.home / ".codex" / "skills" / "demo" / "SKILL.md").exists())
         self.assertTrue((self.home / ".agents" / "skills" / "demo" / "SKILL.md").exists())
         self.assertTrue((self.home / ".hermes" / "skills" / "demo" / "SKILL.md").exists())
         self.assertTrue((project_root / ".claude" / "skills" / "demo" / "SKILL.md").exists())
         self.assertTrue((project_root / ".agents" / "skills" / "demo" / "SKILL.md").exists())
         self.assertEqual([], self._swap_dirs(self.home / ".claude" / "skills"))
-        self.assertEqual([], self._swap_dirs(self.home / ".codex" / "skills"))
         self.assertEqual([], self._swap_dirs(self.home / ".agents" / "skills"))
         self.assertEqual([], self._swap_dirs(self.home / ".hermes" / "skills"))
 
@@ -711,7 +721,7 @@ class FanOutTests(EnvSandbox):
         original = install_skill.deploy_to_target
 
         def flaky(package_dir: Path, target_dir: Path, install_root: Path) -> None:
-            if ".codex" in str(target_dir):
+            if target_dir == self.home / ".agents" / "skills" / "demo":
                 raise OSError("simulated disk failure")
             original(package_dir, target_dir, install_root)
 
@@ -789,7 +799,7 @@ class FanOutTests(EnvSandbox):
         project_root = self.root / "repo"
         project_root.mkdir()
         user_targets = [{"tool": "claude-code", "scope": "user", "path": str(self.home / ".claude/skills/demo"), "checksum": "sha256:u"}]
-        project_targets = [{"tool": "codex", "scope": "project", "path": str(project_root / ".codex/skills/demo"), "checksum": "sha256:p"}]
+        project_targets = [{"tool": "codex", "scope": "project", "path": str(project_root / ".agents/skills/demo"), "checksum": "sha256:p"}]
 
         companion_lib.upsert_skill_lock_record(companion_lib.lockfile_path(), "ws-1", "https://api/v1", skill, user_targets, relative_to=None)
         companion_lib.upsert_skill_lock_record(companion_lib.project_lockfile_path(project_root), "ws-1", "https://api/v1", skill, project_targets, relative_to=project_root)
@@ -801,7 +811,7 @@ class FanOutTests(EnvSandbox):
         project_lock = json.loads(companion_lib.project_lockfile_path(project_root).read_text())
         project_record = project_lock["workspaces"]["ws-1"]["skills"]["demo"]
         # Project lockfile stores repo-relative paths so it can be committed and shared.
-        self.assertEqual(project_record["targets"][0]["path"], ".codex/skills/demo")
+        self.assertEqual(project_record["targets"][0]["path"], ".agents/skills/demo")
 
     def test_project_lockfile_rejects_symlinked_companion_parent(self) -> None:
         skill = {"name": "demo", "slug": "demo", "skillId": "id-1", "version": "1.0.0", "checksum": "sha256:pkg"}
@@ -1323,7 +1333,7 @@ class DependencyInstallPlanTests(EnvSandbox):
         self.assertEqual(sorted(user_skills), ["dep", "root"])
         self.assertEqual(sorted(project_skills), ["dep", "root"])
         self.assertEqual(user_skills["dep"]["targets"][0]["tool"], "claude-code")
-        self.assertEqual(project_skills["root"]["targets"][0]["path"], ".codex/skills/root")
+        self.assertEqual(project_skills["root"]["targets"][0]["path"], ".agents/skills/root")
 
 
 if __name__ == "__main__":

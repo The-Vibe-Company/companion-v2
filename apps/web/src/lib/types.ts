@@ -70,6 +70,9 @@ export interface SkillVM {
   updated: string; // relative label (server-computed)
   installStatus: "none" | "installed" | "update"; // caller's install state for this skill
   installedVersion: string | null; // version the caller recorded installing, if any
+  remoteEnabled?: boolean; // available through the on-demand gateway catalog
+  localInstalled?: boolean; // durable physical copy reported on a machine
+  deliveryModes?: Array<"remote" | "local">;
   requiresCount: number; // dependencies the current version declares
   usedByCount: number; // other skills (current versions) that depend on this one
   depWarn: boolean; // any declared dependency is not satisfied
@@ -133,6 +136,9 @@ export function mapSkill(row: SkillListRow): SkillVM {
     updated: relativeTime(row.updated_at),
     installStatus: row.install_status ?? "none",
     installedVersion: row.installed_version ?? null,
+    remoteEnabled: row.remote_enabled ?? row.scope === "personal",
+    localInstalled: row.local_installed ?? row.installed ?? false,
+    deliveryModes: row.delivery_modes ?? [],
     requiresCount: row.requires_count ?? 0,
     usedByCount: row.used_by_count ?? 0,
     depWarn: row.dep_warn ?? false,

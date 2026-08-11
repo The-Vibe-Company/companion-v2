@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { skillListRowSchema } from "../src/skill";
+import { agentCatalogPackageSchema, skillListRowSchema } from "../src/skill";
 
 const baseRow = {
   id: "skill-1",
@@ -70,5 +70,41 @@ describe("skillListRowSchema modifiers", () => {
         avatar_url: "/v1/users/user-2/avatar?v=1",
       },
     ]);
+  });
+
+  it("represents Remote and Local as independent Added delivery modes", () => {
+    const parsed = skillListRowSchema.parse({
+      ...baseRow,
+      remote_enabled: true,
+      local_installed: true,
+      added: true,
+      delivery_modes: ["remote", "local"],
+    });
+    expect(parsed).toMatchObject({
+      remote_enabled: true,
+      local_installed: true,
+      added: true,
+      delivery_modes: ["remote", "local"],
+    });
+  });
+});
+
+describe("agentCatalogPackageSchema", () => {
+  it("keeps discovery metadata but strips a supplied SKILL.md body", () => {
+    const parsed = agentCatalogPackageSchema.parse({
+      skill_id: "skill-1",
+      version_id: "version-1",
+      slug: "seo-helper",
+      version: "1.0.0",
+      checksum: "sha256:" + "a".repeat(64),
+      size_bytes: 123,
+      frontmatter: "name: seo-helper",
+      body: "instructions that must not be cached",
+      dependency_slugs: [],
+      root_slugs: ["seo-helper"],
+      package_url: "https://companion.example/v1/agent-catalog/packages/seo-helper/1.0.0",
+      proof: "signed-proof",
+    });
+    expect(parsed).not.toHaveProperty("body");
   });
 });

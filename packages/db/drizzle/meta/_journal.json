@@ -449,6 +449,13 @@
       "when": 1786240800000,
       "tag": "0063_skills_hub_only",
       "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1786406400000,
+      "tag": "0064_remote_skill_catalog",
+      "breakpoints": true
     }
   ]
 }

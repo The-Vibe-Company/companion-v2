@@ -60,6 +60,9 @@ export const COMPANION_AGENT_OPERATION_REGISTRY = [
   // Install state is caller-owned personal state. It intentionally needs read, not catalog-write.
   { method: "POST", path: "/skills/:slug/install", capability: "skills:read", transport: "rest" },
   { method: "DELETE", path: "/skills/:slug/install", capability: "skills:read", transport: "rest" },
+  { method: "PUT", path: "/skills/:slug/agent-catalog", capability: "skills:read", transport: "rest" },
+  { method: "DELETE", path: "/skills/:slug/agent-catalog", capability: "skills:read", transport: "rest" },
+  { method: "POST", path: "/agent-catalog/snapshots", capability: "skills:read", transport: "rest" },
   { method: "POST", path: "/skills/:slug/labels", capability: "skills:write", transport: "rest" },
   { method: "DELETE", path: "/skills/:slug/labels", capability: "skills:write", transport: "rest" },
   { method: "POST", path: "/skills/:slug/personal-labels", capability: "skills:write", transport: "rest" },

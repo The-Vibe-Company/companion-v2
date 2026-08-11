@@ -10,7 +10,9 @@ export type SkillActionId =
   | "archive"
   | "restore"
   | "mark-installed"
-  | "mark-not-installed";
+  | "mark-not-installed"
+  | "enable-remote"
+  | "disable-remote";
 
 export interface SkillAction {
   id: SkillActionId;
@@ -46,6 +48,8 @@ export const SKILL_ACTIONS = {
   restore: { id: "restore", label: "Restore skill", contextualLabel: "Restore", icon: "rotate-ccw" },
   markInstalled: { id: "mark-installed", label: "Mark as installed", icon: "circle-check" },
   markNotInstalled: { id: "mark-not-installed", label: "Mark as not installed", icon: "circle-x" },
+  enableRemote: { id: "enable-remote", label: "Add to remote agents", contextualLabel: "Add Remote", icon: "cloud" },
+  disableRemote: { id: "disable-remote", label: "Remove from remote agents", icon: "cloud-off" },
 } as const satisfies Record<string, SkillAction>;
 
 type ActionSkill = Pick<
@@ -60,6 +64,8 @@ type ActionSkill = Pick<
   | "validation"
   | "referenced"
   | "usedByCount"
+  | "remoteEnabled"
+  | "localInstalled"
 >;
 
 /**
@@ -109,6 +115,10 @@ export function resolveSkillActions(skill: ActionSkill, permissions: SkillAction
   if (downloadable) secondary.push(SKILL_ACTIONS.download);
 
   if (!skill.archived) {
+    if (skill.scope === "org" && skill.remoteEnabled) secondary.push(SKILL_ACTIONS.disableRemote);
+    if (skill.scope === "org" && !skill.remoteEnabled && skill.validation === "valid" && skill.version) {
+      secondary.push(SKILL_ACTIONS.enableRemote);
+    }
     if (permissions.canPublishVersion) secondary.push(SKILL_ACTIONS.publishVersion);
     if (permissions.canManagePublic) {
       secondary.push({

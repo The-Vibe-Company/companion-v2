@@ -129,6 +129,10 @@ export const reportSkillInstallInputSchema = z.object({
 });
 export type ReportSkillInstallInput = z.infer<typeof reportSkillInstallInputSchema>;
 
+/** Independent ways an added skill can be delivered to an external coding agent. */
+export const skillDeliveryModeSchema = z.enum(["remote", "local"]);
+export type SkillDeliveryMode = z.infer<typeof skillDeliveryModeSchema>;
+
 /** Response from `POST /v1/skills/:slug/install`. */
 export const reportSkillInstallResultSchema = z.object({
   ok: z.literal(true),
@@ -136,6 +140,9 @@ export const reportSkillInstallResultSchema = z.object({
   status: localSkillStatusSchema,
   installed_version: z.string().nullable(),
   current_version: z.string().nullable(),
+  remote_enabled: z.boolean().default(false),
+  local_installed: z.literal(true).default(true),
+  delivery_modes: z.array(skillDeliveryModeSchema).default(["local"]),
 });
 export type ReportSkillInstallResult = z.infer<typeof reportSkillInstallResultSchema>;
 
@@ -144,8 +151,21 @@ export const skillUninstallResultSchema = z.object({
   ok: z.literal(true),
   installed: z.literal(false),
   status: z.literal("none"),
+  remote_enabled: z.boolean().default(false),
+  local_installed: z.literal(false).default(false),
+  delivery_modes: z.array(skillDeliveryModeSchema).default([]),
 });
 export type SkillUninstallResult = z.infer<typeof skillUninstallResultSchema>;
+
+/** Response from enabling/disabling a skill in the caller's remote agent catalog. */
+export const skillAgentCatalogResultSchema = z.object({
+  ok: z.literal(true),
+  added: z.boolean(),
+  remote_enabled: z.boolean(),
+  local_installed: z.boolean(),
+  delivery_modes: z.array(skillDeliveryModeSchema),
+});
+export type SkillAgentCatalogResult = z.infer<typeof skillAgentCatalogResultSchema>;
 
 /**
  * One row of the `skill_list_v` view — the denormalized read shape the web table
@@ -222,8 +242,16 @@ export const skillListRowSchema = z.object({
   tools: z.array(z.string()),
   /** Declared required secrets / env vars + install notes (parsed from the version frontmatter). */
   requirements: z.array(skillRequirementSchema).default([]),
-  /** Whether the caller has this skill recorded as installed (any version). */
+  /** Whether the caller has a durable local copy. `?installed=true` filters on this value. */
   installed: z.boolean().default(false),
+  /** Whether the skill is exposed through the caller's remote agent catalog. */
+  remote_enabled: z.boolean().default(false),
+  /** Alias with explicit semantics for clients migrating from the old `installed` field. */
+  local_installed: z.boolean().default(false),
+  /** True when at least one delivery mode is active (personal authored skills are always added). */
+  added: z.boolean().default(false),
+  /** Stable ordered delivery modes used for Remote / Local / Both UI. */
+  delivery_modes: z.array(skillDeliveryModeSchema).default([]),
   /** Version the caller recorded installing, or null (never installed, or marked without a version). */
   installed_version: z.string().nullable().default(null),
   /** "none" (not installed) | "installed" (current, or version-unknown) | "update" (behind current). */
@@ -246,6 +274,36 @@ export const skillListRowSchema = z.object({
   updated_at: z.string(),
 });
 export type SkillListRow = z.infer<typeof skillListRowSchema>;
+
+export const agentCatalogSnapshotInputSchema = z.object({
+  /** Immutable snapshot lifetime. Eight hours by default; the server caps it at 24 hours. */
+  ttl_seconds: z.number().int().min(60).max(86_400).optional(),
+});
+export type AgentCatalogSnapshotInput = z.infer<typeof agentCatalogSnapshotInputSchema>;
+
+export const agentCatalogPackageSchema = z.object({
+  skill_id: z.string(),
+  version_id: z.string(),
+  slug: z.string(),
+  version: z.string(),
+  checksum: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  size_bytes: z.number().int().nonnegative(),
+  frontmatter: z.string(),
+  dependency_slugs: z.array(z.string()),
+  root_slugs: z.array(z.string()),
+  package_url: z.string(),
+  proof: z.string(),
+});
+export type AgentCatalogPackage = z.infer<typeof agentCatalogPackageSchema>;
+
+export const agentCatalogSnapshotSchema = z.object({
+  snapshot_id: z.string(),
+  workspace_id: z.string(),
+  created_at: z.string(),
+  expires_at: z.string(),
+  packages: z.array(agentCatalogPackageSchema),
+});
+export type AgentCatalogSnapshot = z.infer<typeof agentCatalogSnapshotSchema>;
 
 /** Body for `PUT /v1/skills/:slug/public-version`. Only the current immutable version is accepted. */
 export const setSkillPublicVersionInputSchema = z.object({

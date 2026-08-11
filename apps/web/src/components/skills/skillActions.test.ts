@@ -41,6 +41,8 @@ function skill(overrides: Partial<SkillVM> = {}): SkillVM {
     updated: "just now",
     installStatus: "none",
     installedVersion: null,
+    remoteEnabled: overrides.remoteEnabled ?? (overrides.installStatus != null && overrides.installStatus !== "none"),
+    localInstalled: overrides.localInstalled ?? (overrides.installStatus != null && overrides.installStatus !== "none"),
     requiresCount: 0,
     usedByCount: 0,
     depWarn: false,
@@ -97,13 +99,13 @@ describe("resolveSkillActions", () => {
 
   it("keeps download, lifecycle, publish, and manual correction secondary", () => {
     const fresh = resolveSkillActions(skill(), allowed).secondary.map((action) => action.id);
-    expect(fresh).toEqual(["download", "publish-version", "archive", "mark-installed"]);
+    expect(fresh).toEqual(["download", "enable-remote", "publish-version", "archive", "mark-installed"]);
 
     const current = resolveSkillActions(
       skill({ installStatus: "installed", installedVersion: "1.0.0" }),
       allowed,
     ).secondary.map((action) => action.id);
-    expect(current).toEqual(["download", "publish-version", "archive", "mark-not-installed"]);
+    expect(current).toEqual(["download", "disable-remote", "publish-version", "archive", "mark-not-installed"]);
 
     const archived = resolveSkillActions(skill({ archived: true, referenced: true }), allowed).secondary.map(
       (action) => action.id,
