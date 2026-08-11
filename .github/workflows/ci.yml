@@ -143,7 +143,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            go-version: 1.22.x
+          - os: macos-latest
+            # Go 1.22 binaries predate the LC_UUID fix required by macOS 26.
+            go-version: 1.25.x
+          - os: windows-latest
+            go-version: 1.22.x
     defaults:
       run:
         working-directory: clients/companion-gateway
@@ -154,7 +161,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5
         with:
-          go-version-file: clients/companion-gateway/go.mod
+          go-version: ${{ matrix.go-version }}
           cache-dependency-path: clients/companion-gateway/go.mod
 
       - name: Test gateway
