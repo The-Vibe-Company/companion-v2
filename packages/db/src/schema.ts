@@ -366,6 +366,8 @@ export const companions = pgTable(
       .notNull()
       .references(() => user.id),
     name: text("name").notNull(),
+    /** One short operator-authored line describing the Companion; never a system prompt. */
+    persona: text("persona"),
     boxId: text("box_id"),
     runtimeState: companionRuntimeStateEnum("runtime_state").notNull().default("not_created"),
     daemonState: companionDaemonStateEnum("daemon_state").notNull().default("unknown"),
@@ -390,6 +392,10 @@ export const companions = pgTable(
       name: "companions_owner_membership_fk",
     }),
     positiveDiskLayout: check("companions_disk_layout_version_check", sql`${t.diskLayoutVersion} >= 1`),
+    personaLength: check(
+      "companions_persona_check",
+      sql`${t.persona} is null or char_length(${t.persona}) <= 280`,
+    ),
     boxIdShape: check(
       "companions_box_id_check",
       sql`${t.boxId} is null or ${t.boxId} ~ '^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$'`,

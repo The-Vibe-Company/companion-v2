@@ -14,6 +14,17 @@ import type { TreeRow } from "./sidebarTree";
 type SidebarSelection = { lib: SkillsLibrary; kind: "all" | "installed" | "label"; label?: string } | null;
 type MoveTarget = { path: string; label: string };
 
+/** Workspace mode: the Skills libraries, or the Companions agent list (Companions flag only). */
+export type SidebarMode = "skills" | "companions";
+
+export type SidebarCompanion = {
+  id: string;
+  name: string;
+  /** Short status word already paired with the dot colour, never colour alone. */
+  status: string;
+  tone: "ok" | "warn" | "danger" | "unknown";
+};
+
 function labelParent(path: string): string | null {
   const i = path.lastIndexOf("/");
   return i === -1 ? null : path.slice(0, i);
@@ -478,10 +489,13 @@ export function Sidebar({
   onSelectLocal,
   onSelectArchived,
   onSelectSecrets,
-  onSelectCompanions = () => {},
   secretsActive = false,
   companionsEnabled = false,
-  companionsActive = false,
+  mode = "skills",
+  onSelectMode = () => {},
+  companions = [],
+  activeCompanionId = null,
+  onSelectCompanion = () => {},
   navigationOnly = false,
   localActive,
   localUpdateCount,
@@ -530,10 +544,14 @@ export function Sidebar({
   onSelectLocal: () => void;
   onSelectArchived: () => void;
   onSelectSecrets: () => void;
-  onSelectCompanions?: () => void;
   secretsActive?: boolean;
   companionsEnabled?: boolean;
-  companionsActive?: boolean;
+  /** Companions mode replaces the Skills libraries with the workspace Companion list. */
+  mode?: SidebarMode;
+  onSelectMode?: (mode: SidebarMode) => void;
+  companions?: SidebarCompanion[];
+  activeCompanionId?: string | null;
+  onSelectCompanion?: (companionId: string) => void;
   /** Render the complete shared navigation without exposing label mutation affordances. */
   navigationOnly?: boolean;
   localActive: boolean;
@@ -565,6 +583,8 @@ export function Sidebar({
     action();
     onCloseMobile();
   };
+
+  const companionsMode = companionsEnabled && mode === "companions";
 
   const rootDropOk = (lib: SkillsLibrary) => hovered?.kind === "root" && hovered.lib === lib;
   const rootDropDone = (lib: SkillsLibrary) => dropDone?.kind === "root" && dropDone.lib === lib;
@@ -671,170 +691,206 @@ export function Sidebar({
           <Icon name="search" size={14} />
         </button>
       </div>
-      <nav className="side__nav" aria-label="Primary">
-        {/* ===== MY SKILLS ===== */}
-        <div
-          className={
-            "ml-libhead" +
-            (mineHeadActive ? " is-active" : "") +
-            (rootDropOk("mine") ? " ml-libhead--dropok" : "") +
-            (rootDropDone("mine") ? " ml-libhead--dropdone" : "")
-          }
-          style={{ marginTop: 2 }}
-          {...rootDropProps("mine")}
-        >
-          <button
-            type="button"
-            className={"ml-libhead__chev" + (mineOpen ? " is-open" : "")}
-            aria-label={mineOpen ? "Collapse My Skills" : "Expand My Skills"}
-            aria-expanded={mineOpen}
-            onClick={() => setMineOpen((o) => !o)}
-          >
-            <Icon name={mineOpen ? "chevron-down" : "chevron-right"} size={16} />
-          </button>
-          <button
-            type="button"
-            className="ml-libhead__main"
-            aria-current={mineHeadActive ? "page" : undefined}
-            onClick={() => {
-              setMineOpen(true);
-              runAndClose(onSelectMineAll);
-            }}
-            title="My Skills"
-          >
-            <span className="ml-libhead__ico">
-              <Icon name="user" size={16} />
-            </span>
-            <span className="ml-libhead__name">My Skills</span>
-          </button>
-          <span className="ml-libhead__count tnum">{mineCount}</span>
-          {!navigationOnly && (
+      {companionsEnabled && (
+        <div className="modeseg" role="group" aria-label="Workspace mode">
+          {(["skills", "companions"] as const).map((value) => (
             <button
-              className="side__addteam"
-              title={personalSkillsEnabled ? "New personal folder" : "Personal skills require Pro"}
-              aria-label={personalSkillsEnabled ? "New personal folder" : "View plans for personal skills"}
-              onClick={() => personalSkillsEnabled ? openNewFolder("mine", "") : onUpgrade()}
+              key={value}
+              type="button"
+              className={"modeseg__btn" + (mode === value ? " is-active" : "")}
+              aria-pressed={mode === value}
+              onClick={() => runAndClose(() => onSelectMode(value))}
+              title={value === "skills" ? "Skills" : "Companions"}
             >
-              <Icon name={personalSkillsEnabled ? "plus" : "lock"} size={14} />
-            </button>
-          )}
-        </div>
-        {mineOpen && (
-          <div className="ml-kids">
-            <button
-              className={"navitem" + (inWorkspace && selection!.kind === "installed" ? " navitem--active" : "")}
-              aria-current={inWorkspace && selection!.kind === "installed" ? "page" : undefined}
-              onClick={() => runAndClose(onSelectInstalled)}
-              title={installedUpdateCount > 0 ? `${installedUpdateCount} update${installedUpdateCount === 1 ? "" : "s"} available` : "Installed from the organization"}
-            >
-              <span className="navitem__ico">
-                <Icon name="download" />
+              <span className="modeseg__ico">
+                <Icon name={value === "skills" ? "layers" : "bot"} size={15} />
               </span>
-              <span className="navitem__label">Installed</span>
-              {installedUpdateCount > 0 ? (
-                <span
-                  className="ml-updot"
-                  title={`${installedUpdateCount} update${installedUpdateCount === 1 ? "" : "s"} available`}
-                  aria-label={`${installedUpdateCount} update${installedUpdateCount === 1 ? "" : "s"} available`}
-                />
-              ) : (
-                <span className="navitem__count tnum">{installedCount}</span>
-              )}
+              <span className="modeseg__label">{value === "skills" ? "Skills" : "Companions"}</span>
             </button>
-            {newFolderRow("mine", "drafts/research…")}
-            <LabelTreeRows
-              lib="mine"
-              rows={mineTreeRows}
-              expanded={expanded}
-              activePath={activeMineLabel}
-              drag={drag}
-              hovered={hovered}
-              openPendingPath={openPendingPath}
-              dropDone={dropDone}
-              onToggleExpand={onToggleExpand}
-              onSelect={(path) => runAndClose(() => onSelectLabel("mine", path))}
-              onOpenMenu={(row, pos, trigger) => setMenu({ row, lib: "mine", pos, trigger })}
-              onStartDrag={onLabelStartDrag}
-              canManage={!navigationOnly}
-            />
-          </div>
-        )}
-
-        {/* ===== ORGANIZATION ===== */}
-        <div
-          className={
-            "ml-libhead" +
-            (orgHeadActive ? " is-active" : "") +
-            (rootDropOk("org") ? " ml-libhead--dropok" : "") +
-            (rootDropDone("org") ? " ml-libhead--dropdone" : "")
-          }
-          style={{ marginTop: 4 }}
-          {...rootDropProps("org")}
-        >
-          <button
-            type="button"
-            className={"ml-libhead__chev" + (orgOpen ? " is-open" : "")}
-            aria-label={orgOpen ? "Collapse Organization" : "Expand Organization"}
-            aria-expanded={orgOpen}
-            onClick={() => setOrgOpen((o) => !o)}
-          >
-            <Icon name={orgOpen ? "chevron-down" : "chevron-right"} size={16} />
-          </button>
-          <button
-            type="button"
-            className="ml-libhead__main"
-            aria-current={orgHeadActive ? "page" : undefined}
-            onClick={() => {
-              setOrgOpen(true);
-              runAndClose(onSelectOrgAll);
-            }}
-            title="Organization"
-          >
-            <span className="ml-libhead__ico">
-              <Icon name="building-2" size={16} />
-            </span>
-            <span className="ml-libhead__name">Organization</span>
-          </button>
-          <span className="ml-libhead__count tnum">{orgCount}</span>
-          {!navigationOnly && (
-            <button className="side__addteam" title="New org folder" aria-label="New org folder" onClick={() => openNewFolder("org", "")}>
-              <Icon name="plus" size={14} />
-            </button>
-          )}
+          ))}
         </div>
-        {orgOpen && (
-          <div className="ml-kids">
-            {newFolderRow("org", "marketing/seo…")}
-            <LabelTreeRows
-              lib="org"
-              rows={orgTreeRows}
-              expanded={expanded}
-              activePath={activeOrgLabel}
-              drag={drag}
-              hovered={hovered}
-              openPendingPath={openPendingPath}
-              dropDone={dropDone}
-              onToggleExpand={onToggleExpand}
-              onSelect={(path) => runAndClose(() => onSelectLabel("org", path))}
-              onOpenMenu={(row, pos, trigger) => setMenu({ row, lib: "org", pos, trigger })}
-              onStartDrag={onLabelStartDrag}
-              canManage={!navigationOnly}
-            />
+      )}
+      <nav className="side__nav" aria-label="Primary">
+        {companionsMode ? (
+          <div className="cmpnav">
+            {companions.length === 0 ? (
+              <p className="cmpnav__empty">No Companions yet</p>
+            ) : (
+              companions.map((companion) => {
+                const active = companion.id === activeCompanionId;
+                return (
+                  <button
+                    key={companion.id}
+                    type="button"
+                    className={"cmprow" + (active ? " cmprow--active" : "")}
+                    aria-current={active ? "page" : undefined}
+                    onClick={() => runAndClose(() => onSelectCompanion(companion.id))}
+                    title={`${companion.name} — ${companion.status}`}
+                  >
+                    <span className="cmprow__avatar" aria-hidden="true">
+                      {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
+                    </span>
+                    <span className="cmprow__name">{companion.name}</span>
+                    <span className={`cmprow__dot cmprow__dot--${companion.tone}`} aria-hidden="true" />
+                    <span className="sr-only">{companion.status}</span>
+                  </button>
+                );
+              })
+            )}
           </div>
-        )}
+        ) : (
+          <>
+            {/* ===== MY SKILLS ===== */}
+            <div
+              className={
+                "ml-libhead" +
+                (mineHeadActive ? " is-active" : "") +
+                (rootDropOk("mine") ? " ml-libhead--dropok" : "") +
+                (rootDropDone("mine") ? " ml-libhead--dropdone" : "")
+              }
+              style={{ marginTop: 2 }}
+              {...rootDropProps("mine")}
+            >
+              <button
+                type="button"
+                className={"ml-libhead__chev" + (mineOpen ? " is-open" : "")}
+                aria-label={mineOpen ? "Collapse My Skills" : "Expand My Skills"}
+                aria-expanded={mineOpen}
+                onClick={() => setMineOpen((o) => !o)}
+              >
+                <Icon name={mineOpen ? "chevron-down" : "chevron-right"} size={16} />
+              </button>
+              <button
+                type="button"
+                className="ml-libhead__main"
+                aria-current={mineHeadActive ? "page" : undefined}
+                onClick={() => {
+                  setMineOpen(true);
+                  runAndClose(onSelectMineAll);
+                }}
+                title="My Skills"
+              >
+                <span className="ml-libhead__ico">
+                  <Icon name="user" size={16} />
+                </span>
+                <span className="ml-libhead__name">My Skills</span>
+              </button>
+              <span className="ml-libhead__count tnum">{mineCount}</span>
+              {!navigationOnly && (
+                <button
+                  className="side__addteam"
+                  title={personalSkillsEnabled ? "New personal folder" : "Personal skills require Pro"}
+                  aria-label={personalSkillsEnabled ? "New personal folder" : "View plans for personal skills"}
+                  onClick={() => personalSkillsEnabled ? openNewFolder("mine", "") : onUpgrade()}
+                >
+                  <Icon name={personalSkillsEnabled ? "plus" : "lock"} size={14} />
+                </button>
+              )}
+            </div>
+            {mineOpen && (
+              <div className="ml-kids">
+                <button
+                  className={"navitem" + (inWorkspace && selection!.kind === "installed" ? " navitem--active" : "")}
+                  aria-current={inWorkspace && selection!.kind === "installed" ? "page" : undefined}
+                  onClick={() => runAndClose(onSelectInstalled)}
+                  title={installedUpdateCount > 0 ? `${installedUpdateCount} update${installedUpdateCount === 1 ? "" : "s"} available` : "Installed from the organization"}
+                >
+                  <span className="navitem__ico">
+                    <Icon name="download" />
+                  </span>
+                  <span className="navitem__label">Installed</span>
+                  {installedUpdateCount > 0 ? (
+                    <span
+                      className="ml-updot"
+                      title={`${installedUpdateCount} update${installedUpdateCount === 1 ? "" : "s"} available`}
+                      aria-label={`${installedUpdateCount} update${installedUpdateCount === 1 ? "" : "s"} available`}
+                    />
+                  ) : (
+                    <span className="navitem__count tnum">{installedCount}</span>
+                  )}
+                </button>
+                {newFolderRow("mine", "drafts/research…")}
+                <LabelTreeRows
+                  lib="mine"
+                  rows={mineTreeRows}
+                  expanded={expanded}
+                  activePath={activeMineLabel}
+                  drag={drag}
+                  hovered={hovered}
+                  openPendingPath={openPendingPath}
+                  dropDone={dropDone}
+                  onToggleExpand={onToggleExpand}
+                  onSelect={(path) => runAndClose(() => onSelectLabel("mine", path))}
+                  onOpenMenu={(row, pos, trigger) => setMenu({ row, lib: "mine", pos, trigger })}
+                  onStartDrag={onLabelStartDrag}
+                  canManage={!navigationOnly}
+                />
+              </div>
+            )}
 
-        {companionsEnabled && (
-          <button
-            className={"navitem navitem--bottom" + (companionsActive ? " navitem--active" : "")}
-            aria-current={companionsActive ? "page" : undefined}
-            onClick={() => runAndClose(onSelectCompanions)}
-            title="Companions"
-          >
-            <span className="navitem__ico">
-              <Icon name="bot" />
-            </span>
-            <span className="navitem__label">Companions</span>
-          </button>
+            {/* ===== ORGANIZATION ===== */}
+            <div
+              className={
+                "ml-libhead" +
+                (orgHeadActive ? " is-active" : "") +
+                (rootDropOk("org") ? " ml-libhead--dropok" : "") +
+                (rootDropDone("org") ? " ml-libhead--dropdone" : "")
+              }
+              style={{ marginTop: 4 }}
+              {...rootDropProps("org")}
+            >
+              <button
+                type="button"
+                className={"ml-libhead__chev" + (orgOpen ? " is-open" : "")}
+                aria-label={orgOpen ? "Collapse Organization" : "Expand Organization"}
+                aria-expanded={orgOpen}
+                onClick={() => setOrgOpen((o) => !o)}
+              >
+                <Icon name={orgOpen ? "chevron-down" : "chevron-right"} size={16} />
+              </button>
+              <button
+                type="button"
+                className="ml-libhead__main"
+                aria-current={orgHeadActive ? "page" : undefined}
+                onClick={() => {
+                  setOrgOpen(true);
+                  runAndClose(onSelectOrgAll);
+                }}
+                title="Organization"
+              >
+                <span className="ml-libhead__ico">
+                  <Icon name="building-2" size={16} />
+                </span>
+                <span className="ml-libhead__name">Organization</span>
+              </button>
+              <span className="ml-libhead__count tnum">{orgCount}</span>
+              {!navigationOnly && (
+                <button className="side__addteam" title="New org folder" aria-label="New org folder" onClick={() => openNewFolder("org", "")}>
+                  <Icon name="plus" size={14} />
+                </button>
+              )}
+            </div>
+            {orgOpen && (
+              <div className="ml-kids">
+                {newFolderRow("org", "marketing/seo…")}
+                <LabelTreeRows
+                  lib="org"
+                  rows={orgTreeRows}
+                  expanded={expanded}
+                  activePath={activeOrgLabel}
+                  drag={drag}
+                  hovered={hovered}
+                  openPendingPath={openPendingPath}
+                  dropDone={dropDone}
+                  onToggleExpand={onToggleExpand}
+                  onSelect={(path) => runAndClose(() => onSelectLabel("org", path))}
+                  onOpenMenu={(row, pos, trigger) => setMenu({ row, lib: "org", pos, trigger })}
+                  onStartDrag={onLabelStartDrag}
+                  canManage={!navigationOnly}
+                />
+              </div>
+            )}
+          </>
         )}
 
         <button
@@ -850,22 +906,24 @@ export function Sidebar({
         </button>
 
         {/* ===== BOTTOM ===== */}
-        <button
-          className={"navitem" + (localActive ? " navitem--active" : "")}
-          aria-current={localActive ? "page" : undefined}
-          onClick={() => runAndClose(onSelectLocal)}
-          title="Companion skills"
-        >
-          <span className="navitem__ico">
-            <Icon name="laptop" />
-          </span>
-          <span className="navitem__label">Companion skills</span>
-          {localUpdateCount > 0 && (
-            <span className="navitem__count navitem__count--warn tnum" title="Updates available">
-              {localUpdateCount}
+        {!companionsMode && (
+          <button
+            className={"navitem" + (localActive ? " navitem--active" : "")}
+            aria-current={localActive ? "page" : undefined}
+            onClick={() => runAndClose(onSelectLocal)}
+            title="Companion skills"
+          >
+            <span className="navitem__ico">
+              <Icon name="laptop" />
             </span>
-          )}
-        </button>
+            <span className="navitem__label">Companion skills</span>
+            {localUpdateCount > 0 && (
+              <span className="navitem__count navitem__count--warn tnum" title="Updates available">
+                {localUpdateCount}
+              </span>
+            )}
+          </button>
+        )}
         <button
           className={"navitem" + (archivedActive ? " navitem--active" : "")}
           aria-current={archivedActive ? "page" : undefined}

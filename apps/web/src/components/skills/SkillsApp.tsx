@@ -1665,8 +1665,10 @@ export function SkillsApp({
         onSelectLocal={selectLocal}
         onSelectArchived={selectArchived}
         onSelectSecrets={() => router.push("/secrets")}
-        onSelectCompanions={() => router.push("/companions")}
         companionsEnabled={companionsEnabled}
+        onSelectMode={(mode) => {
+          if (mode === "companions") router.push("/companions");
+        }}
         localActive={localActive}
         localUpdateCount={localUpdateCount}
         archivedActive={archivedActive}

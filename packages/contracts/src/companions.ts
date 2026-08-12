@@ -75,9 +75,13 @@ export const companionProvidersResponseSchema = z.object({
 });
 export type CompanionProvidersResponse = z.infer<typeof companionProvidersResponseSchema>;
 
+export const companionPersonaSchema = z.string().trim().max(280);
+
 export const companionSchema = z.object({
   id: z.string().uuid(),
   name: z.string(),
+  /** One short line describing what this Companion is for; shown under the name in the list. */
+  persona: z.string().nullable(),
   owner_id: z.string(),
   access: companionAccessSchema,
   runtime: z.object({
@@ -145,6 +149,7 @@ export type CompanionTranscript = z.infer<typeof companionTranscriptSchema>;
 
 export const createCompanionInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
+  persona: companionPersonaSchema.optional(),
   provider_id: companionProviderIdSchema.optional(),
 }).strict();
 export type CreateCompanionInput = z.infer<typeof createCompanionInputSchema>;

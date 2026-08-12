@@ -32,6 +32,19 @@ describe("Companion provider contracts", () => {
       name: "Research",
       provider_id: "anthropic",
     })).toMatchObject({ provider_id: "anthropic" });
+    expect(createCompanionInputSchema.parse({
+      name: "Luna",
+      persona: "  Content marketing assistant  ",
+      provider_id: "anthropic",
+    })).toMatchObject({ persona: "Content marketing assistant" });
+    expect(() => createCompanionInputSchema.parse({
+      name: "Luna",
+      persona: "x".repeat(281),
+    })).toThrow();
+    expect(() => createCompanionInputSchema.parse({
+      name: "Luna",
+      system_prompt: "not part of creation",
+    })).toThrow();
     expect(() => startCompanionRuntimeInputSchema.parse({
       credentials: [{ provider: "anthropic", env_key: "ANTHROPIC_API_KEY", value: "must-not-enter-start" }],
     })).toThrow();
