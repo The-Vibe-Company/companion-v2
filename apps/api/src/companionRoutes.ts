@@ -3,6 +3,9 @@ import { z } from "zod";
 import {
   CompanionNotFoundError,
   CompanionRuntimeForbiddenError,
+  CompanionRuntimeTransitionError,
+  claimCompanionRuntimeStart,
+  claimCompanionRuntimeStop,
   companionsEnabled,
   createCompanion,
   getCompanion,
@@ -37,6 +40,7 @@ function errorStatus(error: unknown): number {
   if (error instanceof AuthenticationRequiredError) return 401;
   if (error instanceof CompanionNotFoundError) return 404;
   if (error instanceof CompanionRuntimeForbiddenError) return 403;
+  if (error instanceof CompanionRuntimeTransitionError) return 409;
   if (error instanceof BoxRuntimeConfigurationError) return 503;
   if (error instanceof BoxRuntimeProviderError) {
     if (error.status === 409) return 409;
@@ -148,17 +152,14 @@ export function registerCompanionRoutes(
       companionIdSchema.parse(companionId);
       const body = startCompanionRuntimeInputSchema.parse(await c.req.json().catch(() => ({})));
       mutation = await tenant(c, async ({ actor, orgId, database }) => {
-        const companion = await getCompanionForRuntime({ actor, orgId, companionId, database });
-        await updateCompanionRuntime({
-          actor,
-          orgId,
-          companionId,
-          patch: { runtimeState: "provisioning", daemonState: "starting" },
-          database,
+        const companion = await claimCompanionRuntimeStart({
+          actor, orgId, companionId, database,
         });
         return { actor, orgId, companion };
       });
-      const providerIds = [...new Set(body.credentials.map((credential) => credential.provider))];
+      const providerIds = body.credentials.length
+        ? [...new Set(body.credentials.map((credential) => credential.provider))]
+        : mutation.companion.runtime.provider_ids;
       const observed = await runtimeFactory().start({
         companionId,
         orgId: mutation.orgId,
@@ -218,17 +219,19 @@ export function registerCompanionRoutes(
   });
 
   app.post("/v1/companions/:id/runtime/stop", async (c) => {
+    const companionId = c.req.param("id");
+    let mutation:
+      | {
+          actor: ReturnType<typeof actorFromContext>;
+          orgId: string;
+          companion: Awaited<ReturnType<typeof claimCompanionRuntimeStop>>;
+        }
+      | undefined;
     try {
-      const companionId = companionIdSchema.parse(c.req.param("id"));
-      const mutation = await tenant(c, async ({ actor, orgId, database }) => {
-        const companion = await getCompanionForRuntime({ actor, orgId, companionId, database });
-        if (!companion.runtime.box_id) throw new Error("companion has no Box to stop");
-        await updateCompanionRuntime({
-          actor,
-          orgId,
-          companionId,
-          patch: { runtimeState: "stopping" },
-          database,
+      companionIdSchema.parse(companionId);
+      mutation = await tenant(c, async ({ actor, orgId, database }) => {
+        const companion = await claimCompanionRuntimeStop({
+          actor, orgId, companionId, database,
         });
         return { actor, orgId, companion };
       });
@@ -251,6 +254,18 @@ export function registerCompanionRoutes(
       );
       return c.json({ companion });
     } catch (error) {
+      if (mutation) {
+        await withTenantContext(
+          { orgId: mutation.orgId, userId: mutation.actor.id },
+          (database) => updateCompanionRuntime({
+            actor: mutation!.actor,
+            orgId: mutation!.orgId,
+            companionId,
+            patch: { runtimeState: "error", daemonState: "error", observedAt: new Date() },
+            database,
+          }),
+        ).catch(() => undefined);
+      }
       return jsonError(c, error, errorStatus(error));
     }
   });

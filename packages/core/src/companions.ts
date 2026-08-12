@@ -24,6 +24,13 @@ export class CompanionRuntimeForbiddenError extends Error {
   }
 }
 
+export class CompanionRuntimeTransitionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CompanionRuntimeTransitionError";
+  }
+}
+
 /** THE-322 can replace this owner/viewer projection with persisted share grants. */
 export function companionAccessForActor(row: Pick<CompanionRow, "ownerId">, actorId: string): CompanionAccess {
   return row.ownerId === actorId ? "owner" : "viewer";
@@ -152,5 +159,70 @@ export async function updateCompanionRuntime(input: {
     .returning();
   if (!row) throw new CompanionNotFoundError();
   return toCompanion(row, input.actor.id);
+}
+
+export async function claimCompanionRuntimeStart(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  database?: Db;
+}): Promise<Companion> {
+  const database = input.database ?? db;
+  await getCompanionForRuntime({ ...input, database });
+  const [row] = await database
+    .update(schema.companions)
+    .set({ runtimeState: "provisioning", daemonState: "starting", updatedAt: new Date() })
+    .where(and(
+      eq(schema.companions.orgId, input.orgId),
+      eq(schema.companions.id, input.companionId),
+      eq(schema.companions.runtimeState, "not_created"),
+    ))
+    .returning();
+  if (row) return toCompanion(row, input.actor.id);
+
+  const current = await getCompanionForRuntime({ ...input, database });
+  if (current.runtime.state === "provisioning" || current.runtime.state === "stopping") {
+    throw new CompanionRuntimeTransitionError(
+      `companion runtime is already ${current.runtime.state}`,
+    );
+  }
+  const [claimed] = await database
+    .update(schema.companions)
+    .set({ runtimeState: "provisioning", daemonState: "starting", updatedAt: new Date() })
+    .where(and(
+      eq(schema.companions.orgId, input.orgId),
+      eq(schema.companions.id, input.companionId),
+      eq(schema.companions.runtimeState, current.runtime.state),
+    ))
+    .returning();
+  if (!claimed) throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
+  return toCompanion(claimed, input.actor.id);
+}
+
+export async function claimCompanionRuntimeStop(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  database?: Db;
+}): Promise<Companion> {
+  const database = input.database ?? db;
+  const current = await getCompanionForRuntime({ ...input, database });
+  if (!current.runtime.box_id) throw new CompanionRuntimeTransitionError("companion has no Box to stop");
+  if (current.runtime.state === "provisioning" || current.runtime.state === "stopping") {
+    throw new CompanionRuntimeTransitionError(
+      `companion runtime is already ${current.runtime.state}`,
+    );
+  }
+  const [claimed] = await database
+    .update(schema.companions)
+    .set({ runtimeState: "stopping", updatedAt: new Date() })
+    .where(and(
+      eq(schema.companions.orgId, input.orgId),
+      eq(schema.companions.id, input.companionId),
+      eq(schema.companions.runtimeState, current.runtime.state),
+    ))
+    .returning();
+  if (!claimed) throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
+  return toCompanion(claimed, input.actor.id);
 }
 

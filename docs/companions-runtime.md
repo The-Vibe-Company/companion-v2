@@ -47,7 +47,8 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
 ```
 
 Layout version `1` is stored in the control-plane row. Runtime transcripts and files do not enter
-PostgreSQL. A systemd user unit restarts the daemon after Box resume.
+PostgreSQL. A systemd user unit supervises Pi while Box is active; the lifecycle API restarts it
+after a Box resume.
 
 ## Provider credentials
 

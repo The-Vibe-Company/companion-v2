@@ -289,7 +289,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     });
     const started = await this.#command(
       box.id,
-      "set -e; chmod 600 \"$HOME/.companion/runtime/state/providers.env\"; systemctl --user daemon-reload; systemctl --user restart companion-pi-daemon.service; status=$?; rm -f \"$HOME/.companion/runtime/state/providers.env\"; exit $status",
+      "set -e; credential_file=\"$HOME/.companion/runtime/state/providers.env\"; trap 'rm -f \"$credential_file\"' EXIT; chmod 600 \"$credential_file\"; systemctl --user daemon-reload; systemctl --user restart companion-pi-daemon.service",
     );
     if (!started.success) {
       throw new BoxRuntimeProviderError("Pi daemon failed to start", 502);

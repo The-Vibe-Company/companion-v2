@@ -14,6 +14,8 @@ const coreMocks = vi.hoisted(() => ({
   createCompanion: vi.fn(),
   getCompanion: vi.fn(),
   getCompanionForRuntime: vi.fn(),
+  claimCompanionRuntimeStart: vi.fn(),
+  claimCompanionRuntimeStop: vi.fn(),
   updateCompanionRuntime: vi.fn(),
 }));
 
@@ -73,6 +75,8 @@ describe("Companions API feature gate", () => {
     coreMocks.createCompanion.mockResolvedValue(companion);
     coreMocks.getCompanion.mockResolvedValue(companion);
     coreMocks.getCompanionForRuntime.mockResolvedValue(companion);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(companion);
+    coreMocks.claimCompanionRuntimeStop.mockResolvedValue(companion);
     coreMocks.updateCompanionRuntime.mockResolvedValue(companion);
   });
 
@@ -184,6 +188,7 @@ describe("Companions API feature gate", () => {
         { provider: "openai", envKey: "OPENAI_API_KEY", value: "secret-b" },
       ],
     }));
+    expect(coreMocks.claimCompanionRuntimeStart).toHaveBeenCalledOnce();
     expect(JSON.stringify(await response.json())).not.toContain("secret-");
   });
 });
