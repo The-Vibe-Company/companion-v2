@@ -12,8 +12,9 @@ desktop availability, and timestamps. `GET /v1/companions`, `GET /v1/companions/
 
 Lifecycle claims are conditional updates. A claim abandoned by a crashed API process becomes
 retryable after five minutes; starts recover a Box by its deterministic `Companion <uuid>` name
-before creating another one. If a newly returned Box id cannot be persisted, the adapter
-best-effort archives it immediately.
+before creating another one, following every Box-list page. A new Box initially gets a maximum
+five-minute TTL; only after its id is durable does the adapter apply the configured TTL and name.
+If the id cannot be persisted, the adapter best-effort archives the Box immediately.
 
 The current access projection is owner or viewer. Lifecycle, live status, and desktop routes call
 `getCompanionForRuntime` first and permit only owner/editor access. Editors are reserved for

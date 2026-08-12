@@ -74,7 +74,7 @@ describe("AsciiBoxCompanionRuntime", () => {
 
     expect(createBody).toMatchObject({
       noEnv: true,
-      ttlSeconds: 3600,
+      ttlSeconds: 300,
       env: {
         COMPANION_ID: "11111111-1111-4111-8111-111111111111",
         COMPANION_ORG_ID: "22222222-2222-4222-8222-222222222222",
@@ -101,12 +101,19 @@ describe("AsciiBoxCompanionRuntime", () => {
       const url = String(rawUrl);
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
       if (url.includes("/boxes?limit=200") && (!init?.method || init.method === "GET")) {
+        if (!url.includes("cursor=page-2")) {
+          return json({
+            boxes: [],
+            pageInfo: { hasMore: true, nextCursor: "page-2" },
+          });
+        }
         return json({
           boxes: [{
             ...box,
             name: "Companion 11111111-1111-4111-8111-111111111111",
             state: "archived",
           }],
+          pageInfo: { hasMore: false, nextCursor: null },
         });
       }
       if (url.endsWith("/boxes/bx_23456789") && (!init?.method || init.method === "GET")) {

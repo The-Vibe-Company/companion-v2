@@ -32,6 +32,10 @@ interface BoxEnvelope {
 
 interface BoxListEnvelope {
   boxes: BoxInfo[];
+  pageInfo?: {
+    nextCursor: string | null;
+    hasMore: boolean;
+  };
 }
 
 interface CommandEnvelope {
@@ -213,8 +217,16 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
 
   async #findCompanionBox(companionId: string): Promise<BoxInfo | null> {
     const name = `Companion ${companionId}`;
-    const result = await this.#request<BoxListEnvelope>("/boxes?limit=200&sort=desc");
-    return result.boxes.find((box) => box.name === name) ?? null;
+    let cursor: string | null = null;
+    do {
+      const query = new URLSearchParams({ limit: "200", sort: "desc" });
+      if (cursor) query.set("cursor", cursor);
+      const result = await this.#request<BoxListEnvelope>(`/boxes?${query}`);
+      const found = result.boxes.find((box) => box.name === name);
+      if (found) return found;
+      cursor = result.pageInfo?.hasMore ? result.pageInfo.nextCursor : null;
+    } while (cursor);
+    return null;
   }
 
   async #waitReady(boxId: string): Promise<BoxInfo> {
@@ -263,6 +275,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     onBoxAssigned: (boxId: string) => Promise<void>;
   }): Promise<CompanionRuntimeObservation> {
     let box: BoxInfo;
+    let boxIdPersisted = false;
     if (!input.boxId) {
       const recovered = await this.#findCompanionBox(input.companionId);
       if (recovered) {
@@ -271,7 +284,9 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
         const created = await this.#request<BoxEnvelope>("/boxes", {
           method: "POST",
           body: JSON.stringify({
-            ttlSeconds: this.#ttlSeconds,
+            // Bound the cost of the irreducible POST-response/process-crash window. The desired TTL
+            // is applied only after the returned id is durable in the control plane.
+            ttlSeconds: Math.min(this.#ttlSeconds, 300),
             noEnv: true,
             ...(this.#environment ? { environment: this.#environment } : {}),
             env: {
@@ -283,11 +298,16 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
         });
         box = created.box;
         try {
+          await input.onBoxAssigned(box.id);
+          boxIdPersisted = true;
           box = (await this.#request<BoxEnvelope>(
             `/boxes/${encodeURIComponent(box.id)}`,
             {
               method: "PATCH",
-              body: JSON.stringify({ name: `Companion ${input.companionId}` }),
+              body: JSON.stringify({
+                name: `Companion ${input.companionId}`,
+                ttlSeconds: this.#ttlSeconds,
+              }),
             },
           )).box;
         } catch (error) {
@@ -316,16 +336,18 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
       throw new BoxRuntimeProviderError(`Box cannot start from state ${box.state}`, 409);
     }
 
-    try {
-      await input.onBoxAssigned(box.id);
-    } catch (error) {
-      if (!input.boxId) {
-        await this.#request(`/boxes/${encodeURIComponent(box.id)}/stop`, {
-          method: "POST",
-          body: JSON.stringify({ force: false }),
-        }).catch(() => undefined);
+    if (!boxIdPersisted) {
+      try {
+        await input.onBoxAssigned(box.id);
+      } catch (error) {
+        if (!input.boxId) {
+          await this.#request(`/boxes/${encodeURIComponent(box.id)}/stop`, {
+            method: "POST",
+            body: JSON.stringify({ force: false }),
+          }).catch(() => undefined);
+        }
+        throw error;
       }
-      throw error;
     }
     box = await this.#waitReady(box.id);
     await this.#request(`/boxes/${encodeURIComponent(box.id)}/files`, {
