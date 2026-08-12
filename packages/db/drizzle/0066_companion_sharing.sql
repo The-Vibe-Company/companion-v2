@@ -141,10 +141,9 @@ CREATE POLICY "companion_workspace_access_owner_write_rls" ON "companion_workspa
 CREATE POLICY "companion_member_access_member_read_rls" ON "companion_member_access"
   FOR SELECT USING (
     "org_id" = NULLIF(current_setting('app.org_id', true), '')::uuid
-    AND EXISTS (
-      SELECT 1 FROM public.memberships m
-      WHERE m.org_id = companion_member_access.org_id
-        AND m.user_id = NULLIF(current_setting('app.user_id', true), '')
+    AND (
+      "owner_id" = NULLIF(current_setting('app.user_id', true), '')
+      OR "user_id" = NULLIF(current_setting('app.user_id', true), '')
     )
   );
 --> statement-breakpoint

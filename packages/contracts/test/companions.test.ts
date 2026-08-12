@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   createCompanionInputSchema,
+  inviteCompanionMemberInputSchema,
   saveCompanionProviderInputSchema,
+  setCompanionWorkspaceShareInputSchema,
   startCompanionRuntimeInputSchema,
 } from "../src/companions";
 
@@ -93,5 +95,22 @@ describe("Companion runtime injection contract", () => {
         "MCP environment reference MISSING_TOKEN has no matching mcp_credentials entry",
       ]));
     }
+  });
+});
+
+describe("Companion sharing contracts", () => {
+  it("accepts only Editor or Viewer for workspace and member grants", () => {
+    expect(setCompanionWorkspaceShareInputSchema.parse({ role: "viewer" })).toEqual({
+      role: "viewer",
+    });
+    expect(setCompanionWorkspaceShareInputSchema.parse({ role: null })).toEqual({ role: null });
+    expect(inviteCompanionMemberInputSchema.parse({
+      email: "editor@example.test",
+      role: "editor",
+    })).toEqual({ email: "editor@example.test", role: "editor" });
+    expect(() => inviteCompanionMemberInputSchema.parse({
+      email: "owner@example.test",
+      role: "owner",
+    })).toThrow();
   });
 });
