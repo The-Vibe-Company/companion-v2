@@ -26,9 +26,8 @@ export default async function CompanionsPage() {
 
   const headers = { "x-companion-org": current.id };
   const emptyLabels: LabelsResponse = { tree: [], flat: [] };
-  const [companions, mineRows, orgRows, personalLabels, orgLabels, localSkills, archivedMine, archivedOrg] =
+  const [mineRows, orgRows, personalLabels, orgLabels, localSkills, archivedMine, archivedOrg] =
     await Promise.all([
-      serverApiFetch<{ companions: unknown[] }>("/v1/companions", { headers }).catch(() => null),
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=mine", { headers }).catch(() => null),
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=org", { headers }).catch(() => null),
       serverApiFetch<LabelsResponse>("/v1/personal-labels", { headers }).catch(() => emptyLabels),
@@ -37,7 +36,7 @@ export default async function CompanionsPage() {
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=mine&archived=true", { headers }).catch(() => []),
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=org&archived=true", { headers }).catch(() => []),
     ]);
-  if (!companions || !mineRows || !orgRows) return <WorkspaceLoadError />;
+  if (!mineRows || !orgRows) return <WorkspaceLoadError />;
 
   const mineSkills = mineRows.map(mapSkill);
   const orgSkills = orgRows.map(mapSkill);

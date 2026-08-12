@@ -16,6 +16,11 @@ export function registerCompanionRoutes(
   app.get("/v1/companions", async (c) => {
     try {
       actorFromContext(c);
+    } catch (error) {
+      return jsonError(c, error, 401);
+    }
+
+    try {
       await orgIdFromContext(c);
       return c.json({ companions: [] });
     } catch (error) {

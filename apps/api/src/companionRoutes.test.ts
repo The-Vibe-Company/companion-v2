@@ -22,6 +22,9 @@ describe("Companions API feature gate", () => {
       name: "User",
     });
     contextMocks.orgIdFromContext.mockResolvedValue("org-1");
+    contextMocks.jsonError.mockImplementation((_context, _error, status) =>
+      Response.json({ ok: false }, { status }),
+    );
   });
 
   it("does not register the route when the flag is off", async () => {
@@ -43,5 +46,19 @@ describe("Companions API feature gate", () => {
     await expect(response.json()).resolves.toEqual({ companions: [] });
     expect(contextMocks.actorFromContext).toHaveBeenCalledOnce();
     expect(contextMocks.orgIdFromContext).toHaveBeenCalledOnce();
+  });
+
+  it("returns 401 before tenant resolution when no session exists", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    contextMocks.actorFromContext.mockImplementationOnce(() => {
+      throw new Error("not authenticated");
+    });
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    const response = await app.request("/v1/companions");
+
+    expect(response.status).toBe(401);
+    expect(contextMocks.jsonError).toHaveBeenCalledWith(expect.anything(), expect.any(Error), 401);
+    expect(contextMocks.orgIdFromContext).not.toHaveBeenCalled();
   });
 });
