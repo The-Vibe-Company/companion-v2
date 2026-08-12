@@ -278,6 +278,7 @@ import {
   getBillingPreviewSource,
   getBillingOverview,
   processStripeWebhook,
+  warnIfCompanionsMisconfigured,
 } from "@companion/core";
 
 const app = new Hono<{ Variables: ApiVariables }>();
@@ -3888,6 +3889,7 @@ app.delete("/v1/tokens/:id", async (c) => {
 const port = Number(process.env.COMPANION_API_PORT ?? process.env.PORT ?? 3001);
 const hostname = process.env.COMPANION_API_HOST;
 assertBillingEnvironmentConfigured();
+warnIfCompanionsMisconfigured();
 serve({ fetch: app.fetch, port, ...(hostname ? { hostname } : {}) }, (info) => {
   console.log(`Companion API listening on ${hostname ? `http://${hostname}:${info.port}` : `port ${info.port}`}`);
 });
