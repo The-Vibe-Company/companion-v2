@@ -1,5 +1,11 @@
 import { companionsEnabled } from "@companion/core";
-import type { LabelsResponse, LocalSkillRow, SkillListRow } from "@companion/contracts";
+import type {
+  Companion,
+  CompanionProvidersResponse,
+  LabelsResponse,
+  LocalSkillRow,
+  SkillListRow,
+} from "@companion/contracts";
 import { notFound, redirect } from "next/navigation";
 import { CompanionsApp } from "@/components/companions/CompanionsApp";
 import { AuthUnavailable, WorkspaceLoadError } from "@/components/org/WorkspaceLoadError";
@@ -26,7 +32,17 @@ export default async function CompanionsPage() {
 
   const headers = { "x-companion-org": current.id };
   const emptyLabels: LabelsResponse = { tree: [], flat: [] };
-  const [mineRows, orgRows, personalLabels, orgLabels, localSkills, archivedMine, archivedOrg] =
+  const [
+    mineRows,
+    orgRows,
+    personalLabels,
+    orgLabels,
+    localSkills,
+    archivedMine,
+    archivedOrg,
+    companionsResponse,
+    providers,
+  ] =
     await Promise.all([
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=mine", { headers }).catch(() => null),
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=org", { headers }).catch(() => null),
@@ -35,8 +51,10 @@ export default async function CompanionsPage() {
       serverApiFetch<LocalSkillRow[]>("/v1/local-skills", { headers }).catch(() => []),
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=mine&archived=true", { headers }).catch(() => []),
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=org&archived=true", { headers }).catch(() => []),
+      serverApiFetch<{ companions: Companion[] }>("/v1/companions", { headers }).catch(() => null),
+      serverApiFetch<CompanionProvidersResponse>("/v1/companion-providers", { headers }).catch(() => null),
     ]);
-  if (!mineRows || !orgRows) return <WorkspaceLoadError />;
+  if (!mineRows || !orgRows || !companionsResponse || !providers) return <WorkspaceLoadError />;
 
   const mineSkills = mineRows.map(mapSkill);
   const orgSkills = orgRows.map(mapSkill);
@@ -44,6 +62,8 @@ export default async function CompanionsPage() {
     <CompanionsApp
       orgs={orgs}
       currentOrg={current}
+      initialCompanions={companionsResponse.companions}
+      initialProviders={providers}
       navigation={{
         mineTreeRows: deriveTreeRows(
           mineSkills.filter((skill) => skill.source === "authored"),

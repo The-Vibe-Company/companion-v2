@@ -48,16 +48,17 @@ Conductor uses `.conductor/settings.toml` and `bash scripts/dev-conductor.sh` fo
 
 ### Companions runtime
 
-Companions are disabled by default. To expose the authenticated empty-list web shell and the
-control-plane API, set the same server-side flag for both web and API, then restart:
+Companions are disabled by default. To expose the authenticated list/create shell, workspace
+provider connections, and control-plane API, set the same server-side flag for both web and API,
+then restart:
 
 ```bash
 COMPANION_COMPANIONS_ENABLED=true
 ```
 
-With the flag unset or `false`, `/companions` and `/v1/companions` return not found and no Companions
-navigation is rendered. The harness remains API-only: the web shell has no runtime, provider, or
-desktop controls.
+With the flag unset or `false`, `/companions`, `/v1/companions`, and `/v1/companion-providers`
+return not found and no Companions navigation is rendered. The harness remains API-only: the web
+shell has a compact provider picker but no Pi, runtime, or desktop controls.
 
 Configured Owner/Editor lifecycle calls use Pi inside a no-env [Box](https://box.ascii.dev). Set:
 
@@ -71,8 +72,8 @@ COMPANION_PI_INSTALL_COMMAND='npm install --global @earendil-works/pi-coding-age
 ```
 
 Prefer a Box environment/template with Pi already pinned and omit the install command. Never put
-provider credentials in these variables; lifecycle requests deliver them transiently to the Pi
-process. See `docs/companions-runtime.md`.
+provider credentials in these variables; workspace credentials are envelope-encrypted and only the
+selected Pi auth entry is delivered to Box. See `docs/companions-runtime.md`.
 
 ## Verification
 

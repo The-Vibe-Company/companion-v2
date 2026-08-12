@@ -24,7 +24,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(() => new AsciiBoxCompanionRuntime({})).toThrow(BoxRuntimeConfigurationError);
   });
 
-  it("creates a no-env Box, installs the Pi daemon layout, and injects provider keys transiently", async () => {
+  it("creates a no-env Box, installs Pi, and writes owner-only provider auth", async () => {
     let fileBody: Record<string, unknown> | undefined;
     let createBody: Record<string, unknown> | undefined;
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
@@ -66,9 +66,9 @@ describe("AsciiBoxCompanionRuntime", () => {
       companionId: "11111111-1111-4111-8111-111111111111",
       orgId: "22222222-2222-4222-8222-222222222222",
       boxId: null,
-      credentials: [
-        { provider: "anthropic", envKey: "ANTHROPIC_API_KEY", value: "secret-value" },
-      ],
+      providerAuth: {
+        anthropic: { type: "api_key", key: "secret-value" },
+      },
       onBoxAssigned: assigned,
     });
 
@@ -84,8 +84,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(String(createBody?.setupScript)).toContain("ExecStart=%h/.companion/bin/pi-daemon");
     expect(String(createBody?.setupScript)).not.toContain("OpenCode");
     expect(fileBody).toEqual({
-      path: ".companion/runtime/state/providers.env",
-      content: "ANTHROPIC_API_KEY=\"secret-value\"\n",
+      path: ".pi/agent/auth.json",
+      content: "{\"anthropic\":{\"type\":\"api_key\",\"key\":\"secret-value\"}}\n",
     });
     expect(assigned).toHaveBeenCalledWith("bx_23456789");
     expect(result).toEqual({
@@ -144,7 +144,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       companionId: "11111111-1111-4111-8111-111111111111",
       orgId: "22222222-2222-4222-8222-222222222222",
       boxId: null,
-      credentials: [],
+      providerAuth: {},
       onBoxAssigned: async () => undefined,
     });
 
@@ -193,14 +193,14 @@ describe("AsciiBoxCompanionRuntime", () => {
       companionId: "11111111-1111-4111-8111-111111111111",
       orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
-      credentials: [
-        { provider: "anthropic", envKey: "ANTHROPIC_API_KEY", value: "secret-value" },
-      ],
+      providerAuth: {
+        anthropic: { type: "api_key", key: "secret-value" },
+      },
       onBoxAssigned: async () => undefined,
     })).rejects.toThrow("command transport failed");
 
     expect(commands.some((command) =>
-      command === "rm -f \"$HOME/.companion/runtime/state/providers.env\"")).toBe(true);
+      command === "rm -f \"$HOME/.pi/agent/auth.json\"")).toBe(true);
   });
 
   it("best-effort archives a newly created Box when its id cannot be persisted", async () => {
@@ -229,7 +229,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       companionId: "11111111-1111-4111-8111-111111111111",
       orgId: "22222222-2222-4222-8222-222222222222",
       boxId: null,
-      credentials: [],
+      providerAuth: {},
       onBoxAssigned: async () => {
         throw new Error("database unavailable");
       },

@@ -6,8 +6,10 @@ OpenCode, or Vercel runtime dependency.
 
 ## Control-plane and wake boundary
 
-PostgreSQL stores only list/open metadata: owner, Box id, last observed Box/Pi state, provider ids,
-desktop availability, and timestamps. `GET /v1/companions`, `GET /v1/companions/:id`, and the default
+PostgreSQL stores list/open metadata plus workspace provider connections. Provider credential
+payloads are envelope-encrypted in `companion_provider_connections`; ordinary reads expose only the
+provider id, authentication method, and timestamps. `GET /v1/companions`,
+`GET /v1/companions/:id`, and the default
 `GET /v1/companions/:id/runtime` read only this projection and never call Box.
 
 Lifecycle claims are conditional updates. A claim abandoned by a crashed API process becomes
@@ -31,6 +33,10 @@ organization member is a no-wake viewer.
 | `POST` | `/v1/companions/:id/runtime/start` | Creates or resumes Box, then starts Pi |
 | `POST` | `/v1/companions/:id/runtime/stop` | Stops Pi, then snapshots/archives Box |
 | `POST` | `/v1/companions/:id/runtime/desktop` | Owner/editor only; never resumes Box |
+| `GET` | `/v1/companion-providers` | Never |
+| `PUT` | `/v1/companion-providers/:provider` | Never; Owner/Admin only |
+| `DELETE` | `/v1/companion-providers/:provider` | Never; Owner/Admin only |
+| `PUT` | `/v1/companion-providers/default` | Never; Owner/Admin only |
 
 Desktop responses are secret-bearing and are returned only to the authorized caller. They are never
 stored. The response advertises `automation: "lux"` so THE-323 can attach the Box desktop/Lux UI
@@ -50,6 +56,8 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
     └── logs/
         ├── pi.rpc.ndjson  # Pi JSON RPC output
         └── pi.stderr.log
+~/.pi/agent/
+└── auth.json             # owner-only Pi API key or refreshable OAuth entry
 ```
 
 Layout version `1` is stored in the control-plane row. Runtime transcripts and files do not enter
@@ -58,19 +66,44 @@ after a Box resume.
 
 ## Provider credentials
 
-`POST .../runtime/start` accepts multiple `{ provider, env_key, value }` entries. Values are:
+Provider management is workspace-scoped and Owner/Admin-only. API keys and one-provider Pi OAuth
+entries are encrypted with `COMPANION_SECRETS_MASTER_KEY`; responses, logs, audit metadata, and
+Companion rows never contain plaintext. Starting a Companion resolves only its selected provider,
+decrypts the credential after the owner/editor wake guard, and writes a minimal owner-only
+`~/.pi/agent/auth.json` to Box before restarting Pi. Direct credentials are rejected by the start
+endpoint.
 
-1. validated and kept out of response bodies and control-plane persistence;
-2. written through the Box file API to an owner-only transient environment file;
-3. inherited by the restarted Pi process; and
-4. removed immediately after systemd starts the process.
+The auth file remains on snapshotted Box disk because Pi must update refreshable subscription
+tokens. Reconnecting or disconnecting a provider replaces or removes the control-plane copy; the
+next start replaces the Box file with only the selected provider. A failed daemon-start transport
+best-effort removes the just-written auth file.
 
-If the start command transport fails after the file write, the adapter makes a separate
-best-effort removal call before returning the error.
+Subscription setup deliberately reuses Pi's authentication implementation. Run `/login` with the
+same pinned Pi version on a trusted machine, then submit only that provider's `{ "type": "oauth",
+... }` entry from `~/.pi/agent/auth.json`. Never submit the whole auth file. API keys are stored as
+literal Pi `api_key` entries, so shell-command and environment interpolation are not accepted.
 
-Only provider ids are persisted. THE-324 can resolve subscriptions/secrets and send the same input
-without changing the Box adapter. Credential values must be single-line and environment keys must
-be unique.
+Provider failures use stable codes suitable for the chat surface:
+`provider_not_configured`, `provider_auth_invalid`, `provider_auth_expired`, and
+`provider_unavailable`. Messages name the provider and the corrective action; raw Pi output and
+credential material must remain behind the adapter boundary.
+
+## V1 providers
+
+| Picker label | Pi auth key | Authentication |
+|---|---|---|
+| Claude | `anthropic` | Anthropic API key or Claude Pro/Max Pi OAuth entry |
+| Codex | `openai-codex` | ChatGPT Plus/Pro Pi OAuth entry |
+| z.ai | `zai` | z.ai API key, including Coding Plan keys |
+
+The web picker intentionally shows only this short list. The API and storage key use Pi provider
+ids and accept any valid lowercase Pi provider id, so another built-in provider can be connected
+without a schema change. To add one to the picker:
+
+1. verify its auth-file key and supported auth methods against the pinned Pi `providers.md`;
+2. add one entry to `COMPANION_PROVIDER_CATALOG` in `packages/contracts/src/companions.ts`;
+3. add contract and Box adapter coverage for its auth entry;
+4. update this table.
 
 ## Configuration
 

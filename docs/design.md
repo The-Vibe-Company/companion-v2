@@ -30,7 +30,7 @@ The API owns one Box HTTP adapter for the gated Companions lifecycle; Pi remains
 
 Every tenant-owned row carries `org_id`. The current Drizzle schema in `packages/db/src/schema.ts` is the source of truth.
 
-Core entities are organizations, users, memberships, invitations, skills, immutable skill versions/files, dependencies, installs, labels and personal labels, comments/images, public releases and transfer tickets, GitHub connections/destinations, skill-secret declarations/bindings/suggestions, encrypted secrets/versions/recipients, Skill Database declarations/realms/shares/object deletions, audit records, billing, tokens, onboarding/preferences, Agent Auth identities/grants, and gated Companion control-plane metadata.
+Core entities are organizations, users, memberships, invitations, skills, immutable skill versions/files, dependencies, installs, labels and personal labels, comments/images, public releases and transfer tickets, GitHub connections/destinations, skill-secret declarations/bindings/suggestions, encrypted secrets/versions/recipients, Skill Database declarations/realms/shares/object deletions, audit records, billing, tokens, onboarding/preferences, Agent Auth identities/grants, and gated Companion control-plane metadata plus encrypted workspace provider connections.
 
 The forward migration `0063_skills_hub_only.sql` intentionally drops all historical Project, skill-run, sandbox-usage, model-provider, prompt, transcript, attachment, artifact, and runtime worker state. The cutover is fail-closed: its first statement refuses to drop ownership rows while Project workspaces, unsettled sandboxes, active usage, or S3-backed runtime metadata remain. Operators must quiesce the old release and drain or explicitly delete those external resources before upgrading. Historical migrations remain immutable so already-migrated databases can upgrade safely.
 
@@ -69,13 +69,16 @@ An authenticated Agent Auth identity may issue a short-lived child PAT only thro
 The API exposes auth, organizations, skills, labels, dependencies, comments, files/versions, installs, public releases, GitHub, secrets, Skill Databases, billing, tokens, onboarding, and skill-facing Agent Auth. Historical Project, skill-run, prompt, attachment/artifact, and model-provider endpoints remain unregistered.
 
 `COMPANION_COMPANIONS_ENABLED=true` additionally registers authenticated, tenant-scoped Companion
-metadata and Box/Pi lifecycle endpoints. List, detail, and default status reads use PostgreSQL only.
+metadata, provider, and Box/Pi lifecycle endpoints. List, detail, provider metadata, and default
+status reads use PostgreSQL only.
 Live status, start/stop, and desktop require owner/editor access before the Box adapter is created;
 the current pre-sharing projection makes non-owners viewers. The default remains fail-closed: when
-the flag is absent or false, none of these routes are registered. Provider credentials are accepted
-only by start, passed through a transient Box file, and never persisted in the control plane.
+the flag is absent or false, none of these routes are registered. Owner/Admin-managed workspace
+provider credentials are envelope-encrypted, write-only, and decrypted only after the Companion
+wake guard. Start never accepts caller-supplied credentials; it writes only the selected provider's
+Pi auth entry to the owner-only Box auth file.
 
-The web has no `/projects` route and no Run/Session state in the Skills URL grammar. Old query parameters are ignored and canonical navigation returns to the Skills detail. By default the only product workspace navigation is Skills. The same `COMPANION_COMPANIONS_ENABLED` server-side flag can expose an authenticated `/companions` empty-list shell and its sidebar entry. The Pi/Box harness is deliberately invisible in that shell; provider, desktop, and sharing UI arrive in later tickets.
+The web has no `/projects` route and no Run/Session state in the Skills URL grammar. Old query parameters are ignored and canonical navigation returns to the Skills detail. By default the only product workspace navigation is Skills. The same `COMPANION_COMPANIONS_ENABLED` server-side flag exposes an authenticated `/companions` list/create shell and its sidebar entry. Creation has one compact picker over connected Claude, Codex, and z.ai providers plus the workspace default. Pi/Box controls, provider catalogs, desktop chrome, and sharing remain invisible.
 
 Pi sessions, RPC events, and logs live only under `~/.companion/runtime` on snapshotted Box disk.
 PostgreSQL stores Box id and last-observed lifecycle metadata so list/open never wakes Box. Desktop

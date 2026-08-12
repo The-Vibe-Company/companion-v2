@@ -50,12 +50,6 @@ interface DesktopEnvelope {
   provisioning?: boolean;
 }
 
-export interface ProviderCredential {
-  provider: string;
-  envKey: string;
-  value: string;
-}
-
 export interface CompanionRuntimeObservation {
   boxId: string;
   runtimeState: CompanionRuntimeState;
@@ -68,7 +62,7 @@ export interface CompanionBoxRuntime {
     companionId: string;
     orgId: string;
     boxId: string | null;
-    credentials: ProviderCredential[];
+    providerAuth: Record<string, Record<string, unknown>>;
     onBoxAssigned: (boxId: string) => Promise<void>;
   }): Promise<CompanionRuntimeObservation>;
   stop(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
@@ -105,7 +99,7 @@ if ! command -v pi >/dev/null 2>&1; then
   ${install}
 fi
 command -v pi >/dev/null 2>&1
-mkdir -p "$HOME/.companion/bin" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.config/systemd/user"
+mkdir -p "$HOME/.companion/bin" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.config/systemd/user" "$HOME/.pi/agent"
 cat > "$HOME/.companion/bin/pi-daemon" <<'COMPANION_PI_DAEMON'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -126,7 +120,6 @@ After=network-online.target
 [Service]
 Type=simple
 ExecStart=%h/.companion/bin/pi-daemon
-EnvironmentFile=-%h/.companion/runtime/state/providers.env
 Restart=on-failure
 RestartSec=2
 
@@ -135,13 +128,6 @@ WantedBy=default.target
 COMPANION_PI_SERVICE
 systemctl --user daemon-reload
 `;
-}
-
-function encodeEnvironmentFile(credentials: ProviderCredential[]): string {
-  return credentials
-    .map(({ envKey, value }) => `${envKey}=${JSON.stringify(value)}`)
-    .join("\n")
-    .concat(credentials.length ? "\n" : "");
 }
 
 function observation(box: BoxInfo, daemonState: CompanionDaemonState): CompanionRuntimeObservation {
@@ -260,10 +246,10 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     return result.stdout.trim() === "active" ? "running" : "stopped";
   }
 
-  async #removeProviderFile(boxId: string): Promise<void> {
+  async #removeProviderAuthFile(boxId: string): Promise<void> {
     await this.#command(
       boxId,
-      "rm -f \"$HOME/.companion/runtime/state/providers.env\"",
+      "rm -f \"$HOME/.pi/agent/auth.json\"",
     );
   }
 
@@ -271,7 +257,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     companionId: string;
     orgId: string;
     boxId: string | null;
-    credentials: ProviderCredential[];
+    providerAuth: Record<string, Record<string, unknown>>;
     onBoxAssigned: (boxId: string) => Promise<void>;
   }): Promise<CompanionRuntimeObservation> {
     let box: BoxInfo;
@@ -353,22 +339,22 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     await this.#request(`/boxes/${encodeURIComponent(box.id)}/files`, {
       method: "PUT",
       body: JSON.stringify({
-        path: ".companion/runtime/state/providers.env",
-        content: encodeEnvironmentFile(input.credentials),
+        path: ".pi/agent/auth.json",
+        content: `${JSON.stringify(input.providerAuth)}\n`,
       }),
     });
     let started: CommandEnvelope;
     try {
       started = await this.#command(
         box.id,
-        "set -e; credential_file=\"$HOME/.companion/runtime/state/providers.env\"; trap 'rm -f \"$credential_file\"' EXIT; chmod 600 \"$credential_file\"; systemctl --user daemon-reload; systemctl --user restart companion-pi-daemon.service",
+        "set -e; chmod 700 \"$HOME/.pi\" \"$HOME/.pi/agent\"; chmod 600 \"$HOME/.pi/agent/auth.json\"; systemctl --user daemon-reload; systemctl --user restart companion-pi-daemon.service",
       );
     } catch (error) {
-      await this.#removeProviderFile(box.id).catch(() => undefined);
+      await this.#removeProviderAuthFile(box.id).catch(() => undefined);
       throw error;
     }
     if (!started.success) {
-      await this.#removeProviderFile(box.id).catch(() => undefined);
+      await this.#removeProviderAuthFile(box.id).catch(() => undefined);
       throw new BoxRuntimeProviderError("Pi daemon failed to start", 502);
     }
     const daemonState = await this.#daemonState(box.id);
