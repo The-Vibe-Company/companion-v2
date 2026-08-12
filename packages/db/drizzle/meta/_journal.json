@@ -470,6 +470,13 @@
       "when": 1786567200000,
       "tag": "0066_companion_sharing",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1786572000000,
+      "tag": "0067_companion_persona",
+      "breakpoints": true
     }
   ]
 }

@@ -104,6 +104,7 @@ function toCompanion(row: CompanionRow, access: CompanionAccess): Companion {
   return {
     id: row.id,
     name: row.name,
+    persona: row.persona,
     owner_id: row.ownerId,
     access,
     runtime: {
@@ -192,6 +193,7 @@ export async function createCompanion(input: {
   actor: ActorContext;
   orgId: string;
   name: string;
+  persona?: string;
   providerId?: string;
   database?: Db;
 }): Promise<Companion> {
@@ -228,6 +230,7 @@ export async function createCompanion(input: {
       orgId: input.orgId,
       ownerId: input.actor.id,
       name: input.name,
+      persona: input.persona?.trim() || null,
       providerIds: [providerId],
     })
     .returning();

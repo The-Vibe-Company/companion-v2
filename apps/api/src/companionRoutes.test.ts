@@ -68,6 +68,7 @@ vi.mock("@companion/skills", () => skillsMocks);
 const companion = {
   id: "11111111-1111-4111-8111-111111111111",
   name: "Research",
+  persona: "Incident research assistant",
   owner_id: "user-1",
   access: "owner" as const,
   runtime: {
@@ -320,6 +321,43 @@ describe("Companions API feature gate", () => {
 
     expect(response.status).toBe(403);
     expect(runtimeFactory).not.toHaveBeenCalled();
+  });
+
+  it("creates a Companion from a name, a persona, and one connected provider", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    const response = await app.request("/v1/companions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Luna",
+        persona: "Content marketing assistant",
+        provider_id: "anthropic",
+      }),
+    });
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toEqual({ companion });
+    expect(coreMocks.createCompanion).toHaveBeenCalledWith(expect.objectContaining({
+      name: "Luna",
+      persona: "Content marketing assistant",
+      providerId: "anthropic",
+    }));
+  });
+
+  it("rejects a persona longer than the stored column allows", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    const response = await app.request("/v1/companions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Luna", persona: "x".repeat(281) }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(coreMocks.createCompanion).not.toHaveBeenCalled();
   });
 
   it("guards provider attachment with the same owner-only Companion boundary", async () => {

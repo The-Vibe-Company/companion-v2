@@ -1,25 +1,19 @@
 "use client";
 
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type {
   Companion,
-  CompanionProviderAuthMethod,
   CompanionProvidersResponse,
   CompanionTranscript,
-  SaveCompanionProviderInput,
 } from "@companion/contracts";
 import type { OrgVM } from "@/lib/types";
-import {
-  createCompanion,
-  deleteCompanionProvider,
-  getCompanionTranscript,
-  saveCompanionProvider,
-  setCompanionProvider,
-  setDefaultCompanionProvider,
-} from "@/lib/companions";
+import { getCompanionTranscript, setCompanionProvider } from "@/lib/companions";
 import { Icon } from "../Icon";
+import { CompanionProvidersDialog } from "./CompanionProvidersDialog";
+import { NewCompanionDialog } from "./NewCompanionDialog";
 import { ShareCompanionDialog } from "./ShareCompanionDialog";
+import { companionStatus, relativeTime } from "./status";
 import { Onboarding } from "../org/Onboarding";
 import { useOrgActions } from "../org/useOrgActions";
 import { Sidebar } from "../skills/Sidebar";
@@ -38,6 +32,13 @@ export interface CompanionNavigation {
   installedUpdateCount: number;
   localUpdateCount: number;
   archivedCount: number;
+}
+
+/** Server markup keeps the stable ISO day; the relative form appears once the client owns the clock. */
+function UpdatedAt({ iso }: { iso: string }) {
+  const [text, setText] = useState(() => iso.slice(0, 10));
+  useEffect(() => setText(relativeTime(iso)), [iso]);
+  return <time className="companions-row__time" dateTime={iso}>{text}</time>;
 }
 
 export function CompanionsApp({
@@ -59,23 +60,10 @@ export function CompanionsApp({
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [companions, setCompanions] = useState(initialCompanions);
   const [providers, setProviders] = useState(initialProviders);
-  const [name, setName] = useState("");
-  const [selectedProvider, setSelectedProvider] = useState(
-    initialProviders.default_provider_id ?? initialProviders.connections[0]?.provider_id ?? "",
-  );
-  const firstAvailableProvider = initialProviders.catalog.find(
-    (provider) => !initialProviders.connections.some(
-      (connection) => connection.provider_id === provider.id,
-    ),
-  );
-  const [providerToAdd, setProviderToAdd] = useState(firstAvailableProvider?.id ?? "");
-  const [authMethod, setAuthMethod] = useState<CompanionProviderAuthMethod>(
-    firstAvailableProvider?.auth_methods[0] ?? "api_key",
-  );
-  const [credential, setCredential] = useState("");
-  const [busy, setBusy] = useState<
-    "create" | "provider" | "default" | "delete" | "configure" | null
-  >(null);
+  const [query, setQuery] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [managingProviders, setManagingProviders] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sharing, setSharing] = useState<Companion | null>(null);
   const [opened, setOpened] = useState<Companion | null>(null);
@@ -84,145 +72,30 @@ export function CompanionsApp({
   const threadRef = useRef<HTMLElement>(null);
   const transcriptRequestRef = useRef(0);
   const noop = () => {};
-  const connectedIds = useMemo(
-    () => new Set(providers.connections.map((connection) => connection.provider_id)),
-    [providers.connections],
-  );
-  const providersAvailableToAdd = providers.catalog.filter((provider) => !connectedIds.has(provider.id));
-  const selectedProviderDefinition = providers.catalog.find((provider) => provider.id === providerToAdd);
 
   const providerName = (providerId: string) =>
     providers.catalog.find((provider) => provider.id === providerId)?.name ?? providerId;
+  const fallbackProvider = providers.default_provider_id
+    ?? providers.connections[0]?.provider_id
+    ?? "";
 
-  const onCreateCompanion = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!selectedProvider) {
-      setError("Connect a provider before creating a Companion.");
-      return;
-    }
-    setBusy("create");
-    setError(null);
-    try {
-      const companion = await createCompanion(currentOrg.id, {
-        name: name.trim(),
-        provider_id: selectedProvider,
-      });
-      setCompanions((current) => [companion, ...current]);
-      setName("");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Companion could not be created.");
-    } finally {
-      setBusy(null);
-    }
-  };
+  const sidebarCompanions = useMemo(
+    () => companions.map((companion) => {
+      const status = companionStatus(companion.runtime.state);
+      return { id: companion.id, name: companion.name, status: status.label, tone: status.tone };
+    }),
+    [companions],
+  );
 
-  const onSaveProvider = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!providerToAdd) return;
-    setBusy("provider");
-    setError(null);
-    try {
-      const parsedCredential = authMethod === "subscription"
-        ? JSON.parse(credential) as Record<string, unknown>
-        : credential.trim();
-      if (
-        authMethod === "subscription"
-        && (!parsedCredential || typeof parsedCredential !== "object" || parsedCredential.type !== "oauth")
-      ) {
-        throw new Error("Paste one Pi subscription entry whose type is oauth.");
-      }
-      const input: SaveCompanionProviderInput = authMethod === "subscription"
-        ? { auth_method: "subscription", credential: parsedCredential as Record<string, unknown> }
-        : { auth_method: "api_key", credential: parsedCredential as string };
-      const connection = await saveCompanionProvider(currentOrg.id, providerToAdd, input);
-      let defaultProviderId = providers.default_provider_id;
-      if (!defaultProviderId) {
-        await setDefaultCompanionProvider(currentOrg.id, providerToAdd);
-        defaultProviderId = providerToAdd;
-        setSelectedProvider(providerToAdd);
-      }
-      const nextConnections = [...providers.connections, connection];
-      setProviders((current) => ({
-        ...current,
-        connections: nextConnections,
-        default_provider_id: defaultProviderId,
-      }));
-      setCredential("");
-      const next = providers.catalog.find((provider) =>
-        !nextConnections.some((candidate) => candidate.provider_id === provider.id));
-      setProviderToAdd(next?.id ?? "");
-      setAuthMethod(next?.auth_methods[0] ?? "api_key");
-    } catch (cause) {
-      setError(cause instanceof SyntaxError
-        ? "Subscription credential must be valid JSON."
-        : cause instanceof Error ? cause.message : "Provider could not be connected.");
-    } finally {
-      setBusy(null);
-    }
-  };
+  const visible = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase("en-US");
+    if (!needle) return companions;
+    return companions.filter((companion) =>
+      companion.name.toLocaleLowerCase("en-US").includes(needle)
+      || (companion.persona ?? "").toLocaleLowerCase("en-US").includes(needle));
+  }, [companions, query]);
 
-  const onDefaultProvider = async (providerId: string) => {
-    setBusy("default");
-    setError(null);
-    try {
-      await setDefaultCompanionProvider(currentOrg.id, providerId);
-      setProviders((current) => ({ ...current, default_provider_id: providerId }));
-      setSelectedProvider(providerId);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Default provider could not be saved.");
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const onDeleteProvider = async (providerId: string) => {
-    if (!window.confirm(
-      `Disconnect ${providerName(providerId)}? Companions using it cannot start until it is reconnected.`,
-    )) return;
-    setBusy("delete");
-    setError(null);
-    try {
-      await deleteCompanionProvider(currentOrg.id, providerId);
-      const nextConnections = providers.connections.filter(
-        (connection) => connection.provider_id !== providerId,
-      );
-      setProviders((current) => ({
-        ...current,
-        connections: nextConnections,
-        default_provider_id:
-          current.default_provider_id === providerId ? null : current.default_provider_id,
-      }));
-      if (selectedProvider === providerId) setSelectedProvider(nextConnections[0]?.provider_id ?? "");
-      if (!providerToAdd) {
-        const restored = providers.catalog.find((provider) => provider.id === providerId);
-        setProviderToAdd(providerId);
-        setAuthMethod(restored?.auth_methods[0] ?? "api_key");
-      }
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Provider could not be disconnected.");
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const onConfigureCompanion = async (companionId: string, providerId: string) => {
-    if (!providerId) {
-      setError("Connect a provider before configuring this Companion.");
-      return;
-    }
-    setBusy("configure");
-    setError(null);
-    try {
-      const companion = await setCompanionProvider(currentOrg.id, companionId, providerId);
-      setCompanions((current) => current.map((item) => item.id === companion.id ? companion : item));
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Provider could not be set.");
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const onOpenCompanion = async (companion: Companion) => {
+  const openCompanion = async (companion: Companion) => {
     const requestId = ++transcriptRequestRef.current;
     setOpened(companion);
     setTranscript(null);
@@ -240,6 +113,31 @@ export function CompanionsApp({
   const closeThread = () => {
     transcriptRequestRef.current += 1;
     setOpened(null);
+  };
+
+  const onCreated = (companion: Companion) => {
+    setCompanions((current) => [companion, ...current]);
+    setCreating(false);
+    setError(null);
+    void openCompanion(companion);
+  };
+
+  const onSetProvider = async (companion: Companion) => {
+    if (!fallbackProvider) {
+      setError("Connect a provider before configuring this Companion.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await setCompanionProvider(currentOrg.id, companion.id, fallbackProvider);
+      setCompanions((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setOpened((current) => current?.id === updated.id ? updated : current);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Provider could not be set.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const navigateToLabel = (lib: SkillsLibrary, path: string) => {
@@ -265,15 +163,17 @@ export function CompanionsApp({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [mobileSidebarOpen]);
 
+  const overlayOpen = opened !== null || sharing !== null || creating || managingProviders;
+
   useEffect(() => {
-    if (!opened && !sharing) return;
+    if (!overlayOpen) return;
     const sidebar = document.querySelector<HTMLElement>(".side");
     const sidebarWasInert = sidebar?.inert ?? false;
     if (sidebar) sidebar.inert = true;
     return () => {
       if (sidebar) sidebar.inert = sidebarWasInert;
     };
-  }, [opened, sharing]);
+  }, [overlayOpen]);
 
   useEffect(() => {
     if (!opened) return;
@@ -350,9 +250,17 @@ export function CompanionsApp({
         onSelectLocal={() => router.push(skillsRouteHref({ kind: "local" }))}
         onSelectArchived={() => router.push(skillsRouteHref({ kind: "archived" }))}
         onSelectSecrets={() => router.push("/secrets")}
-        onSelectCompanions={noop}
         companionsEnabled
-        companionsActive
+        mode="companions"
+        onSelectMode={(mode) => {
+          if (mode === "skills") router.push("/skills");
+        }}
+        companions={sidebarCompanions}
+        activeCompanionId={opened?.id ?? null}
+        onSelectCompanion={(companionId) => {
+          const companion = companions.find((item) => item.id === companionId);
+          if (companion) void openCompanion(companion);
+        }}
         navigationOnly
         localActive={false}
         localUpdateCount={navigation.localUpdateCount}
@@ -373,269 +281,116 @@ export function CompanionsApp({
 
       <main
         className="companions-main"
-        aria-hidden={mobileSidebarOpen || opened !== null || sharing !== null || undefined}
-        inert={mobileSidebarOpen || opened !== null || sharing !== null ? true : undefined}
+        aria-hidden={mobileSidebarOpen || overlayOpen || undefined}
+        inert={mobileSidebarOpen || overlayOpen ? true : undefined}
       >
         <header className="companions-head">
-          <div>
-            <p>Workspace</p>
-            <h1>Companions</h1>
-            <span>Create a Companion with one connected model provider.</span>
+          <h1>
+            Companions
+            <span className="companions-count tnum">{companions.length}</span>
+          </h1>
+          <div className="companions-head-actions">
+            {providers.can_manage && (
+              <button
+                type="button"
+                className="cds-btn cds-btn--secondary cds-btn--md"
+                onClick={() => setManagingProviders(true)}
+              >
+                Providers
+              </button>
+            )}
+            <button
+              type="button"
+              className="cds-btn cds-btn--primary cds-btn--md"
+              onClick={() => setCreating(true)}
+            >
+              <Icon name="plus" size={15} /> New companion
+            </button>
           </div>
         </header>
-        <div className="companions-content">
-          {error && (
-            <div className="companions-error" role="alert">
-              {error}
-            </div>
-          )}
 
-          <section className="companions-section" aria-labelledby="companion-create-title">
-            <div className="companions-section-head">
-              <div>
-                <h2 id="companion-create-title">Create Companion</h2>
-                <p>The provider can be changed by creating another Companion.</p>
-              </div>
+        <div className="companions-content">
+          {error && <div className="companions-error" role="alert">{error}</div>}
+
+          {companions.length === 0 ? (
+            <div className="companions-empty">
+              <Icon name="bot" size={22} />
+              <strong>No Companions yet</strong>
+              <p>A Companion is a name, one line of persona, and a model provider. It stays asleep until you open it.</p>
+              <button
+                type="button"
+                className="cds-btn cds-btn--primary cds-btn--md"
+                onClick={() => setCreating(true)}
+              >
+                New companion
+              </button>
             </div>
-            <form className="companions-create-form" onSubmit={onCreateCompanion}>
-              <label>
-                Name
+          ) : (
+            <>
+              <label className="companions-search">
+                <Icon name="search" size={15} />
                 <input
-                  required
-                  maxLength={120}
-                  value={name}
-                  onChange={(event) => setName(event.target.value)}
-                  placeholder="Research"
+                  type="search"
+                  value={query}
+                  placeholder="Search companions"
+                  aria-label="Search companions"
+                  onChange={(event) => setQuery(event.target.value)}
                 />
               </label>
-              <label>
-                Provider
-                <select
-                  required
-                  value={selectedProvider}
-                  onChange={(event) => setSelectedProvider(event.target.value)}
-                  disabled={!providers.connections.length}
-                >
-                  {!providers.connections.length && <option value="">No connected providers</option>}
-                  {providers.connections.map((connection) => (
-                    <option key={connection.provider_id} value={connection.provider_id}>
-                      {providerName(connection.provider_id)}
-                      {providers.default_provider_id === connection.provider_id ? " (default)" : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                type="submit"
-                className="cds-btn cds-btn--primary cds-btn--md"
-                disabled={busy !== null || !providers.connections.length || !name.trim()}
-              >
-                {busy === "create" ? "Creating..." : "Create Companion"}
-              </button>
-            </form>
-          </section>
 
-          <section className="companions-section" aria-labelledby="companion-providers-title">
-            <div className="companions-section-head">
-              <div>
-                <h2 id="companion-providers-title">Providers</h2>
-                <p>Credentials stay encrypted and are sent only to the selected Companion.</p>
-              </div>
-            </div>
-            {providers.connections.length ? (
-              <div className="companions-provider-list">
-                {providers.connections.map((connection) => (
-                  <div className="companions-provider-row" key={connection.provider_id}>
-                    <div>
-                      <strong>{providerName(connection.provider_id)}</strong>
-                      <span>
-                        {connection.auth_method === "api_key" ? "API key" : "Subscription"}
-                        {providers.default_provider_id === connection.provider_id
-                          ? " · Workspace default"
-                          : ""}
-                      </span>
-                    </div>
-                    {providers.can_manage && (
-                      <div className="companions-provider-actions">
-                        {providers.default_provider_id !== connection.provider_id && (
-                          <button
-                            type="button"
-                            className="cds-btn cds-btn--secondary cds-btn--sm"
-                            disabled={busy !== null}
-                            onClick={() => void onDefaultProvider(connection.provider_id)}
-                          >
-                            Make default
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          className="cds-btn cds-btn--ghost cds-btn--sm"
-                          disabled={busy !== null}
-                          onClick={() => void onDeleteProvider(connection.provider_id)}
-                        >
-                          Disconnect
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="companions-provider-empty">
-                <Icon name="bot" size={20} />
-                <div>
-                  <strong>No provider connected</strong>
-                  <span>
-                    {providers.can_manage
-                      ? "Connect one provider to create a Companion."
-                      : "Ask a workspace admin to connect a provider."}
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {providers.can_manage && providersAvailableToAdd.length > 0 && (
-              <details className="companions-provider-add" open={!providers.connections.length}>
-                <summary>Connect provider</summary>
-                <form onSubmit={onSaveProvider}>
-                  <label>
-                    Provider
-                    <select
-                      value={providerToAdd}
-                      onChange={(event) => {
-                        const providerId = event.target.value;
-                        const definition = providers.catalog.find((provider) => provider.id === providerId);
-                        setProviderToAdd(providerId);
-                        setAuthMethod(definition?.auth_methods[0] ?? "api_key");
-                        setCredential("");
-                      }}
-                    >
-                      {providersAvailableToAdd.map((provider) => (
-                        <option key={provider.id} value={provider.id}>{provider.name}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Authentication
-                    <select
-                      value={authMethod}
-                      onChange={(event) => {
-                        setAuthMethod(event.target.value as CompanionProviderAuthMethod);
-                        setCredential("");
-                      }}
-                    >
-                      {selectedProviderDefinition?.auth_methods.map((method) => (
-                        <option key={method} value={method}>
-                          {method === "api_key" ? "API key" : "Subscription"}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="companions-credential">
-                    {authMethod === "api_key" ? "API key" : "Pi subscription credential"}
-                    {authMethod === "api_key" ? (
-                      <input
-                        required
-                        type="password"
-                        autoComplete="off"
-                        value={credential}
-                        onChange={(event) => setCredential(event.target.value)}
-                      />
-                    ) : (
-                      <>
-                        <textarea
-                          required
-                          rows={4}
-                          value={credential}
-                          onChange={(event) => setCredential(event.target.value)}
-                          placeholder={'{"type":"oauth", ...}'}
-                        />
-                        <span>Paste only this provider's entry from Pi <code>auth.json</code>.</span>
-                      </>
-                    )}
-                  </label>
-                  <button
-                    type="submit"
-                    className="cds-btn cds-btn--secondary cds-btn--md"
-                    disabled={busy !== null || !credential.trim() || !providerToAdd}
-                  >
-                    {busy === "provider" ? "Connecting..." : "Connect provider"}
-                  </button>
-                </form>
-              </details>
-            )}
-          </section>
-
-          <section className="companions-section" aria-labelledby="companion-list-title">
-            <div className="companions-section-head">
-              <div>
-                <h2 id="companion-list-title">Workspace Companions</h2>
-                <p>{companions.length} total</p>
-              </div>
-            </div>
-            {companions.length ? (
               <div className="companions-list">
-                {companions.map((companion) => (
-                  <div className="companions-row" key={companion.id}>
-                    <div>
-                      <strong>{companion.name}</strong>
-                      <span>{providerName(companion.runtime.provider_ids[0] ?? "unconfigured")}</span>
-                    </div>
-                    <div className="companions-row-actions">
-                      {!companion.runtime.provider_ids.length
-                        && companion.access === "owner"
-                        && (providers.default_provider_id ?? selectedProvider) && (
-                          <button
-                            type="button"
-                            className="cds-btn cds-btn--secondary cds-btn--sm"
-                            disabled={busy !== null}
-                            onClick={() => void onConfigureCompanion(
-                              companion.id,
-                              providers.default_provider_id ?? selectedProvider,
-                            )}
-                          >
-                            {busy === "configure"
-                              ? "Setting..."
-                              : `Set ${providerName(
-                                providers.default_provider_id ?? selectedProvider,
-                              )}`}
-                          </button>
-                        )}
-                      <span className="companions-role">{companion.access}</span>
-                      <span className="companions-state">
-                        <i aria-hidden="true" />
-                        {companion.runtime.state.replace("_", " ")}
-                      </span>
+                <div className="companions-row companions-row--head">
+                  <span>Companion</span>
+                  <span>Status</span>
+                  <span>Updated</span>
+                  <span>Access</span>
+                </div>
+                {visible.map((companion) => {
+                  const status = companionStatus(companion.runtime.state);
+                  return (
+                    <div className="companions-row" key={companion.id}>
                       <button
                         type="button"
-                        className="cds-btn cds-btn--secondary cds-btn--sm"
-                        onClick={() => void onOpenCompanion(companion)}
+                        className="companions-row__main"
+                        onClick={() => void openCompanion(companion)}
                       >
-                        Open
+                        <span className="companions-avatar" aria-hidden="true">
+                          {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
+                        </span>
+                        <span className="companions-row__text">
+                          <strong>{companion.name}</strong>
+                          <span>
+                            {companion.persona
+                              ?? providerName(companion.runtime.provider_ids[0] ?? "No provider")}
+                          </span>
+                        </span>
                       </button>
-                      {companion.access === "owner" && (
-                        <button
-                          type="button"
-                          className="cds-btn cds-btn--ghost cds-btn--sm"
-                          onClick={() => setSharing(companion)}
-                        >
-                          Share
-                        </button>
-                      )}
+                      <span className={`companions-state companions-state--${status.tone}`}>
+                        <i aria-hidden="true" />
+                        {status.label}
+                      </span>
+                      <UpdatedAt iso={companion.updated_at} />
+                      <span className="companions-row-actions">
+                        <span className="companions-role">{companion.access}</span>
+                        {companion.access === "owner" && (
+                          <button
+                            type="button"
+                            className="cds-btn cds-btn--ghost cds-btn--sm"
+                            onClick={() => setSharing(companion)}
+                          >
+                            Share
+                          </button>
+                        )}
+                      </span>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
+                {visible.length === 0 && (
+                  <p className="companions-list-empty">No Companion matches this search.</p>
+                )}
               </div>
-            ) : (
-              <div className="companions-list-empty">
-                <Icon name="bot" size={20} />
-                <div>
-                  <strong>No Companions yet</strong>
-                  <span>Choose a provider above to create the first one.</span>
-                </div>
-              </div>
-            )}
-          </section>
+            </>
+          )}
         </div>
       </main>
 
@@ -655,6 +410,7 @@ export function CompanionsApp({
               <div>
                 <h2 id="companions-thread-title">{opened.name}</h2>
                 <p>
+                  {opened.persona ? `${opened.persona} · ` : ""}
                   {opened.access === "viewer"
                     ? "Read-only transcript · Box stays asleep"
                     : "Transcript"}
@@ -669,6 +425,19 @@ export function CompanionsApp({
                 <Icon name="x" size={16} />
               </button>
             </header>
+            {opened.access === "owner" && !opened.runtime.provider_ids.length && fallbackProvider && (
+              <div className="companions-thread-notice">
+                <span>This Companion has no provider yet.</span>
+                <button
+                  type="button"
+                  className="cds-btn cds-btn--secondary cds-btn--sm"
+                  disabled={busy}
+                  onClick={() => void onSetProvider(opened)}
+                >
+                  {busy ? "Setting..." : `Set ${providerName(fallbackProvider)}`}
+                </button>
+              </div>
+            )}
             <div className="companions-thread-body">
               {transcriptError ? (
                 <div className="companions-error" role="alert">{transcriptError}</div>
@@ -698,6 +467,28 @@ export function CompanionsApp({
             )}
           </aside>
         </div>
+      )}
+
+      {creating && (
+        <NewCompanionDialog
+          orgId={currentOrg.id}
+          providers={providers}
+          onCreated={onCreated}
+          onConnectProvider={() => {
+            setCreating(false);
+            setManagingProviders(true);
+          }}
+          onClose={() => setCreating(false)}
+        />
+      )}
+
+      {managingProviders && (
+        <CompanionProvidersDialog
+          orgId={currentOrg.id}
+          providers={providers}
+          onProviders={setProviders}
+          onClose={() => setManagingProviders(false)}
+        />
       )}
 
       {sharing && (

@@ -134,6 +134,7 @@ export function registerCompanionRoutes(
           actor,
           orgId,
           name: body.name,
+          persona: body.persona,
           providerId: body.provider_id,
           database,
         }));

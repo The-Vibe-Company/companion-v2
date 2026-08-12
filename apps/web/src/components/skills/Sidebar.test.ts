@@ -14,8 +14,10 @@ const org = {
   logoUrl: null,
 };
 
-function renderSidebar(companionsEnabled: boolean) {
-  const props: ComponentProps<typeof Sidebar> = {
+type SidebarProps = ComponentProps<typeof Sidebar>;
+
+function renderSidebar(overrides: Partial<SidebarProps> = {}) {
+  const props: SidebarProps = {
     orgs: [org],
     currentOrg: org,
     onSwitchOrg: noop,
@@ -50,8 +52,6 @@ function renderSidebar(companionsEnabled: boolean) {
     onSelectLocal: noop,
     onSelectArchived: noop,
     onSelectSecrets: noop,
-    onSelectCompanions: noop,
-    companionsEnabled,
     localActive: false,
     localUpdateCount: 0,
     archivedActive: false,
@@ -59,16 +59,59 @@ function renderSidebar(companionsEnabled: boolean) {
     mobileOpen: false,
     onToggleMobile: noop,
     onCloseMobile: noop,
+    ...overrides,
   };
   return renderToStaticMarkup(React.createElement(Sidebar, props));
 }
 
+const companions = [
+  { id: "companion-1", name: "Luna", status: "Online", tone: "ok" as const },
+  { id: "companion-2", name: "Milo", status: "Asleep", tone: "unknown" as const },
+];
+
 describe("Sidebar Companions feature gate", () => {
   it("does not expose Companions navigation when disabled", () => {
-    expect(renderSidebar(false)).not.toContain("Companions");
+    const markup = renderSidebar({ companionsEnabled: false });
+
+    expect(markup).not.toContain("Companions");
+    expect(markup).not.toContain("modeseg");
+    expect(markup).toContain("My Skills");
   });
 
-  it("shows Companions navigation when enabled", () => {
-    expect(renderSidebar(true)).toContain("Companions");
+  it("shows the Skills | Companions mode segment when enabled", () => {
+    const markup = renderSidebar({ companionsEnabled: true });
+
+    expect(markup).toContain("Workspace mode");
+    expect(markup).toContain(">Skills</span>");
+    expect(markup).toContain(">Companions</span>");
+    expect(markup).toContain("My Skills");
+  });
+
+  it("replaces the Skills libraries with the Companion list in Companions mode", () => {
+    const markup = renderSidebar({ companionsEnabled: true, mode: "companions", companions });
+
+    expect(markup).toContain("Luna");
+    expect(markup).toContain("Milo");
+    // The status word is visible text, not a colour-only dot.
+    expect(markup).toContain('class="cmprow__statusword">Online<');
+    expect(markup).toContain('aria-label="Luna — Online"');
+    expect(markup).not.toContain("My Skills");
+    expect(markup).not.toContain("Organization");
+    expect(markup).not.toContain("Companion skills");
+    expect(markup).toContain("Secrets");
+    expect(markup).toContain("Archived");
+  });
+
+  it("keeps the Companions mode list honest when the workspace has none", () => {
+    const markup = renderSidebar({ companionsEnabled: true, mode: "companions", companions: [] });
+
+    expect(markup).toContain("No Companions yet");
+  });
+
+  it("ignores Companions mode when the flag is off", () => {
+    const markup = renderSidebar({ companionsEnabled: false, mode: "companions", companions });
+
+    expect(markup).not.toContain("Luna");
+    expect(markup).toContain("My Skills");
   });
 });
