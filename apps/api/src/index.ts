@@ -265,6 +265,7 @@ import { buildInlineCompanionManifest, uploadDependencyValues, withResolvedManif
 import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
 import { parseSkillListQuery } from "./skillListQuery";
 import { registerAgentAuthRoutes } from "./agentAuthRoutes";
+import { registerCompanionRoutes } from "./companionRoutes";
 import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
 import { StripeBillingGateway } from "@companion/billing";
 import {
@@ -811,6 +812,7 @@ app.use(
 app.use("*", attachSession);
 
 registerAgentAuthRoutes(app);
+registerCompanionRoutes(app);
 
 app.get("/health", (c) => c.json({ ok: true }));
 

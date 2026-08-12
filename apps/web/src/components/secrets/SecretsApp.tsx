@@ -186,6 +186,7 @@ export function SecretsApp({
   orgs,
   currentOrg,
   initialCreateKey,
+  companionsEnabled = false,
   navigation,
 }: {
   initialSecrets: SecretRow[];
@@ -194,6 +195,7 @@ export function SecretsApp({
   orgs: OrgVM[];
   currentOrg: OrgVM;
   initialCreateKey: string | null;
+  companionsEnabled?: boolean;
   navigation: {
     mineTreeRows: TreeRow[];
     orgTreeRows: TreeRow[];
@@ -373,6 +375,8 @@ export function SecretsApp({
         onSelectLocal={() => router.push(skillsRouteHref({ kind: "local" }))}
         onSelectArchived={() => router.push(skillsRouteHref({ kind: "archived" }))}
         onSelectSecrets={noop}
+        onSelectCompanions={() => router.push("/companions")}
+        companionsEnabled={companionsEnabled}
         secretsActive
         navigationOnly
         localActive={false}
