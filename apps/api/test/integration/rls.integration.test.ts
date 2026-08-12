@@ -4,8 +4,14 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { extractRuntimeRoleGrantBlock, resolveRuntimeRoleGrantsFile } from "../../src/migrate";
 import {
   CompanionRuntimeTransitionError,
+  CompanionShareForbiddenError,
+  CompanionNotFoundError,
   claimCompanionRuntimeStart,
   claimCompanionRuntimeStop,
+  inviteCompanionMember,
+  listCompanionShares,
+  revokeCompanionMember,
+  updateCompanionMemberRole,
   updateCompanionObservation,
 } from "@companion/core";
 import { withTenantContext } from "@companion/db";
@@ -81,22 +87,111 @@ describe("Skills Hub PostgreSQL isolation", () => {
     expect(await visibleSlugs(fixture.orgB, fixture.outsider.id)).toEqual([otherOrgSlug]);
   });
 
-  it("lets members read Companion metadata but only the owner mutate its runtime projection", async () => {
-    const visible = await integrationSql.begin(async (tx) => {
+  it("enforces Companion member and workspace ACL roles in PostgreSQL", async () => {
+    const initiallyVisible = await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${apiRole}`);
       await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
       return tx<Array<{ id: string }>>`select id from companions`;
     });
-    expect(visible.map((row) => row.id)).toContain(companionId);
+    expect(initiallyVisible).toEqual([]);
 
-    const adminUpdates = await integrationSql.begin(async (tx) => {
+    await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.owner.id}, true)`;
+      await tx`
+        insert into companion_member_access (
+          org_id, companion_id, user_id, owner_id, role, granted_by
+        ) values (
+          ${fixture.orgA}, ${companionId}, ${fixture.admin.id}, ${fixture.owner.id}, 'viewer',
+          ${fixture.owner.id}
+        )
+      `;
+      await tx`
+        insert into companion_transcript_entries (
+          org_id, companion_id, event_id, ordinal, role, content
+        ) values (
+          ${fixture.orgA}, ${companionId}, 'event-1', 0, 'assistant', 'Control-plane message'
+        )
+      `;
+    });
+
+    const viewerResult = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
+      const visible = await tx<Array<{ id: string }>>`select id from companions`;
+      const transcript = await tx<Array<{ content: string }>>`
+        select content from companion_transcript_entries where companion_id = ${companionId}
+      `;
+      const updated = await tx<Array<{ id: string }>>`
+        update companions set runtime_state = 'running' where id = ${companionId} returning id
+      `;
+      return { visible, transcript, updated };
+    });
+    expect(viewerResult.visible).toEqual([{ id: companionId }]);
+    expect(viewerResult.transcript).toEqual([{ content: "Control-plane message" }]);
+    expect(viewerResult.updated).toEqual([]);
+
+    await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.owner.id}, true)`;
+      await tx`
+        update companion_member_access set role = 'editor'
+        where companion_id = ${companionId} and user_id = ${fixture.admin.id}
+      `;
+      await tx`
+        insert into companion_workspace_access (
+          org_id, companion_id, owner_id, role, granted_by
+        ) values (
+          ${fixture.orgA}, ${companionId}, ${fixture.owner.id}, 'editor', ${fixture.owner.id}
+        )
+      `;
+    });
+
+    const editorUpdate = await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${apiRole}`);
       await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
       return tx<Array<{ id: string }>>`
         update companions set runtime_state = 'running' where id = ${companionId} returning id
       `;
     });
-    expect(adminUpdates).toEqual([]);
+    expect(editorUpdate).toEqual([{ id: companionId }]);
+
+    const workspaceEditorUpdate = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.developer.id}, true)`;
+      return tx<Array<{ id: string }>>`
+        update companions set runtime_state = 'stopped' where id = ${companionId} returning id
+      `;
+    });
+    expect(workspaceEditorUpdate).toEqual([{ id: companionId }]);
+
+    await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.owner.id}, true)`;
+      await tx`
+        update companion_member_access set role = 'viewer'
+        where companion_id = ${companionId} and user_id = ${fixture.admin.id}
+      `;
+    });
+    const overriddenViewerUpdate = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
+      return tx<Array<{ id: string }>>`
+        update companions set runtime_state = 'running' where id = ${companionId} returning id
+      `;
+    });
+    expect(overriddenViewerUpdate).toEqual([]);
+    await expect(integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
+      await tx`
+        insert into companion_transcript_entries (
+          org_id, companion_id, event_id, ordinal, role, content
+        ) values (
+          ${fixture.orgA}, ${companionId}, 'viewer-write', 1, 'user', 'must be rejected'
+        )
+      `;
+    })).rejects.toThrow();
 
     const outsiderVisible = await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${apiRole}`);
@@ -150,6 +245,71 @@ describe("Skills Hub PostgreSQL isolation", () => {
       return tx<Array<{ provider_id: string }>>`select provider_id from companion_provider_connections`;
     });
     expect(outsiderVisible).toEqual([]);
+  });
+
+  it("enforces owner-only invite, role change, and revoke services", async () => {
+    const ownerInput = {
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      companionId,
+    };
+    const invited = await withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => inviteCompanionMember({
+        ...ownerInput,
+        email: fixture.admin.email,
+        role: "editor",
+        database,
+      }),
+    );
+    expect(invited.members).toEqual(expect.arrayContaining([
+      expect.objectContaining({ user_id: fixture.admin.id, role: "editor" }),
+    ]));
+
+    const changed = await withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => updateCompanionMemberRole({
+        ...ownerInput,
+        userId: fixture.admin.id,
+        role: "viewer",
+        database,
+      }),
+    );
+    expect(changed.members).toEqual(expect.arrayContaining([
+      expect.objectContaining({ user_id: fixture.admin.id, role: "viewer" }),
+    ]));
+
+    await expect(withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.admin.id },
+      (database) => listCompanionShares({
+        actor: fixture.admin,
+        orgId: fixture.orgA,
+        companionId,
+        database,
+      }),
+    )).rejects.toBeInstanceOf(CompanionShareForbiddenError);
+
+    await expect(withTenantContext(
+      { orgId: fixture.orgB, userId: fixture.outsider.id },
+      (database) => listCompanionShares({
+        actor: fixture.outsider,
+        orgId: fixture.orgB,
+        companionId,
+        database,
+      }),
+    )).rejects.toBeInstanceOf(CompanionNotFoundError);
+
+    const revoked = await withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => revokeCompanionMember({
+        ...ownerInput,
+        userId: fixture.admin.id,
+        database,
+      }),
+    );
+    expect(revoked.members).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ user_id: fixture.admin.id }),
+    ]));
   });
 
   it("CAS-claims lifecycle transitions and keeps live observations from clobbering them", async () => {

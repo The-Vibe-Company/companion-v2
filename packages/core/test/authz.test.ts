@@ -54,9 +54,13 @@ describe("canPerform — flat skill capability gate (every member ⇒ every acti
 });
 
 describe("Companion wake boundary", () => {
-  it("projects non-owners as viewers until THE-322 adds explicit editor grants", () => {
+  it("resolves owner, member override, workspace default, and no access", () => {
     expect(companionAccessForActor({ ownerId: "u-owner" }, "u-owner")).toBe("owner");
-    expect(companionAccessForActor({ ownerId: "u-owner" }, "u-member")).toBe("viewer");
+    expect(companionAccessForActor({ ownerId: "u-owner" }, "u-member", "editor", "viewer"))
+      .toBe("editor");
+    expect(companionAccessForActor({ ownerId: "u-owner" }, "u-member", null, "viewer"))
+      .toBe("viewer");
+    expect(companionAccessForActor({ ownerId: "u-owner" }, "u-member")).toBeNull();
   });
 
   it("never lets a viewer wake Box", () => {

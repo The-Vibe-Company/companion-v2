@@ -69,10 +69,12 @@ An authenticated Agent Auth identity may issue a short-lived child PAT only thro
 The API exposes auth, organizations, skills, labels, dependencies, comments, files/versions, installs, public releases, GitHub, secrets, Skill Databases, billing, tokens, onboarding, and skill-facing Agent Auth. Historical Project, skill-run, prompt, attachment/artifact, and model-provider endpoints remain unregistered.
 
 `COMPANION_COMPANIONS_ENABLED=true` additionally registers authenticated, tenant-scoped Companion
-metadata, provider, and Box/Pi lifecycle endpoints. List, detail, provider metadata, and default
-status reads use PostgreSQL only.
-Live status, start/stop, and desktop require owner/editor access before the Box adapter is created;
-the current pre-sharing projection makes non-owners viewers. The default remains fail-closed: when
+metadata, ACL, transcript read-model, provider, and Box/Pi lifecycle endpoints. List, detail, ACL,
+transcript, provider metadata, and default status reads use PostgreSQL only. A Companion Owner can
+grant Editor or Viewer access to the workspace or individual current members; an individual grant
+overrides the workspace default. Live status, start/stop, plugin injection, and desktop require
+owner/editor access before the Box adapter is created, while provider and share management remain
+owner-only. Viewers can read the control-plane transcript but cannot contact Box. The default remains fail-closed: when
 the flag is absent or false, none of these routes are registered. Owner/Admin-managed workspace
 model-provider credentials are envelope-encrypted, write-only, and decrypted only after the
 Companion wake guard. Start never accepts caller-supplied model-provider credentials; it writes only

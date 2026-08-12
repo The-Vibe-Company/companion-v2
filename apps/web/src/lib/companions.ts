@@ -2,6 +2,9 @@ import type {
   Companion,
   CompanionProviderConnection,
   CompanionProvidersResponse,
+  CompanionShareRole,
+  CompanionShares,
+  CompanionTranscript,
   SaveCompanionProviderInput,
 } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
@@ -70,6 +73,90 @@ export async function setCompanionProvider(
     },
   );
   return result.companion;
+}
+
+export async function getCompanionShares(
+  orgId: string,
+  companionId: string,
+): Promise<CompanionShares> {
+  const result = await apiFetch<{ shares: CompanionShares }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/shares`,
+    { headers: orgHeaders(orgId) },
+  );
+  return result.shares;
+}
+
+export async function setCompanionWorkspaceShare(
+  orgId: string,
+  companionId: string,
+  role: CompanionShareRole | null,
+): Promise<CompanionShares> {
+  const result = await apiFetch<{ shares: CompanionShares }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/shares/workspace`,
+    {
+      method: "PUT",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify({ role }),
+    },
+  );
+  return result.shares;
+}
+
+export async function inviteCompanionMember(
+  orgId: string,
+  companionId: string,
+  email: string,
+  role: CompanionShareRole,
+): Promise<CompanionShares> {
+  const result = await apiFetch<{ shares: CompanionShares }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/shares/members`,
+    {
+      method: "PUT",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify({ email, role }),
+    },
+  );
+  return result.shares;
+}
+
+export async function updateCompanionMemberRole(
+  orgId: string,
+  companionId: string,
+  userId: string,
+  role: CompanionShareRole,
+): Promise<CompanionShares> {
+  const result = await apiFetch<{ shares: CompanionShares }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/shares/members/${encodeURIComponent(userId)}`,
+    {
+      method: "PATCH",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify({ role }),
+    },
+  );
+  return result.shares;
+}
+
+export async function revokeCompanionMember(
+  orgId: string,
+  companionId: string,
+  userId: string,
+): Promise<CompanionShares> {
+  const result = await apiFetch<{ shares: CompanionShares }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/shares/members/${encodeURIComponent(userId)}`,
+    { method: "DELETE", headers: orgHeaders(orgId) },
+  );
+  return result.shares;
+}
+
+export async function getCompanionTranscript(
+  orgId: string,
+  companionId: string,
+): Promise<CompanionTranscript> {
+  const result = await apiFetch<{ transcript: CompanionTranscript }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/transcript`,
+    { headers: orgHeaders(orgId) },
+  );
+  return result.transcript;
 }
 
 export type { CompanionProvidersResponse };

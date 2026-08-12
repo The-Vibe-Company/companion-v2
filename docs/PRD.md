@@ -44,8 +44,9 @@ Give organizations one secure, self-hostable place to govern reusable AI coding 
 
 ### Explicit exclusions
 
-- Historical Projects/skill runs, control-plane prompts/transcripts/runtime files, prewarming,
-  container catalogs, deployment management, and harnesses other than Pi.
+- Historical Projects/skill runs, control-plane prompt execution or authoritative Pi runtime files,
+  prewarming, container catalogs, deployment management, and harnesses other than Pi. The gated
+  Companions surface keeps only the transcript read model required for no-wake Viewer reads.
 - The optional `companions` flag may register the documented Companion provider and Box/Pi lifecycle
   API only. It must not expose harness chrome, wake Box on viewer reads, or execute Pi in Companion.
 

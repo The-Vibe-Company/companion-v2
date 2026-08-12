@@ -43,6 +43,12 @@ export const companionProviderAuthMethodEnum = pgEnum("companion_provider_auth_m
   "api_key",
   "subscription",
 ]);
+export const companionShareRoleEnum = pgEnum("companion_share_role", ["editor", "viewer"]);
+export const companionTranscriptRoleEnum = pgEnum("companion_transcript_role", [
+  "user",
+  "assistant",
+  "system",
+]);
 export const billingSeatSyncStatusEnum = pgEnum("billing_seat_sync_status", ["synced", "pending", "error"]);
 export const invitationStatusEnum = pgEnum("invitation_status", [
   "pending",
@@ -376,6 +382,7 @@ export const companions = pgTable(
   },
   (t) => ({
     uniqueOrgId: unique("companions_org_id_id_uq").on(t.orgId, t.id),
+    uniqueOwnerIdentity: unique("companions_org_id_id_owner_id_uq").on(t.orgId, t.id, t.ownerId),
     byOrgUpdated: index("companions_org_updated_idx").on(t.orgId, t.updatedAt),
     ownerMembershipFk: foreignKey({
       columns: [t.orgId, t.ownerId],
@@ -386,6 +393,104 @@ export const companions = pgTable(
     boxIdShape: check(
       "companions_box_id_check",
       sql`${t.boxId} is null or ${t.boxId} ~ '^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$'`,
+    ),
+  }),
+);
+
+/** Optional default access granted to every current member of the Companion's workspace. */
+export const companionWorkspaceAccess = pgTable(
+  "companion_workspace_access",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    companionId: uuid("companion_id")
+      .primaryKey()
+      .references(() => companions.id, { onDelete: "cascade" }),
+    ownerId: text("owner_id").notNull(),
+    role: companionShareRoleEnum("role").notNull(),
+    grantedBy: text("granted_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    companionOrgFk: foreignKey({
+      columns: [t.orgId, t.companionId, t.ownerId],
+      foreignColumns: [companions.orgId, companions.id, companions.ownerId],
+      name: "companion_workspace_access_companion_fk",
+    }),
+  }),
+);
+
+/** A member-specific grant overrides workspace-wide access for the same Companion. */
+export const companionMemberAccess = pgTable(
+  "companion_member_access",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    companionId: uuid("companion_id")
+      .notNull()
+      .references(() => companions.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    ownerId: text("owner_id").notNull(),
+    role: companionShareRoleEnum("role").notNull(),
+    grantedBy: text("granted_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.companionId, t.userId] }),
+    companionOrgFk: foreignKey({
+      columns: [t.orgId, t.companionId, t.ownerId],
+      foreignColumns: [companions.orgId, companions.id, companions.ownerId],
+      name: "companion_member_access_companion_fk",
+    }),
+    memberFk: foreignKey({
+      columns: [t.orgId, t.userId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "companion_member_access_membership_fk",
+    }),
+    byMember: index("companion_member_access_member_idx").on(t.orgId, t.userId),
+  }),
+);
+
+/**
+ * Durable, append-oriented transcript projection. Pi remains authoritative while active; browser
+ * reads, especially Viewer reads, use this table and therefore never contact or wake Box.
+ */
+export const companionTranscriptEntries = pgTable(
+  "companion_transcript_entries",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    companionId: uuid("companion_id")
+      .notNull()
+      .references(() => companions.id, { onDelete: "cascade" }),
+    eventId: text("event_id").notNull(),
+    ordinal: integer("ordinal").notNull(),
+    role: companionTranscriptRoleEnum("role").notNull(),
+    content: text("content").notNull(),
+    createdAt: now(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.companionId, t.eventId] }),
+    companionOrgFk: foreignKey({
+      columns: [t.orgId, t.companionId],
+      foreignColumns: [companions.orgId, companions.id],
+      name: "companion_transcript_entries_companion_fk",
+    }),
+    ordered: unique("companion_transcript_entries_ordinal_uq").on(t.companionId, t.ordinal),
+    nonnegativeOrdinal: check(
+      "companion_transcript_entries_ordinal_check",
+      sql`${t.ordinal} >= 0`,
+    ),
+    boundedContent: check(
+      "companion_transcript_entries_content_check",
+      sql`octet_length(${t.content}) <= 1048576`,
     ),
   }),
 );
