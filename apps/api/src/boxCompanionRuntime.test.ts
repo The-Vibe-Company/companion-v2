@@ -155,6 +155,8 @@ describe("AsciiBoxCompanionRuntime", () => {
       String(url).endsWith("/resume") && init?.method === "POST")).toBe(true);
     expect(fetchMock.mock.calls.some(([url, init]) =>
       String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).endsWith("/files") && init?.method === "PUT")).toBe(false);
   });
 
   it("reports archived status without executing a command or waking the Box", async () => {
