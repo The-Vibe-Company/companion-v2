@@ -57,7 +57,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     vi.stubGlobal("fetch", fetchMock);
     const runtime = new AsciiBoxCompanionRuntime({
       COMPANION_BOX_API_KEY: "box_test",
-      COMPANION_PI_INSTALL_COMMAND: "npm install --global @mariozechner/pi-coding-agent@1.2.3",
+      COMPANION_PI_INSTALL_COMMAND: "npm install --global @earendil-works/pi-coding-agent@1.2.3",
       COMPANION_BOX_POLL_INTERVAL_MS: "1",
     });
     const assigned = vi.fn(async () => undefined);

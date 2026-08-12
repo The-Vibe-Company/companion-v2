@@ -67,7 +67,7 @@ COMPANION_BOX_API_KEY=box_...
 COMPANION_BOX_API_BASE=https://ascii.dev/api/box/v1
 COMPANION_BOX_ENVIRONMENT=base
 COMPANION_BOX_TTL_SECONDS=3600
-COMPANION_PI_INSTALL_COMMAND='npm install --global @mariozechner/pi-coding-agent@<pin>'
+COMPANION_PI_INSTALL_COMMAND='npm install --global @earendil-works/pi-coding-agent@<pin>'
 ```
 
 Prefer a Box environment/template with Pi already pinned and omit the install command. Never put
