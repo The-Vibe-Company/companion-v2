@@ -31,11 +31,27 @@ elif [ -n "${DATABASE_RUNTIME_ROLE:-}" ]; then
   runtime_role_args=(-e "DATABASE_RUNTIME_ROLE=$DATABASE_RUNTIME_ROLE")
 fi
 
+# The pre-deploy entrypoints must execute, not merely re-export. A bundler that splits them into a
+# shared chunk leaves `node dist/migrate.js` exiting 0 without applying anything, which Railway
+# reports as a successful deploy onto an unmigrated database.
+if docker run --rm companion-api:ci node dist/migrate.js; then
+  echo "dist/migrate.js exited 0 without a database URL; the entrypoint did not run" >&2
+  exit 1
+fi
+if docker run --rm companion-api:ci node dist/cutover.js; then
+  echo "dist/cutover.js exited 0 without a command; the entrypoint did not run" >&2
+  exit 1
+fi
+
 docker run --rm "${network_args[@]}" \
   -e DATABASE_URL="$container_api_url" \
   -e DATABASE_MIGRATION_URL="$container_migration_url" \
   "${runtime_role_args[@]}" \
   companion-api:ci node dist/migrate.js
+
+docker run --rm "${network_args[@]}" postgres:16-alpine \
+  psql "$container_migration_url" -v ON_ERROR_STOP=1 -tAc \
+  'select count(*) from drizzle.__drizzle_migrations' | grep -qE '^[1-9][0-9]*$'
 
 worker_id="$(docker run -d "${network_args[@]}" \
   -e COMPANION_BILLING_MODE=off \

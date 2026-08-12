@@ -8,6 +8,7 @@
     "seed:test-user": "tsx src/seed-test-user.ts",
     "build": "tsup && node scripts/copy-migrations.cjs",
     "migrate": "node dist/migrate.js",
+    "cutover": "node dist/cutover.js",
     "start": "node dist/migrate.js && node dist/index.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",

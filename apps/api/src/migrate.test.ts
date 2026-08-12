@@ -3,10 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  CUTOVER_GUARD_MESSAGE,
+  CUTOVER_GUARD_SQLSTATE,
   databaseRuntimeRole,
   databaseRuntimeRoles,
   databaseUrl,
   extractRuntimeRoleGrantBlock,
+  formatMigrationFailure,
   resolveMigrationsFolder,
   resolveRuntimeRoleGrantsFile,
 } from "./migrate";
@@ -253,5 +256,50 @@ describe("runtime role grants", () => {
 
   it("rejects an unmarked grants file", () => {
     expect(() => extractRuntimeRoleGrantBlock("select 1;")).toThrow("missing its marked SQL block");
+  });
+});
+
+describe("formatMigrationFailure", () => {
+  it("surfaces the PostgreSQL detail and hint a stack trace drops", () => {
+    const error = Object.assign(new Error("permission denied for table skills"), {
+      code: "42501",
+      detail: "role companion_api lacks INSERT",
+      hint: "apply packages/db/runtime-role-grants.sql",
+    });
+
+    const formatted = formatMigrationFailure(error);
+
+    expect(formatted.split("\n")[0]).toBe("permission denied for table skills");
+    expect(formatted).toContain("SQLSTATE: 42501");
+    expect(formatted).toContain("DETAIL: role companion_api lacks INSERT");
+    expect(formatted).toContain("HINT: apply packages/db/runtime-role-grants.sql");
+    expect(formatted).not.toContain("cutover.js");
+  });
+
+  it("reads through the wrapper Drizzle throws around the failed statement", () => {
+    const error = new Error("Failed query: DO $ensure_runtime_resources_drained$ ...", {
+      cause: Object.assign(new Error(CUTOVER_GUARD_MESSAGE), {
+        code: CUTOVER_GUARD_SQLSTATE,
+        detail: "pending storage records=12, Projects=3, sandboxes=0, active usage sessions=0",
+      }),
+    });
+
+    const formatted = formatMigrationFailure(error);
+
+    expect(formatted.split("\n")[0]).toBe(CUTOVER_GUARD_MESSAGE);
+    expect(formatted).toContain("pending storage records=12");
+    expect(formatted).toContain("node dist/cutover.js purge --confirm-provider-cleanup");
+    expect(formatted).toContain("deploy/railway/README.md");
+  });
+
+  it("tolerates a self-referential cause chain", () => {
+    const error: Error & { cause?: unknown } = new Error("looping failure");
+    error.cause = error;
+
+    expect(formatMigrationFailure(error).split("\n")[0]).toBe("looping failure");
+  });
+
+  it("still reports non-database failures", () => {
+    expect(formatMigrationFailure("boom")).toBe("boom");
   });
 });

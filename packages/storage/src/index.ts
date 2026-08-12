@@ -324,7 +324,12 @@ export function isStoragePreconditionFailure(error: unknown): boolean {
   return status === 412 || name === "PreconditionFailed";
 }
 
-export async function deleteSkillArchive(input: {
+/**
+ * Delete one object by key. Companion keeps every object family in the same bucket under distinct
+ * prefixes, so callers that hold a stored key can remove exactly that object without knowing which
+ * family produced it.
+ */
+export async function deleteStorageObject(input: {
   key: string;
   ifMatch?: string;
   signal?: AbortSignal;
@@ -341,6 +346,16 @@ export async function deleteSkillArchive(input: {
     }),
     { abortSignal: input.signal },
   );
+}
+
+export async function deleteSkillArchive(input: {
+  key: string;
+  ifMatch?: string;
+  signal?: AbortSignal;
+  client?: S3Client;
+  config?: StorageConfig;
+}): Promise<void> {
+  await deleteStorageObject(input);
 }
 
 export async function getSkillArchive(input: {

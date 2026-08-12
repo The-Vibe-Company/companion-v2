@@ -7,13 +7,15 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
 
-const MIGRATION_LOCK_CLASS_ID = 72_401;
-const MIGRATION_LOCK_OBJECT_ID = 20_260_608;
+export const MIGRATION_LOCK_CLASS_ID = 72_401;
+export const MIGRATION_LOCK_OBJECT_ID = 20_260_608;
 const DEFAULT_MIGRATION_LOCK_TIMEOUT_MS = 60_000;
 const RUNTIME_GRANTS_BEGIN = "-- companion-runtime-grants-begin";
 const RUNTIME_GRANTS_END = "-- companion-runtime-grants-end";
 const DATABASE_ROLE_PATTERN = /^[a-z_][a-z0-9_]{0,62}$/;
 
+export const CUTOVER_GUARD_SQLSTATE = "55000";
+export const CUTOVER_GUARD_MESSAGE = "Skills Hub-only migration requires runtime resource cleanup first";
 export function databaseUrl(env: NodeJS.ProcessEnv = process.env): string {
   const url = env.DATABASE_MIGRATION_URL ?? env.DATABASE_URL;
   if (!url) {
@@ -243,6 +245,63 @@ export async function run(): Promise<void> {
   }
 }
 
+interface DatabaseErrorFields extends Error {
+  code?: string;
+  detail?: string;
+  hint?: string;
+  where?: string;
+}
+
+/**
+ * Drizzle rethrows a driver failure wrapped in a generic error whose message is the entire failed
+ * statement, so the SQLSTATE, DETAIL and HINT PostgreSQL raised sit on the cause chain.
+ */
+function databaseErrorFields(error: Error): DatabaseErrorFields | null {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current);
+    const candidate = current as DatabaseErrorFields;
+    if (candidate.code || candidate.detail || candidate.hint) return candidate;
+    current = candidate.cause;
+  }
+  return null;
+}
+
+/**
+ * A failed pre-deploy migration is usually diagnosed from the deploy log alone, where the raw error
+ * is a stack trace wrapped around a full SQL dump. Lead with what PostgreSQL actually reported, and
+ * spell out the remediation for the fail-closed Skills Hub cutover guard, which no code change can
+ * clear on its own.
+ */
+export function formatMigrationFailure(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const database = databaseErrorFields(error);
+  const lines = [database?.message ?? error.message];
+  if (database?.code) lines.push(`SQLSTATE: ${database.code}`);
+  if (database?.detail) lines.push(`DETAIL: ${database.detail}`);
+  if (database?.hint) lines.push(`HINT: ${database.hint}`);
+  if (database?.where) lines.push(`WHERE: ${database.where}`);
+
+  if (database?.code === CUTOVER_GUARD_SQLSTATE && database.message === CUTOVER_GUARD_MESSAGE) {
+    lines.push(
+      "",
+      "Migration 0063_skills_hub_only.sql refuses to drop the retired Project and run tables while",
+      "they still hold the only references to objects this deployment provisioned in object storage",
+      "and sandbox providers. Every deploy fails here until those obligations are settled; no",
+      "application code change can clear them.",
+      "",
+      "Run the one-shot cutover command against this database to inventory and settle them:",
+      "  node dist/cutover.js report",
+      "  node dist/cutover.js purge --confirm-provider-cleanup",
+      'See "Skills Hub-only cutover" in deploy/railway/README.md for the full runbook.',
+    );
+  }
+
+  lines.push("", error.stack ?? error.message);
+  return lines.join("\n");
+}
+
 function isMain(): boolean {
   const entrypoint = process.argv[1];
   return Boolean(entrypoint && pathToFileURL(entrypoint).href === import.meta.url);
@@ -251,11 +310,7 @@ function isMain(): boolean {
 if (isMain()) {
   run().catch((error: unknown) => {
     console.error("Failed to apply Drizzle migrations");
-    if (error instanceof Error) {
-      console.error(error.stack ?? error.message);
-    } else {
-      console.error(String(error));
-    }
+    console.error(formatMigrationFailure(error));
     process.exitCode = 1;
   });
 }

@@ -89,6 +89,82 @@ statement repeats the preflight and aborts before any `DROP` when an external cl
 remains. It must finish before starting the new API/worker version. Historical migrations are not
 rewritten.
 
+## Skills Hub-only cutover
+
+### Symptom
+
+The API service runs `node dist/migrate.js` as its `preDeployCommand`, so a database that still
+holds Project and run rows fails **every** API deployment on the `0063` guard:
+
+```
+Skills Hub-only migration requires runtime resource cleanup first
+SQLSTATE: 55000
+DETAIL: pending storage records=..., Projects=..., sandboxes=..., active usage sessions=...
+```
+
+Web and worker have no pre-deploy migration, so they keep deploying successfully from the same
+commit. The symptom therefore looks like an API-only build failure that is unrelated to whatever
+was merged, and it repeats on every commit until the cutover below is finished. The image builds
+fine; only the pre-deploy step fails.
+
+### Why this needs an operator
+
+The guard is correct, not a false positive. Those rows hold the only remaining references to objects
+in the configured bucket and to sandboxes and checkpoints at the provider. Dropping them without
+deleting the external resources first strands sensitive objects and billable resources permanently.
+The earlier procedure relied on the previous release's cleanup worker to drain them; once the new
+worker is deployed that release no longer exists, so the one-shot `cutover` command below performs
+that cleanup instead. It always deletes an object before removing the row that names it.
+
+### Runbook
+
+Everything below runs against the migration-owner database URL and the same S3 credentials the API
+uses. Take a PostgreSQL backup first.
+
+1. **Get the current API image running.** The cutover command ships in the API image, which cannot
+   become active while the pre-deploy migration fails. In the Railway API service settings,
+   temporarily clear the pre-deploy command (or set it to `node dist/cutover.js report`) and
+   redeploy. This also quiesces the database on its own: the new API and web have no Project or run
+   surface, so nothing can create new runtime rows while you work.
+
+2. **Inventory the obligations.** `railway ssh` into the API service and run:
+
+   ```bash
+   node dist/cutover.js report
+   ```
+
+   This is read-only. It prints the same four counts the migration checks, every distinct object key
+   still referenced, every sandbox and checkpoint identity, and every unsettled usage session.
+   **Save this output.** After the cutover it is the only record of which external objects existed.
+   If you used the pre-deploy override instead of `railway ssh`, the deploy log holds the same
+   output.
+
+3. **Handle anything you want to keep.** Copy or relocate any object from the printed list that
+   should outlive the cutover. Then release the printed sandboxes and checkpoints at the provider;
+   no code in this release can reach them.
+
+4. **Settle the obligations.**
+
+   ```bash
+   node dist/cutover.js purge --confirm-provider-cleanup
+   ```
+
+   The command refuses to delete anything until `--confirm-provider-cleanup` asserts step 3 is done,
+   deletes each object from the bucket and only then removes the rows naming it, empties the retired
+   runtime tables, and re-checks the guard's four counts before reporting success. Add `--dry-run`
+   first to see exactly what it would do. Add `--skip-object-delete` only when you have already
+   moved or deleted the objects yourself; the rows are then discarded without touching the bucket.
+
+   Objects belonging to Skills, Skill Databases, public releases, logos, avatars, and comment images
+   share the bucket and are never in the list, because the command only deletes keys the retired
+   tables reference.
+
+5. **Restore the pre-deploy command** to `node dist/migrate.js` and redeploy. Migrations `0063`
+   through the current head apply, and the API becomes healthy again.
+
+If a new Project or run row appears between steps 2 and 4, the final verification fails with the
+remaining counts rather than reporting success; stop web and API traffic and re-run step 4.
+
 ## Shared configuration
 
 Configure public API/web origins, Better Auth secret/cookie prefix, PostgreSQL role URLs, S3 credentials, and email. Configure `COMPANION_SECRETS_MASTER_KEY` for skill secrets. Optional integrations use GitHub App, Stripe, and PostHog variables documented in `.env.example`.
