@@ -33,7 +33,8 @@
         "date": "2026-08-12",
         "changes": [
           "Documents that Companion Owner, Editor, and Viewer sharing is browser-session workspace administration.",
-          "Keeps runtime ACL, transcript, Box lifecycle, plugins, and desktop routes outside delegated Skills Hub Agent Auth."
+          "Keeps runtime ACL, transcript, Box lifecycle, plugins, and desktop routes outside delegated Skills Hub Agent Auth.",
+          "Refreshes the bundled Agent Auth client with the locked workspace build toolchain."
         ]
       },
       {
