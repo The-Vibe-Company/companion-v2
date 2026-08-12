@@ -165,6 +165,21 @@ describe("safe public skill ZIP inspection", () => {
 });
 
 describe("atomic public skill install", () => {
+  it("resolves Grok Bot skills in Cursor's supported global and project roots", async () => {
+    const projectRoot = await mkdtemp(join(tmpdir(), "companion-grok-bot-install-"));
+    expect(resolvePublicSkillDestination({
+      slug: "safe-skill",
+      tool: "grok-bot",
+      scope: "global",
+    })).toBe(join(homedir(), ".cursor", "skills", "safe-skill"));
+    expect(resolvePublicSkillDestination({
+      slug: "safe-skill",
+      tool: "grok-bot",
+      scope: "project",
+      projectRoot,
+    })).toBe(join(projectRoot, ".cursor", "skills", "safe-skill"));
+  });
+
   it("resolves and installs OpenClaw project skills in the workspace skills directory", async () => {
     const projectRoot = await mkdtemp(join(tmpdir(), "companion-openclaw-install-"));
     expect(resolvePublicSkillDestination({

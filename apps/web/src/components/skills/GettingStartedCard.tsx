@@ -14,12 +14,13 @@ import {
 import { Icon } from "../Icon";
 import { fillPrompt } from "./prompts";
 
-type AgentId = "claude-code" | "codex" | "opencode";
+type AgentId = "claude-code" | "codex" | "opencode" | "grok-bot";
 
 const AGENTS: Record<AgentId, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
   opencode: "OpenCode",
+  "grok-bot": "Grok Bot",
 };
 
 const STEPS: Array<{

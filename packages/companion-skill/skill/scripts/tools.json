@@ -20,6 +20,12 @@
       "skillsDir": { "user": "~/.agents/skills", "project": ".agents/skills" },
       "format": "skill-md"
     },
+    "grok-bot": {
+      "displayName": "Grok Bot",
+      "detect": ["~/.cursor"],
+      "skillsDir": { "user": "~/.cursor/skills", "project": ".cursor/skills" },
+      "format": "skill-md"
+    },
     "openclaw": {
       "displayName": "OpenClaw",
       "detect": ["~/.openclaw"],

@@ -132,6 +132,24 @@ describe("GettingStartedCard", () => {
     expect(queryMocks.fetch).not.toHaveBeenCalled();
   });
 
+  it("copies a Grok Bot onboarding prompt", async () => {
+    const { container } = await mount();
+    const select = container.querySelector("select");
+    await act(async () => {
+      if (select) {
+        select.value = "grok-bot";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(".gs-step__action")?.click();
+      await Promise.resolve();
+    });
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+      "onboard https://companion.example/v1 org-1 in Grok Bot as Grok Bot [PAT intentionally omitted; use Agent Auth]",
+    );
+  });
+
   it("switches every remaining action to the short resume prompt after installation", async () => {
     const { container } = await mount({
       ...emptyState,

@@ -52,7 +52,9 @@ describe("buildPublicInstallPrompt", () => {
     expect(prompt).toContain("Never interpolate the ticket");
     expect(prompt).toContain("Pipe the captured JSON over stdin");
     expect(prompt).toContain("do not resolve dependencies, secrets, skill_installs, or scripts");
-    expect(prompt).toContain("Claude Code, Codex, OpenCode, OpenClaw, or Hermes");
+    expect(prompt).toContain("Claude Code, Codex, OpenCode, Grok Bot, OpenClaw, or Hermes");
+    expect(prompt).toContain("~/.cursor/skills/<slug>");
+    expect(prompt).toContain("<project>/.cursor/skills/<slug>");
     expect(prompt).toContain("~/.openclaw/skills/<slug>");
     expect(prompt).toContain("~/.hermes/skills/<slug>");
     expect(prompt).toContain("Hermes is global-only");

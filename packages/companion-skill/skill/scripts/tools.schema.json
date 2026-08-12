@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://thecompanion.sh/schemas/companion-tools.v1.schema.json",
   "title": "Companion tool registry",
-  "description": "Registry of local agent tools a Companion skill can be installed into (Claude Code, Codex, OpenCode, OpenClaw, Hermes, …). The single, extensible source of truth for each tool's on-disk skill directories.",
+  "description": "Registry of local agent tools a Companion skill can be installed into (Claude Code, Codex, OpenCode, Grok Bot, OpenClaw, Hermes, …). The single, extensible source of truth for each tool's on-disk skill directories.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "tools"],
@@ -50,12 +50,12 @@
             "user": {
               "type": "string",
               "minLength": 1,
-              "description": "User-global skills directory (with ~ allowed), e.g. \"~/.claude/skills\", \"~/.agents/skills\", or \"~/.openclaw/skills\"."
+              "description": "User-global skills directory (with ~ allowed), e.g. \"~/.claude/skills\", \"~/.agents/skills\", \"~/.cursor/skills\", or \"~/.openclaw/skills\"."
             },
             "project": {
               "type": "string",
               "minLength": 1,
-              "description": "Optional project-relative skills directory, e.g. \".claude/skills\", \".agents/skills\", or \"skills\" (joined under a repo or workspace root). Omit it when a tool only has a global source of truth."
+              "description": "Optional project-relative skills directory, e.g. \".claude/skills\", \".agents/skills\", \".cursor/skills\", or \"skills\" (joined under a repo or workspace root). Omit it when a tool only has a global source of truth."
             }
           }
         },

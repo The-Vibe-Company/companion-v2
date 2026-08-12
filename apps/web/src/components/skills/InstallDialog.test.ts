@@ -40,6 +40,37 @@ afterEach(() => {
 });
 
 describe("InstallDialog", () => {
+  it("selects Grok Bot and shows Cursor's global skills destination", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+
+    await act(async () => {
+      root.render(
+        React.createElement(InstallDialog, {
+          skill,
+          workspaceId: "org-1",
+          onClose: vi.fn(),
+          onReported: vi.fn(),
+        }),
+      );
+    });
+
+    const manual = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Download package"),
+    );
+    await act(async () => manual?.click());
+    const grokBot = Array.from(container.querySelectorAll<HTMLElement>('[role="radio"]')).find((radio) =>
+      radio.textContent?.includes("Grok Bot"),
+    );
+    expect(grokBot).toBeTruthy();
+    await act(async () => grokBot?.click());
+
+    expect(grokBot?.getAttribute("aria-checked")).toBe("true");
+    expect(container.textContent).toContain("~/.cursor/skills/research-agent");
+  });
+
   it("selects OpenClaw and shows its managed global destination", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);

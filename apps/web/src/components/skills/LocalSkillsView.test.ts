@@ -100,6 +100,7 @@ describe("LocalSkillsView", () => {
     expect(container.textContent).toContain("Claude Code");
     expect(container.textContent).toContain("Codex");
     expect(container.textContent).toContain("OpenCode");
+    expect(container.textContent).toContain("Grok Bot");
     expect(container.textContent).toContain("OpenClaw");
     expect(container.textContent).toContain("Hermes");
     expect(container.textContent).toContain("Maybe later");
@@ -160,6 +161,31 @@ describe("LocalSkillsView", () => {
     });
 
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining("agent=OpenClaw"));
+  });
+
+  it("reports Grok Bot as the installing assistant when selected", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    const container = await mount();
+    const grokBot = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Grok Bot"),
+    );
+    await act(async () => grokBot?.click());
+
+    const copy = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Copy prompt"),
+    );
+    await act(async () => {
+      copy?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining("agent=Grok Bot"));
   });
 
   it("reports Hermes as the installing assistant when selected", async () => {

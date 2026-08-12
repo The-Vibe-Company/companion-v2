@@ -148,7 +148,7 @@
     {
       "id": 13,
       "prompt": "Je viens d'installer Companion. Aide-moi à commencer et à importer mes skills locaux.",
-      "expected_output": "Runs the mandatory self-updating bootstrap once, reads GET /getting-started, responds in French, preserves and explicitly passes the user's absolute project root, scans only registered Claude Code, Codex, and OpenCode user/current-project roots, labels results as candidates rather than authored skills, and asks for per-publication confirmation before recording local_review on a 2xx response.",
+      "expected_output": "Runs the mandatory self-updating bootstrap once, reads GET /getting-started, responds in French, preserves and explicitly passes the user's absolute project root, scans only registered Claude Code, Codex, OpenCode, Grok Bot, and Hermes user/current-project roots, labels results as candidates rather than authored skills, and asks for per-publication confirmation before recording local_review on a 2xx response.",
       "expectations": [
         "Runs bootstrap.py --json --auto-update-companion before onboarding mutations.",
         "Reads server-owned getting-started progress and resumes from first_incomplete_step.",
