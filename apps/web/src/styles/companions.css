@@ -144,6 +144,7 @@
 .companions-row > div:first-child,
 .companions-provider-empty > div,
 .companions-list-empty > div {
+  min-width: 0;
   display: grid;
   gap: 1px;
 }
@@ -163,6 +164,7 @@
 .companions-list-empty span {
   color: var(--color-muted);
   font-size: var(--text-xs);
+  overflow-wrap: anywhere;
 }
 
 .companions-provider-actions {

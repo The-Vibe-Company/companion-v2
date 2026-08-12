@@ -6,6 +6,7 @@ import type {
   Companion,
   CompanionProviderAuthMethod,
   CompanionProvidersResponse,
+  SaveCompanionProviderInput,
 } from "@companion/contracts";
 import type { OrgVM } from "@/lib/types";
 import {
@@ -115,10 +116,10 @@ export function CompanionsApp({
       ) {
         throw new Error("Paste one Pi subscription entry whose type is oauth.");
       }
-      const connection = await saveCompanionProvider(currentOrg.id, providerToAdd, {
-        auth_method: authMethod,
-        credential: parsedCredential,
-      } as never);
+      const input: SaveCompanionProviderInput = authMethod === "subscription"
+        ? { auth_method: "subscription", credential: parsedCredential as Record<string, unknown> }
+        : { auth_method: "api_key", credential: parsedCredential as string };
+      const connection = await saveCompanionProvider(currentOrg.id, providerToAdd, input);
       let defaultProviderId = providers.default_provider_id;
       if (!defaultProviderId) {
         await setDefaultCompanionProvider(currentOrg.id, providerToAdd);
@@ -442,9 +443,10 @@ export function CompanionsApp({
                       />
                     ) : (
                       <>
-                        <textarea
+                        <input
                           required
-                          rows={4}
+                          type="password"
+                          autoComplete="off"
                           value={credential}
                           onChange={(event) => setCredential(event.target.value)}
                           placeholder={'{"type":"oauth", ...}'}
@@ -468,7 +470,7 @@ export function CompanionsApp({
           <section className="companions-section" aria-labelledby="companion-list-title">
             <div className="companions-section-head">
               <div>
-                <h2 id="companion-list-title">Your Companions</h2>
+                <h2 id="companion-list-title">Workspace Companions</h2>
                 <p>{companions.length} total</p>
               </div>
             </div>
