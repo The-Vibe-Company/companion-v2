@@ -86,10 +86,10 @@ export const companionMcpAccountSchema = z.discriminatedUnion("transport", [
   }).strict(),
   companionMcpAccountBaseSchema.extend({
     transport: z.literal("http"),
-    url: z.string().url().max(4_096).refine((value) => {
-      const protocol = new URL(value).protocol;
-      return protocol === "http:" || protocol === "https:";
-    }, { message: "MCP URL must use http or https" }),
+    url: z.string().url().max(4_096).refine(
+      (value) => /^https?:\/\//i.test(value),
+      { message: "MCP URL must use http or https" },
+    ),
     headers: mcpHeaderBindingsSchema,
   }).strict(),
 ]);
