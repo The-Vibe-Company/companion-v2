@@ -102,4 +102,3 @@ export function buildMcpAdapterInjection(accounts: CompanionMcpAccount[]): {
 export function runtimeSkillArchivePath(skill: Pick<CompanionRuntimeSkill, "slug">): string {
   return `.companion/runtime/state/skill-archives/${skill.slug}.tar.gz.b64`;
 }
-
