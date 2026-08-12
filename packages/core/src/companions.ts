@@ -293,9 +293,14 @@ export async function setCompanionProvider(input: {
       eq(schema.companions.orgId, input.orgId),
       eq(schema.companions.id, input.companionId),
       eq(schema.companions.ownerId, input.actor.id),
+      eq(schema.companions.providerIds, []),
     ))
     .returning();
-  if (!row) throw new CompanionNotFoundError();
+  if (!row) {
+    throw new CompanionRuntimeTransitionError(
+      "this Companion provider was already configured",
+    );
+  }
   return toCompanion(row, input.actor.id);
 }
 

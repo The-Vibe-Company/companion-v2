@@ -193,8 +193,7 @@ export function CompanionsApp({
     }
   };
 
-  const onConfigureCompanion = async (companionId: string) => {
-    const providerId = providers.default_provider_id ?? selectedProvider;
+  const onConfigureCompanion = async (companionId: string, providerId: string) => {
     if (!providerId) {
       setError("Connect a provider before configuring this Companion.");
       return;
@@ -505,14 +504,21 @@ export function CompanionsApp({
                     <div className="companions-row-actions">
                       {!companion.runtime.provider_ids.length
                         && companion.access === "owner"
-                        && providers.connections.length > 0 && (
+                        && (providers.default_provider_id ?? selectedProvider) && (
                           <button
                             type="button"
                             className="cds-btn cds-btn--secondary cds-btn--sm"
                             disabled={busy !== null}
-                            onClick={() => void onConfigureCompanion(companion.id)}
+                            onClick={() => void onConfigureCompanion(
+                              companion.id,
+                              providers.default_provider_id ?? selectedProvider,
+                            )}
                           >
-                            {busy === "configure" ? "Setting..." : "Set provider"}
+                            {busy === "configure"
+                              ? "Setting..."
+                              : `Set ${providerName(
+                                providers.default_provider_id ?? selectedProvider,
+                              )}`}
                           </button>
                         )}
                       <span className="companions-state">
