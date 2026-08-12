@@ -15,15 +15,19 @@ import {
   deleteCompanionProvider,
   getCompanion,
   getCompanionForRuntime,
-  getCompanionTranscript,
+  getCompanionThread,
   inviteCompanionMember,
   listCompanionShares,
   listCompanionRuntimeSkillPackages,
   listCompanions,
   listCompanionProviders,
+  listPendingCompanionMessages,
+  projectCompanionPiEvents,
+  recordCompanionPiProjection,
   resolveCompanionProviderAuth,
   revokeCompanionMember,
   saveCompanionProvider,
+  sendCompanionMessage,
   setCompanionProvider,
   setCompanionWorkspaceShare,
   setDefaultCompanionProvider,
@@ -31,16 +35,23 @@ import {
   updateCompanionMemberRole,
   updateCompanionRuntime,
 } from "@companion/core";
+import type { CompanionPiEntry } from "@companion/core";
 import {
   createCompanionInputSchema,
   inviteCompanionMemberInputSchema,
   companionProviderIdSchema,
   saveCompanionProviderInputSchema,
+  sendCompanionMessageInputSchema,
   setCompanionProviderInputSchema,
   setCompanionWorkspaceShareInputSchema,
   setDefaultCompanionProviderInputSchema,
   startCompanionRuntimeInputSchema,
   updateCompanionMemberRoleInputSchema,
+} from "@companion/contracts";
+import type {
+  Companion,
+  CompanionThread,
+  CompanionTranscriptEntry,
 } from "@companion/contracts";
 import { withTenantContext, type Db } from "@companion/db";
 import { skillChecksum, toTar } from "@companion/skills";
@@ -81,6 +92,64 @@ function errorStatus(error: unknown): number {
   }
   if (error instanceof z.ZodError) return 400;
   return 400;
+}
+
+/**
+ * Pi only receives messages while the control plane already records a running Box. Chat therefore
+ * never creates or resumes one: waking stays an explicit Owner/Editor lifecycle action.
+ */
+function piIsReachable(companion: Companion): boolean {
+  return Boolean(companion.runtime.box_id) && companion.runtime.state === "running";
+}
+
+function recordProjection(input: {
+  actor: ReturnType<typeof actorFromContext>;
+  orgId: string;
+  companionId: string;
+  entries: CompanionPiEntry[];
+  piLogOffset?: number;
+  deliveredOrdinal?: number;
+}): Promise<CompanionThread> {
+  return withTenantContext(
+    { orgId: input.orgId, userId: input.actor.id },
+    (database) => recordCompanionPiProjection({ ...input, database }),
+  );
+}
+
+/**
+ * Hand persisted messages to Pi in order and record how far delivery reached. A refusal is not an
+ * error for the caller: the message is already durable, so the next sync retries it.
+ */
+async function deliverCompanionMessages(input: {
+  actor: ReturnType<typeof actorFromContext>;
+  orgId: string;
+  companionId: string;
+  boxId: string;
+  messages: CompanionTranscriptEntry[];
+  runtimeFactory: RuntimeFactory;
+}): Promise<CompanionThread | null> {
+  const runtime = input.runtimeFactory();
+  let deliveredOrdinal: number | undefined;
+  try {
+    for (const message of input.messages) {
+      await runtime.prompt({
+        boxId: input.boxId,
+        message: message.content,
+        requestId: message.event_id,
+      });
+      deliveredOrdinal = message.ordinal;
+    }
+  } catch {
+    // Leave the undelivered tail pending instead of losing it or failing the persisted send.
+  }
+  if (deliveredOrdinal === undefined) return null;
+  return recordProjection({
+    actor: input.actor,
+    orgId: input.orgId,
+    companionId: input.companionId,
+    entries: [],
+    deliveredOrdinal,
+  });
 }
 
 function routeError(c: Context, error: unknown): Response {
@@ -303,12 +372,96 @@ export function registerCompanionRoutes(
     }
   });
 
-  app.get("/v1/companions/:id/transcript", async (c) => {
+  app.get("/v1/companions/:id/thread", async (c) => {
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
-      const transcript = await tenant(c, ({ actor, orgId, database }) =>
-        getCompanionTranscript({ actor, orgId, companionId, database }));
-      return c.json({ transcript });
+      const thread = await tenant(c, ({ actor, orgId, database }) =>
+        getCompanionThread({ actor, orgId, companionId, database }));
+      return c.json({ thread });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companions/:id/messages", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const body = sendCompanionMessageInputSchema.parse(await c.req.json());
+      const sent = await tenant(c, async ({ actor, orgId, database }) => {
+        const companion = await getCompanionForRuntime({ actor, orgId, companionId, database });
+        const result = await sendCompanionMessage({
+          actor, orgId, companionId, content: body.content, database,
+        });
+        return { actor, orgId, companion, ...result };
+      });
+      if (!piIsReachable(sent.companion)) {
+        return c.json({ thread: sent.thread, delivery: "pending" as const });
+      }
+      const delivered = await deliverCompanionMessages({
+        actor: sent.actor,
+        orgId: sent.orgId,
+        companionId,
+        boxId: sent.companion.runtime.box_id!,
+        messages: [sent.entry],
+        runtimeFactory,
+      });
+      return c.json({
+        thread: delivered ?? sent.thread,
+        delivery: delivered ? ("delivered" as const) : ("pending" as const),
+      });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companions/:id/thread/sync", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const resolved = await tenant(c, async ({ actor, orgId, database }) => {
+        const companion = await getCompanionForRuntime({ actor, orgId, companionId, database });
+        const state = await listPendingCompanionMessages({ actor, orgId, companionId, database });
+        return { actor, orgId, companion, ...state };
+      });
+      if (!piIsReachable(resolved.companion)) {
+        const thread = await withTenantContext(
+          { orgId: resolved.orgId, userId: resolved.actor.id },
+          (database) => getCompanionThread({
+            actor: resolved.actor, orgId: resolved.orgId, companionId, database,
+          }),
+        );
+        return c.json({ thread, source: "control_plane" as const });
+      }
+      const boxId = resolved.companion.runtime.box_id!;
+      const runtime = runtimeFactory();
+      let deliveredOrdinal: number | undefined;
+      try {
+        for (const message of resolved.pending) {
+          await runtime.prompt({ boxId, message: message.content, requestId: message.event_id });
+          deliveredOrdinal = message.ordinal;
+        }
+      } catch (error) {
+        if (deliveredOrdinal !== undefined) {
+          await recordProjection({
+            actor: resolved.actor,
+            orgId: resolved.orgId,
+            companionId,
+            entries: [],
+            deliveredOrdinal,
+          }).catch(() => undefined);
+        }
+        throw error;
+      }
+      const events = await runtime.readEvents({ boxId, offset: resolved.piLogOffset });
+      const projection = projectCompanionPiEvents({ chunk: events.chunk, offset: events.offset });
+      const thread = await recordProjection({
+        actor: resolved.actor,
+        orgId: resolved.orgId,
+        companionId,
+        entries: projection.entries,
+        piLogOffset: events.offset + projection.consumedBytes,
+        deliveredOrdinal,
+      });
+      return c.json({ thread, source: "box" as const });
     } catch (error) {
       return routeError(c, error);
     }

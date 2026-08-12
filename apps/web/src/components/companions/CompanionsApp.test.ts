@@ -67,13 +67,14 @@ function companion(overrides: Partial<Companion> = {}): Companion {
   };
 }
 
-function render(companions: Companion[]) {
+function render(companions: Companion[], initialCompanionId?: string | null) {
   return renderToStaticMarkup(React.createElement(CompanionsApp, {
     orgs: [org],
     currentOrg: org,
     navigation,
     initialCompanions: companions,
     initialProviders: providers,
+    initialCompanionId,
   }));
 }
 
@@ -114,5 +115,20 @@ describe("CompanionsApp", () => {
     expect(markup).toContain("Workspace mode");
     expect(markup).toContain("cmprow");
     expect(markup).not.toContain("My Skills");
+  });
+
+  it("opens the chat thread for a deep-linked Companion instead of the list", () => {
+    const markup = render([companion()], "11111111-1111-4111-8111-111111111111");
+
+    expect(markup).toContain("Chat with Luna");
+    expect(markup).toContain("Back to Companions");
+    expect(markup).not.toContain("Search companions");
+  });
+
+  it("falls back to the list when the deep-linked Companion is not visible", () => {
+    const markup = render([companion()], "33333333-3333-4333-8333-333333333333");
+
+    expect(markup).toContain("Search companions");
+    expect(markup).not.toContain("Chat with Luna");
   });
 });

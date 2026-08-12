@@ -1,16 +1,23 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type {
   Companion,
   CompanionProvidersResponse,
-  CompanionTranscript,
+  CompanionThread as Thread,
 } from "@companion/contracts";
 import type { OrgVM } from "@/lib/types";
-import { getCompanionTranscript, setCompanionProvider } from "@/lib/companions";
+import {
+  getCompanionThread,
+  sendCompanionMessage,
+  setCompanionProvider,
+  startCompanionRuntime,
+  syncCompanionThread,
+} from "@/lib/companions";
 import { Icon } from "../Icon";
 import { CompanionProvidersDialog } from "./CompanionProvidersDialog";
+import { CompanionThread } from "./CompanionThread";
 import { NewCompanionDialog } from "./NewCompanionDialog";
 import { ShareCompanionDialog } from "./ShareCompanionDialog";
 import { companionStatus, relativeTime } from "./status";
@@ -20,8 +27,9 @@ import { Sidebar } from "../skills/Sidebar";
 import { skillsRouteHref, type SkillsLibrary } from "../skills/route";
 import type { TreeRow } from "../skills/sidebarTree";
 
-const DIALOG_FOCUSABLE =
-  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+/** Awake threads pull Pi events; asleep and Viewer threads only re-read the control plane. */
+const LIVE_POLL_MS = 2_000;
+const READ_MODEL_POLL_MS = 8_000;
 
 export interface CompanionNavigation {
   mineTreeRows: TreeRow[];
@@ -41,18 +49,28 @@ function UpdatedAt({ iso }: { iso: string }) {
   return <time className="companions-row__time" dateTime={iso}>{text}</time>;
 }
 
+function threadUrl(companionId: string | null): void {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (companionId) url.searchParams.set("companion", companionId);
+  else url.searchParams.delete("companion");
+  window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+}
+
 export function CompanionsApp({
   orgs,
   currentOrg,
   navigation,
   initialCompanions,
   initialProviders,
+  initialCompanionId,
 }: {
   orgs: OrgVM[];
   currentOrg: OrgVM;
   navigation: CompanionNavigation;
   initialCompanions: Companion[];
   initialProviders: CompanionProvidersResponse;
+  initialCompanionId?: string | null;
 }) {
   const router = useRouter();
   const orgActions = useOrgActions();
@@ -66,12 +84,24 @@ export function CompanionsApp({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sharing, setSharing] = useState<Companion | null>(null);
-  const [opened, setOpened] = useState<Companion | null>(null);
-  const [transcript, setTranscript] = useState<CompanionTranscript | null>(null);
-  const [transcriptError, setTranscriptError] = useState<string | null>(null);
-  const threadRef = useRef<HTMLElement>(null);
-  const transcriptRequestRef = useRef(0);
+  const [openedId, setOpenedId] = useState<string | null>(
+    () => initialCompanions.some((item) => item.id === initialCompanionId)
+      ? initialCompanionId ?? null
+      : null,
+  );
+  const [thread, setThread] = useState<Thread | null>(null);
+  const [threadError, setThreadError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const [waking, setWaking] = useState(false);
+  const threadRequestRef = useRef(0);
   const noop = () => {};
+
+  const opened = useMemo(
+    () => companions.find((companion) => companion.id === openedId) ?? null,
+    [companions, openedId],
+  );
+  const canRunOpened = opened !== null && opened.access !== "viewer";
+  const openedAwake = opened?.runtime.state === "running";
 
   const providerName = (providerId: string) =>
     providers.catalog.find((provider) => provider.id === providerId)?.name ?? providerId;
@@ -95,31 +125,91 @@ export function CompanionsApp({
       || (companion.persona ?? "").toLocaleLowerCase("en-US").includes(needle));
   }, [companions, query]);
 
-  const openCompanion = async (companion: Companion) => {
-    const requestId = ++transcriptRequestRef.current;
-    setOpened(companion);
-    setTranscript(null);
-    setTranscriptError(null);
-    try {
-      const result = await getCompanionTranscript(currentOrg.id, companion.id);
-      if (requestId === transcriptRequestRef.current) setTranscript(result);
-    } catch (cause) {
-      if (requestId === transcriptRequestRef.current) {
-        setTranscriptError(cause instanceof Error ? cause.message : "Transcript could not be loaded.");
-      }
-    }
+  const openCompanion = (companion: Companion) => {
+    threadRequestRef.current += 1;
+    setOpenedId(companion.id);
+    setThread(null);
+    setThreadError(null);
+    threadUrl(companion.id);
   };
 
   const closeThread = () => {
-    transcriptRequestRef.current += 1;
-    setOpened(null);
+    threadRequestRef.current += 1;
+    setOpenedId(null);
+    setThread(null);
+    setThreadError(null);
+    threadUrl(null);
+  };
+
+  /** One refresh of the open thread: Pi delivery plus projection when awake, read model otherwise. */
+  const refreshThread = useCallback(async (live: boolean) => {
+    if (!openedId) return;
+    const requestId = ++threadRequestRef.current;
+    try {
+      const next = live
+        ? await syncCompanionThread(currentOrg.id, openedId)
+        : await getCompanionThread(currentOrg.id, openedId);
+      if (requestId === threadRequestRef.current) {
+        setThread(next);
+        setThreadError(null);
+      }
+    } catch (cause) {
+      if (requestId === threadRequestRef.current) {
+        setThreadError(cause instanceof Error ? cause.message : "This thread could not be loaded.");
+      }
+    }
+  }, [currentOrg.id, openedId]);
+
+  useEffect(() => {
+    if (!openedId) return;
+    void refreshThread(false);
+  }, [openedId, refreshThread]);
+
+  useEffect(() => {
+    if (!openedId) return;
+    const live = canRunOpened && openedAwake;
+    const timer = setInterval(
+      () => void refreshThread(live),
+      live ? LIVE_POLL_MS : READ_MODEL_POLL_MS,
+    );
+    return () => clearInterval(timer);
+  }, [canRunOpened, openedAwake, openedId, refreshThread]);
+
+  const onSend = async (content: string) => {
+    if (!openedId) return;
+    setSending(true);
+    setThreadError(null);
+    try {
+      const next = await sendCompanionMessage(currentOrg.id, openedId, content);
+      threadRequestRef.current += 1;
+      setThread(next);
+    } catch (cause) {
+      setThreadError(cause instanceof Error ? cause.message : "The message could not be sent.");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const onWake = async () => {
+    if (!opened) return;
+    setWaking(true);
+    setThreadError(null);
+    try {
+      const updated = await startCompanionRuntime(currentOrg.id, opened.id);
+      setCompanions((current) => current.map((item) => item.id === updated.id ? updated : item));
+      await refreshThread(true);
+    } catch (cause) {
+      setThreadError(cause instanceof Error ? cause.message : "This Companion could not be woken.");
+    } finally {
+      setWaking(false);
+    }
   };
 
   const onCreated = (companion: Companion) => {
     setCompanions((current) => [companion, ...current]);
     setCreating(false);
     setError(null);
-    void openCompanion(companion);
+    openCompanion(companion);
   };
 
   const onSetProvider = async (companion: Companion) => {
@@ -132,7 +222,6 @@ export function CompanionsApp({
     try {
       const updated = await setCompanionProvider(currentOrg.id, companion.id, fallbackProvider);
       setCompanions((current) => current.map((item) => item.id === updated.id ? updated : item));
-      setOpened((current) => current?.id === updated.id ? updated : current);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Provider could not be set.");
     } finally {
@@ -163,55 +252,17 @@ export function CompanionsApp({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [mobileSidebarOpen]);
 
-  const overlayOpen = opened !== null || sharing !== null || creating || managingProviders;
+  const dialogOpen = sharing !== null || creating || managingProviders;
 
   useEffect(() => {
-    if (!overlayOpen) return;
+    if (!dialogOpen) return;
     const sidebar = document.querySelector<HTMLElement>(".side");
     const sidebarWasInert = sidebar?.inert ?? false;
     if (sidebar) sidebar.inert = true;
     return () => {
       if (sidebar) sidebar.inert = sidebarWasInert;
     };
-  }, [overlayOpen]);
-
-  useEffect(() => {
-    if (!opened) return;
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const dialog = threadRef.current;
-    dialog?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        transcriptRequestRef.current += 1;
-        setOpened(null);
-        return;
-      }
-      if (event.key !== "Tab" || !dialog) return;
-      const items = Array.from(dialog.querySelectorAll<HTMLElement>(DIALOG_FOCUSABLE)).filter(
-        (item) => item.offsetParent !== null,
-      );
-      if (!items.length) {
-        event.preventDefault();
-        dialog.focus();
-        return;
-      }
-      const first = items[0]!;
-      const last = items[items.length - 1]!;
-      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      opener?.focus();
-    };
-  }, [opened]);
+  }, [dialogOpen]);
 
   return (
     <div className={"app app--skills companions-app" + (mobileSidebarOpen ? " app--side-open" : "")}>
@@ -256,10 +307,10 @@ export function CompanionsApp({
           if (mode === "skills") router.push("/skills");
         }}
         companions={sidebarCompanions}
-        activeCompanionId={opened?.id ?? null}
+        activeCompanionId={openedId}
         onSelectCompanion={(companionId) => {
           const companion = companions.find((item) => item.id === companionId);
-          if (companion) void openCompanion(companion);
+          if (companion) openCompanion(companion);
         }}
         navigationOnly
         localActive={false}
@@ -280,151 +331,12 @@ export function CompanionsApp({
       )}
 
       <main
-        className="companions-main"
-        aria-hidden={mobileSidebarOpen || overlayOpen || undefined}
-        inert={mobileSidebarOpen || overlayOpen ? true : undefined}
+        className={"companions-main" + (opened ? " companions-main--chat" : "")}
+        aria-hidden={mobileSidebarOpen || dialogOpen || undefined}
+        inert={mobileSidebarOpen || dialogOpen ? true : undefined}
       >
-        <header className="companions-head">
-          <h1>
-            Companions
-            <span className="companions-count tnum">{companions.length}</span>
-          </h1>
-          <div className="companions-head-actions">
-            {providers.can_manage && (
-              <button
-                type="button"
-                className="cds-btn cds-btn--secondary cds-btn--md"
-                onClick={() => setManagingProviders(true)}
-              >
-                Providers
-              </button>
-            )}
-            <button
-              type="button"
-              className="cds-btn cds-btn--primary cds-btn--md"
-              onClick={() => setCreating(true)}
-            >
-              <Icon name="plus" size={15} /> New companion
-            </button>
-          </div>
-        </header>
-
-        <div className="companions-content">
-          {error && <div className="companions-error" role="alert">{error}</div>}
-
-          {companions.length === 0 ? (
-            <div className="companions-empty">
-              <Icon name="bot" size={22} />
-              <strong>No Companions yet</strong>
-              <p>A Companion is a name, one line of persona, and a model provider. It stays asleep until you open it.</p>
-              <button
-                type="button"
-                className="cds-btn cds-btn--primary cds-btn--md"
-                onClick={() => setCreating(true)}
-              >
-                New companion
-              </button>
-            </div>
-          ) : (
-            <>
-              <label className="companions-search">
-                <Icon name="search" size={15} />
-                <input
-                  type="search"
-                  value={query}
-                  placeholder="Search companions"
-                  aria-label="Search companions"
-                  onChange={(event) => setQuery(event.target.value)}
-                />
-              </label>
-
-              <div className="companions-list">
-                <div className="companions-row companions-row--head">
-                  <span>Companion</span>
-                  <span>Status</span>
-                  <span>Updated</span>
-                  <span>Access</span>
-                </div>
-                {visible.map((companion) => {
-                  const status = companionStatus(companion.runtime.state);
-                  return (
-                    <div className="companions-row" key={companion.id}>
-                      <button
-                        type="button"
-                        className="companions-row__main"
-                        onClick={() => void openCompanion(companion)}
-                      >
-                        <span className="companions-avatar" aria-hidden="true">
-                          {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
-                        </span>
-                        <span className="companions-row__text">
-                          <strong>{companion.name}</strong>
-                          <span>
-                            {companion.persona
-                              ?? providerName(companion.runtime.provider_ids[0] ?? "No provider")}
-                          </span>
-                        </span>
-                      </button>
-                      <span className={`companions-state companions-state--${status.tone}`}>
-                        <i aria-hidden="true" />
-                        {status.label}
-                      </span>
-                      <UpdatedAt iso={companion.updated_at} />
-                      <span className="companions-row-actions">
-                        <span className="companions-role">{companion.access}</span>
-                        {companion.access === "owner" && (
-                          <button
-                            type="button"
-                            className="cds-btn cds-btn--ghost cds-btn--sm"
-                            onClick={() => setSharing(companion)}
-                          >
-                            Share
-                          </button>
-                        )}
-                      </span>
-                    </div>
-                  );
-                })}
-                {visible.length === 0 && (
-                  <p className="companions-list-empty">No Companion matches this search.</p>
-                )}
-              </div>
-            </>
-          )}
-        </div>
-      </main>
-
-      {opened && (
-        <div className="companions-thread-scrim" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) closeThread();
-        }}>
-          <aside
-            className="companions-thread"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="companions-thread-title"
-            ref={threadRef}
-            tabIndex={-1}
-          >
-            <header>
-              <div>
-                <h2 id="companions-thread-title">{opened.name}</h2>
-                <p>
-                  {opened.persona ? `${opened.persona} · ` : ""}
-                  {opened.access === "viewer"
-                    ? "Read-only transcript · Box stays asleep"
-                    : "Transcript"}
-                </p>
-              </div>
-              <button
-                type="button"
-                className="iconbtn"
-                aria-label="Close transcript"
-                onClick={closeThread}
-              >
-                <Icon name="x" size={16} />
-              </button>
-            </header>
+        {opened ? (
+          <>
             {opened.access === "owner" && !opened.runtime.provider_ids.length && fallbackProvider && (
               <div className="companions-thread-notice">
                 <span>This Companion has no provider yet.</span>
@@ -438,36 +350,130 @@ export function CompanionsApp({
                 </button>
               </div>
             )}
-            <div className="companions-thread-body">
-              {transcriptError ? (
-                <div className="companions-error" role="alert">{transcriptError}</div>
-              ) : !transcript ? (
-                <p className="companions-thread-empty">Loading transcript...</p>
-              ) : transcript.entries.length ? (
-                transcript.entries.map((entry) => (
-                  <article className={`companions-message companions-message--${entry.role}`} key={entry.event_id}>
-                    <strong>{entry.role === "assistant" ? opened.name : entry.role}</strong>
-                    <p>{entry.content}</p>
-                    <time dateTime={entry.created_at}>
-                      {new Date(entry.created_at).toLocaleString()}
-                    </time>
-                  </article>
-                ))
-              ) : (
-                <div className="companions-thread-empty">
-                  <strong>No messages yet</strong>
-                  <p>The control-plane transcript is empty. Opening it did not contact Box.</p>
+            <CompanionThread
+              companion={opened}
+              thread={thread}
+              error={threadError}
+              busy={sending}
+              waking={waking}
+              onBack={closeThread}
+              onSend={(content) => void onSend(content)}
+              onWake={() => void onWake()}
+            />
+          </>
+        ) : (
+          <>
+            <header className="companions-head">
+              <h1>
+                Companions
+                <span className="companions-count tnum">{companions.length}</span>
+              </h1>
+              <div className="companions-head-actions">
+                {providers.can_manage && (
+                  <button
+                    type="button"
+                    className="cds-btn cds-btn--secondary cds-btn--md"
+                    onClick={() => setManagingProviders(true)}
+                  >
+                    Providers
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="cds-btn cds-btn--primary cds-btn--md"
+                  onClick={() => setCreating(true)}
+                >
+                  <Icon name="plus" size={15} /> New companion
+                </button>
+              </div>
+            </header>
+
+            <div className="companions-content">
+              {error && <div className="companions-error" role="alert">{error}</div>}
+
+              {companions.length === 0 ? (
+                <div className="companions-empty">
+                  <Icon name="bot" size={22} />
+                  <strong>No Companions yet</strong>
+                  <p>A Companion is a name, one line of persona, and a model provider. It stays asleep until you open it.</p>
+                  <button
+                    type="button"
+                    className="cds-btn cds-btn--primary cds-btn--md"
+                    onClick={() => setCreating(true)}
+                  >
+                    New companion
+                  </button>
                 </div>
+              ) : (
+                <>
+                  <label className="companions-search">
+                    <Icon name="search" size={15} />
+                    <input
+                      type="search"
+                      value={query}
+                      placeholder="Search companions"
+                      aria-label="Search companions"
+                      onChange={(event) => setQuery(event.target.value)}
+                    />
+                  </label>
+
+                  <div className="companions-list">
+                    <div className="companions-row companions-row--head">
+                      <span>Companion</span>
+                      <span>Status</span>
+                      <span>Updated</span>
+                      <span>Access</span>
+                    </div>
+                    {visible.map((companion) => {
+                      const status = companionStatus(companion.runtime.state);
+                      return (
+                        <div className="companions-row" key={companion.id}>
+                          <button
+                            type="button"
+                            className="companions-row__main"
+                            onClick={() => openCompanion(companion)}
+                          >
+                            <span className="companions-avatar" aria-hidden="true">
+                              {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
+                            </span>
+                            <span className="companions-row__text">
+                              <strong>{companion.name}</strong>
+                              <span>
+                                {companion.persona
+                                  ?? providerName(companion.runtime.provider_ids[0] ?? "No provider")}
+                              </span>
+                            </span>
+                          </button>
+                          <span className={`companions-state companions-state--${status.tone}`}>
+                            <i aria-hidden="true" />
+                            {status.label}
+                          </span>
+                          <UpdatedAt iso={companion.updated_at} />
+                          <span className="companions-row-actions">
+                            <span className="companions-role">{companion.access}</span>
+                            {companion.access === "owner" && (
+                              <button
+                                type="button"
+                                className="cds-btn cds-btn--ghost cds-btn--sm"
+                                onClick={() => setSharing(companion)}
+                              >
+                                Share
+                              </button>
+                            )}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {visible.length === 0 && (
+                      <p className="companions-list-empty">No Companion matches this search.</p>
+                    )}
+                  </div>
+                </>
               )}
             </div>
-            {opened.access === "viewer" && (
-              <footer>
-                Viewer access is read-only. Run, plugins, and desktop are unavailable.
-              </footer>
-            )}
-          </aside>
-        </div>
-      )}
+          </>
+        )}
+      </main>
 
       {creating && (
         <NewCompanionDialog

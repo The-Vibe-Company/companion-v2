@@ -69,12 +69,17 @@ An authenticated Agent Auth identity may issue a short-lived child PAT only thro
 The API exposes auth, organizations, skills, labels, dependencies, comments, files/versions, installs, public releases, GitHub, secrets, Skill Databases, billing, tokens, onboarding, and skill-facing Agent Auth. Historical Project, skill-run, prompt, attachment/artifact, and model-provider endpoints remain unregistered.
 
 `COMPANION_COMPANIONS_ENABLED=true` additionally registers authenticated, tenant-scoped Companion
-metadata, ACL, transcript read-model, provider, and Box/Pi lifecycle endpoints. List, detail, ACL,
-transcript, provider metadata, and default status reads use PostgreSQL only. A Companion Owner can
+metadata, ACL, chat thread, provider, and Box/Pi lifecycle endpoints. List, detail, ACL,
+thread, provider metadata, and default status reads use PostgreSQL only. A Companion Owner can
 grant Editor or Viewer access to the workspace or individual current members; an individual grant
 overrides the workspace default. Live status, start/stop, plugin injection, and desktop require
 owner/editor access before the Box adapter is created, while provider and share management remain
-owner-only. Viewers can read the control-plane transcript but cannot contact Box. The default remains fail-closed: when
+owner-only. Each Companion owns exactly one chat thread. `companion_threads` carries its ordinal and
+delivery watermarks and `companion_transcript_entries` carries its messages, so sending persists in
+the control plane before any Box contact and an undelivered message stays pending until a later
+owner/editor sync. Sync is the only path that reaches Pi: it delivers pending messages through the
+owner-only FIFO and projects new Pi output from a recorded byte offset, which makes retries
+idempotent. Viewers can read the control-plane thread but cannot send or contact Box. The default remains fail-closed: when
 the flag is absent or false, none of these routes are registered. Owner/Admin-managed workspace
 model-provider credentials are envelope-encrypted, write-only, and decrypted only after the
 Companion wake guard. Start never accepts caller-supplied model-provider credentials; it writes only
@@ -86,7 +91,7 @@ the durable JSON contains environment references only, while their values use th
 `mcp_credentials` channel and never persist in the control plane. Viewer authorization completes
 before skill storage or Box is contacted.
 
-The web has no `/projects` route and no Run/Session state in the Skills URL grammar. Old query parameters are ignored and canonical navigation returns to the Skills detail. By default the only product workspace navigation is Skills. The same `COMPANION_COMPANIONS_ENABLED` server-side flag exposes an authenticated `/companions` list/create shell plus the Skills | Companions sidebar mode segment that reaches it; with the flag off neither the route nor the segment exists. A Companion carries an optional persona of at most 280 characters, stored as one descriptive line and never as a system prompt. Creation asks for the name, that persona, and one compact picker over connected Claude, Codex, and z.ai providers defaulting to the workspace default. Native mobile clients get the Companion list and its thread only; Skills management stays on web and mobile web. Pi/Box controls, provider catalogs, and desktop chrome remain invisible.
+The web has no `/projects` route and no Run/Session state in the Skills URL grammar. Old query parameters are ignored and canonical navigation returns to the Skills detail. By default the only product workspace navigation is Skills. The same `COMPANION_COMPANIONS_ENABLED` server-side flag exposes an authenticated `/companions` list/create shell, the 1:1 chat thread it opens into, plus the Skills | Companions sidebar mode segment that reaches it; with the flag off neither the route nor the segment exists. Opening a Companion replaces the list with its thread and deep-links through a `companion` search parameter. The thread shows only the conversation and, for a runner whose Box is asleep, one Wake control; Pi tools, Skills, and desktop chrome stay out of it, and a Viewer gets the transcript with no composer. A Companion carries an optional persona of at most 280 characters, stored as one descriptive line and never as a system prompt. Creation asks for the name, that persona, and one compact picker over connected Claude, Codex, and z.ai providers defaulting to the workspace default. Native mobile clients get the Companion list and its thread only; Skills management stays on web and mobile web. Pi/Box controls, provider catalogs, and desktop chrome remain invisible.
 
 Pi sessions, RPC events, and logs live only under `~/.companion/runtime` on snapshotted Box disk.
 PostgreSQL stores Box id and last-observed lifecycle metadata so list/open never wakes Box. Desktop

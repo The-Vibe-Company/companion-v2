@@ -1,5 +1,6 @@
 import {
   type AnyPgColumn,
+  bigint,
   boolean,
   check,
   foreignKey,
@@ -460,6 +461,46 @@ export const companionMemberAccess = pgTable(
       name: "companion_member_access_membership_fk",
     }),
     byMember: index("companion_member_access_member_idx").on(t.orgId, t.userId),
+  }),
+);
+
+/**
+ * One chat thread per Companion. The primary key is the Companion id, so a Companion can never own
+ * a second thread and a thread can never span Companions. The row also carries the two watermarks
+ * that make Pi exchange idempotent: the highest message ordinal Pi has received and the byte offset
+ * already projected from the Box RPC log.
+ */
+export const companionThreads = pgTable(
+  "companion_threads",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    companionId: uuid("companion_id")
+      .primaryKey()
+      .references(() => companions.id, { onDelete: "cascade" }),
+    /** Next transcript ordinal to hand out; monotonic, so concurrent sends cannot collide. */
+    nextOrdinal: integer("next_ordinal").notNull().default(0),
+    /** Highest user-message ordinal already delivered to Pi; null when nothing was delivered. */
+    deliveredOrdinal: integer("delivered_ordinal"),
+    /** Bytes of `~/.companion/runtime/logs/pi.rpc.ndjson` already projected into the transcript. */
+    piLogOffset: bigint("pi_log_offset", { mode: "number" }).notNull().default(0),
+    lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    companionOrgFk: foreignKey({
+      columns: [t.orgId, t.companionId],
+      foreignColumns: [companions.orgId, companions.id],
+      name: "companion_threads_companion_fk",
+    }),
+    nonnegativeNextOrdinal: check("companion_threads_next_ordinal_check", sql`${t.nextOrdinal} >= 0`),
+    nonnegativeDeliveredOrdinal: check(
+      "companion_threads_delivered_ordinal_check",
+      sql`${t.deliveredOrdinal} is null or ${t.deliveredOrdinal} >= 0`,
+    ),
+    nonnegativeLogOffset: check("companion_threads_pi_log_offset_check", sql`${t.piLogOffset} >= 0`),
   }),
 );
 

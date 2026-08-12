@@ -138,14 +138,28 @@ export const companionTranscriptEntrySchema = z.object({
   created_at: z.string().datetime(),
 });
 export type CompanionTranscriptEntry = z.infer<typeof companionTranscriptEntrySchema>;
+export type CompanionTranscriptRole = CompanionTranscriptEntry["role"];
 
-export const companionTranscriptSchema = z.object({
+/**
+ * One Companion owns exactly one chat thread. The payload is the control-plane read model, so a
+ * Viewer reads it without any Box contact; `can_send` reflects the Owner/Editor run boundary and
+ * `pending_count` counts messages Pi has not received yet.
+ */
+export const companionThreadSchema = z.object({
   companion_id: z.string().uuid(),
   access: companionAccessSchema,
   read_only: z.boolean(),
+  can_send: z.boolean(),
   entries: z.array(companionTranscriptEntrySchema),
+  pending_count: z.number().int().nonnegative(),
+  last_message_at: z.string().datetime().nullable(),
 });
-export type CompanionTranscript = z.infer<typeof companionTranscriptSchema>;
+export type CompanionThread = z.infer<typeof companionThreadSchema>;
+
+export const sendCompanionMessageInputSchema = z.object({
+  content: z.string().trim().min(1).max(16_384),
+}).strict();
+export type SendCompanionMessageInput = z.infer<typeof sendCompanionMessageInputSchema>;
 
 export const createCompanionInputSchema = z.object({
   name: z.string().trim().min(1).max(120),

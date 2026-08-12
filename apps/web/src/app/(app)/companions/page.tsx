@@ -17,8 +17,15 @@ import { mapSkill } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-export default async function CompanionsPage() {
+export default async function CompanionsPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   if (!companionsEnabled()) notFound();
+
+  const openedCompanion = (await searchParams).companion;
+  const initialCompanionId = typeof openedCompanion === "string" ? openedCompanion : null;
 
   const authState = await loadServerAuth<{ needsOnboarding?: boolean }>();
   if (authState.status === "unauthenticated") redirect("/login");
@@ -65,6 +72,7 @@ export default async function CompanionsPage() {
       currentOrg={current}
       initialCompanions={companionsResponse.companions}
       initialProviders={providers}
+      initialCompanionId={initialCompanionId}
       navigation={{
         mineTreeRows: deriveTreeRows(
           mineSkills.filter((skill) => skill.source === "authored"),

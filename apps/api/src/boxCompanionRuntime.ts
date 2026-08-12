@@ -15,6 +15,8 @@ import {
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
 const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
 export const COMPANION_PI_DISK_LAYOUT_VERSION = 2;
+/** Bytes of Pi RPC output one control-plane sync may pull; the rest is read by the next sync. */
+const COMPANION_PI_EVENT_READ_LIMIT = 262_144;
 const READY_STATES = new Set<BoxState>(["ready", "idle", "running"]);
 const STARTING_STATES = new Set<BoxState>(["init", "provisioning", "provisioned", "cloning"]);
 
@@ -73,6 +75,12 @@ export interface CompanionRuntimeObservation {
   desktopAvailable: boolean;
 }
 
+/** A byte range of the Pi RPC log; `offset` is where the next read must resume. */
+export interface CompanionPiEventChunk {
+  chunk: string;
+  offset: number;
+}
+
 export interface CompanionBoxRuntime {
   start(input: {
     companionId: string;
@@ -89,6 +97,10 @@ export interface CompanionBoxRuntime {
   stop(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
   status(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
   desktop(input: { boxId: string }): Promise<{ url: string | null; provisioning: boolean }>;
+  /** Hand one chat message to the already running Pi daemon; never creates or resumes a Box. */
+  prompt(input: { boxId: string; message: string; requestId: string }): Promise<void>;
+  /** Read Pi RPC output from `offset` so the control plane can project new events. */
+  readEvents(input: { boxId: string; offset: number }): Promise<CompanionPiEventChunk>;
 }
 
 export class BoxRuntimeConfigurationError extends Error {
@@ -529,6 +541,54 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     const box = await this.#get(input.boxId);
     const daemonState = READY_STATES.has(box.state) ? await this.#daemonState(input.boxId) : "stopped";
     return observation(box, daemonState);
+  }
+
+  async prompt(input: { boxId: string; message: string; requestId: string }): Promise<void> {
+    const command = JSON.stringify({
+      id: input.requestId,
+      type: "prompt",
+      message: input.message,
+      streamingBehavior: "followUp",
+    });
+    const result = await this.#command(
+      input.boxId,
+      `set -euo pipefail
+fifo="$HOME/.companion/runtime/state/pi.rpc.in"
+systemctl --user is-active --quiet companion-pi-daemon.service
+test -p "$fifo"
+printf '%s\\n' ${shellQuote(command)} > "$fifo"`,
+      20,
+    );
+    if (!result.success) {
+      throw new BoxRuntimeProviderError("Pi did not accept the message; wake the Companion and retry", 409);
+    }
+  }
+
+  async readEvents(input: { boxId: string; offset: number }): Promise<CompanionPiEventChunk> {
+    const result = await this.#command(
+      input.boxId,
+      `set -euo pipefail
+log="$HOME/.companion/runtime/logs/pi.rpc.ndjson"
+offset=${Math.max(0, Math.trunc(input.offset))}
+if [ ! -f "$log" ]; then printf '%s\\n' 0; exit 0; fi
+size="$(wc -c < "$log")"
+# A resumed Box keeps the log, but a rebuilt disk can shrink it; restart from the top instead of
+# reading a stale byte range.
+if [ "$size" -lt "$offset" ]; then offset=0; fi
+printf '%s\\n' "$offset"
+tail -c "+$((offset + 1))" "$log" | head -c ${COMPANION_PI_EVENT_READ_LIMIT}`,
+      30,
+    );
+    if (!result.success) {
+      throw new BoxRuntimeProviderError("Pi event log could not be read from Box", 502);
+    }
+    const separator = result.stdout.indexOf("\n");
+    if (separator < 0) return { chunk: "", offset: input.offset };
+    const parsedOffset = Number.parseInt(result.stdout.slice(0, separator), 10);
+    return {
+      chunk: result.stdout.slice(separator + 1),
+      offset: Number.isSafeInteger(parsedOffset) && parsedOffset >= 0 ? parsedOffset : 0,
+    };
   }
 
   async desktop(input: { boxId: string }): Promise<{ url: string | null; provisioning: boolean }> {
