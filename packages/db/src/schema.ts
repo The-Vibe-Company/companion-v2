@@ -39,6 +39,10 @@ export const companionDaemonStateEnum = pgEnum("companion_daemon_state", [
   "stopped",
   "error",
 ]);
+export const companionProviderAuthMethodEnum = pgEnum("companion_provider_auth_method", [
+  "api_key",
+  "subscription",
+]);
 export const billingSeatSyncStatusEnum = pgEnum("billing_seat_sync_status", ["synced", "pending", "error"]);
 export const invitationStatusEnum = pgEnum("invitation_status", [
   "pending",
@@ -290,9 +294,17 @@ export const organizations = pgTable(
      * nothing; null means this org has no policy.
      */
     skillNamingPolicy: text("skill_naming_policy"),
+    /** Pi provider selected when a new Companion does not explicitly choose one. */
+    defaultCompanionProviderId: text("default_companion_provider_id"),
     createdAt: now(),
     updatedAt: updatedAt(),
   },
+  (t) => ({
+    defaultCompanionProviderIdShape: check(
+      "organizations_default_companion_provider_id_check",
+      sql`${t.defaultCompanionProviderId} is null or ${t.defaultCompanionProviderId} ~ '^[a-z][a-z0-9-]{0,62}$'`,
+    ),
+  }),
 );
 
 export const organizationDomains = pgTable(
@@ -352,6 +364,8 @@ export const companions = pgTable(
     runtimeState: companionRuntimeStateEnum("runtime_state").notNull().default("not_created"),
     daemonState: companionDaemonStateEnum("daemon_state").notNull().default("unknown"),
     providerIds: jsonb("provider_ids").$type<string[]>().notNull().default([]),
+    /** Encrypted provider credential generation last applied to the Box Pi auth file. */
+    providerCredentialGeneration: uuid("provider_credential_generation"),
     diskLayoutVersion: integer("disk_layout_version").notNull().default(1),
     desktopAvailable: boolean("desktop_available").notNull().default(false),
     lastObservedAt: timestamp("last_observed_at", { withTimezone: true }),
@@ -372,6 +386,44 @@ export const companions = pgTable(
     boxIdShape: check(
       "companions_box_id_check",
       sql`${t.boxId} is null or ${t.boxId} ~ '^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$'`,
+    ),
+  }),
+);
+
+/**
+ * Workspace-level Pi provider credentials. Ciphertext is envelope-encrypted and only decrypted
+ * immediately before it is delivered to the selected Companion's Box.
+ */
+export const companionProviderConnections = pgTable(
+  "companion_provider_connections",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    providerId: text("provider_id").notNull(),
+    authMethod: companionProviderAuthMethodEnum("auth_method").notNull(),
+    credentialGeneration: uuid("credential_generation").notNull().defaultRandom(),
+    credentialVersion: integer("credential_version").notNull().default(1),
+    ciphertext: text("ciphertext").notNull(),
+    iv: text("iv").notNull(),
+    authTag: text("auth_tag").notNull(),
+    wrappedDek: text("wrapped_dek").notNull(),
+    wrapIv: text("wrap_iv").notNull(),
+    wrapAuthTag: text("wrap_auth_tag").notNull(),
+    keyId: text("key_id").notNull(),
+    connectedBy: text("connected_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.orgId, t.providerId] }),
+    providerIdShape: check(
+      "companion_provider_connections_provider_id_check",
+      sql`${t.providerId} ~ '^[a-z][a-z0-9-]{0,62}$'`,
+    ),
+    credentialVersionCheck: check(
+      "companion_provider_connections_credential_version_check",
+      sql`${t.credentialVersion} >= 1`,
     ),
   }),
 );

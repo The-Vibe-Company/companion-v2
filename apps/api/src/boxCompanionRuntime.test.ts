@@ -24,7 +24,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(() => new AsciiBoxCompanionRuntime({})).toThrow(BoxRuntimeConfigurationError);
   });
 
-  it("creates a no-env Box, installs the Pi daemon layout, and injects provider keys transiently", async () => {
+  it("creates a no-env Box, installs Pi, and writes owner-only provider auth", async () => {
     let fileBody: Record<string, unknown> | undefined;
     const files = new Map<string, string>();
     let createBody: Record<string, unknown> | undefined;
@@ -70,8 +70,12 @@ describe("AsciiBoxCompanionRuntime", () => {
       orgId: "22222222-2222-4222-8222-222222222222",
       boxId: null,
       clientSurface: "web",
-      credentials: [
-        { provider: "anthropic", envKey: "ANTHROPIC_API_KEY", value: "secret-value" },
+      providerAuth: {
+        anthropic: { type: "api_key", key: "provider-secret" },
+      },
+      replaceProviderAuth: true,
+      mcpCredentials: [
+        { env_key: "GITHUB_TOKEN_WORK", value: "mcp-secret" },
       ],
       mcpAccounts: [{
         id: "github-work",
@@ -79,7 +83,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         transport: "stdio",
         command: "github-mcp-server",
         args: ["stdio"],
-        env: { GITHUB_TOKEN: "ANTHROPIC_API_KEY" },
+        env: { GITHUB_TOKEN: "GITHUB_TOKEN_WORK" },
         lifecycle: "lazy",
         direct_tools: false,
       }],
@@ -107,12 +111,15 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(String(createBody?.setupScript)).not.toContain("OpenCode");
     expect(fileBody).toEqual({
       path: ".companion/runtime/state/providers.env",
-      content: "ANTHROPIC_API_KEY=\"secret-value\"\n",
+      content: "GITHUB_TOKEN_WORK=\"mcp-secret\"\n",
     });
+    expect(files.get(".companion/pi/auth.json"))
+      .toBe("{\"anthropic\":{\"type\":\"api_key\",\"key\":\"provider-secret\"}}\n");
     expect(files.get(".companion/runtime/state/skill-archives/incident-summary.tar.gz.b64"))
       .toBe(Buffer.from("archive").toString("base64"));
-    expect(files.get(".companion/pi/mcp.json")).toContain("${ANTHROPIC_API_KEY}");
-    expect(files.get(".companion/pi/mcp.json")).not.toContain("secret-value");
+    expect(files.get(".companion/pi/mcp.json")).toContain("${GITHUB_TOKEN_WORK}");
+    expect(files.get(".companion/pi/mcp.json")).not.toContain("mcp-secret");
+    expect(files.get(".companion/pi/mcp.json")).not.toContain("provider-secret");
     expect(files.get(".companion/runtime/state/mcp-accounts.json")).toContain("GitHub work");
     expect(assigned).toHaveBeenCalledWith("bx_23456789");
     expect(result).toEqual({
@@ -125,6 +132,7 @@ describe("AsciiBoxCompanionRuntime", () => {
 
   it("recovers a deterministically named archived Box before restarting Pi", async () => {
     const commands: string[] = [];
+    const writtenPaths: string[] = [];
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
@@ -151,7 +159,10 @@ describe("AsciiBoxCompanionRuntime", () => {
         expect(body).toEqual({ noEnv: true, ttlSeconds: 3600 });
         return json({ box: { ...box, state: "provisioning" } }, 202);
       }
-      if (url.endsWith("/files") && init?.method === "PUT") return json({ ok: true });
+      if (url.endsWith("/files") && init?.method === "PUT") {
+        writtenPaths.push(String(body.path));
+        return json({ ok: true });
+      }
       if (url.endsWith("/commands") && init?.method === "POST") {
         commands.push(String(body.command));
         return json({
@@ -174,7 +185,9 @@ describe("AsciiBoxCompanionRuntime", () => {
       orgId: "22222222-2222-4222-8222-222222222222",
       boxId: null,
       clientSurface: "mobile_web",
-      credentials: [],
+      providerAuth: {},
+      replaceProviderAuth: false,
+      mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
       onBoxAssigned: async () => undefined,
@@ -185,6 +198,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       String(url).endsWith("/resume") && init?.method === "POST")).toBe(true);
     expect(fetchMock.mock.calls.some(([url, init]) =>
       String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
+    expect(writtenPaths).not.toContain(".companion/pi/auth.json");
     expect(commands.some((command) =>
       command.includes("pi-layout.version") && command.includes("pi-mcp-adapter@2.12.1"))).toBe(true);
   });
@@ -228,8 +242,12 @@ describe("AsciiBoxCompanionRuntime", () => {
       orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
-      credentials: [
-        { provider: "anthropic", envKey: "ANTHROPIC_API_KEY", value: "secret-value" },
+      providerAuth: {
+        anthropic: { type: "api_key", key: "provider-secret" },
+      },
+      replaceProviderAuth: true,
+      mcpCredentials: [
+        { env_key: "GITHUB_TOKEN_WORK", value: "mcp-secret" },
       ],
       mcpAccounts: [],
       skills: [],
@@ -267,8 +285,12 @@ describe("AsciiBoxCompanionRuntime", () => {
       orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
-      credentials: [
-        { provider: "anthropic", envKey: "ANTHROPIC_API_KEY", value: "secret-value" },
+      providerAuth: {
+        anthropic: { type: "api_key", key: "provider-secret" },
+      },
+      replaceProviderAuth: true,
+      mcpCredentials: [
+        { env_key: "GITHUB_TOKEN_WORK", value: "mcp-secret" },
       ],
       mcpAccounts: [],
       skills: [],
@@ -306,7 +328,9 @@ describe("AsciiBoxCompanionRuntime", () => {
       orgId: "22222222-2222-4222-8222-222222222222",
       boxId: null,
       clientSurface: "web",
-      credentials: [],
+      providerAuth: {},
+      replaceProviderAuth: true,
+      mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
       onBoxAssigned: async () => {

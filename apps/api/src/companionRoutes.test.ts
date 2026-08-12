@@ -11,7 +11,13 @@ const contextMocks = vi.hoisted(() => ({
 
 const coreMocks = vi.hoisted(() => ({
   listCompanions: vi.fn(),
+  listCompanionProviders: vi.fn(),
   createCompanion: vi.fn(),
+  saveCompanionProvider: vi.fn(),
+  setCompanionProvider: vi.fn(),
+  deleteCompanionProvider: vi.fn(),
+  setDefaultCompanionProvider: vi.fn(),
+  resolveCompanionProviderAuth: vi.fn(),
   getCompanion: vi.fn(),
   getCompanionForRuntime: vi.fn(),
   listCompanionRuntimeSkillPackages: vi.fn(),
@@ -62,7 +68,8 @@ const companion = {
     state: "stopped" as const,
     daemon_state: "stopped" as const,
     box_id: "bx_23456789",
-    provider_ids: [],
+    provider_ids: ["anthropic"],
+    provider_credential_generation: null,
     disk_layout_version: 1,
     desktop_available: true,
     last_observed_at: null,
@@ -86,7 +93,28 @@ describe("Companions API feature gate", () => {
       Response.json({ ok: false }, { status }),
     );
     coreMocks.listCompanions.mockResolvedValue([]);
+    coreMocks.listCompanionProviders.mockResolvedValue({
+      catalog: [],
+      connections: [],
+      default_provider_id: null,
+      can_manage: true,
+    });
     coreMocks.createCompanion.mockResolvedValue(companion);
+    coreMocks.saveCompanionProvider.mockResolvedValue({
+      provider_id: "anthropic",
+      auth_method: "api_key",
+      connected_by: "user-1",
+      created_at: companion.created_at,
+      updated_at: companion.updated_at,
+    });
+    coreMocks.setCompanionProvider.mockResolvedValue(companion);
+    coreMocks.deleteCompanionProvider.mockResolvedValue(undefined);
+    coreMocks.setDefaultCompanionProvider.mockResolvedValue(undefined);
+    coreMocks.resolveCompanionProviderAuth.mockResolvedValue({
+      providerId: "anthropic",
+      credentialGeneration: "22222222-2222-4222-8222-222222222222",
+      authEntry: { type: "api_key", key: "secret-a" },
+    });
     coreMocks.getCompanion.mockResolvedValue(companion);
     coreMocks.getCompanionForRuntime.mockResolvedValue(companion);
     coreMocks.listCompanionRuntimeSkillPackages.mockResolvedValue([]);
@@ -103,6 +131,7 @@ describe("Companions API feature gate", () => {
     registerCompanionRoutes(app, {});
 
     expect((await app.request("/v1/companions")).status).toBe(404);
+    expect((await app.request("/v1/companion-providers")).status).toBe(404);
     expect(contextMocks.actorFromContext).not.toHaveBeenCalled();
   });
 
@@ -190,7 +219,22 @@ describe("Companions API feature gate", () => {
     expect(runtimeFactory).not.toHaveBeenCalled();
   });
 
-  it("passes multi-provider credentials transiently to an owner start", async () => {
+  it("guards provider attachment with the same owner-only Companion boundary", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const forbidden = new (await import("@companion/core")).CompanionRuntimeForbiddenError();
+    coreMocks.setCompanionProvider.mockRejectedValueOnce(forbidden);
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    const response = await app.request(`/v1/companions/${companion.id}/provider`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: "anthropic" }),
+    });
+
+    expect(response.status).toBe(403);
+  });
+
+  it("resolves the selected encrypted provider and passes only Pi auth to Box", async () => {
     const app = new Hono<{ Variables: ApiVariables }>();
     const start = vi.fn(async (input) => {
       await input.onBoxAssigned("bx_23456789");
@@ -213,9 +257,8 @@ describe("Companions API feature gate", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        credentials: [
-          { provider: "anthropic", env_key: "ANTHROPIC_API_KEY", value: "secret-a" },
-          { provider: "openai", env_key: "OPENAI_API_KEY", value: "secret-b" },
+        mcp_credentials: [
+          { env_key: "GITHUB_TOKEN_WORK", value: "secret-b" },
         ],
         mcp_accounts: [{
           id: "github-work",
@@ -223,7 +266,7 @@ describe("Companions API feature gate", () => {
           transport: "stdio",
           command: "npx",
           args: ["-y", "@modelcontextprotocol/server-github"],
-          env: { GITHUB_TOKEN: "OPENAI_API_KEY" },
+          env: { GITHUB_TOKEN: "GITHUB_TOKEN_WORK" },
         }],
       }),
     });
@@ -234,17 +277,125 @@ describe("Companions API feature gate", () => {
       orgId: "org-1",
       boxId: "bx_23456789",
       clientSurface: "web",
-      credentials: [
-        { provider: "anthropic", envKey: "ANTHROPIC_API_KEY", value: "secret-a" },
-        { provider: "openai", envKey: "OPENAI_API_KEY", value: "secret-b" },
+      providerAuth: {
+        anthropic: { type: "api_key", key: "secret-a" },
+      },
+      replaceProviderAuth: true,
+      mcpCredentials: [
+        { env_key: "GITHUB_TOKEN_WORK", value: "secret-b" },
       ],
       mcpAccounts: [
         expect.objectContaining({ id: "github-work", label: "GitHub work", transport: "stdio" }),
       ],
       skills: [],
     }));
+    expect(coreMocks.resolveCompanionProviderAuth).toHaveBeenCalledOnce();
     expect(coreMocks.claimCompanionRuntimeStart).toHaveBeenCalledOnce();
     expect(JSON.stringify(await response.json())).not.toContain("secret-");
+  });
+
+  it.each([
+    [
+      "keeps a refreshed subscription file on an already provisioned Box at the current layout",
+      {
+        box_id: "bx_23456789",
+        disk_layout_version: 2,
+        provider_credential_generation: "22222222-2222-4222-8222-222222222222",
+      },
+      false,
+    ],
+    [
+      "rewrites provider auth for a Companion that has no Box yet",
+      {
+        box_id: null,
+        disk_layout_version: 2,
+        provider_credential_generation: "22222222-2222-4222-8222-222222222222",
+      },
+      true,
+    ],
+    [
+      "rewrites provider auth when the Box still holds an older Pi layout",
+      {
+        box_id: "bx_23456789",
+        disk_layout_version: 1,
+        provider_credential_generation: "22222222-2222-4222-8222-222222222222",
+      },
+      true,
+    ],
+    [
+      "rewrites provider auth after the workspace connection was rotated",
+      {
+        box_id: "bx_23456789",
+        disk_layout_version: 2,
+        provider_credential_generation: "33333333-3333-4333-8333-333333333333",
+      },
+      true,
+    ],
+  ])("%s", async (_name, runtime, expected) => {
+    const claimed = { ...companion, runtime: { ...companion.runtime, ...runtime } };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(claimed);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(claimed);
+    const start = vi.fn(async (input) => {
+      await input.onBoxAssigned("bx_23456789");
+      return {
+        boxId: "bx_23456789",
+        runtimeState: "running" as const,
+        daemonState: "running" as const,
+        desktopAvailable: true,
+      };
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, vi.fn(() => ({
+      start,
+      stop: vi.fn(),
+      status: vi.fn(),
+      desktop: vi.fn(),
+    })));
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ replaceProviderAuth: expected }));
+  });
+
+  it("stores provider credentials without returning their value", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    const response = await app.request("/v1/companion-providers/anthropic", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auth_method: "api_key", credential: "secret-a" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(coreMocks.saveCompanionProvider).toHaveBeenCalledWith(expect.objectContaining({
+      providerId: "anthropic",
+      authMethod: "api_key",
+      credential: "secret-a",
+    }));
+    expect(JSON.stringify(await response.json())).not.toContain("secret-a");
+  });
+
+  it("lets an owner attach a connected provider to a pre-provider Companion", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    const response = await app.request(`/v1/companions/${companion.id}/provider`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: "anthropic" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(coreMocks.setCompanionProvider).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: companion.id,
+      providerId: "anthropic",
+    }));
   });
 
   it("injects Installed skills for mobile web but never for native mobile", async () => {

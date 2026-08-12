@@ -3,6 +3,7 @@ import type {
   CompanionClientSurface,
   CompanionDaemonState,
   CompanionMcpAccount,
+  CompanionMcpCredential,
   CompanionRuntimeState,
 } from "@companion/contracts";
 import {
@@ -62,11 +63,8 @@ interface DesktopEnvelope {
   provisioning?: boolean;
 }
 
-export interface ProviderCredential {
-  provider: string;
-  envKey: string;
-  value: string;
-}
+/** Transient environment value inherited by Pi for one labeled MCP account. */
+export type McpRuntimeCredential = CompanionMcpCredential;
 
 export interface CompanionRuntimeObservation {
   boxId: string;
@@ -81,7 +79,9 @@ export interface CompanionBoxRuntime {
     orgId: string;
     boxId: string | null;
     clientSurface: CompanionClientSurface;
-    credentials: ProviderCredential[];
+    providerAuth: Record<string, Record<string, unknown>>;
+    replaceProviderAuth: boolean;
+    mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
     onBoxAssigned: (boxId: string) => Promise<void>;
@@ -168,9 +168,9 @@ printf '%s\n' "$expected_layout" > "$layout_marker"
 `;
 }
 
-function encodeEnvironmentFile(credentials: ProviderCredential[]): string {
+function encodeEnvironmentFile(credentials: McpRuntimeCredential[]): string {
   return credentials
-    .map(({ envKey, value }) => `${envKey}=${JSON.stringify(value)}`)
+    .map(({ env_key: envKey, value }) => `${envKey}=${JSON.stringify(value)}`)
     .join("\n")
     .concat(credentials.length ? "\n" : "");
 }
@@ -324,7 +324,9 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
   async #injectPiResources(input: {
     boxId: string;
     clientSurface: CompanionClientSurface;
-    credentials: ProviderCredential[];
+    providerAuth: Record<string, Record<string, unknown>>;
+    replaceProviderAuth: boolean;
+    mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
   }): Promise<void> {
@@ -335,6 +337,15 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
       "set -e; root=\"$HOME/.companion/runtime\"; rm -rf \"$root/state/skill-archives\"; mkdir -p \"$root/state/skill-archives\"",
     );
     if (!cleared.success) throw new BoxRuntimeProviderError("Pi resource staging failed", 502);
+    // Pi keeps refreshed subscription tokens in its own agent directory, so the auth file is
+    // replaced only when the encrypted workspace connection generation changes.
+    if (input.replaceProviderAuth) {
+      await this.#writeFile(
+        input.boxId,
+        ".companion/pi/auth.json",
+        `${JSON.stringify(input.providerAuth)}\n`,
+      );
+    }
     await this.#writeFile(
       input.boxId,
       ".companion/pi/mcp.json",
@@ -364,7 +375,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
       await this.#writeFile(
         input.boxId,
         ".companion/runtime/state/providers.env",
-        encodeEnvironmentFile(input.credentials),
+        encodeEnvironmentFile(input.mcpCredentials),
       );
       const prepared = await this.#command(
         input.boxId,
@@ -383,7 +394,9 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     orgId: string;
     boxId: string | null;
     clientSurface: CompanionClientSurface;
-    credentials: ProviderCredential[];
+    providerAuth: Record<string, Record<string, unknown>>;
+    replaceProviderAuth: boolean;
+    mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
     onBoxAssigned: (boxId: string) => Promise<void>;
@@ -468,7 +481,9 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     await this.#injectPiResources({
       boxId: box.id,
       clientSurface: input.clientSurface,
-      credentials: input.credentials,
+      providerAuth: input.providerAuth,
+      replaceProviderAuth: input.replaceProviderAuth,
+      mcpCredentials: input.mcpCredentials,
       mcpAccounts: input.mcpAccounts,
       skills: input.skills,
     });
@@ -476,7 +491,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     try {
       started = await this.#command(
         box.id,
-        "set -e; credential_file=\"$HOME/.companion/runtime/state/providers.env\"; trap 'rm -f \"$credential_file\"' EXIT; chmod 600 \"$credential_file\"; systemctl --user daemon-reload; systemctl --user restart companion-pi-daemon.service",
+        "set -e; credential_file=\"$HOME/.companion/runtime/state/providers.env\"; trap 'rm -f \"$credential_file\"' EXIT; chmod 600 \"$credential_file\"; auth_file=\"$HOME/.companion/pi/auth.json\"; if [ ! -f \"$auth_file\" ]; then echo 'Companion provider auth file is missing' >&2; exit 1; fi; chmod 700 \"$HOME/.companion/pi\"; chmod 600 \"$auth_file\"; systemctl --user daemon-reload; systemctl --user restart companion-pi-daemon.service",
       );
     } catch (error) {
       await this.#removeProviderFile(box.id).catch(() => undefined);

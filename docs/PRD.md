@@ -26,6 +26,14 @@ Give organizations one secure, self-hostable place to govern reusable AI coding 
 - Delegated Agent Auth limited to skills, Skill Databases, public installs, and skill secrets. Connected clients are external consumers, never hosted agents.
 - Short-lived child PATs may inherit only the server-computed active exact-workspace Agent Auth grant snapshot; callers cannot choose broader scopes or organizations.
 
+### Optional Companions
+
+- Behind `companions`, members can create a Companion with one connected Pi provider.
+- Owner/Admin can connect or disconnect envelope-encrypted workspace provider credentials and choose
+  a workspace default. V1 exposes Claude, Codex, and z.ai in one compact creation flow.
+- Pi-supported API-key and subscription auth entries are resolved only for the selected Companion
+  and sent to Box; provider errors are clear and value-free.
+
 ### Security
 
 - Every tenant row carries `org_id`; personal resources remain creator-only with no admin override.
@@ -38,8 +46,8 @@ Give organizations one secure, self-hostable place to govern reusable AI coding 
 
 - Historical Projects/skill runs, control-plane prompts/transcripts/runtime files, prewarming,
   container catalogs, deployment management, and harnesses other than Pi.
-- The optional `companions` flag may register the documented Box/Pi lifecycle API only. It must not
-  expose provider or harness UI, wake Box on viewer reads, or execute the harness in Companion.
+- The optional `companions` flag may register the documented Companion provider and Box/Pi lifecycle
+  API only. It must not expose harness chrome, wake Box on viewer reads, or execute Pi in Companion.
 
 ## Success measures
 

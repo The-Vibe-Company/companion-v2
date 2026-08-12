@@ -106,6 +106,52 @@ describe("Skills Hub PostgreSQL isolation", () => {
     expect(outsiderVisible).toEqual([]);
   });
 
+  it("lets admins manage provider ciphertext while members see metadata only within the tenant", async () => {
+    await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
+      await tx`
+        insert into companion_provider_connections (
+          org_id, provider_id, auth_method, ciphertext, iv, auth_tag,
+          wrapped_dek, wrap_iv, wrap_auth_tag, key_id, connected_by
+        ) values (
+          ${fixture.orgA}, 'anthropic', 'api_key', 'ciphertext', 'iv', 'tag',
+          'dek', 'wrap-iv', 'wrap-tag', 'key-id', ${fixture.admin.id}
+        )
+      `;
+    });
+
+    const developerVisible = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.developer.id}, true)`;
+      return tx<Array<{ provider_id: string; auth_method: string }>>`
+        select provider_id, auth_method from companion_provider_connections
+      `;
+    });
+    expect(developerVisible).toEqual([{ provider_id: "anthropic", auth_method: "api_key" }]);
+
+    await expect(integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.developer.id}, true)`;
+      await tx`
+        insert into companion_provider_connections (
+          org_id, provider_id, auth_method, ciphertext, iv, auth_tag,
+          wrapped_dek, wrap_iv, wrap_auth_tag, key_id, connected_by
+        ) values (
+          ${fixture.orgA}, 'zai', 'api_key', 'ciphertext', 'iv', 'tag',
+          'dek', 'wrap-iv', 'wrap-tag', 'key-id', ${fixture.developer.id}
+        )
+      `;
+    })).rejects.toThrow();
+
+    const outsiderVisible = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgB}, true), set_config('app.user_id', ${fixture.outsider.id}, true)`;
+      return tx<Array<{ provider_id: string }>>`select provider_id from companion_provider_connections`;
+    });
+    expect(outsiderVisible).toEqual([]);
+  });
+
   it("CAS-claims lifecycle transitions and keeps live observations from clobbering them", async () => {
     await integrationSql`
       update companions

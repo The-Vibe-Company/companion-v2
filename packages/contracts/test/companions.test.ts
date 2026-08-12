@@ -1,13 +1,48 @@
 import { describe, expect, it } from "vitest";
-import { startCompanionRuntimeInputSchema } from "../src/companions";
+import {
+  createCompanionInputSchema,
+  saveCompanionProviderInputSchema,
+  startCompanionRuntimeInputSchema,
+} from "../src/companions";
+
+describe("Companion provider contracts", () => {
+  it("requires a single-line API key and accepts Pi OAuth subscription entries", () => {
+    expect(saveCompanionProviderInputSchema.parse({
+      auth_method: "api_key",
+      credential: "sk-test",
+    })).toEqual({ auth_method: "api_key", credential: "sk-test" });
+    expect(saveCompanionProviderInputSchema.parse({
+      auth_method: "subscription",
+      credential: { type: "oauth", access: "token", refresh: "refresh", expires: 123 },
+    })).toMatchObject({ auth_method: "subscription" });
+    expect(() => saveCompanionProviderInputSchema.parse({
+      auth_method: "api_key",
+      credential: "line-one\nline-two",
+    })).toThrow();
+    expect(() => saveCompanionProviderInputSchema.parse({
+      auth_method: "subscription",
+      credential: { type: "api_key", key: "wrong shape" },
+    })).toThrow();
+  });
+
+  it("selects a provider at creation and rejects model credentials on start", () => {
+    expect(createCompanionInputSchema.parse({
+      name: "Research",
+      provider_id: "anthropic",
+    })).toMatchObject({ provider_id: "anthropic" });
+    expect(() => startCompanionRuntimeInputSchema.parse({
+      credentials: [{ provider: "anthropic", env_key: "ANTHROPIC_API_KEY", value: "must-not-enter-start" }],
+    })).toThrow();
+  });
+});
 
 describe("Companion runtime injection contract", () => {
   it("accepts labeled multi-account MCP configuration with transient credential references", () => {
     const parsed = startCompanionRuntimeInputSchema.parse({
       client_surface: "mobile_web",
-      credentials: [
-        { provider: "github", env_key: "GITHUB_PERSONAL", value: "personal-secret" },
-        { provider: "github", env_key: "GITHUB_WORK", value: "work-secret" },
+      mcp_credentials: [
+        { env_key: "GITHUB_PERSONAL", value: "personal-secret" },
+        { env_key: "GITHUB_WORK", value: "work-secret" },
       ],
       mcp_accounts: [
         {
@@ -33,7 +68,7 @@ describe("Companion runtime injection contract", () => {
 
   it("rejects duplicate labels and missing MCP credential references", () => {
     const result = startCompanionRuntimeInputSchema.safeParse({
-      credentials: [],
+      mcp_credentials: [],
       mcp_accounts: [
         {
           id: "one",
@@ -55,7 +90,7 @@ describe("Companion runtime injection contract", () => {
     if (!result.success) {
       expect(result.error.issues.map((issue) => issue.message)).toEqual(expect.arrayContaining([
         "MCP account labels must be unique",
-        "MCP environment reference MISSING_TOKEN has no matching credential",
+        "MCP environment reference MISSING_TOKEN has no matching mcp_credentials entry",
       ]));
     }
   });

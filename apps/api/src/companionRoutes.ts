@@ -2,21 +2,33 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 import {
   CompanionNotFoundError,
+  CompanionProviderError,
+  CompanionProviderForbiddenError,
   CompanionRuntimeForbiddenError,
   CompanionRuntimeTransitionError,
   claimCompanionRuntimeStart,
   claimCompanionRuntimeStop,
   companionsEnabled,
   createCompanion,
+  deleteCompanionProvider,
   getCompanion,
   getCompanionForRuntime,
   listCompanionRuntimeSkillPackages,
   listCompanions,
+  listCompanionProviders,
+  resolveCompanionProviderAuth,
+  saveCompanionProvider,
+  setCompanionProvider,
+  setDefaultCompanionProvider,
   updateCompanionObservation,
   updateCompanionRuntime,
 } from "@companion/core";
 import {
   createCompanionInputSchema,
+  companionProviderIdSchema,
+  saveCompanionProviderInputSchema,
+  setCompanionProviderInputSchema,
+  setDefaultCompanionProviderInputSchema,
   startCompanionRuntimeInputSchema,
 } from "@companion/contracts";
 import { withTenantContext, type Db } from "@companion/db";
@@ -45,6 +57,8 @@ function errorStatus(error: unknown): number {
   if (error instanceof AuthenticationRequiredError) return 401;
   if (error instanceof CompanionNotFoundError) return 404;
   if (error instanceof CompanionRuntimeForbiddenError) return 403;
+  if (error instanceof CompanionProviderForbiddenError) return 403;
+  if (error instanceof CompanionProviderError) return 422;
   if (error instanceof CompanionRuntimeTransitionError) return 409;
   if (error instanceof BoxRuntimeConfigurationError) return 503;
   if (error instanceof BoxRuntimeProviderError) {
@@ -54,6 +68,18 @@ function errorStatus(error: unknown): number {
   }
   if (error instanceof z.ZodError) return 400;
   return 400;
+}
+
+function routeError(c: Context, error: unknown): Response {
+  if (error instanceof CompanionProviderError) {
+    return c.json({
+      ok: false,
+      error: error.message,
+      code: error.code,
+      provider_id: error.providerId,
+    }, errorStatus(error) as never);
+  }
+  return jsonError(c, error, errorStatus(error));
 }
 
 export function registerCompanionRoutes(
@@ -91,10 +117,72 @@ export function registerCompanionRoutes(
     try {
       const body = createCompanionInputSchema.parse(await c.req.json());
       const companion = await tenant(c, ({ actor, orgId, database }) =>
-        createCompanion({ actor, orgId, name: body.name, database }));
+        createCompanion({
+          actor,
+          orgId,
+          name: body.name,
+          providerId: body.provider_id,
+          database,
+        }));
       return c.json({ companion }, 201);
     } catch (error) {
-      return jsonError(c, error, errorStatus(error));
+      return routeError(c, error);
+    }
+  });
+
+  app.get("/v1/companion-providers", async (c) => {
+    try {
+      const providers = await tenant(c, ({ actor, orgId, database }) =>
+        listCompanionProviders({ actor, orgId, database }));
+      return c.json(providers);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.put("/v1/companion-providers/default", async (c) => {
+    try {
+      const body = setDefaultCompanionProviderInputSchema.parse(await c.req.json());
+      await tenant(c, ({ actor, orgId, database }) =>
+        setDefaultCompanionProvider({
+          actor,
+          orgId,
+          providerId: body.provider_id,
+          database,
+        }));
+      return c.json({ ok: true });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.put("/v1/companion-providers/:provider", async (c) => {
+    try {
+      const providerId = companionProviderIdSchema.parse(c.req.param("provider"));
+      const body = saveCompanionProviderInputSchema.parse(await c.req.json());
+      const connection = await tenant(c, ({ actor, orgId, database }) =>
+        saveCompanionProvider({
+          actor,
+          orgId,
+          providerId,
+          authMethod: body.auth_method,
+          credential: body.credential,
+          database,
+        }));
+      return c.json({ connection });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.delete("/v1/companion-providers/:provider", async (c) => {
+    try {
+      const providerId = companionProviderIdSchema.parse(c.req.param("provider"));
+      await tenant(c, ({ actor, orgId, database }) =>
+        deleteCompanionProvider({ actor, orgId, providerId, database }));
+      return c.json({ ok: true });
+    } catch (error) {
+      return routeError(c, error);
     }
   });
 
@@ -106,6 +194,24 @@ export function registerCompanionRoutes(
       return c.json({ companion });
     } catch (error) {
       return jsonError(c, error, errorStatus(error));
+    }
+  });
+
+  app.put("/v1/companions/:id/provider", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const body = setCompanionProviderInputSchema.parse(await c.req.json());
+      const companion = await tenant(c, ({ actor, orgId, database }) =>
+        setCompanionProvider({
+          actor,
+          orgId,
+          companionId,
+          providerId: body.provider_id,
+          database,
+        }));
+      return c.json({ companion });
+    } catch (error) {
+      return routeError(c, error);
     }
   });
 
@@ -151,6 +257,7 @@ export function registerCompanionRoutes(
           actor: ReturnType<typeof actorFromContext>;
           orgId: string;
           companion: Awaited<ReturnType<typeof getCompanionForRuntime>>;
+          provider: Awaited<ReturnType<typeof resolveCompanionProviderAuth>>;
           skillPackages: Awaited<ReturnType<typeof listCompanionRuntimeSkillPackages>>;
         }
       | undefined;
@@ -158,13 +265,16 @@ export function registerCompanionRoutes(
       companionIdSchema.parse(companionId);
       const body = startCompanionRuntimeInputSchema.parse(await c.req.json().catch(() => ({})));
       mutation = await tenant(c, async ({ actor, orgId, database }) => {
+        const provider = await resolveCompanionProviderAuth({
+          actor, orgId, companionId, database,
+        });
         const companion = await claimCompanionRuntimeStart({
           actor, orgId, companionId, database,
         });
         const skillPackages = body.client_surface === "native_mobile"
           ? []
           : await listCompanionRuntimeSkillPackages({ actor, orgId, database });
-        return { actor, orgId, companion, skillPackages };
+        return { actor, orgId, companion, provider, skillPackages };
       });
       const skills = await Promise.all(mutation.skillPackages.map(async (skill) => {
         const archive = await getSkillArchive({ key: skill.storagePath });
@@ -181,19 +291,23 @@ export function registerCompanionRoutes(
           archive,
         };
       }));
-      const providerIds = body.credentials.length
-        ? [...new Set(body.credentials.map((credential) => credential.provider))]
-        : mutation.companion.runtime.provider_ids;
       const observed = await runtimeFactory().start({
         companionId,
         orgId: mutation.orgId,
         boxId: mutation.companion.runtime.box_id,
         clientSurface: body.client_surface,
-        credentials: body.credentials.map((credential) => ({
-          provider: credential.provider,
-          envKey: credential.env_key,
-          value: credential.value,
-        })),
+        providerAuth: {
+          [mutation.provider.providerId]: mutation.provider.authEntry,
+        },
+        // Skipping the write preserves a subscription token Pi refreshed on disk, so it is safe
+        // only for a Box this Companion already provisioned at the current layout, where the
+        // recorded generation proves the expected file is already in Pi's agent directory.
+        replaceProviderAuth:
+          !mutation.companion.runtime.box_id
+          || mutation.companion.runtime.disk_layout_version !== COMPANION_PI_DISK_LAYOUT_VERSION
+          || mutation.companion.runtime.provider_credential_generation
+            !== mutation.provider.credentialGeneration,
+        mcpCredentials: body.mcp_credentials,
         mcpAccounts: body.mcp_accounts,
         skills,
         onBoxAssigned: async (boxId) => {
@@ -219,7 +333,8 @@ export function registerCompanionRoutes(
             boxId: observed.boxId,
             runtimeState: observed.runtimeState,
             daemonState: observed.daemonState,
-            providerIds,
+            providerIds: [mutation!.provider.providerId],
+            providerCredentialGeneration: mutation!.provider.credentialGeneration,
             diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
             desktopAvailable: observed.desktopAvailable,
             observedAt: new Date(),
@@ -242,7 +357,7 @@ export function registerCompanionRoutes(
           }),
         ).catch(() => undefined);
       }
-      return jsonError(c, error, errorStatus(error));
+      return routeError(c, error);
     }
   });
 
