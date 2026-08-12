@@ -1174,6 +1174,65 @@ export async function listSkills(input: {
   }) as SkillListRow[];
 }
 
+export interface CompanionRuntimeSkillPackage {
+  slug: string;
+  version: string;
+  checksum: string;
+  storagePath: string;
+}
+
+/**
+ * Resolve the exact current packages exposed to Pi for this actor. "My Skills" is the execution
+ * library: creator-owned personal skills plus organization skills the actor explicitly installed.
+ * Invalid, archived, and unpublished entries never cross the Box boundary.
+ */
+export async function listCompanionRuntimeSkillPackages(input: {
+  actor: ActorContext;
+  orgId: string;
+  database?: Db;
+}): Promise<CompanionRuntimeSkillPackage[]> {
+  const database = input.database ?? db;
+  const visible = await listSkills({
+    actor: input.actor,
+    orgId: input.orgId,
+    library: "mine",
+    database,
+  });
+  const skillIds = visible
+    .filter((skill) => skill.validation === "valid" && skill.current_version)
+    .map((skill) => skill.id);
+  if (!skillIds.length) return [];
+
+  const rows = await database
+    .select({
+      skillId: schema.skills.id,
+      slug: schema.skills.slug,
+      version: schema.skillVersions.version,
+      checksum: schema.skillVersions.checksum,
+      storagePath: schema.skillVersions.storagePath,
+    })
+    .from(schema.skills)
+    .innerJoin(
+      schema.skillVersions,
+      and(
+        eq(schema.skillVersions.orgId, schema.skills.orgId),
+        eq(schema.skillVersions.skillId, schema.skills.id),
+        eq(schema.skillVersions.id, schema.skills.currentVersionId),
+      ),
+    )
+    .where(and(
+      eq(schema.skills.orgId, input.orgId),
+      inArray(schema.skills.id, skillIds),
+      isNull(schema.skills.archivedAt),
+      eq(schema.skills.validation, "valid"),
+      eq(schema.skillVersions.validation, "valid"),
+    ));
+  const order = new Map(skillIds.map((id, index) => [id, index]));
+  return rows
+    .sort((left, right) => (order.get(left.skillId) ?? 0) - (order.get(right.skillId) ?? 0))
+    .map(({ slug, version, checksum, storagePath }) => ({ slug, version, checksum, storagePath }));
+}
+
 async function loadSkillModifiers(input: {
   database: Db;
   orgId: string;

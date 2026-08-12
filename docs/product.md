@@ -37,4 +37,7 @@ Historical Projects, skill runs, attachments/artifacts, generic model-provider s
 deployment surfaces remain removed and fail closed. Behind the `companions` flag, the control plane
 stores Companion list/open metadata, encrypted workspace Pi provider connections, and controls Pi
 in box.ascii.dev. The creation surface has one short provider picker and no harness settings screen.
-Sessions remain on Box disk, and viewer reads never wake or contact Box.
+Sessions remain on Box disk, and viewer reads never wake or contact Box. Pi receives the caller's
+Installed skills only for web and mobile web; native mobile receives no Skills source. Labeled MCP
+accounts are injected through the Box-hosted Pi adapter without persisting credential values in the
+control plane.

@@ -74,9 +74,15 @@ status reads use PostgreSQL only.
 Live status, start/stop, and desktop require owner/editor access before the Box adapter is created;
 the current pre-sharing projection makes non-owners viewers. The default remains fail-closed: when
 the flag is absent or false, none of these routes are registered. Owner/Admin-managed workspace
-provider credentials are envelope-encrypted, write-only, and decrypted only after the Companion
-wake guard. Start never accepts caller-supplied credentials; it writes only the selected provider's
-Pi auth entry to the owner-only Box auth file.
+model-provider credentials are envelope-encrypted, write-only, and decrypted only after the
+Companion wake guard. Start never accepts caller-supplied model-provider credentials; it writes only
+the selected provider's Pi auth entry to the owner-only Box auth file.
+Owner/editor web and mobile-web starts resolve the actor's valid Installed library and expose those
+packages through Pi's explicit native Skills source. Native-mobile starts always replace that source
+with an empty tree. Labeled MCP accounts are translated into an isolated `pi-mcp-adapter` config;
+the durable JSON contains environment references only, while their values use the transient
+`mcp_credentials` channel and never persist in the control plane. Viewer authorization completes
+before skill storage or Box is contacted.
 
 The web has no `/projects` route and no Run/Session state in the Skills URL grammar. Old query parameters are ignored and canonical navigation returns to the Skills detail. By default the only product workspace navigation is Skills. The same `COMPANION_COMPANIONS_ENABLED` server-side flag exposes an authenticated `/companions` list/create shell and its sidebar entry. Creation has one compact picker over connected Claude, Codex, and z.ai providers plus the workspace default. Pi/Box controls, provider catalogs, desktop chrome, and sharing remain invisible.
 

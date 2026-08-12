@@ -13,6 +13,7 @@ import {
   deleteCompanionProvider,
   getCompanion,
   getCompanionForRuntime,
+  listCompanionRuntimeSkillPackages,
   listCompanions,
   listCompanionProviders,
   resolveCompanionProviderAuth,
@@ -31,6 +32,8 @@ import {
   startCompanionRuntimeInputSchema,
 } from "@companion/contracts";
 import { withTenantContext, type Db } from "@companion/db";
+import { skillChecksum, toTar } from "@companion/skills";
+import { getSkillArchive } from "@companion/storage";
 import {
   actorFromContext,
   AuthenticationRequiredError,
@@ -42,6 +45,7 @@ import {
   AsciiBoxCompanionRuntime,
   BoxRuntimeConfigurationError,
   BoxRuntimeProviderError,
+  COMPANION_PI_DISK_LAYOUT_VERSION,
   type CompanionBoxRuntime,
 } from "./boxCompanionRuntime";
 
@@ -254,11 +258,12 @@ export function registerCompanionRoutes(
           orgId: string;
           companion: Awaited<ReturnType<typeof getCompanionForRuntime>>;
           provider: Awaited<ReturnType<typeof resolveCompanionProviderAuth>>;
+          skillPackages: Awaited<ReturnType<typeof listCompanionRuntimeSkillPackages>>;
         }
       | undefined;
     try {
       companionIdSchema.parse(companionId);
-      startCompanionRuntimeInputSchema.parse(await c.req.json().catch(() => ({})));
+      const body = startCompanionRuntimeInputSchema.parse(await c.req.json().catch(() => ({})));
       mutation = await tenant(c, async ({ actor, orgId, database }) => {
         const provider = await resolveCompanionProviderAuth({
           actor, orgId, companionId, database,
@@ -266,18 +271,43 @@ export function registerCompanionRoutes(
         const companion = await claimCompanionRuntimeStart({
           actor, orgId, companionId, database,
         });
-        return { actor, orgId, companion, provider };
+        const skillPackages = body.client_surface === "native_mobile"
+          ? []
+          : await listCompanionRuntimeSkillPackages({ actor, orgId, database });
+        return { actor, orgId, companion, provider, skillPackages };
       });
+      const skills = await Promise.all(mutation.skillPackages.map(async (skill) => {
+        const archive = await getSkillArchive({ key: skill.storagePath });
+        if (skillChecksum(toTar(archive)) !== skill.checksum) {
+          throw new BoxRuntimeProviderError(
+            `stored skill package no longer matches ${skill.slug}@${skill.version}`,
+            502,
+          );
+        }
+        return {
+          slug: skill.slug,
+          version: skill.version,
+          checksum: skill.checksum,
+          archive,
+        };
+      }));
       const observed = await runtimeFactory().start({
         companionId,
         orgId: mutation.orgId,
         boxId: mutation.companion.runtime.box_id,
+        clientSurface: body.client_surface,
         providerAuth: {
           [mutation.provider.providerId]: mutation.provider.authEntry,
         },
+        // A Box that the control plane has not seen yet cannot hold a matching auth file, so the
+        // generation check only skips the write for a Box this Companion already provisioned.
         replaceProviderAuth:
-          mutation.companion.runtime.provider_credential_generation
-          !== mutation.provider.credentialGeneration,
+          !mutation.companion.runtime.box_id
+          || mutation.companion.runtime.provider_credential_generation
+            !== mutation.provider.credentialGeneration,
+        mcpCredentials: body.mcp_credentials,
+        mcpAccounts: body.mcp_accounts,
+        skills,
         onBoxAssigned: async (boxId) => {
           await withTenantContext(
             { orgId: mutation!.orgId, userId: mutation!.actor.id },
@@ -301,7 +331,9 @@ export function registerCompanionRoutes(
             boxId: observed.boxId,
             runtimeState: observed.runtimeState,
             daemonState: observed.daemonState,
+            providerIds: [mutation!.provider.providerId],
             providerCredentialGeneration: mutation!.provider.credentialGeneration,
+            diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
             desktopAvailable: observed.desktopAvailable,
             observedAt: new Date(),
             startedAt: new Date(),

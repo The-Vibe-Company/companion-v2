@@ -20,10 +20,20 @@ const coreMocks = vi.hoisted(() => ({
   resolveCompanionProviderAuth: vi.fn(),
   getCompanion: vi.fn(),
   getCompanionForRuntime: vi.fn(),
+  listCompanionRuntimeSkillPackages: vi.fn(),
   claimCompanionRuntimeStart: vi.fn(),
   claimCompanionRuntimeStop: vi.fn(),
   updateCompanionObservation: vi.fn(),
   updateCompanionRuntime: vi.fn(),
+}));
+
+const storageMocks = vi.hoisted(() => ({
+  getSkillArchive: vi.fn(),
+}));
+
+const skillsMocks = vi.hoisted(() => ({
+  skillChecksum: vi.fn(),
+  toTar: vi.fn((archive) => archive),
 }));
 
 vi.mock("./context", async (importOriginal) => ({
@@ -45,6 +55,9 @@ vi.mock("@companion/db", async (importOriginal) => ({
     ) => fn({}),
   ),
 }));
+
+vi.mock("@companion/storage", () => storageMocks);
+vi.mock("@companion/skills", () => skillsMocks);
 
 const companion = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -104,10 +117,12 @@ describe("Companions API feature gate", () => {
     });
     coreMocks.getCompanion.mockResolvedValue(companion);
     coreMocks.getCompanionForRuntime.mockResolvedValue(companion);
+    coreMocks.listCompanionRuntimeSkillPackages.mockResolvedValue([]);
     coreMocks.claimCompanionRuntimeStart.mockResolvedValue(companion);
     coreMocks.claimCompanionRuntimeStop.mockResolvedValue(companion);
     coreMocks.updateCompanionObservation.mockResolvedValue(companion);
     coreMocks.updateCompanionRuntime.mockResolvedValue(companion);
+    skillsMocks.skillChecksum.mockReturnValue(`sha256:${"a".repeat(64)}`);
   });
 
   it("does not register the route when the flag is off", async () => {
@@ -241,7 +256,19 @@ describe("Companions API feature gate", () => {
     const response = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: "{}",
+      body: JSON.stringify({
+        mcp_credentials: [
+          { env_key: "GITHUB_TOKEN_WORK", value: "secret-b" },
+        ],
+        mcp_accounts: [{
+          id: "github-work",
+          label: "GitHub work",
+          transport: "stdio",
+          command: "npx",
+          args: ["-y", "@modelcontextprotocol/server-github"],
+          env: { GITHUB_TOKEN: "GITHUB_TOKEN_WORK" },
+        }],
+      }),
     });
 
     expect(response.status).toBe(200);
@@ -249,10 +276,18 @@ describe("Companions API feature gate", () => {
       companionId: companion.id,
       orgId: "org-1",
       boxId: "bx_23456789",
+      clientSurface: "web",
       providerAuth: {
         anthropic: { type: "api_key", key: "secret-a" },
       },
       replaceProviderAuth: true,
+      mcpCredentials: [
+        { env_key: "GITHUB_TOKEN_WORK", value: "secret-b" },
+      ],
+      mcpAccounts: [
+        expect.objectContaining({ id: "github-work", label: "GitHub work", transport: "stdio" }),
+      ],
+      skills: [],
     }));
     expect(coreMocks.resolveCompanionProviderAuth).toHaveBeenCalledOnce();
     expect(coreMocks.claimCompanionRuntimeStart).toHaveBeenCalledOnce();
@@ -293,6 +328,79 @@ describe("Companions API feature gate", () => {
       companionId: companion.id,
       providerId: "anthropic",
     }));
+  });
+
+  it("injects Installed skills for mobile web but never for native mobile", async () => {
+    const skillPackage = {
+      slug: "incident-summary",
+      version: "1.2.3",
+      checksum: `sha256:${"a".repeat(64)}`,
+      storagePath: "org-1/incident-summary/1.2.3.tar.gz",
+    };
+    coreMocks.listCompanionRuntimeSkillPackages.mockResolvedValue([skillPackage]);
+    storageMocks.getSkillArchive.mockResolvedValue(Buffer.from("skill-archive"));
+    const starts: Array<Record<string, unknown>> = [];
+    const runtimeFactory = vi.fn(() => ({
+      start: vi.fn(async (input) => {
+        starts.push(input);
+        return {
+          boxId: "bx_23456789",
+          runtimeState: "running" as const,
+          daemonState: "running" as const,
+          desktopAvailable: true,
+        };
+      }),
+      stop: vi.fn(),
+      status: vi.fn(),
+      desktop: vi.fn(),
+    }));
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const mobileWeb = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_surface: "mobile_web" }),
+    });
+    expect(mobileWeb.status).toBe(200);
+    expect(starts[0]?.skills).toEqual([{
+      slug: "incident-summary",
+      version: "1.2.3",
+      checksum: skillPackage.checksum,
+      archive: Buffer.from("skill-archive"),
+    }]);
+
+    const nativeMobile = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_surface: "native_mobile" }),
+    });
+    expect(nativeMobile.status).toBe(200);
+    expect(starts[1]?.skills).toEqual([]);
+    expect(coreMocks.listCompanionRuntimeSkillPackages).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a stored skill archive whose checksum changed before contacting Box", async () => {
+    coreMocks.listCompanionRuntimeSkillPackages.mockResolvedValue([{
+      slug: "incident-summary",
+      version: "1.2.3",
+      checksum: `sha256:${"a".repeat(64)}`,
+      storagePath: "org-1/incident-summary/1.2.3.tar.gz",
+    }]);
+    storageMocks.getSkillArchive.mockResolvedValue(Buffer.from("corrupt"));
+    skillsMocks.skillChecksum.mockReturnValueOnce(`sha256:${"b".repeat(64)}`);
+    const runtimeFactory = vi.fn();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(502);
+    expect(runtimeFactory).not.toHaveBeenCalled();
   });
 
   it("returns a transition conflict when desktop is requested before Box creation", async () => {
