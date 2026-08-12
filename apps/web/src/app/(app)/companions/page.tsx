@@ -60,6 +60,7 @@ export default async function CompanionsPage() {
   const orgSkills = orgRows.map(mapSkill);
   return (
     <CompanionsApp
+      key={current.id}
       orgs={orgs}
       currentOrg={current}
       initialCompanions={companionsResponse.companions}

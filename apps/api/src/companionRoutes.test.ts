@@ -14,6 +14,7 @@ const coreMocks = vi.hoisted(() => ({
   listCompanionProviders: vi.fn(),
   createCompanion: vi.fn(),
   saveCompanionProvider: vi.fn(),
+  setCompanionProvider: vi.fn(),
   deleteCompanionProvider: vi.fn(),
   setDefaultCompanionProvider: vi.fn(),
   resolveCompanionProviderAuth: vi.fn(),
@@ -93,6 +94,7 @@ describe("Companions API feature gate", () => {
       created_at: companion.created_at,
       updated_at: companion.updated_at,
     });
+    coreMocks.setCompanionProvider.mockResolvedValue(companion);
     coreMocks.deleteCompanionProvider.mockResolvedValue(undefined);
     coreMocks.setDefaultCompanionProvider.mockResolvedValue(undefined);
     coreMocks.resolveCompanionProviderAuth.mockResolvedValue({
@@ -259,6 +261,23 @@ describe("Companions API feature gate", () => {
       credential: "secret-a",
     }));
     expect(JSON.stringify(await response.json())).not.toContain("secret-a");
+  });
+
+  it("lets an owner attach a connected provider to a pre-provider Companion", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    const response = await app.request(`/v1/companions/${companion.id}/provider`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: "anthropic" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(coreMocks.setCompanionProvider).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: companion.id,
+      providerId: "anthropic",
+    }));
   });
 
   it("returns a transition conflict when desktop is requested before Box creation", async () => {

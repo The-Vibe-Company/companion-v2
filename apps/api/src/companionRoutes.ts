@@ -17,6 +17,7 @@ import {
   listCompanionProviders,
   resolveCompanionProviderAuth,
   saveCompanionProvider,
+  setCompanionProvider,
   setDefaultCompanionProvider,
   updateCompanionObservation,
   updateCompanionRuntime,
@@ -25,6 +26,7 @@ import {
   createCompanionInputSchema,
   companionProviderIdSchema,
   saveCompanionProviderInputSchema,
+  setCompanionProviderInputSchema,
   setDefaultCompanionProviderInputSchema,
   startCompanionRuntimeInputSchema,
 } from "@companion/contracts";
@@ -188,6 +190,24 @@ export function registerCompanionRoutes(
       return c.json({ companion });
     } catch (error) {
       return jsonError(c, error, errorStatus(error));
+    }
+  });
+
+  app.put("/v1/companions/:id/provider", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const body = setCompanionProviderInputSchema.parse(await c.req.json());
+      const companion = await tenant(c, ({ actor, orgId, database }) =>
+        setCompanionProvider({
+          actor,
+          orgId,
+          companionId,
+          providerId: body.provider_id,
+          database,
+        }));
+      return c.json({ companion });
+    } catch (error) {
+      return routeError(c, error);
     }
   });
 

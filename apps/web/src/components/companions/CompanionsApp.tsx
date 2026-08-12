@@ -13,6 +13,7 @@ import {
   createCompanion,
   deleteCompanionProvider,
   saveCompanionProvider,
+  setCompanionProvider,
   setDefaultCompanionProvider,
 } from "@/lib/companions";
 import { Icon } from "../Icon";
@@ -66,7 +67,9 @@ export function CompanionsApp({
     firstAvailableProvider?.auth_methods[0] ?? "api_key",
   );
   const [credential, setCredential] = useState("");
-  const [busy, setBusy] = useState<"create" | "provider" | "default" | "delete" | null>(null);
+  const [busy, setBusy] = useState<
+    "create" | "provider" | "default" | "delete" | "configure" | null
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const noop = () => {};
   const connectedIds = useMemo(
@@ -185,6 +188,24 @@ export function CompanionsApp({
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Provider could not be disconnected.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onConfigureCompanion = async (companionId: string) => {
+    const providerId = providers.default_provider_id ?? selectedProvider;
+    if (!providerId) {
+      setError("Connect a provider before configuring this Companion.");
+      return;
+    }
+    setBusy("configure");
+    setError(null);
+    try {
+      const companion = await setCompanionProvider(currentOrg.id, companionId, providerId);
+      setCompanions((current) => current.map((item) => item.id === companion.id ? companion : item));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Provider could not be set.");
     } finally {
       setBusy(null);
     }
@@ -443,10 +464,9 @@ export function CompanionsApp({
                       />
                     ) : (
                       <>
-                        <input
+                        <textarea
                           required
-                          type="password"
-                          autoComplete="off"
+                          rows={4}
                           value={credential}
                           onChange={(event) => setCredential(event.target.value)}
                           placeholder={'{"type":"oauth", ...}'}
@@ -482,10 +502,24 @@ export function CompanionsApp({
                       <strong>{companion.name}</strong>
                       <span>{providerName(companion.runtime.provider_ids[0] ?? "unconfigured")}</span>
                     </div>
-                    <span className="companions-state">
-                      <i aria-hidden="true" />
-                      {companion.runtime.state.replace("_", " ")}
-                    </span>
+                    <div className="companions-row-actions">
+                      {!companion.runtime.provider_ids.length
+                        && companion.access === "owner"
+                        && providers.connections.length > 0 && (
+                          <button
+                            type="button"
+                            className="cds-btn cds-btn--secondary cds-btn--sm"
+                            disabled={busy !== null}
+                            onClick={() => void onConfigureCompanion(companion.id)}
+                          >
+                            {busy === "configure" ? "Setting..." : "Set provider"}
+                          </button>
+                        )}
+                      <span className="companions-state">
+                        <i aria-hidden="true" />
+                        {companion.runtime.state.replace("_", " ")}
+                      </span>
+                    </div>
                   </div>
                 ))}
               </div>

@@ -56,4 +56,20 @@ export async function setDefaultCompanionProvider(
   });
 }
 
+export async function setCompanionProvider(
+  orgId: string,
+  companionId: string,
+  providerId: string,
+): Promise<Companion> {
+  const result = await apiFetch<{ companion: Companion }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/provider`,
+    {
+      method: "PUT",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify({ provider_id: providerId }),
+    },
+  );
+  return result.companion;
+}
+
 export type { CompanionProvidersResponse };

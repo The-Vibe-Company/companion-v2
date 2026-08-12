@@ -173,6 +173,12 @@
   gap: 8px;
 }
 
+.companions-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .companions-provider-empty,
 .companions-list-empty {
   min-height: 92px;
@@ -281,5 +287,10 @@
   .companions-provider-actions {
     width: 100%;
     flex-wrap: wrap;
+  }
+
+  .companions-row-actions {
+    width: 100%;
+    justify-content: space-between;
   }
 }

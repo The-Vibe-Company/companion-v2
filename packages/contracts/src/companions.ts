@@ -101,6 +101,11 @@ export const createCompanionInputSchema = z.object({
 }).strict();
 export type CreateCompanionInput = z.infer<typeof createCompanionInputSchema>;
 
+export const setCompanionProviderInputSchema = z.object({
+  provider_id: companionProviderIdSchema,
+}).strict();
+export type SetCompanionProviderInput = z.infer<typeof setCompanionProviderInputSchema>;
+
 const apiKeyProviderAuthInputSchema = z.object({
   auth_method: z.literal("api_key"),
   credential: z.string().min(1).max(32_768).refine((value) => !/[\r\n\0]/.test(value), {

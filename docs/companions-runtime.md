@@ -28,6 +28,7 @@ organization member is a no-wake viewer.
 | `POST` | `/v1/companions` | Never |
 | `GET` | `/v1/companions` | Never |
 | `GET` | `/v1/companions/:id` | Never |
+| `PUT` | `/v1/companions/:id/provider` | Never; owner-only, unconfigured Companions only |
 | `GET` | `/v1/companions/:id/runtime` | Never |
 | `GET` | `/v1/companions/:id/runtime?live=true` | Owner/editor only; observes without resuming |
 | `POST` | `/v1/companions/:id/runtime/start` | Creates or resumes Box, then starts Pi |
@@ -72,6 +73,10 @@ Companion rows never contain plaintext. Starting a Companion resolves only its s
 decrypts the credential after the owner/editor wake guard, and writes a minimal owner-only
 `~/.pi/agent/auth.json` to Box before restarting Pi. Direct credentials are rejected by the start
 endpoint.
+
+Companions created before provider support may have no provider id. Their owner can attach one
+connected provider once through `PUT /v1/companions/:id/provider`; this does not contact or wake Box.
+After a provider is attached it is immutable, matching the creation flow.
 
 The auth file remains on snapshotted Box disk because Pi must update refreshable subscription
 tokens. Reconnecting or disconnecting a provider replaces or removes the control-plane copy; the

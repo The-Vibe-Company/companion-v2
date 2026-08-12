@@ -204,7 +204,10 @@ async function assertProviderAdmin(database: Db, actor: ActorContext, orgId: str
 }
 
 function toProviderConnection(
-  row: typeof schema.companionProviderConnections.$inferSelect,
+  row: Pick<
+    typeof schema.companionProviderConnections.$inferSelect,
+    "providerId" | "authMethod" | "connectedBy" | "createdAt" | "updatedAt"
+  >,
 ): CompanionProviderConnection {
   return {
     provider_id: row.providerId,
@@ -229,7 +232,13 @@ export async function listCompanionProviders(input: {
       columns: { defaultCompanionProviderId: true },
     }),
     database
-      .select()
+      .select({
+        providerId: schema.companionProviderConnections.providerId,
+        authMethod: schema.companionProviderConnections.authMethod,
+        connectedBy: schema.companionProviderConnections.connectedBy,
+        createdAt: schema.companionProviderConnections.createdAt,
+        updatedAt: schema.companionProviderConnections.updatedAt,
+      })
       .from(schema.companionProviderConnections)
       .where(eq(schema.companionProviderConnections.orgId, input.orgId))
       .orderBy(asc(schema.companionProviderConnections.providerId)),
@@ -243,6 +252,51 @@ export async function listCompanionProviders(input: {
     default_provider_id: org?.defaultCompanionProviderId ?? null,
     can_manage: canManageOrg(role),
   };
+}
+
+export async function setCompanionProvider(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  providerId: string;
+  database?: Db;
+}): Promise<Companion> {
+  const database = input.database ?? db;
+  const companion = await getCompanionForRuntime({ ...input, database });
+  if (companion.runtime.provider_ids.length) {
+    throw new CompanionRuntimeTransitionError(
+      "this Companion already has a provider; create another Companion to use a different one",
+    );
+  }
+  const connection = await database.query.companionProviderConnections.findFirst({
+    where: and(
+      eq(schema.companionProviderConnections.orgId, input.orgId),
+      eq(schema.companionProviderConnections.providerId, input.providerId),
+    ),
+    columns: { providerId: true },
+  });
+  if (!connection) {
+    throw new CompanionProviderError(
+      "provider_not_configured",
+      `The ${providerName(input.providerId)} provider is not connected in this workspace.`,
+      input.providerId,
+    );
+  }
+  const [row] = await database
+    .update(schema.companions)
+    .set({
+      providerIds: [input.providerId],
+      providerCredentialGeneration: null,
+      updatedAt: new Date(),
+    })
+    .where(and(
+      eq(schema.companions.orgId, input.orgId),
+      eq(schema.companions.id, input.companionId),
+      eq(schema.companions.ownerId, input.actor.id),
+    ))
+    .returning();
+  if (!row) throw new CompanionNotFoundError();
+  return toCompanion(row, input.actor.id);
 }
 
 export async function saveCompanionProvider(input: {
