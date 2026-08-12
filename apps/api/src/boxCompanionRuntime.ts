@@ -1,7 +1,19 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import type { CompanionDaemonState, CompanionRuntimeState } from "@companion/contracts";
+import type {
+  CompanionClientSurface,
+  CompanionDaemonState,
+  CompanionMcpAccount,
+  CompanionRuntimeState,
+} from "@companion/contracts";
+import {
+  buildMcpAdapterInjection,
+  runtimeSkillArchivePath,
+  type CompanionRuntimeSkill,
+} from "./companionPiInjection";
 
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
+const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
+export const COMPANION_PI_DISK_LAYOUT_VERSION = 2;
 const READY_STATES = new Set<BoxState>(["ready", "idle", "running"]);
 const STARTING_STATES = new Set<BoxState>(["init", "provisioning", "provisioned", "cloning"]);
 
@@ -68,7 +80,10 @@ export interface CompanionBoxRuntime {
     companionId: string;
     orgId: string;
     boxId: string | null;
+    clientSurface: CompanionClientSurface;
     credentials: ProviderCredential[];
+    mcpAccounts: CompanionMcpAccount[];
+    skills: CompanionRuntimeSkill[];
     onBoxAssigned: (boxId: string) => Promise<void>;
   }): Promise<CompanionRuntimeObservation>;
   stop(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
@@ -95,7 +110,11 @@ export class BoxRuntimeProviderError extends Error {
   }
 }
 
-function setupScript(installCommand: string | undefined): string {
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\"'\"'")}'`;
+}
+
+function setupScript(installCommand: string | undefined, mcpAdapterPackage: string): string {
   const install = installCommand?.trim()
     ? installCommand
     : "echo 'Pi is not installed; configure COMPANION_PI_INSTALL_COMMAND or preinstall pi in the Box image' >&2; exit 1";
@@ -105,17 +124,28 @@ if ! command -v pi >/dev/null 2>&1; then
   ${install}
 fi
 command -v pi >/dev/null 2>&1
-mkdir -p "$HOME/.companion/bin" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.config/systemd/user"
+mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.config/systemd/user"
+layout_marker="$HOME/.companion/runtime/state/pi-layout.version"
+expected_layout=${shellQuote(`${COMPANION_PI_DISK_LAYOUT_VERSION}:${mcpAdapterPackage}`)}
+if [ -f "$layout_marker" ] && [ "$(cat "$layout_marker")" = "$expected_layout" ]; then
+  exit 0
+fi
+PI_CODING_AGENT_DIR="$HOME/.companion/pi" pi install ${shellQuote(mcpAdapterPackage)}
 cat > "$HOME/.companion/bin/pi-daemon" <<'COMPANION_PI_DAEMON'
 #!/usr/bin/env bash
 set -euo pipefail
 root="$HOME/.companion/runtime"
 mkdir -p "$root/sessions" "$root/state" "$root/logs"
+export PI_CODING_AGENT_DIR="$HOME/.companion/pi"
 fifo="$root/state/pi.rpc.in"
 rm -f "$fifo"
 mkfifo -m 600 "$fifo"
 exec 3<>"$fifo"
-exec pi --mode rpc --session-dir "$root/sessions" <&3 >>"$root/logs/pi.rpc.ndjson" 2>>"$root/logs/pi.stderr.log"
+skill_args=(--no-skills)
+if find "$root/skills" -type f -name SKILL.md -print -quit 2>/dev/null | grep -q .; then
+  skill_args+=(--skill "$root/skills")
+fi
+exec pi --mode rpc --session-dir "$root/sessions" "\${skill_args[@]}" <&3 >>"$root/logs/pi.rpc.ndjson" 2>>"$root/logs/pi.stderr.log"
 COMPANION_PI_DAEMON
 chmod 700 "$HOME/.companion/bin/pi-daemon"
 cat > "$HOME/.config/systemd/user/companion-pi-daemon.service" <<'COMPANION_PI_SERVICE'
@@ -134,6 +164,7 @@ RestartSec=2
 WantedBy=default.target
 COMPANION_PI_SERVICE
 systemctl --user daemon-reload
+printf '%s\n' "$expected_layout" > "$layout_marker"
 `;
 }
 
@@ -171,6 +202,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
   readonly #pollIntervalMs: number;
   readonly #readyTimeoutMs: number;
   readonly #installCommand: string | undefined;
+  readonly #mcpAdapterPackage: string;
 
   constructor(env: NodeJS.ProcessEnv = process.env) {
     const apiKey = env.COMPANION_BOX_API_KEY?.trim();
@@ -186,9 +218,11 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     this.#pollIntervalMs = positiveInteger(env.COMPANION_BOX_POLL_INTERVAL_MS, 1000);
     this.#readyTimeoutMs = positiveInteger(env.COMPANION_BOX_READY_TIMEOUT_MS, 120_000);
     this.#installCommand = env.COMPANION_PI_INSTALL_COMMAND;
+    this.#mcpAdapterPackage =
+      env.COMPANION_PI_MCP_ADAPTER_PACKAGE?.trim() || DEFAULT_PI_MCP_ADAPTER_PACKAGE;
   }
 
-  async #request<T>(path: string, init?: RequestInit): Promise<T> {
+  async #request<T>(path: string, init?: RequestInit, timeoutMs = 30_000): Promise<T> {
     const response = await fetch(`${this.#baseUrl}${path}`, {
       ...init,
       headers: {
@@ -196,7 +230,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
         ...(init?.body ? { "Content-Type": "application/json" } : {}),
         ...init?.headers,
       },
-      signal: AbortSignal.timeout(30_000),
+      signal: init?.signal ?? AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) {
       const body = await response.json().catch(() => null) as
@@ -245,11 +279,15 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     throw new BoxRuntimeProviderError("Box did not become ready before the configured timeout", 504);
   }
 
-  async #command(boxId: string, command: string): Promise<CommandEnvelope> {
+  async #command(
+    boxId: string,
+    command: string,
+    timeoutSeconds = 60,
+  ): Promise<CommandEnvelope> {
     return this.#request<CommandEnvelope>(`/boxes/${encodeURIComponent(boxId)}/commands`, {
       method: "POST",
-      body: JSON.stringify({ command, timeoutSeconds: 60 }),
-    });
+      body: JSON.stringify({ command, timeoutSeconds }),
+    }, (timeoutSeconds + 10) * 1_000);
   }
 
   async #daemonState(boxId: string): Promise<CompanionDaemonState> {
@@ -267,11 +305,87 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     );
   }
 
+  async #writeFile(boxId: string, path: string, content: string): Promise<void> {
+    await this.#request(`/boxes/${encodeURIComponent(boxId)}/files`, {
+      method: "PUT",
+      body: JSON.stringify({ path, content }),
+    });
+  }
+
+  async #ensurePiLayout(boxId: string): Promise<void> {
+    const result = await this.#command(
+      boxId,
+      setupScript(this.#installCommand, this.#mcpAdapterPackage),
+      180,
+    );
+    if (!result.success) throw new BoxRuntimeProviderError("Pi runtime layout failed to install", 502);
+  }
+
+  async #injectPiResources(input: {
+    boxId: string;
+    clientSurface: CompanionClientSurface;
+    credentials: ProviderCredential[];
+    mcpAccounts: CompanionMcpAccount[];
+    skills: CompanionRuntimeSkill[];
+  }): Promise<void> {
+    const injectedSkills = input.clientSurface === "native_mobile" ? [] : input.skills;
+    const mcp = buildMcpAdapterInjection(input.mcpAccounts);
+    const cleared = await this.#command(
+      input.boxId,
+      "set -e; root=\"$HOME/.companion/runtime\"; rm -rf \"$root/state/skill-archives\"; mkdir -p \"$root/state/skill-archives\"",
+    );
+    if (!cleared.success) throw new BoxRuntimeProviderError("Pi resource staging failed", 502);
+    await this.#writeFile(
+      input.boxId,
+      ".companion/pi/mcp.json",
+      `${JSON.stringify(mcp.config, null, 2)}\n`,
+    );
+    await this.#writeFile(
+      input.boxId,
+      ".companion/runtime/state/mcp-accounts.json",
+      `${JSON.stringify({ accounts: mcp.accounts }, null, 2)}\n`,
+    );
+    await this.#writeFile(
+      input.boxId,
+      ".companion/runtime/state/skills.json",
+      `${JSON.stringify({
+        client_surface: input.clientSurface,
+        skills: injectedSkills.map(({ slug, version, checksum }) => ({ slug, version, checksum })),
+      }, null, 2)}\n`,
+    );
+    for (const skill of injectedSkills) {
+      await this.#writeFile(
+        input.boxId,
+        runtimeSkillArchivePath(skill),
+        skill.archive.toString("base64"),
+      );
+    }
+    try {
+      await this.#writeFile(
+        input.boxId,
+        ".companion/runtime/state/providers.env",
+        encodeEnvironmentFile(input.credentials),
+      );
+      const prepared = await this.#command(
+        input.boxId,
+        "set -euo pipefail; root=\"$HOME/.companion/runtime\"; rm -rf \"$root/skills.next\"; mkdir -p \"$root/skills.next\"; shopt -s nullglob; for archive in \"$root/state/skill-archives\"/*.tar.gz.b64; do slug=\"$(basename \"$archive\" .tar.gz.b64)\"; mkdir -p \"$root/skills.next/$slug\"; base64 --decode \"$archive\" | tar --extract --gzip --file=- --directory=\"$root/skills.next/$slug\" --no-same-owner --no-same-permissions; done; rm -rf \"$root/skills.prev\"; if [ -d \"$root/skills\" ]; then mv \"$root/skills\" \"$root/skills.prev\"; fi; mv \"$root/skills.next\" \"$root/skills\"; rm -rf \"$root/skills.prev\" \"$root/state/skill-archives\"",
+        180,
+      );
+      if (!prepared.success) throw new BoxRuntimeProviderError("Pi resources failed to prepare", 502);
+    } catch (error) {
+      await this.#removeProviderFile(input.boxId).catch(() => undefined);
+      throw error;
+    }
+  }
+
   async start(input: {
     companionId: string;
     orgId: string;
     boxId: string | null;
+    clientSurface: CompanionClientSurface;
     credentials: ProviderCredential[];
+    mcpAccounts: CompanionMcpAccount[];
+    skills: CompanionRuntimeSkill[];
     onBoxAssigned: (boxId: string) => Promise<void>;
   }): Promise<CompanionRuntimeObservation> {
     let box: BoxInfo;
@@ -293,7 +407,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
               COMPANION_ID: input.companionId,
               COMPANION_ORG_ID: input.orgId,
             },
-            setupScript: setupScript(this.#installCommand),
+            setupScript: setupScript(this.#installCommand, this.#mcpAdapterPackage),
           }),
         });
         box = created.box;
@@ -350,12 +464,13 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
       }
     }
     box = await this.#waitReady(box.id);
-    await this.#request(`/boxes/${encodeURIComponent(box.id)}/files`, {
-      method: "PUT",
-      body: JSON.stringify({
-        path: ".companion/runtime/state/providers.env",
-        content: encodeEnvironmentFile(input.credentials),
-      }),
+    await this.#ensurePiLayout(box.id);
+    await this.#injectPiResources({
+      boxId: box.id,
+      clientSurface: input.clientSurface,
+      credentials: input.credentials,
+      mcpAccounts: input.mcpAccounts,
+      skills: input.skills,
     });
     let started: CommandEnvelope;
     try {

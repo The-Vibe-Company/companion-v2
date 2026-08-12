@@ -10,6 +10,7 @@ import {
   createCompanion,
   getCompanion,
   getCompanionForRuntime,
+  listCompanionRuntimeSkillPackages,
   listCompanions,
   updateCompanionObservation,
   updateCompanionRuntime,
@@ -19,6 +20,8 @@ import {
   startCompanionRuntimeInputSchema,
 } from "@companion/contracts";
 import { withTenantContext, type Db } from "@companion/db";
+import { skillChecksum, toTar } from "@companion/skills";
+import { getSkillArchive } from "@companion/storage";
 import {
   actorFromContext,
   AuthenticationRequiredError,
@@ -30,6 +33,7 @@ import {
   AsciiBoxCompanionRuntime,
   BoxRuntimeConfigurationError,
   BoxRuntimeProviderError,
+  COMPANION_PI_DISK_LAYOUT_VERSION,
   type CompanionBoxRuntime,
 } from "./boxCompanionRuntime";
 
@@ -147,6 +151,7 @@ export function registerCompanionRoutes(
           actor: ReturnType<typeof actorFromContext>;
           orgId: string;
           companion: Awaited<ReturnType<typeof getCompanionForRuntime>>;
+          skillPackages: Awaited<ReturnType<typeof listCompanionRuntimeSkillPackages>>;
         }
       | undefined;
     try {
@@ -156,8 +161,26 @@ export function registerCompanionRoutes(
         const companion = await claimCompanionRuntimeStart({
           actor, orgId, companionId, database,
         });
-        return { actor, orgId, companion };
+        const skillPackages = body.client_surface === "native_mobile"
+          ? []
+          : await listCompanionRuntimeSkillPackages({ actor, orgId, database });
+        return { actor, orgId, companion, skillPackages };
       });
+      const skills = await Promise.all(mutation.skillPackages.map(async (skill) => {
+        const archive = await getSkillArchive({ key: skill.storagePath });
+        if (skillChecksum(toTar(archive)) !== skill.checksum) {
+          throw new BoxRuntimeProviderError(
+            `stored skill package no longer matches ${skill.slug}@${skill.version}`,
+            502,
+          );
+        }
+        return {
+          slug: skill.slug,
+          version: skill.version,
+          checksum: skill.checksum,
+          archive,
+        };
+      }));
       const providerIds = body.credentials.length
         ? [...new Set(body.credentials.map((credential) => credential.provider))]
         : mutation.companion.runtime.provider_ids;
@@ -165,11 +188,14 @@ export function registerCompanionRoutes(
         companionId,
         orgId: mutation.orgId,
         boxId: mutation.companion.runtime.box_id,
+        clientSurface: body.client_surface,
         credentials: body.credentials.map((credential) => ({
           provider: credential.provider,
           envKey: credential.env_key,
           value: credential.value,
         })),
+        mcpAccounts: body.mcp_accounts,
+        skills,
         onBoxAssigned: async (boxId) => {
           await withTenantContext(
             { orgId: mutation!.orgId, userId: mutation!.actor.id },
@@ -194,6 +220,7 @@ export function registerCompanionRoutes(
             runtimeState: observed.runtimeState,
             daemonState: observed.daemonState,
             providerIds,
+            diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
             desktopAvailable: observed.desktopAvailable,
             observedAt: new Date(),
             startedAt: new Date(),

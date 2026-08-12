@@ -21,6 +21,11 @@ The current access projection is owner or viewer. Lifecycle, live status, and de
 THE-322's share grants; until those grants exist only the creator is an owner and every other
 organization member is a no-wake viewer.
 
+Runtime starts identify their client surface as `web`, `mobile_web`, or `native_mobile`. Web and
+mobile-web starts resolve the actor's Installed library (personal skills they own plus organization
+skills they installed) and inject only valid current packages. Native-mobile starts always inject
+an empty skill set. This is enforced by the API and again by the Box adapter before Pi is restarted.
+
 | Method | Path | Box contact |
 |---|---|---|
 | `POST` | `/v1/companions` | Never |
@@ -43,18 +48,53 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
 ```text
 ~/.companion/
 ├── bin/pi-daemon
+├── pi/
+│   └── mcp.json           # pi-mcp-adapter config; environment references only
 └── runtime/
+    ├── skills/            # exact current packages exposed through Pi native Skills
     ├── sessions/          # Pi session tree files (`pi --session-dir`)
     ├── state/
+    │   ├── mcp-accounts.json # account ids, labels, adapter names, and transports
+    │   ├── skills.json    # injected surface/version/checksum projection
     │   └── pi.rpc.in      # owner-only FIFO for the Pi JSON RPC stream
     └── logs/
         ├── pi.rpc.ndjson  # Pi JSON RPC output
         └── pi.stderr.log
 ```
 
-Layout version `1` is stored in the control-plane row. Runtime transcripts and files do not enter
-PostgreSQL. A systemd user unit supervises Pi while Box is active; the lifecycle API restarts it
-after a Box resume.
+Layout version `2` is written to the control-plane row after a successful Skills/MCP-aware start and
+to an on-disk marker keyed by the adapter package. Starts repair older Box snapshots before resource
+injection. Runtime transcripts and files do not enter PostgreSQL. A systemd user unit supervises Pi
+while Box is active; the lifecycle API restarts it after a Box resume.
+
+## Pi Skills injection
+
+Pi starts with `--no-skills` so ambient Box or package skills cannot leak into a Companion. For a
+web or mobile-web start, the API:
+
+1. resolves the authorized actor's Installed library in the tenant transaction;
+2. reads each exact current archive from object storage;
+3. stages the archives through the Box file API and extracts them into a replacement
+   `~/.companion/runtime/skills` tree;
+4. starts Pi with that tree as an explicit repeatable native `--skill` source.
+
+The replacement is prepared before the old tree is swapped, and invalid, archived, unpublished,
+or inaccessible packages are excluded. The browser chat consumes Pi's normal Skills capability;
+Companion does not add Pi tool/skill chrome inside the thread. Native mobile receives no skill
+archives or `--skill` source even if a caller supplies stale client state.
+
+## MCP adapter injection
+
+The Box setup installs the pinned `pi-mcp-adapter` package into the isolated
+`PI_CODING_AGENT_DIR`. `POST .../runtime/start` accepts up to 50 labeled MCP accounts. Each account
+has a stable Companion id, a user-facing label, and either an HTTP or stdio transport. Companion
+maps the label plus a stable id digest to a unique adapter server name, so multiple accounts for
+one MCP provider cannot collide.
+
+Adapter JSON contains only transport metadata and `${ENV_KEY}` references. Values use the same
+transient credential environment file as model-provider credentials: Pi inherits them, then the
+file is removed. Host-config discovery, MCP sampling, and MCP elicitation are disabled. This gives
+THE-321 a real multi-account injection API without adding its Plugins management UI here.
 
 ## Provider credentials
 
@@ -85,8 +125,10 @@ Optional settings:
 - `COMPANION_BOX_POLL_INTERVAL_MS` (default `1000`)
 - `COMPANION_BOX_READY_TIMEOUT_MS` (default `120000`)
 - `COMPANION_PI_INSTALL_COMMAND`
+- `COMPANION_PI_MCP_ADAPTER_PACKAGE` (default pinned to `npm:pi-mcp-adapter@2.12.1`)
 
 Boxes are always created/resumed with `noEnv: true` and receive only tenant/Companion identifiers.
-Preinstall a pinned Pi version in the Box environment/template when possible. Otherwise set a
-pinned, operator-controlled install command. The setup fails closed if `pi` remains unavailable.
+Preinstall pinned Pi and MCP adapter versions in the Box environment/template when possible.
+Otherwise set a pinned, operator-controlled Pi install command; the setup installs the configured
+adapter package and fails closed if either dependency is unavailable.
 

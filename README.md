@@ -68,11 +68,15 @@ COMPANION_BOX_API_BASE=https://ascii.dev/api/box/v1
 COMPANION_BOX_ENVIRONMENT=base
 COMPANION_BOX_TTL_SECONDS=3600
 COMPANION_PI_INSTALL_COMMAND='npm install --global @earendil-works/pi-coding-agent@<pin>'
+COMPANION_PI_MCP_ADAPTER_PACKAGE=npm:pi-mcp-adapter@2.12.1
 ```
 
 Prefer a Box environment/template with Pi already pinned and omit the install command. Never put
 provider credentials in these variables; lifecycle requests deliver them transiently to the Pi
-process. See `docs/companions-runtime.md`.
+process. Web and mobile-web lifecycle starts inject the actor's valid Installed packages as native
+Pi Skills. Native-mobile starts inject no skills. Labeled MCP accounts are accepted by the same
+start API and converted to adapter config with environment references only. See
+`docs/companions-runtime.md`.
 
 ## Verification
 

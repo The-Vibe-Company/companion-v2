@@ -131,6 +131,7 @@ export async function updateCompanionRuntime(input: {
     runtimeState?: CompanionRuntimeState;
     daemonState?: CompanionDaemonState;
     providerIds?: string[];
+    diskLayoutVersion?: number;
     desktopAvailable?: boolean;
     observedAt?: Date;
     startedAt?: Date;
@@ -148,6 +149,9 @@ export async function updateCompanionRuntime(input: {
       ...(input.patch.runtimeState ? { runtimeState: input.patch.runtimeState } : {}),
       ...(input.patch.daemonState ? { daemonState: input.patch.daemonState } : {}),
       ...(input.patch.providerIds ? { providerIds: input.patch.providerIds } : {}),
+      ...(input.patch.diskLayoutVersion !== undefined
+        ? { diskLayoutVersion: input.patch.diskLayoutVersion }
+        : {}),
       ...(input.patch.desktopAvailable !== undefined
         ? { desktopAvailable: input.patch.desktopAvailable }
         : {}),

@@ -74,6 +74,11 @@ Live status, start/stop, and desktop require owner/editor access before the Box 
 the current pre-sharing projection makes non-owners viewers. The default remains fail-closed: when
 the flag is absent or false, none of these routes are registered. Provider credentials are accepted
 only by start, passed through a transient Box file, and never persisted in the control plane.
+Owner/editor web and mobile-web starts resolve the actor's valid Installed library and expose those
+packages through Pi's explicit native Skills source. Native-mobile starts always replace that source
+with an empty tree. Labeled MCP accounts are translated into an isolated `pi-mcp-adapter` config;
+the durable JSON contains environment references only, while values use the transient credential
+channel. Viewer authorization completes before skill storage or Box is contacted.
 
 The web has no `/projects` route and no Run/Session state in the Skills URL grammar. Old query parameters are ignored and canonical navigation returns to the Skills detail. By default the only product workspace navigation is Skills. The same `COMPANION_COMPANIONS_ENABLED` server-side flag can expose an authenticated `/companions` empty-list shell and its sidebar entry. The Pi/Box harness is deliberately invisible in that shell; provider, desktop, and sharing UI arrive in later tickets.
 

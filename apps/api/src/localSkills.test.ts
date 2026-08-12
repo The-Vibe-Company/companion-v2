@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.37.0");
+    expect(pkg.version).toBe("1.38.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -126,13 +126,18 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("Grok Bot");
-    expect(changelog).toContain("~/.cursor/skills");
-    expect(changelog).toContain(".cursor/skills");
-    expect(changelog).toContain("delegated Agent Auth");
+    expect(changelog).toContain("published integrity baseline");
+    expect(changelog).toContain("Does not change Companion skill commands");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
+    const grokChanges = manifest.metadata?.changelog
+      ?.find((entry) => entry.version === "1.37.0")
+      ?.changes?.join("\n") ?? "";
+    expect(grokChanges).toContain("Grok Bot");
+    expect(grokChanges).toContain("~/.cursor/skills");
+    expect(grokChanges).toContain(".cursor/skills");
+    expect(grokChanges).toContain("delegated Agent Auth");
     const delegationChanges = manifest.metadata?.changelog
       ?.find((entry) => entry.version === "1.34.0")
       ?.changes?.join("\n") ?? "";
