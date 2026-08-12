@@ -89,6 +89,35 @@ statement repeats the preflight and aborts before any `DROP` when an external cl
 remains. It must finish before starting the new API/worker version. Historical migrations are not
 rewritten.
 
+## Skills Hub-only cutover
+
+The API service runs `node dist/migrate.js` as its `preDeployCommand`, so a database that still
+holds Project and run rows fails **every** API deployment on the `0063` guard, with SQLSTATE `55000`
+and the message `Skills Hub-only migration requires runtime resource cleanup first`. Web and worker
+have no pre-deploy migration and keep deploying successfully, so the symptom looks like an
+API-only, commit-independent build failure. The deploy log prints the pending counts and the
+remediation below.
+
+Once the new worker is deployed, the old release's cleanup worker no longer exists, so steps 2–3
+above can no longer drain anything. Finish the cutover instead:
+
+1. Confirm from the deploy log's `DETAIL` line which obligations remain.
+2. Delete the historical Project and run objects with your object-storage administration tooling
+   (every key named by `project_attachment_uploads`, `project_attachments`, `project_files`,
+   `project_file_versions`, `skill_run_attachments`, `skill_run_attachment_uploads`, and
+   `skill_run_artifacts`) and release any sandbox or golden-snapshot resource still held at the
+   provider. Nothing else references those objects, so this is the last chance to remove them.
+3. Set `COMPANION_SKILLS_HUB_CUTOVER_ACK=external-cleanup-complete` on the API service and redeploy.
+   The pre-deploy migration then empties the retired runtime tables inside the migration lock, logs
+   the per-table row counts it discarded, and lets `0063` and later migrations apply.
+4. Remove the variable after the deploy succeeds. Leaving it set is harmless — the retired tables no
+   longer exist — but it should not outlive the cutover. Any other value fails fast rather than
+   discarding rows whose external objects may still exist.
+
+The acknowledgement only empties the tables `0063` drops moments later; Skills, organizations,
+users, auth, Agent Auth, secrets, Skill Databases, GitHub, billing, and public-release data are
+untouched.
+
 ## Shared configuration
 
 Configure public API/web origins, Better Auth secret/cookie prefix, PostgreSQL role URLs, S3 credentials, and email. Configure `COMPANION_SECRETS_MASTER_KEY` for skill secrets. Optional integrations use GitHub App, Stripe, and PostHog variables documented in `.env.example`.
