@@ -18,10 +18,16 @@ before creating another one, following every Box-list page. A new Box initially 
 five-minute TTL; only after its id is durable does the adapter apply the configured TTL and name.
 If the id cannot be persisted, the adapter best-effort archives the Box immediately.
 
-The current access projection is owner or viewer. Lifecycle, live status, and desktop routes call
-`getCompanionForRuntime` first and permit only owner/editor access. Editors are reserved for
-THE-322's share grants; until those grants exist only the creator is an owner and every other
-organization member is a no-wake viewer.
+Each Companion has one immutable Owner, an optional workspace-wide Editor/Viewer grant, and
+member-specific Editor/Viewer grants. A member grant overrides the workspace default. Only the Owner
+manages sharing or the selected provider. Owner and Editor may chat and use lifecycle, plugin
+injection, live status, and desktop routes. Viewer is read-only: authorization completes before
+skill storage or a Box adapter is created.
+
+`companion_transcript_entries` is the control-plane read model for the one-thread-per-Companion chat.
+Pi remains authoritative while active; THE-320 appends idempotent Pi events to this projection while
+the Box is already running. `GET /v1/companions/:id/transcript` reads PostgreSQL only, so opening a
+Viewer thread never reads Box disk, starts Pi, or wakes Box.
 
 Runtime starts identify their client surface as `web`, `mobile_web`, or `native_mobile`. Web and
 mobile-web starts resolve the actor's Installed library (personal skills they own plus organization
@@ -34,6 +40,8 @@ an empty skill set. This is enforced by the API and again by the Box adapter bef
 | `GET` | `/v1/companions` | Never |
 | `GET` | `/v1/companions/:id` | Never |
 | `PUT` | `/v1/companions/:id/provider` | Never; owner-only, unconfigured Companions only |
+| `GET/PUT/PATCH/DELETE` | `/v1/companions/:id/shares/...` | Never; owner-only |
+| `GET` | `/v1/companions/:id/transcript` | Never; authorized read-only control-plane projection |
 | `GET` | `/v1/companions/:id/runtime` | Never |
 | `GET` | `/v1/companions/:id/runtime?live=true` | Owner/editor only; observes without resuming |
 | `POST` | `/v1/companions/:id/runtime/start` | Creates or resumes Box, then starts Pi |

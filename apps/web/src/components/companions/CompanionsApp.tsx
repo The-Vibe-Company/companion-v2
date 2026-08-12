@@ -1,22 +1,25 @@
 "use client";
 
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type {
   Companion,
   CompanionProviderAuthMethod,
   CompanionProvidersResponse,
+  CompanionTranscript,
   SaveCompanionProviderInput,
 } from "@companion/contracts";
 import type { OrgVM } from "@/lib/types";
 import {
   createCompanion,
   deleteCompanionProvider,
+  getCompanionTranscript,
   saveCompanionProvider,
   setCompanionProvider,
   setDefaultCompanionProvider,
 } from "@/lib/companions";
 import { Icon } from "../Icon";
+import { ShareCompanionDialog } from "./ShareCompanionDialog";
 import { Onboarding } from "../org/Onboarding";
 import { useOrgActions } from "../org/useOrgActions";
 import { Sidebar } from "../skills/Sidebar";
@@ -71,6 +74,11 @@ export function CompanionsApp({
     "create" | "provider" | "default" | "delete" | "configure" | null
   >(null);
   const [error, setError] = useState<string | null>(null);
+  const [sharing, setSharing] = useState<Companion | null>(null);
+  const [opened, setOpened] = useState<Companion | null>(null);
+  const [transcript, setTranscript] = useState<CompanionTranscript | null>(null);
+  const [transcriptError, setTranscriptError] = useState<string | null>(null);
+  const threadRef = useRef<HTMLElement>(null);
   const noop = () => {};
   const connectedIds = useMemo(
     () => new Set(providers.connections.map((connection) => connection.provider_id)),
@@ -210,6 +218,17 @@ export function CompanionsApp({
     }
   };
 
+  const onOpenCompanion = async (companion: Companion) => {
+    setOpened(companion);
+    setTranscript(null);
+    setTranscriptError(null);
+    try {
+      setTranscript(await getCompanionTranscript(currentOrg.id, companion.id));
+    } catch (cause) {
+      setTranscriptError(cause instanceof Error ? cause.message : "Transcript could not be loaded.");
+    }
+  };
+
   const navigateToLabel = (lib: SkillsLibrary, path: string) => {
     router.push(skillsRouteHref({ lib, kind: "label", label: path }));
   };
@@ -232,6 +251,22 @@ export function CompanionsApp({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [mobileSidebarOpen]);
+
+  useEffect(() => {
+    if (!opened) return;
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    threadRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setOpened(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      opener?.focus();
+    };
+  }, [opened]);
 
   return (
     <div className={"app app--skills companions-app" + (mobileSidebarOpen ? " app--side-open" : "")}>
@@ -293,8 +328,8 @@ export function CompanionsApp({
 
       <main
         className="companions-main"
-        aria-hidden={mobileSidebarOpen || undefined}
-        inert={mobileSidebarOpen ? true : undefined}
+        aria-hidden={mobileSidebarOpen || opened !== null || sharing !== null || undefined}
+        inert={mobileSidebarOpen || opened !== null || sharing !== null ? true : undefined}
       >
         <header className="companions-head">
           <div>
@@ -521,10 +556,27 @@ export function CompanionsApp({
                               )}`}
                           </button>
                         )}
+                      <span className="companions-role">{companion.access}</span>
                       <span className="companions-state">
                         <i aria-hidden="true" />
                         {companion.runtime.state.replace("_", " ")}
                       </span>
+                      <button
+                        type="button"
+                        className="cds-btn cds-btn--secondary cds-btn--sm"
+                        onClick={() => void onOpenCompanion(companion)}
+                      >
+                        Open
+                      </button>
+                      {companion.access === "owner" && (
+                        <button
+                          type="button"
+                          className="cds-btn cds-btn--ghost cds-btn--sm"
+                          onClick={() => setSharing(companion)}
+                        >
+                          Share
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -541,6 +593,75 @@ export function CompanionsApp({
           </section>
         </div>
       </main>
+
+      {opened && (
+        <div className="companions-thread-scrim" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setOpened(null);
+        }}>
+          <aside
+            className="companions-thread"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="companions-thread-title"
+            ref={threadRef}
+            tabIndex={-1}
+          >
+            <header>
+              <div>
+                <h2 id="companions-thread-title">{opened.name}</h2>
+                <p>
+                  {opened.access === "viewer"
+                    ? "Read-only transcript · Box stays asleep"
+                    : "Transcript"}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="iconbtn"
+                aria-label="Close transcript"
+                onClick={() => setOpened(null)}
+              >
+                <Icon name="x" size={16} />
+              </button>
+            </header>
+            <div className="companions-thread-body">
+              {transcriptError ? (
+                <div className="companions-error" role="alert">{transcriptError}</div>
+              ) : !transcript ? (
+                <p className="companions-thread-empty">Loading transcript...</p>
+              ) : transcript.entries.length ? (
+                transcript.entries.map((entry) => (
+                  <article className={`companions-message companions-message--${entry.role}`} key={entry.event_id}>
+                    <strong>{entry.role === "assistant" ? opened.name : entry.role}</strong>
+                    <p>{entry.content}</p>
+                    <time dateTime={entry.created_at}>
+                      {new Date(entry.created_at).toLocaleString()}
+                    </time>
+                  </article>
+                ))
+              ) : (
+                <div className="companions-thread-empty">
+                  <strong>No messages yet</strong>
+                  <p>The control-plane transcript is empty. Opening it did not contact Box.</p>
+                </div>
+              )}
+            </div>
+            {opened.access === "viewer" && (
+              <footer>
+                Viewer access is read-only. Run, plugins, and desktop are unavailable.
+              </footer>
+            )}
+          </aside>
+        </div>
+      )}
+
+      {sharing && (
+        <ShareCompanionDialog
+          orgId={currentOrg.id}
+          companion={sharing}
+          onClose={() => setSharing(null)}
+        />
+      )}
 
       {orgActions.onboarding && (
         <Onboarding

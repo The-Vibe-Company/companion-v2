@@ -15,6 +15,8 @@ export type CompanionDaemonState = z.infer<typeof companionDaemonStateSchema>;
 
 export const companionAccessSchema = z.enum(["owner", "editor", "viewer"]);
 export type CompanionAccess = z.infer<typeof companionAccessSchema>;
+export const companionShareRoleSchema = z.enum(["editor", "viewer"]);
+export type CompanionShareRole = z.infer<typeof companionShareRoleSchema>;
 
 export const companionProviderIdSchema = z.string().trim().regex(/^[a-z][a-z0-9-]{0,62}$/);
 export type CompanionProviderId = z.infer<typeof companionProviderIdSchema>;
@@ -94,6 +96,52 @@ export const companionSchema = z.object({
   updated_at: z.string().datetime(),
 });
 export type Companion = z.infer<typeof companionSchema>;
+
+export const companionShareMemberSchema = z.object({
+  user_id: z.string(),
+  name: z.string(),
+  email: z.string().email(),
+  role: companionAccessSchema,
+  is_owner: z.boolean(),
+});
+export type CompanionShareMember = z.infer<typeof companionShareMemberSchema>;
+
+export const companionSharesSchema = z.object({
+  companion_id: z.string().uuid(),
+  workspace_role: companionShareRoleSchema.nullable(),
+  members: z.array(companionShareMemberSchema),
+});
+export type CompanionShares = z.infer<typeof companionSharesSchema>;
+
+export const setCompanionWorkspaceShareInputSchema = z.object({
+  role: companionShareRoleSchema.nullable(),
+}).strict();
+
+export const inviteCompanionMemberInputSchema = z.object({
+  email: z.string().trim().email().max(320),
+  role: companionShareRoleSchema,
+}).strict();
+
+export const updateCompanionMemberRoleInputSchema = z.object({
+  role: companionShareRoleSchema,
+}).strict();
+
+export const companionTranscriptEntrySchema = z.object({
+  event_id: z.string().min(1).max(200),
+  ordinal: z.number().int().nonnegative(),
+  role: z.enum(["user", "assistant", "system"]),
+  content: z.string(),
+  created_at: z.string().datetime(),
+});
+export type CompanionTranscriptEntry = z.infer<typeof companionTranscriptEntrySchema>;
+
+export const companionTranscriptSchema = z.object({
+  companion_id: z.string().uuid(),
+  access: companionAccessSchema,
+  read_only: z.boolean(),
+  entries: z.array(companionTranscriptEntrySchema),
+});
+export type CompanionTranscript = z.infer<typeof companionTranscriptSchema>;
 
 export const createCompanionInputSchema = z.object({
   name: z.string().trim().min(1).max(120),

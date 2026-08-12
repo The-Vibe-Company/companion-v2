@@ -22,7 +22,9 @@ plane. External coding agents can still use delegated Agent Auth as Skills Hub c
 
 ## Non-goals
 
-- Control-plane execution of agent code, prompts, transcripts, or runtime files.
+- Control-plane execution of agent code or runtime files, and authoritative storage of Pi runtime
+  files. The gated Companions feature may retain a read-only transcript projection so Viewer reads
+  never wake Box.
 - Persistent Cowork or Project workspaces.
 - Runtime providers other than Box, harnesses other than Pi, prewarming, or deployment management.
 - A generic AI application builder.

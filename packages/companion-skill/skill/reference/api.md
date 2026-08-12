@@ -473,8 +473,10 @@ Manifest v2 accepts an optional root `icon`. Valid values are `activity`, `bookm
 `square-stack`, `star`, `tag`, `terminal`, `users`, and `zap`. Preserve the field when normalizing,
 repairing, or republishing a manifest. Unknown values fail validation; omission remains compatible.
 
-Do not use this skill for workspace members, invitations, org settings mutation, or general token
-management. The automatic current-token refresh above is the only token-management exception.
+Do not use this skill for workspace members, invitations, Companion Owner/Editor/Viewer sharing,
+Companion transcripts or runtime actions, org settings mutation, or general token management. Those
+Companion routes require a signed-in browser session and are intentionally absent from the delegated
+Agent Auth registry. The automatic current-token refresh above is the only token-management exception.
 The only org-settings surface in the closed Companion capability registry is
 `GET /orgs/current/skill-naming-policy` (`skills:read`; also available in explicit legacy PAT mode).
 

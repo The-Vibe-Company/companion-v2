@@ -6,6 +6,8 @@ import {
   CompanionProviderForbiddenError,
   CompanionRuntimeForbiddenError,
   CompanionRuntimeTransitionError,
+  CompanionShareForbiddenError,
+  CompanionShareTargetError,
   claimCompanionRuntimeStart,
   claimCompanionRuntimeStop,
   companionsEnabled,
@@ -13,23 +15,32 @@ import {
   deleteCompanionProvider,
   getCompanion,
   getCompanionForRuntime,
+  getCompanionTranscript,
+  inviteCompanionMember,
+  listCompanionShares,
   listCompanionRuntimeSkillPackages,
   listCompanions,
   listCompanionProviders,
   resolveCompanionProviderAuth,
+  revokeCompanionMember,
   saveCompanionProvider,
   setCompanionProvider,
+  setCompanionWorkspaceShare,
   setDefaultCompanionProvider,
   updateCompanionObservation,
+  updateCompanionMemberRole,
   updateCompanionRuntime,
 } from "@companion/core";
 import {
   createCompanionInputSchema,
+  inviteCompanionMemberInputSchema,
   companionProviderIdSchema,
   saveCompanionProviderInputSchema,
   setCompanionProviderInputSchema,
+  setCompanionWorkspaceShareInputSchema,
   setDefaultCompanionProviderInputSchema,
   startCompanionRuntimeInputSchema,
+  updateCompanionMemberRoleInputSchema,
 } from "@companion/contracts";
 import { withTenantContext, type Db } from "@companion/db";
 import { skillChecksum, toTar } from "@companion/skills";
@@ -58,6 +69,8 @@ function errorStatus(error: unknown): number {
   if (error instanceof CompanionNotFoundError) return 404;
   if (error instanceof CompanionRuntimeForbiddenError) return 403;
   if (error instanceof CompanionProviderForbiddenError) return 403;
+  if (error instanceof CompanionShareForbiddenError) return 403;
+  if (error instanceof CompanionShareTargetError) return 422;
   if (error instanceof CompanionProviderError) return 422;
   if (error instanceof CompanionRuntimeTransitionError) return 409;
   if (error instanceof BoxRuntimeConfigurationError) return 503;
@@ -210,6 +223,91 @@ export function registerCompanionRoutes(
           database,
         }));
       return c.json({ companion });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.get("/v1/companions/:id/shares", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const shares = await tenant(c, ({ actor, orgId, database }) =>
+        listCompanionShares({ actor, orgId, companionId, database }));
+      return c.json({ shares });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.put("/v1/companions/:id/shares/workspace", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const body = setCompanionWorkspaceShareInputSchema.parse(await c.req.json());
+      const shares = await tenant(c, ({ actor, orgId, database }) =>
+        setCompanionWorkspaceShare({ actor, orgId, companionId, role: body.role, database }));
+      return c.json({ shares });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.put("/v1/companions/:id/shares/members", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const body = inviteCompanionMemberInputSchema.parse(await c.req.json());
+      const shares = await tenant(c, ({ actor, orgId, database }) =>
+        inviteCompanionMember({
+          actor,
+          orgId,
+          companionId,
+          email: body.email,
+          role: body.role,
+          database,
+        }));
+      return c.json({ shares });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.patch("/v1/companions/:id/shares/members/:userId", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const userId = z.string().min(1).max(255).parse(c.req.param("userId"));
+      const body = updateCompanionMemberRoleInputSchema.parse(await c.req.json());
+      const shares = await tenant(c, ({ actor, orgId, database }) =>
+        updateCompanionMemberRole({
+          actor,
+          orgId,
+          companionId,
+          userId,
+          role: body.role,
+          database,
+        }));
+      return c.json({ shares });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.delete("/v1/companions/:id/shares/members/:userId", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const userId = z.string().min(1).max(255).parse(c.req.param("userId"));
+      const shares = await tenant(c, ({ actor, orgId, database }) =>
+        revokeCompanionMember({ actor, orgId, companionId, userId, database }));
+      return c.json({ shares });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.get("/v1/companions/:id/transcript", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const transcript = await tenant(c, ({ actor, orgId, database }) =>
+        getCompanionTranscript({ actor, orgId, companionId, database }));
+      return c.json({ transcript });
     } catch (error) {
       return routeError(c, error);
     }
