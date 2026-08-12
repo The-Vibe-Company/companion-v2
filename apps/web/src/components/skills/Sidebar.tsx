@@ -724,6 +724,7 @@ export function Sidebar({
                     type="button"
                     className={"cmprow" + (active ? " cmprow--active" : "")}
                     aria-current={active ? "page" : undefined}
+                    aria-label={`${companion.name} — ${companion.status}`}
                     onClick={() => runAndClose(() => onSelectCompanion(companion.id))}
                     title={`${companion.name} — ${companion.status}`}
                   >
@@ -731,8 +732,12 @@ export function Sidebar({
                       {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
                     </span>
                     <span className="cmprow__name">{companion.name}</span>
-                    <span className={`cmprow__dot cmprow__dot--${companion.tone}`} aria-hidden="true" />
-                    <span className="sr-only">{companion.status}</span>
+                    {/* The dot never stands alone: the word rides with it, and the collapsed rail
+                        keeps it in the button's accessible name. */}
+                    <span className="cmprow__status" aria-hidden="true">
+                      <i className={`cmprow__dot cmprow__dot--${companion.tone}`} />
+                      <span className="cmprow__statusword">{companion.status}</span>
+                    </span>
                   </button>
                 );
               })

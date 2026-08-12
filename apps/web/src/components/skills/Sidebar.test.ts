@@ -92,7 +92,9 @@ describe("Sidebar Companions feature gate", () => {
 
     expect(markup).toContain("Luna");
     expect(markup).toContain("Milo");
-    expect(markup).toContain("Online");
+    // The status word is visible text, not a colour-only dot.
+    expect(markup).toContain('class="cmprow__statusword">Online<');
+    expect(markup).toContain('aria-label="Luna — Online"');
     expect(markup).not.toContain("My Skills");
     expect(markup).not.toContain("Organization");
     expect(markup).not.toContain("Companion skills");
