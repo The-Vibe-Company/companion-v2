@@ -281,7 +281,7 @@ export function registerCompanionRoutes(
             boxId: observed.boxId,
             runtimeState: observed.runtimeState,
             daemonState: observed.daemonState,
-            providerCredentialGeneration: mutation.provider.credentialGeneration,
+            providerCredentialGeneration: mutation!.provider.credentialGeneration,
             desktopAvailable: observed.desktopAvailable,
             observedAt: new Date(),
             startedAt: new Date(),
