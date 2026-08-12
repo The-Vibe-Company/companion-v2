@@ -100,9 +100,12 @@ export function NewCompanionDialog({
             value={persona}
             onChange={(event) => setPersona(event.target.value)}
             placeholder="Content marketing assistant"
+            aria-describedby="companion-persona-hint"
           />
-          <span>One line, shown under the name in the list.</span>
         </label>
+        <p className="companions-new-form__hint" id="companion-persona-hint">
+          One line, shown under the name in the list.
+        </p>
         <fieldset className="companions-picker">
           <legend>Provider</legend>
           {connected ? (

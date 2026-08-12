@@ -163,10 +163,10 @@
   gap: 14px;
 }
 
-.companions-new-form label > span {
+.companions-new-form__hint {
+  margin: -9px 0 0;
   color: var(--color-muted);
   font-size: var(--text-xs);
-  font-weight: 400;
 }
 
 .companions-picker {
