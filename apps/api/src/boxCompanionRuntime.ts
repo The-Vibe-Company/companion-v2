@@ -19,6 +19,7 @@ export type BoxState =
 
 interface BoxInfo {
   id: string;
+  name?: string;
   state: BoxState;
   desktopAvailable: boolean;
   setupStatus?: "pending" | "running" | "done" | "failed" | null;
@@ -27,6 +28,10 @@ interface BoxInfo {
 
 interface BoxEnvelope {
   box: BoxInfo;
+}
+
+interface BoxListEnvelope {
+  boxes: BoxInfo[];
 }
 
 interface CommandEnvelope {
@@ -116,8 +121,8 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/home/user/.companion/bin/pi-daemon
-EnvironmentFile=-/home/user/.companion/runtime/state/providers.env
+ExecStart=%h/.companion/bin/pi-daemon
+EnvironmentFile=-%h/.companion/runtime/state/providers.env
 Restart=on-failure
 RestartSec=2
 
@@ -206,6 +211,12 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     return (await this.#request<BoxEnvelope>(`/boxes/${encodeURIComponent(boxId)}`)).box;
   }
 
+  async #findCompanionBox(companionId: string): Promise<BoxInfo | null> {
+    const name = `Companion ${companionId}`;
+    const result = await this.#request<BoxListEnvelope>("/boxes?limit=200&sort=desc");
+    return result.boxes.find((box) => box.name === name) ?? null;
+  }
+
   async #waitReady(boxId: string): Promise<BoxInfo> {
     const deadline = Date.now() + this.#readyTimeoutMs;
     while (Date.now() < deadline) {
@@ -237,6 +248,13 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     return result.stdout.trim() === "active" ? "running" : "stopped";
   }
 
+  async #removeProviderFile(boxId: string): Promise<void> {
+    await this.#command(
+      boxId,
+      "rm -f \"$HOME/.companion/runtime/state/providers.env\"",
+    );
+  }
+
   async start(input: {
     companionId: string;
     orgId: string;
@@ -246,39 +264,69 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
   }): Promise<CompanionRuntimeObservation> {
     let box: BoxInfo;
     if (!input.boxId) {
-      const created = await this.#request<BoxEnvelope>("/boxes", {
-        method: "POST",
-        body: JSON.stringify({
-          ttlSeconds: this.#ttlSeconds,
-          noEnv: true,
-          ...(this.#environment ? { environment: this.#environment } : {}),
-          env: {
-            COMPANION_ID: input.companionId,
-            COMPANION_ORG_ID: input.orgId,
-          },
-          setupScript: setupScript(this.#installCommand),
-        }),
-      });
-      box = created.box;
+      const recovered = await this.#findCompanionBox(input.companionId);
+      if (recovered) {
+        box = recovered;
+      } else {
+        const created = await this.#request<BoxEnvelope>("/boxes", {
+          method: "POST",
+          body: JSON.stringify({
+            ttlSeconds: this.#ttlSeconds,
+            noEnv: true,
+            ...(this.#environment ? { environment: this.#environment } : {}),
+            env: {
+              COMPANION_ID: input.companionId,
+              COMPANION_ORG_ID: input.orgId,
+            },
+            setupScript: setupScript(this.#installCommand),
+          }),
+        });
+        box = created.box;
+        try {
+          box = (await this.#request<BoxEnvelope>(
+            `/boxes/${encodeURIComponent(box.id)}`,
+            {
+              method: "PATCH",
+              body: JSON.stringify({ name: `Companion ${input.companionId}` }),
+            },
+          )).box;
+        } catch (error) {
+          await this.#request(`/boxes/${encodeURIComponent(box.id)}/stop`, {
+            method: "POST",
+            body: JSON.stringify({ force: false }),
+          }).catch(() => undefined);
+          throw error;
+        }
+      }
     } else {
       box = await this.#get(input.boxId);
-      if (box.state === "archived") {
-        const resumed = await this.#request<BoxEnvelope>(
-          `/boxes/${encodeURIComponent(input.boxId)}/resume`,
-          {
-            method: "POST",
-            body: JSON.stringify({ noEnv: true, ttlSeconds: this.#ttlSeconds }),
-          },
-        );
-        box = resumed.box;
-      } else if (box.state === "archiving") {
-        throw new BoxRuntimeProviderError("Box is still archiving; retry start after it is archived", 409);
-      } else if (!READY_STATES.has(box.state) && !STARTING_STATES.has(box.state)) {
-        throw new BoxRuntimeProviderError(`Box cannot start from state ${box.state}`, 409);
-      }
+    }
+    if (box.state === "archived") {
+      const resumed = await this.#request<BoxEnvelope>(
+        `/boxes/${encodeURIComponent(box.id)}/resume`,
+        {
+          method: "POST",
+          body: JSON.stringify({ noEnv: true, ttlSeconds: this.#ttlSeconds }),
+        },
+      );
+      box = resumed.box;
+    } else if (box.state === "archiving") {
+      throw new BoxRuntimeProviderError("Box is still archiving; retry start after it is archived", 409);
+    } else if (!READY_STATES.has(box.state) && !STARTING_STATES.has(box.state)) {
+      throw new BoxRuntimeProviderError(`Box cannot start from state ${box.state}`, 409);
     }
 
-    await input.onBoxAssigned(box.id);
+    try {
+      await input.onBoxAssigned(box.id);
+    } catch (error) {
+      if (!input.boxId) {
+        await this.#request(`/boxes/${encodeURIComponent(box.id)}/stop`, {
+          method: "POST",
+          body: JSON.stringify({ force: false }),
+        }).catch(() => undefined);
+      }
+      throw error;
+    }
     box = await this.#waitReady(box.id);
     await this.#request(`/boxes/${encodeURIComponent(box.id)}/files`, {
       method: "PUT",
@@ -287,11 +335,18 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
         content: encodeEnvironmentFile(input.credentials),
       }),
     });
-    const started = await this.#command(
-      box.id,
-      "set -e; credential_file=\"$HOME/.companion/runtime/state/providers.env\"; trap 'rm -f \"$credential_file\"' EXIT; chmod 600 \"$credential_file\"; systemctl --user daemon-reload; systemctl --user restart companion-pi-daemon.service",
-    );
+    let started: CommandEnvelope;
+    try {
+      started = await this.#command(
+        box.id,
+        "set -e; credential_file=\"$HOME/.companion/runtime/state/providers.env\"; trap 'rm -f \"$credential_file\"' EXIT; chmod 600 \"$credential_file\"; systemctl --user daemon-reload; systemctl --user restart companion-pi-daemon.service",
+      );
+    } catch (error) {
+      await this.#removeProviderFile(box.id).catch(() => undefined);
+      throw error;
+    }
     if (!started.success) {
+      await this.#removeProviderFile(box.id).catch(() => undefined);
       throw new BoxRuntimeProviderError("Pi daemon failed to start", 502);
     }
     const daemonState = await this.#daemonState(box.id);

@@ -16,6 +16,7 @@ const coreMocks = vi.hoisted(() => ({
   getCompanionForRuntime: vi.fn(),
   claimCompanionRuntimeStart: vi.fn(),
   claimCompanionRuntimeStop: vi.fn(),
+  updateCompanionObservation: vi.fn(),
   updateCompanionRuntime: vi.fn(),
 }));
 
@@ -77,6 +78,7 @@ describe("Companions API feature gate", () => {
     coreMocks.getCompanionForRuntime.mockResolvedValue(companion);
     coreMocks.claimCompanionRuntimeStart.mockResolvedValue(companion);
     coreMocks.claimCompanionRuntimeStop.mockResolvedValue(companion);
+    coreMocks.updateCompanionObservation.mockResolvedValue(companion);
     coreMocks.updateCompanionRuntime.mockResolvedValue(companion);
   });
 
@@ -148,6 +150,31 @@ describe("Companions API feature gate", () => {
     expect(runtimeFactory).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["start", `/v1/companions/${companion.id}/runtime/start`],
+    ["stop", `/v1/companions/${companion.id}/runtime/stop`],
+    ["desktop", `/v1/companions/${companion.id}/runtime/desktop`],
+  ])("guards viewer %s before creating or calling the Box client", async (_action, path) => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const runtimeFactory = vi.fn(() => {
+      throw new Error("Box client must not be created");
+    });
+    const forbidden = new (await import("@companion/core")).CompanionRuntimeForbiddenError();
+    coreMocks.getCompanionForRuntime.mockRejectedValue(forbidden);
+    coreMocks.claimCompanionRuntimeStart.mockRejectedValue(forbidden);
+    coreMocks.claimCompanionRuntimeStop.mockRejectedValue(forbidden);
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(403);
+    expect(runtimeFactory).not.toHaveBeenCalled();
+  });
+
   it("passes multi-provider credentials transiently to an owner start", async () => {
     const app = new Hono<{ Variables: ApiVariables }>();
     const start = vi.fn(async (input) => {
@@ -190,5 +217,24 @@ describe("Companions API feature gate", () => {
     }));
     expect(coreMocks.claimCompanionRuntimeStart).toHaveBeenCalledOnce();
     expect(JSON.stringify(await response.json())).not.toContain("secret-");
+  });
+
+  it("returns a transition conflict when desktop is requested before Box creation", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    coreMocks.getCompanionForRuntime.mockResolvedValueOnce({
+      ...companion,
+      runtime: { ...companion.runtime, box_id: null },
+    });
+    const runtimeFactory = vi.fn(() => {
+      throw new Error("Box client must not be created");
+    });
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/desktop`, {
+      method: "POST",
+    });
+
+    expect(response.status).toBe(409);
+    expect(runtimeFactory).not.toHaveBeenCalled();
   });
 });

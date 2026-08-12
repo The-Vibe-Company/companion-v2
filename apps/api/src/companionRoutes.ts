@@ -11,6 +11,7 @@ import {
   getCompanion,
   getCompanionForRuntime,
   listCompanions,
+  updateCompanionObservation,
   updateCompanionRuntime,
 } from "@companion/core";
 import {
@@ -120,7 +121,7 @@ export function registerCompanionRoutes(
       const observed = await runtimeFactory().status({ boxId: resolved.companion.runtime.box_id });
       const companion = await withTenantContext(
         { orgId: resolved.orgId, userId: resolved.actor.id },
-        (database) => updateCompanionRuntime({
+        (database) => updateCompanionObservation({
           actor: resolved.actor,
           orgId: resolved.orgId,
           companionId,
@@ -276,7 +277,9 @@ export function registerCompanionRoutes(
       const companionId = companionIdSchema.parse(c.req.param("id"));
       const companion = await tenant(c, ({ actor, orgId, database }) =>
         getCompanionForRuntime({ actor, orgId, companionId, database }));
-      if (!companion.runtime.box_id) throw new Error("companion has no Box");
+      if (!companion.runtime.box_id) {
+        throw new CompanionRuntimeTransitionError("companion has no Box");
+      }
       const desktop = await runtimeFactory().desktop({ boxId: companion.runtime.box_id });
       return c.json({
         desktop_url: desktop.url,

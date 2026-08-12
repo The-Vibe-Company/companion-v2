@@ -30,9 +30,15 @@ describe("AsciiBoxCompanionRuntime", () => {
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.includes("/boxes?limit=200") && (!init?.method || init.method === "GET")) {
+        return json({ boxes: [] });
+      }
       if (url.endsWith("/boxes") && init?.method === "POST") {
         createBody = body;
         return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } }, 202);
+      }
+      if (url.endsWith("/boxes/bx_23456789") && init?.method === "PATCH") {
+        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } });
       }
       if (url.endsWith("/files") && init?.method === "PUT") {
         fileBody = body;
@@ -75,6 +81,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       },
     });
     expect(String(createBody?.setupScript)).toContain("pi --mode rpc --session-dir");
+    expect(String(createBody?.setupScript)).toContain("ExecStart=%h/.companion/bin/pi-daemon");
     expect(String(createBody?.setupScript)).not.toContain("OpenCode");
     expect(fileBody).toEqual({
       path: ".companion/runtime/state/providers.env",
@@ -89,16 +96,20 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
   });
 
-  it("resumes an archived Box before restarting Pi", async () => {
-    let firstGet = true;
+  it("recovers a deterministically named archived Box before restarting Pi", async () => {
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.includes("/boxes?limit=200") && (!init?.method || init.method === "GET")) {
+        return json({
+          boxes: [{
+            ...box,
+            name: "Companion 11111111-1111-4111-8111-111111111111",
+            state: "archived",
+          }],
+        });
+      }
       if (url.endsWith("/boxes/bx_23456789") && (!init?.method || init.method === "GET")) {
-        if (firstGet) {
-          firstGet = false;
-          return json({ box: { ...box, state: "archived", setupStatus: "done" } });
-        }
         return json({ box });
       }
       if (url.endsWith("/resume") && init?.method === "POST") {
@@ -125,7 +136,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     const result = await runtime.start({
       companionId: "11111111-1111-4111-8111-111111111111",
       orgId: "22222222-2222-4222-8222-222222222222",
-      boxId: "bx_23456789",
+      boxId: null,
       credentials: [],
       onBoxAssigned: async () => undefined,
     });
@@ -133,6 +144,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(result.runtimeState).toBe("running");
     expect(fetchMock.mock.calls.some(([url, init]) =>
       String(url).endsWith("/resume") && init?.method === "POST")).toBe(true);
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
   });
 
   it("reports archived status without executing a command or waking the Box", async () => {
@@ -145,6 +158,77 @@ describe("AsciiBoxCompanionRuntime", () => {
 
     expect(result).toMatchObject({ runtimeState: "stopped", daemonState: "stopped" });
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("best-effort removes the provider file when daemon start transport fails", async () => {
+    const commands: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && (!init?.method || init.method === "GET")) {
+        return json({ box });
+      }
+      if (url.endsWith("/files") && init?.method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && init?.method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        if (command.includes("restart companion-pi-daemon")) {
+          return json({ code: "box_direct_failed", message: "command transport failed" }, 502);
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      credentials: [
+        { provider: "anthropic", envKey: "ANTHROPIC_API_KEY", value: "secret-value" },
+      ],
+      onBoxAssigned: async () => undefined,
+    })).rejects.toThrow("command transport failed");
+
+    expect(commands.some((command) =>
+      command === "rm -f \"$HOME/.companion/runtime/state/providers.env\"")).toBe(true);
+  });
+
+  it("best-effort archives a newly created Box when its id cannot be persisted", async () => {
+    let stopped = false;
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (url.includes("/boxes?limit=200") && (!init?.method || init.method === "GET")) {
+        return json({ boxes: [] });
+      }
+      if (url.endsWith("/boxes") && init?.method === "POST") {
+        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } }, 202);
+      }
+      if (url.endsWith("/boxes/bx_23456789") && init?.method === "PATCH") {
+        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } });
+      }
+      if (url.endsWith("/stop") && init?.method === "POST") {
+        stopped = true;
+        return json({ box: { ...box, state: "archiving" } }, 202);
+      }
+      throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: null,
+      credentials: [],
+      onBoxAssigned: async () => {
+        throw new Error("database unavailable");
+      },
+    })).rejects.toThrow("database unavailable");
+
+    expect(stopped).toBe(true);
   });
 });
 

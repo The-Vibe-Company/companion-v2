@@ -3,6 +3,13 @@ import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { extractRuntimeRoleGrantBlock, resolveRuntimeRoleGrantsFile } from "../../src/migrate";
 import {
+  CompanionRuntimeTransitionError,
+  claimCompanionRuntimeStart,
+  claimCompanionRuntimeStop,
+  updateCompanionObservation,
+} from "@companion/core";
+import { withTenantContext } from "@companion/db";
+import {
   createIntegrationFixture,
   integrationSql,
   seedSkill,
@@ -97,5 +104,57 @@ describe("Skills Hub PostgreSQL isolation", () => {
       return tx<Array<{ id: string }>>`select id from companions`;
     });
     expect(outsiderVisible).toEqual([]);
+  });
+
+  it("CAS-claims lifecycle transitions and keeps live observations from clobbering them", async () => {
+    await integrationSql`
+      update companions
+      set box_id = 'bx_23456789', runtime_state = 'stopped', daemon_state = 'stopped'
+      where id = ${companionId}
+    `;
+    const input = {
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      companionId,
+    };
+
+    const started = await withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => claimCompanionRuntimeStart({ ...input, database }),
+    );
+    expect(started.runtime.state).toBe("provisioning");
+    await expect(withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => claimCompanionRuntimeStart({ ...input, database }),
+    )).rejects.toBeInstanceOf(CompanionRuntimeTransitionError);
+
+    const observed = await withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => updateCompanionObservation({
+        ...input,
+        patch: {
+          runtimeState: "stopped",
+          daemonState: "stopped",
+          desktopAvailable: false,
+          observedAt: new Date(),
+        },
+        database,
+      }),
+    );
+    expect(observed.runtime.state).toBe("provisioning");
+
+    await integrationSql`
+      update companions set runtime_state = 'running', daemon_state = 'running'
+      where id = ${companionId}
+    `;
+    const stopped = await withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => claimCompanionRuntimeStop({ ...input, database }),
+    );
+    expect(stopped.runtime.state).toBe("stopping");
+    await expect(withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => claimCompanionRuntimeStop({ ...input, database }),
+    )).rejects.toBeInstanceOf(CompanionRuntimeTransitionError);
   });
 });

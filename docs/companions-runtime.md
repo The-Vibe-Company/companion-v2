@@ -10,6 +10,11 @@ PostgreSQL stores only list/open metadata: owner, Box id, last observed Box/Pi s
 desktop availability, and timestamps. `GET /v1/companions`, `GET /v1/companions/:id`, and the default
 `GET /v1/companions/:id/runtime` read only this projection and never call Box.
 
+Lifecycle claims are conditional updates. A claim abandoned by a crashed API process becomes
+retryable after five minutes; starts recover a Box by its deterministic `Companion <uuid>` name
+before creating another one. If a newly returned Box id cannot be persisted, the adapter
+best-effort archives it immediately.
+
 The current access projection is owner or viewer. Lifecycle, live status, and desktop routes call
 `getCompanionForRuntime` first and permit only owner/editor access. Editors are reserved for
 THE-322's share grants; until those grants exist only the creator is an owner and every other
@@ -58,6 +63,9 @@ after a Box resume.
 2. written through the Box file API to an owner-only transient environment file;
 3. inherited by the restarted Pi process; and
 4. removed immediately after systemd starts the process.
+
+If the start command transport fails after the file write, the adapter makes a separate
+best-effort removal call before returning the error.
 
 Only provider ids are persisted. THE-324 can resolve subscriptions/secrets and send the same input
 without changing the Box adapter. Credential values must be single-line and environment keys must

@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, lt, notInArray } from "drizzle-orm";
 import type {
   Companion,
   CompanionAccess,
@@ -9,6 +9,7 @@ import { db, schema, type Db } from "@companion/db";
 import { assertMember, type ActorContext } from "./services";
 
 type CompanionRow = typeof schema.companions.$inferSelect;
+const COMPANION_RUNTIME_CLAIM_STALE_MS = 5 * 60_000;
 
 export class CompanionNotFoundError extends Error {
   constructor() {
@@ -161,6 +162,43 @@ export async function updateCompanionRuntime(input: {
   return toCompanion(row, input.actor.id);
 }
 
+/**
+ * Record a live Box observation without overwriting a lifecycle claim. A status poll that races a
+ * start/stop returns the claimed control-plane state and lets that mutation remain authoritative.
+ */
+export async function updateCompanionObservation(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  patch: {
+    runtimeState: CompanionRuntimeState;
+    daemonState: CompanionDaemonState;
+    desktopAvailable: boolean;
+    observedAt: Date;
+  };
+  database?: Db;
+}): Promise<Companion> {
+  const database = input.database ?? db;
+  await getCompanionForRuntime({ ...input, database });
+  const [row] = await database
+    .update(schema.companions)
+    .set({
+      runtimeState: input.patch.runtimeState,
+      daemonState: input.patch.daemonState,
+      desktopAvailable: input.patch.desktopAvailable,
+      lastObservedAt: input.patch.observedAt,
+      updatedAt: new Date(),
+    })
+    .where(and(
+      eq(schema.companions.orgId, input.orgId),
+      eq(schema.companions.id, input.companionId),
+      notInArray(schema.companions.runtimeState, ["provisioning", "stopping"]),
+    ))
+    .returning();
+  if (row) return toCompanion(row, input.actor.id);
+  return getCompanionForRuntime({ ...input, database });
+}
+
 export async function claimCompanionRuntimeStart(input: {
   actor: ActorContext;
   orgId: string;
@@ -181,7 +219,10 @@ export async function claimCompanionRuntimeStart(input: {
   if (row) return toCompanion(row, input.actor.id);
 
   const current = await getCompanionForRuntime({ ...input, database });
-  if (current.runtime.state === "provisioning" || current.runtime.state === "stopping") {
+  const transitional =
+    current.runtime.state === "provisioning" || current.runtime.state === "stopping";
+  const staleBefore = new Date(Date.now() - COMPANION_RUNTIME_CLAIM_STALE_MS);
+  if (transitional && new Date(current.updated_at) >= staleBefore) {
     throw new CompanionRuntimeTransitionError(
       `companion runtime is already ${current.runtime.state}`,
     );
@@ -193,6 +234,7 @@ export async function claimCompanionRuntimeStart(input: {
       eq(schema.companions.orgId, input.orgId),
       eq(schema.companions.id, input.companionId),
       eq(schema.companions.runtimeState, current.runtime.state),
+      transitional ? lt(schema.companions.updatedAt, staleBefore) : undefined,
     ))
     .returning();
   if (!claimed) throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
@@ -208,7 +250,10 @@ export async function claimCompanionRuntimeStop(input: {
   const database = input.database ?? db;
   const current = await getCompanionForRuntime({ ...input, database });
   if (!current.runtime.box_id) throw new CompanionRuntimeTransitionError("companion has no Box to stop");
-  if (current.runtime.state === "provisioning" || current.runtime.state === "stopping") {
+  const transitional =
+    current.runtime.state === "provisioning" || current.runtime.state === "stopping";
+  const staleBefore = new Date(Date.now() - COMPANION_RUNTIME_CLAIM_STALE_MS);
+  if (transitional && new Date(current.updated_at) >= staleBefore) {
     throw new CompanionRuntimeTransitionError(
       `companion runtime is already ${current.runtime.state}`,
     );
@@ -220,6 +265,7 @@ export async function claimCompanionRuntimeStop(input: {
       eq(schema.companions.orgId, input.orgId),
       eq(schema.companions.id, input.companionId),
       eq(schema.companions.runtimeState, current.runtime.state),
+      transitional ? lt(schema.companions.updatedAt, staleBefore) : undefined,
     ))
     .returning();
   if (!claimed) throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
