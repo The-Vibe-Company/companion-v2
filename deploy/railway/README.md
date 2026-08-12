@@ -97,6 +97,27 @@ API and worker should use distinct `LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT` Pos
 
 The worker needs no Vercel, OpenCode, model-provider, golden snapshot, or runtime lifecycle variables.
 
+## Companions (optional, default off)
+
+`COMPANION_COMPANIONS_ENABLED` gates the Companions control plane on both web and API. It defaults to
+`false` when unset, so a fresh Railway deployment boots with Companions disabled and none of the
+Box/Pi/provider variables are required — leave the flag unset to keep it off. The API registers no
+Companion routes and the web shell hides the Companions surface until the flag is `true`.
+
+Set the flag to `true` on both `web` and `api` only when you intend to run Companions, and provide the
+runtime secrets it needs:
+
+- `COMPANION_BOX_API_KEY` — required for Box lifecycle calls (start/stop/status).
+- `COMPANION_SECRETS_MASTER_KEY` — the base64 32-byte Skills master key also envelope-encrypts
+  companion provider subscription credentials; it is already required by Secrets in production.
+- `COMPANION_PI_INSTALL_COMMAND` — set an operator-pinned Pi install command unless the Box template
+  preinstalls Pi.
+
+Optional tuning variables (`COMPANION_BOX_API_BASE`, `COMPANION_BOX_ENVIRONMENT`,
+`COMPANION_BOX_TTL_SECONDS`, `COMPANION_PI_MCP_ADAPTER_PACKAGE`) fall back to the safe defaults in
+`.env.example`. When the flag is `true` but a required secret is unset, the API still boots and logs a
+single startup warning naming the missing variables; Box and provider actions fail until they are set.
+
 ## Health and rollback
 
 Use `/health` for API availability and the Railway process status for worker/web. A rollback across migration 0062 restores code but not intentionally dropped runtime data; restore the pre-deploy database backup only if the product decision itself is rolled back. Skills, organizations, users, auth, Agent Auth, secrets, Skill Databases, GitHub, billing, and public-release data are preserved by the migration.
