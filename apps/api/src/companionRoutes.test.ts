@@ -204,6 +204,21 @@ describe("Companions API feature gate", () => {
     expect(runtimeFactory).not.toHaveBeenCalled();
   });
 
+  it("guards provider attachment with the same owner-only Companion boundary", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const forbidden = new (await import("@companion/core")).CompanionRuntimeForbiddenError();
+    coreMocks.setCompanionProvider.mockRejectedValueOnce(forbidden);
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    const response = await app.request(`/v1/companions/${companion.id}/provider`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: "anthropic" }),
+    });
+
+    expect(response.status).toBe(403);
+  });
+
   it("resolves the selected encrypted provider and passes only Pi auth to Box", async () => {
     const app = new Hono<{ Variables: ApiVariables }>();
     const start = vi.fn(async (input) => {
