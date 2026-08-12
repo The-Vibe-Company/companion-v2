@@ -18,7 +18,7 @@ from typing import Any
 
 import companion_lib
 
-ONBOARDING_TOOLS = ("claude-code", "codex", "opencode", "hermes")
+ONBOARDING_TOOLS = ("claude-code", "codex", "opencode", "grok-bot", "hermes")
 COMPANION_SLUG = "companion"
 COMPANION_MANIFEST = Path(__file__).resolve().parent.parent / "companion.json"
 MAX_SKILL_FILES = 2_000

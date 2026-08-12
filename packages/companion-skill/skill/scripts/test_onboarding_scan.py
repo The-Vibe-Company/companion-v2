@@ -56,6 +56,12 @@ class OnboardingScanTests(unittest.TestCase):
                                 "project": ".agents/skills",
                             }
                         },
+                        "grok-bot": {
+                            "skillsDir": {
+                                "user": str(self.home / ".cursor" / "skills"),
+                                "project": ".cursor/skills",
+                            }
+                        },
                         "openclaw": {
                             "skillsDir": {
                                 "user": str(self.home / ".openclaw" / "skills"),
@@ -164,6 +170,25 @@ class OnboardingScanTests(unittest.TestCase):
                 "path": str(nested),
             },
             rows[0]["copies"][0],
+        )
+
+    def test_discovers_grok_bot_global_and_project_skills(self):
+        global_skill = self.skill(self.home / ".cursor/skills/global-workflow", "global-workflow")
+        project_skill = self.skill(self.project / ".cursor/skills/project-workflow", "project-workflow")
+
+        rows = self.run_scan()
+
+        self.assertEqual(["global-workflow", "project-workflow"], [row["slug"] for row in rows])
+        self.assertEqual(
+            {
+                ("grok-bot", "user", str(global_skill)),
+                ("grok-bot", "project", str(project_skill)),
+            },
+            {
+                (copy["tool"], copy["scope"], copy["path"])
+                for row in rows
+                for copy in row["copies"]
+            },
         )
 
     def test_excludes_companion_and_lockfile_tracked_by_path_or_slug_checksum(self):

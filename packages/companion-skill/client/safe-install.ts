@@ -33,7 +33,7 @@ const CENTRAL_SIGNATURE = 0x02014b50;
 const LOCAL_SIGNATURE = 0x04034b50;
 const WIN32_RESERVED_BASENAME = /^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])$/i;
 
-export type PublicInstallTool = "claude-code" | "codex" | "opencode" | "openclaw" | "hermes";
+export type PublicInstallTool = "claude-code" | "codex" | "opencode" | "grok-bot" | "openclaw" | "hermes";
 export type PublicInstallScope = "global" | "project";
 
 export interface PublicInstallPrerequisites {
@@ -327,6 +327,7 @@ export function inspectPublicSkillZip(bytes: Uint8Array): InspectedPublicSkillZi
 function libraryParts(tool: PublicInstallTool, scope: PublicInstallScope): string[] {
   if (tool === "claude-code") return [".claude", "skills"];
   if (tool === "codex") return [".codex", "skills"];
+  if (tool === "grok-bot") return [".cursor", "skills"];
   if (tool === "openclaw") return scope === "global" ? [".openclaw", "skills"] : ["skills"];
   if (tool === "hermes") {
     if (scope === "project") {

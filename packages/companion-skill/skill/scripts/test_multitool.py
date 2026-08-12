@@ -37,6 +37,12 @@ REGISTRY = {
         "skillsDir": {"user": "~/.agents/skills", "project": ".agents/skills"},
         "format": "skill-md",
     },
+    "grok-bot": {
+        "displayName": "Grok Bot",
+        "detect": ["~/.cursor"],
+        "skillsDir": {"user": "~/.cursor/skills", "project": ".cursor/skills"},
+        "format": "skill-md",
+    },
     "openclaw": {
         "displayName": "OpenClaw",
         "detect": ["~/.openclaw"],
@@ -83,12 +89,16 @@ class RegistryTests(EnvSandbox):
         self.assertIn("claude-code", registry)
         self.assertIn("codex", registry)
         self.assertIn("opencode", registry)
+        self.assertIn("grok-bot", registry)
         self.assertIn("openclaw", registry)
         self.assertIn("hermes", registry)
         self.assertEqual(registry["claude-code"]["skillsDir"]["user"], "~/.claude/skills")
         self.assertEqual(registry["opencode"]["detect"], ["~/.config/opencode"])
         self.assertEqual(registry["opencode"]["skillsDir"]["user"], "~/.agents/skills")
         self.assertEqual(registry["opencode"]["skillsDir"]["project"], ".agents/skills")
+        self.assertEqual(registry["grok-bot"]["detect"], ["~/.cursor"])
+        self.assertEqual(registry["grok-bot"]["skillsDir"]["user"], "~/.cursor/skills")
+        self.assertEqual(registry["grok-bot"]["skillsDir"]["project"], ".cursor/skills")
         self.assertEqual(registry["openclaw"]["detect"], ["~/.openclaw"])
         self.assertEqual(registry["openclaw"]["skillsDir"]["user"], "~/.openclaw/skills")
         self.assertEqual(registry["openclaw"]["skillsDir"]["project"], "skills")
@@ -103,15 +113,20 @@ class RegistryTests(EnvSandbox):
         self.assertEqual(companion_lib.detect_tools(REGISTRY), ["claude-code", "codex"])
         (self.home / ".config" / "opencode").mkdir(parents=True)
         self.assertEqual(companion_lib.detect_tools(REGISTRY), ["claude-code", "codex", "opencode"])
+        (self.home / ".cursor").mkdir()
+        self.assertEqual(
+            companion_lib.detect_tools(REGISTRY),
+            ["claude-code", "codex", "grok-bot", "opencode"],
+        )
         (self.home / ".openclaw").mkdir()
         self.assertEqual(
             companion_lib.detect_tools(REGISTRY),
-            ["claude-code", "codex", "openclaw", "opencode"],
+            ["claude-code", "codex", "grok-bot", "openclaw", "opencode"],
         )
         (self.home / ".hermes").mkdir()
         self.assertEqual(
             companion_lib.detect_tools(REGISTRY),
-            ["claude-code", "codex", "hermes", "openclaw", "opencode"],
+            ["claude-code", "codex", "grok-bot", "hermes", "openclaw", "opencode"],
         )
 
     def test_resolve_target_dir_user_and_project(self) -> None:
@@ -124,6 +139,10 @@ class RegistryTests(EnvSandbox):
         self.assertEqual(project_dir, project_root / ".codex" / "skills" / "demo")
         opencode_project_dir = companion_lib.resolve_target_dir("opencode", "project", "demo", project_root, REGISTRY)
         self.assertEqual(opencode_project_dir, project_root / ".agents" / "skills" / "demo")
+        grok_user_dir = companion_lib.resolve_target_dir("grok-bot", "user", "demo", None, REGISTRY)
+        self.assertEqual(grok_user_dir, self.home / ".cursor" / "skills" / "demo")
+        grok_project_dir = companion_lib.resolve_target_dir("grok-bot", "project", "demo", project_root, REGISTRY)
+        self.assertEqual(grok_project_dir, project_root / ".cursor" / "skills" / "demo")
         openclaw_user_dir = companion_lib.resolve_target_dir("openclaw", "user", "demo", None, REGISTRY)
         self.assertEqual(openclaw_user_dir, self.home / ".openclaw" / "skills" / "demo")
         openclaw_project_dir = companion_lib.resolve_target_dir("openclaw", "project", "demo", project_root, REGISTRY)
@@ -168,14 +187,14 @@ class ConfigTests(EnvSandbox):
     def test_round_trip_tool_config(self) -> None:
         self.assertEqual(companion_lib.load_tool_config(), [])
         path = companion_lib.save_tool_config(
-            ["opencode", "openclaw", "hermes", "codex", "claude-code", "codex"],
+            ["opencode", "openclaw", "grok-bot", "hermes", "codex", "claude-code", "codex"],
             detected_at="2026-06-26T00:00:00Z",
         )
         self.assertTrue(path.exists())
         saved = json.loads(path.read_text())
-        self.assertEqual(saved["tools"], ["claude-code", "codex", "hermes", "openclaw", "opencode"])  # sorted + deduped
+        self.assertEqual(saved["tools"], ["claude-code", "codex", "grok-bot", "hermes", "openclaw", "opencode"])  # sorted + deduped
         self.assertEqual(saved["detectedAt"], "2026-06-26T00:00:00Z")
-        self.assertEqual(companion_lib.load_tool_config(), ["claude-code", "codex", "hermes", "openclaw", "opencode"])
+        self.assertEqual(companion_lib.load_tool_config(), ["claude-code", "codex", "grok-bot", "hermes", "openclaw", "opencode"])
 
 
 class CredentialResolutionTests(EnvSandbox):
@@ -539,18 +558,21 @@ class FanOutTests(EnvSandbox):
         pkg = self._package()
         project_root = self.root / "repo"
         project_root.mkdir()
-        plan = [("claude-code", "user"), ("codex", "user"), ("opencode", "user"), ("hermes", "user"), ("claude-code", "project"), ("opencode", "project")]
+        plan = [("claude-code", "user"), ("codex", "user"), ("opencode", "user"), ("grok-bot", "user"), ("hermes", "user"), ("claude-code", "project"), ("opencode", "project"), ("grok-bot", "project")]
         results = install_skill.fan_out_install(pkg, "demo", plan, REGISTRY, project_root, {}, {}, force=False)
         self.assertTrue(all(row["status"] == "installed" for row in results))
         self.assertTrue((self.home / ".claude" / "skills" / "demo" / "SKILL.md").exists())
         self.assertTrue((self.home / ".codex" / "skills" / "demo" / "SKILL.md").exists())
         self.assertTrue((self.home / ".agents" / "skills" / "demo" / "SKILL.md").exists())
+        self.assertTrue((self.home / ".cursor" / "skills" / "demo" / "SKILL.md").exists())
         self.assertTrue((self.home / ".hermes" / "skills" / "demo" / "SKILL.md").exists())
         self.assertTrue((project_root / ".claude" / "skills" / "demo" / "SKILL.md").exists())
         self.assertTrue((project_root / ".agents" / "skills" / "demo" / "SKILL.md").exists())
+        self.assertTrue((project_root / ".cursor" / "skills" / "demo" / "SKILL.md").exists())
         self.assertEqual([], self._swap_dirs(self.home / ".claude" / "skills"))
         self.assertEqual([], self._swap_dirs(self.home / ".codex" / "skills"))
         self.assertEqual([], self._swap_dirs(self.home / ".agents" / "skills"))
+        self.assertEqual([], self._swap_dirs(self.home / ".cursor" / "skills"))
         self.assertEqual([], self._swap_dirs(self.home / ".hermes" / "skills"))
 
     def test_deploy_to_target_restores_and_deletes_backup_after_rename_failure(self) -> None:
@@ -1307,7 +1329,7 @@ class DependencyInstallPlanTests(EnvSandbox):
                 "token",
                 "ws",
                 [dep, root],
-                [("claude-code", "user"), ("codex", "project")],
+                [("claude-code", "user"), ("codex", "project"), ("grok-bot", "project")],
                 REGISTRY,
                 project_root,
                 {},
@@ -1323,7 +1345,17 @@ class DependencyInstallPlanTests(EnvSandbox):
         self.assertEqual(sorted(user_skills), ["dep", "root"])
         self.assertEqual(sorted(project_skills), ["dep", "root"])
         self.assertEqual(user_skills["dep"]["targets"][0]["tool"], "claude-code")
-        self.assertEqual(project_skills["root"]["targets"][0]["path"], ".codex/skills/root")
+        project_targets = {
+            target["tool"]: target["path"]
+            for target in project_skills["root"]["targets"]
+        }
+        self.assertEqual(
+            project_targets,
+            {
+                "codex": ".codex/skills/root",
+                "grok-bot": ".cursor/skills/root",
+            },
+        )
 
 
 if __name__ == "__main__":

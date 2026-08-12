@@ -1,11 +1,11 @@
 {
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.35.0",
+  "version": "1.37.0",
   "icon": "boxes",
   "title": "Companion",
   "description": "Manage and safely install SKILL.md packages through delegated Agent Auth, including pinned public releases, publishing, updates, dependencies, secrets, hosted Skill Databases, local install tracking, and Companion self-update.",
-  "notes": "## What it does\n\nThe Companion skill gives your assistant one reliable workflow for local SKILL.md packages: connect through delegated Agent Auth, validate, publish, update, organize, install, audit, use declared hosted SQLite state, and self-update. It can also publish one explicitly selected version of an organization skill as a stable public release.\n\n## Safety model\n\n- Reads only skill folders you point it at and Companion's own local state under ~/.companion.\n- Stores only the non-secret Agent Auth reference in ~/.companion/credentials.json; private keys live in 0600 files under ~/.companion/agent-auth.\n- Requests workspace-scoped capabilities progressively and never silently falls back to a preserved PAT. Legacy PAT use requires COMPANION_AUTH_MODE=legacy-pat.\n- Can issue a short-lived, revocable child PAT from an existing Agent Auth grant snapshot and pass it only through an owner-only FIFO; env mode never reads credentials.json or starts device approval.\n- Confirms publishing or archival changes before mutating workspace skills, and defaults public-release promotion to no after every publication.\n- Verifies the exact public ZIP checksum, rejects unsafe archive entries, and never executes packaged scripts during a public install.\n- Uses companion.json as the source of truth for package identity, version, env/secrets, hosted database declarations, dependencies, notes, commands, and changelog.\n\n## Local tracking\n\nCompanion records installed workspace skills in ~/.companion/skills.lock.json under workspace-id keys so audits can compare local versions, checksums, and dependency snapshots against the workspace registry without storing credentials. Installs fan out into every tool the user works with (Claude Code, Codex, OpenCode, OpenClaw, Hermes, …); each record's targets[] array tracks the per-tool and per-project install locations, with project-scope installs kept in a per-project <repo>/.companion/skills.lock.json. Hermes installs use its global ~/.hermes/skills source of truth. Companion self-update also repairs every existing user-global Companion copy as one verified multi-tool transaction, with rollback on partial failure. Public-link installs only install the selected root ZIP and do not create a Companion skill_installs row.",
+  "notes": "## What it does\n\nThe Companion skill gives your assistant one reliable workflow for local SKILL.md packages: connect through delegated Agent Auth, validate, publish, update, organize, install, audit, use declared hosted SQLite state, and self-update. It can also publish one explicitly selected version of an organization skill as a stable public release.\n\n## Safety model\n\n- Reads only skill folders you point it at and Companion's own local state under ~/.companion.\n- Stores only the non-secret Agent Auth reference in ~/.companion/credentials.json; private keys live in 0600 files under ~/.companion/agent-auth.\n- Requests workspace-scoped capabilities progressively and never silently falls back to a preserved PAT. Legacy PAT use requires COMPANION_AUTH_MODE=legacy-pat.\n- Can issue a short-lived, revocable child PAT from an existing Agent Auth grant snapshot and pass it only through an owner-only FIFO; env mode never reads credentials.json or starts device approval.\n- Confirms publishing or archival changes before mutating workspace skills, and defaults public-release promotion to no after every publication.\n- Verifies the exact public ZIP checksum, rejects unsafe archive entries, and never executes packaged scripts during a public install.\n- Uses companion.json as the source of truth for package identity, version, env/secrets, hosted database declarations, dependencies, notes, commands, and changelog.\n\n## Local tracking\n\nCompanion records installed workspace skills in ~/.companion/skills.lock.json under workspace-id keys so audits can compare local versions, checksums, and dependency snapshots against the workspace registry without storing credentials. Installs fan out into every tool the user works with (Claude Code, Codex, OpenCode, Grok Bot, OpenClaw, Hermes, …); each record's targets[] array tracks the per-tool and per-project install locations, with project-scope installs kept in a per-project <repo>/.companion/skills.lock.json. Grok Bot is Cursor's desktop assistant, so Grok Bot installs use Cursor's supported ~/.cursor/skills global root or .cursor/skills project root. Hermes installs use its global ~/.hermes/skills source of truth. Companion self-update also repairs every existing user-global Companion copy as one verified multi-tool transaction, with rollback on partial failure. Public-link installs only install the selected root ZIP and do not create a Companion skill_installs row.",
   "metadata": {
     "companionSkillId": "b0780a97-6972-4a2b-8e88-f41a528900c7",
     "integrityFiles": [
@@ -28,6 +28,24 @@
       "evals/evals.json"
     ],
     "changelog": [
+      {
+        "version": "1.37.0",
+        "date": "2026-08-12",
+        "changes": [
+          "Clarifies that the grok-bot install target is Grok Bot (Cursor), Cursor's desktop assistant, across tool display names and docs.",
+          "Keeps the stable grok-bot machine key and ~/.cursor/skills and .cursor/skills discovery roots unchanged.",
+          "Keeps delegated Agent Auth as the default programmatic identity."
+        ]
+      },
+      {
+        "version": "1.36.0",
+        "date": "2026-08-11",
+        "changes": [
+          "Adds Grok Bot (Cursor's desktop assistant) as a detected Companion install target through Cursor's supported ~/.cursor/skills and .cursor/skills discovery roots.",
+          "Tracks Grok Bot user and project installs in lockfile targets and includes them in onboarding scans and Companion self-update fan-out.",
+          "Documents Grok Bot install choices while keeping delegated Agent Auth as the default identity."
+        ]
+      },
       {
         "version": "1.35.0",
         "date": "2026-08-09",
@@ -466,7 +484,7 @@
     { "name": "Update Companion skill", "desc": "Check and synchronize the latest bundled Companion skill across every existing registered tool installation." },
     { "name": "Guard against duplicates", "desc": "Preflight the local inventory and workspace catalog before create/update/install to block duplicate slugs and skill-id retargets." },
     { "name": "Check for updates", "desc": "Compare installed skills and dependencies against the workspace registry." },
-    { "name": "Install into your tools", "desc": "Fan out a skill install into every configured tool (Claude Code, Codex, OpenCode, OpenClaw, Hermes) at each supported scope." },
+    { "name": "Install into your tools", "desc": "Fan out a skill install into every configured tool (Claude Code, Codex, OpenCode, Grok Bot (Cursor), OpenClaw, Hermes) at each supported scope." },
     { "name": "Install updates", "desc": "Bring outdated skills up to the latest published version." },
     { "name": "Validate a skill", "desc": "Check a skill is well formed before you share it." },
     { "name": "Manage your skills", "desc": "List and organize the skills on this machine." }

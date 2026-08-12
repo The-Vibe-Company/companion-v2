@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.35.0");
+    expect(pkg.version).toBe("1.37.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -126,9 +126,10 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("Skills Hub only");
+    expect(changelog).toContain("Grok Bot");
+    expect(changelog).toContain("~/.cursor/skills");
+    expect(changelog).toContain(".cursor/skills");
     expect(changelog).toContain("delegated Agent Auth");
-    expect(changelog).toContain("hosted Skill Databases");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
@@ -168,7 +169,10 @@ describe("companion skill package + row", () => {
     expect(row.prompts.install).toContain("{workspaceId}");
     expect(row.prompts.install).not.toContain("{token}");
     expect(row.prompts.install).toContain("@auth/agent-cli@0.5.1");
-    expect(row.prompts.install).toContain("Claude Code, Codex, OpenCode, OpenClaw, or Hermes");
+    expect(row.prompts.install).toContain("Claude Code, Codex, OpenCode, Grok Bot, OpenClaw, or Hermes");
+    expect(row.prompts.install).toContain("~/.cursor/skills");
+    expect(row.prompts.install).toContain(".cursor/skills");
+    expect(row.prompts.install).toContain("Cursor's desktop assistant");
     expect(row.prompts.install).toContain("Hermes is global-only");
     expect(row.prompts.install).toContain("do not offer project scope for Hermes");
     expect(row.prompts.install).toContain("~/.hermes/skills/<slug>");
@@ -225,7 +229,7 @@ describe("companion skill package + row", () => {
     const companionLib = await readFile(join(companionSkillDir(), "scripts", "companion_lib.py"), "utf8");
     const guardScript = await readFile(join(companionSkillDir(), "scripts", "skill_guard.py"), "utf8");
     expect(skillMd).not.toContain("companion_version:");
-    expect(skillMd).toContain("compatibility: claude-code codex opencode");
+    expect(skillMd).toContain("compatibility: claude-code codex opencode grok-bot");
     expect(skillMd).toContain("companion.json.version");
     expect(skillMd).toContain("https://thecompanion.sh/schemas/companion-manifest.v2.schema.json");
     expect(skillMd).toContain("skills.lock.json");

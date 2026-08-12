@@ -580,10 +580,12 @@ and retry only the install report.
 
 The install report stays **aggregate**: the workspace tracks one `skill_installs` row per user, with
 no per-tool dimension. When a skill is installed into several local tools at once (Claude Code,
-Codex, OpenCode, OpenClaw, Hermes, …) or into multiple projects, still send a **single**
+Codex, OpenCode, Grok Bot, OpenClaw, Hermes, …) or into multiple projects, still send a **single**
 `POST /skills/{slug}/install`, using `agent` to name the tools (for example
-`"Claude Code, Codex, OpenCode, OpenClaw, Hermes"`). OpenClaw targets `~/.openclaw/skills` for user-global
-installs and `<workspace>/skills` for workspace installs. Hermes targets only its recursive,
+`"Claude Code, Codex, OpenCode, Grok Bot, OpenClaw, Hermes"`). Grok Bot is Cursor's desktop assistant,
+so it targets Cursor's supported `~/.cursor/skills` user-global root and `<project>/.cursor/skills`
+project root. OpenClaw targets
+`~/.openclaw/skills` for user-global installs and `<workspace>/skills` for workspace installs. Hermes targets only its recursive,
 user-global source of truth at `~/.hermes/skills`. The per-tool, per-project install locations
 are tracked locally, not in the workspace: each lockfile skill record carries a `targets[]` array
 (`{ tool, scope, path, checksum }`), user-scope targets in `~/.companion/skills.lock.json` and

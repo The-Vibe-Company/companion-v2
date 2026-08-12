@@ -2,8 +2,8 @@
 """Install (or update) a published workspace skill into every local tool at once.
 
 This is the deterministic fan-out behind multi-tool installs. Given a skill slug it downloads the
-package once and deploys it into each configured tool (Claude Code, Codex, OpenCode, OpenClaw,
-Hermes, …) at
+package once and deploys it into each configured tool (Claude Code, Codex, OpenCode, Grok Bot,
+OpenClaw, Hermes, …) at
 the requested scope (user-global and/or the current project or workspace), then records every install
 location in the right lockfile so updates and audits stay tool-aware:
 
@@ -724,7 +724,7 @@ def resolve_tools(args_tools: str | None, registry: dict[str, Any]) -> list[str]
         fail(
             "no tools configured. Detected on this machine: "
             f"{hint}. Confirm the set with the user, then write {config_path()} "
-            "(or pass --tools claude-code,codex,opencode,openclaw,hermes)."
+            "(or pass --tools claude-code,codex,opencode,grok-bot,openclaw,hermes)."
         )
     unknown = [tool for tool in wanted if tool not in registry]
     if unknown:
