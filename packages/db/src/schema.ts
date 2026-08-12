@@ -364,6 +364,8 @@ export const companions = pgTable(
     runtimeState: companionRuntimeStateEnum("runtime_state").notNull().default("not_created"),
     daemonState: companionDaemonStateEnum("daemon_state").notNull().default("unknown"),
     providerIds: jsonb("provider_ids").$type<string[]>().notNull().default([]),
+    /** Encrypted provider credential generation last applied to the Box Pi auth file. */
+    providerCredentialGeneration: uuid("provider_credential_generation"),
     diskLayoutVersion: integer("disk_layout_version").notNull().default(1),
     desktopAvailable: boolean("desktop_available").notNull().default(false),
     lastObservedAt: timestamp("last_observed_at", { withTimezone: true }),

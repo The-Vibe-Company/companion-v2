@@ -69,6 +69,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       providerAuth: {
         anthropic: { type: "api_key", key: "secret-value" },
       },
+      replaceProviderAuth: true,
       onBoxAssigned: assigned,
     });
 
@@ -145,6 +146,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       orgId: "22222222-2222-4222-8222-222222222222",
       boxId: null,
       providerAuth: {},
+      replaceProviderAuth: false,
       onBoxAssigned: async () => undefined,
     });
 
@@ -196,6 +198,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       providerAuth: {
         anthropic: { type: "api_key", key: "secret-value" },
       },
+      replaceProviderAuth: true,
       onBoxAssigned: async () => undefined,
     })).rejects.toThrow("command transport failed");
 
@@ -230,6 +233,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       orgId: "22222222-2222-4222-8222-222222222222",
       boxId: null,
       providerAuth: {},
+      replaceProviderAuth: true,
       onBoxAssigned: async () => {
         throw new Error("database unavailable");
       },

@@ -255,6 +255,9 @@ export function registerCompanionRoutes(
         providerAuth: {
           [mutation.provider.providerId]: mutation.provider.authEntry,
         },
+        replaceProviderAuth:
+          mutation.companion.runtime.provider_credential_generation
+          !== mutation.provider.credentialGeneration,
         onBoxAssigned: async (boxId) => {
           await withTenantContext(
             { orgId: mutation!.orgId, userId: mutation!.actor.id },
@@ -278,6 +281,7 @@ export function registerCompanionRoutes(
             boxId: observed.boxId,
             runtimeState: observed.runtimeState,
             daemonState: observed.daemonState,
+            providerCredentialGeneration: mutation.provider.credentialGeneration,
             desktopAvailable: observed.desktopAvailable,
             observedAt: new Date(),
             startedAt: new Date(),

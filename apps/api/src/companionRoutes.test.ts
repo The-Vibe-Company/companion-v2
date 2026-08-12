@@ -55,6 +55,7 @@ const companion = {
     daemon_state: "stopped" as const,
     box_id: "bx_23456789",
     provider_ids: ["anthropic"],
+    provider_credential_generation: null,
     disk_layout_version: 1,
     desktop_available: true,
     last_observed_at: null,
@@ -96,6 +97,7 @@ describe("Companions API feature gate", () => {
     coreMocks.setDefaultCompanionProvider.mockResolvedValue(undefined);
     coreMocks.resolveCompanionProviderAuth.mockResolvedValue({
       providerId: "anthropic",
+      credentialGeneration: "22222222-2222-4222-8222-222222222222",
       authEntry: { type: "api_key", key: "secret-a" },
     });
     coreMocks.getCompanion.mockResolvedValue(companion);
@@ -233,6 +235,7 @@ describe("Companions API feature gate", () => {
       providerAuth: {
         anthropic: { type: "api_key", key: "secret-a" },
       },
+      replaceProviderAuth: true,
     }));
     expect(coreMocks.resolveCompanionProviderAuth).toHaveBeenCalledOnce();
     expect(coreMocks.claimCompanionRuntimeStart).toHaveBeenCalledOnce();

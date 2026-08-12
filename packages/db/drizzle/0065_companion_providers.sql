@@ -3,6 +3,9 @@ CREATE TYPE "companion_provider_auth_method" AS ENUM ('api_key', 'subscription')
 ALTER TABLE "organizations"
   ADD COLUMN "default_companion_provider_id" text;
 --> statement-breakpoint
+ALTER TABLE "companions"
+  ADD COLUMN "provider_credential_generation" uuid;
+--> statement-breakpoint
 ALTER TABLE "organizations"
   ADD CONSTRAINT "organizations_default_companion_provider_id_check"
   CHECK (

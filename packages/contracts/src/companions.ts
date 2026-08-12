@@ -83,6 +83,7 @@ export const companionSchema = z.object({
     daemon_state: companionDaemonStateSchema,
     box_id: z.string().nullable(),
     provider_ids: z.array(z.string()),
+    provider_credential_generation: z.string().uuid().nullable(),
     disk_layout_version: z.number().int().positive(),
     desktop_available: z.boolean(),
     last_observed_at: z.string().datetime().nullable(),

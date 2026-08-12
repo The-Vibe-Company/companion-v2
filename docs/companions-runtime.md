@@ -75,8 +75,9 @@ endpoint.
 
 The auth file remains on snapshotted Box disk because Pi must update refreshable subscription
 tokens. Reconnecting or disconnecting a provider replaces or removes the control-plane copy; the
-next start replaces the Box file with only the selected provider. A failed daemon-start transport
-best-effort removes the just-written auth file.
+next start replaces the Box file with only the selected provider. Later starts preserve Pi's
+possibly refreshed OAuth entry until the encrypted connection generation changes. A failed
+daemon-start transport best-effort removes a just-written auth file.
 
 Subscription setup deliberately reuses Pi's authentication implementation. Run `/login` with the
 same pinned Pi version on a trusted machine, then submit only that provider's `{ "type": "oauth",

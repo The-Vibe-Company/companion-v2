@@ -63,6 +63,7 @@ export interface CompanionBoxRuntime {
     orgId: string;
     boxId: string | null;
     providerAuth: Record<string, Record<string, unknown>>;
+    replaceProviderAuth: boolean;
     onBoxAssigned: (boxId: string) => Promise<void>;
   }): Promise<CompanionRuntimeObservation>;
   stop(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
@@ -258,6 +259,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     orgId: string;
     boxId: string | null;
     providerAuth: Record<string, Record<string, unknown>>;
+    replaceProviderAuth: boolean;
     onBoxAssigned: (boxId: string) => Promise<void>;
   }): Promise<CompanionRuntimeObservation> {
     let box: BoxInfo;
@@ -336,13 +338,15 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
       }
     }
     box = await this.#waitReady(box.id);
-    await this.#request(`/boxes/${encodeURIComponent(box.id)}/files`, {
-      method: "PUT",
-      body: JSON.stringify({
-        path: ".pi/agent/auth.json",
-        content: `${JSON.stringify(input.providerAuth)}\n`,
-      }),
-    });
+    if (input.replaceProviderAuth) {
+      await this.#request(`/boxes/${encodeURIComponent(box.id)}/files`, {
+        method: "PUT",
+        body: JSON.stringify({
+          path: ".pi/agent/auth.json",
+          content: `${JSON.stringify(input.providerAuth)}\n`,
+        }),
+      });
+    }
     let started: CommandEnvelope;
     try {
       started = await this.#command(

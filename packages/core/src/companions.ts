@@ -87,6 +87,7 @@ function toCompanion(row: CompanionRow, actorId: string): Companion {
       daemon_state: row.daemonState,
       box_id: row.boxId,
       provider_ids: row.providerIds,
+      provider_credential_generation: row.providerCredentialGeneration,
       disk_layout_version: row.diskLayoutVersion,
       desktop_available: row.desktopAvailable,
       last_observed_at: row.lastObservedAt?.toISOString() ?? null,
@@ -397,7 +398,11 @@ export async function resolveCompanionProviderAuth(input: {
   companionId: string;
   masterKey?: Buffer;
   database?: Db;
-}): Promise<{ providerId: string; authEntry: Record<string, unknown> }> {
+}): Promise<{
+  providerId: string;
+  credentialGeneration: string;
+  authEntry: Record<string, unknown>;
+}> {
   const database = input.database ?? db;
   const companion = await getCompanionForRuntime({ ...input, database });
   const providerId = companion.runtime.provider_ids[0];
@@ -431,7 +436,11 @@ export async function resolveCompanionProviderAuth(input: {
     if (!authEntry || typeof authEntry !== "object" || !["api_key", "oauth"].includes(String(authEntry.type))) {
       throw new Error("invalid provider credential");
     }
-    return { providerId, authEntry };
+    return {
+      providerId,
+      credentialGeneration: row.credentialGeneration,
+      authEntry,
+    };
   } catch {
     throw new CompanionProviderError(
       "provider_auth_invalid",
@@ -461,6 +470,7 @@ export async function updateCompanionRuntime(input: {
     runtimeState?: CompanionRuntimeState;
     daemonState?: CompanionDaemonState;
     providerIds?: string[];
+    providerCredentialGeneration?: string | null;
     desktopAvailable?: boolean;
     observedAt?: Date;
     startedAt?: Date;
@@ -478,6 +488,9 @@ export async function updateCompanionRuntime(input: {
       ...(input.patch.runtimeState ? { runtimeState: input.patch.runtimeState } : {}),
       ...(input.patch.daemonState ? { daemonState: input.patch.daemonState } : {}),
       ...(input.patch.providerIds ? { providerIds: input.patch.providerIds } : {}),
+      ...(input.patch.providerCredentialGeneration !== undefined
+        ? { providerCredentialGeneration: input.patch.providerCredentialGeneration }
+        : {}),
       ...(input.patch.desktopAvailable !== undefined
         ? { desktopAvailable: input.patch.desktopAvailable }
         : {}),
