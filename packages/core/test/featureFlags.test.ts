@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { COMPANIONS_FEATURE_FLAG, companionsEnabled } from "./featureFlags";
+import { COMPANIONS_FEATURE_FLAG, companionsEnabled } from "../src/featureFlags";
 
 describe("companionsEnabled", () => {
   it("fails closed when the flag is absent or disabled", () => {
