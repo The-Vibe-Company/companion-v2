@@ -269,6 +269,35 @@ describe("Companions API feature gate", () => {
   });
 
   it.each([
+    ["list", "GET", `/v1/companions/${companion.id}/shares`, undefined, "listCompanionShares"],
+    ["workspace", "PUT", `/v1/companions/${companion.id}/shares/workspace`, {
+      role: "viewer",
+    }, "setCompanionWorkspaceShare"],
+    ["invite", "PUT", `/v1/companions/${companion.id}/shares/members`, {
+      email: "viewer@example.test",
+      role: "viewer",
+    }, "inviteCompanionMember"],
+    ["role", "PATCH", `/v1/companions/${companion.id}/shares/members/user-2`, {
+      role: "editor",
+    }, "updateCompanionMemberRole"],
+    ["revoke", "DELETE", `/v1/companions/${companion.id}/shares/members/user-2`, undefined,
+      "revokeCompanionMember"],
+  ] as const)("rejects non-owner share %s", async (_name, method, path, body, mockName) => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const forbidden = new (await import("@companion/core")).CompanionShareForbiddenError();
+    coreMocks[mockName].mockRejectedValueOnce(forbidden);
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    const response = await app.request(path, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+
+    expect(response.status).toBe(403);
+  });
+
+  it.each([
     ["start", `/v1/companions/${companion.id}/runtime/start`],
     ["stop", `/v1/companions/${companion.id}/runtime/stop`],
     ["desktop", `/v1/companions/${companion.id}/runtime/desktop`],

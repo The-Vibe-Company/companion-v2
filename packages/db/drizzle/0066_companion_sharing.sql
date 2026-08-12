@@ -262,11 +262,19 @@ CREATE POLICY "companion_transcript_entries_editor_insert_rls" ON "companion_tra
               AND a.user_id = NULLIF(current_setting('app.user_id', true), '')
               AND a.role = 'editor'
           )
-          OR EXISTS (
-            SELECT 1 FROM public.companion_workspace_access a
-            WHERE a.org_id = c.org_id
-              AND a.companion_id = c.id
-              AND a.role = 'editor'
+          OR (
+            NOT EXISTS (
+              SELECT 1 FROM public.companion_member_access a
+              WHERE a.org_id = c.org_id
+                AND a.companion_id = c.id
+                AND a.user_id = NULLIF(current_setting('app.user_id', true), '')
+            )
+            AND EXISTS (
+              SELECT 1 FROM public.companion_workspace_access a
+              WHERE a.org_id = c.org_id
+                AND a.companion_id = c.id
+                AND a.role = 'editor'
+            )
           )
         )
     )

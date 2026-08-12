@@ -26,6 +26,9 @@ import { Sidebar } from "../skills/Sidebar";
 import { skillsRouteHref, type SkillsLibrary } from "../skills/route";
 import type { TreeRow } from "../skills/sidebarTree";
 
+const DIALOG_FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 export interface CompanionNavigation {
   mineTreeRows: TreeRow[];
   orgTreeRows: TreeRow[];
@@ -79,6 +82,7 @@ export function CompanionsApp({
   const [transcript, setTranscript] = useState<CompanionTranscript | null>(null);
   const [transcriptError, setTranscriptError] = useState<string | null>(null);
   const threadRef = useRef<HTMLElement>(null);
+  const transcriptRequestRef = useRef(0);
   const noop = () => {};
   const connectedIds = useMemo(
     () => new Set(providers.connections.map((connection) => connection.provider_id)),
@@ -219,14 +223,23 @@ export function CompanionsApp({
   };
 
   const onOpenCompanion = async (companion: Companion) => {
+    const requestId = ++transcriptRequestRef.current;
     setOpened(companion);
     setTranscript(null);
     setTranscriptError(null);
     try {
-      setTranscript(await getCompanionTranscript(currentOrg.id, companion.id));
+      const result = await getCompanionTranscript(currentOrg.id, companion.id);
+      if (requestId === transcriptRequestRef.current) setTranscript(result);
     } catch (cause) {
-      setTranscriptError(cause instanceof Error ? cause.message : "Transcript could not be loaded.");
+      if (requestId === transcriptRequestRef.current) {
+        setTranscriptError(cause instanceof Error ? cause.message : "Transcript could not be loaded.");
+      }
     }
+  };
+
+  const closeThread = () => {
+    transcriptRequestRef.current += 1;
+    setOpened(null);
   };
 
   const navigateToLabel = (lib: SkillsLibrary, path: string) => {
@@ -253,13 +266,45 @@ export function CompanionsApp({
   }, [mobileSidebarOpen]);
 
   useEffect(() => {
+    if (!opened && !sharing) return;
+    const sidebar = document.querySelector<HTMLElement>(".side");
+    const sidebarWasInert = sidebar?.inert ?? false;
+    if (sidebar) sidebar.inert = true;
+    return () => {
+      if (sidebar) sidebar.inert = sidebarWasInert;
+    };
+  }, [opened, sharing]);
+
+  useEffect(() => {
     if (!opened) return;
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    threadRef.current?.focus();
+    const dialog = threadRef.current;
+    dialog?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      setOpened(null);
+      if (event.key === "Escape") {
+        event.preventDefault();
+        transcriptRequestRef.current += 1;
+        setOpened(null);
+        return;
+      }
+      if (event.key !== "Tab" || !dialog) return;
+      const items = Array.from(dialog.querySelectorAll<HTMLElement>(DIALOG_FOCUSABLE)).filter(
+        (item) => item.offsetParent !== null,
+      );
+      if (!items.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = items[0]!;
+      const last = items[items.length - 1]!;
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => {
@@ -596,7 +641,7 @@ export function CompanionsApp({
 
       {opened && (
         <div className="companions-thread-scrim" onMouseDown={(event) => {
-          if (event.target === event.currentTarget) setOpened(null);
+          if (event.target === event.currentTarget) closeThread();
         }}>
           <aside
             className="companions-thread"
@@ -619,7 +664,7 @@ export function CompanionsApp({
                 type="button"
                 className="iconbtn"
                 aria-label="Close transcript"
-                onClick={() => setOpened(null)}
+                onClick={closeThread}
               >
                 <Icon name="x" size={16} />
               </button>

@@ -49,8 +49,10 @@ export function ShareCompanionDialog({
     setError(null);
     try {
       setShares(await action());
+      return true;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Sharing could not be updated.");
+      return false;
     } finally {
       setBusy(false);
     }
@@ -58,8 +60,8 @@ export function ShareCompanionDialog({
 
   const invite = async (event: FormEvent) => {
     event.preventDefault();
-    await run(() => inviteCompanionMember(orgId, companion.id, email.trim(), role));
-    setEmail("");
+    const saved = await run(() => inviteCompanionMember(orgId, companion.id, email.trim(), role));
+    if (saved) setEmail("");
   };
 
   return (
