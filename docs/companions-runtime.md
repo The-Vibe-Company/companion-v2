@@ -123,9 +123,15 @@ After a provider is attached it is immutable, matching the creation flow.
 The auth file remains on snapshotted Box disk because Pi must update refreshable subscription
 tokens. Reconnecting or disconnecting a provider replaces or removes the control-plane copy; the
 next start replaces the Box file with only the selected provider. Later starts preserve Pi's
-possibly refreshed OAuth entry until the encrypted connection generation changes or the Companion
-is provisioned onto a new Box. A failed daemon start still best-effort removes the transient
-`mcp_credentials` environment file.
+possibly refreshed OAuth entry, and skip the rewrite only for a Box this Companion already
+provisioned at the current disk layout whose recorded credential generation still matches. A new
+Box, an older layout, or a rotated connection always rewrites the file. Start fails closed when the
+file is absent, and a failed daemon start still best-effort removes the transient `mcp_credentials`
+environment file.
+
+Migration `0065` clears `provider_ids` for existing rows. Before it, that column recorded whichever
+credential tags a start request carried, including MCP account tags, so no legacy value can name a
+workspace connection. Owners attach a real provider afterwards through the one-time route below.
 
 Subscription setup deliberately reuses Pi's authentication implementation. Run `/login` with the
 same pinned Pi version on a trusted machine, then submit only that provider's `{ "type": "oauth",

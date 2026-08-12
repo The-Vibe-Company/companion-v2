@@ -299,10 +299,12 @@ export function registerCompanionRoutes(
         providerAuth: {
           [mutation.provider.providerId]: mutation.provider.authEntry,
         },
-        // A Box that the control plane has not seen yet cannot hold a matching auth file, so the
-        // generation check only skips the write for a Box this Companion already provisioned.
+        // Skipping the write preserves a subscription token Pi refreshed on disk, so it is safe
+        // only for a Box this Companion already provisioned at the current layout, where the
+        // recorded generation proves the expected file is already in Pi's agent directory.
         replaceProviderAuth:
           !mutation.companion.runtime.box_id
+          || mutation.companion.runtime.disk_layout_version !== COMPANION_PI_DISK_LAYOUT_VERSION
           || mutation.companion.runtime.provider_credential_generation
             !== mutation.provider.credentialGeneration,
         mcpCredentials: body.mcp_credentials,

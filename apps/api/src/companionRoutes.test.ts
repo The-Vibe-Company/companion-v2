@@ -294,6 +294,74 @@ describe("Companions API feature gate", () => {
     expect(JSON.stringify(await response.json())).not.toContain("secret-");
   });
 
+  it.each([
+    [
+      "keeps a refreshed subscription file on an already provisioned Box at the current layout",
+      {
+        box_id: "bx_23456789",
+        disk_layout_version: 2,
+        provider_credential_generation: "22222222-2222-4222-8222-222222222222",
+      },
+      false,
+    ],
+    [
+      "rewrites provider auth for a Companion that has no Box yet",
+      {
+        box_id: null,
+        disk_layout_version: 2,
+        provider_credential_generation: "22222222-2222-4222-8222-222222222222",
+      },
+      true,
+    ],
+    [
+      "rewrites provider auth when the Box still holds an older Pi layout",
+      {
+        box_id: "bx_23456789",
+        disk_layout_version: 1,
+        provider_credential_generation: "22222222-2222-4222-8222-222222222222",
+      },
+      true,
+    ],
+    [
+      "rewrites provider auth after the workspace connection was rotated",
+      {
+        box_id: "bx_23456789",
+        disk_layout_version: 2,
+        provider_credential_generation: "33333333-3333-4333-8333-333333333333",
+      },
+      true,
+    ],
+  ])("%s", async (_name, runtime, expected) => {
+    const claimed = { ...companion, runtime: { ...companion.runtime, ...runtime } };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(claimed);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(claimed);
+    const start = vi.fn(async (input) => {
+      await input.onBoxAssigned("bx_23456789");
+      return {
+        boxId: "bx_23456789",
+        runtimeState: "running" as const,
+        daemonState: "running" as const,
+        desktopAvailable: true,
+      };
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, vi.fn(() => ({
+      start,
+      stop: vi.fn(),
+      status: vi.fn(),
+      desktop: vi.fn(),
+    })));
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ replaceProviderAuth: expected }));
+  });
+
   it("stores provider credentials without returning their value", async () => {
     const app = new Hono<{ Variables: ApiVariables }>();
     registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });

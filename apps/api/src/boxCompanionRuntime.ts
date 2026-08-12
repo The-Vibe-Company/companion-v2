@@ -491,7 +491,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     try {
       started = await this.#command(
         box.id,
-        "set -e; credential_file=\"$HOME/.companion/runtime/state/providers.env\"; trap 'rm -f \"$credential_file\"' EXIT; chmod 600 \"$credential_file\"; chmod 700 \"$HOME/.companion/pi\"; if [ -f \"$HOME/.companion/pi/auth.json\" ]; then chmod 600 \"$HOME/.companion/pi/auth.json\"; fi; systemctl --user daemon-reload; systemctl --user restart companion-pi-daemon.service",
+        "set -e; credential_file=\"$HOME/.companion/runtime/state/providers.env\"; trap 'rm -f \"$credential_file\"' EXIT; chmod 600 \"$credential_file\"; auth_file=\"$HOME/.companion/pi/auth.json\"; if [ ! -f \"$auth_file\" ]; then echo 'Companion provider auth file is missing' >&2; exit 1; fi; chmod 700 \"$HOME/.companion/pi\"; chmod 600 \"$auth_file\"; systemctl --user daemon-reload; systemctl --user restart companion-pi-daemon.service",
       );
     } catch (error) {
       await this.#removeProviderFile(box.id).catch(() => undefined);

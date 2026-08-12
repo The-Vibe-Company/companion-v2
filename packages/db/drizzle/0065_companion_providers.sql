@@ -6,6 +6,12 @@ ALTER TABLE "organizations"
 ALTER TABLE "companions"
   ADD COLUMN "provider_credential_generation" uuid;
 --> statement-breakpoint
+-- Before this migration `provider_ids` recorded whichever credential tags a start request happened
+-- to carry, including MCP account tags. The column now names the one workspace model-provider
+-- connection a Companion uses, and no such connection can exist yet, so every legacy value is
+-- meaningless. Clearing it lets owners attach a real provider through the one-time attach route.
+UPDATE "companions" SET "provider_ids" = '[]'::jsonb WHERE "provider_ids" <> '[]'::jsonb;
+--> statement-breakpoint
 ALTER TABLE "organizations"
   ADD CONSTRAINT "organizations_default_companion_provider_id_check"
   CHECK (
