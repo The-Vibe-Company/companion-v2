@@ -1,7 +1,7 @@
 {
   "files": {
-    "SKILL.md": "sha256:25b17880bd35f8e66dcf1db35271a5d5d269032402386817ebe5276c6ce7278f",
-    "companion.json": "sha256:31db09ebc6afe48a468d286bf2f63983c8095f783d684c1cf56a04292d302e62",
+    "SKILL.md": "sha256:7771d2cba1258ca851b19269cde3f40bb6eae7663ced72ec0f0beec806c913b5",
+    "companion.json": "sha256:28a0b74e95536a32301dc92ecbaee2a7fa11854bf8b390a148a3d5eea90d42e0",
     "evals/evals.json": "sha256:e798e4ee34de8b0bcc4ca4509d3ffab2c05c0ae84d169d201831aeda2d161f33",
     "scripts/bootstrap.py": "sha256:fcc58a22a3d8d270d3d2faef448bafefc3215556462aa5e66c37da82567711a0",
     "scripts/bootstrap_integrity.py": "sha256:697301a13d7fae907966209507e2636692b276c401e334ee97e4596e7b7b2ebe",
@@ -16,8 +16,8 @@
     "scripts/skill_guard.py": "sha256:27c9d27da0f7bbe39aeeb9f796f64671a8ac119b6be2f1295c92590cd8998a70",
     "scripts/sync_companion.py": "sha256:6338283999c982750e0226104aa862d1037e492e17170bb182af6d1173ca9b7e",
     "scripts/sync_secrets.py": "sha256:7059dec3ccf12208f046251fc5d4046187e4423d6f59e5464b0e8c7e9718b83c",
-    "scripts/tools.json": "sha256:779a597bcb1c62646d0af2aed8ce35f37d605262c8c0b1300f10d33e053840b9"
+    "scripts/tools.json": "sha256:38829413bac88d339347c474cbe3613a6760f3388bd58f1c79dddb170c89ebcb"
   },
   "schemaVersion": 1,
-  "version": "1.36.0"
+  "version": "1.37.0"
 }

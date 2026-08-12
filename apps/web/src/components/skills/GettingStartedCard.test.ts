@@ -146,7 +146,7 @@ describe("GettingStartedCard", () => {
       await Promise.resolve();
     });
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
-      "onboard https://companion.example/v1 org-1 in Grok Bot as Grok Bot [PAT intentionally omitted; use Agent Auth]",
+      "onboard https://companion.example/v1 org-1 in Grok Bot (Cursor) as Grok Bot (Cursor) [PAT intentionally omitted; use Agent Auth]",
     );
   });
 

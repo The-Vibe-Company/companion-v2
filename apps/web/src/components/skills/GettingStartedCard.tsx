@@ -20,7 +20,7 @@ const AGENTS: Record<AgentId, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
   opencode: "OpenCode",
-  "grok-bot": "Grok Bot",
+  "grok-bot": "Grok Bot (Cursor)",
 };
 
 const STEPS: Array<{

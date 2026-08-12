@@ -46,7 +46,7 @@ const ASSISTANTS: Record<AssistantId, { name: string; vendor: string; hint: stri
   "claude-code": { name: "Claude Code", vendor: "anthropic", hint: "paste into Claude Code" },
   codex: { name: "Codex", vendor: "openai", hint: "paste into Codex" },
   opencode: { name: "OpenCode", vendor: "opencode", hint: "paste into OpenCode" },
-  "grok-bot": { name: "Grok Bot", vendor: "cursor", hint: "paste into Grok Bot" },
+  "grok-bot": { name: "Grok Bot (Cursor)", vendor: "cursor", hint: "paste into Cursor's Grok Bot" },
   openclaw: { name: "OpenClaw", vendor: "openclaw", hint: "paste into OpenClaw" },
   hermes: { name: "Hermes", vendor: "nous-research", hint: "paste into Hermes" },
 };

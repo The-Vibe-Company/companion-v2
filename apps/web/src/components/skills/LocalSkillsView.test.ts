@@ -185,7 +185,7 @@ describe("LocalSkillsView", () => {
       await Promise.resolve();
     });
 
-    expect(writeText).toHaveBeenCalledWith(expect.stringContaining("agent=Grok Bot"));
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining("agent=Grok Bot (Cursor)"));
   });
 
   it("reports Hermes as the installing assistant when selected", async () => {

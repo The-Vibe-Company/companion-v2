@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://thecompanion.sh/schemas/companion-tools.v1.schema.json",
   "title": "Companion tool registry",
-  "description": "Registry of local agent tools a Companion skill can be installed into (Claude Code, Codex, OpenCode, Grok Bot, OpenClaw, Hermes, …). The single, extensible source of truth for each tool's on-disk skill directories.",
+  "description": "Registry of local agent tools a Companion skill can be installed into (Claude Code, Codex, OpenCode, Grok Bot (Cursor's desktop assistant), OpenClaw, Hermes, …). The single, extensible source of truth for each tool's on-disk skill directories.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "tools"],

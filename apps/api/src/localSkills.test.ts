@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.36.0");
+    expect(pkg.version).toBe("1.37.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -172,6 +172,7 @@ describe("companion skill package + row", () => {
     expect(row.prompts.install).toContain("Claude Code, Codex, OpenCode, Grok Bot, OpenClaw, or Hermes");
     expect(row.prompts.install).toContain("~/.cursor/skills");
     expect(row.prompts.install).toContain(".cursor/skills");
+    expect(row.prompts.install).toContain("Cursor's desktop assistant");
     expect(row.prompts.install).toContain("Hermes is global-only");
     expect(row.prompts.install).toContain("do not offer project scope for Hermes");
     expect(row.prompts.install).toContain("~/.hermes/skills/<slug>");

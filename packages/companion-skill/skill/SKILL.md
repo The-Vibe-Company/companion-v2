@@ -491,9 +491,10 @@ secret). The supported tools and their on-disk skill directories are declared in
 `scripts/tools.json` registry, which is extensible: adding a tool there is enough to make it an
 install target. The OpenCode target uses the shared Agent Skills paths (`~/.agents/skills` and
 `.agents/skills`) so the same installed package is discoverable by OpenCode's agent-compatible
-loader. Grok Bot uses Cursor's documented Agent Skills roots (`~/.cursor/skills` and
-`.cursor/skills`); these are stable discovery paths, unlike Cursor-managed internal sand-data
-workflow locations. OpenClaw uses `~/.openclaw/skills` for user-global installs and `<workspace>/skills` for
+loader. Grok Bot is Cursor's desktop assistant, so the `grok-bot` target installs into Cursor's
+documented Agent Skills roots (`~/.cursor/skills` and `.cursor/skills`); these are stable discovery
+paths, unlike Cursor-managed internal sand-data workflow locations. OpenClaw uses `~/.openclaw/skills`
+for user-global installs and `<workspace>/skills` for
 workspace installs. Hermes uses `~/.hermes/skills` as its recursive, user-global source of truth and
 does not expose a canonical project scope. `scripts/tools.schema.json` is the registry's JSON Schema
 (referenced via `$schema`).
@@ -617,8 +618,9 @@ secrets, creates `skill_installs`, or runs scripts. Surface declared prerequisit
 5. Ask **Global** or **This project** before writing. Resolve the selected tool's canonical skills
    directory, reject a symlink in the chosen root or either destination ancestor, and prove the
    physical destination remains inside that root before staging and again before replacement.
-   Grok Bot uses `~/.cursor/skills/<slug>` globally or `<project>/.cursor/skills/<slug>` for the
-   current project. Hermes is global-only: use `~/.hermes/skills/<slug>` and do not offer project scope for it.
+   Grok Bot is Cursor's desktop assistant; Grok Bot (Cursor) uses `~/.cursor/skills/<slug>` globally or
+   `<project>/.cursor/skills/<slug>` for the current project. Hermes is global-only: use
+   `~/.hermes/skills/<slug>` and do not offer project scope for it.
    Confirm before replacing an existing folder, stage on the same filesystem, then use an atomic
    rename with rollback. Do not install dependencies.
 6. Report the installed slug/version/checksum and list required and optional env/secrets plus
@@ -1329,7 +1331,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.36.0","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.37.0","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 

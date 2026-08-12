@@ -21,7 +21,7 @@
       "format": "skill-md"
     },
     "grok-bot": {
-      "displayName": "Grok Bot",
+      "displayName": "Grok Bot (Cursor)",
       "detect": ["~/.cursor"],
       "skillsDir": { "user": "~/.cursor/skills", "project": ".cursor/skills" },
       "format": "skill-md"
