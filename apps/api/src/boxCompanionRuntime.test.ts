@@ -48,6 +48,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       }
       if (url.endsWith("/commands") && init?.method === "POST") {
         const command = String(body.command);
+        if (command.includes("skills.next")) expect(body.timeoutSeconds).toBe(180);
         if (command.includes("is-active")) {
           return json({ success: true, exitCode: 0, stdout: "active\n", stderr: "" });
         }
@@ -123,6 +124,7 @@ describe("AsciiBoxCompanionRuntime", () => {
   });
 
   it("recovers a deterministically named archived Box before restarting Pi", async () => {
+    const commands: string[] = [];
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
@@ -151,6 +153,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       }
       if (url.endsWith("/files") && init?.method === "PUT") return json({ ok: true });
       if (url.endsWith("/commands") && init?.method === "POST") {
+        commands.push(String(body.command));
         return json({
           success: true,
           exitCode: 0,
@@ -182,6 +185,8 @@ describe("AsciiBoxCompanionRuntime", () => {
       String(url).endsWith("/resume") && init?.method === "POST")).toBe(true);
     expect(fetchMock.mock.calls.some(([url, init]) =>
       String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
+    expect(commands.some((command) =>
+      command.includes("pi-layout.version") && command.includes("pi-mcp-adapter@2.12.1"))).toBe(true);
   });
 
   it("reports archived status without executing a command or waking the Box", async () => {
@@ -230,6 +235,45 @@ describe("AsciiBoxCompanionRuntime", () => {
       skills: [],
       onBoxAssigned: async () => undefined,
     })).rejects.toThrow("command transport failed");
+
+    expect(commands.some((command) =>
+      command === "rm -f \"$HOME/.companion/runtime/state/providers.env\"")).toBe(true);
+  });
+
+  it("best-effort removes the provider file when skill preparation transport fails", async () => {
+    const commands: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && (!init?.method || init.method === "GET")) {
+        return json({ box });
+      }
+      if (url.endsWith("/files") && init?.method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && init?.method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        if (command.includes("skills.next")) {
+          return json({ code: "box_direct_failed", message: "prepare transport failed" }, 502);
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      credentials: [
+        { provider: "anthropic", envKey: "ANTHROPIC_API_KEY", value: "secret-value" },
+      ],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    })).rejects.toThrow("prepare transport failed");
 
     expect(commands.some((command) =>
       command === "rm -f \"$HOME/.companion/runtime/state/providers.env\"")).toBe(true);

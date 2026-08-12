@@ -13,6 +13,7 @@ import {
 
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
 const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
+export const COMPANION_PI_DISK_LAYOUT_VERSION = 2;
 const READY_STATES = new Set<BoxState>(["ready", "idle", "running"]);
 const STARTING_STATES = new Set<BoxState>(["init", "provisioning", "provisioned", "cloning"]);
 
@@ -124,6 +125,11 @@ if ! command -v pi >/dev/null 2>&1; then
 fi
 command -v pi >/dev/null 2>&1
 mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.config/systemd/user"
+layout_marker="$HOME/.companion/runtime/state/pi-layout.version"
+expected_layout=${shellQuote(`${COMPANION_PI_DISK_LAYOUT_VERSION}:${mcpAdapterPackage}`)}
+if [ -f "$layout_marker" ] && [ "$(cat "$layout_marker")" = "$expected_layout" ]; then
+  exit 0
+fi
 PI_CODING_AGENT_DIR="$HOME/.companion/pi" pi install ${shellQuote(mcpAdapterPackage)}
 cat > "$HOME/.companion/bin/pi-daemon" <<'COMPANION_PI_DAEMON'
 #!/usr/bin/env bash
@@ -158,6 +164,7 @@ RestartSec=2
 WantedBy=default.target
 COMPANION_PI_SERVICE
 systemctl --user daemon-reload
+printf '%s\n' "$expected_layout" > "$layout_marker"
 `;
 }
 
@@ -215,7 +222,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
       env.COMPANION_PI_MCP_ADAPTER_PACKAGE?.trim() || DEFAULT_PI_MCP_ADAPTER_PACKAGE;
   }
 
-  async #request<T>(path: string, init?: RequestInit): Promise<T> {
+  async #request<T>(path: string, init?: RequestInit, timeoutMs = 30_000): Promise<T> {
     const response = await fetch(`${this.#baseUrl}${path}`, {
       ...init,
       headers: {
@@ -223,7 +230,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
         ...(init?.body ? { "Content-Type": "application/json" } : {}),
         ...init?.headers,
       },
-      signal: AbortSignal.timeout(30_000),
+      signal: init?.signal ?? AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) {
       const body = await response.json().catch(() => null) as
@@ -272,11 +279,15 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     throw new BoxRuntimeProviderError("Box did not become ready before the configured timeout", 504);
   }
 
-  async #command(boxId: string, command: string): Promise<CommandEnvelope> {
+  async #command(
+    boxId: string,
+    command: string,
+    timeoutSeconds = 60,
+  ): Promise<CommandEnvelope> {
     return this.#request<CommandEnvelope>(`/boxes/${encodeURIComponent(boxId)}/commands`, {
       method: "POST",
-      body: JSON.stringify({ command, timeoutSeconds: 60 }),
-    });
+      body: JSON.stringify({ command, timeoutSeconds }),
+    }, (timeoutSeconds + 10) * 1_000);
   }
 
   async #daemonState(boxId: string): Promise<CompanionDaemonState> {
@@ -299,6 +310,15 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
       method: "PUT",
       body: JSON.stringify({ path, content }),
     });
+  }
+
+  async #ensurePiLayout(boxId: string): Promise<void> {
+    const result = await this.#command(
+      boxId,
+      setupScript(this.#installCommand, this.#mcpAdapterPackage),
+      180,
+    );
+    if (!result.success) throw new BoxRuntimeProviderError("Pi runtime layout failed to install", 502);
   }
 
   async #injectPiResources(input: {
@@ -340,19 +360,21 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
         skill.archive.toString("base64"),
       );
     }
-    await this.#writeFile(
-      input.boxId,
-      ".companion/runtime/state/providers.env",
-      encodeEnvironmentFile(input.credentials),
-    );
-
-    const prepared = await this.#command(
-      input.boxId,
-      "set -euo pipefail; root=\"$HOME/.companion/runtime\"; rm -rf \"$root/skills.next\"; mkdir -p \"$root/skills.next\"; shopt -s nullglob; for archive in \"$root/state/skill-archives\"/*.tar.gz.b64; do slug=\"$(basename \"$archive\" .tar.gz.b64)\"; mkdir -p \"$root/skills.next/$slug\"; base64 --decode \"$archive\" | tar --extract --gzip --file=- --directory=\"$root/skills.next/$slug\" --no-same-owner --no-same-permissions; done; rm -rf \"$root/skills.prev\"; if [ -d \"$root/skills\" ]; then mv \"$root/skills\" \"$root/skills.prev\"; fi; mv \"$root/skills.next\" \"$root/skills\"; rm -rf \"$root/skills.prev\" \"$root/state/skill-archives\"",
-    );
-    if (!prepared.success) {
+    try {
+      await this.#writeFile(
+        input.boxId,
+        ".companion/runtime/state/providers.env",
+        encodeEnvironmentFile(input.credentials),
+      );
+      const prepared = await this.#command(
+        input.boxId,
+        "set -euo pipefail; root=\"$HOME/.companion/runtime\"; rm -rf \"$root/skills.next\"; mkdir -p \"$root/skills.next\"; shopt -s nullglob; for archive in \"$root/state/skill-archives\"/*.tar.gz.b64; do slug=\"$(basename \"$archive\" .tar.gz.b64)\"; mkdir -p \"$root/skills.next/$slug\"; base64 --decode \"$archive\" | tar --extract --gzip --file=- --directory=\"$root/skills.next/$slug\" --no-same-owner --no-same-permissions; done; rm -rf \"$root/skills.prev\"; if [ -d \"$root/skills\" ]; then mv \"$root/skills\" \"$root/skills.prev\"; fi; mv \"$root/skills.next\" \"$root/skills\"; rm -rf \"$root/skills.prev\" \"$root/state/skill-archives\"",
+        180,
+      );
+      if (!prepared.success) throw new BoxRuntimeProviderError("Pi resources failed to prepare", 502);
+    } catch (error) {
       await this.#removeProviderFile(input.boxId).catch(() => undefined);
-      throw new BoxRuntimeProviderError("Pi resources failed to prepare", 502);
+      throw error;
     }
   }
 
@@ -442,6 +464,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
       }
     }
     box = await this.#waitReady(box.id);
+    await this.#ensurePiLayout(box.id);
     await this.#injectPiResources({
       boxId: box.id,
       clientSurface: input.clientSurface,

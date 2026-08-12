@@ -25,6 +25,11 @@ const storageMocks = vi.hoisted(() => ({
   getSkillArchive: vi.fn(),
 }));
 
+const skillsMocks = vi.hoisted(() => ({
+  skillChecksum: vi.fn(),
+  toTar: vi.fn((archive) => archive),
+}));
+
 vi.mock("./context", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./context")>()),
   ...contextMocks,
@@ -46,6 +51,7 @@ vi.mock("@companion/db", async (importOriginal) => ({
 }));
 
 vi.mock("@companion/storage", () => storageMocks);
+vi.mock("@companion/skills", () => skillsMocks);
 
 const companion = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -88,6 +94,7 @@ describe("Companions API feature gate", () => {
     coreMocks.claimCompanionRuntimeStop.mockResolvedValue(companion);
     coreMocks.updateCompanionObservation.mockResolvedValue(companion);
     coreMocks.updateCompanionRuntime.mockResolvedValue(companion);
+    skillsMocks.skillChecksum.mockReturnValue(`sha256:${"a".repeat(64)}`);
   });
 
   it("does not register the route when the flag is off", async () => {
@@ -288,6 +295,29 @@ describe("Companions API feature gate", () => {
     expect(nativeMobile.status).toBe(200);
     expect(starts[1]?.skills).toEqual([]);
     expect(coreMocks.listCompanionRuntimeSkillPackages).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a stored skill archive whose checksum changed before contacting Box", async () => {
+    coreMocks.listCompanionRuntimeSkillPackages.mockResolvedValue([{
+      slug: "incident-summary",
+      version: "1.2.3",
+      checksum: `sha256:${"a".repeat(64)}`,
+      storagePath: "org-1/incident-summary/1.2.3.tar.gz",
+    }]);
+    storageMocks.getSkillArchive.mockResolvedValue(Buffer.from("corrupt"));
+    skillsMocks.skillChecksum.mockReturnValueOnce(`sha256:${"b".repeat(64)}`);
+    const runtimeFactory = vi.fn();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(502);
+    expect(runtimeFactory).not.toHaveBeenCalled();
   });
 
   it("returns a transition conflict when desktop is requested before Box creation", async () => {

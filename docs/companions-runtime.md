@@ -62,9 +62,10 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
         └── pi.stderr.log
 ```
 
-Layout version `1` is stored in the control-plane row. Runtime transcripts and files do not enter
-PostgreSQL. A systemd user unit supervises Pi while Box is active; the lifecycle API restarts it
-after a Box resume.
+Layout version `2` is written to the control-plane row after a successful Skills/MCP-aware start and
+to an on-disk marker keyed by the adapter package. Starts repair older Box snapshots before resource
+injection. Runtime transcripts and files do not enter PostgreSQL. A systemd user unit supervises Pi
+while Box is active; the lifecycle API restarts it after a Box resume.
 
 ## Pi Skills injection
 
