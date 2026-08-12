@@ -1,6 +1,7 @@
-# Companion v2 architecture — Skills Hub
+# Companion v2 architecture — Skills Hub and optional Companions
 
-This document is the authoritative architecture. Companion is a Skills Hub only. It does not execute or launch agents.
+This document is the authoritative architecture. Companion is always a Skills Hub; behind the
+`companions` flag it is also a control plane for Pi daemons that execute inside box.ascii.dev.
 
 ## System shape
 
@@ -22,13 +23,14 @@ packages/billing         Stripe integration
 packages/companion-skill bundled external-agent workflow
 ```
 
-There is no sandbox/runtime package, provider adapter, deployment reconciler, Project supervisor, run supervisor, model catalog, or agent launcher.
+There is no Project/skill-run supervisor, model catalog, deployment reconciler, or runtime UI.
+The API owns one Box HTTP adapter for the gated Companions lifecycle; Pi remains inside Box.
 
 ## Data model
 
 Every tenant-owned row carries `org_id`. The current Drizzle schema in `packages/db/src/schema.ts` is the source of truth.
 
-Core entities are organizations, users, memberships, invitations, skills, immutable skill versions/files, dependencies, installs, labels and personal labels, comments/images, public releases and transfer tickets, GitHub connections/destinations, skill-secret declarations/bindings/suggestions, encrypted secrets/versions/recipients, Skill Database declarations/realms/shares/object deletions, audit records, billing, tokens, onboarding/preferences, and Agent Auth identities/grants.
+Core entities are organizations, users, memberships, invitations, skills, immutable skill versions/files, dependencies, installs, labels and personal labels, comments/images, public releases and transfer tickets, GitHub connections/destinations, skill-secret declarations/bindings/suggestions, encrypted secrets/versions/recipients, Skill Database declarations/realms/shares/object deletions, audit records, billing, tokens, onboarding/preferences, Agent Auth identities/grants, and gated Companion control-plane metadata.
 
 The forward migration `0063_skills_hub_only.sql` intentionally drops all historical Project, skill-run, sandbox-usage, model-provider, prompt, transcript, attachment, artifact, and runtime worker state. The cutover is fail-closed: its first statement refuses to drop ownership rows while Project workspaces, unsettled sandboxes, active usage, or S3-backed runtime metadata remain. Operators must quiesce the old release and drain or explicitly delete those external resources before upgrading. Historical migrations remain immutable so already-migrated databases can upgrade safely.
 
@@ -62,15 +64,22 @@ Agent Auth connects an external coding agent to the Skills Hub. Tenant capabilit
 
 An authenticated Agent Auth identity may issue a short-lived child PAT only through the registered inheritance form. The server snapshots its active exact-workspace grants, expands database write to read, caps expiry at seven days and the earliest source expiry, and persists value-free source/target provenance. Request bodies cannot select scopes or another organization, PATs cannot mint or refresh child PATs, and target-bound tokens require the matching delegation-target header. This is bearer binding rather than runtime attestation: possession of both values remains sufficient until expiry or revocation.
 
-## API and fail-closed removal
+## API, Companions, and fail-closed removal
 
-The API exposes auth, organizations, skills, labels, dependencies, comments, files/versions, installs, public releases, GitHub, secrets, Skill Databases, billing, tokens, onboarding, and skill-facing Agent Auth. Project, run, prompt, transcript, runtime attachment/artifact, model-provider, and launch endpoints are not registered and therefore use the normal not-found response.
+The API exposes auth, organizations, skills, labels, dependencies, comments, files/versions, installs, public releases, GitHub, secrets, Skill Databases, billing, tokens, onboarding, and skill-facing Agent Auth. Historical Project, skill-run, prompt, attachment/artifact, and model-provider endpoints remain unregistered.
 
-`COMPANION_COMPANIONS_ENABLED=true` additionally registers an authenticated, tenant-scoped empty
-`GET /v1/companions` list scaffold. The default is fail-closed: when the flag is absent or false, the
-API route is not registered.
+`COMPANION_COMPANIONS_ENABLED=true` additionally registers authenticated, tenant-scoped Companion
+metadata and Box/Pi lifecycle endpoints. List, detail, and default status reads use PostgreSQL only.
+Live status, start/stop, and desktop require owner/editor access before the Box adapter is created;
+the current pre-sharing projection makes non-owners viewers. The default remains fail-closed: when
+the flag is absent or false, none of these routes are registered. Provider credentials are accepted
+only by start, passed through a transient Box file, and never persisted in the control plane.
 
-The web has no `/projects` route and no Run/Session state in the Skills URL grammar. Old query parameters are ignored and canonical navigation returns to the Skills detail. By default the only product workspace navigation is Skills. The same `COMPANION_COMPANIONS_ENABLED` server-side flag can expose an authenticated `/companions` empty-list shell and its sidebar entry. This scaffold has no persistence, agent lifecycle, launch, chat, plugin, or sharing capability.
+The web has no `/projects` route and no Run/Session state in the Skills URL grammar. Old query parameters are ignored and canonical navigation returns to the Skills detail. By default the only product workspace navigation is Skills. The same `COMPANION_COMPANIONS_ENABLED` server-side flag can expose an authenticated `/companions` empty-list shell and its sidebar entry. The Pi/Box harness is deliberately invisible in that shell; provider, desktop, and sharing UI arrive in later tickets.
+
+Pi sessions, RPC events, and logs live only under `~/.companion/runtime` on snapshotted Box disk.
+PostgreSQL stores Box id and last-observed lifecycle metadata so list/open never wakes Box. Desktop
+URLs are secret-bearing response-only values. See `docs/companions-runtime.md`.
 
 ## Process and database roles
 
@@ -78,4 +87,7 @@ The API and worker use distinct `NOSUPERUSER NOBYPASSRLS NOINHERIT` roles in pro
 
 ## Deployment
 
-Self-hosted development runs PostgreSQL, S3-compatible storage, and email plus API, worker, and web. The worker needs no Vercel/OpenCode/model-provider credentials. Railway and container configs deploy only the Skills Hub services. Conductor runs native per-workspace PostgreSQL with optional MinIO/Mailpit as documented in `CLAUDE.md`. Feature configuration is environment-based and provider-neutral; the Companions scaffold does not depend on Vercel deployment primitives.
+Self-hosted development runs PostgreSQL, S3-compatible storage, and email plus API, worker, and web.
+The API needs a Box service key only when Companions lifecycle is enabled; the worker needs no Box,
+Vercel, OpenCode, or model-provider credentials. ascii.dev hosts the deployed control plane. Conductor
+runs native per-workspace PostgreSQL with optional MinIO/Mailpit as documented in `CLAUDE.md`.

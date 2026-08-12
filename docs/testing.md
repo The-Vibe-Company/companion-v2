@@ -9,7 +9,7 @@ Prefer the lowest level that proves the boundary, but use real PostgreSQL, objec
 | Promise | Regression caught | Required level | Sensitivity example |
 |---|---|---|---|
 | Personal skills and personal database realms remain creator-only; org skills remain member-wide | Same-org admin override or cross-tenant disclosure | Core + PostgreSQL + HTTP | Remove the creator or tenant predicate |
-| Runtime execution is absent and cannot be feature-flagged back on | Old Projects/Run route, API, DB object, supervisor, or launch control returns | Contracts + route/component + migrated PostgreSQL + browser | Restore a runtime route/table/flag or `Run skill` label |
+| Historical Project/skill-run execution stays absent; the gated Companions harness is Box/Pi-only and invisible in UI | Old runtime returns, a viewer wakes Box, credentials persist, or harness chrome renders | Contracts + Core + HTTP + migrated PostgreSQL + browser | Call the Box adapter before the owner/editor guard or render a Pi control |
 | Skills Hub cutover preserves external cleanup ownership until deletion succeeds | Migration drops S3 keys or provider identities before old cleanup drains | Historical PostgreSQL migration replay | Seed a legacy storage ownership row and let migration 0063 continue |
 | Uploads and public packages are archive-safe, checksum-bound, and limited to verified sessions, approved agent tickets, or exact `public-skills:install` PATs | Traversal, link, collision, oversized archive, substituted release, or under-scoped PAT download | Package + storage + HTTP integration | Relax one ZIP, checksum, or package-scope guard |
 | Share is the only personal-to-org transition and carries required private dependencies | Partial dependency closure or unauthorized share | Core + PostgreSQL + HTTP | Skip the owner or dependency-plan gate |
@@ -27,7 +27,7 @@ Prefer the lowest level that proves the boundary, but use real PostgreSQL, objec
 - Archive/transfer-ticket and secret-redaction tests for every changed binary or sensitive flow.
 - Integration tests against a disposable migrated PostgreSQL database for schema/RLS/grant changes.
 - Browser validation for any UI, route, auth, style, or browser behavior change.
-- Provider-like adapters such as storage, GitHub, and Skill Database runtimes need shared contract/idempotency tests.
+- Provider-like adapters such as storage, GitHub, Skill Database, and Box runtimes need shared contract/idempotency tests.
 
 ## Frontend gate
 

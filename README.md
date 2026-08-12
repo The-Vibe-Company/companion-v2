@@ -46,18 +46,33 @@ pnpm dev
 
 Conductor uses `.conductor/settings.toml` and `bash scripts/dev-conductor.sh` for isolated native services.
 
-### Companions scaffold
+### Companions runtime
 
-The inert Companions list scaffold is disabled by default. To expose its authenticated web route,
-sidebar entry, and API route locally, set the same server-side flag for both web and API, then restart:
+Companions are disabled by default. To expose the authenticated empty-list web shell and the
+control-plane API, set the same server-side flag for both web and API, then restart:
 
 ```bash
 COMPANION_COMPANIONS_ENABLED=true
 ```
 
 With the flag unset or `false`, `/companions` and `/v1/companions` return not found and no Companions
-navigation is rendered. The scaffold does not create or run agents, chat, plugins, or sharing. The
-configuration is provider-neutral and uses no Vercel-specific deployment behavior.
+navigation is rendered. The harness remains API-only: the web shell has no runtime, provider, or
+desktop controls.
+
+Configured Owner/Editor lifecycle calls use Pi inside a no-env [Box](https://box.ascii.dev). Set:
+
+```bash
+COMPANION_BOX_API_KEY=box_...
+# Optional overrides:
+COMPANION_BOX_API_BASE=https://ascii.dev/api/box/v1
+COMPANION_BOX_ENVIRONMENT=base
+COMPANION_BOX_TTL_SECONDS=3600
+COMPANION_PI_INSTALL_COMMAND='npm install --global @earendil-works/pi-coding-agent@<pin>'
+```
+
+Prefer a Box environment/template with Pi already pinned and omit the install command. Never put
+provider credentials in these variables; lifecycle requests deliver them transiently to the Pi
+process. See `docs/companions-runtime.md`.
 
 ## Verification
 

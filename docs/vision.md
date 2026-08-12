@@ -1,8 +1,13 @@
 # Companion v2 vision
 
-Companion v2 is the self-hostable Skills Hub for an organization and the coding agents its members already use. It is a trusted registry for creating, validating, versioning, organizing, sharing, installing, and publishing `SKILL.md` packages.
+Companion v2 is the self-hostable Skills Hub and optional Companions control plane for an
+organization. It is a trusted registry for creating, validating, versioning, organizing, sharing,
+installing, and publishing `SKILL.md` packages.
 
-Companion does not create, launch, host, resume, or execute agents. It has no chat runtime, Project workspace, sandbox, model router, container catalog, or deployment provider. External coding agents are clients of the Skills Hub through delegated Agent Auth; they execute outside Companion.
+By default Companion does not operate agents. When the `companions` feature is enabled, the API may
+create and resume an isolated box.ascii.dev Box and control a Pi daemon inside it. Pi and its
+sessions execute on Box disk; the Companion services remain a metadata and authorization control
+plane. External coding agents can still use delegated Agent Auth as Skills Hub clients.
 
 ## Principles
 
@@ -17,7 +22,7 @@ Companion does not create, launch, host, resume, or execute agents. It has no ch
 
 ## Non-goals
 
-- Agent lifecycle, chat, prompts, transcripts, attachments, artifacts, or runtime cleanup.
+- Control-plane execution of agent code, prompts, transcripts, or runtime files.
 - Persistent Cowork or Project workspaces.
-- Sandboxes, prewarming, model credentials, runtime providers, containers, or deployments.
+- Runtime providers other than Box, harnesses other than Pi, prewarming, or deployment management.
 - A generic AI application builder.

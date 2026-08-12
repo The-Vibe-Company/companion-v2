@@ -24,6 +24,21 @@ export const validationStateEnum = pgEnum("validation_state", ["valid", "validat
 // even admins do not. Share flips 'personal' → 'org'; there is no reverse transition.
 export const skillScopeEnum = pgEnum("skill_scope", ["personal", "org"]);
 export const orgKindEnum = pgEnum("org_kind", ["personal", "team"]);
+export const companionRuntimeStateEnum = pgEnum("companion_runtime_state", [
+  "not_created",
+  "provisioning",
+  "running",
+  "stopping",
+  "stopped",
+  "error",
+]);
+export const companionDaemonStateEnum = pgEnum("companion_daemon_state", [
+  "unknown",
+  "starting",
+  "running",
+  "stopped",
+  "error",
+]);
 export const billingSeatSyncStatusEnum = pgEnum("billing_seat_sync_status", ["synced", "pending", "error"]);
 export const invitationStatusEnum = pgEnum("invitation_status", [
   "pending",
@@ -314,6 +329,50 @@ export const memberships = pgTable(
   (t) => ({
     pk: primaryKey({ columns: [t.orgId, t.userId] }),
     byUser: index("memberships_user_idx").on(t.userId),
+  }),
+);
+
+/**
+ * Durable control-plane projection for one Companion. Runtime sessions and transcripts stay on
+ * the Box disk; this row contains only enough metadata to list/open without contacting or waking
+ * the Box. Provider credentials and desktop URLs must never be stored here.
+ */
+export const companions = pgTable(
+  "companions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => user.id),
+    name: text("name").notNull(),
+    boxId: text("box_id"),
+    runtimeState: companionRuntimeStateEnum("runtime_state").notNull().default("not_created"),
+    daemonState: companionDaemonStateEnum("daemon_state").notNull().default("unknown"),
+    providerIds: jsonb("provider_ids").$type<string[]>().notNull().default([]),
+    diskLayoutVersion: integer("disk_layout_version").notNull().default(1),
+    desktopAvailable: boolean("desktop_available").notNull().default(false),
+    lastObservedAt: timestamp("last_observed_at", { withTimezone: true }),
+    lastStartedAt: timestamp("last_started_at", { withTimezone: true }),
+    lastStoppedAt: timestamp("last_stopped_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgId: unique("companions_org_id_id_uq").on(t.orgId, t.id),
+    byOrgUpdated: index("companions_org_updated_idx").on(t.orgId, t.updatedAt),
+    ownerMembershipFk: foreignKey({
+      columns: [t.orgId, t.ownerId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "companions_owner_membership_fk",
+    }),
+    positiveDiskLayout: check("companions_disk_layout_version_check", sql`${t.diskLayoutVersion} >= 1`),
+    boxIdShape: check(
+      "companions_box_id_check",
+      sql`${t.boxId} is null or ${t.boxId} ~ '^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$'`,
+    ),
   }),
 );
 

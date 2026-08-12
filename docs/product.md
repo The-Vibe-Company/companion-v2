@@ -31,6 +31,9 @@ Organization labels form a shared tree. Personal labels form a private per-membe
 6. Mirror organization skills to GitHub deterministically.
 7. Let an approved external coding agent read/write skills, use Skill Databases, or retrieve bound secrets through constrained grants.
 
-## Removed surface
+## Runtime boundary
 
-Projects, runs, sessions, prompts, transcripts, runtime attachments/artifacts, launch buttons, model/provider settings, sandboxes, prewarming, containers, deployments, and runtime feature flags do not exist. Historical URLs and APIs fail closed.
+Historical Projects, skill runs, attachments/artifacts, provider settings, and deployment surfaces
+remain removed and fail closed. Behind the `companions` flag, an API-only control plane stores
+Companion list/open metadata and controls Pi in box.ascii.dev. Sessions remain on Box disk, and
+viewer reads never wake or contact Box.
