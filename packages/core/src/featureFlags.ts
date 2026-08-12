@@ -12,6 +12,8 @@ export function companionsEnabled(env: NodeJS.ProcessEnv = process.env): boolean
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
 const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
 const DEFAULT_BOX_TTL_SECONDS = 3600;
+const DEFAULT_BOX_POLL_INTERVAL_MS = 1_000;
+const DEFAULT_BOX_READY_TIMEOUT_MS = 120_000;
 
 /**
  * Secrets that only become required when Companions is turned on. The Box lifecycle needs an API key
@@ -29,6 +31,8 @@ export interface CompanionsRuntimeConfig {
   boxApiBase: string;
   boxEnvironment?: string;
   boxTtlSeconds: number;
+  boxPollIntervalMs: number;
+  boxReadyTimeoutMs: number;
   piInstallCommand?: string;
   piMcpAdapterPackage: string;
   /** Required secrets that are unset while the flag is on. Always empty when the flag is off. */
@@ -55,6 +59,14 @@ export function companionsRuntimeConfig(
     boxApiBase: (env.COMPANION_BOX_API_BASE?.trim() || DEFAULT_BOX_API_BASE).replace(/\/+$/, ""),
     boxEnvironment: env.COMPANION_BOX_ENVIRONMENT?.trim() || undefined,
     boxTtlSeconds: positiveInteger(env.COMPANION_BOX_TTL_SECONDS, DEFAULT_BOX_TTL_SECONDS),
+    boxPollIntervalMs: positiveInteger(
+      env.COMPANION_BOX_POLL_INTERVAL_MS,
+      DEFAULT_BOX_POLL_INTERVAL_MS,
+    ),
+    boxReadyTimeoutMs: positiveInteger(
+      env.COMPANION_BOX_READY_TIMEOUT_MS,
+      DEFAULT_BOX_READY_TIMEOUT_MS,
+    ),
     piInstallCommand: env.COMPANION_PI_INSTALL_COMMAND?.trim() || undefined,
     piMcpAdapterPackage:
       env.COMPANION_PI_MCP_ADAPTER_PACKAGE?.trim() || DEFAULT_PI_MCP_ADAPTER_PACKAGE,

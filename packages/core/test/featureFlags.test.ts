@@ -26,6 +26,8 @@ describe("companionsRuntimeConfig", () => {
     expect(config.missingRequired).toEqual([]);
     expect(config.boxApiBase).toBe("https://ascii.dev/api/box/v1");
     expect(config.boxTtlSeconds).toBe(3600);
+    expect(config.boxPollIntervalMs).toBe(1_000);
+    expect(config.boxReadyTimeoutMs).toBe(120_000);
     expect(config.piMcpAdapterPackage).toBe("npm:pi-mcp-adapter@2.12.1");
     expect(config.boxEnvironment).toBeUndefined();
     expect(config.piInstallCommand).toBeUndefined();
@@ -58,12 +60,16 @@ describe("companionsRuntimeConfig", () => {
       COMPANION_BOX_API_BASE: "https://box.example.com/api/v1///",
       COMPANION_BOX_ENVIRONMENT: "staging",
       COMPANION_BOX_TTL_SECONDS: "600",
+      COMPANION_BOX_POLL_INTERVAL_MS: "250",
+      COMPANION_BOX_READY_TIMEOUT_MS: "60000",
       COMPANION_PI_INSTALL_COMMAND: "pi install",
       COMPANION_PI_MCP_ADAPTER_PACKAGE: "npm:pi-mcp-adapter@9.9.9",
     });
     expect(config.boxApiBase).toBe("https://box.example.com/api/v1");
     expect(config.boxEnvironment).toBe("staging");
     expect(config.boxTtlSeconds).toBe(600);
+    expect(config.boxPollIntervalMs).toBe(250);
+    expect(config.boxReadyTimeoutMs).toBe(60_000);
     expect(config.piInstallCommand).toBe("pi install");
     expect(config.piMcpAdapterPackage).toBe("npm:pi-mcp-adapter@9.9.9");
   });
