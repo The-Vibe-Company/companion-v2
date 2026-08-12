@@ -46,6 +46,19 @@ pnpm dev
 
 Conductor uses `.conductor/settings.toml` and `bash scripts/dev-conductor.sh` for isolated native services.
 
+### Companions scaffold
+
+The inert Companions list scaffold is disabled by default. To expose its authenticated web route,
+sidebar entry, and API route locally, set the same server-side flag for both web and API, then restart:
+
+```bash
+COMPANION_COMPANIONS_ENABLED=true
+```
+
+With the flag unset or `false`, `/companions` and `/v1/companions` return not found and no Companions
+navigation is rendered. The scaffold does not create or run agents, chat, plugins, or sharing. The
+configuration is provider-neutral and uses no Vercel-specific deployment behavior.
+
 ## Verification
 
 ```bash

@@ -478,7 +478,10 @@ export function Sidebar({
   onSelectLocal,
   onSelectArchived,
   onSelectSecrets,
+  onSelectCompanions = () => {},
   secretsActive = false,
+  companionsEnabled = false,
+  companionsActive = false,
   navigationOnly = false,
   localActive,
   localUpdateCount,
@@ -527,7 +530,10 @@ export function Sidebar({
   onSelectLocal: () => void;
   onSelectArchived: () => void;
   onSelectSecrets: () => void;
+  onSelectCompanions?: () => void;
   secretsActive?: boolean;
+  companionsEnabled?: boolean;
+  companionsActive?: boolean;
   /** Render the complete shared navigation without exposing label mutation affordances. */
   navigationOnly?: boolean;
   localActive: boolean;
@@ -815,6 +821,20 @@ export function Sidebar({
               canManage={!navigationOnly}
             />
           </div>
+        )}
+
+        {companionsEnabled && (
+          <button
+            className={"navitem navitem--bottom" + (companionsActive ? " navitem--active" : "")}
+            aria-current={companionsActive ? "page" : undefined}
+            onClick={() => runAndClose(onSelectCompanions)}
+            title="Companions"
+          >
+            <span className="navitem__ico">
+              <Icon name="bot" />
+            </span>
+            <span className="navitem__label">Companions</span>
+          </button>
         )}
 
         <button

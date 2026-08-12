@@ -259,7 +259,7 @@ Use a dense product layout. The primary shell is a fixed sidebar (244px) plus co
 main content constrained enough to scan but not padded into a landing page. Layout tokens:
 `sidebar-width` 244px, `topbar-height` 56px, `content-max` 1120px, `drawer-width` 460px.
 
-The sidebar presents the Skills libraries directly: My Skills, Organization, Installed, Companion skills, Archived, and Secrets. There is no workspace switch, agent launcher, session history, provider catalog, or dormant runtime control. External coding-agent access lives in Settings and is described explicitly as delegated Skills Hub access.
+The sidebar presents the Skills libraries directly: My Skills, Organization, Installed, Companion skills, Archived, and Secrets. When `COMPANION_COMPANIONS_ENABLED=true`, it also presents a Companions entry for the inert empty-list scaffold; the entry is absent by default. There is no agent launcher, session history, provider catalog, or dormant runtime control. External coding-agent access lives in Settings and is described explicitly as delegated Skills Hub access.
 
 Prefer tables and structured rows for resources. Companion lists skills, labels, versions, dependencies, members, scopes, comments, releases, databases, and audit events. These surfaces should be compact and sortable/filterable over time, not inflated into repeated marketing cards.
 

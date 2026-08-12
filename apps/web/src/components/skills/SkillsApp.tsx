@@ -206,6 +206,7 @@ export function SkillsApp({
   currentOrg,
   initialRoute,
   initialRouteSource,
+  companionsEnabled = false,
 }: {
   initialMineSkills: SkillVM[];
   initialOrgSkills: SkillVM[];
@@ -220,6 +221,7 @@ export function SkillsApp({
   currentOrg: OrgVM;
   initialRoute: SkillsRoute;
   initialRouteSource: SkillsRouteSource;
+  companionsEnabled?: boolean;
 }) {
   const router = useRouter();
   const orgActions = useOrgActions();
@@ -1663,6 +1665,8 @@ export function SkillsApp({
         onSelectLocal={selectLocal}
         onSelectArchived={selectArchived}
         onSelectSecrets={() => router.push("/secrets")}
+        onSelectCompanions={() => router.push("/companions")}
+        companionsEnabled={companionsEnabled}
         localActive={localActive}
         localUpdateCount={localUpdateCount}
         archivedActive={archivedActive}

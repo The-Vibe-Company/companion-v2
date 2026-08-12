@@ -66,7 +66,11 @@ An authenticated Agent Auth identity may issue a short-lived child PAT only thro
 
 The API exposes auth, organizations, skills, labels, dependencies, comments, files/versions, installs, public releases, GitHub, secrets, Skill Databases, billing, tokens, onboarding, and skill-facing Agent Auth. Project, run, prompt, transcript, runtime attachment/artifact, model-provider, and launch endpoints are not registered and therefore use the normal not-found response.
 
-The web has no `/projects` route and no Run/Session state in the Skills URL grammar. Old query parameters are ignored and canonical navigation returns to the Skills detail. The only product workspace navigation is Skills.
+`COMPANION_COMPANIONS_ENABLED=true` additionally registers an authenticated, tenant-scoped empty
+`GET /v1/companions` list scaffold. The default is fail-closed: when the flag is absent or false, the
+API route is not registered.
+
+The web has no `/projects` route and no Run/Session state in the Skills URL grammar. Old query parameters are ignored and canonical navigation returns to the Skills detail. By default the only product workspace navigation is Skills. The same `COMPANION_COMPANIONS_ENABLED` server-side flag can expose an authenticated `/companions` empty-list shell and its sidebar entry. This scaffold has no persistence, agent lifecycle, launch, chat, plugin, or sharing capability.
 
 ## Process and database roles
 
@@ -74,4 +78,4 @@ The API and worker use distinct `NOSUPERUSER NOBYPASSRLS NOINHERIT` roles in pro
 
 ## Deployment
 
-Self-hosted development runs PostgreSQL, S3-compatible storage, and email plus API, worker, and web. The worker needs no Vercel/OpenCode/model-provider credentials. Railway and container configs deploy only the Skills Hub services. Conductor runs native per-workspace PostgreSQL with optional MinIO/Mailpit as documented in `CLAUDE.md`.
+Self-hosted development runs PostgreSQL, S3-compatible storage, and email plus API, worker, and web. The worker needs no Vercel/OpenCode/model-provider credentials. Railway and container configs deploy only the Skills Hub services. Conductor runs native per-workspace PostgreSQL with optional MinIO/Mailpit as documented in `CLAUDE.md`. Feature configuration is environment-based and provider-neutral; the Companions scaffold does not depend on Vercel deployment primitives.
