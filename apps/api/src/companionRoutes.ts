@@ -235,12 +235,13 @@ export function registerCompanionRoutes(
         });
         return { actor, orgId, companion };
       });
-      const observed = await runtimeFactory().stop({ boxId: mutation.companion.runtime.box_id! });
+      const claimed = mutation;
+      const observed = await runtimeFactory().stop({ boxId: claimed.companion.runtime.box_id! });
       const companion = await withTenantContext(
-        { orgId: mutation.orgId, userId: mutation.actor.id },
+        { orgId: claimed.orgId, userId: claimed.actor.id },
         (database) => updateCompanionRuntime({
-          actor: mutation.actor,
-          orgId: mutation.orgId,
+          actor: claimed.actor,
+          orgId: claimed.orgId,
           companionId,
           patch: {
             runtimeState: observed.runtimeState,
