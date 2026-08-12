@@ -3,6 +3,8 @@ import type { OrgRole } from "@companion/contracts";
 import {
   canAccessSkill,
   canAccessSkillDatabaseRealm,
+  canWakeCompanion,
+  companionAccessForActor,
   canManageOrg,
   canAccessSecret,
   canManageSecret,
@@ -48,6 +50,19 @@ describe("canPerform — flat skill capability gate (every member ⇒ every acti
     for (const action of SKILL_ACTIONS) {
       expect(canPerform(actor("developer"), action)).toBe(true);
     }
+  });
+});
+
+describe("Companion wake boundary", () => {
+  it("projects non-owners as viewers until THE-322 adds explicit editor grants", () => {
+    expect(companionAccessForActor({ ownerId: "u-owner" }, "u-owner")).toBe("owner");
+    expect(companionAccessForActor({ ownerId: "u-owner" }, "u-member")).toBe("viewer");
+  });
+
+  it("never lets a viewer wake Box", () => {
+    expect(canWakeCompanion("owner")).toBe(true);
+    expect(canWakeCompanion("editor")).toBe(true);
+    expect(canWakeCompanion("viewer")).toBe(false);
   });
 });
 describe("canAccessSkill — personal-skill privacy (owner-only, NO admin override)", () => {

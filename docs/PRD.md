@@ -36,8 +36,10 @@ Give organizations one secure, self-hostable place to govern reusable AI coding 
 
 ### Explicit exclusions
 
-- Projects, chat sessions, skill runs, launchers, prompts, transcripts, runtime files, artifacts, sandboxes, prewarming, model/provider connections, container catalogs, deployments, and agent/runtime supervisors.
-- No feature flag or hidden endpoint may restore those capabilities.
+- Historical Projects/skill runs, control-plane prompts/transcripts/runtime files, prewarming,
+  container catalogs, deployment management, and harnesses other than Pi.
+- The optional `companions` flag may register the documented Box/Pi lifecycle API only. It must not
+  expose provider or harness UI, wake Box on viewer reads, or execute the harness in Companion.
 
 ## Success measures
 
@@ -49,7 +51,7 @@ Give organizations one secure, self-hostable place to govern reusable AI coding 
 
 ## Acceptance gates
 
-- Old runtime web URLs redirect to Skills without preserving runtime state; old API paths return not found, and no runtime navigation or action renders.
+- Old Project/run web and API paths remain unavailable, and no Pi/Box harness chrome renders.
 - A forward migration removes runtime tables, policies, functions, indexes, and enums without changing historical migrations.
 - Skills list/detail/upload/publish/install/public release and authenticated external-agent workflows pass behavior tests.
 - Typecheck, lint, build, migration/integration tests, browser smoke, and change verification pass.

@@ -27,6 +27,7 @@ describe("Skills Hub PostgreSQL isolation", () => {
   let personalSlug: string;
   let orgSlug: string;
   let otherOrgSlug: string;
+  const companionId = randomUUID();
 
   beforeAll(async () => {
     fixture = await createIntegrationFixture();
@@ -36,6 +37,10 @@ describe("Skills Hub PostgreSQL isolation", () => {
     await seedSkill({ orgId: fixture.orgA, creator: fixture.owner, slug: personalSlug, scope: "personal" });
     await seedSkill({ orgId: fixture.orgA, creator: fixture.owner, slug: orgSlug, scope: "org" });
     await seedSkill({ orgId: fixture.orgB, creator: fixture.outsider, slug: otherOrgSlug, scope: "org" });
+    await integrationSql`
+      insert into companions (id, org_id, owner_id, name)
+      values (${companionId}, ${fixture.orgA}, ${fixture.owner.id}, 'RLS companion')
+    `;
     await integrationSql.unsafe(`create role ${apiRole} login nosuperuser nobypassrls noinherit`);
     await integrationSql.unsafe(`create role ${workerRole} login nosuperuser nobypassrls noinherit`);
     const grants = extractRuntimeRoleGrantBlock(await readFile(await resolveRuntimeRoleGrantsFile(), "utf8"));
@@ -47,6 +52,7 @@ describe("Skills Hub PostgreSQL isolation", () => {
   });
 
   afterAll(async () => {
+    await integrationSql`delete from companions where id = ${companionId}`;
     await fixture.cleanup();
     await integrationSql.unsafe(`drop owned by ${apiRole}`);
     await integrationSql.unsafe(`drop owned by ${workerRole}`);
@@ -66,5 +72,30 @@ describe("Skills Hub PostgreSQL isolation", () => {
   it("shows an owner their personal and org skills but hides both from other tenants", async () => {
     expect(await visibleSlugs(fixture.orgA, fixture.owner.id)).toEqual([orgSlug, personalSlug].sort());
     expect(await visibleSlugs(fixture.orgB, fixture.outsider.id)).toEqual([otherOrgSlug]);
+  });
+
+  it("lets members read Companion metadata but only the owner mutate its runtime projection", async () => {
+    const visible = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
+      return tx<Array<{ id: string }>>`select id from companions`;
+    });
+    expect(visible.map((row) => row.id)).toContain(companionId);
+
+    const adminUpdates = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
+      return tx<Array<{ id: string }>>`
+        update companions set runtime_state = 'running' where id = ${companionId} returning id
+      `;
+    });
+    expect(adminUpdates).toEqual([]);
+
+    const outsiderVisible = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgB}, true), set_config('app.user_id', ${fixture.outsider.id}, true)`;
+      return tx<Array<{ id: string }>>`select id from companions`;
+    });
+    expect(outsiderVisible).toEqual([]);
   });
 });
