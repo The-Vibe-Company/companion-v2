@@ -10,6 +10,7 @@ import {
   createCompanion,
   getCompanion,
   getCompanionForRuntime,
+  listCompanionRuntimeSkillPackages,
   listCompanions,
   updateCompanionObservation,
   updateCompanionRuntime,
@@ -19,6 +20,7 @@ import {
   startCompanionRuntimeInputSchema,
 } from "@companion/contracts";
 import { withTenantContext, type Db } from "@companion/db";
+import { getSkillArchive } from "@companion/storage";
 import {
   actorFromContext,
   AuthenticationRequiredError,
@@ -147,6 +149,7 @@ export function registerCompanionRoutes(
           actor: ReturnType<typeof actorFromContext>;
           orgId: string;
           companion: Awaited<ReturnType<typeof getCompanionForRuntime>>;
+          skillPackages: Awaited<ReturnType<typeof listCompanionRuntimeSkillPackages>>;
         }
       | undefined;
     try {
@@ -156,8 +159,17 @@ export function registerCompanionRoutes(
         const companion = await claimCompanionRuntimeStart({
           actor, orgId, companionId, database,
         });
-        return { actor, orgId, companion };
+        const skillPackages = body.client_surface === "native_mobile"
+          ? []
+          : await listCompanionRuntimeSkillPackages({ actor, orgId, database });
+        return { actor, orgId, companion, skillPackages };
       });
+      const skills = await Promise.all(mutation.skillPackages.map(async (skill) => ({
+        slug: skill.slug,
+        version: skill.version,
+        checksum: skill.checksum,
+        archive: await getSkillArchive({ key: skill.storagePath }),
+      })));
       const providerIds = body.credentials.length
         ? [...new Set(body.credentials.map((credential) => credential.provider))]
         : mutation.companion.runtime.provider_ids;
@@ -165,11 +177,14 @@ export function registerCompanionRoutes(
         companionId,
         orgId: mutation.orgId,
         boxId: mutation.companion.runtime.box_id,
+        clientSurface: body.client_surface,
         credentials: body.credentials.map((credential) => ({
           provider: credential.provider,
           envKey: credential.env_key,
           value: credential.value,
         })),
+        mcpAccounts: body.mcp_accounts,
+        skills,
         onBoxAssigned: async (boxId) => {
           await withTenantContext(
             { orgId: mutation!.orgId, userId: mutation!.actor.id },

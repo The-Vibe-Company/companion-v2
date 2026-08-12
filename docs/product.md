@@ -36,4 +36,6 @@ Organization labels form a shared tree. Personal labels form a private per-membe
 Historical Projects, skill runs, attachments/artifacts, provider settings, and deployment surfaces
 remain removed and fail closed. Behind the `companions` flag, an API-only control plane stores
 Companion list/open metadata and controls Pi in box.ascii.dev. Sessions remain on Box disk, and
-viewer reads never wake or contact Box.
+viewer reads never wake or contact Box. Pi receives the caller's Installed skills only for web and
+mobile web; native mobile receives no Skills source. Labeled MCP accounts are injected through the
+Box-hosted Pi adapter without persisting credential values in the control plane.
