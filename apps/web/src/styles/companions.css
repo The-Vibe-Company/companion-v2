@@ -187,9 +187,11 @@
 }
 
 .companions-chip {
+  flex: none;
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
   min-height: 32px;
   padding: 0 11px;
   border: 1px solid var(--color-line-strong);
@@ -239,7 +241,7 @@
   cursor: pointer;
 }
 
-.companions-new-form label,
+.companions-new-form > label,
 .companions-provider-add label {
   min-width: 0;
   display: grid;
@@ -355,7 +357,8 @@
   font-weight: 600;
 }
 
-.companions-row__text {
+.companions-row__text,
+.companions-provider-row > div:first-child {
   min-width: 0;
   display: grid;
   gap: 1px;
