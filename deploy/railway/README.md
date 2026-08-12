@@ -91,32 +91,79 @@ rewritten.
 
 ## Skills Hub-only cutover
 
+### Symptom
+
 The API service runs `node dist/migrate.js` as its `preDeployCommand`, so a database that still
-holds Project and run rows fails **every** API deployment on the `0063` guard, with SQLSTATE `55000`
-and the message `Skills Hub-only migration requires runtime resource cleanup first`. Web and worker
-have no pre-deploy migration and keep deploying successfully, so the symptom looks like an
-API-only, commit-independent build failure. The deploy log prints the pending counts and the
-remediation below.
+holds Project and run rows fails **every** API deployment on the `0063` guard:
 
-Once the new worker is deployed, the old release's cleanup worker no longer exists, so steps 2–3
-above can no longer drain anything. Finish the cutover instead:
+```
+Skills Hub-only migration requires runtime resource cleanup first
+SQLSTATE: 55000
+DETAIL: pending storage records=..., Projects=..., sandboxes=..., active usage sessions=...
+```
 
-1. Confirm from the deploy log's `DETAIL` line which obligations remain.
-2. Delete the historical Project and run objects with your object-storage administration tooling
-   (every key named by `project_attachment_uploads`, `project_attachments`, `project_files`,
-   `project_file_versions`, `skill_run_attachments`, `skill_run_attachment_uploads`, and
-   `skill_run_artifacts`) and release any sandbox or golden-snapshot resource still held at the
-   provider. Nothing else references those objects, so this is the last chance to remove them.
-3. Set `COMPANION_SKILLS_HUB_CUTOVER_ACK=external-cleanup-complete` on the API service and redeploy.
-   The pre-deploy migration then empties the retired runtime tables inside the migration lock, logs
-   the per-table row counts it discarded, and lets `0063` and later migrations apply.
-4. Remove the variable after the deploy succeeds. Leaving it set is harmless — the retired tables no
-   longer exist — but it should not outlive the cutover. Any other value fails fast rather than
-   discarding rows whose external objects may still exist.
+Web and worker have no pre-deploy migration, so they keep deploying successfully from the same
+commit. The symptom therefore looks like an API-only build failure that is unrelated to whatever
+was merged, and it repeats on every commit until the cutover below is finished. The image builds
+fine; only the pre-deploy step fails.
 
-The acknowledgement only empties the tables `0063` drops moments later; Skills, organizations,
-users, auth, Agent Auth, secrets, Skill Databases, GitHub, billing, and public-release data are
-untouched.
+### Why this needs an operator
+
+The guard is correct, not a false positive. Those rows hold the only remaining references to objects
+in the configured bucket and to sandboxes and checkpoints at the provider. Dropping them without
+deleting the external resources first strands sensitive objects and billable resources permanently.
+The earlier procedure relied on the previous release's cleanup worker to drain them; once the new
+worker is deployed that release no longer exists, so the one-shot `cutover` command below performs
+that cleanup instead. It always deletes an object before removing the row that names it.
+
+### Runbook
+
+Everything below runs against the migration-owner database URL and the same S3 credentials the API
+uses. Take a PostgreSQL backup first.
+
+1. **Get the current API image running.** The cutover command ships in the API image, which cannot
+   become active while the pre-deploy migration fails. In the Railway API service settings,
+   temporarily clear the pre-deploy command (or set it to `node dist/cutover.js report`) and
+   redeploy. This also quiesces the database on its own: the new API and web have no Project or run
+   surface, so nothing can create new runtime rows while you work.
+
+2. **Inventory the obligations.** `railway ssh` into the API service and run:
+
+   ```bash
+   node dist/cutover.js report
+   ```
+
+   This is read-only. It prints the same four counts the migration checks, every distinct object key
+   still referenced, every sandbox and checkpoint identity, and every unsettled usage session.
+   **Save this output.** After the cutover it is the only record of which external objects existed.
+   If you used the pre-deploy override instead of `railway ssh`, the deploy log holds the same
+   output.
+
+3. **Handle anything you want to keep.** Copy or relocate any object from the printed list that
+   should outlive the cutover. Then release the printed sandboxes and checkpoints at the provider;
+   no code in this release can reach them.
+
+4. **Settle the obligations.**
+
+   ```bash
+   node dist/cutover.js purge --confirm-provider-cleanup
+   ```
+
+   The command refuses to delete anything until `--confirm-provider-cleanup` asserts step 3 is done,
+   deletes each object from the bucket and only then removes the rows naming it, empties the retired
+   runtime tables, and re-checks the guard's four counts before reporting success. Add `--dry-run`
+   first to see exactly what it would do. Add `--skip-object-delete` only when you have already
+   moved or deleted the objects yourself; the rows are then discarded without touching the bucket.
+
+   Objects belonging to Skills, Skill Databases, public releases, logos, avatars, and comment images
+   share the bucket and are never in the list, because the command only deletes keys the retired
+   tables reference.
+
+5. **Restore the pre-deploy command** to `node dist/migrate.js` and redeploy. Migrations `0063`
+   through the current head apply, and the API becomes healthy again.
+
+If a new Project or run row appears between steps 2 and 4, the final verification fails with the
+remaining counts rather than reporting success; stop web and API traffic and re-run step 4.
 
 ## Shared configuration
 

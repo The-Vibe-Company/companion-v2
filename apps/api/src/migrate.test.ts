@@ -1,14 +1,10 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   CUTOVER_GUARD_MESSAGE,
   CUTOVER_GUARD_SQLSTATE,
-  SKILLS_HUB_CUTOVER_ACK_ENV,
-  SKILLS_HUB_CUTOVER_ACK_VALUE,
-  SKILLS_HUB_RETIRED_TABLES,
   databaseRuntimeRole,
   databaseRuntimeRoles,
   databaseUrl,
@@ -16,7 +12,6 @@ import {
   formatMigrationFailure,
   resolveMigrationsFolder,
   resolveRuntimeRoleGrantsFile,
-  skillsHubCutoverAcknowledged,
 } from "./migrate";
 
 const tempDirs: string[] = [];
@@ -264,38 +259,6 @@ describe("runtime role grants", () => {
   });
 });
 
-describe("Skills Hub cutover acknowledgement", () => {
-  it("stays off until an operator sets the exact acknowledgement", () => {
-    expect(skillsHubCutoverAcknowledged({})).toBe(false);
-    expect(skillsHubCutoverAcknowledged({ [SKILLS_HUB_CUTOVER_ACK_ENV]: "" })).toBe(false);
-    expect(
-      skillsHubCutoverAcknowledged({ [SKILLS_HUB_CUTOVER_ACK_ENV]: ` ${SKILLS_HUB_CUTOVER_ACK_VALUE} ` }),
-    ).toBe(true);
-  });
-
-  it.each(["true", "1", "yes", "external-cleanup-pending"])(
-    "refuses the ambiguous value %s instead of discarding rows",
-    (value) => {
-      expect(() => skillsHubCutoverAcknowledged({ [SKILLS_HUB_CUTOVER_ACK_ENV]: value })).toThrow(
-        `${SKILLS_HUB_CUTOVER_ACK_ENV} must be exactly "${SKILLS_HUB_CUTOVER_ACK_VALUE}"`,
-      );
-    },
-  );
-
-  it("drains exactly the tables migration 0063 drops", async () => {
-    const migration = await readFile(
-      fileURLToPath(new URL("../../../packages/db/drizzle/0063_skills_hub_only.sql", import.meta.url)),
-      "utf8",
-    );
-    const dropped = [...migration.matchAll(/^DROP TABLE IF EXISTS public\.([a-z_]+) CASCADE/gm)].map(
-      (match) => match[1],
-    );
-
-    expect(dropped.length).toBeGreaterThan(0);
-    expect([...SKILLS_HUB_RETIRED_TABLES].sort()).toEqual([...dropped].sort());
-  });
-});
-
 describe("formatMigrationFailure", () => {
   it("surfaces the PostgreSQL detail and hint a stack trace drops", () => {
     const error = Object.assign(new Error("permission denied for table skills"), {
@@ -310,7 +273,7 @@ describe("formatMigrationFailure", () => {
     expect(formatted).toContain("SQLSTATE: 42501");
     expect(formatted).toContain("DETAIL: role companion_api lacks INSERT");
     expect(formatted).toContain("HINT: apply packages/db/runtime-role-grants.sql");
-    expect(formatted).not.toContain(SKILLS_HUB_CUTOVER_ACK_ENV);
+    expect(formatted).not.toContain("cutover.js");
   });
 
   it("reads through the wrapper Drizzle throws around the failed statement", () => {
@@ -325,7 +288,7 @@ describe("formatMigrationFailure", () => {
 
     expect(formatted.split("\n")[0]).toBe(CUTOVER_GUARD_MESSAGE);
     expect(formatted).toContain("pending storage records=12");
-    expect(formatted).toContain(`${SKILLS_HUB_CUTOVER_ACK_ENV}=${SKILLS_HUB_CUTOVER_ACK_VALUE}`);
+    expect(formatted).toContain("node dist/cutover.js purge --confirm-provider-cleanup");
     expect(formatted).toContain("deploy/railway/README.md");
   });
 
