@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   CompanionNotFoundError,
   CompanionPluginConflictError,
+  CompanionRegistryUnavailableError,
   CompanionProviderError,
   CompanionProviderForbiddenError,
   CompanionRuntimeForbiddenError,
@@ -16,6 +17,8 @@ import {
   deleteCompanionPlugin,
   deleteCompanionProvider,
   getCompanion,
+  getCompanionRegistryServer,
+  listCompanionRegistry,
   getCompanionForRuntime,
   getCompanionThread,
   listCompanionShares,
@@ -42,6 +45,8 @@ import type { CompanionPiEntry } from "@companion/core";
 import {
   createCompanionInputSchema,
   companionProviderIdSchema,
+  companionRegistryQuerySchema,
+  companionRegistryServerNameSchema,
   saveCompanionProviderInputSchema,
   sendCompanionMessageInputSchema,
   setCompanionProviderInputSchema,
@@ -96,6 +101,7 @@ function errorStatus(error: unknown): number {
   if (error instanceof CompanionProviderError) return 422;
   if (error instanceof CompanionRuntimeTransitionError) return 409;
   if (error instanceof CompanionPluginConflictError) return 409;
+  if (error instanceof CompanionRegistryUnavailableError) return 503;
   if (error instanceof BoxRuntimeConfigurationError) return 503;
   if (error instanceof BoxRuntimeProviderError) {
     if (error.status === 409) return 409;
@@ -219,6 +225,18 @@ export function registerCompanionRoutes(
       fn({ actor, orgId, database }));
   }
 
+  /**
+   * Registry browse is a read-only proxy of a public catalog, so it needs the same flag/allowlist
+   * gate as the rest of Companions but no tenant row: the pins and cache live in the control plane,
+   * not in PostgreSQL. Reject before any registry work when the caller is outside the allowlist.
+   */
+  function assertRegistryAccess(c: Context<{ Variables: ApiVariables }>): void {
+    const actor = actorFromContext(c);
+    if (!companionsAvailableToUser(actor.email, env)) {
+      throw new CompanionAccessForbiddenError();
+    }
+  }
+
   app.get("/v1/companions", async (c) => {
     try {
       const companions = await tenant(c, ({ actor, orgId, database }) =>
@@ -284,6 +302,35 @@ export function registerCompanionRoutes(
       await tenant(c, ({ actor, orgId, database }) =>
         deleteCompanionPlugin({ actor, orgId, accountId, database }));
       return c.json({ ok: true });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.get("/v1/companion-registry/servers", async (c) => {
+    try {
+      assertRegistryAccess(c);
+      const query = companionRegistryQuerySchema.parse({
+        search: c.req.query("search"),
+        cursor: c.req.query("cursor"),
+      });
+      const result = await listCompanionRegistry({
+        search: query.search,
+        cursor: query.cursor,
+        env,
+      });
+      return c.json(result);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.get("/v1/companion-registry/server", async (c) => {
+    try {
+      assertRegistryAccess(c);
+      const name = companionRegistryServerNameSchema.parse(c.req.query("name"));
+      const result = await getCompanionRegistryServer({ name, env });
+      return c.json(result);
     } catch (error) {
       return routeError(c, error);
     }

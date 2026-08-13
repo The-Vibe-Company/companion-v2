@@ -9,6 +9,7 @@ export * from "./billing";
 export * from "./billingService";
 export * from "./featureFlags";
 export * from "./companions";
+export * from "./companionRegistry";
 export * from "./companionPiEvents";
 export * from "./companionRuntimeErrors";
 export { listCompanionRuntimeSkillPackages } from "./services";
