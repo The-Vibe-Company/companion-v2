@@ -196,8 +196,9 @@ provide the runtime secrets it needs:
 
 Optional tuning variables (`COMPANION_BOX_API_BASE`, `COMPANION_BOX_ENVIRONMENT`,
 `COMPANION_BOX_TTL_SECONDS`, `COMPANION_PI_MCP_ADAPTER_PACKAGE`) fall back to the safe defaults in
-`.env.example`. When the flag is `true` but a required secret is unset, the API still boots and logs a
-single startup warning naming the missing variables; Box and provider actions fail until they are set.
+`.env.example`. When the flag is `true`, the allowlist is non-empty, and a required secret is unset,
+the API still boots and logs a single startup warning naming the missing variables; Box and provider
+actions fail until they are set.
 
 For the initial production rollout, set these exact values on both the Railway `api` and `web`
 services:
