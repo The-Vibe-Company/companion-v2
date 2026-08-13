@@ -44,7 +44,7 @@ const PI_DAEMON_DIAGNOSTIC_LABELS = {
  * of bounded length, so the three fragments and their labels have to fit it together: a status line
  * long enough on its own would push out the Pi stderr line the diagnostic exists to surface.
  */
-const PI_DAEMON_DIAGNOSTIC_BUDGETS = { state: 24, status: 74, stderr: 74 } as const;
+const PI_DAEMON_DIAGNOSTIC_BUDGETS = { state: 16, status: 82, stderr: 74 } as const;
 const READY_STATES = new Set<BoxState>(["ready", "idle", "running"]);
 const STARTING_STATES = new Set<BoxState>(["init", "provisioning", "provisioned", "cloning"]);
 const ARCHIVED_STATES = new Set<BoxState>(["archiving", "archived"]);
