@@ -519,6 +519,13 @@
       "when": 1786591200000,
       "tag": "0073_companion_runtime_pools",
       "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1786594800000,
+      "tag": "0074_companion_box_runtime_restore",
+      "breakpoints": true
     }
   ]
 }

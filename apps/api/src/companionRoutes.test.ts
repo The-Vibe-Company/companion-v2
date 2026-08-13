@@ -27,7 +27,6 @@ const coreMocks = vi.hoisted(() => ({
   setDefaultCompanionProvider: vi.fn(),
   resolveCompanionProviderAuth: vi.fn(),
   resolveCompanionPluginInjection: vi.fn(),
-  resolveCompanionBoxScope: vi.fn(),
   getCompanion: vi.fn(),
   getCompanionForRuntime: vi.fn(),
   getCompanionThread: vi.fn(),
@@ -149,16 +148,6 @@ const runningCompanion = {
   runtime: { ...companion.runtime, state: "running" as const, daemon_state: "running" as const },
 };
 
-// THE-330: the wake resolves the workspace's shared Box, so the route hands the adapter a
-// deterministic scoped name rather than a per-Companion id. `org-1` is a team workspace here.
-const BOX_SCOPE = {
-  scope: "org" as const,
-  orgId: "org-1",
-  ownerId: null,
-  boxName: "Companion org org-1",
-  boxEnv: { COMPANION_SCOPE: "org", COMPANION_ORG_ID: "org-1" },
-};
-
 describe("Companions API feature gate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -230,7 +219,6 @@ describe("Companions API feature gate", () => {
       accounts: [],
       credentials: [],
     });
-    coreMocks.resolveCompanionBoxScope.mockResolvedValue(BOX_SCOPE);
     coreMocks.getCompanion.mockResolvedValue(companion);
     coreMocks.getCompanionForRuntime.mockResolvedValue(companion);
     coreMocks.getCompanionThread.mockResolvedValue(viewerThread);
@@ -500,7 +488,6 @@ describe("Companions API feature gate", () => {
     await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
     expect(runtime.prompt).toHaveBeenCalledWith({
       boxId: companion.runtime.box_id,
-      companionId: companion.id,
       message: message.content,
       requestId: message.event_id,
     });
@@ -641,7 +628,6 @@ describe("Companions API feature gate", () => {
     expect(runtime.prompt).toHaveBeenCalledOnce();
     expect(runtime.readEvents).toHaveBeenCalledWith({
       boxId: companion.runtime.box_id,
-      companionId: companion.id,
       offset: 512,
     });
     // Delivery is claimed before the log is read, so the prompt cannot be repeated by a retry.
@@ -949,8 +935,8 @@ describe("Companions API feature gate", () => {
 
     expect(response.status).toBe(200);
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
-      boxName: BOX_SCOPE.boxName,
-      boxEnv: BOX_SCOPE.boxEnv,
+      companionId: companion.id,
+      orgId: "org-1",
       boxId: "bx_23456789",
       clientSurface: "web",
       providerAuth: {
@@ -975,7 +961,7 @@ describe("Companions API feature gate", () => {
       "keeps a refreshed subscription file on an already provisioned Box at the current layout",
       {
         box_id: "bx_23456789",
-        disk_layout_version: 3,
+        disk_layout_version: 4,
         provider_credential_generation: "22222222-2222-4222-8222-222222222222",
       },
       false,
@@ -984,7 +970,7 @@ describe("Companions API feature gate", () => {
       "rewrites provider auth for a Companion that has no Box yet",
       {
         box_id: null,
-        disk_layout_version: 2,
+        disk_layout_version: 4,
         provider_credential_generation: "22222222-2222-4222-8222-222222222222",
       },
       true,
@@ -1002,7 +988,7 @@ describe("Companions API feature gate", () => {
       "rewrites provider auth after the workspace connection was rotated",
       {
         box_id: "bx_23456789",
-        disk_layout_version: 3,
+        disk_layout_version: 4,
         provider_credential_generation: "33333333-3333-4333-8333-333333333333",
       },
       true,
