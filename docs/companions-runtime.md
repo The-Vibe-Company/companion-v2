@@ -154,15 +154,23 @@ to an on-disk marker keyed by the adapter package. Starts repair older Box snaps
 injection. Runtime transcripts and files do not enter PostgreSQL. A systemd user unit supervises Pi
 while Box is active; the lifecycle API restarts it after a Box resume.
 
-A Wake re-runs the same `setupScript` as a Box command to repair the layout. Box commands run in a
-fresh non-interactive shell that never inherits the interactive login/nvm PATH, so the script checks
-the on-disk marker and exits before it resolves `pi`: an already-laid-out disk whose marker matches
-`<layout version>:<adapter package>` is healthy even when `pi` is not on the command's PATH, and a
-Wake must not fail it. When a relayout is actually needed, the script first re-derives PATH from the
-known install locations (the nvm node bins, the global npm prefix bin, and `~/.local/bin`, plus a
-best-effort `nvm.sh` source), resolves Pi's absolute path, bakes that absolute path into the daemon
-wrapper, and pins the unit's `Environment=PATH` to Pi's bin directory, so the supervised daemon never
-depends on a login-shell PATH the systemd user manager will not provide.
+Every Box command payload is sent as `bash --noprofile --norc -c '<script>'`. The command API
+executes the payload as a string rather than as a file, so a `#!/usr/bin/env bash` shebang inside it
+is only a comment, and on a Box whose `/bin/sh` is dash the payload dies on its first line with
+`set: Illegal option -o pipefail`. Every Companion payload also uses bashisms further down — arrays
+and `${x[@]}` in the daemon wrapper, `shopt -s nullglob` in the skill staging — so the shell is
+pinned once at the transport rather than per script. A Wake re-runs `setupScript` through that same
+command path, and its failure previously surfaced only as `Pi runtime layout failed to install`; the
+recorded line now also carries the command's exit code and the last thing the shell said.
+
+`--noprofile --norc` keeps the payload's environment deterministic, so the scripts derive whatever
+PATH they need. `setupScript` checks the on-disk marker and exits before it resolves `pi`: an
+already-laid-out disk whose marker matches `<layout version>:<adapter package>` is healthy even when
+`pi` is not on the command's PATH. When a relayout is actually needed, the script re-derives PATH
+from the known install locations (the nvm node bins, the global npm prefix bin, and `~/.local/bin`,
+plus a best-effort `nvm.sh` source), resolves Pi's absolute path, bakes that absolute path into the
+daemon wrapper, and pins the unit's `Environment=PATH` to Pi's bin directory, so the supervised
+daemon never depends on a login-shell PATH the systemd user manager will not provide.
 
 The create `setupScript` installs Pi, writes the daemon wrapper, and writes the systemd user unit,
 and it deliberately runs no user-manager command. A Box executing its create script has no user D-Bus

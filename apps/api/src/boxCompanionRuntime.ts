@@ -130,6 +130,36 @@ function shellQuote(value: string): string {
 }
 
 /**
+ * Run one Companion payload under bash whatever shell the Box command API picked.
+ *
+ * The API executes the command as a string, not as a file, so a `#!/usr/bin/env bash` shebang in the
+ * payload is only a comment. On a Box whose `/bin/sh` is dash, every Companion payload dies on its
+ * very first line with `set: Illegal option -o pipefail`, and each one also uses bashisms further
+ * down: arrays and `${x[@]}` in the daemon wrapper, `shopt -s nullglob` in the skill staging, and
+ * `<<<`-free but bash-only `[[`-adjacent constructs elsewhere. That failure is silent and total,
+ * which is how a healthy, already-laid-out Box still reported "Pi runtime layout failed to install".
+ *
+ * `--noprofile --norc` keeps the shell deterministic: the payload gets the inherited environment and
+ * nothing a Box image's rc files might add, which is why the scripts derive the PATH they need.
+ */
+function bashCommand(script: string): string {
+  return `bash --noprofile --norc -c ${shellQuote(script)}`;
+}
+
+/**
+ * Keep one Box command failure readable as a single stored line. The control plane sanitizes and
+ * truncates whatever it records, so the useful part is the last thing the shell complained about,
+ * not the transcript: `set: Illegal option -o pipefail` names the real fault immediately.
+ */
+function commandFailureDetail(result: CommandEnvelope): string {
+  const lastLine = (text: string | undefined): string | undefined =>
+    (text ?? "").split(/[\r\n]+/).map((line) => line.trim()).filter(Boolean).at(-1);
+  const output = lastLine(result.stderr) ?? lastLine(result.stdout);
+  const exit = result.exitCode === null ? "" : ` (exit ${result.exitCode})`;
+  return output ? `${exit}: ${output}` : exit;
+}
+
+/**
  * A Box command runs in a fresh non-interactive shell with uid 1000 but none of the interactive
  * login PATH, so a Box whose Pi was installed through nvm cannot see `pi`/`npm` here. Every command
  * that resolves those binaries prepends the known install locations first: the nvm node bins, the
@@ -483,7 +513,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
   ): Promise<CommandEnvelope> {
     return this.#request<CommandEnvelope>(`/boxes/${encodeURIComponent(boxId)}/commands`, {
       method: "POST",
-      body: JSON.stringify({ command, timeoutSeconds }),
+      body: JSON.stringify({ command: bashCommand(command), timeoutSeconds }),
     }, (timeoutSeconds + 10) * 1_000);
   }
 
@@ -516,7 +546,12 @@ systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true`,
       setupScript(this.#installCommand, this.#mcpAdapterPackage),
       180,
     );
-    if (!result.success) throw new BoxRuntimeProviderError("Pi runtime layout failed to install", 502);
+    if (!result.success) {
+      throw new BoxRuntimeProviderError(
+        `Pi runtime layout failed to install${commandFailureDetail(result)}`,
+        502,
+      );
+    }
   }
 
   async #injectPiResources(input: {
@@ -685,7 +720,10 @@ trap - EXIT`,
     }
     if (!started.success) {
       await this.#removeProviderFile(box.id).catch(() => undefined);
-      throw new BoxRuntimeProviderError("Pi daemon failed to start", 502);
+      throw new BoxRuntimeProviderError(
+        `Pi daemon failed to start${commandFailureDetail(started)}`,
+        502,
+      );
     }
     const daemonState = await this.#daemonState(box.id);
     if (daemonState !== "running") throw new BoxRuntimeProviderError("Pi daemon is not running after start", 502);
