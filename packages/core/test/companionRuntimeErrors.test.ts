@@ -18,6 +18,11 @@ describe("sanitizeCompanionRuntimeError", () => {
     )).toBe("Box Pi setup failed: exit 1");
   });
 
+  it("passes a Pi user-bus failure through unchanged so an operator can tell it apart from config", () => {
+    expect(sanitizeCompanionRuntimeError("Companion cannot reach the systemd user bus on this Box"))
+      .toBe("Companion cannot reach the systemd user bus on this Box");
+  });
+
   it("redacts credential-shaped text a Box or provider message echoed back", () => {
     const sanitized = sanitizeCompanionRuntimeError(
       'Box rejected the request: authorization: Bearer abcdef0123456789abcdef, key sk-live-abcdef012345',
