@@ -18,7 +18,7 @@
     "@companion/db": "workspace:*",
     "@companion/skills": "workspace:*",
     "drizzle-orm": "^0.45.2",
-    "free-email-domains": "^1.2.0",
+    "free-email-domains": "^1.9.93",
     "zod": "^3.24.1"
   },
   "devDependencies": {
