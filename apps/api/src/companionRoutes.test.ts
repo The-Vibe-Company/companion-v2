@@ -490,10 +490,60 @@ describe("Companions API feature gate", () => {
       boxId: companion.runtime.box_id,
       offset: 512,
     });
+    // Delivery is claimed before the log is read, so the prompt cannot be repeated by a retry.
+    expect(coreMocks.recordCompanionPiProjection).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      deliveredOrdinal: 0,
+      entries: [],
+    }));
+    expect(coreMocks.recordCompanionPiProjection).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      piLogOffset: 512 + Buffer.byteLength(reply, "utf8"),
+      piLogRewound: false,
+      entries: [expect.objectContaining({ role: "assistant", content: "Two services timed out." })],
+    }));
+  });
+
+  it("keeps the delivery watermark when reading the Pi log fails after the prompt", async () => {
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({ pending: [message], piLogOffset: 512 });
+    const runtime = boxRuntime({
+      readEvents: vi.fn(async () => {
+        throw new Error("box command failed");
+      }),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(400);
+    // The failed read must not cost Pi a second copy of the same message on the next sync.
     expect(coreMocks.recordCompanionPiProjection).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: 0,
-      piLogOffset: 512 + Buffer.byteLength(reply, "utf8"),
-      entries: [expect.objectContaining({ role: "assistant", content: "Two services timed out." })],
+      entries: [],
+    }));
+  });
+
+  it("rereads a shrunken Pi log from its start and owns the offset outright", async () => {
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({ pending: [], piLogOffset: 4096 });
+    const runtime = boxRuntime({ readEvents: vi.fn(async () => ({ chunk: "", offset: 0 })) });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    expect(coreMocks.recordCompanionPiProjection).toHaveBeenCalledWith(expect.objectContaining({
+      piLogOffset: 0,
+      piLogRewound: true,
     }));
   });
 
