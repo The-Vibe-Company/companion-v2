@@ -1,4 +1,8 @@
-import { CompanionPluginConflictError, CompanionRegistryUnavailableError } from "@companion/core";
+import {
+  CompanionPluginConflictError,
+  CompanionProviderError,
+  CompanionRegistryUnavailableError,
+} from "@companion/core";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthenticationRequiredError, type ApiVariables } from "./context";
@@ -592,6 +596,41 @@ describe("Companions API feature gate", () => {
         runtimeState: "error",
         daemonState: "error",
         lastError: "Box resume failed",
+      }),
+    }));
+  });
+
+  it("records last_error when automatic wake fails before the runtime claim", async () => {
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    coreMocks.resolveCompanionProviderAuth.mockRejectedValueOnce(
+      new CompanionProviderError(
+        "provider_not_configured",
+        "The provider connection is unavailable.",
+      ),
+    );
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
+    expect(runtime.start).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: companion.id,
+      patch: expect.objectContaining({
+        runtimeState: "error",
+        daemonState: "error",
+        lastError: "The provider connection is unavailable.",
       }),
     }));
   });

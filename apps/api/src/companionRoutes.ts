@@ -235,6 +235,12 @@ export function registerCompanionRoutes(
     companionId: string,
     body: StartCompanionRuntimeInput,
   ): Promise<{ companion: Companion; runtime: CompanionBoxRuntime }> {
+    let failureContext:
+      | {
+          actor: ReturnType<typeof actorFromContext>;
+          orgId: string;
+        }
+      | undefined;
     let mutation:
       | {
           actor: ReturnType<typeof actorFromContext>;
@@ -247,6 +253,7 @@ export function registerCompanionRoutes(
       | undefined;
     try {
       mutation = await tenant(c, async ({ actor, orgId, database }) => {
+        failureContext = { actor, orgId };
         const provider = await resolveCompanionProviderAuth({
           actor, orgId, companionId, database,
         });
@@ -339,12 +346,13 @@ export function registerCompanionRoutes(
       );
       return { companion, runtime };
     } catch (error) {
-      if (mutation) {
+      const context = mutation ?? failureContext;
+      if (context) {
         await withTenantContext(
-          { orgId: mutation.orgId, userId: mutation.actor.id },
+          { orgId: context.orgId, userId: context.actor.id },
           (database) => updateCompanionRuntime({
-            actor: mutation!.actor,
-            orgId: mutation!.orgId,
+            actor: context.actor,
+            orgId: context.orgId,
             companionId,
             patch: {
               runtimeState: "error",
