@@ -178,16 +178,16 @@ The worker needs no Vercel, OpenCode, model-provider, golden snapshot, or runtim
 `COMPANION_COMPANIONS_ENABLED` gates the Companions control plane on both web and API. It defaults to
 `false` when unset, so a fresh Railway deployment boots with Companions disabled and none of the
 Box/Pi/provider variables are required — leave the flag unset to keep it off. The API registers no
-Companion routes and the web shell hides the Companions surface until the flag is `true`.
+Companion routes and the web shell hides the Companions surface until the flag is `true` and a
+non-empty allowlist is configured.
 
-Set the flag to `true` on both `web` and `api` only when you intend to run Companions, and provide the
-runtime secrets it needs:
+Set the flag and allowlist on both `web` and `api` only when you intend to run Companions, and
+provide the runtime secrets it needs:
 
-- `COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS` — optional comma-separated, case-insensitive exact
-  domains. When set, only authenticated users with a matching email domain can see the web surface or
-  use Companion API routes. Missing or malformed user emails are denied. When unset or empty, the
-  current behavior is preserved for authenticated workspace users with valid emails while the master
-  flag is `true`.
+- `COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS` — required comma-separated, case-insensitive exact
+  domains. Only authenticated users with a matching email domain can see the web surface or use
+  Companion API routes. Missing or malformed user emails are denied. When unset or empty, Companions
+  stays disabled and the API registers no Companion routes even if the master flag is `true`.
 - `COMPANION_BOX_API_KEY` — required for Box lifecycle calls (start/stop/status).
 - `COMPANION_SECRETS_MASTER_KEY` — the base64 32-byte Skills master key also envelope-encrypts
   companion provider subscription credentials; it is already required by Secrets in production.

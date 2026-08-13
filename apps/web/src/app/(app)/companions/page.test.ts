@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 /**
  * Product promise:
  * The Companions route stays absent when the master flag is off and remains invisible to signed-in
- * users outside an optional email-domain allowlist.
+ * users outside the required email-domain allowlist.
  *
  * Regression caught:
  * A server page could expose the Companions shell even though the API rejects the same user.
@@ -60,6 +60,16 @@ describe("Companions page access gate", () => {
   it("returns not found before authentication when the master flag is off", async () => {
     delete process.env.COMPANION_COMPANIONS_ENABLED;
     process.env.COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS = "thevibecompany.co";
+
+    await expect(CompanionsPage({ searchParams: Promise.resolve({}) })).rejects.toThrow(
+      "not-found",
+    );
+    expect(authMocks.loadServerAuth).not.toHaveBeenCalled();
+  });
+
+  it("returns not found before authentication when the allowlist is empty", async () => {
+    process.env.COMPANION_COMPANIONS_ENABLED = "true";
+    delete process.env.COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS;
 
     await expect(CompanionsPage({ searchParams: Promise.resolve({}) })).rejects.toThrow(
       "not-found",

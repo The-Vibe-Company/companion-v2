@@ -79,10 +79,16 @@ describe("Companions sidebar access", () => {
   });
 
   it.each([
-    ["an allowlisted email", "User@TheVibeCompany.Co", true],
-    ["a non-allowlisted email", "user@example.com", false],
-    ["a missing email", undefined, false],
-  ])("passes the correct gate for %s", async (_case, email, expected) => {
+    ["an allowlisted email", "User@TheVibeCompany.Co", "thevibecompany.co", true],
+    ["a non-allowlisted email", "user@example.com", "thevibecompany.co", false],
+    ["a missing email", undefined, "thevibecompany.co", false],
+    ["a missing allowlist", "user@thevibecompany.co", undefined, false],
+  ])("passes the correct gate for %s", async (_case, email, allowlist, expected) => {
+    if (allowlist === undefined) {
+      delete process.env.COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS;
+    } else {
+      process.env.COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS = allowlist;
+    }
     authMocks.loadServerAuth.mockResolvedValue({
       status: "authenticated",
       user: {

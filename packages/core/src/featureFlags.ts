@@ -5,12 +5,15 @@ export const COMPANIONS_ALLOWED_EMAIL_DOMAINS_ENV =
   "COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS";
 
 export function companionsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env[COMPANIONS_FEATURE_FLAG]?.trim().toLowerCase() === ENABLED_VALUE;
+  return (
+    env[COMPANIONS_FEATURE_FLAG]?.trim().toLowerCase() === ENABLED_VALUE
+    && companionsAllowedEmailDomains(env).size > 0
+  );
 }
 
 /**
- * Resolve the optional, case-insensitive email-domain allowlist. Empty entries are ignored so an
- * unset, blank, or comma-only value preserves the existing all-authenticated-users behavior.
+ * Resolve the required, case-insensitive email-domain allowlist. Empty entries are ignored. An
+ * unset, blank, or comma-only value keeps Companions disabled even when the master flag is true.
  */
 export function companionsAllowedEmailDomains(
   env: NodeJS.ProcessEnv = process.env,
@@ -24,9 +27,8 @@ export function companionsAllowedEmailDomains(
 }
 
 /**
- * Decide whether an authenticated user may access Companions. The master switch always wins. When
- * no domain allowlist is configured, every authenticated user with a valid email remains eligible,
- * matching the historical enabled behavior. Missing or malformed emails fail closed.
+ * Decide whether an authenticated user may access Companions. The master switch and a non-empty
+ * allowlist are both required. Missing or malformed emails fail closed.
  */
 export function companionsAvailableToUser(
   email: string | null | undefined,
@@ -41,7 +43,7 @@ export function companionsAvailableToUser(
   }
 
   const allowedDomains = companionsAllowedEmailDomains(env);
-  return allowedDomains.size === 0 || allowedDomains.has(normalizedEmail.slice(at + 1));
+  return allowedDomains.has(normalizedEmail.slice(at + 1));
 }
 
 // Defaults intentionally mirror AsciiBoxCompanionRuntime and .env.example so that a deployment can

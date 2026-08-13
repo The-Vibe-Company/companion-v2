@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthenticationRequiredError, type ApiVariables } from "./context";
-import { registerCompanionRoutes } from "./companionRoutes";
+import { registerCompanionRoutes as registerCompanionRoutesImpl } from "./companionRoutes";
 
 const contextMocks = vi.hoisted(() => ({
   actorFromContext: vi.fn(),
@@ -44,6 +44,19 @@ const skillsMocks = vi.hoisted(() => ({
   skillChecksum: vi.fn(),
   toTar: vi.fn((archive) => archive),
 }));
+
+function registerCompanionRoutes(
+  ...[app, env, runtimeFactory]: Parameters<typeof registerCompanionRoutesImpl>
+): void {
+  registerCompanionRoutesImpl(
+    app,
+    {
+      COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "example.test",
+      ...env,
+    },
+    runtimeFactory,
+  );
+}
 
 vi.mock("./context", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./context")>()),
@@ -205,6 +218,16 @@ describe("Companions API feature gate", () => {
     const app = new Hono<{ Variables: ApiVariables }>();
 
     registerCompanionRoutes(app, {});
+
+    expect((await app.request("/v1/companions")).status).toBe(404);
+    expect((await app.request("/v1/companion-providers")).status).toBe(404);
+    expect(contextMocks.actorFromContext).not.toHaveBeenCalled();
+  });
+
+  it("does not register routes when the master flag is on without an allowlist", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+
+    registerCompanionRoutesImpl(app, { COMPANION_COMPANIONS_ENABLED: "true" });
 
     expect((await app.request("/v1/companions")).status).toBe(404);
     expect((await app.request("/v1/companion-providers")).status).toBe(404);
