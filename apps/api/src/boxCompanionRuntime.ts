@@ -20,6 +20,8 @@ const COMPANION_PI_EVENT_READ_LIMIT = 262_144;
 const READY_STATES = new Set<BoxState>(["ready", "idle", "running"]);
 const STARTING_STATES = new Set<BoxState>(["init", "provisioning", "provisioned", "cloning"]);
 const ARCHIVED_STATES = new Set<BoxState>(["archiving", "archived"]);
+/** Printed by the staging command when Pi's auth file already exists on the Box disk. */
+const PROVIDER_AUTH_PRESENT_MARKER = "companion-provider-auth-present";
 
 export type BoxState =
   | "init"
@@ -434,12 +436,15 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     const mcp = buildMcpAdapterInjection(input.mcpAccounts);
     const cleared = await this.#command(
       input.boxId,
-      "set -e; root=\"$HOME/.companion/runtime\"; rm -rf \"$root/state/skill-archives\"; mkdir -p \"$root/state/skill-archives\"",
+      `set -e; root="$HOME/.companion/runtime"; rm -rf "$root/state/skill-archives"; mkdir -p "$root/state/skill-archives"; if [ -f "$HOME/.companion/pi/auth.json" ]; then printf '%s\\n' ${shellQuote(PROVIDER_AUTH_PRESENT_MARKER)}; fi`,
     );
     if (!cleared.success) throw new BoxRuntimeProviderError("Pi resource staging failed", 502);
     // Pi keeps refreshed subscription tokens in its own agent directory, so the auth file is
-    // replaced only when the encrypted workspace connection generation changes.
-    if (input.replaceProviderAuth) {
+    // replaced only when the encrypted workspace connection generation changes. The disk itself is
+    // the authority on whether the file exists: a Box the control plane recorded at the current
+    // generation can still be a replacement disk that never received it, for example when an earlier
+    // start failed after the new Box id was persisted.
+    if (input.replaceProviderAuth || !cleared.stdout.includes(PROVIDER_AUTH_PRESENT_MARKER)) {
       await this.#writeFile(
         input.boxId,
         ".companion/pi/auth.json",

@@ -26,7 +26,8 @@ and records the new id through the same assignment callback. Renaming happens be
 replacement is created, so no later start can re-adopt the retired disk, and both retirement calls
 are best-effort because a Box the provider will not rename or stop must never leave a Companion
 permanently un-wakeable. A replacement disk always receives Pi's auth file again, whatever provider
-generation the control plane recorded for the Box it replaced. A Box that is merely still
+generation the control plane recorded for the Box it replaced, including on a later start that finds
+the file missing on a disk an earlier start had already assigned. A Box that is merely still
 provisioning, including one whose setup is `pending` or `running`, is waited on as before.
 
 Each Companion has one immutable Owner, an optional workspace-wide Editor/Viewer grant, and
@@ -184,7 +185,10 @@ tokens. Reconnecting or disconnecting a provider replaces or removes the control
 next start replaces the Box file with only the selected provider. Later starts preserve Pi's
 possibly refreshed OAuth entry, and skip the rewrite only for a Box this Companion already
 provisioned at the current disk layout whose recorded credential generation still matches. A new
-Box, an older layout, or a rotated connection always rewrites the file. Start fails closed when the
+Box, an older layout, or a rotated connection always rewrites the file. The disk is the final
+authority: the staging step reports whether `auth.json` exists, and a start rewrites the file
+whenever it does not, so a replacement disk provisioned by an earlier start that failed before Pi
+was configured cannot inherit a recorded generation it never satisfied. Start fails closed when the
 file is absent, and a failed daemon start still best-effort removes the transient `mcp_credentials`
 environment file.
 

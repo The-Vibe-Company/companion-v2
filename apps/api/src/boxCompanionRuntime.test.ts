@@ -10,6 +10,8 @@ const box = {
   desktopAvailable: true,
   setupStatus: "done",
 };
+/** Printed by the adapter's staging command when Pi's auth file already exists on the Box disk. */
+const AUTH_PRESENT_MARKER = "companion-provider-auth-present";
 
 function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
@@ -164,11 +166,15 @@ describe("AsciiBoxCompanionRuntime", () => {
         return json({ ok: true });
       }
       if (url.endsWith("/commands") && init?.method === "POST") {
-        commands.push(String(body.command));
+        const command = String(body.command);
+        commands.push(command);
         return json({
           success: true,
           exitCode: 0,
-          stdout: String(body.command).includes("is-active") ? "active\n" : "",
+          // The resumed disk still carries the Pi auth file Companion wrote before it was archived.
+          stdout: command.includes("is-active")
+            ? "active\n"
+            : command.includes(AUTH_PRESENT_MARKER) ? `${AUTH_PRESENT_MARKER}\n` : "",
           stderr: "",
         });
       }
@@ -293,6 +299,180 @@ describe("AsciiBoxCompanionRuntime", () => {
       daemonState: "running",
       desktopAvailable: true,
     });
+  });
+
+  it("writes Pi auth onto a disk that has none even when the caller skipped the rewrite", async () => {
+    const writtenPaths: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") {
+        writtenPaths.push(String(body.path));
+        return json({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        // The staging command reports no auth file, as on a replacement disk an earlier start
+        // provisioned but never finished configuring.
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      // The control plane recorded this Box at the current layout and generation.
+      replaceProviderAuth: false,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(writtenPaths).toContain(".companion/pi/auth.json");
+    expect(result.runtimeState).toBe("running");
+  });
+
+  it("replaces a Box whose Pi setup failed even when the provider refuses the rename", async () => {
+    const failed = {
+      ...box,
+      id: "bx_pdddbvx9",
+      name: "Companion 11111111-1111-4111-8111-111111111111",
+      state: "idle",
+      setupStatus: "failed",
+    };
+    let stopped = false;
+    let createdBox = false;
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_pdddbvx9") && method === "GET") return json({ box: failed });
+      if (url.endsWith("/boxes/bx_pdddbvx9") && method === "PATCH") {
+        return json({ code: "box_immutable", message: "name cannot be changed" }, 409);
+      }
+      if (url.endsWith("/boxes/bx_pdddbvx9/stop") && method === "POST") {
+        stopped = true;
+        return json({ box: { ...failed, state: "archiving" } }, 202);
+      }
+      if (url.endsWith("/boxes") && method === "POST") {
+        createdBox = true;
+        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } }, 202);
+      }
+      if (url.endsWith("/boxes/bx_23456789") && method === "PATCH") return json({ box });
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/boxes/bx_23456789/commands") && method === "POST") {
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_pdddbvx9",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(stopped).toBe(true);
+    expect(createdBox).toBe(true);
+    expect(result.boxId).toBe("bx_23456789");
+  });
+
+  it("retires an archived Box whose Pi setup failed instead of resuming it", async () => {
+    let renamed = "";
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_asleepbad") && method === "GET") {
+        return json({
+          box: {
+            ...box,
+            id: "bx_asleepbad",
+            name: "Companion 11111111-1111-4111-8111-111111111111",
+            state: "archived",
+            setupStatus: "failed",
+          },
+        });
+      }
+      if (url.endsWith("/boxes/bx_asleepbad") && method === "PATCH") {
+        renamed = String(body.name);
+        return json({ box: { ...box, id: "bx_asleepbad", state: "archived" } });
+      }
+      if (url.endsWith("/boxes") && method === "POST") {
+        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } }, 202);
+      }
+      if (url.endsWith("/boxes/bx_23456789") && method === "PATCH") return json({ box });
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/boxes/bx_23456789/commands") && method === "POST") {
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_asleepbad",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(renamed).toMatch(/^Retired Companion 11111111-1111-4111-8111-111111111111 \d+$/);
+    // An archived Box is already stopped, and its broken disk must never be resumed.
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/bx_asleepbad/stop")))
+      .toBe(false);
+    expect(result.boxId).toBe("bx_23456789");
   });
 
   it("replaces the assigned Box when it entered the terminal error state", async () => {
