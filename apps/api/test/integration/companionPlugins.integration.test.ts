@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  CompanionPluginConflictError,
   deleteCompanionPlugin,
   listCompanionPlugins,
   resolveCompanionPluginInjection,
@@ -109,5 +110,49 @@ describe("member-private Companion Plugins", () => {
       orgId: fixture.orgA,
       database: integrationDb,
     })).resolves.toEqual([]);
+  });
+
+  it("stores authless HTTP accounts and maps duplicate labels to a conflict", async () => {
+    const account = await saveCompanionPlugin({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      plugin: {
+        provider: "github",
+        label: "work",
+        transport: "http",
+        url: "https://mcp.example.test/github/work",
+        args: [],
+      },
+      masterKey,
+      database: integrationDb,
+    });
+    expect(account).toMatchObject({
+      provider: "github",
+      label: "work",
+      transport: "http",
+      endpoint: "https://mcp.example.test/github/work",
+      connected: true,
+    });
+
+    await expect(saveCompanionPlugin({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      plugin: {
+        provider: "github",
+        label: "work",
+        transport: "http",
+        url: "https://mcp.example.test/github/work",
+        args: [],
+      },
+      masterKey,
+      database: integrationDb,
+    })).rejects.toBeInstanceOf(CompanionPluginConflictError);
+
+    await deleteCompanionPlugin({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      accountId: account.id,
+      database: integrationDb,
+    });
   });
 });

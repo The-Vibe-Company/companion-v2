@@ -1,3 +1,4 @@
+import { CompanionPluginConflictError } from "@companion/core";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthenticationRequiredError, type ApiVariables } from "./context";
@@ -851,6 +852,33 @@ describe("Companions API feature gate", () => {
       plugin: expect.objectContaining({ provider: "github", label: "work" }),
     }));
     expect(JSON.stringify(await created.json())).not.toContain("secret-mcp");
+
+    const authless = await app.request("/v1/companion-plugins", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        label: "personal",
+        transport: "http",
+        url: "https://mcp.example.test/github/personal",
+        args: [],
+      }),
+    });
+    expect(authless.status).toBe(201);
+
+    coreMocks.saveCompanionPlugin.mockRejectedValueOnce(new CompanionPluginConflictError());
+    const conflict = await app.request("/v1/companion-plugins", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        label: "work",
+        transport: "http",
+        url: "https://mcp.example.test/github/work",
+        args: [],
+      }),
+    });
+    expect(conflict.status).toBe(409);
 
     const removed = await app.request(
       "/v1/companion-plugins/44444444-4444-4444-8444-444444444444",

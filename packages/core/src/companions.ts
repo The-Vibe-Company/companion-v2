@@ -34,6 +34,22 @@ const COMPANION_RUNTIME_CLAIM_STALE_MS = 5 * 60_000;
 const PROVIDER_CREDENTIAL_PURPOSE = "companion-provider-credential";
 const MCP_CREDENTIAL_PURPOSE = "companion-mcp-credential";
 
+/** Drizzle query errors nest postgres.js SQLSTATE on `cause`; check both layers. */
+function isPostgresUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  if ("code" in error && (error as { code?: unknown }).code === "23505") return true;
+  if (
+    "cause" in error
+    && error.cause
+    && typeof error.cause === "object"
+    && "code" in error.cause
+    && (error.cause as { code?: unknown }).code === "23505"
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export class CompanionNotFoundError extends Error {
   constructor() {
     super("companion not found");
@@ -877,12 +893,8 @@ export async function saveCompanionPlugin(input: {
     });
     return toPluginAccount(row);
   } catch (error) {
-    if (
-      typeof error === "object"
-      && error !== null
-      && "code" in error
-      && error.code === "23505"
-    ) {
+    // Drizzle wraps postgres.js errors, so SQLSTATE lives on `cause` for unique conflicts.
+    if (isPostgresUniqueViolation(error)) {
       throw new CompanionPluginConflictError();
     }
     throw error;

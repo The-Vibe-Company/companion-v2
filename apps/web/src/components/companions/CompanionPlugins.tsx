@@ -37,6 +37,7 @@ function AddMcpDialog({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    if (busy) return;
     setBusy(true);
     setError(null);
     const credential = credentialValue.trim()
