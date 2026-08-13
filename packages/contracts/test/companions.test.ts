@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   companionDesktopSchema,
+  companionMessageEventId,
   companionThreadSchema,
   companionSharesSchema,
   createCompanionInputSchema,
@@ -161,6 +162,29 @@ describe("Companion chat contracts", () => {
       content: "Ship it",
       tools: ["bash"],
     })).toThrow();
+  });
+
+  it("lets a send name the turn it creates, and only as an id", () => {
+    // One send, one id: the control plane stores the turn a resent request names once, so the id has
+    // to survive parsing intact and anything that is not one is refused before persistence.
+    expect(sendCompanionMessageInputSchema.parse({
+      content: "Ship it",
+      client_message_id: "33333333-3333-4333-8333-333333333333",
+    })).toEqual({
+      content: "Ship it",
+      client_message_id: "33333333-3333-4333-8333-333333333333",
+    });
+    expect(() => sendCompanionMessageInputSchema.parse({
+      content: "Ship it",
+      client_message_id: "pi:512",
+    })).toThrow();
+  });
+
+  it("keeps sent messages and projected Pi events in separate id namespaces", () => {
+    // The composer shows a message under the id the control plane will store it under, so the two
+    // must agree and neither may be able to name an entry the Pi log will claim later.
+    expect(companionMessageEventId("33333333-3333-4333-8333-333333333333"))
+      .toBe("msg:33333333-3333-4333-8333-333333333333");
   });
 
   it("describes one thread per Companion with its run boundary and message authors", () => {

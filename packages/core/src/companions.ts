@@ -21,6 +21,7 @@ import {
   COMPANION_PROVIDER_CATALOG,
   companionMcpAccountSchema,
   companionMcpCredentialSchema,
+  companionMessageEventId,
 } from "@companion/contracts";
 import { db, schema, type Db } from "@companion/db";
 import { canManageOrg } from "./authz";
@@ -470,42 +471,85 @@ async function allocateThreadOrdinals(input: {
 /**
  * Persist one Owner/Editor message in the control plane. Persistence is deliberately independent of
  * the harness: the message survives a sleeping Box and is handed to Pi by the delivery path.
+ *
+ * One send is one turn. The event id comes from the sender's `clientMessageId`, so the same send
+ * arriving twice — a retried request, a replayed one, a client that submitted twice — resolves to the
+ * turn already stored rather than a second copy of it. The primary key `(companion_id, event_id)` is
+ * what enforces it, so two requests racing each other settle the same way as two arriving in order.
  */
 export async function sendCompanionMessage(input: {
   actor: ActorContext;
   orgId: string;
   companionId: string;
   content: string;
+  clientMessageId?: string;
   database?: Db;
 }): Promise<{ thread: CompanionThread; entry: CompanionTranscriptEntry }> {
   const database = input.database ?? db;
   const companion = await getCompanionForRuntime({ ...input, database });
-  const createdAt = new Date();
-  const ordinal = await allocateThreadOrdinals({
+  const eventId = companionMessageEventId(input.clientMessageId ?? randomUUID());
+  await insertCompanionMessage({
     database,
     orgId: input.orgId,
     companionId: input.companionId,
-    count: 1,
-    lastMessageAt: createdAt,
-  });
-  await database.insert(schema.companionTranscriptEntries).values({
-    orgId: input.orgId,
-    companionId: input.companionId,
-    eventId: `msg:${randomUUID()}`,
-    ordinal,
-    role: "user",
+    eventId,
     content: input.content,
     authorId: input.actor.id,
-    createdAt,
   });
   const [row, entries] = await Promise.all([
     readCompanionThreadRow(database, input.orgId, input.companionId),
     readCompanionTranscript(database, input.orgId, input.companionId),
   ]);
   const thread = toThread({ actor: input.actor, companion, row, entries });
-  const entry = entries.find((item) => item.ordinal === ordinal);
+  const entry = entries.find((item) => item.event_id === eventId);
   if (!entry) throw new Error("failed to persist companion message");
   return { thread, entry };
+}
+
+/**
+ * Store one user message unless this send is already in the transcript. The read comes first so a
+ * resent send does not burn an ordinal, and the conflicting insert closes the window between that
+ * read and the write for two requests that arrive at once.
+ */
+async function insertCompanionMessage(input: {
+  database: Db;
+  orgId: string;
+  companionId: string;
+  eventId: string;
+  content: string;
+  authorId: string;
+}): Promise<void> {
+  const [stored] = await input.database
+    .select({ eventId: schema.companionTranscriptEntries.eventId })
+    .from(schema.companionTranscriptEntries)
+    .where(and(
+      eq(schema.companionTranscriptEntries.orgId, input.orgId),
+      eq(schema.companionTranscriptEntries.companionId, input.companionId),
+      eq(schema.companionTranscriptEntries.eventId, input.eventId),
+    ))
+    .limit(1);
+  if (stored) return;
+  const createdAt = new Date();
+  const ordinal = await allocateThreadOrdinals({
+    database: input.database,
+    orgId: input.orgId,
+    companionId: input.companionId,
+    count: 1,
+    lastMessageAt: createdAt,
+  });
+  await input.database
+    .insert(schema.companionTranscriptEntries)
+    .values({
+      orgId: input.orgId,
+      companionId: input.companionId,
+      eventId: input.eventId,
+      ordinal,
+      role: "user",
+      content: input.content,
+      authorId: input.authorId,
+      createdAt,
+    })
+    .onConflictDoNothing();
 }
 
 /**
@@ -517,7 +561,12 @@ export async function listPendingCompanionMessages(input: {
   orgId: string;
   companionId: string;
   database?: Db;
-}): Promise<{ pending: CompanionTranscriptEntry[]; piLogOffset: number }> {
+}): Promise<{
+  pending: CompanionTranscriptEntry[];
+  piLogOffset: number;
+  /** How far delivery already reached, so a caller can tell a delivered message from a waiting one. */
+  deliveredOrdinal: number | null;
+}> {
   const database = input.database ?? db;
   await getCompanionForRuntime({ ...input, database });
   const [row, entries] = await Promise.all([
@@ -529,6 +578,7 @@ export async function listPendingCompanionMessages(input: {
     pending: entries.filter((entry) =>
       entry.role === "user" && (deliveredOrdinal === null || entry.ordinal > deliveredOrdinal)),
     piLogOffset: row?.piLogOffset ?? 0,
+    deliveredOrdinal,
   };
 }
 

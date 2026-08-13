@@ -95,10 +95,21 @@ describe("transcriptTurns", () => {
     expect(turns[2]?.lead).toBe(true);
   });
 
-  it("marks the message the composer has not had confirmed yet", () => {
-    const turns = transcriptTurns([entry({ event_id: "sending" })], context);
+  it("marks only the message the composer has not had confirmed yet", () => {
+    const turns = transcriptTurns(
+      [entry({ event_id: "msg:1" }), entry({ event_id: "msg:2" })],
+      { ...context, sendingEventId: "msg:2" },
+    );
 
-    expect(turns[0]?.sending).toBe(true);
+    expect(turns.map((turn) => turn.sending)).toEqual([false, true]);
+  });
+
+  it("marks nothing while no send is in flight", () => {
+    // A saved entry is never in flight, and the id is the same one the control plane stored, so
+    // nothing may go on claiming a message is still on its way once its send has settled.
+    const turns = transcriptTurns([entry({ event_id: "msg:1" })], context);
+
+    expect(turns[0]?.sending).toBe(false);
   });
 });
 

@@ -449,13 +449,28 @@ export function registerCompanionRoutes(
       const body = sendCompanionMessageInputSchema.parse(await c.req.json());
       const sent = await tenant(c, async ({ actor, orgId, database }) => {
         const companion = await getCompanionForRuntime({ actor, orgId, companionId, database });
+        // One send is one turn: the sender's message id decides the transcript entry, so a request
+        // that arrives twice resolves to the turn already stored instead of writing a second one.
         const result = await sendCompanionMessage({
-          actor, orgId, companionId, content: body.content, database,
+          actor,
+          orgId,
+          companionId,
+          content: body.content,
+          clientMessageId: body.client_message_id,
+          database,
         });
         // Anything a sleeping Box never received is still pending, so Pi receives the whole
-        // backlog in order rather than this message alone.
+        // backlog in order rather than this message alone. A resent send that was already
+        // delivered is not pending, so it is never handed to Pi a second time either.
         const state = await listPendingCompanionMessages({ actor, orgId, companionId, database });
-        return { actor, orgId, companion, pending: state.pending, ...result };
+        return {
+          actor,
+          orgId,
+          companion,
+          pending: state.pending,
+          deliveredOrdinal: state.deliveredOrdinal,
+          ...result,
+        };
       });
       if (!piIsReachable(sent.companion)) {
         return c.json({ thread: sent.thread, delivery: "pending" as const });
@@ -468,9 +483,10 @@ export function registerCompanionRoutes(
         messages: sent.pending,
         runtimeFactory,
       });
+      const deliveredOrdinal = delivered?.deliveredOrdinal ?? sent.deliveredOrdinal;
       return c.json({
         thread: delivered?.thread ?? sent.thread,
-        delivery: delivered && delivered.deliveredOrdinal >= sent.entry.ordinal
+        delivery: deliveredOrdinal !== null && deliveredOrdinal >= sent.entry.ordinal
           ? ("delivered" as const)
           : ("pending" as const),
       });

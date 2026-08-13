@@ -156,8 +156,25 @@ export const companionThreadSchema = z.object({
 });
 export type CompanionThread = z.infer<typeof companionThreadSchema>;
 
+/**
+ * One send, one turn. The sender names the message it is creating, and the control plane stores that
+ * name as the transcript event id, so a request that arrives twice — a retried fetch, a proxy replay,
+ * a client that resent the same submission — persists the same turn instead of a second one.
+ */
+export const companionClientMessageIdSchema = z.string().uuid();
+
+/**
+ * The transcript event id one client message id owns. Sent messages and projected Pi events keep
+ * separate id namespaces, so a sender can never name an entry the Pi log will claim later, and the
+ * message a composer shows before the control plane answers already carries its final id.
+ */
+export function companionMessageEventId(clientMessageId: string): string {
+  return `msg:${clientMessageId}`;
+}
+
 export const sendCompanionMessageInputSchema = z.object({
   content: z.string().trim().min(1).max(16_384),
+  client_message_id: companionClientMessageIdSchema.optional(),
 }).strict();
 export type SendCompanionMessageInput = z.infer<typeof sendCompanionMessageInputSchema>;
 
