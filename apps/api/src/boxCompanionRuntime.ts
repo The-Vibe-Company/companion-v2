@@ -41,7 +41,7 @@ const PI_DAEMON_DIAGNOSTIC_LABELS = {
   stderr: "companion-pi-stderr",
 } as const;
 /** The sentence a failed wait reports, and the room its fragments have left inside the stored line. */
-const PI_DAEMON_FAILURE_MESSAGE = "Pi daemon is not running after start";
+export const PI_DAEMON_FAILURE_MESSAGE = "Pi daemon is not running after start";
 /**
  * What each diagnostic fragment may spend, in the order fragments are allowed to claim it.
  * `companions.last_error` keeps one sanitized line of bounded length, so the fragments have to fit
@@ -225,6 +225,39 @@ function daemonExitDetail(line: string | undefined): string | undefined {
 function clampDiagnostic(value: string, limit: number): string {
   const collapsed = value.replace(/\s+/g, " ").trim();
   return collapsed.length <= limit ? collapsed : `${collapsed.slice(0, limit - 1).trimEnd()}…`;
+}
+
+/**
+ * Turn one diagnostic stdout into the detail the failure sentence carries. Reading the labels and
+ * spending the shared allowance is a decision about text alone, so it stays out of the Box call:
+ * the arithmetic has to hold for every combination of present, absent, short, and overlong
+ * fragments, and that is a sweep over strings rather than over wakes.
+ */
+export function composeDaemonFailureDetail(stdout: string): string {
+  const lines = (label: string): string[] => labeledDiagnosticLines(stdout, label);
+  const status = lines(PI_DAEMON_DIAGNOSTIC_LABELS.status);
+  const values: Record<PiDaemonDiagnosticKey, string | undefined> = {
+    state: lines(PI_DAEMON_DIAGNOSTIC_LABELS.state).at(-1),
+    // Both come from the same grep, so each is picked by what it says rather than by where it
+    // landed: a unit that prints only one of them must not have it read as the other.
+    active: status.find((line) => line.startsWith("Active:")),
+    exit: status.map(daemonExitDetail).find(Boolean),
+    stderr: lines(PI_DAEMON_DIAGNOSTIC_LABELS.stderr).at(-1),
+  };
+  const fragments: string[] = [];
+  let remaining =
+    COMPANION_RUNTIME_ERROR_MAX_LENGTH - PI_DAEMON_FAILURE_MESSAGE.length - ": ".length;
+  for (const budget of PI_DAEMON_DIAGNOSTIC_BUDGETS) {
+    const value = values[budget.key];
+    if (!value) continue;
+    const separator = fragments.length ? PI_DAEMON_DIAGNOSTIC_SEPARATOR.length : 0;
+    const room = Math.min(budget.limit, remaining - separator - budget.prefix.length);
+    if (room < PI_DAEMON_DIAGNOSTIC_MINIMUM) continue;
+    const fragment = `${budget.prefix}${clampDiagnostic(value, room)}`;
+    fragments.push(fragment);
+    remaining -= separator + fragment.length;
+  }
+  return fragments.length ? `: ${fragments.join(PI_DAEMON_DIAGNOSTIC_SEPARATOR)}` : "";
 }
 
 /** Where the layout script is staged on the Box disk so it runs as a file, never as a command. */
@@ -617,31 +650,7 @@ fi
 exit 0`,
       30,
     ).catch(() => null);
-    if (!result) return "";
-    const lines = (label: string): string[] => labeledDiagnosticLines(result.stdout, label);
-    const status = lines(PI_DAEMON_DIAGNOSTIC_LABELS.status);
-    const values: Record<PiDaemonDiagnosticKey, string | undefined> = {
-      state: lines(PI_DAEMON_DIAGNOSTIC_LABELS.state).at(-1),
-      // Both come from the same grep, so each is picked by what it says rather than by where it
-      // landed: a unit that prints only one of them must not have it read as the other.
-      active: status.find((line) => line.startsWith("Active:")),
-      exit: status.map(daemonExitDetail).find(Boolean),
-      stderr: lines(PI_DAEMON_DIAGNOSTIC_LABELS.stderr).at(-1),
-    };
-    const fragments: string[] = [];
-    let remaining =
-      COMPANION_RUNTIME_ERROR_MAX_LENGTH - PI_DAEMON_FAILURE_MESSAGE.length - ": ".length;
-    for (const budget of PI_DAEMON_DIAGNOSTIC_BUDGETS) {
-      const value = values[budget.key];
-      if (!value) continue;
-      const separator = fragments.length ? PI_DAEMON_DIAGNOSTIC_SEPARATOR.length : 0;
-      const room = Math.min(budget.limit, remaining - separator - budget.prefix.length);
-      if (room < PI_DAEMON_DIAGNOSTIC_MINIMUM) continue;
-      const fragment = `${budget.prefix}${clampDiagnostic(value, room)}`;
-      fragments.push(fragment);
-      remaining -= separator + fragment.length;
-    }
-    return fragments.length ? `: ${fragments.join(PI_DAEMON_DIAGNOSTIC_SEPARATOR)}` : "";
+    return result ? composeDaemonFailureDetail(result.stdout) : "";
   }
 
   async #removeProviderFile(boxId: string): Promise<void> {
