@@ -12,6 +12,7 @@ import type { OrgVM } from "@/lib/types";
 import {
   getCompanionRuntime,
   getCompanionThread,
+  listCompanions,
   openCompanionDesktop,
   sendCompanionMessage,
   setCompanionProvider,
@@ -24,6 +25,7 @@ import { CompanionPlugins } from "./CompanionPlugins";
 import { CompanionThread } from "./CompanionThread";
 import { NewCompanionDialog } from "./NewCompanionDialog";
 import { ShareCompanionDialog } from "./ShareCompanionDialog";
+import { applyCompanionRuntime } from "./runtimePool";
 import { companionStatus, relativeTime } from "./status";
 import { createThreadQueue } from "./threadQueue";
 import { Onboarding } from "../org/Onboarding";
@@ -153,16 +155,6 @@ export function CompanionsApp({
       || (companion.persona ?? "").toLocaleLowerCase("en-US").includes(needle));
   }, [companions, query]);
 
-  const openCompanion = (companion: Companion) => {
-    threadRequestRef.current += 1;
-    setOpenedId(companion.id);
-    setThread(null);
-    setThreadError(null);
-    setDesktopError(null);
-    setPluginsOpen(false);
-    threadUrl(companion.id);
-  };
-
   const closeThread = () => {
     const wasOpen = openedId;
     threadRequestRef.current += 1;
@@ -232,18 +224,52 @@ export function CompanionsApp({
   }, [canRunOpened, openedAwake, openedId, refreshThread]);
 
   /**
+   * One Companion's runtime answer belongs to every Companion that shares its Box. The workspace
+   * owns the Box, so a wake, a stop, or a status read speaks for the whole scope: applying it to the
+   * answered row alone leaves a sibling showing the chip from before the answer.
+   */
+  const applyRuntime = useCallback((updated: Companion) => {
+    setCompanions((current) => applyCompanionRuntime(current, updated, currentOrg.kind));
+  }, [currentOrg.kind]);
+
+  /**
+   * Re-read every Companion from the control plane. The list already projects each one's shared Box,
+   * so this is what makes a chip honest after a lifecycle write, whichever Companion is opened next.
+   */
+  const reloadCompanions = useCallback(async () => {
+    try {
+      setCompanions(await listCompanions(currentOrg.id));
+    } catch {
+      // Keep the projection already on screen rather than emptying the list over a failed read.
+    }
+  }, [currentOrg.id]);
+
+  /**
    * Re-read one Companion; a failed read leaves the current row alone. The control-plane read is the
    * default, so it is safe for a Viewer and after a failed wake. A live read observes an already
    * running Box for a runner and still never resumes one.
    */
   const refreshCompanion = useCallback(async (companionId: string, live = false) => {
     try {
-      const latest = await getCompanionRuntime(currentOrg.id, companionId, { live });
-      setCompanions((current) => current.map((item) => item.id === latest.id ? latest : item));
+      applyRuntime(await getCompanionRuntime(currentOrg.id, companionId, { live }));
     } catch {
       // The failure that prompted this read is already on screen; do not replace it with this one.
     }
-  }, [currentOrg.id]);
+  }, [applyRuntime, currentOrg.id]);
+
+  const openCompanion = (companion: Companion) => {
+    threadRequestRef.current += 1;
+    setOpenedId(companion.id);
+    setThread(null);
+    setThreadError(null);
+    setDesktopError(null);
+    setPluginsOpen(false);
+    threadUrl(companion.id);
+    // The list this row came from may predate a wake made on a Companion sharing its Box, so the
+    // chip is re-read from the control plane rather than trusted to be current. The read never
+    // observes the Box, so opening a Companion still cannot wake one.
+    void refreshCompanion(companion.id);
+  };
 
   // Only a runner whose Box is already running observes it, so opening a thread never wakes a Box
   // and a Viewer's chip stays on the control-plane projection.
@@ -282,8 +308,10 @@ export function CompanionsApp({
     setThreadError(null);
     try {
       const updated = await startCompanionRuntime(currentOrg.id, companionId);
-      setCompanions((current) => current.map((item) => item.id === updated.id ? updated : item));
-      await refreshThread(true);
+      // One wake starts the Box the whole workspace shares, so every loaded Companion in the scope
+      // reads that Box immediately, and the list is re-read to confirm it from the control plane.
+      applyRuntime(updated);
+      await Promise.all([reloadCompanions(), refreshThread(true)]);
     } catch (cause) {
       setThreadError(cause instanceof Error ? cause.message : "This Companion could not be woken.");
       // A failed start records why on the Companion, so re-read it: the status pill must show Error
@@ -358,6 +386,7 @@ export function CompanionsApp({
     setError(null);
     try {
       const updated = await setCompanionProvider(currentOrg.id, companion.id, fallbackProvider);
+      // Provider selection is the Companion's own, so it lands on that row alone.
       setCompanions((current) => current.map((item) => item.id === updated.id ? updated : item));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Provider could not be set.");

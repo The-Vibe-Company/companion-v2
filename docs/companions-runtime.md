@@ -149,8 +149,12 @@ still delivers it in order.
 
 `POST /v1/companions/:id/thread/sync` is the single Owner/Editor step that reconciles a live thread.
 It hands pending messages to the running Pi daemon in ordinal order through the owner-only
-`pi.rpc.in` FIFO, reads `pi.rpc.ndjson` from the recorded byte offset, and appends the projected
-entries. `delivered_ordinal` is claimed as soon as Pi accepts a prompt and before the log is read, so
+`pi.rpc.in` FIFO, reads `sessions/<companionId>/pi.rpc.ndjson` from the recorded byte offset, and
+appends the projected entries. That read fails at nothing that only means "no events yet": a
+Companion that has not prompted yet has no session log, a rebuilt disk lost the one it had, and a log
+longer than one chunk is cut off at the read limit on purpose. Each of those is an empty or partial
+chunk, never a failure the reader is shown, because the thread itself is readable from PostgreSQL
+either way. `delivered_ordinal` is claimed as soon as Pi accepts a prompt and before the log is read, so
 a failed read or projection cannot make a retry hand Pi the same message again. `pi_log_offset` then
 advances with the projection, and event ids derive from log byte offsets, so a retried sync appends
 nothing new. Both watermarks only move forward, except when Pi's log shrank: that read starts at the
@@ -183,20 +187,25 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
 │   └── mcp.json           # pi-mcp-adapter config; environment references only
 └── runtime/
     ├── skills/            # exact current packages exposed through Pi native Skills
-    ├── sessions/          # Pi session tree files (`pi --session-dir`)
+    ├── sessions/          # one directory per Companion sharing this Box
+    │   └── <companionId>/pi.rpc.ndjson # that Companion's Pi JSON RPC output
+    ├── pi-sessions/       # Pi session tree files (`pi --session-dir`)
     ├── state/
     │   ├── mcp-accounts.json # account ids, labels, adapter names, and transports
     │   ├── skills.json    # injected surface/version/checksum projection
-    │   └── pi.rpc.in      # owner-only FIFO for the Pi JSON RPC stream
-    └── logs/
-        ├── pi.rpc.ndjson  # Pi JSON RPC output
-        └── pi.stderr.log
+    │   ├── pi.rpc.in      # owner-only FIFO for the Pi JSON RPC stream
+    │   ├── pi.rpc.lock    # held across the marker and FIFO writes of one prompt
+    │   └── active-session # the Companion the daemon is routing Pi output into
+    └── logs/pi.stderr.log
 ```
 
-Layout version `2` is written to the control-plane row after a successful Skills/MCP-aware start and
-to an on-disk marker keyed by the adapter package. Starts repair older Box snapshots before resource
-injection. Runtime transcripts and files do not enter PostgreSQL. A systemd user unit supervises Pi
-while Box is active; the lifecycle API restarts it after a Box resume.
+Layout version `3` is written to the control-plane pool row after a successful Skills/MCP-aware start
+and to an on-disk marker keyed by the adapter package. It is the layout that made the runtime
+shareable: one Pi daemon serves every Companion on the Box and routes its RPC output per Companion,
+so the log is `runtime/sessions/<companionId>/pi.rpc.ndjson` rather than one log for the machine.
+Starts repair older Box snapshots before resource injection. Runtime transcripts and files do not
+enter PostgreSQL. A systemd user unit supervises Pi while Box is active; the lifecycle API restarts it
+after a Box resume.
 
 A start repairs the layout of a Box that already exists by running the same script the create path
 uses, and it runs it the same way: the script is staged onto the disk through the file API as

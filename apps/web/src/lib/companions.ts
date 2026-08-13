@@ -29,6 +29,18 @@ export async function createCompanion(
   return result.companion;
 }
 
+/**
+ * Every Companion this member can read, each already projecting the chip of the Box its workspace
+ * shares. A lifecycle write re-reads this so a Companion opened next cannot show the state its
+ * shared Box was in before the write.
+ */
+export async function listCompanions(orgId: string): Promise<Companion[]> {
+  const result = await apiFetch<{ companions: Companion[] }>("/v1/companions", {
+    headers: orgHeaders(orgId),
+  });
+  return result.companions;
+}
+
 export async function saveCompanionPlugin(
   orgId: string,
   input: SaveCompanionPluginInput,

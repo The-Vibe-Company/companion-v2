@@ -1052,23 +1052,41 @@ printf '%s\\n' ${shellQuote(command)} > "$fifo"`,
     companionId: string;
     offset: number;
   }): Promise<CompanionPiEventChunk> {
+    // Reading a log is not a failure the reader can act on, so this script fails at nothing that
+    // simply means "no events yet". `pipefail` is deliberately absent: `head` stops at the read limit
+    // and closes the pipe, which kills a `tail` with more log left to give, and a Companion whose Pi
+    // wrote more than one chunk's worth reported the read as broken on every sync from then on.
     const result = await this.#command(
       input.boxId,
-      `set -euo pipefail
+      `set -u
 session=${shellQuote(input.companionId)}
 log="$HOME/.companion/runtime/sessions/$session/pi.rpc.ndjson"
 offset=${Math.max(0, Math.trunc(input.offset))}
-if [ ! -f "$log" ]; then printf '%s\\n' 0; exit 0; fi
-size="$(wc -c < "$log")"
+# A Companion that has not prompted yet has no session log, and a rebuilt disk lost the one it had:
+# both read as an empty chunk from the start of a log that does not exist.
+if [ ! -f "$log" ] || [ ! -r "$log" ]; then printf '%s\\n' 0; exit 0; fi
+set -- $(wc -c < "$log" 2>/dev/null)
+size="\${1:-}"
+# A size that cannot be read is not a rewind: keep the recorded offset so nothing is reprojected.
+case "$size" in
+  ''|*[!0-9]*) printf '%s\\n' "$offset"; exit 0 ;;
+esac
 # A resumed Box keeps the log, but a rebuilt disk can shrink it; restart from the top instead of
 # reading a stale byte range.
 if [ "$size" -lt "$offset" ]; then offset=0; fi
 printf '%s\\n' "$offset"
-tail -c "+$((offset + 1))" "$log" | head -c ${COMPANION_PI_EVENT_READ_LIMIT}`,
+if [ "$size" -gt "$offset" ]; then
+  tail -c "+$((offset + 1))" "$log" 2>/dev/null | head -c ${COMPANION_PI_EVENT_READ_LIMIT} || true
+fi
+exit 0`,
       30,
     );
     if (!result.success) {
-      throw new BoxRuntimeProviderError("Pi event log could not be read from Box", 502);
+      // What the Box refused travels with the sentence; the bare line was unactionable in production.
+      throw new BoxRuntimeProviderError(
+        `Pi event log could not be read from Box${commandFailureDetail(result)}`,
+        502,
+      );
     }
     const separator = result.stdout.indexOf("\n");
     if (separator < 0) return { chunk: "", offset: input.offset };

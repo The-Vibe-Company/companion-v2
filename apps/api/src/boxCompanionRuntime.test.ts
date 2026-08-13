@@ -1,3 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { COMPANION_RUNTIME_ERROR_MAX_LENGTH } from "@companion/core";
 import {
@@ -1977,6 +1981,24 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(result).toEqual({ chunk: "{\"type\":\"agent_settled\"}\n", offset: 0 });
   });
 
+  it("names what the Box refused when the Pi event log genuinely cannot be read", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({
+      success: false,
+      exitCode: 2,
+      stdout: "",
+      stderr: "bash: line 3: /home/box/.companion: Permission denied",
+    })));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    // A read that failed for a reason still fails, and it says the reason: the bare sentence cost a
+    // production probe to diagnose.
+    await expect(runtime.readEvents({
+      boxId: "bx_23456789",
+      companionId: COMPANION_ID,
+      offset: 0,
+    })).rejects.toThrow(/Pi event log could not be read from Box \(exit 2\): .*Permission denied/);
+  });
+
   it("best-effort archives a newly created Box when its id cannot be persisted", async () => {
     let stopped = false;
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
@@ -2018,3 +2040,106 @@ describe("AsciiBoxCompanionRuntime", () => {
   });
 });
 
+
+/**
+ * The read the thread sync depends on, run as a shell against a Box disk rather than asserted as
+ * text. Whether `set -e`, `pipefail`, a missing session directory, or a log longer than one chunk
+ * turns a read into a failure is a property of the script itself: production showed "Pi event log
+ * could not be read from Box" on a Companion whose thread was perfectly readable, so the script is
+ * exercised here the way the Box runs it.
+ */
+describe("Pi event log read script", () => {
+  const homes: string[] = [];
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+  });
+
+  /** The command the adapter sends for one read, captured from the Box command API. */
+  async function readScript(offset: number): Promise<string> {
+    let command = "";
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      command = String(body.command);
+      return json({ success: true, exitCode: 0, stdout: "0\n", stderr: "" });
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+    await runtime.readEvents({ boxId: "bx_23456789", companionId: COMPANION_ID, offset });
+    return command;
+  }
+
+  /** A Box disk at layout v3: the daemon's session tree exists before any Companion prompts. */
+  function boxDisk(log?: string): string {
+    const home = mkdtempSync(join(tmpdir(), "companion-box-"));
+    homes.push(home);
+    mkdirSync(join(home, ".companion/runtime/sessions"), { recursive: true });
+    mkdirSync(join(home, ".companion/runtime/state"), { recursive: true });
+    if (log !== undefined) {
+      const session = join(home, ".companion/runtime/sessions", COMPANION_ID);
+      mkdirSync(session, { recursive: true });
+      writeFileSync(join(session, "pi.rpc.ndjson"), log);
+    }
+    return home;
+  }
+
+  function run(script: string, home: string): { code: number | null; stdout: Buffer } {
+    const result = spawnSync("bash", ["-c", script], {
+      env: { ...process.env, HOME: home },
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    if (result.error) throw result.error;
+    return { code: result.status, stdout: result.stdout };
+  }
+
+  it("reads a brand-new Box as an empty chunk instead of a failed sync", async () => {
+    const script = await readScript(0);
+
+    // The session log appears with Pi's first reply. Until then the Companion has no events, which is
+    // not a failure the reader can do anything about.
+    const fresh = run(script, boxDisk());
+
+    expect(fresh.code).toBe(0);
+    expect(fresh.stdout.toString()).toBe("0\n");
+  });
+
+  it("reads a log longer than one chunk without reporting the read as broken", async () => {
+    const limit = 262_144;
+    const line = `${JSON.stringify({ type: "agent_message_delta", text: "x".repeat(96) })}\n`;
+    const log = line.repeat(Math.ceil((limit * 2) / line.length));
+    const script = await readScript(0);
+
+    // `head` closes the pipe at the limit, so `tail` is cut short by design. Under `pipefail` that
+    // ended every sync of a busy Companion with a banner instead of the chunk it had just read.
+    const chunked = run(script, boxDisk(log));
+
+    expect(chunked.code).toBe(0);
+    const separator = chunked.stdout.indexOf(0x0a);
+    expect(chunked.stdout.subarray(0, separator).toString()).toBe("0");
+    expect(chunked.stdout.length - separator - 1).toBe(limit);
+  });
+
+  it("continues from the recorded offset and rereads a log that shrank", async () => {
+    const head = "{\"type\":\"agent_message\",\"text\":\"first\"}\n";
+    const tail = "{\"type\":\"agent_settled\"}\n";
+
+    const resumed = run(await readScript(head.length), boxDisk(head + tail));
+    expect(resumed.code).toBe(0);
+    expect(resumed.stdout.toString()).toBe(`${head.length}\n${tail}`);
+
+    // A rebuilt disk left a shorter log than the offset the projection recorded, so the read starts
+    // at the top and owns the offset outright rather than reading a stale byte range.
+    const rebuilt = run(await readScript(4_096), boxDisk(tail));
+    expect(rebuilt.code).toBe(0);
+    expect(rebuilt.stdout.toString()).toBe(`0\n${tail}`);
+  });
+
+  it("reads a log with nothing new as the offset it was given", async () => {
+    const log = "{\"type\":\"agent_settled\"}\n";
+
+    const caughtUp = run(await readScript(log.length), boxDisk(log));
+
+    expect(caughtUp.code).toBe(0);
+    expect(caughtUp.stdout.toString()).toBe(`${log.length}\n`);
+  });
+});

@@ -6,6 +6,7 @@ import {
   claimCompanionRuntimeStop,
   getCompanion,
   getCompanionForRuntime,
+  listCompanions,
   resolveCompanionBoxScope,
   sendCompanionMessage,
   updateCompanionRuntime,
@@ -170,6 +171,20 @@ describe("Companion shared runtime pool", () => {
     expect(poolScope).toEqual({ scope: "org", owner_id: null });
   });
 
+  it("lists a never-woken Companion on the Box its workspace already runs", async () => {
+    // The list is what the Companions surface renders from, so a Companion nobody woke has to arrive
+    // already carrying the shared chip; anything else has to be repaired by a second wake.
+    const listed = await withTenantContext(
+      { orgId: teamOrg, userId: member.id },
+      (database) => listCompanions({ actor: member, orgId: teamOrg, database }),
+    );
+    const sibling = listed.find((companion) => companion.id === orgB);
+    expect(sibling?.runtime.box_id).toBe("bx_abcdefgh");
+    expect(sibling?.runtime.state).toBe("running");
+    // Reading the chip never claims a pool of its own: the workspace still has exactly one Box.
+    expect(await poolCount(teamOrg)).toBe(1);
+  });
+
   it("stops the shared machine for the whole scope, not one Companion", async () => {
     // A member stops the Box off their own Companion; the owner's Companion reads the same stop.
     const stopped = await withTenantContext(
@@ -201,6 +216,18 @@ describe("Companion shared runtime pool", () => {
       { orgId: teamOrg, userId: member.id },
       (database) => getCompanionForRuntime({ actor: member, orgId: teamOrg, companionId: orgA, database }),
     )).rejects.toBeInstanceOf(CompanionRuntimeForbiddenError);
+
+    // The same member's list holds a Companion they run and one they only watch. Both read the state
+    // of the one shared Box, and only the one they run carries the Box itself.
+    const listed = await withTenantContext(
+      { orgId: teamOrg, userId: member.id },
+      (database) => listCompanions({ actor: member, orgId: teamOrg, database }),
+    );
+    const watched = listed.find((companion) => companion.id === orgA);
+    const own = listed.find((companion) => companion.id === orgB);
+    expect(watched?.runtime.state).toBe(own?.runtime.state);
+    expect(watched?.runtime.box_id).toBeNull();
+    expect(own?.runtime.box_id).toBe("bx_abcdefgh");
   });
 });
 

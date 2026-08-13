@@ -508,7 +508,10 @@ export const companionThreads = pgTable(
     nextOrdinal: integer("next_ordinal").notNull().default(0),
     /** Highest user-message ordinal already delivered to Pi; null when nothing was delivered. */
     deliveredOrdinal: integer("delivered_ordinal"),
-    /** Bytes of `~/.companion/runtime/logs/pi.rpc.ndjson` already projected into the transcript. */
+    /**
+     * Bytes of this Companion's own Pi log — `runtime/sessions/<companionId>/pi.rpc.ndjson` on the
+     * Box the workspace shares — already projected into the transcript.
+     */
     piLogOffset: bigint("pi_log_offset", { mode: "number" }).notNull().default(0),
     lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
     createdAt: now(),
