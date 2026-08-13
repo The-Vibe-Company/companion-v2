@@ -130,26 +130,10 @@ function shellQuote(value: string): string {
 }
 
 /**
- * Run one Companion payload under bash whatever shell the Box command API picked.
- *
- * The API executes the command as a string, not as a file, so a `#!/usr/bin/env bash` shebang in the
- * payload is only a comment. On a Box whose `/bin/sh` is dash, every Companion payload dies on its
- * very first line with `set: Illegal option -o pipefail`, and each one also uses bashisms further
- * down: arrays and `${x[@]}` in the daemon wrapper, `shopt -s nullglob` in the skill staging, and
- * `<<<`-free but bash-only `[[`-adjacent constructs elsewhere. That failure is silent and total,
- * which is how a healthy, already-laid-out Box still reported "Pi runtime layout failed to install".
- *
- * `--noprofile --norc` keeps the shell deterministic: the payload gets the inherited environment and
- * nothing a Box image's rc files might add, which is why the scripts derive the PATH they need.
- */
-function bashCommand(script: string): string {
-  return `bash --noprofile --norc -c ${shellQuote(script)}`;
-}
-
-/**
  * Keep one Box command failure readable as a single stored line. The control plane sanitizes and
- * truncates whatever it records, so the useful part is the last thing the shell complained about,
- * not the transcript: `set: Illegal option -o pipefail` names the real fault immediately.
+ * truncates whatever it records, so the useful part is the last thing the shell complained about
+ * rather than the transcript, which is the difference between "Pi runtime layout failed to install"
+ * and a message that names the failing line.
  */
 function commandFailureDetail(result: CommandEnvelope): string {
   const lastLine = (text: string | undefined): string | undefined =>
@@ -159,29 +143,8 @@ function commandFailureDetail(result: CommandEnvelope): string {
   return output ? `${exit}: ${output}` : exit;
 }
 
-/**
- * A Box command runs in a fresh non-interactive shell with uid 1000 but none of the interactive
- * login PATH, so a Box whose Pi was installed through nvm cannot see `pi`/`npm` here. Every command
- * that resolves those binaries prepends the known install locations first: the nvm node bins, the
- * global npm prefix bin, and the per-user bin. Sourcing `nvm.sh` is best-effort and never fatal.
- */
-const PI_PATH_BOOTSTRAP = `# Make nvm/npm/user-installed Pi reachable from a non-interactive Box command.
-if [ -s "$HOME/.nvm/nvm.sh" ]; then
-  { . "$HOME/.nvm/nvm.sh"; } >/dev/null 2>&1 || true
-fi
-if [ -d "$HOME/.nvm/versions/node" ]; then
-  for _companion_node_bin in "$HOME"/.nvm/versions/node/*/bin; do
-    [ -d "$_companion_node_bin" ] && PATH="$_companion_node_bin:$PATH"
-  done
-  unset _companion_node_bin
-fi
-if command -v npm >/dev/null 2>&1; then
-  _companion_npm_prefix="$(npm prefix -g 2>/dev/null || true)"
-  [ -n "$_companion_npm_prefix" ] && [ -d "$_companion_npm_prefix/bin" ] && PATH="$_companion_npm_prefix/bin:$PATH"
-  unset _companion_npm_prefix
-fi
-[ -d "$HOME/.local/bin" ] && PATH="$HOME/.local/bin:$PATH"
-export PATH`;
+/** Where the layout script is staged on the Box disk so it runs as a file, never as a command. */
+const PI_LAYOUT_SCRIPT_PATH = ".companion/bin/ensure-pi-layout.sh";
 
 function setupScript(installCommand: string | undefined, mcpAdapterPackage: string): string {
   const install = installCommand?.trim()
@@ -189,10 +152,8 @@ function setupScript(installCommand: string | undefined, mcpAdapterPackage: stri
     : "echo 'Pi is not installed; configure COMPANION_PI_INSTALL_COMMAND or preinstall pi in the Box image' >&2; exit 1";
   return `#!/usr/bin/env bash
 set -euo pipefail
-${PI_PATH_BOOTSTRAP}
-# An already-laid-out disk short-circuits before Pi is resolved: a Wake re-runs this script as a Box
-# command that never inherits the interactive nvm PATH, so requiring \`pi\` here would fail every Wake
-# even on a healthy Box. The marker is the sole authority that the layout matches this control plane.
+# An already-laid-out disk short-circuits before anything else, so repairing the layout on a Box that
+# is already correct costs one file read and cannot fail on a dependency it does not need.
 layout_marker="$HOME/.companion/runtime/state/pi-layout.version"
 expected_layout=${shellQuote(`${COMPANION_PI_DISK_LAYOUT_VERSION}:${mcpAdapterPackage}`)}
 if [ -f "$layout_marker" ] && [ "$(cat "$layout_marker")" = "$expected_layout" ]; then
@@ -513,7 +474,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
   ): Promise<CommandEnvelope> {
     return this.#request<CommandEnvelope>(`/boxes/${encodeURIComponent(boxId)}/commands`, {
       method: "POST",
-      body: JSON.stringify({ command: bashCommand(command), timeoutSeconds }),
+      body: JSON.stringify({ command, timeoutSeconds }),
     }, (timeoutSeconds + 10) * 1_000);
   }
 
@@ -540,13 +501,31 @@ systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true`,
     });
   }
 
+  /**
+   * Repair the Pi layout on a Box that already exists.
+   *
+   * The identical script installs Pi correctly as the create `setupScript`, which the provider runs
+   * as a file with its shebang, and fails when it is sent as a command string instead: the payload
+   * carries heredocs, nested single and double quotes, and several kilobytes, none of which survive
+   * the command transport intact. So this stages the script through the file API the same way the
+   * create path gets it, and the command it does send is one short, quote-light line.
+   */
   async #ensurePiLayout(boxId: string): Promise<void> {
-    const result = await this.#command(
+    const prepared = await this.#command(boxId, 'mkdir -p "$HOME/.companion/bin"');
+    if (!prepared.success) {
+      throw new BoxRuntimeProviderError(
+        `Pi runtime layout failed to install${commandFailureDetail(prepared)}`,
+        502,
+      );
+    }
+    await this.#writeFile(
       boxId,
+      PI_LAYOUT_SCRIPT_PATH,
       setupScript(this.#installCommand, this.#mcpAdapterPackage),
-      180,
     );
+    const result = await this.#command(boxId, `bash "$HOME/${PI_LAYOUT_SCRIPT_PATH}"`, 180);
     if (!result.success) {
+      // The bare message cost a production probe to diagnose, so the failing line travels with it.
       throw new BoxRuntimeProviderError(
         `Pi runtime layout failed to install${commandFailureDetail(result)}`,
         502,

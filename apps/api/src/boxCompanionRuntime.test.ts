@@ -12,18 +12,10 @@ const box = {
 };
 /** Printed by the adapter's staging command when Pi's auth file already exists on the Box disk. */
 const AUTH_PRESENT_MARKER = "companion-provider-auth-present";
-/** Every Box command payload is sent re-executed under bash, whatever the provider's `sh` is. */
-const BASH_PREFIX = "bash --noprofile --norc -c ";
 const PROVIDER_FILE_REMOVAL = "rm -f \"$HOME/.companion/runtime/state/providers.env\"";
-
-/**
- * Undo the bash transport wrapper so a test reads the script the Box actually runs. The wrapping
- * itself is asserted once, on the raw payload, rather than repeated in every command assertion.
- */
-function payload(command: string): string {
-  if (!command.startsWith(BASH_PREFIX)) return command;
-  return command.slice(BASH_PREFIX.length).slice(1, -1).replaceAll("'\"'\"'", "'");
-}
+/** The layout script is staged on disk and run as a file, so the command itself stays this short. */
+const LAYOUT_SCRIPT_PATH = ".companion/bin/ensure-pi-layout.sh";
+const LAYOUT_RUN_COMMAND = `bash "$HOME/${LAYOUT_SCRIPT_PATH}"`;
 
 function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
@@ -61,7 +53,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         return json({ ok: true });
       }
       if (url.endsWith("/commands") && init?.method === "POST") {
-        const command = payload(String(body.command));
+        const command = String(body.command);
         if (command.includes("skills.next")) expect(body.timeoutSeconds).toBe(180);
         if (command.includes("is-active")) {
           return json({ success: true, exitCode: 0, stdout: "active\n", stderr: "" });
@@ -150,13 +142,14 @@ describe("AsciiBoxCompanionRuntime", () => {
       const method = init?.method ?? "GET";
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
       if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
       if (url.endsWith("/commands") && method === "POST") {
-        if (payload(String(body.command)).includes("pi-layout.version")) {
+        if (String(body.command).includes(LAYOUT_SCRIPT_PATH)) {
           return json({
             success: false,
-            exitCode: 2,
+            exitCode: 127,
             stdout: "",
-            stderr: "dash: 1: set: Illegal option -o pipefail\n",
+            stderr: "/home/user/.companion/bin/ensure-pi-layout.sh: line 21: pi: command not found\n",
           });
         }
         return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
@@ -183,82 +176,15 @@ describe("AsciiBoxCompanionRuntime", () => {
       skills: [],
       onBoxAssigned: async () => undefined,
     })).rejects.toThrow(
-      "Pi runtime layout failed to install (exit 2): dash: 1: set: Illegal option -o pipefail",
+      "Pi runtime layout failed to install (exit 127): "
+      + "/home/user/.companion/bin/ensure-pi-layout.sh: line 21: pi: command not found",
     );
   });
 
-  it("runs every Box command under bash so a dash /bin/sh cannot kill the payload", async () => {
+  it("stages the layout script as a file and never sends the script body as a command", async () => {
     const commands: string[] = [];
-    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
-      const url = String(rawUrl);
-      const method = init?.method ?? "GET";
-      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
-      if (url.includes("/boxes?limit=200") && method === "GET") return json({ boxes: [] });
-      if (url.endsWith("/boxes") && method === "POST") {
-        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } }, 202);
-      }
-      if (url.endsWith("/boxes/bx_23456789") && method === "PATCH") return json({ box });
-      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
-      if (url.endsWith("/boxes/bx_23456789/stop") && method === "POST") {
-        return json({ box: { ...box, state: "archiving" } }, 202);
-      }
-      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
-      if (url.endsWith("/commands") && method === "POST") {
-        const sent = String(body.command);
-        commands.push(sent);
-        return json({
-          success: true,
-          exitCode: 0,
-          stdout: payload(sent).includes("is-active") ? "active\n" : "",
-          stderr: "",
-        });
-      }
-      throw new Error(`unexpected Box request: ${method} ${url}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    const runtime = new AsciiBoxCompanionRuntime({
-      COMPANION_BOX_API_KEY: "box_test",
-      COMPANION_PI_INSTALL_COMMAND: "npm install --global @earendil-works/pi-coding-agent@1.2.3",
-      COMPANION_BOX_POLL_INTERVAL_MS: "1",
-    });
-
-    await runtime.start({
-      companionId: "11111111-1111-4111-8111-111111111111",
-      orgId: "22222222-2222-4222-8222-222222222222",
-      boxId: null,
-      clientSurface: "web",
-      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
-      replaceProviderAuth: true,
-      mcpCredentials: [],
-      mcpAccounts: [],
-      skills: [],
-      onBoxAssigned: async () => undefined,
-    });
-    await runtime.stop({ boxId: "bx_23456789" });
-    await runtime.prompt({ boxId: "bx_23456789", message: "hi", requestId: "msg:1" });
-    await runtime.readEvents({ boxId: "bx_23456789", offset: 0 });
-
-    expect(commands.length).toBeGreaterThan(4);
-    for (const command of commands) {
-      // The command API executes this string, so the payload's own shebang is only a comment. A Box
-      // whose /bin/sh is dash would abort on `set -o pipefail` before running a single real line.
-      expect(command.startsWith(BASH_PREFIX)).toBe(true);
-      // Everything dash has to parse itself is the bash invocation, and nothing more.
-      const outer = `${command.slice(0, BASH_PREFIX.length)}<payload>`;
-      expect(outer).toBe("bash --noprofile --norc -c <payload>");
-      // The payload reaches bash byte for byte, single quotes included.
-      expect(command).toBe(
-        `${BASH_PREFIX}'${payload(command).replaceAll("'", "'\"'\"'")}'`,
-      );
-    }
-    // The bashisms that dash would have rejected are still in the payloads, now safely.
-    expect(commands.some((command) => payload(command).includes("set -euo pipefail"))).toBe(true);
-    expect(commands.some((command) => payload(command).includes("shopt -s nullglob"))).toBe(true);
-  });
-
-  it("short-circuits an already-laid-out disk before requiring pi on PATH and bootstraps PATH", async () => {
+    const files = new Map<string, string>();
     let createdSetupScript = "";
-    let layoutCommand = "";
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const method = init?.method ?? "GET";
@@ -270,13 +196,14 @@ describe("AsciiBoxCompanionRuntime", () => {
       }
       if (url.endsWith("/boxes/bx_23456789") && method === "PATCH") return json({ box });
       if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
-      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/files") && method === "PUT") {
+        files.set(String(body.path), String(body.content));
+        return json({ ok: true });
+      }
       if (url.endsWith("/commands") && method === "POST") {
-        const command = payload(String(body.command));
-        // The layout command re-runs the full setupScript as a Box command on Wake.
-        if (command.includes("pi-layout.version") && command.includes("expected_layout")) {
-          layoutCommand = command;
-        }
+        const command = String(body.command);
+        commands.push(command);
+        if (command === LAYOUT_RUN_COMMAND) expect(body.timeoutSeconds).toBe(180);
         return json({
           success: true,
           exitCode: 0,
@@ -306,23 +233,84 @@ describe("AsciiBoxCompanionRuntime", () => {
       onBoxAssigned: async () => undefined,
     });
 
-    for (const script of [createdSetupScript, layoutCommand]) {
-      expect(script).not.toBe("");
-      const markerIndex = script.indexOf("[ -f \"$layout_marker\" ]");
-      const piResolveIndex = script.indexOf("command -v pi");
-      // A Wake must exit 0 on an already-laid-out disk before it ever requires pi on PATH.
-      expect(markerIndex).toBeGreaterThan(-1);
-      expect(piResolveIndex).toBeGreaterThan(-1);
-      expect(markerIndex).toBeLessThan(piResolveIndex);
-      // Box commands do not inherit the interactive nvm PATH, so the script re-derives it.
-      expect(script).toContain(".nvm/versions/node");
-      expect(script).toContain("npm prefix -g");
-      expect(script).toContain("$HOME/.local/bin");
-      expect(script).toContain(".nvm/nvm.sh");
+    // The script the create path installs as a file is the same text the repair path stages, so a
+    // Box can only ever be laid out by one script.
+    expect(files.get(LAYOUT_SCRIPT_PATH)).toBe(createdSetupScript);
+    expect(commands).toContain('mkdir -p "$HOME/.companion/bin"');
+    expect(commands).toContain(LAYOUT_RUN_COMMAND);
+    // The directory has to exist before the file API can land the script in it.
+    expect(commands.indexOf('mkdir -p "$HOME/.companion/bin"'))
+      .toBeLessThan(commands.indexOf(LAYOUT_RUN_COMMAND));
+    // The create setupScript runs as a file with a shebang and succeeds; the identical text sent as
+    // a command string does not survive the transport, so no command may carry the script body.
+    for (const command of commands) {
+      expect(command).not.toContain("COMPANION_PI_DAEMON");
+      expect(command).not.toContain("COMPANION_PI_SERVICE");
+      expect(command).not.toContain("expected_layout");
+      expect(command).not.toContain("pi-layout.version");
+      expect(command).not.toContain("<<");
     }
-    // The daemon wrapper and unit resolve Pi without a login-shell PATH.
+    // Both commands the repair does send are short, quote-light lines, unlike the staged script.
+    for (const command of commands.filter((sent) => sent.includes(".companion/bin"))) {
+      expect(command.length).toBeLessThan(100);
+    }
+    expect(createdSetupScript.length).toBeGreaterThan(2_500);
+  });
+
+  it("short-circuits an already-laid-out disk before it resolves pi", async () => {
+    let createdSetupScript = "";
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.includes("/boxes?limit=200") && method === "GET") return json({ boxes: [] });
+      if (url.endsWith("/boxes") && method === "POST") {
+        createdSetupScript = String(body.setupScript);
+        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } }, 202);
+      }
+      if (url.endsWith("/boxes/bx_23456789") && method === "PATCH") return json({ box });
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: command.includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_PI_INSTALL_COMMAND: "npm install --global @earendil-works/pi-coding-agent@1.2.3",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: null,
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    // Repairing a Box that is already correct must not depend on anything the layout already has.
+    const markerIndex = createdSetupScript.indexOf("[ -f \"$layout_marker\" ]");
+    const piResolveIndex = createdSetupScript.indexOf("command -v pi");
+    expect(markerIndex).toBeGreaterThan(-1);
+    expect(piResolveIndex).toBeGreaterThan(-1);
+    expect(markerIndex).toBeLessThan(piResolveIndex);
+    // The supervised daemon gets a minimal PATH from the systemd user manager, so Pi is resolved at
+    // layout time and pinned both in the wrapper and on the unit.
     expect(createdSetupScript).toContain("pi_bin=\"$(command -v pi)\"");
-    expect(createdSetupScript).toContain("PI_BIN=%q");
     expect(createdSetupScript).toContain("exec \"$PI_BIN\" --mode rpc");
     expect(createdSetupScript).toContain("Environment=PATH=");
   });
@@ -343,7 +331,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
       if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
       if (url.endsWith("/commands") && method === "POST") {
-        const command = payload(String(body.command));
+        const command = String(body.command);
         commands.push(command);
         return json({
           success: true,
@@ -413,7 +401,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
       if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
       if (url.endsWith("/commands") && method === "POST") {
-        const command = payload(String(body.command));
+        const command = String(body.command);
         if (command.includes("restart companion-pi-daemon.service")) {
           return json({
             success: false,
@@ -449,6 +437,7 @@ describe("AsciiBoxCompanionRuntime", () => {
   it("recovers a deterministically named archived Box before restarting Pi", async () => {
     const commands: string[] = [];
     const writtenPaths: string[] = [];
+    const writtenFiles = new Map<string, string>();
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
@@ -477,10 +466,11 @@ describe("AsciiBoxCompanionRuntime", () => {
       }
       if (url.endsWith("/files") && init?.method === "PUT") {
         writtenPaths.push(String(body.path));
+        writtenFiles.set(String(body.path), String(body.content));
         return json({ ok: true });
       }
       if (url.endsWith("/commands") && init?.method === "POST") {
-        const command = payload(String(body.command));
+        const command = String(body.command);
         commands.push(command);
         return json({
           success: true,
@@ -519,8 +509,10 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(fetchMock.mock.calls.some(([url, init]) =>
       String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
     expect(writtenPaths).not.toContain(".companion/pi/auth.json");
-    expect(commands.some((command) =>
-      command.includes("pi-layout.version") && command.includes("pi-mcp-adapter@2.12.1"))).toBe(true);
+    // The resumed disk is repaired against the current adapter version, from the staged file.
+    expect(writtenFiles.get(LAYOUT_SCRIPT_PATH)).toContain("pi-layout.version");
+    expect(writtenFiles.get(LAYOUT_SCRIPT_PATH)).toContain("pi-mcp-adapter@2.12.1");
+    expect(commands).toContain(LAYOUT_RUN_COMMAND);
   });
 
   it("replaces the assigned Box when its Pi setup failed and rewrites provider auth", async () => {
@@ -566,7 +558,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         return json({
           success: true,
           exitCode: 0,
-          stdout: payload(String(body.command)).includes("is-active") ? "active\n" : "",
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
           stderr: "",
         });
       }
@@ -632,7 +624,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         return json({
           success: true,
           exitCode: 0,
-          stdout: payload(String(body.command)).includes("is-active") ? "active\n" : "",
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
           stderr: "",
         });
       }
@@ -695,7 +687,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         return json({
           success: true,
           exitCode: 0,
-          stdout: payload(String(body.command)).includes("is-active") ? "active\n" : "",
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
           stderr: "",
         });
       }
@@ -756,7 +748,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         return json({
           success: true,
           exitCode: 0,
-          stdout: payload(String(body.command)).includes("is-active") ? "active\n" : "",
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
           stderr: "",
         });
       }
@@ -817,7 +809,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         return json({
           success: true,
           exitCode: 0,
-          stdout: payload(String(body.command)).includes("is-active") ? "active\n" : "",
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
           stderr: "",
         });
       }
@@ -875,7 +867,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         return json({
           success: true,
           exitCode: 0,
-          stdout: payload(String(body.command)).includes("is-active") ? "active\n" : "",
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
           stderr: "",
         });
       }
@@ -923,7 +915,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         return json({
           success: true,
           exitCode: 0,
-          stdout: payload(String(body.command)).includes("is-active") ? "active\n" : "",
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
           stderr: "",
         });
       }
@@ -964,7 +956,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
       if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
       if (url.endsWith("/commands") && method === "POST") {
-        stopCommand = payload(String(body.command));
+        stopCommand = String(body.command);
         // The Box never started Pi, so the shell guard exits 0 without stopping anything.
         return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
       }
@@ -1033,7 +1025,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       }
       if (url.endsWith("/files") && init?.method === "PUT") return json({ ok: true });
       if (url.endsWith("/commands") && init?.method === "POST") {
-        const command = payload(String(body.command));
+        const command = String(body.command);
         commands.push(command);
         if (command.includes("restart companion-pi-daemon")) {
           return json({ code: "box_direct_failed", message: "command transport failed" }, 502);
@@ -1076,7 +1068,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       }
       if (url.endsWith("/files") && init?.method === "PUT") return json({ ok: true });
       if (url.endsWith("/commands") && init?.method === "POST") {
-        const command = payload(String(body.command));
+        const command = String(body.command);
         commands.push(command);
         if (command.includes("skills.next")) {
           return json({ code: "box_direct_failed", message: "prepare transport failed" }, 502);
@@ -1115,7 +1107,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       const url = String(rawUrl);
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
       if (url.endsWith("/commands") && init?.method === "POST") {
-        commands.push(payload(String(body.command)));
+        commands.push(String(body.command));
         return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
       }
       throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
@@ -1157,7 +1149,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     let command = "";
     vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
-      command = payload(String(body.command));
+      command = String(body.command);
       // A rebuilt disk shrank the log, so the Box script restarted from the top.
       return json({ success: true, exitCode: 0, stdout: "0\n{\"type\":\"agent_settled\"}\n", stderr: "" });
     }));
