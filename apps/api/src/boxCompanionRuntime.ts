@@ -15,6 +15,15 @@ import {
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
 const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
 export const COMPANION_PI_DISK_LAYOUT_VERSION = 2;
+/** Content bytes the provider's file API refuses in one `PUT /boxes/:id/files` body. */
+const BOX_FILE_WRITE_LIMIT_BYTES = 5 * 1024 * 1024;
+/**
+ * Payload bytes per part of an oversized file. Each part travels base64-encoded, so the request
+ * body is a third larger than this and still a megabyte clear of the provider's limit.
+ */
+const BOX_FILE_PART_BYTES = 3 * 1024 * 1024;
+/** A multi-megabyte part takes longer to upload than the short control calls share a budget with. */
+const BOX_FILE_PART_TIMEOUT_MS = 120_000;
 /** Bytes of Pi RPC output one control-plane sync may pull; the rest is read by the next sync. */
 const COMPANION_PI_EVENT_READ_LIMIT = 262_144;
 const READY_STATES = new Set<BoxState>(["ready", "idle", "running"]);
@@ -494,11 +503,82 @@ systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true`,
     );
   }
 
+  /**
+   * One `PUT /boxes/:id/files` request. The provider names the byte limit it enforced but not the
+   * file it rejected, so the path travels with the failure: `last_error` has to say which payload
+   * overflowed, not only that something did.
+   */
+  async #putFile(
+    boxId: string,
+    path: string,
+    content: string,
+    options?: { encoding?: "base64"; timeoutMs?: number },
+  ): Promise<void> {
+    try {
+      await this.#request(
+        `/boxes/${encodeURIComponent(boxId)}/files`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            path,
+            content,
+            ...(options?.encoding ? { encoding: options.encoding } : {}),
+          }),
+        },
+        options?.timeoutMs,
+      );
+    } catch (error) {
+      if (error instanceof BoxRuntimeProviderError) {
+        throw new BoxRuntimeProviderError(
+          `Box rejected the write of ${path}: ${error.message}`,
+          error.status,
+          error.code,
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Land one file on the Box disk whatever its size. The file API takes the whole body in a single
+   * JSON request, rejects content over `BOX_FILE_WRITE_LIMIT_BYTES`, and offers no append,
+   * multipart, or streaming write, so a base64 skill archive of a few megabytes cannot be written
+   * at all in one call. An oversized payload therefore lands as numbered parts that one short
+   * command concatenates back into place. The payload itself never travels as a command string:
+   * that transport already proved it mangles bodies far smaller than an archive.
+   */
   async #writeFile(boxId: string, path: string, content: string): Promise<void> {
-    await this.#request(`/boxes/${encodeURIComponent(boxId)}/files`, {
-      method: "PUT",
-      body: JSON.stringify({ path, content }),
-    });
+    const payload = Buffer.from(content, "utf8");
+    if (payload.byteLength < BOX_FILE_WRITE_LIMIT_BYTES) {
+      await this.#putFile(boxId, path, content);
+      return;
+    }
+    const parts: string[] = [];
+    for (let offset = 0; offset < payload.byteLength; offset += BOX_FILE_PART_BYTES) {
+      const part = `${path}.part${parts.length}`;
+      // Parts are split on byte boundaries and sent base64, so a payload that is not plain ASCII
+      // cannot lose a multi-byte character to the split.
+      await this.#putFile(
+        boxId,
+        part,
+        payload.subarray(offset, offset + BOX_FILE_PART_BYTES).toString("base64"),
+        { encoding: "base64", timeoutMs: BOX_FILE_PART_TIMEOUT_MS },
+      );
+      parts.push(part);
+    }
+    const quoted = parts.map(shellQuote).join(" ");
+    const joined = await this.#command(
+      boxId,
+      `set -e; cd "$HOME"; cat ${quoted} > ${shellQuote(path)}; rm -f ${quoted}`,
+      120,
+    );
+    if (!joined.success) {
+      throw new BoxRuntimeProviderError(
+        `Box could not join the ${parts.length} staged parts of ${path}`
+        + commandFailureDetail(joined),
+        502,
+      );
+    }
   }
 
   /**

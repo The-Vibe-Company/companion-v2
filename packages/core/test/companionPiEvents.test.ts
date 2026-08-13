@@ -81,6 +81,60 @@ describe("Pi RPC log projection", () => {
     expect(projection.entries[1]?.content).toContain("agent is streaming");
   });
 
+  it("shows the reasoning when a settled turn answered without a text part", () => {
+    const chunk = [
+      line({ type: "message_end", message: { role: "user", content: "What year is it? One word." } }),
+      line({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "\n2025" }],
+          stopReason: "stop",
+          timestamp: Date.parse("2026-08-12T11:59:30.000Z"),
+        },
+      }),
+      line({ type: "agent_settled" }),
+    ].join("");
+
+    const projection = projectCompanionPiEvents({ chunk, offset: 0, now });
+
+    expect(projection.entries).toEqual([{
+      eventId: expect.stringMatching(/^pi:\d+$/),
+      role: "assistant",
+      content: "2025",
+      createdAt: new Date("2026-08-12T11:59:30.000Z"),
+    }]);
+    expect(projection.settled).toBe(true);
+  });
+
+  it("keeps a settled turn with no content at all visible as a system line", () => {
+    const chunk = [
+      line({ type: "message_end", message: { role: "assistant", content: [], stopReason: "stop" } }),
+      line({ type: "agent_settled" }),
+    ].join("");
+
+    const projection = projectCompanionPiEvents({ chunk, offset: 0, now });
+
+    expect(projection.entries.map((entry) => entry.role)).toEqual(["system"]);
+    expect(projection.entries[0]?.content).toBe("Pi ended the turn without a visible reply.");
+    expect(projection.settled).toBe(true);
+  });
+
+  it("leaves a mid-turn tool step invisible", () => {
+    const chunk = line({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call_1", name: "bash", arguments: { command: "ls" } }],
+        stopReason: "toolUse",
+      },
+    });
+
+    const projection = projectCompanionPiEvents({ chunk, offset: 0, now });
+
+    expect(projection.entries).toEqual([]);
+  });
+
   it("skips malformed records instead of failing the whole sync", () => {
     const chunk = `not json\n${line({
       type: "message_end",

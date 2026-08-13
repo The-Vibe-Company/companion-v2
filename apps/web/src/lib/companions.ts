@@ -1,12 +1,15 @@
 import type {
   Companion,
   CompanionDesktop,
+  CompanionPluginAccount,
+  CompanionPluginsResponse,
   CompanionProviderConnection,
   CompanionProvidersResponse,
   CompanionShareRole,
   CompanionShares,
   CompanionThread,
   SaveCompanionProviderInput,
+  SaveCompanionPluginInput,
 } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
 
@@ -24,6 +27,27 @@ export async function createCompanion(
     body: JSON.stringify(input),
   });
   return result.companion;
+}
+
+export async function saveCompanionPlugin(
+  orgId: string,
+  input: SaveCompanionPluginInput,
+): Promise<CompanionPluginAccount> {
+  const result = await apiFetch<{ account: CompanionPluginAccount }>("/v1/companion-plugins", {
+    method: "POST",
+    headers: orgHeaders(orgId),
+    body: JSON.stringify(input),
+    // Fail closed before a stuck proxy leaves the dialog spinning.
+    signal: AbortSignal.timeout(10_000),
+  });
+  return result.account;
+}
+
+export async function deleteCompanionPlugin(orgId: string, accountId: string): Promise<void> {
+  await apiFetch(`/v1/companion-plugins/${encodeURIComponent(accountId)}`, {
+    method: "DELETE",
+    headers: orgHeaders(orgId),
+  });
 }
 
 export async function saveCompanionProvider(
@@ -236,3 +260,4 @@ export async function openCompanionDesktop(
 }
 
 export type { CompanionProvidersResponse };
+export type { CompanionPluginsResponse };

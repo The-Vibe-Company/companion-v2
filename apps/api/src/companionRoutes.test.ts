@@ -1,3 +1,4 @@
+import { CompanionPluginConflictError } from "@companion/core";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthenticationRequiredError, type ApiVariables } from "./context";
@@ -14,12 +15,16 @@ const contextMocks = vi.hoisted(() => ({
 const coreMocks = vi.hoisted(() => ({
   listCompanions: vi.fn(),
   listCompanionProviders: vi.fn(),
+  listCompanionPlugins: vi.fn(),
   createCompanion: vi.fn(),
+  saveCompanionPlugin: vi.fn(),
+  deleteCompanionPlugin: vi.fn(),
   saveCompanionProvider: vi.fn(),
   setCompanionProvider: vi.fn(),
   deleteCompanionProvider: vi.fn(),
   setDefaultCompanionProvider: vi.fn(),
   resolveCompanionProviderAuth: vi.fn(),
+  resolveCompanionPluginInjection: vi.fn(),
   getCompanion: vi.fn(),
   getCompanionForRuntime: vi.fn(),
   getCompanionThread: vi.fn(),
@@ -163,6 +168,18 @@ describe("Companions API feature gate", () => {
       default_provider_id: null,
       can_manage: true,
     });
+    coreMocks.listCompanionPlugins.mockResolvedValue([]);
+    coreMocks.saveCompanionPlugin.mockResolvedValue({
+      id: "44444444-4444-4444-8444-444444444444",
+      provider: "github",
+      label: "work",
+      transport: "http",
+      endpoint: "https://mcp.example.test/github",
+      connected: true,
+      created_at: companion.created_at,
+      updated_at: companion.updated_at,
+    });
+    coreMocks.deleteCompanionPlugin.mockResolvedValue(undefined);
     coreMocks.createCompanion.mockResolvedValue(companion);
     coreMocks.saveCompanionProvider.mockResolvedValue({
       provider_id: "anthropic",
@@ -178,6 +195,10 @@ describe("Companions API feature gate", () => {
       providerId: "anthropic",
       credentialGeneration: "22222222-2222-4222-8222-222222222222",
       authEntry: { type: "api_key", key: "secret-a" },
+    });
+    coreMocks.resolveCompanionPluginInjection.mockResolvedValue({
+      accounts: [],
+      credentials: [],
     });
     coreMocks.getCompanion.mockResolvedValue(companion);
     coreMocks.getCompanionForRuntime.mockResolvedValue(companion);
@@ -224,6 +245,7 @@ describe("Companions API feature gate", () => {
 
     expect((await app.request("/v1/companions")).status).toBe(404);
     expect((await app.request("/v1/companion-providers")).status).toBe(404);
+    expect((await app.request("/v1/companion-plugins")).status).toBe(404);
     expect(contextMocks.actorFromContext).not.toHaveBeenCalled();
   });
 
@@ -234,6 +256,7 @@ describe("Companions API feature gate", () => {
 
     expect((await app.request("/v1/companions")).status).toBe(404);
     expect((await app.request("/v1/companion-providers")).status).toBe(404);
+    expect((await app.request("/v1/companion-plugins")).status).toBe(404);
     expect(contextMocks.actorFromContext).not.toHaveBeenCalled();
   });
 
@@ -289,6 +312,44 @@ describe("Companions API feature gate", () => {
     expect(response.status).toBe(403);
     expect(contextMocks.orgIdFromContext).not.toHaveBeenCalled();
     expect(coreMocks.listCompanions).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["GET", "/v1/companion-plugins", undefined],
+    ["POST", "/v1/companion-plugins", JSON.stringify({
+      provider: "linear",
+      label: "work",
+      transport: "http",
+      url: "https://mcp.example.test/linear",
+      args: [],
+    })],
+    ["DELETE", "/v1/companion-plugins/44444444-4444-4444-8444-444444444444", undefined],
+  ])("returns 403 before tenant resolution for %s %s outside the allowlist", async (
+    method,
+    path,
+    body,
+  ) => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    contextMocks.actorFromContext.mockReturnValueOnce({
+      id: "user-1",
+      email: "user@example.test",
+      name: "User",
+    });
+    registerCompanionRoutes(app, {
+      COMPANION_COMPANIONS_ENABLED: "true",
+      COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "thevibecompany.co",
+    });
+
+    const response = await app.request(path, {
+      method,
+      ...(body ? { body, headers: { "content-type": "application/json" } } : {}),
+    });
+
+    expect(response.status).toBe(403);
+    expect(contextMocks.orgIdFromContext).not.toHaveBeenCalled();
+    expect(coreMocks.listCompanionPlugins).not.toHaveBeenCalled();
+    expect(coreMocks.saveCompanionPlugin).not.toHaveBeenCalled();
+    expect(coreMocks.deleteCompanionPlugin).not.toHaveBeenCalled();
   });
 
   it("returns 401 before tenant resolution when no session exists", async () => {
@@ -566,6 +627,40 @@ describe("Companions API feature gate", () => {
       piLogOffset: 512 + Buffer.byteLength(reply, "utf8"),
       piLogRewound: false,
       entries: [expect.objectContaining({ role: "assistant", content: "Two services timed out." })],
+    }));
+  });
+
+  it("records a reply when Pi answered inside a thinking block and settled", async () => {
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [{ ...message, content: "What year is it? One word." }],
+      piLogOffset: 512,
+    });
+    const chunk = [
+      { type: "message_end", message: { role: "user", content: "What year is it? One word." } },
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "\n2025" }],
+          stopReason: "stop",
+        },
+      },
+      { type: "agent_settled" },
+    ].map((event) => `${JSON.stringify(event)}\n`).join("");
+    const runtime = boxRuntime({ readEvents: vi.fn(async () => ({ chunk, offset: 512 })) });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    expect(coreMocks.recordCompanionPiProjection).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      entries: [expect.objectContaining({ role: "assistant", content: "2025" })],
     }));
   });
 
@@ -920,6 +1015,105 @@ describe("Companions API feature gate", () => {
       credential: "secret-a",
     }));
     expect(JSON.stringify(await response.json())).not.toContain("secret-a");
+  });
+
+  it("manages labeled MCP accounts outside the Companion thread", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    const listed = await app.request("/v1/companion-plugins");
+    expect(listed.status).toBe(200);
+    await expect(listed.json()).resolves.toEqual({ accounts: [] });
+
+    const created = await app.request("/v1/companion-plugins", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        label: "work",
+        transport: "http",
+        url: "https://mcp.example.test/github",
+        credential_name: "Authorization",
+        credential_value: "Bearer secret-mcp",
+      }),
+    });
+    expect(created.status).toBe(201);
+    expect(coreMocks.saveCompanionPlugin).toHaveBeenCalledWith(expect.objectContaining({
+      plugin: expect.objectContaining({ provider: "github", label: "work" }),
+    }));
+    expect(JSON.stringify(await created.json())).not.toContain("secret-mcp");
+
+    const authless = await app.request("/v1/companion-plugins", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        label: "personal",
+        transport: "http",
+        url: "https://mcp.example.test/github/personal",
+        args: [],
+      }),
+    });
+    expect(authless.status).toBe(201);
+
+    coreMocks.saveCompanionPlugin.mockRejectedValueOnce(new CompanionPluginConflictError());
+    const conflict = await app.request("/v1/companion-plugins", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        label: "work",
+        transport: "http",
+        url: "https://mcp.example.test/github/work",
+        args: [],
+      }),
+    });
+    expect(conflict.status).toBe(409);
+
+    const removed = await app.request(
+      "/v1/companion-plugins/44444444-4444-4444-8444-444444444444",
+      { method: "DELETE" },
+    );
+    expect(removed.status).toBe(200);
+    expect(coreMocks.deleteCompanionPlugin).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: "44444444-4444-4444-8444-444444444444",
+    }));
+  });
+
+  it("injects saved member plugins through THE-325 without exposing their credential", async () => {
+    coreMocks.resolveCompanionPluginInjection.mockResolvedValueOnce({
+      accounts: [{
+        id: "44444444-4444-4444-8444-444444444444",
+        label: "work",
+        transport: "http",
+        url: "https://mcp.example.test/github",
+        headers: { Authorization: "COMPANION_MCP_ACCOUNT" },
+        lifecycle: "lazy",
+        direct_tools: false,
+      }],
+      credentials: [{ env_key: "COMPANION_MCP_ACCOUNT", value: "secret-mcp" }],
+    });
+    const start = vi.fn(async () => ({
+      boxId: "bx_23456789",
+      runtimeState: "running" as const,
+      daemonState: "running" as const,
+      desktopAvailable: false,
+    }));
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => boxRuntime({ start }));
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_surface: "mobile_web" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      mcpAccounts: [expect.objectContaining({ label: "work" })],
+      mcpCredentials: [{ env_key: "COMPANION_MCP_ACCOUNT", value: "secret-mcp" }],
+    }));
+    expect(JSON.stringify(await response.json())).not.toContain("secret-mcp");
   });
 
   it("lets an owner attach a connected provider to a pre-provider Companion", async () => {

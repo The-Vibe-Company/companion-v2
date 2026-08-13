@@ -19,9 +19,10 @@ export interface CompanionPiProjection {
 const MAX_CONTENT_CHARACTERS = 100_000;
 const TRUNCATION_SUFFIX = "\n[truncated]";
 
-interface PiTextBlock {
+interface PiContentBlock {
   type?: unknown;
   text?: unknown;
+  thinking?: unknown;
 }
 
 interface PiMessage {
@@ -39,19 +40,62 @@ interface PiEvent {
   message?: unknown;
 }
 
+const THINKING_BLOCK_TYPES = new Set(["thinking", "reasoning", "redacted_thinking"]);
+const TOOL_CALL_BLOCK_TYPES = new Set(["toolCall", "tool_call", "toolUse", "tool_use"]);
+/** Stop reasons that end a turn. A tool step is mid-turn, so its empty message stays invisible. */
+const TURN_END_STOP_REASONS = new Set([
+  "stop",
+  "endTurn",
+  "end_turn",
+  "stopSequence",
+  "stop_sequence",
+  "maxTokens",
+  "max_tokens",
+]);
+
+function blocksOf(message: PiMessage): PiContentBlock[] {
+  if (!Array.isArray(message.content)) return [];
+  return message.content.filter((block): block is PiContentBlock =>
+    typeof block === "object" && block !== null);
+}
+
+function blockType(block: PiContentBlock): string {
+  return typeof block.type === "string" ? block.type : "";
+}
+
 /**
  * Assistant text only. Thinking blocks, tool calls, and tool results are deliberately dropped: the
- * chat thread is a conversation surface, never a Pi tool console.
+ * chat thread is a conversation surface, never a Pi tool console. A turn with no text at all falls
+ * back to its thinking rather than showing nothing.
  */
 function assistantText(message: PiMessage): string {
   if (typeof message.content === "string") return message.content.trim();
-  if (!Array.isArray(message.content)) return "";
-  return message.content
-    .filter((block): block is PiTextBlock =>
-      typeof block === "object" && block !== null && (block as PiTextBlock).type === "text")
+  return blocksOf(message)
+    .filter((block) => blockType(block) === "text")
     .map((block) => (typeof block.text === "string" ? block.text : ""))
     .join("")
     .trim();
+}
+
+/**
+ * The reasoning a turn produced, read only when it produced no text at all. Some models answer a
+ * short question inside the thinking block and end the turn with no text part; showing that reasoning
+ * is the difference between an answer and a thread that looks stuck. A turn that did produce text
+ * keeps its thinking hidden.
+ */
+function assistantThinking(message: PiMessage): string {
+  return blocksOf(message)
+    .filter((block) => THINKING_BLOCK_TYPES.has(blockType(block)))
+    .map((block) => {
+      if (typeof block.thinking === "string") return block.thinking;
+      return typeof block.text === "string" ? block.text : "";
+    })
+    .join("")
+    .trim();
+}
+
+function hasToolCall(message: PiMessage): boolean {
+  return blocksOf(message).some((block) => TOOL_CALL_BLOCK_TYPES.has(blockType(block)));
 }
 
 function truncate(content: string): string {
@@ -72,7 +116,7 @@ function entryFrom(event: PiEvent, now: Date): Omit<CompanionPiEntry, "eventId">
       ? event.message
       : {}) as PiMessage;
     if (message.role !== "assistant") return null;
-    const content = assistantText(message);
+    const content = assistantText(message) || assistantThinking(message);
     if (content) {
       return { role: "assistant", content: truncate(content), createdAt: messageTimestamp(message, now) };
     }
@@ -80,6 +124,17 @@ function entryFrom(event: PiEvent, now: Date): Omit<CompanionPiEntry, "eventId">
       return {
         role: "system",
         content: `Pi ended the turn without a reply (${message.stopReason}).`,
+        createdAt: messageTimestamp(message, now),
+      };
+    }
+    // A turn that ended with nothing to show must still close the conversation, or the thread looks
+    // like Pi is still thinking. Mid-turn tool steps carry no visible content either and stay silent.
+    if (typeof message.stopReason === "string"
+      && TURN_END_STOP_REASONS.has(message.stopReason)
+      && !hasToolCall(message)) {
+      return {
+        role: "system",
+        content: "Pi ended the turn without a visible reply.",
         createdAt: messageTimestamp(message, now),
       };
     }

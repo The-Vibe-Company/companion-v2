@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type {
   Companion,
+  CompanionPluginAccount,
   CompanionProvidersResponse,
   CompanionThread as Thread,
 } from "@companion/contracts";
@@ -19,6 +20,7 @@ import {
 } from "@/lib/companions";
 import { Icon } from "../Icon";
 import { CompanionProvidersDialog } from "./CompanionProvidersDialog";
+import { CompanionPlugins } from "./CompanionPlugins";
 import { CompanionThread } from "./CompanionThread";
 import { NewCompanionDialog } from "./NewCompanionDialog";
 import { ShareCompanionDialog } from "./ShareCompanionDialog";
@@ -61,7 +63,10 @@ function UpdatedAt({ iso }: { iso: string }) {
 function threadUrl(companionId: string | null): void {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
-  if (companionId) url.searchParams.set("companion", companionId);
+  if (companionId) {
+    url.searchParams.set("companion", companionId);
+    url.searchParams.delete("view");
+  }
   else url.searchParams.delete("companion");
   window.history.replaceState(null, "", `${url.pathname}${url.search}`);
 }
@@ -72,14 +77,18 @@ export function CompanionsApp({
   navigation,
   initialCompanions,
   initialProviders,
+  initialPlugins,
   initialCompanionId,
+  initialPluginsOpen = false,
 }: {
   orgs: OrgVM[];
   currentOrg: OrgVM;
   navigation: CompanionNavigation;
   initialCompanions: Companion[];
   initialProviders: CompanionProvidersResponse;
+  initialPlugins: CompanionPluginAccount[];
   initialCompanionId?: string | null;
+  initialPluginsOpen?: boolean;
 }) {
   const router = useRouter();
   const orgActions = useOrgActions();
@@ -90,6 +99,7 @@ export function CompanionsApp({
   const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
   const [managingProviders, setManagingProviders] = useState(false);
+  const [pluginsOpen, setPluginsOpen] = useState(initialPluginsOpen && !initialCompanionId);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sharing, setSharing] = useState<Companion | null>(null);
@@ -142,6 +152,7 @@ export function CompanionsApp({
     setOpenedId(companion.id);
     setThread(null);
     setThreadError(null);
+    setPluginsOpen(false);
     threadUrl(companion.id);
   };
 
@@ -156,6 +167,23 @@ export function CompanionsApp({
     window.requestAnimationFrame(() => {
       (wasOpen ? rowRefs.current.get(wasOpen) : null)?.focus();
     });
+  };
+
+  const openPlugins = () => {
+    setPluginsOpen(true);
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("companion");
+    url.searchParams.set("view", "plugins");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+  };
+
+  const closePlugins = () => {
+    setPluginsOpen(false);
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("view");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}`);
   };
 
   /** One refresh of the open thread: Pi delivery plus projection when awake, read model otherwise. */
@@ -441,6 +469,12 @@ export function CompanionsApp({
               onDesktop={() => void onDesktop()}
             />
           </>
+        ) : pluginsOpen ? (
+          <CompanionPlugins
+            orgId={currentOrg.id}
+            initialAccounts={initialPlugins}
+            onBack={closePlugins}
+          />
         ) : (
           <>
             <header className="companions-head">
@@ -458,6 +492,13 @@ export function CompanionsApp({
                     Providers
                   </button>
                 )}
+                <button
+                  type="button"
+                  className="cds-btn cds-btn--secondary cds-btn--md"
+                  onClick={openPlugins}
+                >
+                  <Icon name="plug-zap" size={15} /> Plugins
+                </button>
                 <button
                   type="button"
                   className="cds-btn cds-btn--primary cds-btn--md"

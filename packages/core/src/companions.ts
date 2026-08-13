@@ -4,17 +4,25 @@ import type {
   Companion,
   CompanionAccess,
   CompanionDaemonState,
+  CompanionMcpAccount,
+  CompanionMcpCredential,
+  CompanionPluginAccount,
   CompanionProviderAuthMethod,
   CompanionProviderConnection,
   CompanionProvidersResponse,
   CompanionRuntimeState,
+  SaveCompanionPluginInput,
   CompanionShareMember,
   CompanionShareRole,
   CompanionShares,
   CompanionThread,
   CompanionTranscriptEntry,
 } from "@companion/contracts";
-import { COMPANION_PROVIDER_CATALOG } from "@companion/contracts";
+import {
+  COMPANION_PROVIDER_CATALOG,
+  companionMcpAccountSchema,
+  companionMcpCredentialSchema,
+} from "@companion/contracts";
 import { db, schema, type Db } from "@companion/db";
 import { canManageOrg } from "./authz";
 import type { CompanionPiEntry } from "./companionPiEvents";
@@ -28,6 +36,23 @@ import { assertMember, getOrgRole, type ActorContext } from "./services";
 type CompanionRow = typeof schema.companions.$inferSelect;
 const COMPANION_RUNTIME_CLAIM_STALE_MS = 5 * 60_000;
 const PROVIDER_CREDENTIAL_PURPOSE = "companion-provider-credential";
+const MCP_CREDENTIAL_PURPOSE = "companion-mcp-credential";
+
+/** Drizzle query errors nest postgres.js SQLSTATE on `cause`; check both layers. */
+function isPostgresUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  if ("code" in error && (error as { code?: unknown }).code === "23505") return true;
+  if (
+    "cause" in error
+    && error.cause
+    && typeof error.cause === "object"
+    && "code" in error.cause
+    && (error.cause as { code?: unknown }).code === "23505"
+  ) {
+    return true;
+  }
+  return false;
+}
 
 export class CompanionNotFoundError extends Error {
   constructor() {
@@ -74,6 +99,13 @@ export class CompanionProviderForbiddenError extends Error {
   constructor() {
     super("provider management requires workspace Owner or Admin access");
     this.name = "CompanionProviderForbiddenError";
+  }
+}
+
+export class CompanionPluginConflictError extends Error {
+  constructor() {
+    super("this MCP provider already has an account with that label");
+    this.name = "CompanionPluginConflictError";
   }
 }
 
@@ -748,6 +780,218 @@ function providerCiphertext(
     wrapAuthTag: row.wrapAuthTag,
     keyId: row.keyId,
   };
+}
+
+function mcpCiphertext(row: typeof schema.companionMcpAccounts.$inferSelect): OpaqueCiphertext {
+  return {
+    ciphertext: row.ciphertext,
+    iv: row.iv,
+    authTag: row.authTag,
+    wrappedDek: row.wrappedDek,
+    wrapIv: row.wrapIv,
+    wrapAuthTag: row.wrapAuthTag,
+    keyId: row.keyId,
+  };
+}
+
+function toPluginAccount(
+  row: typeof schema.companionMcpAccounts.$inferSelect,
+): CompanionPluginAccount {
+  const config = companionMcpAccountSchema.parse(row.accountConfig);
+  return {
+    id: row.id,
+    provider: row.provider,
+    label: row.label,
+    transport: config.transport,
+    endpoint: config.transport === "http"
+      ? config.url
+      : [config.command, ...config.args].join(" "),
+    connected: true,
+    created_at: row.createdAt.toISOString(),
+    updated_at: row.updatedAt.toISOString(),
+  };
+}
+
+/** List only the current member's connector accounts; workspace admins have no override. */
+export async function listCompanionPlugins(input: {
+  actor: ActorContext;
+  orgId: string;
+  database?: Db;
+}): Promise<CompanionPluginAccount[]> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const rows = await database
+    .select()
+    .from(schema.companionMcpAccounts)
+    .where(and(
+      eq(schema.companionMcpAccounts.orgId, input.orgId),
+      eq(schema.companionMcpAccounts.ownerId, input.actor.id),
+    ))
+    .orderBy(asc(schema.companionMcpAccounts.provider), asc(schema.companionMcpAccounts.label));
+  return rows.map(toPluginAccount);
+}
+
+/**
+ * Save one connector outside chat. Credential plaintext is accepted only on this write and stored
+ * envelope-encrypted; reads expose transport metadata and the account label only.
+ */
+export async function saveCompanionPlugin(input: {
+  actor: ActorContext;
+  orgId: string;
+  plugin: SaveCompanionPluginInput;
+  masterKey?: Buffer;
+  database?: Db;
+}): Promise<CompanionPluginAccount> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const id = randomUUID();
+  const generation = randomUUID();
+  const envKey = `COMPANION_MCP_${id.replaceAll("-", "").toLocaleUpperCase("en-US")}`;
+  const credentials: CompanionMcpCredential[] = input.plugin.credential_value
+    ? [{ env_key: envKey, value: input.plugin.credential_value }]
+    : [];
+  const common = {
+    id,
+    label: input.plugin.label,
+    lifecycle: "lazy" as const,
+    direct_tools: false as const,
+  };
+  const account: CompanionMcpAccount = input.plugin.transport === "http"
+    ? {
+        ...common,
+        transport: "http",
+        url: input.plugin.url!,
+        headers: input.plugin.credential_name
+          ? { [input.plugin.credential_name]: envKey }
+          : {},
+      }
+    : {
+        ...common,
+        transport: "stdio",
+        command: input.plugin.command!,
+        args: input.plugin.args,
+        env: input.plugin.credential_name
+          ? { [input.plugin.credential_name]: envKey }
+          : {},
+      };
+  companionMcpAccountSchema.parse(account);
+  const encrypted = encryptOpaqueValue({
+    orgId: input.orgId,
+    purpose: MCP_CREDENTIAL_PURPOSE,
+    subjectId: `${id}:${generation}`,
+    value: JSON.stringify(credentials),
+  }, input.masterKey);
+  try {
+    const [row] = await database
+      .insert(schema.companionMcpAccounts)
+      .values({
+        id,
+        orgId: input.orgId,
+        ownerId: input.actor.id,
+        provider: input.plugin.provider,
+        label: input.plugin.label,
+        transport: input.plugin.transport,
+        accountConfig: account,
+        credentialGeneration: generation,
+        ...encrypted,
+      })
+      .returning();
+    if (!row) throw new Error("failed to save MCP account");
+    await database.insert(schema.auditLog).values({
+      orgId: input.orgId,
+      actorId: input.actor.id,
+      privateToUserId: input.actor.id,
+      action: "companion.plugin.connected",
+      targetType: "companion_mcp_account",
+      targetId: id,
+      metadata: {
+        provider: input.plugin.provider,
+        label: input.plugin.label,
+        transport: input.plugin.transport,
+      },
+    });
+    return toPluginAccount(row);
+  } catch (error) {
+    // Drizzle wraps postgres.js errors, so SQLSTATE lives on `cause` for unique conflicts.
+    if (isPostgresUniqueViolation(error)) {
+      throw new CompanionPluginConflictError();
+    }
+    throw error;
+  }
+}
+
+export async function deleteCompanionPlugin(input: {
+  actor: ActorContext;
+  orgId: string;
+  accountId: string;
+  database?: Db;
+}): Promise<void> {
+  const database = input.database ?? db;
+  await assertMember(database, input.actor, input.orgId);
+  const [deleted] = await database
+    .delete(schema.companionMcpAccounts)
+    .where(and(
+      eq(schema.companionMcpAccounts.id, input.accountId),
+      eq(schema.companionMcpAccounts.orgId, input.orgId),
+      eq(schema.companionMcpAccounts.ownerId, input.actor.id),
+    ))
+    .returning({ id: schema.companionMcpAccounts.id });
+  if (!deleted) throw new CompanionNotFoundError();
+  await database.insert(schema.auditLog).values({
+    orgId: input.orgId,
+    actorId: input.actor.id,
+    privateToUserId: input.actor.id,
+    action: "companion.plugin.disconnected",
+    targetType: "companion_mcp_account",
+    targetId: input.accountId,
+    metadata: {},
+  });
+}
+
+/**
+ * Resolve the current member's saved accounts only after Owner/Editor runtime authorization. The
+ * caller passes the resulting values straight to THE-325's transient environment channel.
+ */
+export async function resolveCompanionPluginInjection(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  masterKey?: Buffer;
+  database?: Db;
+}): Promise<{ accounts: CompanionMcpAccount[]; credentials: CompanionMcpCredential[] }> {
+  const database = input.database ?? db;
+  await getCompanionForRuntime({ ...input, database });
+  const rows = await database
+    .select()
+    .from(schema.companionMcpAccounts)
+    .where(and(
+      eq(schema.companionMcpAccounts.orgId, input.orgId),
+      eq(schema.companionMcpAccounts.ownerId, input.actor.id),
+    ))
+    .orderBy(asc(schema.companionMcpAccounts.provider), asc(schema.companionMcpAccounts.label));
+  const accounts: CompanionMcpAccount[] = [];
+  const credentials: CompanionMcpCredential[] = [];
+  for (const row of rows) {
+    try {
+      accounts.push(companionMcpAccountSchema.parse(row.accountConfig));
+      const plaintext = decryptOpaqueValue({
+        orgId: input.orgId,
+        purpose: MCP_CREDENTIAL_PURPOSE,
+        subjectId: `${row.id}:${row.credentialGeneration}`,
+        ...mcpCiphertext(row),
+      }, input.masterKey);
+      const parsed = JSON.parse(plaintext);
+      if (!Array.isArray(parsed)) throw new Error("invalid MCP credential payload");
+      credentials.push(...parsed.map((value) => companionMcpCredentialSchema.parse(value)));
+    } catch {
+      throw new CompanionProviderError(
+        "provider_auth_invalid",
+        `Authentication for ${row.provider} (${row.label}) is invalid. Reconnect it in Plugins.`,
+        null,
+      );
+    }
+  }
+  return { accounts, credentials };
 }
 
 async function assertProviderAdmin(database: Db, actor: ActorContext, orgId: string): Promise<void> {

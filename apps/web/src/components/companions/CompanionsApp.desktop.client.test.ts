@@ -121,6 +121,7 @@ async function open(initial: Companion) {
       navigation,
       initialCompanions: [initial],
       initialProviders: providers,
+      initialPlugins: [],
       initialCompanionId: companionId,
     }));
   });

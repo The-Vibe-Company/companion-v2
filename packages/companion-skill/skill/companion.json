@@ -1,7 +1,7 @@
 {
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.44.0",
+  "version": "1.45.0",
   "icon": "boxes",
   "title": "Companion",
   "description": "Manage and safely install SKILL.md packages through delegated Agent Auth, including pinned public releases, publishing, updates, dependencies, secrets, hosted Skill Databases, local install tracking, and Companion self-update.",
@@ -29,11 +29,20 @@
     ],
     "changelog": [
       {
-        "version": "1.44.0",
+        "version": "1.45.0",
         "date": "2026-08-13",
         "changes": [
           "Refreshes the bundled Agent Auth client after the Companions contract added the Box desktop handoff schema.",
           "Keeps Box status, the Box desktop, and Lux computer use outside delegated Skills Hub Agent Auth.",
+          "No change to Companion skill commands, permissions, or installation behavior."
+        ]
+      },
+      {
+        "version": "1.44.0",
+        "date": "2026-08-13",
+        "changes": [
+          "Refreshes the bundled Agent Auth client after the gated Companions contract added member-private labeled MCP account metadata.",
+          "Keeps Plugins, connector authentication, MCP injection, and Companion chat outside delegated Skills Hub Agent Auth.",
           "No change to Companion skill commands, permissions, or installation behavior."
         ]
       },

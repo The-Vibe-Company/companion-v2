@@ -2,6 +2,7 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 import {
   CompanionNotFoundError,
+  CompanionPluginConflictError,
   CompanionProviderError,
   CompanionProviderForbiddenError,
   CompanionRuntimeForbiddenError,
@@ -13,6 +14,7 @@ import {
   companionsAvailableToUser,
   companionsEnabled,
   createCompanion,
+  deleteCompanionPlugin,
   deleteCompanionProvider,
   getCompanion,
   getCompanionForRuntime,
@@ -22,12 +24,15 @@ import {
   listCompanionRuntimeSkillPackages,
   listCompanions,
   listCompanionProviders,
+  listCompanionPlugins,
   listPendingCompanionMessages,
   projectCompanionPiEvents,
   recordCompanionPiProjection,
   resolveCompanionProviderAuth,
+  resolveCompanionPluginInjection,
   revokeCompanionMember,
   saveCompanionProvider,
+  saveCompanionPlugin,
   sendCompanionMessage,
   setCompanionProvider,
   setCompanionWorkspaceShare,
@@ -47,6 +52,7 @@ import {
   setCompanionWorkspaceShareInputSchema,
   setDefaultCompanionProviderInputSchema,
   startCompanionRuntimeInputSchema,
+  saveCompanionPluginInputSchema,
   updateCompanionMemberRoleInputSchema,
 } from "@companion/contracts";
 import type {
@@ -95,6 +101,7 @@ function errorStatus(error: unknown): number {
   if (error instanceof CompanionShareTargetError) return 422;
   if (error instanceof CompanionProviderError) return 422;
   if (error instanceof CompanionRuntimeTransitionError) return 409;
+  if (error instanceof CompanionPluginConflictError) return 409;
   if (error instanceof BoxRuntimeConfigurationError) return 503;
   if (error instanceof BoxRuntimeProviderError) {
     if (error.status === 409) return 409;
@@ -250,6 +257,38 @@ export function registerCompanionRoutes(
       const providers = await tenant(c, ({ actor, orgId, database }) =>
         listCompanionProviders({ actor, orgId, database }));
       return c.json(providers);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.get("/v1/companion-plugins", async (c) => {
+    try {
+      const accounts = await tenant(c, ({ actor, orgId, database }) =>
+        listCompanionPlugins({ actor, orgId, database }));
+      return c.json({ accounts });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companion-plugins", async (c) => {
+    try {
+      const body = saveCompanionPluginInputSchema.parse(await c.req.json());
+      const account = await tenant(c, ({ actor, orgId, database }) =>
+        saveCompanionPlugin({ actor, orgId, plugin: body, database }));
+      return c.json({ account }, 201);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.delete("/v1/companion-plugins/:id", async (c) => {
+    try {
+      const accountId = companionIdSchema.parse(c.req.param("id"));
+      await tenant(c, ({ actor, orgId, database }) =>
+        deleteCompanionPlugin({ actor, orgId, accountId, database }));
+      return c.json({ ok: true });
     } catch (error) {
       return routeError(c, error);
     }
@@ -550,6 +589,7 @@ export function registerCompanionRoutes(
           orgId: string;
           companion: Awaited<ReturnType<typeof getCompanionForRuntime>>;
           provider: Awaited<ReturnType<typeof resolveCompanionProviderAuth>>;
+          plugins: Awaited<ReturnType<typeof resolveCompanionPluginInjection>>;
           skillPackages: Awaited<ReturnType<typeof listCompanionRuntimeSkillPackages>>;
         }
       | undefined;
@@ -560,13 +600,18 @@ export function registerCompanionRoutes(
         const provider = await resolveCompanionProviderAuth({
           actor, orgId, companionId, database,
         });
+        const plugins = body.client_surface === "native_mobile"
+          ? { accounts: [], credentials: [] }
+          : await resolveCompanionPluginInjection({
+              actor, orgId, companionId, database,
+            });
         const companion = await claimCompanionRuntimeStart({
           actor, orgId, companionId, database,
         });
         const skillPackages = body.client_surface === "native_mobile"
           ? []
           : await listCompanionRuntimeSkillPackages({ actor, orgId, database });
-        return { actor, orgId, companion, provider, skillPackages };
+        return { actor, orgId, companion, provider, plugins, skillPackages };
       });
       const skills = await Promise.all(mutation.skillPackages.map(async (skill) => {
         const archive = await getSkillArchive({ key: skill.storagePath });
@@ -599,8 +644,12 @@ export function registerCompanionRoutes(
           || mutation.companion.runtime.disk_layout_version !== COMPANION_PI_DISK_LAYOUT_VERSION
           || mutation.companion.runtime.provider_credential_generation
             !== mutation.provider.credentialGeneration,
-        mcpCredentials: body.mcp_credentials,
-        mcpAccounts: body.mcp_accounts,
+        mcpCredentials: body.client_surface === "native_mobile"
+          ? []
+          : [...mutation.plugins.credentials, ...body.mcp_credentials],
+        mcpAccounts: body.client_surface === "native_mobile"
+          ? []
+          : [...mutation.plugins.accounts, ...body.mcp_accounts],
         skills,
         onBoxAssigned: async (boxId) => {
           await withTenantContext(
