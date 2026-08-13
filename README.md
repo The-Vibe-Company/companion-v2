@@ -72,7 +72,8 @@ COMPANION_BOX_API_KEY=box_...
 # Optional overrides:
 COMPANION_BOX_API_BASE=https://ascii.dev/api/box/v1
 COMPANION_BOX_ENVIRONMENT=base
-COMPANION_BOX_TTL_SECONDS=3600
+# Refreshed after each message Pi accepts; the default idle window is six hours.
+COMPANION_BOX_TTL_SECONDS=21600
 COMPANION_PI_INSTALL_COMMAND='npm install --global @earendil-works/pi-coding-agent@<pin>'
 COMPANION_PI_MCP_ADAPTER_PACKAGE=npm:pi-mcp-adapter@2.12.1
 ```

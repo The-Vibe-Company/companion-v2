@@ -59,6 +59,7 @@ import type {
   CompanionDesktop,
   CompanionThread,
   CompanionTranscriptEntry,
+  StartCompanionRuntimeInput,
 } from "@companion/contracts";
 import { withTenantContext, type Db } from "@companion/db";
 import { skillChecksum, toTar } from "@companion/skills";
@@ -111,12 +112,11 @@ function errorStatus(error: unknown): number {
   return 400;
 }
 
-/**
- * Pi only receives messages while the control plane already records a running Box. Chat therefore
- * never creates or resumes one: waking stays an explicit Owner/Editor lifecycle action.
- */
+/** Thread sync observes the control-plane projection and never wakes an unreachable Pi. */
 function piIsReachable(companion: Companion): boolean {
-  return Boolean(companion.runtime.box_id) && companion.runtime.state === "running";
+  return Boolean(companion.runtime.box_id)
+    && companion.runtime.state === "running"
+    && companion.runtime.daemon_state === "running";
 }
 
 function recordProjection(input: {
@@ -145,13 +145,12 @@ async function deliverCompanionMessages(input: {
   companionId: string;
   boxId: string;
   messages: CompanionTranscriptEntry[];
-  runtimeFactory: RuntimeFactory;
+  runtime: CompanionBoxRuntime;
 }): Promise<{ thread: CompanionThread; deliveredOrdinal: number } | null> {
-  const runtime = input.runtimeFactory();
   let deliveredOrdinal: number | undefined;
   try {
     for (const message of input.messages) {
-      await runtime.prompt({
+      await input.runtime.prompt({
         boxId: input.boxId,
         message: message.content,
         requestId: message.event_id,
@@ -169,6 +168,9 @@ async function deliverCompanionMessages(input: {
     entries: [],
     deliveredOrdinal,
   });
+  // Move the Box idle clock only after Pi accepted at least one durable message. A failed prompt
+  // remains pending and therefore cannot lengthen the machine's lifetime.
+  await input.runtime.refreshTtl({ boxId: input.boxId }).catch(() => undefined);
   return { thread, deliveredOrdinal };
 }
 
@@ -221,6 +223,154 @@ export function registerCompanionRoutes(
     const orgId = await orgIdFromContext(c);
     return withTenantContext({ orgId, userId: actor.id }, (database) =>
       fn({ actor, orgId, database }));
+  }
+
+  /**
+   * Claim and start one Companion through the same lifecycle path for an explicit Wake or a
+   * persisted message. The Box adapter owns the warm decision, so an already-active layout-6 Pi
+   * returns before resource injection or any systemd start.
+   */
+  async function startRuntime(
+    c: Context<{ Variables: ApiVariables }>,
+    companionId: string,
+    body: StartCompanionRuntimeInput,
+  ): Promise<{ companion: Companion; runtime: CompanionBoxRuntime }> {
+    let failureContext:
+      | {
+          actor: ReturnType<typeof actorFromContext>;
+          orgId: string;
+        }
+      | undefined;
+    let mutation:
+      | {
+          actor: ReturnType<typeof actorFromContext>;
+          orgId: string;
+          companion: Awaited<ReturnType<typeof getCompanionForRuntime>>;
+          provider: Awaited<ReturnType<typeof resolveCompanionProviderAuth>>;
+          plugins: Awaited<ReturnType<typeof resolveCompanionPluginInjection>>;
+          skillPackages: Awaited<ReturnType<typeof listCompanionRuntimeSkillPackages>>;
+        }
+      | undefined;
+    try {
+      mutation = await tenant(c, async ({ actor, orgId, database }) => {
+        failureContext = { actor, orgId };
+        const provider = await resolveCompanionProviderAuth({
+          actor, orgId, companionId, database,
+        });
+        const plugins = body.client_surface === "native_mobile"
+          ? { accounts: [], credentials: [] }
+          : await resolveCompanionPluginInjection({
+              actor, orgId, companionId, database,
+            });
+        const companion = await claimCompanionRuntimeStart({
+          actor, orgId, companionId, database,
+        });
+        const skillPackages = body.client_surface === "native_mobile"
+          ? []
+          : await listCompanionRuntimeSkillPackages({ actor, orgId, database });
+        return { actor, orgId, companion, provider, plugins, skillPackages };
+      });
+      const skills = await Promise.all(mutation.skillPackages.map(async (skill) => {
+        const archive = await getSkillArchive({ key: skill.storagePath });
+        if (skillChecksum(toTar(archive)) !== skill.checksum) {
+          throw new BoxRuntimeProviderError(
+            `stored skill package no longer matches ${skill.slug}@${skill.version}`,
+            502,
+          );
+        }
+        return {
+          slug: skill.slug,
+          version: skill.version,
+          checksum: skill.checksum,
+          archive,
+        };
+      }));
+      const runtime = runtimeFactory();
+      const observed = await runtime.start({
+        companionId,
+        orgId: mutation.orgId,
+        boxId: mutation.companion.runtime.box_id,
+        clientSurface: body.client_surface,
+        providerAuth: {
+          [mutation.provider.providerId]: mutation.provider.authEntry,
+        },
+        // Skipping the write preserves a subscription token Pi refreshed on disk, so it is safe
+        // only for a Box this Companion already provisioned at the current layout, where the
+        // recorded generation proves the expected file is already in Pi's agent directory.
+        replaceProviderAuth:
+          !mutation.companion.runtime.box_id
+          || mutation.companion.runtime.disk_layout_version !== COMPANION_PI_DISK_LAYOUT_VERSION
+          || mutation.companion.runtime.provider_credential_generation
+            !== mutation.provider.credentialGeneration,
+        mcpCredentials: body.client_surface === "native_mobile"
+          ? []
+          : [...mutation.plugins.credentials, ...body.mcp_credentials],
+        mcpAccounts: body.client_surface === "native_mobile"
+          ? []
+          : [...mutation.plugins.accounts, ...body.mcp_accounts],
+        skills,
+        // `null` clears the recorded Box: the adapter found that the id this row carried names a
+        // machine this Companion does not own, so no other path may reach it either.
+        onBoxAssigned: async (boxId) => {
+          await withTenantContext(
+            { orgId: mutation!.orgId, userId: mutation!.actor.id },
+            (database) => updateCompanionRuntime({
+              actor: mutation!.actor,
+              orgId: mutation!.orgId,
+              companionId,
+              patch: { boxId, runtimeState: "provisioning", daemonState: "starting" },
+              database,
+            }),
+          );
+        },
+      });
+      const companion = await withTenantContext(
+        { orgId: mutation.orgId, userId: mutation.actor.id },
+        (database) => updateCompanionRuntime({
+          actor: mutation!.actor,
+          orgId: mutation!.orgId,
+          companionId,
+          patch: {
+            boxId: observed.boxId,
+            runtimeState: observed.runtimeState,
+            daemonState: observed.daemonState,
+            providerIds: [mutation!.provider.providerId],
+            providerCredentialGeneration: mutation!.provider.credentialGeneration,
+            diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
+            desktopAvailable: observed.desktopAvailable,
+            observedAt: new Date(),
+            startedAt: new Date(),
+          },
+          database,
+        }),
+      );
+      return { companion, runtime };
+    } catch (error) {
+      // A pre-claim transition conflict means another request owns the wake. Preserve its
+      // provisioning lock; all other authorized failures remain visible through last_error.
+      const context = mutation
+        ?? (error instanceof CompanionRuntimeTransitionError ? undefined : failureContext);
+      if (context) {
+        await withTenantContext(
+          { orgId: context.orgId, userId: context.actor.id },
+          (database) => updateCompanionRuntime({
+            actor: context.actor,
+            orgId: context.orgId,
+            companionId,
+            patch: {
+              runtimeState: "error",
+              daemonState: "error",
+              // Keep the reason beside the durable message so a failed automatic wake remains
+              // diagnosable and retrying that same message can claim the lifecycle again.
+              lastError: companionRuntimeErrorMessage(error),
+              observedAt: new Date(),
+            },
+            database,
+          }),
+        ).catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   /**
@@ -472,16 +622,61 @@ export function registerCompanionRoutes(
           ...result,
         };
       });
-      if (!piIsReachable(sent.companion)) {
-        return c.json({ thread: sent.thread, delivery: "pending" as const });
+      // A replay of an already-delivered send has nothing to wake or hand to Pi.
+      if (sent.pending.length === 0) {
+        const delivered =
+          sent.deliveredOrdinal !== null && sent.deliveredOrdinal >= sent.entry.ordinal;
+        // A prior attempt may have delivered and persisted the watermark but failed its TTL PATCH.
+        // Retrying the same idempotent send repairs that clock without prompting Pi a second time.
+        if (delivered && sent.companion.runtime.box_id) {
+          await runtimeFactory().refreshTtl({ boxId: sent.companion.runtime.box_id })
+            .catch(() => undefined);
+        }
+        return c.json({
+          thread: sent.thread,
+          delivery: delivered ? ("delivered" as const) : ("pending" as const),
+        });
+      }
+      let runtime: CompanionBoxRuntime | undefined;
+      let boxId: string | undefined;
+      if (piIsReachable(sent.companion)) {
+        // Provider TTL can archive a Box while the control-plane projection still says running.
+        // Observe without resuming; a genuinely warm daemon stays on the prompt-only path, while a
+        // stale projection falls through to the same start path as an explicitly asleep Companion.
+        const candidate = runtimeFactory();
+        const observed = await candidate.status({
+          boxId: sent.companion.runtime.box_id!,
+        }).catch(() => null);
+        if (observed?.runtimeState === "running" && observed.daemonState === "running") {
+          runtime = candidate;
+          boxId = sent.companion.runtime.box_id!;
+        }
+      }
+      if (!runtime || !boxId) {
+        try {
+          const started = await startRuntime(
+            c,
+            companionId,
+            startCompanionRuntimeInputSchema.parse({ client_surface: body.client_surface }),
+          );
+          if (!started.companion.runtime.box_id) {
+            throw new CompanionRuntimeTransitionError("companion start completed without a Box");
+          }
+          runtime = started.runtime;
+          boxId = started.companion.runtime.box_id;
+        } catch {
+          // Persistence happened first and startRuntime recorded last_error. Returning the durable
+          // pending turn keeps the composer from creating a second id for the same user action.
+          return c.json({ thread: sent.thread, delivery: "pending" as const });
+        }
       }
       const delivered = await deliverCompanionMessages({
         actor: sent.actor,
         orgId: sent.orgId,
         companionId,
-        boxId: sent.companion.runtime.box_id!,
+        boxId,
         messages: sent.pending,
-        runtimeFactory,
+        runtime,
       });
       const deliveredOrdinal = delivered?.deliveredOrdinal ?? sent.deliveredOrdinal;
       return c.json({
@@ -491,7 +686,7 @@ export function registerCompanionRoutes(
           : ("pending" as const),
       });
     } catch (error) {
-      return routeError(c, error);
+      return runtimeRouteError(c, error);
     }
   });
 
@@ -524,13 +719,16 @@ export function registerCompanionRoutes(
         // Record what Pi accepted before reading its log. Whatever happens next — a failed read, a
         // failed projection, a refused prompt — a retry must not prompt the same message twice.
         if (deliveredOrdinal !== undefined) {
-          await recordProjection({
+          const recorded = await recordProjection({
             actor: resolved.actor,
             orgId: resolved.orgId,
             companionId,
             entries: [],
             deliveredOrdinal,
-          }).catch(() => undefined);
+          }).then(() => true, () => false);
+          if (recorded) {
+            await runtime.refreshTtl({ boxId }).catch(() => undefined);
+          }
         }
       }
       const events = await runtime.readEvents({ boxId, offset: resolved.piLogOffset });
@@ -588,130 +786,12 @@ export function registerCompanionRoutes(
 
   app.post("/v1/companions/:id/runtime/start", async (c) => {
     const companionId = c.req.param("id");
-    let mutation:
-      | {
-          actor: ReturnType<typeof actorFromContext>;
-          orgId: string;
-          companion: Awaited<ReturnType<typeof getCompanionForRuntime>>;
-          provider: Awaited<ReturnType<typeof resolveCompanionProviderAuth>>;
-          plugins: Awaited<ReturnType<typeof resolveCompanionPluginInjection>>;
-          skillPackages: Awaited<ReturnType<typeof listCompanionRuntimeSkillPackages>>;
-        }
-      | undefined;
     try {
       companionIdSchema.parse(companionId);
       const body = startCompanionRuntimeInputSchema.parse(await c.req.json().catch(() => ({})));
-      mutation = await tenant(c, async ({ actor, orgId, database }) => {
-        const provider = await resolveCompanionProviderAuth({
-          actor, orgId, companionId, database,
-        });
-        const plugins = body.client_surface === "native_mobile"
-          ? { accounts: [], credentials: [] }
-          : await resolveCompanionPluginInjection({
-              actor, orgId, companionId, database,
-            });
-        const companion = await claimCompanionRuntimeStart({
-          actor, orgId, companionId, database,
-        });
-        const skillPackages = body.client_surface === "native_mobile"
-          ? []
-          : await listCompanionRuntimeSkillPackages({ actor, orgId, database });
-        return { actor, orgId, companion, provider, plugins, skillPackages };
-      });
-      const skills = await Promise.all(mutation.skillPackages.map(async (skill) => {
-        const archive = await getSkillArchive({ key: skill.storagePath });
-        if (skillChecksum(toTar(archive)) !== skill.checksum) {
-          throw new BoxRuntimeProviderError(
-            `stored skill package no longer matches ${skill.slug}@${skill.version}`,
-            502,
-          );
-        }
-        return {
-          slug: skill.slug,
-          version: skill.version,
-          checksum: skill.checksum,
-          archive,
-        };
-      }));
-      const observed = await runtimeFactory().start({
-        companionId,
-        orgId: mutation.orgId,
-        boxId: mutation.companion.runtime.box_id,
-        clientSurface: body.client_surface,
-        providerAuth: {
-          [mutation.provider.providerId]: mutation.provider.authEntry,
-        },
-        // Skipping the write preserves a subscription token Pi refreshed on disk, so it is safe
-        // only for a Box this Companion already provisioned at the current layout, where the
-        // recorded generation proves the expected file is already in Pi's agent directory.
-        replaceProviderAuth:
-          !mutation.companion.runtime.box_id
-          || mutation.companion.runtime.disk_layout_version !== COMPANION_PI_DISK_LAYOUT_VERSION
-          || mutation.companion.runtime.provider_credential_generation
-            !== mutation.provider.credentialGeneration,
-        mcpCredentials: body.client_surface === "native_mobile"
-          ? []
-          : [...mutation.plugins.credentials, ...body.mcp_credentials],
-        mcpAccounts: body.client_surface === "native_mobile"
-          ? []
-          : [...mutation.plugins.accounts, ...body.mcp_accounts],
-        skills,
-        // `null` clears the recorded Box: the adapter found that the id this row carried names a
-        // machine this Companion does not own, so no other path may reach it either.
-        onBoxAssigned: async (boxId) => {
-          await withTenantContext(
-            { orgId: mutation!.orgId, userId: mutation!.actor.id },
-            (database) => updateCompanionRuntime({
-              actor: mutation!.actor,
-              orgId: mutation!.orgId,
-              companionId,
-              patch: { boxId, runtimeState: "provisioning", daemonState: "starting" },
-              database,
-            }),
-          );
-        },
-      });
-      const companion = await withTenantContext(
-        { orgId: mutation.orgId, userId: mutation.actor.id },
-        (database) => updateCompanionRuntime({
-          actor: mutation!.actor,
-          orgId: mutation!.orgId,
-          companionId,
-          patch: {
-            boxId: observed.boxId,
-            runtimeState: observed.runtimeState,
-            daemonState: observed.daemonState,
-            providerIds: [mutation!.provider.providerId],
-            providerCredentialGeneration: mutation!.provider.credentialGeneration,
-            diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
-            desktopAvailable: observed.desktopAvailable,
-            observedAt: new Date(),
-            startedAt: new Date(),
-          },
-          database,
-        }),
-      );
-      return c.json({ companion });
+      const started = await startRuntime(c, companionId, body);
+      return c.json({ companion: started.companion });
     } catch (error) {
-      if (mutation) {
-        await withTenantContext(
-          { orgId: mutation.orgId, userId: mutation.actor.id },
-          (database) => updateCompanionRuntime({
-            actor: mutation!.actor,
-            orgId: mutation!.orgId,
-            companionId,
-            patch: {
-              runtimeState: "error",
-              daemonState: "error",
-              // The row carries the reason so a reload still explains the red status instead of
-              // leaving the operator with the word "Error" and nothing else.
-              lastError: companionRuntimeErrorMessage(error),
-              observedAt: new Date(),
-            },
-            database,
-          }),
-        ).catch(() => undefined);
-      }
       return runtimeRouteError(c, error);
     }
   });

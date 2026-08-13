@@ -51,7 +51,7 @@ export function companionsAvailableToUser(
 // tuning variable. Keep these in sync if the runtime defaults change.
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
 const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
-const DEFAULT_BOX_TTL_SECONDS = 3600;
+const DEFAULT_BOX_TTL_SECONDS = 21_600;
 const DEFAULT_BOX_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_BOX_READY_TIMEOUT_MS = 120_000;
 

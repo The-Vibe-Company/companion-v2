@@ -179,6 +179,8 @@ export interface CompanionBoxRuntime {
   desktop(input: { boxId: string }): Promise<{ url: string | null; provisioning: boolean }>;
   /** Hand one chat message to the already running Pi daemon; never creates or resumes a Box. */
   prompt(input: { boxId: string; message: string; requestId: string }): Promise<void>;
+  /** Reset the provider's idle clock after Pi accepts a durable message. */
+  refreshTtl(input: { boxId: string }): Promise<void>;
   /** Read Pi RPC output from `offset` so the control plane can project new events. */
   readEvents(input: { boxId: string; offset: number }): Promise<CompanionPiEventChunk>;
 }
@@ -554,7 +556,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     this.#apiKey = apiKey;
     this.#baseUrl = (env.COMPANION_BOX_API_BASE?.trim() || DEFAULT_BOX_API_BASE).replace(/\/+$/, "");
     this.#environment = env.COMPANION_BOX_ENVIRONMENT?.trim() || undefined;
-    this.#ttlSeconds = positiveInteger(env.COMPANION_BOX_TTL_SECONDS, 3600);
+    this.#ttlSeconds = positiveInteger(env.COMPANION_BOX_TTL_SECONDS, 21_600);
     this.#pollIntervalMs = positiveInteger(env.COMPANION_BOX_POLL_INTERVAL_MS, 1000);
     this.#readyTimeoutMs = positiveInteger(env.COMPANION_BOX_READY_TIMEOUT_MS, 120_000);
     this.#daemonActiveTimeoutMs = positiveInteger(
@@ -1182,6 +1184,13 @@ printf '%s\\n' ${shellQuote(command)} > "$fifo"`,
     if (!result.success) {
       throw new BoxRuntimeProviderError("Pi did not accept the message; wake the Companion and retry", 409);
     }
+  }
+
+  async refreshTtl(input: { boxId: string }): Promise<void> {
+    await this.#request(`/boxes/${encodeURIComponent(input.boxId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ ttlSeconds: this.#ttlSeconds }),
+    });
   }
 
   /**

@@ -98,7 +98,7 @@ describe("companionsRuntimeConfig", () => {
     expect(config.enabled).toBe(false);
     expect(config.missingRequired).toEqual([]);
     expect(config.boxApiBase).toBe("https://ascii.dev/api/box/v1");
-    expect(config.boxTtlSeconds).toBe(3600);
+    expect(config.boxTtlSeconds).toBe(21_600);
     expect(config.boxPollIntervalMs).toBe(1_000);
     expect(config.boxReadyTimeoutMs).toBe(120_000);
     expect(config.piMcpAdapterPackage).toBe("npm:pi-mcp-adapter@2.12.1");
@@ -155,8 +155,8 @@ describe("companionsRuntimeConfig", () => {
   });
 
   it("falls back to the default TTL when the override is not a positive integer", () => {
-    expect(companionsRuntimeConfig({ COMPANION_BOX_TTL_SECONDS: "nope" }).boxTtlSeconds).toBe(3600);
-    expect(companionsRuntimeConfig({ COMPANION_BOX_TTL_SECONDS: "-5" }).boxTtlSeconds).toBe(3600);
+    expect(companionsRuntimeConfig({ COMPANION_BOX_TTL_SECONDS: "nope" }).boxTtlSeconds).toBe(21_600);
+    expect(companionsRuntimeConfig({ COMPANION_BOX_TTL_SECONDS: "-5" }).boxTtlSeconds).toBe(21_600);
   });
 });
 

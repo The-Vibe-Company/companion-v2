@@ -1706,7 +1706,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         return json({ box });
       }
       if (url.endsWith("/resume") && init?.method === "POST") {
-        expect(body).toEqual({ noEnv: true, ttlSeconds: 3600 });
+        expect(body).toEqual({ noEnv: true, ttlSeconds: 21_600 });
         return json({ box: { ...box, state: "provisioning" } }, 202);
       }
       if (url.endsWith("/files") && init?.method === "PUT") {
@@ -2574,6 +2574,23 @@ describe("AsciiBoxCompanionRuntime", () => {
       '{"id":"msg:1","type":"prompt","message":"Summarize the incident","streamingBehavior":"followUp"}',
     );
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("refreshes the Box idle clock to six hours after a successful message", async () => {
+    let patchBody: Record<string, unknown> | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (url.endsWith("/boxes/bx_23456789") && init?.method === "PATCH") {
+        patchBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return json({ box });
+      }
+      throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await runtime.refreshTtl({ boxId: "bx_23456789" });
+
+    expect(patchBody).toEqual({ ttlSeconds: 21_600 });
   });
 
   it("refuses a prompt as a conflict when the Pi daemon is not running", async () => {
