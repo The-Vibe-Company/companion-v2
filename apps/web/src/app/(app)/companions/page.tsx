@@ -1,6 +1,7 @@
 import { companionsEnabled } from "@companion/core";
 import type {
   Companion,
+  CompanionPluginsResponse,
   CompanionProvidersResponse,
   LabelsResponse,
   LocalSkillRow,
@@ -24,8 +25,10 @@ export default async function CompanionsPage({
 }) {
   if (!companionsEnabled()) notFound();
 
-  const openedCompanion = (await searchParams).companion;
+  const resolvedSearchParams = await searchParams;
+  const openedCompanion = resolvedSearchParams.companion;
   const initialCompanionId = typeof openedCompanion === "string" ? openedCompanion : null;
+  const initialPluginsOpen = resolvedSearchParams.view === "plugins";
 
   const authState = await loadServerAuth<{ needsOnboarding?: boolean }>();
   if (authState.status === "unauthenticated") redirect("/login");
@@ -49,6 +52,7 @@ export default async function CompanionsPage({
     archivedOrg,
     companionsResponse,
     providers,
+    plugins,
   ] =
     await Promise.all([
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=mine", { headers }).catch(() => null),
@@ -60,8 +64,11 @@ export default async function CompanionsPage({
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=org&archived=true", { headers }).catch(() => []),
       serverApiFetch<{ companions: Companion[] }>("/v1/companions", { headers }).catch(() => null),
       serverApiFetch<CompanionProvidersResponse>("/v1/companion-providers", { headers }).catch(() => null),
+      serverApiFetch<CompanionPluginsResponse>("/v1/companion-plugins", { headers }).catch(() => null),
     ]);
-  if (!mineRows || !orgRows || !companionsResponse || !providers) return <WorkspaceLoadError />;
+  if (!mineRows || !orgRows || !companionsResponse || !providers || !plugins) {
+    return <WorkspaceLoadError />;
+  }
 
   const mineSkills = mineRows.map(mapSkill);
   const orgSkills = orgRows.map(mapSkill);
@@ -72,7 +79,9 @@ export default async function CompanionsPage({
       currentOrg={current}
       initialCompanions={companionsResponse.companions}
       initialProviders={providers}
+      initialPlugins={plugins.accounts}
       initialCompanionId={initialCompanionId}
+      initialPluginsOpen={initialPluginsOpen}
       navigation={{
         mineTreeRows: deriveTreeRows(
           mineSkills.filter((skill) => skill.source === "authored"),

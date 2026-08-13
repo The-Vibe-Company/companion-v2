@@ -158,6 +158,157 @@
   width: min(660px, calc(100vw - 28px));
 }
 
+.companions-plugin-dialog {
+  width: min(600px, calc(100vw - 28px));
+}
+
+.companions-plugins__head {
+  align-items: flex-start;
+}
+
+.companions-plugins__title {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.companions-plugins__title > div {
+  min-width: 0;
+}
+
+.companions-plugins__title p {
+  margin: 5px 0 0;
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+
+.companions-plugin-list {
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.companions-plugin-row {
+  min-height: 76px;
+  padding: 14px 16px;
+  display: grid;
+  grid-template-columns: 34px minmax(120px, 0.6fr) 120px minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  border-bottom: 1px solid var(--color-line);
+}
+
+.companions-plugin-row:last-child {
+  border-bottom: 0;
+}
+
+.companions-plugin-row > strong {
+  color: var(--color-fg);
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.companions-plugin-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.companions-plugin-labels {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.companions-plugin-label {
+  min-height: 28px;
+  padding-left: 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.companions-plugin-label button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-faint);
+  cursor: pointer;
+}
+
+.companions-plugin-label button:hover {
+  background: var(--color-line);
+  color: var(--color-fg);
+}
+
+.companions-plugin-label button:focus-visible {
+  outline: 2px solid var(--color-accent-ring);
+  outline-offset: 1px;
+}
+
+.companions-plugin-label button:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.companions-plugin-form {
+  display: grid;
+  gap: 14px;
+}
+
+.companions-plugin-form__pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.companions-plugin-form label {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  color: var(--color-fg);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.companions-plugin-form :is(input, select) {
+  width: 100%;
+  min-height: 36px;
+  padding: 0 11px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-fg);
+  font: inherit;
+  font-weight: 400;
+}
+
+.companions-plugin-form :is(input, select):focus-visible {
+  outline: 2px solid var(--color-accent-ring);
+  outline-offset: 1px;
+  border-color: var(--color-accent-edge);
+}
+
 .companions-new-form {
   display: grid;
   gap: 14px;
@@ -846,6 +997,34 @@
     flex-direction: column;
   }
 
+  .companions-plugins__head {
+    gap: 14px;
+  }
+
+  .companions-plugins__head > .cds-btn {
+    margin-left: 42px;
+  }
+
+  .companions-plugin-row {
+    grid-template-columns: 34px minmax(0, 1fr) auto;
+    grid-template-areas:
+      "icon name status"
+      "labels labels labels";
+    gap: 9px 10px;
+  }
+
+  .companions-plugin-icon { grid-area: icon; }
+  .companions-plugin-row > strong { grid-area: name; }
+  .companions-plugin-row > .companions-state { grid-area: status; }
+  .companions-plugin-labels {
+    grid-area: labels;
+    padding-top: 3px;
+  }
+
+  .companions-plugin-form__pair {
+    grid-template-columns: 1fr;
+  }
+
   .companions-provider-add {
     grid-template-columns: 1fr;
   }
@@ -895,6 +1074,17 @@
   .companions-share-member-actions {
     align-items: flex-end;
     flex-direction: column;
+  }
+}
+
+@media (pointer: coarse) {
+  .companions-plugin-label button {
+    width: 44px;
+    height: 44px;
+  }
+
+  .companions-plugin-label {
+    min-height: 44px;
   }
 }
 

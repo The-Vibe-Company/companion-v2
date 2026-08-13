@@ -67,14 +67,29 @@ function companion(overrides: Partial<Companion> = {}): Companion {
   };
 }
 
-function render(companions: Companion[], initialCompanionId?: string | null) {
+function render(
+  companions: Companion[],
+  initialCompanionId?: string | null,
+  initialPluginsOpen = false,
+) {
   return renderToStaticMarkup(React.createElement(CompanionsApp, {
     orgs: [org],
     currentOrg: org,
     navigation,
     initialCompanions: companions,
     initialProviders: providers,
+    initialPlugins: [{
+      id: "44444444-4444-4444-8444-444444444444",
+      provider: "linear",
+      label: "work",
+      transport: "http",
+      endpoint: "https://mcp.linear.example",
+      connected: true,
+      created_at: "2026-08-12T12:00:00.000Z",
+      updated_at: "2026-08-12T12:00:00.000Z",
+    }],
     initialCompanionId,
+    initialPluginsOpen,
   }));
 }
 
@@ -130,5 +145,18 @@ describe("CompanionsApp", () => {
 
     expect(markup).toContain("Search companions");
     expect(markup).not.toContain("Chat with Luna");
+  });
+
+  it("renders Plugins as a separate web surface and keeps it out of chat", () => {
+    const plugins = render([companion()], null, true);
+    expect(plugins).toContain("MCP servers. Connect multiple accounts with labels.");
+    expect(plugins).toContain("Linear");
+    expect(plugins).toContain("work");
+    expect(plugins).not.toContain("Chat with Luna");
+
+    const chat = render([companion()], companion().id);
+    expect(chat).toContain("Chat with Luna");
+    expect(chat).not.toContain(">Plugins<");
+    expect(chat).not.toContain("Add MCP");
   });
 });

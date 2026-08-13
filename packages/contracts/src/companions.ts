@@ -266,6 +266,89 @@ export const companionMcpAccountSchema = z.discriminatedUnion("transport", [
 ]);
 export type CompanionMcpAccount = z.infer<typeof companionMcpAccountSchema>;
 
+export const companionPluginTransportSchema = z.enum(["http", "stdio"]);
+
+/**
+ * One member-owned MCP connection. Authentication is deliberately write-only: ordinary reads
+ * expose the provider, account label, and transport metadata, never the connector credential.
+ */
+export const companionPluginAccountSchema = z.object({
+  id: z.string().uuid(),
+  provider: z.string(),
+  label: z.string(),
+  transport: companionPluginTransportSchema,
+  endpoint: z.string(),
+  connected: z.literal(true),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime(),
+}).strict();
+export type CompanionPluginAccount = z.infer<typeof companionPluginAccountSchema>;
+
+export const companionPluginsResponseSchema = z.object({
+  accounts: z.array(companionPluginAccountSchema),
+}).strict();
+export type CompanionPluginsResponse = z.infer<typeof companionPluginsResponseSchema>;
+
+/**
+ * The compact Plugins form supports the adapter's HTTP and stdio transports while keeping secret
+ * values separate from durable transport metadata. `credential_name` is a header for HTTP and an
+ * environment variable for stdio.
+ */
+export const saveCompanionPluginInputSchema = z.object({
+  provider: z.string().trim().regex(/^[a-z][a-z0-9-]{0,62}$/),
+  label: z.string().trim().min(1).max(40),
+  transport: companionPluginTransportSchema,
+  url: z.string().trim().url().max(4_096).refine(
+    (value) => /^https?:\/\//i.test(value),
+    { message: "MCP URL must use http or https" },
+  ).optional(),
+  command: z.string().trim().min(1).max(1_024).refine(
+    (value) => !/[\r\n\0]/.test(value),
+    { message: "command must be a single line" },
+  ).optional(),
+  args: z.array(z.string().max(8_192).refine((value) => !value.includes("\0"), {
+    message: "arguments must not contain null bytes",
+  })).max(100).default([]),
+  credential_name: z.string().trim().min(1).max(128).refine(
+    (value) => /^[A-Za-z_][A-Za-z0-9_-]{0,127}$/.test(value),
+    { message: "credential name must be a header or environment variable name" },
+  ).optional(),
+  credential_value: z.string().min(1).max(32_768).refine(
+    (value) => !/[\r\n\0]/.test(value),
+    { message: "credential value must be a single line" },
+  ).optional(),
+}).strict().superRefine((input, context) => {
+  if (input.transport === "http" && !input.url) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["url"], message: "HTTP MCP needs a URL" });
+  }
+  if (input.transport === "stdio" && !input.command) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["command"],
+      message: "stdio MCP needs a command",
+    });
+  }
+  if (Boolean(input.credential_name) !== Boolean(input.credential_value)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [input.credential_name ? "credential_value" : "credential_name"],
+      message: "credential name and value must be supplied together",
+    });
+  }
+  if (
+    input.transport === "stdio"
+    && input.credential_name
+    && !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(input.credential_name)
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["credential_name"],
+      message: "stdio credential names must be environment variable names",
+    });
+  }
+});
+export type SaveCompanionPluginInput = z.infer<typeof saveCompanionPluginInputSchema>;
+
 export const startCompanionRuntimeInputSchema = z.object({
   client_surface: companionClientSurfaceSchema.default("web"),
   mcp_credentials: z.array(companionMcpCredentialSchema).max(20).default([]),

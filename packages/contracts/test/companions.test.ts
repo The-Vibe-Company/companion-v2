@@ -4,6 +4,7 @@ import {
   createCompanionInputSchema,
   inviteCompanionMemberInputSchema,
   saveCompanionProviderInputSchema,
+  saveCompanionPluginInputSchema,
   sendCompanionMessageInputSchema,
   setCompanionWorkspaceShareInputSchema,
   startCompanionRuntimeInputSchema,
@@ -54,6 +55,40 @@ describe("Companion provider contracts", () => {
 });
 
 describe("Companion runtime injection contract", () => {
+  it("validates the compact write-only Plugins form for both adapter transports", () => {
+    expect(saveCompanionPluginInputSchema.parse({
+      provider: "github",
+      label: "work",
+      transport: "http",
+      url: "https://mcp.example.test/github",
+      credential_name: "Authorization",
+      credential_value: "Bearer secret",
+    })).toMatchObject({ provider: "github", label: "work", args: [] });
+    expect(saveCompanionPluginInputSchema.parse({
+      provider: "github",
+      label: "personal",
+      transport: "stdio",
+      command: "github-mcp-server",
+      args: ["stdio"],
+      credential_name: "GITHUB_TOKEN",
+      credential_value: "secret",
+    })).toMatchObject({ transport: "stdio" });
+    expect(() => saveCompanionPluginInputSchema.parse({
+      provider: "github",
+      label: "work",
+      transport: "http",
+      credential_name: "Authorization",
+    })).toThrow();
+    expect(() => saveCompanionPluginInputSchema.parse({
+      provider: "github",
+      label: "work",
+      transport: "stdio",
+      command: "github-mcp-server",
+      credential_name: "NOT-AN-ENV",
+      credential_value: "secret",
+    })).toThrow();
+  });
+
   it("accepts labeled multi-account MCP configuration with transient credential references", () => {
     const parsed = startCompanionRuntimeInputSchema.parse({
       client_surface: "mobile_web",
