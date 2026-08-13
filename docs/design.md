@@ -75,11 +75,12 @@ are registered. An unset or empty allowlist keeps Companions disabled even when 
 true. Once enabled, the allowlist gates every endpoint after authentication and before tenant
 resolution; missing or malformed emails fail closed.
 List, detail, ACL,
-thread, provider metadata, and default status reads use PostgreSQL only. A Companion Owner can
-grant Editor or Viewer access to the workspace or individual current members; an individual grant
-overrides the workspace default. Live status, start/stop, plugin injection, and desktop require
-owner/editor access before the Box adapter is created, while provider and share management remain
-owner-only. Each Companion owns exactly one chat thread. `companion_threads` carries its ordinal and
+thread, provider metadata, and default status reads use PostgreSQL only. Companion sharing is
+workspace-only: a Companion Owner grants Editor or Viewer access to the whole workspace, or keeps it
+private. There are no per-member grants and no email invites, and authorization ignores any legacy
+member-grant row so a stale grant can never open a Companion. Live status, start/stop, plugin
+injection, and desktop require owner/editor access before the Box adapter is created, while provider
+and share management remain owner-only. Each Companion owns exactly one chat thread. `companion_threads` carries its ordinal and
 delivery watermarks and `companion_transcript_entries` carries its messages, so sending persists in
 the control plane before any Box contact and an undelivered message stays pending until a later
 owner/editor sync. Sync is the only path that reaches Pi: it delivers pending messages through the

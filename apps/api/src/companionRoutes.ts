@@ -8,7 +8,6 @@ import {
   CompanionRuntimeForbiddenError,
   CompanionRuntimeTransitionError,
   CompanionShareForbiddenError,
-  CompanionShareTargetError,
   claimCompanionRuntimeStart,
   claimCompanionRuntimeStop,
   companionsAvailableToUser,
@@ -19,7 +18,6 @@ import {
   getCompanion,
   getCompanionForRuntime,
   getCompanionThread,
-  inviteCompanionMember,
   listCompanionShares,
   listCompanionRuntimeSkillPackages,
   listCompanions,
@@ -30,7 +28,6 @@ import {
   recordCompanionPiProjection,
   resolveCompanionProviderAuth,
   resolveCompanionPluginInjection,
-  revokeCompanionMember,
   saveCompanionProvider,
   saveCompanionPlugin,
   sendCompanionMessage,
@@ -38,13 +35,11 @@ import {
   setCompanionWorkspaceShare,
   setDefaultCompanionProvider,
   updateCompanionObservation,
-  updateCompanionMemberRole,
   updateCompanionRuntime,
 } from "@companion/core";
 import type { CompanionPiEntry } from "@companion/core";
 import {
   createCompanionInputSchema,
-  inviteCompanionMemberInputSchema,
   companionProviderIdSchema,
   saveCompanionProviderInputSchema,
   sendCompanionMessageInputSchema,
@@ -53,7 +48,6 @@ import {
   setDefaultCompanionProviderInputSchema,
   startCompanionRuntimeInputSchema,
   saveCompanionPluginInputSchema,
-  updateCompanionMemberRoleInputSchema,
 } from "@companion/contracts";
 import type {
   Companion,
@@ -98,7 +92,6 @@ function errorStatus(error: unknown): number {
   if (error instanceof CompanionRuntimeForbiddenError) return 403;
   if (error instanceof CompanionProviderForbiddenError) return 403;
   if (error instanceof CompanionShareForbiddenError) return 403;
-  if (error instanceof CompanionShareTargetError) return 422;
   if (error instanceof CompanionProviderError) return 422;
   if (error instanceof CompanionRuntimeTransitionError) return 409;
   if (error instanceof CompanionPluginConflictError) return 409;
@@ -386,57 +379,6 @@ export function registerCompanionRoutes(
       const body = setCompanionWorkspaceShareInputSchema.parse(await c.req.json());
       const shares = await tenant(c, ({ actor, orgId, database }) =>
         setCompanionWorkspaceShare({ actor, orgId, companionId, role: body.role, database }));
-      return c.json({ shares });
-    } catch (error) {
-      return routeError(c, error);
-    }
-  });
-
-  app.put("/v1/companions/:id/shares/members", async (c) => {
-    try {
-      const companionId = companionIdSchema.parse(c.req.param("id"));
-      const body = inviteCompanionMemberInputSchema.parse(await c.req.json());
-      const shares = await tenant(c, ({ actor, orgId, database }) =>
-        inviteCompanionMember({
-          actor,
-          orgId,
-          companionId,
-          email: body.email,
-          role: body.role,
-          database,
-        }));
-      return c.json({ shares });
-    } catch (error) {
-      return routeError(c, error);
-    }
-  });
-
-  app.patch("/v1/companions/:id/shares/members/:userId", async (c) => {
-    try {
-      const companionId = companionIdSchema.parse(c.req.param("id"));
-      const userId = z.string().min(1).max(255).parse(c.req.param("userId"));
-      const body = updateCompanionMemberRoleInputSchema.parse(await c.req.json());
-      const shares = await tenant(c, ({ actor, orgId, database }) =>
-        updateCompanionMemberRole({
-          actor,
-          orgId,
-          companionId,
-          userId,
-          role: body.role,
-          database,
-        }));
-      return c.json({ shares });
-    } catch (error) {
-      return routeError(c, error);
-    }
-  });
-
-  app.delete("/v1/companions/:id/shares/members/:userId", async (c) => {
-    try {
-      const companionId = companionIdSchema.parse(c.req.param("id"));
-      const userId = z.string().min(1).max(255).parse(c.req.param("userId"));
-      const shares = await tenant(c, ({ actor, orgId, database }) =>
-        revokeCompanionMember({ actor, orgId, companionId, userId, database }));
       return c.json({ shares });
     } catch (error) {
       return routeError(c, error);

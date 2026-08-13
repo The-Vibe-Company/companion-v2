@@ -107,33 +107,19 @@ export const companionSchema = z.object({
 });
 export type Companion = z.infer<typeof companionSchema>;
 
-export const companionShareMemberSchema = z.object({
-  user_id: z.string(),
-  name: z.string(),
-  email: z.string().email(),
-  role: companionAccessSchema,
-  is_owner: z.boolean(),
-});
-export type CompanionShareMember = z.infer<typeof companionShareMemberSchema>;
-
+/**
+ * Companion sharing is workspace-only: access is `private` (no row), `viewer`, or `editor` for the
+ * whole organization. There are no per-member grants and no email invites — those were cut in
+ * THE-329. Personal workspaces hide sharing entirely because the owner is the only member.
+ */
 export const companionSharesSchema = z.object({
   companion_id: z.string().uuid(),
   workspace_role: companionShareRoleSchema.nullable(),
-  members: z.array(companionShareMemberSchema),
 });
 export type CompanionShares = z.infer<typeof companionSharesSchema>;
 
 export const setCompanionWorkspaceShareInputSchema = z.object({
   role: companionShareRoleSchema.nullable(),
-}).strict();
-
-export const inviteCompanionMemberInputSchema = z.object({
-  email: z.string().trim().email().max(320),
-  role: companionShareRoleSchema,
-}).strict();
-
-export const updateCompanionMemberRoleInputSchema = z.object({
-  role: companionShareRoleSchema,
 }).strict();
 
 export const companionTranscriptEntrySchema = z.object({

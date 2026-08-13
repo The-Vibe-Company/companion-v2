@@ -12,7 +12,6 @@ import type {
   CompanionProvidersResponse,
   CompanionRuntimeState,
   SaveCompanionPluginInput,
-  CompanionShareMember,
   CompanionShareRole,
   CompanionShares,
   CompanionThread,
@@ -116,21 +115,18 @@ export class CompanionShareForbiddenError extends Error {
   }
 }
 
-export class CompanionShareTargetError extends Error {
-  constructor(message = "invite a current workspace member by email") {
-    super(message);
-    this.name = "CompanionShareTargetError";
-  }
-}
-
+/**
+ * Access is the owner, otherwise the workspace-wide grant. Per-member grants were cut in THE-329, so
+ * authorization ignores any that a not-yet-run migration left behind: a stale row can never open a
+ * Companion.
+ */
 export function companionAccessForActor(
   row: Pick<CompanionRow, "ownerId">,
   actorId: string,
-  memberRole: CompanionShareRole | null = null,
   workspaceRole: CompanionShareRole | null = null,
 ): CompanionAccess | null {
   if (row.ownerId === actorId) return "owner";
-  return memberRole ?? workspaceRole;
+  return workspaceRole;
 }
 
 export function canWakeCompanion(access: CompanionAccess): boolean {
@@ -172,25 +168,11 @@ async function loadCompanionAccess(
   actorId: string,
 ): Promise<CompanionAccess | null> {
   if (row.ownerId === actorId) return "owner";
-  const [memberGrant, workspaceGrant] = await Promise.all([
-    database.query.companionMemberAccess.findFirst({
-      where: and(
-        eq(schema.companionMemberAccess.companionId, row.id),
-        eq(schema.companionMemberAccess.userId, actorId),
-      ),
-      columns: { role: true },
-    }),
-    database.query.companionWorkspaceAccess.findFirst({
-      where: eq(schema.companionWorkspaceAccess.companionId, row.id),
-      columns: { role: true },
-    }),
-  ]);
-  return companionAccessForActor(
-    row,
-    actorId,
-    memberGrant?.role ?? null,
-    workspaceGrant?.role ?? null,
-  );
+  const workspaceGrant = await database.query.companionWorkspaceAccess.findFirst({
+    where: eq(schema.companionWorkspaceAccess.companionId, row.id),
+    columns: { role: true },
+  });
+  return companionAccessForActor(row, actorId, workspaceGrant?.role ?? null);
 }
 
 export async function listCompanions(input: {
@@ -298,54 +280,17 @@ export async function listCompanionShares(input: {
   database?: Db;
 }): Promise<CompanionShares> {
   const database = input.database ?? db;
-  const companion = await assertCompanionOwner({ ...input, database });
-  const [workspaceGrant, ownerProfile, memberRows] = await Promise.all([
-    database.query.companionWorkspaceAccess.findFirst({
-      where: and(
-        eq(schema.companionWorkspaceAccess.orgId, input.orgId),
-        eq(schema.companionWorkspaceAccess.companionId, input.companionId),
-      ),
-      columns: { role: true },
-    }),
-    database.query.profiles.findFirst({
-      where: eq(schema.profiles.id, companion.owner_id),
-      columns: { id: true, name: true, email: true },
-    }),
-    database
-      .select({
-        userId: schema.companionMemberAccess.userId,
-        role: schema.companionMemberAccess.role,
-        name: schema.profiles.name,
-        email: schema.profiles.email,
-      })
-      .from(schema.companionMemberAccess)
-      .innerJoin(schema.profiles, eq(schema.profiles.id, schema.companionMemberAccess.userId))
-      .where(and(
-        eq(schema.companionMemberAccess.orgId, input.orgId),
-        eq(schema.companionMemberAccess.companionId, input.companionId),
-      ))
-      .orderBy(asc(schema.profiles.name), asc(schema.profiles.email)),
-  ]);
-  if (!ownerProfile) throw new CompanionShareTargetError("Companion owner profile not found");
+  await assertCompanionOwner({ ...input, database });
+  const workspaceGrant = await database.query.companionWorkspaceAccess.findFirst({
+    where: and(
+      eq(schema.companionWorkspaceAccess.orgId, input.orgId),
+      eq(schema.companionWorkspaceAccess.companionId, input.companionId),
+    ),
+    columns: { role: true },
+  });
   return {
     companion_id: input.companionId,
     workspace_role: workspaceGrant?.role ?? null,
-    members: [
-      {
-        user_id: ownerProfile.id,
-        name: ownerProfile.name,
-        email: ownerProfile.email,
-        role: "owner",
-        is_owner: true,
-      },
-      ...memberRows.map((row): CompanionShareMember => ({
-        user_id: row.userId,
-        name: row.name,
-        email: row.email,
-        role: row.role,
-        is_owner: false,
-      })),
-    ],
   };
 }
 
@@ -386,111 +331,6 @@ export async function setCompanionWorkspaceShare(input: {
     targetType: "companion",
     targetId: input.companionId,
     metadata: { role: input.role },
-  });
-  return listCompanionShares({ ...input, database });
-}
-
-export async function inviteCompanionMember(input: {
-  actor: ActorContext;
-  orgId: string;
-  companionId: string;
-  email: string;
-  role: CompanionShareRole;
-  database?: Db;
-}): Promise<CompanionShares> {
-  const database = input.database ?? db;
-  const companion = await assertCompanionOwner({ ...input, database });
-  const [target] = await database
-    .select({ userId: schema.memberships.userId })
-    .from(schema.memberships)
-    .innerJoin(schema.profiles, eq(schema.profiles.id, schema.memberships.userId))
-    .where(and(
-      eq(schema.memberships.orgId, input.orgId),
-      sql`lower(${schema.profiles.email}) = ${input.email.trim().toLocaleLowerCase("en-US")}`,
-    ))
-    .limit(1);
-  if (!target) throw new CompanionShareTargetError();
-  if (target.userId === companion.owner_id) {
-    throw new CompanionShareTargetError("the Companion owner already has full access");
-  }
-  await database
-    .insert(schema.companionMemberAccess)
-    .values({
-      orgId: input.orgId,
-      companionId: input.companionId,
-      userId: target.userId,
-      ownerId: companion.owner_id,
-      role: input.role,
-      grantedBy: input.actor.id,
-      updatedAt: new Date(),
-    })
-    .onConflictDoUpdate({
-      target: [schema.companionMemberAccess.companionId, schema.companionMemberAccess.userId],
-      set: { role: input.role, grantedBy: input.actor.id, updatedAt: new Date() },
-    });
-  await database.insert(schema.auditLog).values({
-    orgId: input.orgId,
-    actorId: input.actor.id,
-    action: "companion.share.member.invited",
-    targetType: "companion",
-    targetId: input.companionId,
-    metadata: { user_id: target.userId, role: input.role },
-  });
-  return listCompanionShares({ ...input, database });
-}
-
-export async function updateCompanionMemberRole(input: {
-  actor: ActorContext;
-  orgId: string;
-  companionId: string;
-  userId: string;
-  role: CompanionShareRole;
-  database?: Db;
-}): Promise<CompanionShares> {
-  const database = input.database ?? db;
-  await assertCompanionOwner({ ...input, database });
-  const [updated] = await database
-    .update(schema.companionMemberAccess)
-    .set({ role: input.role, grantedBy: input.actor.id, updatedAt: new Date() })
-    .where(and(
-      eq(schema.companionMemberAccess.orgId, input.orgId),
-      eq(schema.companionMemberAccess.companionId, input.companionId),
-      eq(schema.companionMemberAccess.userId, input.userId),
-    ))
-    .returning({ userId: schema.companionMemberAccess.userId });
-  if (!updated) throw new CompanionShareTargetError("Companion member grant not found");
-  await database.insert(schema.auditLog).values({
-    orgId: input.orgId,
-    actorId: input.actor.id,
-    action: "companion.share.member.role_changed",
-    targetType: "companion",
-    targetId: input.companionId,
-    metadata: { user_id: input.userId, role: input.role },
-  });
-  return listCompanionShares({ ...input, database });
-}
-
-export async function revokeCompanionMember(input: {
-  actor: ActorContext;
-  orgId: string;
-  companionId: string;
-  userId: string;
-  database?: Db;
-}): Promise<CompanionShares> {
-  const database = input.database ?? db;
-  await assertCompanionOwner({ ...input, database });
-  await database.delete(schema.companionMemberAccess).where(and(
-    eq(schema.companionMemberAccess.orgId, input.orgId),
-    eq(schema.companionMemberAccess.companionId, input.companionId),
-    eq(schema.companionMemberAccess.userId, input.userId),
-  ));
-  await database.insert(schema.auditLog).values({
-    orgId: input.orgId,
-    actorId: input.actor.id,
-    action: "companion.share.member.revoked",
-    targetType: "companion",
-    targetId: input.companionId,
-    metadata: { user_id: input.userId },
   });
   return listCompanionShares({ ...input, database });
 }

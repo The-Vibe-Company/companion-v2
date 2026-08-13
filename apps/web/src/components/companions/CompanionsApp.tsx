@@ -610,7 +610,7 @@ export function CompanionsApp({
                           <UpdatedAt iso={companion.updated_at} />
                           <span className="companions-row-actions">
                             <span className="companions-role">{companion.access}</span>
-                            {companion.access === "owner" && (
+                            {companion.access === "owner" && currentOrg.kind !== "personal" && (
                               <button
                                 type="button"
                                 className="cds-btn cds-btn--ghost cds-btn--sm"
