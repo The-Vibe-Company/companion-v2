@@ -194,7 +194,9 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(restart).toContain('export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"');
     expect(restart).toContain("loginctl enable-linger");
     expect(restart).toContain("systemctl --user show-environment");
-    expect(restart).toContain("for _ in $(seq 1 20)");
+    expect(restart).toMatch(
+      /for _ in \$\(seq 1 20\); do\n\s+companion_export_user_bus\n\s+if systemctl --user show-environment/,
+    );
     expect(restart).toContain("trap 'rm -f \"$credential_file\"' EXIT");
     expect(restart!.indexOf("restart companion-pi-daemon.service"))
       .toBeLessThan(restart!.lastIndexOf('rm -f "$credential_file"'));
