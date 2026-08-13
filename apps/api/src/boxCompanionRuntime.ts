@@ -1025,10 +1025,9 @@ log="$HOME/.companion/runtime/logs/pi.rpc.ndjson"
 offset=${Math.max(0, Math.trunc(input.offset))}
 # A Companion that has not spoken yet has no log at all, so an absent log reads as empty from the top.
 if [ ! -e "$log" ]; then printf '%s\\n' 0; exit 0; fi
-# A log that exists but cannot be read, or whose size the Box will not report, is an empty read at the
-# offset this sync came in with. Rewinding to 0 would reproject the whole transcript once the log can
-# be read again, and failing would report a broken thread over a transient unreadable file.
-if [ ! -r "$log" ]; then printf '%s\\n' "$offset"; exit 0; fi
+# A log this Box will not size, whether unreadable or not a byte stream at all, is an empty read at
+# the offset this sync came in with. Rewinding to 0 would reproject the whole transcript once it can
+# be read again, and failing would report a broken thread over a file that is merely unreadable.
 # 'wc' still prints a 0 on the way out when it cannot size what it was handed, so its exit status
 # decides whether that 0 is the log's length or the reason there isn't one.
 if size="$(wc -c < "$log" 2>/dev/null)"; then size="$(printf '%s' "$size" | tr -cd '0-9')"; else size=""; fi
@@ -1040,8 +1039,9 @@ printf '%s\\n' "$offset"
 # Deliberately no 'pipefail' on this read. 'head' closes the pipe the moment it has the read limit, so
 # 'tail' dies of SIGPIPE and exits 141; under 'pipefail' that failed the whole read and told the
 # operator a healthy thread could not be read as soon as its log outgrew one chunk. The pipeline
-# reports 'head' instead, and the bytes past the limit are read by the next sync.
-tail -c "+$((offset + 1))" "$log" 2>/dev/null | head -c ${COMPANION_PI_EVENT_READ_LIMIT} || true
+# reports 'head', whose own failure is still a real failure worth reporting, and the bytes past the
+# limit are read by the next sync.
+tail -c "+$((offset + 1))" "$log" 2>/dev/null | head -c ${COMPANION_PI_EVENT_READ_LIMIT}
 exit 0`,
       30,
     );

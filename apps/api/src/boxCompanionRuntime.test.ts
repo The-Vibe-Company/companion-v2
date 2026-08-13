@@ -36,17 +36,21 @@ function json(value: unknown, status = 200): Response {
  * provider's envelope. The Pi event read is a shell script whose failure modes are shell failure
  * modes, so the reads below execute the script the adapter sends rather than assert on its text.
  */
-function runOnBoxDisk(command: string, home: string): Promise<{
+function runOnBoxDisk(command: string, home: string, pathPrefix?: string): Promise<{
   success: boolean;
   exitCode: number;
   stdout: string;
   stderr: string;
 }> {
+  const path = process.env.PATH ?? "/usr/bin:/bin";
   return new Promise((resolve) => {
     execFile(
       "bash",
       ["-c", command],
-      { env: { HOME: home, PATH: process.env.PATH ?? "/usr/bin:/bin" }, maxBuffer: 8 * 1024 * 1024 },
+      {
+        env: { HOME: home, PATH: pathPrefix ? `${pathPrefix}:${path}` : path },
+        maxBuffer: 8 * 1024 * 1024,
+      },
       (error, stdout, stderr) => {
         const code = (error as { code?: unknown } | null)?.code;
         const exitCode = typeof code === "number" ? code : error ? 1 : 0;
@@ -67,21 +71,30 @@ async function boxDiskWithPiLog(contents: string | null): Promise<{ home: string
 }
 
 /** Read events against one of those disks, reporting the status the script exited with. */
-async function readEventsOnBoxDisk(input: { home: string; offset: number }): Promise<{
-  chunk: string;
+async function readEventsOnBoxDisk(input: {
+  home: string;
   offset: number;
-  exitCode: number;
-}> {
+  pathPrefix?: string;
+}): Promise<{ chunk: string; offset: number; exitCode: number }> {
   let exitCode = -1;
   vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
     const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
-    const executed = await runOnBoxDisk(String(body.command), input.home);
+    const executed = await runOnBoxDisk(String(body.command), input.home, input.pathPrefix);
     exitCode = executed.exitCode;
     return json(executed);
   }));
   const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
   const chunk = await runtime.readEvents({ boxId: "bx_23456789", offset: input.offset });
   return { ...chunk, exitCode };
+}
+
+/** A directory holding one command that fails, shadowing the Box's own copy for this read. */
+async function binWithFailingCommand(name: string, exitCode: number, message: string): Promise<string> {
+  const bin = await mkdtemp(join(tmpdir(), "companion-pi-bin-"));
+  const script = join(bin, name);
+  await writeFile(script, `#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(message)} >&2\nexit ${exitCode}\n`);
+  await chmod(script, 0o755);
+  return bin;
 }
 
 describe("AsciiBoxCompanionRuntime", () => {
@@ -2061,7 +2074,8 @@ describe("AsciiBoxCompanionRuntime", () => {
 
     it("holds the offset when the Box will not report the log size", async () => {
       // Something at the log path that does not answer as a byte stream. Rewinding to the top here
-      // would reproject the whole transcript, and failing would blame a thread that is fine.
+      // would reproject the whole transcript, and failing would blame a thread that is fine. This is
+      // the same guard an unreadable log takes, and unlike file permissions it holds for any user.
       const { home, log } = await boxDiskWithPiLog(null);
       await mkdir(log, { recursive: true });
 
@@ -2093,18 +2107,20 @@ describe("AsciiBoxCompanionRuntime", () => {
         .resolves.toEqual({ chunk: `${event(1)}\n`, offset, exitCode: 0 });
     });
 
-    it("reports the Box exit status and last line when a read genuinely fails", async () => {
-      vi.stubGlobal("fetch", vi.fn(async () => json({
-        success: false,
-        exitCode: 127,
-        stdout: "",
-        stderr: "bash: line 2: wc: command not found",
-      })));
-      const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+    it("reports the Box exit status and last line when the read itself fails", async () => {
+      // Tolerating a log the Box cannot read must not tolerate a Box that cannot read: the disk goes
+      // bad underneath the read, so the reader fails after the offset line was already printed.
+      const { home } = await boxDiskWithPiLog(`${event(0)}\n`);
+      const bin = await binWithFailingCommand(
+        "head",
+        1,
+        "head: error reading 'standard input': Input/output error",
+      );
 
-      await expect(runtime.readEvents({ boxId: "bx_23456789", offset: 0 })).rejects.toMatchObject({
+      await expect(readEventsOnBoxDisk({ home, offset: 0, pathPrefix: bin })).rejects.toMatchObject({
         status: 502,
-        message: "Pi event log could not be read from Box (exit 127): bash: line 2: wc: command not found",
+        message:
+          "Pi event log could not be read from Box (exit 1): head: error reading 'standard input': Input/output error",
       });
     });
   });
