@@ -97,6 +97,23 @@ async function binWithFailingCommand(name: string, exitCode: number, message: st
   return bin;
 }
 
+/**
+ * A reader that writes one line of what it was handed and then fails the way a reader whose stdout
+ * stopped accepting bytes does: some of the read landed, and the status still says it went wrong.
+ */
+async function binWithCappedCommand(name: string, exitCode: number): Promise<string> {
+  const bin = await mkdtemp(join(tmpdir(), "companion-pi-bin-"));
+  const script = join(bin, name);
+  await writeFile(
+    script,
+    `#!/bin/sh\nIFS= read -r line\nprintf '%s\\n' "$line"\n`
+    + `printf '%s\\n' ${JSON.stringify(`${name}: error writing 'standard output': Broken pipe`)} >&2\n`
+    + `exit ${exitCode}\n`,
+  );
+  await chmod(script, 0o755);
+  return bin;
+}
+
 describe("AsciiBoxCompanionRuntime", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -2107,9 +2124,26 @@ describe("AsciiBoxCompanionRuntime", () => {
         .resolves.toEqual({ chunk: `${event(1)}\n`, offset, exitCode: 0 });
     });
 
-    it("reports the Box exit status and last line when the read itself fails", async () => {
-      // Tolerating a log the Box cannot read must not tolerate a Box that cannot read: the disk goes
-      // bad underneath the read, so the reader fails after the offset line was already printed.
+    it("keeps the bytes a reader that stopped partway wrote instead of failing the read", async () => {
+      // What production did to this read: whatever captures the command's output stopped accepting
+      // bytes before the read limit, so the reader failed on its own stdout having already written
+      // some. Under `set -e` that failure skipped the script's `exit 0`, and the adapter reported the
+      // chunk's last Pi event line as the reason the log could not be read.
+      const { home } = await boxDiskWithPiLog(`${event(0)}\n${event(1)}\n`);
+      const bin = await binWithCappedCommand("head", 1);
+
+      const read = await readEventsOnBoxDisk({ home, offset: 0, pathPrefix: bin });
+
+      expect(read.exitCode).toBe(0);
+      expect(read.offset).toBe(0);
+      // The bytes the reader did write are a chunk; the rest is read again from this offset.
+      expect(read.chunk).toBe(`${event(0)}\n`);
+    });
+
+    it("holds the offset when the reader fails before writing any bytes", async () => {
+      // The disk goes bad underneath the read, so the reader fails after the offset line was printed
+      // and produces nothing. That is the same empty read an unreadable log takes: it resumes where
+      // this sync came in rather than rewinding and reprojecting the transcript.
       const { home } = await boxDiskWithPiLog(`${event(0)}\n`);
       const bin = await binWithFailingCommand(
         "head",
@@ -2117,11 +2151,43 @@ describe("AsciiBoxCompanionRuntime", () => {
         "head: error reading 'standard input': Input/output error",
       );
 
-      await expect(readEventsOnBoxDisk({ home, offset: 0, pathPrefix: bin })).rejects.toMatchObject({
-        status: 502,
-        message:
-          "Pi event log could not be read from Box (exit 1): head: error reading 'standard input': Input/output error",
-      });
+      await expect(readEventsOnBoxDisk({ home, offset: 0, pathPrefix: bin }))
+        .resolves.toEqual({ chunk: "", offset: 0, exitCode: 0 });
+    });
+  });
+
+  it("projects a capped read the Box called unsuccessful rather than failing the sync", async () => {
+    // The production banner this replaces: the read printed its offset and a Pi event line, came back
+    // unsuccessful with an empty stderr, and the failure detail quoted that event line as the reason
+    // the log could not be read. A read carrying a resume point is a chunk whatever status came with
+    // it, whether the script's own tolerance or this one caught it.
+    const chunk = "{\"type\":\"extension_ui_request\",\"method\":\"setStatus\",\"statusKey\":\"mcp\"}\n";
+    vi.stubGlobal("fetch", vi.fn(async () => json({
+      success: false,
+      exitCode: 1,
+      stdout: `12\n${chunk}`,
+      stderr: "",
+    })));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.readEvents({ boxId: "bx_23456789", offset: 12 }))
+      .resolves.toEqual({ chunk, offset: 12 });
+  });
+
+  it("fails the read when the Box printed no offset to resume from", async () => {
+    // Nothing ran the read, so there is no chunk and no resume point: this is the one Pi read failure
+    // the operator should see, and it names the exit status and the last line the Box printed.
+    vi.stubGlobal("fetch", vi.fn(async () => json({
+      success: false,
+      exitCode: 137,
+      stdout: "",
+      stderr: "command timed out after 30s",
+    })));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.readEvents({ boxId: "bx_23456789", offset: 12 })).rejects.toMatchObject({
+      status: 502,
+      message: "Pi event log could not be read from Box (exit 137): command timed out after 30s",
     });
   });
 

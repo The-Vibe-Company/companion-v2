@@ -265,6 +265,20 @@ export function composeDaemonFailureDetail(stdout: string): string {
   return fragments.length ? `: ${fragments.join(PI_DAEMON_DIAGNOSTIC_SEPARATOR)}` : "";
 }
 
+/**
+ * The chunk one Pi event read produced, or `null` when what the Box printed carries no resume point.
+ * The read opens with the byte offset its bytes start at, so that line is the whole proof a read
+ * happened: without it there is nothing to project and nothing to resume from, and with it the
+ * remainder is projectable whether the reader ran to the read limit or was cut short.
+ */
+function parsePiEventChunk(stdout: string): CompanionPiEventChunk | null {
+  const separator = stdout.indexOf("\n");
+  if (separator < 0) return null;
+  const offset = Number.parseInt(stdout.slice(0, separator), 10);
+  if (!Number.isSafeInteger(offset) || offset < 0) return null;
+  return { chunk: stdout.slice(separator + 1), offset };
+}
+
 /** Where the layout script is staged on the Box disk so it runs as a file, never as a command. */
 const PI_LAYOUT_SCRIPT_PATH = ".companion/bin/ensure-pi-layout.sh";
 
@@ -1036,28 +1050,32 @@ case "$size" in ''|*[!0-9]*) printf '%s\\n' "$offset"; exit 0 ;; esac
 # reading a stale byte range.
 if [ "$size" -lt "$offset" ]; then offset=0; fi
 printf '%s\\n' "$offset"
-# Deliberately no 'pipefail' on this read. 'head' closes the pipe the moment it has the read limit, so
-# 'tail' dies of SIGPIPE and exits 141; under 'pipefail' that failed the whole read and told the
-# operator a healthy thread could not be read as soon as its log outgrew one chunk. The pipeline
-# reports 'head', whose own failure is still a real failure worth reporting, and the bytes past the
-# limit are read by the next sync.
-tail -c "+$((offset + 1))" "$log" 2>/dev/null | head -c ${COMPANION_PI_EVENT_READ_LIMIT}
+# Deliberately no 'pipefail' on this read, and the pipeline's own status is discarded. 'head' closes
+# the pipe the moment it has the read limit, so 'tail' dies of SIGPIPE and exits 141; under 'pipefail'
+# that failed the whole read and told the operator a healthy thread could not be read as soon as its
+# log outgrew one chunk. 'head' then fails the same way on its own stdout when whatever captures this
+# command's output stops accepting bytes before the read limit, and under 'set -e' that skipped the
+# 'exit 0' below and reported the chunk's last event line as the reason the log could not be read. A
+# reader that stops partway has still produced bytes and the offset they start at, so the read is
+# capped rather than broken and the rest is read by the next sync.
+tail -c "+$((offset + 1))" "$log" 2>/dev/null | head -c ${COMPANION_PI_EVENT_READ_LIMIT} || true
 exit 0`,
       30,
     );
+    const read = parsePiEventChunk(result.stdout);
+    // A read that printed the offset its bytes start at produced a chunk, whatever status came back
+    // with it: the reader can stop partway when the transport capturing this command's output caps it
+    // below the read limit, and those bytes plus that offset are exactly what the next sync resumes
+    // from. Only output with no resume point in it means the Box never ran the read, and only then is
+    // the sync a failure that names the exit status and the last line the Box printed.
+    if (read) return read;
     if (!result.success) {
       throw new BoxRuntimeProviderError(
         `Pi event log could not be read from Box${commandFailureDetail(result)}`,
         502,
       );
     }
-    const separator = result.stdout.indexOf("\n");
-    if (separator < 0) return { chunk: "", offset: input.offset };
-    const parsedOffset = Number.parseInt(result.stdout.slice(0, separator), 10);
-    return {
-      chunk: result.stdout.slice(separator + 1),
-      offset: Number.isSafeInteger(parsedOffset) && parsedOffset >= 0 ? parsedOffset : 0,
-    };
+    return { chunk: "", offset: input.offset };
   }
 
   async desktop(input: { boxId: string }): Promise<{ url: string | null; provisioning: boolean }> {
