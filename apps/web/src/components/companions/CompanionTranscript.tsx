@@ -306,7 +306,11 @@ export function CompanionTranscript({
                 </ComposerPrimitive.Send>
               </div>
               <p className="chat-hint">
-                {composerHint({ thread, companionName: companion.name, awake })}
+                {composerHint({
+                  thread,
+                  companionName: companion.name,
+                  state: companion.runtime.state,
+                })}
               </p>
             </ComposerPrimitive.Root>
           ) : (

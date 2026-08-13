@@ -137,14 +137,35 @@ describe("replyExpected", () => {
 
 describe("composerHint", () => {
   it("explains the keys while nothing is waiting", () => {
-    expect(composerHint({ thread: thread(), companionName: "Luna", awake: true }))
+    expect(composerHint({ thread: thread(), companionName: "Luna", state: "running" }))
       .toBe("Enter sends. Shift + Enter starts a new line.");
   });
 
   it("counts messages waiting on a reply and messages waiting on a wake", () => {
-    expect(composerHint({ thread: thread({ pending_count: 1 }), companionName: "Luna", awake: true }))
-      .toBe("1 message waiting for a reply.");
-    expect(composerHint({ thread: thread({ pending_count: 2 }), companionName: "Luna", awake: false }))
-      .toBe("2 messages saved. Wake Luna to deliver.");
+    expect(composerHint({
+      thread: thread({ pending_count: 1 }),
+      companionName: "Luna",
+      state: "running",
+    })).toBe("1 message waiting for a reply.");
+    expect(composerHint({
+      thread: thread({ pending_count: 2 }),
+      companionName: "Luna",
+      state: "stopped",
+    })).toBe("2 messages saved. Wake Luna to deliver.");
+  });
+
+  it("never asks for a wake that is already under way or already done", () => {
+    // The footer reads the same projected state as the status chip, so a Companion a send has woken
+    // cannot keep asking to be woken.
+    expect(composerHint({
+      thread: thread({ pending_count: 1 }),
+      companionName: "Luna",
+      state: "provisioning",
+    })).toBe("1 message saved. Luna is waking to deliver.");
+    expect(composerHint({
+      thread: thread({ pending_count: 1 }),
+      companionName: "Luna",
+      state: "running",
+    })).not.toContain("Wake Luna");
   });
 });

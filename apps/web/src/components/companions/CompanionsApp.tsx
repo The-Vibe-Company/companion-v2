@@ -256,6 +256,7 @@ export function CompanionsApp({
   /** Resolves false when the message never reached the control plane, so the composer keeps its text. */
   const onSend = async (content: string, clientMessageId: string): Promise<boolean> => {
     if (!openedId) return false;
+    const companionId = openedId;
     setSending(true);
     setThreadError(null);
     try {
@@ -263,7 +264,7 @@ export function CompanionsApp({
       // The composer's message id travels with the request, so one submission is one turn however
       // many times the request itself reaches the control plane.
       const next = await threadQueueRef.current.run(
-        () => sendCompanionMessage(currentOrg.id, openedId, content, clientMessageId),
+        () => sendCompanionMessage(currentOrg.id, companionId, content, clientMessageId),
         { skipWhenBusy: false },
       );
       threadRequestRef.current += 1;
@@ -274,6 +275,12 @@ export function CompanionsApp({
       return false;
     } finally {
       setSending(false);
+      // A send can wake this Companion, and it can also fail and record why, so the lifecycle it
+      // leaves behind is re-read from the projection the status chip already uses. Everything the
+      // thread derives from the runtime — the chip, the wake control, the composer footer, and the
+      // live cadence that projects Pi's reply — then moves off the pre-send state together instead
+      // of waiting for a reload. The read is the control-plane projection, so it never wakes a Box.
+      await refreshCompanion(companionId);
     }
   };
 
