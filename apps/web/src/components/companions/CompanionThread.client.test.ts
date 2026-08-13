@@ -46,24 +46,33 @@ const thread: Thread = {
 
 const roots: Root[] = [];
 
-async function mount(onSend: (content: string) => Promise<boolean>) {
+async function mount(
+  onSend: (content: string) => Promise<boolean>,
+  overrides: { companion?: Companion; thread?: Thread; onDesktop?: () => void } = {},
+) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   roots.push(root);
   await act(async () => {
     root.render(React.createElement(CompanionThread, {
-      companion,
-      thread,
+      companion: overrides.companion ?? companion,
+      thread: overrides.thread ?? thread,
       error: null,
       busy: false,
       waking: false,
+      openingDesktop: false,
       onBack: () => {},
       onSend,
       onWake: () => {},
+      onDesktop: overrides.onDesktop ?? (() => {}),
     }));
   });
   return container;
+}
+
+function boxChip(container: HTMLElement) {
+  return container.querySelector(".chat-box") as HTMLElement;
 }
 
 function type(container: HTMLElement, value: string) {
@@ -111,5 +120,40 @@ describe("CompanionThread composer", () => {
     const container = await mount(async () => true);
 
     expect(document.activeElement).toBe(container.querySelector("h1"));
+  });
+});
+
+describe("CompanionThread Box chip", () => {
+  afterEach(() => {
+    act(() => roots.splice(0).forEach((root) => root.unmount()));
+    document.body.innerHTML = "";
+  });
+
+  it("hands a runner the Box desktop from the status chip", async () => {
+    let opened = 0;
+    const container = await mount(async () => true, { onDesktop: () => { opened += 1; } });
+
+    await act(async () => {
+      boxChip(container).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(opened).toBe(1);
+  });
+
+  it("leaves a Viewer's chip inert so reading a thread cannot reach Box", async () => {
+    let opened = 0;
+    const container = await mount(async () => true, {
+      companion: { ...companion, access: "viewer", runtime: { ...companion.runtime, box_id: null } },
+      thread: { ...thread, access: "viewer", read_only: true, can_send: false },
+      onDesktop: () => { opened += 1; },
+    });
+    const chip = boxChip(container);
+
+    await act(async () => {
+      chip.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(chip.tagName).toBe("SPAN");
+    expect(opened).toBe(0);
   });
 });

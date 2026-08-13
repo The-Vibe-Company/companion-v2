@@ -23,6 +23,14 @@ export function companionStatus(
   }
 }
 
+/**
+ * The chat chip names the compute it reports, because that is where an operator reaches the Box
+ * desktop. One dot, the word Box, and the same single state word the list and sidebar use.
+ */
+export function companionBoxStatusLabel(state: CompanionRuntimeState): string {
+  return `Box · ${companionStatus(state).label.toLocaleLowerCase("en-US")}`;
+}
+
 const RELATIVE_UNITS: ReadonlyArray<[Intl.RelativeTimeFormatUnit, number]> = [
   ["year", 365 * 24 * 3_600_000],
   ["month", 30 * 24 * 3_600_000],

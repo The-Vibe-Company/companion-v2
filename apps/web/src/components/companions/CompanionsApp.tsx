@@ -11,6 +11,7 @@ import type { OrgVM } from "@/lib/types";
 import {
   getCompanionRuntime,
   getCompanionThread,
+  openCompanionDesktop,
   sendCompanionMessage,
   setCompanionProvider,
   startCompanionRuntime,
@@ -32,6 +33,12 @@ import type { TreeRow } from "../skills/sidebarTree";
 /** Awake threads pull Pi events; asleep and Viewer threads only re-read the control plane. */
 const LIVE_POLL_MS = 2_000;
 const READ_MODEL_POLL_MS = 8_000;
+/**
+ * How often a runner's status chip re-observes the Box it already runs. This read never resumes a
+ * Box, and a Viewer never makes it, so the chip stays honest about a Box that stopped underneath it
+ * without anyone's Companion being woken to find out.
+ */
+const BOX_STATUS_POLL_MS = 15_000;
 
 export interface CompanionNavigation {
   mineTreeRows: TreeRow[];
@@ -95,6 +102,7 @@ export function CompanionsApp({
   const [threadError, setThreadError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [waking, setWaking] = useState(false);
+  const [openingDesktop, setOpeningDesktop] = useState(false);
   const threadRequestRef = useRef(0);
   const threadQueueRef = useRef(createThreadQueue());
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -187,15 +195,27 @@ export function CompanionsApp({
     return () => clearInterval(timer);
   }, [canRunOpened, openedAwake, openedId, refreshThread]);
 
-  /** Re-read one Companion from the control plane; a failed read leaves the current row alone. */
-  const refreshCompanion = async (companionId: string) => {
+  /**
+   * Re-read one Companion; a failed read leaves the current row alone. The control-plane read is the
+   * default, so it is safe for a Viewer and after a failed wake. A live read observes an already
+   * running Box for a runner and still never resumes one.
+   */
+  const refreshCompanion = useCallback(async (companionId: string, live = false) => {
     try {
-      const latest = await getCompanionRuntime(currentOrg.id, companionId);
+      const latest = await getCompanionRuntime(currentOrg.id, companionId, { live });
       setCompanions((current) => current.map((item) => item.id === latest.id ? latest : item));
     } catch {
       // The failure that prompted this read is already on screen; do not replace it with this one.
     }
-  };
+  }, [currentOrg.id]);
+
+  // Only a runner whose Box is already running observes it, so opening a thread never wakes a Box
+  // and a Viewer's chip stays on the control-plane projection.
+  useEffect(() => {
+    if (!openedId || !canRunOpened || !openedAwake) return;
+    const timer = setInterval(() => void refreshCompanion(openedId, true), BOX_STATUS_POLL_MS);
+    return () => clearInterval(timer);
+  }, [canRunOpened, openedAwake, openedId, refreshCompanion]);
 
   /** Resolves false when the message never reached the control plane, so the composer keeps its text. */
   const onSend = async (content: string): Promise<boolean> => {
@@ -235,6 +255,31 @@ export function CompanionsApp({
       await refreshCompanion(companionId);
     } finally {
       setWaking(false);
+    }
+  };
+
+  /**
+   * Computer use for a runner: one handoff to the Box desktop Lux drives. The Box must already be
+   * running, so this never creates or resumes one, and the returned URL opens in its own tab instead
+   * of being stored anywhere.
+   */
+  const onDesktop = async () => {
+    if (!opened || !canRunOpened || !openedAwake) return;
+    setOpeningDesktop(true);
+    setThreadError(null);
+    try {
+      const desktop = await openCompanionDesktop(currentOrg.id, opened.id);
+      if (desktop.desktop_url) {
+        window.open(desktop.desktop_url, "_blank", "noopener,noreferrer");
+        return;
+      }
+      setThreadError(desktop.provisioning
+        ? "The Box desktop is still starting. Try again in a moment."
+        : "This Box has no desktop to open yet.");
+    } catch (cause) {
+      setThreadError(cause instanceof Error ? cause.message : "The Box desktop could not be opened.");
+    } finally {
+      setOpeningDesktop(false);
     }
   };
 
@@ -389,9 +434,11 @@ export function CompanionsApp({
               error={threadError}
               busy={sending}
               waking={waking}
+              openingDesktop={openingDesktop}
               onBack={closeThread}
               onSend={onSend}
               onWake={() => void onWake()}
+              onDesktop={() => void onDesktop()}
             />
           </>
         ) : (

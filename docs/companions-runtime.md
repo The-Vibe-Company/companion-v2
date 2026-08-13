@@ -62,8 +62,17 @@ an empty skill set. This is enforced by the API and again by the Box adapter bef
 | `PUT` | `/v1/companion-providers/default` | Never; Owner/Admin only |
 
 Desktop responses are secret-bearing and are returned only to the authorized caller. They are never
-stored. The response advertises `automation: "lux"` so THE-323 can attach the Box desktop/Lux UI
-without changing the lifecycle boundary.
+stored. The response advertises `automation: "lux"`, so computer use is the Box desktop Lux drives
+and nothing else; no second computer-use surface may be added beside it.
+
+The web chat header carries that boundary as one chip. It reads `Box · online`, `Box · starting`,
+`Box · asleep`, or `Box · error` from the same runtime state the list and sidebar show, and for an
+Owner or Editor whose Box is already running the chip itself requests the desktop and opens the
+returned URL in a new tab. The URL is used once and never stored by the browser surface either. A
+Companion that is asleep offers Wake instead, because a desktop request cannot resume a Box, and a
+Viewer reads the chip as text: their thread polls only the control-plane projection, while a runner's
+open thread refreshes `GET /v1/companions/:id/runtime?live=true` on a slow interval, so a stale chip
+is corrected by an observation rather than by a wake.
 
 ## Lifecycle failure reporting
 

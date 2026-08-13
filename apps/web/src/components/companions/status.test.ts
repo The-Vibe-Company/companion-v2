@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { companionStatus, relativeTime } from "./status";
+import { companionBoxStatusLabel, companionStatus, relativeTime } from "./status";
 
 describe("companionStatus", () => {
   it("pairs every runtime state with one operator word", () => {
@@ -9,6 +9,13 @@ describe("companionStatus", () => {
     expect(companionStatus("error")).toEqual({ label: "Error", tone: "danger" });
     expect(companionStatus("stopped")).toEqual({ label: "Asleep", tone: "unknown" });
     expect(companionStatus("not_created")).toEqual({ label: "Asleep", tone: "unknown" });
+  });
+
+  it("names the compute in the chat chip without inventing a second vocabulary", () => {
+    expect(companionBoxStatusLabel("running")).toBe("Box · online");
+    expect(companionBoxStatusLabel("provisioning")).toBe("Box · starting");
+    expect(companionBoxStatusLabel("stopped")).toBe("Box · asleep");
+    expect(companionBoxStatusLabel("error")).toBe("Box · error");
   });
 });
 

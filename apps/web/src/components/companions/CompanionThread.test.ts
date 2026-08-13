@@ -71,6 +71,7 @@ function render(props: {
   error?: string | null;
   busy?: boolean;
   waking?: boolean;
+  openingDesktop?: boolean;
 }) {
   return renderToStaticMarkup(React.createElement(CompanionThread, {
     companion: props.companion ?? companion(),
@@ -78,11 +79,24 @@ function render(props: {
     error: props.error ?? null,
     busy: props.busy ?? false,
     waking: props.waking ?? false,
+    openingDesktop: props.openingDesktop ?? false,
     onBack: () => {},
     onSend: async () => true,
     onWake: () => {},
+    onDesktop: () => {},
   }));
 }
+
+const asleep = companion({
+  runtime: { ...companion().runtime, state: "stopped", daemon_state: "stopped", box_id: null },
+});
+
+const viewerThread = thread({
+  viewer_id: "user-9",
+  access: "viewer",
+  read_only: true,
+  can_send: false,
+});
 
 describe("CompanionThread", () => {
   it("renders one Companion's conversation with a composer for a runner", () => {
@@ -92,7 +106,7 @@ describe("CompanionThread", () => {
     expect(markup).toContain("Draft the launch note");
     expect(markup).toContain("Here is a first pass at the launch note.");
     expect(markup).toContain("Message Luna");
-    expect(markup).toContain("Online");
+    expect(markup).toContain("Box · online");
   });
 
   it("keeps Pi tools and Skills out of the thread surface", () => {
@@ -114,22 +128,49 @@ describe("CompanionThread", () => {
     });
 
     expect(markup).toContain("The run stopped before Pi replied.");
-    expect(markup).not.toMatch(/tool|skill|desktop|mcp/i);
+    expect(markup).not.toMatch(/tool|skill|mcp/i);
+    // Computer use is the Box desktop and nothing else, reached from the one status chip.
+    expect(markup.match(/open the Box desktop/g)).toHaveLength(1);
   });
 
   it("gives a Viewer the read model without a composer or a wake control", () => {
     const markup = render({
-      companion: companion({
-        access: "viewer",
-        runtime: { ...companion().runtime, state: "stopped", daemon_state: "stopped", box_id: null },
-      }),
-      thread: thread({ viewer_id: "user-9", access: "viewer", read_only: true, can_send: false }),
+      companion: companion({ ...asleep, access: "viewer" }),
+      thread: viewerThread,
     });
 
     expect(markup).toContain("Draft the launch note");
     expect(markup).toContain("Viewer access is read-only");
     expect(markup).not.toContain("Message Luna");
     expect(markup).not.toContain(">Wake<");
+  });
+
+  it("shows a Viewer the Box status as a read-only chip that cannot open a desktop", () => {
+    const markup = render({
+      companion: companion({ access: "viewer", runtime: { ...companion().runtime, box_id: null } }),
+      thread: viewerThread,
+    });
+
+    expect(markup).toContain("Box · online");
+    expect(markup).not.toContain("open the Box desktop");
+    expect(markup).not.toContain(">Wake<");
+  });
+
+  it("offers the Box desktop from the chip only while a runner's Box is already running", () => {
+    const running = render({});
+
+    expect(running).toContain("Box · online");
+    expect(running).toContain("open the Box desktop");
+    // An asleep Box has no desktop, so the chip stays a status read instead of becoming a start.
+    expect(render({ companion: asleep })).toContain("Box · asleep");
+    expect(render({ companion: asleep })).not.toContain("open the Box desktop");
+  });
+
+  it("reports an in-flight desktop handoff on the chip that started it", () => {
+    const markup = render({ openingDesktop: true });
+
+    expect(markup).toContain("Box · opening desktop");
+    expect(markup).toContain("disabled");
   });
 
   it("credits a teammate's message to its author instead of the reader", () => {
@@ -142,21 +183,12 @@ describe("CompanionThread", () => {
   });
 
   it("offers a wake control only to a runner whose Box is asleep", () => {
-    const asleep = companion({
-      runtime: { ...companion().runtime, state: "stopped", daemon_state: "stopped", box_id: null },
-    });
-
     expect(render({ companion: asleep })).toContain(">Wake<");
     expect(render({})).not.toContain(">Wake<");
   });
 
   it("tells a runner that saved messages wait for a wake", () => {
-    const markup = render({
-      companion: companion({
-        runtime: { ...companion().runtime, state: "stopped", daemon_state: "stopped", box_id: null },
-      }),
-      thread: thread({ pending_count: 2 }),
-    });
+    const markup = render({ companion: asleep, thread: thread({ pending_count: 2 }) });
 
     expect(markup).toContain("2 messages saved. Wake Luna to deliver.");
   });
@@ -173,7 +205,7 @@ describe("CompanionThread", () => {
       }),
     });
 
-    expect(markup).toContain("Error");
+    expect(markup).toContain("Box · error");
     expect(markup).toContain("Box runtime is not configured; set COMPANION_BOX_API_KEY");
   });
 

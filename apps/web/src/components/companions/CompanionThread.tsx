@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Companion, CompanionThread as Thread } from "@companion/contracts";
 import { Icon } from "../Icon";
-import { companionStatus } from "./status";
+import { companionBoxStatusLabel, companionStatus } from "./status";
 
 /** Server markup keeps the stable ISO minute; the local clock takes over on the client. */
 function SentAt({ iso }: { iso: string }) {
@@ -33,7 +33,7 @@ function author(
 /**
  * One Companion, one thread. The transcript is the control-plane read model, so a Viewer sees the
  * conversation without any Box contact and gets no composer. Pi's tools and skills stay out of this
- * surface by design: only the conversation belongs here.
+ * surface by design: the conversation, one status chip, and one lifecycle control belong here.
  */
 export function CompanionThread({
   companion,
@@ -41,18 +41,22 @@ export function CompanionThread({
   error,
   busy,
   waking,
+  openingDesktop,
   onBack,
   onSend,
   onWake,
+  onDesktop,
 }: {
   companion: Companion;
   thread: Thread | null;
   error: string | null;
   busy: boolean;
   waking: boolean;
+  openingDesktop: boolean;
   onBack: () => void;
   onSend: (content: string) => Promise<boolean>;
   onWake: () => void;
+  onDesktop: () => void;
 }) {
   const [draft, setDraft] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
@@ -60,6 +64,11 @@ export function CompanionThread({
   const status = companionStatus(companion.runtime.state);
   const canSend = thread ? thread.can_send : companion.access !== "viewer";
   const awake = companion.runtime.state === "running";
+  const boxLabel = companionBoxStatusLabel(companion.runtime.state);
+  // Computer use is the Box desktop Lux drives, reached from the status chip itself so the header
+  // keeps one control. A Viewer reads the same chip without the action: a sleeping Box has no
+  // desktop, and a Viewer must never be handed anything that could start one.
+  const canOpenDesktop = canSend && awake;
   // A red status without a reason tells an operator nothing. The failure this request saw wins;
   // otherwise the reason recorded on the Companion explains an Error state across reloads.
   const notice = error ?? companion.runtime.last_error;
@@ -96,10 +105,23 @@ export function CompanionThread({
           <h1 ref={headingRef} tabIndex={-1}>{companion.name}</h1>
           {companion.persona && <p>{companion.persona}</p>}
         </div>
-        <span className={`companions-state companions-state--${status.tone}`}>
-          <i aria-hidden="true" />
-          {status.label}
-        </span>
+        {canOpenDesktop ? (
+          <button
+            type="button"
+            className={`companions-state companions-state--${status.tone} chat-box`}
+            aria-label={`${boxLabel} — open the Box desktop`}
+            disabled={openingDesktop}
+            onClick={onDesktop}
+          >
+            <i aria-hidden="true" />
+            {openingDesktop ? "Box · opening desktop" : boxLabel}
+          </button>
+        ) : (
+          <span className={`companions-state companions-state--${status.tone} chat-box`}>
+            <i aria-hidden="true" />
+            {boxLabel}
+          </span>
+        )}
         {canSend && !awake && (
           <button
             type="button"

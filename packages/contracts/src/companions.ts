@@ -343,3 +343,16 @@ export const companionRuntimeStatusSchema = z.object({
 });
 export type CompanionRuntimeStatus = z.infer<typeof companionRuntimeStatusSchema>;
 
+/**
+ * Owner/Editor handoff to the Box desktop. Computer use is that desktop driven by Lux and nothing
+ * else, so the payload names the automation instead of leaving the surface to pick one. The URL is
+ * secret-bearing and belongs to the authorized caller alone: it is never stored or logged, and it
+ * is null while Box is still provisioning the desktop of a Box that is already running.
+ */
+export const companionDesktopSchema = z.object({
+  desktop_url: z.string().url().nullable(),
+  provisioning: z.boolean(),
+  automation: z.literal("lux"),
+}).strict();
+export type CompanionDesktop = z.infer<typeof companionDesktopSchema>;
+

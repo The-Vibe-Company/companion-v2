@@ -1114,6 +1114,53 @@ describe("Companions API feature gate", () => {
     });
   });
 
+  it("hands a runner the Lux desktop of a Box it never starts", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    coreMocks.getCompanionForRuntime.mockResolvedValueOnce(runningCompanion);
+    const runtime = boxRuntime({
+      desktop: vi.fn(async () => ({ url: "https://ascii.dev/desktop/bx_23456789", provisioning: false })),
+    });
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/desktop`, {
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      desktop_url: "https://ascii.dev/desktop/bx_23456789",
+      provisioning: false,
+      automation: "lux",
+    });
+    expect(runtime.desktop).toHaveBeenCalledWith({ boxId: "bx_23456789" });
+    // Computer use observes a Box the runner already started; it is never a wake.
+    expect(runtime.start).not.toHaveBeenCalled();
+    expect(coreMocks.claimCompanionRuntimeStart).not.toHaveBeenCalled();
+    // The secret-bearing URL belongs to this response only, so nothing records it.
+    expect(coreMocks.updateCompanionRuntime).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionObservation).not.toHaveBeenCalled();
+  });
+
+  it("reports a desktop Box is still provisioning instead of inventing a URL", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    coreMocks.getCompanionForRuntime.mockResolvedValueOnce(runningCompanion);
+    const runtime = boxRuntime({
+      desktop: vi.fn(async () => ({ url: null, provisioning: true })),
+    });
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/desktop`, {
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      desktop_url: null,
+      provisioning: true,
+      automation: "lux",
+    });
+  });
+
   it("returns a transition conflict when desktop is requested before Box creation", async () => {
     const app = new Hono<{ Variables: ApiVariables }>();
     coreMocks.getCompanionForRuntime.mockResolvedValueOnce({
