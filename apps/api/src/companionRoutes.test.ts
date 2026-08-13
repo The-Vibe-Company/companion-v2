@@ -33,9 +33,6 @@ const coreMocks = vi.hoisted(() => ({
   recordCompanionPiProjection: vi.fn(),
   listCompanionShares: vi.fn(),
   setCompanionWorkspaceShare: vi.fn(),
-  inviteCompanionMember: vi.fn(),
-  updateCompanionMemberRole: vi.fn(),
-  revokeCompanionMember: vi.fn(),
   listCompanionRuntimeSkillPackages: vi.fn(),
   claimCompanionRuntimeStart: vi.fn(),
   claimCompanionRuntimeStop: vi.fn(),
@@ -217,19 +214,9 @@ describe("Companions API feature gate", () => {
     const shares = {
       companion_id: companion.id,
       workspace_role: null,
-      members: [{
-        user_id: "user-1",
-        name: "User",
-        email: "user@example.test",
-        role: "owner",
-        is_owner: true,
-      }],
     };
     coreMocks.listCompanionShares.mockResolvedValue(shares);
     coreMocks.setCompanionWorkspaceShare.mockResolvedValue(shares);
-    coreMocks.inviteCompanionMember.mockResolvedValue(shares);
-    coreMocks.updateCompanionMemberRole.mockResolvedValue(shares);
-    coreMocks.revokeCompanionMember.mockResolvedValue(shares);
     coreMocks.listCompanionRuntimeSkillPackages.mockResolvedValue([]);
     coreMocks.claimCompanionRuntimeStart.mockResolvedValue(companion);
     coreMocks.claimCompanionRuntimeStop.mockResolvedValue(companion);
@@ -751,16 +738,11 @@ describe("Companions API feature gate", () => {
   });
 
   it.each([
-    ["invite", "PUT", `/v1/companions/${companion.id}/shares/members`, {
-      email: "editor@example.test",
-      role: "editor",
-    }, "inviteCompanionMember"],
-    ["role change", "PATCH", `/v1/companions/${companion.id}/shares/members/user-2`, {
+    ["list", "GET", `/v1/companions/${companion.id}/shares`, undefined, "listCompanionShares"],
+    ["workspace", "PUT", `/v1/companions/${companion.id}/shares/workspace`, {
       role: "viewer",
-    }, "updateCompanionMemberRole"],
-    ["revoke", "DELETE", `/v1/companions/${companion.id}/shares/members/user-2`, undefined,
-      "revokeCompanionMember"],
-  ] as const)("supports owner share %s", async (_name, method, path, body, mockName) => {
+    }, "setCompanionWorkspaceShare"],
+  ] as const)("supports owner workspace share %s", async (_name, method, path, body, mockName) => {
     const app = new Hono<{ Variables: ApiVariables }>();
     registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
 
@@ -779,16 +761,7 @@ describe("Companions API feature gate", () => {
     ["workspace", "PUT", `/v1/companions/${companion.id}/shares/workspace`, {
       role: "viewer",
     }, "setCompanionWorkspaceShare"],
-    ["invite", "PUT", `/v1/companions/${companion.id}/shares/members`, {
-      email: "viewer@example.test",
-      role: "viewer",
-    }, "inviteCompanionMember"],
-    ["role", "PATCH", `/v1/companions/${companion.id}/shares/members/user-2`, {
-      role: "editor",
-    }, "updateCompanionMemberRole"],
-    ["revoke", "DELETE", `/v1/companions/${companion.id}/shares/members/user-2`, undefined,
-      "revokeCompanionMember"],
-  ] as const)("rejects non-owner share %s", async (_name, method, path, body, mockName) => {
+  ] as const)("rejects non-owner workspace share %s", async (_name, method, path, body, mockName) => {
     const app = new Hono<{ Variables: ApiVariables }>();
     const forbidden = new (await import("@companion/core")).CompanionShareForbiddenError();
     coreMocks[mockName].mockRejectedValueOnce(forbidden);
@@ -801,6 +774,29 @@ describe("Companions API feature gate", () => {
     });
 
     expect(response.status).toBe(403);
+  });
+
+  // THE-329 cut individual sharing: the per-member grant endpoints no longer exist.
+  it.each([
+    ["invite", "PUT", `/v1/companions/${companion.id}/shares/members`, {
+      email: "editor@example.test",
+      role: "editor",
+    }],
+    ["role change", "PATCH", `/v1/companions/${companion.id}/shares/members/user-2`, {
+      role: "viewer",
+    }],
+    ["revoke", "DELETE", `/v1/companions/${companion.id}/shares/members/user-2`, undefined],
+  ] as const)("no longer exposes the member share %s endpoint", async (_name, method, path, body) => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    const response = await app.request(path, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+
+    expect(response.status).toBe(404);
   });
 
   it.each([

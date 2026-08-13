@@ -58,11 +58,12 @@ describe("Companion runtime error reporting", () => {
       insert into companions (id, org_id, owner_id, name)
       values (${companionId}, ${fixture.orgA}, ${fixture.owner.id}, 'Runtime error companion')
     `;
+    // Workspace-only sharing (THE-329): a Viewer grant applies to every member, so the developer
+    // reads the Companion as a Viewer.
     await integrationSql`
-      insert into companion_member_access (org_id, companion_id, user_id, owner_id, role, granted_by)
+      insert into companion_workspace_access (org_id, companion_id, owner_id, role, granted_by)
       values (
-        ${fixture.orgA}, ${companionId}, ${fixture.developer.id}, ${fixture.owner.id}, 'viewer',
-        ${fixture.owner.id}
+        ${fixture.orgA}, ${companionId}, ${fixture.owner.id}, 'viewer', ${fixture.owner.id}
       )
     `;
   });
