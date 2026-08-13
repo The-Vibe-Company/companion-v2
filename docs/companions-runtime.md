@@ -65,6 +65,25 @@ Desktop responses are secret-bearing and are returned only to the authorized cal
 stored. The response advertises `automation: "lux"` so THE-323 can attach the Box desktop/Lux UI
 without changing the lifecycle boundary.
 
+## Lifecycle failure reporting
+
+A failure is diagnosable without server logs. A failed start or stop records `runtime_state: error`
+together with one sanitized line in `companions.last_error`, and the failing start, stop, and sync
+responses carry that same line as `error`, so the operator who pressed Wake and the operator who
+reloads later read the same reason.
+
+Only recognized failures explain themselves: Box configuration (`COMPANION_BOX_API_KEY` unset), Box
+and Pi provider failures, provider resolution, and lifecycle conflicts. Every other failure — object
+storage, PostgreSQL, an unexpected adapter fault — records a generic line, so internal text cannot
+reach a stored row or a response. Sanitizing keeps the first line only, redacts credential-shaped
+text and the query string of any URL, and truncates to one status line.
+
+`runtime.last_error` is returned only while the state is `error`. Owner and Editor read the recorded
+reason. A Viewer reads a generic unavailable line instead: a Viewer never runs Box, so a hint about a
+missing service key would only invite them to try. Any lifecycle write that leaves `error` — a
+successful start, a live observation, or the claim a retry takes — clears the line, so a recovered
+Companion never keeps explaining a failure it already retried past.
+
 ## Chat thread
 
 One Companion owns exactly one thread; there are no rooms and no multi-party chats.

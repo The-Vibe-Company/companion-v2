@@ -60,6 +60,9 @@ export function CompanionThread({
   const status = companionStatus(companion.runtime.state);
   const canSend = thread ? thread.can_send : companion.access !== "viewer";
   const awake = companion.runtime.state === "running";
+  // A red status without a reason tells an operator nothing. The failure this request saw wins;
+  // otherwise the reason recorded on the Companion explains an Error state across reloads.
+  const notice = error ?? companion.runtime.last_error;
   const entries = useMemo(() => thread?.entries ?? [], [thread]);
 
   useEffect(() => {
@@ -109,7 +112,7 @@ export function CompanionThread({
         )}
       </header>
 
-      {error && <div className="companions-error" role="alert">{error}</div>}
+      {notice && <div className="companions-error" role="alert">{notice}</div>}
 
       <div className="chat-log" ref={logRef} role="log" aria-live="polite" aria-busy={!thread}>
         {!thread ? (

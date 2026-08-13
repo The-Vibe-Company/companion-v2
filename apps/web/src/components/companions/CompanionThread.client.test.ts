@@ -24,6 +24,7 @@ const companion: Companion = {
     provider_credential_generation: null,
     disk_layout_version: 2,
     desktop_available: false,
+    last_error: null,
     last_observed_at: null,
     last_started_at: null,
     last_stopped_at: null,
