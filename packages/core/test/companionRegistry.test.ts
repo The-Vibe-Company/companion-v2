@@ -6,7 +6,7 @@ import {
   deriveCompanionProviderSlug,
   getCompanionRegistryServer,
   listCompanionRegistry,
-} from "./companionRegistry";
+} from "../src/companionRegistry";
 
 const baseUrl = "https://registry.test";
 
