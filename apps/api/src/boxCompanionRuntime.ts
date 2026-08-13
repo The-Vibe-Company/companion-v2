@@ -189,7 +189,18 @@ printf '%s\n' "$expected_layout" > "$layout_marker"
  * Point `systemctl --user` at the caller's bus. Every Box command runs in its own shell, so any
  * command that talks to the user manager has to locate the bus again.
  */
-const USER_BUS_ENVIRONMENT = 'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"';
+const USER_BUS_ENVIRONMENT = `companion_export_user_bus() {
+  companion_user_runtime_dir="/run/user/$(id -u)"
+  if [ -d "$companion_user_runtime_dir" ]; then
+    export XDG_RUNTIME_DIR="$companion_user_runtime_dir"
+    if [ -S "$XDG_RUNTIME_DIR/bus" ]; then
+      export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+    else
+      unset DBUS_SESSION_BUS_ADDRESS
+    fi
+  fi
+}
+companion_export_user_bus`;
 
 /**
  * Bring up the systemd user manager the Pi unit needs. A Box that never had an interactive login has
@@ -211,11 +222,13 @@ if ! systemctl --user show-environment >/dev/null 2>&1; then
   elif command -v sudo >/dev/null 2>&1; then
     sudo -n systemctl start "user@$companion_uid.service" >/dev/null 2>&1 || true
   fi
-  for _ in 1 2 3 4 5; do
+  for _ in $(seq 1 20); do
+    companion_export_user_bus
     if systemctl --user show-environment >/dev/null 2>&1; then break; fi
     sleep 1
   done
 fi
+companion_export_user_bus
 if ! systemctl --user show-environment >/dev/null 2>&1; then
   echo 'Companion cannot reach the systemd user bus on this Box' >&2
   exit 1
@@ -616,7 +629,10 @@ chmod 600 "$auth_file"
 ${PREPARE_USER_BUS}
 # The create setupScript only writes the unit file, so this is the first load of the Pi daemon unit.
 systemctl --user daemon-reload
-systemctl --user restart companion-pi-daemon.service`,
+systemctl --user restart companion-pi-daemon.service
+# restart waits until systemd has read EnvironmentFile; remove transient MCP credentials immediately after.
+rm -f "$credential_file"
+trap - EXIT`,
         120,
       );
     } catch (error) {
