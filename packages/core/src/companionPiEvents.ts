@@ -65,7 +65,8 @@ function blockType(block: PiContentBlock): string {
 
 /**
  * Assistant text only. Thinking blocks, tool calls, and tool results are deliberately dropped: the
- * chat thread is a conversation surface, never a Pi tool console.
+ * chat thread is a conversation surface, never a Pi tool console. A turn with no text at all falls
+ * back to its thinking rather than showing nothing.
  */
 function assistantText(message: PiMessage): string {
   if (typeof message.content === "string") return message.content.trim();
