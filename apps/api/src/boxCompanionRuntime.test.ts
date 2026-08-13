@@ -822,7 +822,12 @@ describe("AsciiBoxCompanionRuntime", () => {
       mcpAccounts: [],
       skills: [],
       onBoxAssigned: async () => undefined,
-    }).catch((thrown: unknown) => thrown as Error);
+    }).then(
+      (): never => {
+        throw new Error("start returned running for a daemon that never became active");
+      },
+      (thrown: unknown) => thrown as Error,
+    );
 
     // The bare sentence cost a production probe to diagnose: the stored line has to say what the
     // unit reported and what Pi complained about.
