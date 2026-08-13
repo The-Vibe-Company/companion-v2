@@ -19,6 +19,7 @@ export const COMPANION_PI_DISK_LAYOUT_VERSION = 2;
 const COMPANION_PI_EVENT_READ_LIMIT = 262_144;
 const READY_STATES = new Set<BoxState>(["ready", "idle", "running"]);
 const STARTING_STATES = new Set<BoxState>(["init", "provisioning", "provisioned", "cloning"]);
+const ARCHIVED_STATES = new Set<BoxState>(["archiving", "archived"]);
 
 export type BoxState =
   | "init"
@@ -187,6 +188,19 @@ function encodeEnvironmentFile(credentials: McpRuntimeCredential[]): string {
     .concat(credentials.length ? "\n" : "");
 }
 
+function companionBoxName(companionId: string): string {
+  return `Companion ${companionId}`;
+}
+
+/**
+ * Box setup runs once per disk, so a Box whose Pi setup failed can never run Pi, and neither can one
+ * in the terminal error state. Waking such a Box again only repeats the same failure, so the
+ * Companion has to be moved onto a new Box instead.
+ */
+function isBeyondRecovery(box: BoxInfo): boolean {
+  return box.state === "error" || box.setupStatus === "failed";
+}
+
 function observation(box: BoxInfo, daemonState: CompanionDaemonState): CompanionRuntimeObservation {
   const runtimeState: CompanionRuntimeState =
     box.state === "archived"
@@ -261,8 +275,18 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     return (await this.#request<BoxEnvelope>(`/boxes/${encodeURIComponent(boxId)}`)).box;
   }
 
+  /** A Box the provider no longer knows about is reported as missing so the start can replace it. */
+  async #getAssignedBox(boxId: string): Promise<BoxInfo | null> {
+    try {
+      return await this.#get(boxId);
+    } catch (error) {
+      if (error instanceof BoxRuntimeProviderError && error.status === 404) return null;
+      throw error;
+    }
+  }
+
   async #findCompanionBox(companionId: string): Promise<BoxInfo | null> {
-    const name = `Companion ${companionId}`;
+    const name = companionBoxName(companionId);
     let cursor: string | null = null;
     do {
       const query = new URLSearchParams({ limit: "200", sort: "desc" });
@@ -273,6 +297,70 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
       cursor = result.pageInfo?.hasMore ? result.pageInfo.nextCursor : null;
     } while (cursor);
     return null;
+  }
+
+  /**
+   * Create the Box for one Companion and persist its id before the configured TTL and deterministic
+   * name are applied, so a crash between the two can only leak a short-lived, unnamed Box.
+   */
+  async #createCompanionBox(input: {
+    companionId: string;
+    orgId: string;
+    onBoxAssigned: (boxId: string) => Promise<void>;
+  }): Promise<BoxInfo> {
+    const created = await this.#request<BoxEnvelope>("/boxes", {
+      method: "POST",
+      body: JSON.stringify({
+        // Bound the cost of the irreducible POST-response/process-crash window. The desired TTL
+        // is applied only after the returned id is durable in the control plane.
+        ttlSeconds: Math.min(this.#ttlSeconds, 300),
+        noEnv: true,
+        ...(this.#environment ? { environment: this.#environment } : {}),
+        env: {
+          COMPANION_ID: input.companionId,
+          COMPANION_ORG_ID: input.orgId,
+        },
+        setupScript: setupScript(this.#installCommand, this.#mcpAdapterPackage),
+      }),
+    });
+    try {
+      await input.onBoxAssigned(created.box.id);
+      return (await this.#request<BoxEnvelope>(
+        `/boxes/${encodeURIComponent(created.box.id)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            name: companionBoxName(input.companionId),
+            ttlSeconds: this.#ttlSeconds,
+          }),
+        },
+      )).box;
+    } catch (error) {
+      await this.#request(`/boxes/${encodeURIComponent(created.box.id)}/stop`, {
+        method: "POST",
+        body: JSON.stringify({ force: false }),
+      }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  /**
+   * Release a Box that can never run Pi again. Renaming it first frees the deterministic Companion
+   * name so the replacement Box owns it and no later start re-adopts the broken disk. Both calls are
+   * best-effort: a Box the provider will not rename or stop must not keep the Companion un-wakeable.
+   */
+  async #retireBox(box: BoxInfo, companionId: string): Promise<void> {
+    await this.#request(`/boxes/${encodeURIComponent(box.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: `Retired ${companionBoxName(companionId)} ${Date.now()}` }),
+    }).catch(() => undefined);
+    if (!ARCHIVED_STATES.has(box.state)) {
+      await this.#request(`/boxes/${encodeURIComponent(box.id)}/stop`, {
+        method: "POST",
+        // The disk is unusable, so it is discarded instead of snapshotted for a later resume.
+        body: JSON.stringify({ force: true }),
+      }).catch(() => undefined);
+    }
   }
 
   async #waitReady(boxId: string): Promise<BoxInfo> {
@@ -413,52 +501,22 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     skills: CompanionRuntimeSkill[];
     onBoxAssigned: (boxId: string) => Promise<void>;
   }): Promise<CompanionRuntimeObservation> {
-    let box: BoxInfo;
+    let box = input.boxId ? await this.#getAssignedBox(input.boxId) : null;
+    if (!box) box = await this.#findCompanionBox(input.companionId);
+    if (box && isBeyondRecovery(box)) {
+      // The assigned Box failed setup or died, so the Companion moves onto a new Box instead of
+      // failing every future wake against the same broken disk.
+      await this.#retireBox(box, input.companionId);
+      box = null;
+    }
     let boxIdPersisted = false;
-    if (!input.boxId) {
-      const recovered = await this.#findCompanionBox(input.companionId);
-      if (recovered) {
-        box = recovered;
-      } else {
-        const created = await this.#request<BoxEnvelope>("/boxes", {
-          method: "POST",
-          body: JSON.stringify({
-            // Bound the cost of the irreducible POST-response/process-crash window. The desired TTL
-            // is applied only after the returned id is durable in the control plane.
-            ttlSeconds: Math.min(this.#ttlSeconds, 300),
-            noEnv: true,
-            ...(this.#environment ? { environment: this.#environment } : {}),
-            env: {
-              COMPANION_ID: input.companionId,
-              COMPANION_ORG_ID: input.orgId,
-            },
-            setupScript: setupScript(this.#installCommand, this.#mcpAdapterPackage),
-          }),
-        });
-        box = created.box;
-        try {
-          await input.onBoxAssigned(box.id);
-          boxIdPersisted = true;
-          box = (await this.#request<BoxEnvelope>(
-            `/boxes/${encodeURIComponent(box.id)}`,
-            {
-              method: "PATCH",
-              body: JSON.stringify({
-                name: `Companion ${input.companionId}`,
-                ttlSeconds: this.#ttlSeconds,
-              }),
-            },
-          )).box;
-        } catch (error) {
-          await this.#request(`/boxes/${encodeURIComponent(box.id)}/stop`, {
-            method: "POST",
-            body: JSON.stringify({ force: false }),
-          }).catch(() => undefined);
-          throw error;
-        }
-      }
-    } else {
-      box = await this.#get(input.boxId);
+    let replaceProviderAuth = input.replaceProviderAuth;
+    if (!box) {
+      box = await this.#createCompanionBox(input);
+      boxIdPersisted = true;
+      // Pi's auth file lives on the Box disk, so a new disk needs it written whatever generation the
+      // control plane recorded for the Box this start replaced.
+      replaceProviderAuth = true;
     }
     if (box.state === "archived") {
       const resumed = await this.#request<BoxEnvelope>(
@@ -494,7 +552,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
       boxId: box.id,
       clientSurface: input.clientSurface,
       providerAuth: input.providerAuth,
-      replaceProviderAuth: input.replaceProviderAuth,
+      replaceProviderAuth,
       mcpCredentials: input.mcpCredentials,
       mcpAccounts: input.mcpAccounts,
       skills: input.skills,

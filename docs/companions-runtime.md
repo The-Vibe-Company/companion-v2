@@ -18,6 +18,17 @@ before creating another one, following every Box-list page. A new Box initially 
 five-minute TTL; only after its id is durable does the adapter apply the configured TTL and name.
 If the id cannot be persisted, the adapter best-effort archives the Box immediately.
 
+Box setup runs once per disk, so a Box whose Pi setup reports `failed`, that reached the terminal
+`error` state, or that the provider no longer knows about can never run Pi again. A start replaces
+such a Box instead of failing: it renames the broken Box out of the deterministic name, best-effort
+force-stops it so the unusable disk is discarded rather than snapshotted, creates a replacement Box,
+and records the new id through the same assignment callback. Renaming happens before the
+replacement is created, so no later start can re-adopt the retired disk, and both retirement calls
+are best-effort because a Box the provider will not rename or stop must never leave a Companion
+permanently un-wakeable. A replacement disk always receives Pi's auth file again, whatever provider
+generation the control plane recorded for the Box it replaced. A Box that is merely still
+provisioning, including one whose setup is `pending` or `running`, is waited on as before.
+
 Each Companion has one immutable Owner, an optional workspace-wide Editor/Viewer grant, and
 member-specific Editor/Viewer grants. A member grant overrides the workspace default. Only the Owner
 manages sharing or the selected provider. Owner and Editor may chat and use lifecycle, plugin
