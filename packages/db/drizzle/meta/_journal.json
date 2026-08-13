@@ -498,6 +498,13 @@
       "when": 1786582800000,
       "tag": "0070_companion_runtime_error",
       "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1786584000000,
+      "tag": "0071_companion_mcp_accounts",
+      "breakpoints": true
     }
   ]
 }

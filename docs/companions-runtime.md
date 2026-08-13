@@ -60,6 +60,7 @@ an empty skill set. This is enforced by the API and again by the Box adapter bef
 | `PUT` | `/v1/companion-providers/:provider` | Never; Owner/Admin only |
 | `DELETE` | `/v1/companion-providers/:provider` | Never; Owner/Admin only |
 | `PUT` | `/v1/companion-providers/default` | Never; Owner/Admin only |
+| `GET/POST/DELETE` | `/v1/companion-plugins` | Never; current member's private MCP accounts only |
 
 Desktop responses are secret-bearing and are returned only to the authorized caller. They are never
 stored. The response advertises `automation: "lux"` so THE-323 can attach the Box desktop/Lux UI
@@ -211,17 +212,20 @@ archives or `--skill` source even if a caller supplies stale client state.
 ## MCP adapter injection
 
 The Box setup installs the pinned `pi-mcp-adapter` package into the isolated
-`PI_CODING_AGENT_DIR`. `POST .../runtime/start` accepts up to 50 labeled MCP accounts. Each account
-has a stable Companion id, a user-facing label, and either an HTTP or stdio transport. Companion
-maps the label plus a stable id digest to a unique adapter server name, so multiple accounts for
-one MCP provider cannot collide.
+`PI_CODING_AGENT_DIR`. The web and mobile-web Plugins surface stores multiple member-private
+accounts per MCP provider, each with a short label such as `work` or `personal` and either an HTTP
+or stdio transport. The API also retains THE-325's bounded transient start-request contract.
+Companion maps the label plus a stable id digest to a unique adapter server name, so multiple
+accounts for one MCP provider cannot collide.
 
-Adapter JSON contains only transport metadata and `${ENV_KEY}` references. Their values travel in
-the start request's `mcp_credentials` array, are written to a transient environment file that the
-systemd unit reads, and are removed immediately after Pi inherits them. Every referenced env key
-must have a matching `mcp_credentials` entry. Model-provider authentication never uses this channel.
-Host-config discovery, MCP sampling, and MCP elicitation are disabled. This gives THE-321 a real
-multi-account injection API without adding its Plugins management UI here.
+Adapter JSON contains only transport metadata and `${ENV_KEY}` references. Plugin credentials are
+write-only and envelope-encrypted per member in `companion_mcp_accounts`; ordinary reads expose only
+provider, label, transport, endpoint, and timestamps. After Owner/Editor runtime authorization, the
+API decrypts the current member's accounts into THE-325's `mcp_credentials` channel. Values are
+written to a transient environment file that the systemd unit reads and removes immediately after
+Pi inherits them. Every referenced env key must have a matching credential. Model-provider
+authentication never uses this channel. Host-config discovery, MCP sampling, and MCP elicitation are
+disabled. Native-mobile starts discard both saved and caller-supplied MCP accounts.
 
 ## Provider credentials
 

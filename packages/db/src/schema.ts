@@ -592,6 +592,64 @@ export const companionProviderConnections = pgTable(
   }),
 );
 
+/**
+ * Member-owned MCP accounts used by web and mobile-web Companions. Transport metadata persists so
+ * the Plugins screen is useful without waking Box. Credential payloads are envelope-encrypted and
+ * are only decrypted after the Companion runtime authorization guard.
+ */
+export const companionMcpAccounts = pgTable(
+  "companion_mcp_accounts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    label: text("label").notNull(),
+    transport: text("transport").notNull(),
+    accountConfig: jsonb("account_config").$type<Record<string, unknown>>().notNull(),
+    credentialGeneration: uuid("credential_generation").notNull().defaultRandom(),
+    ciphertext: text("ciphertext").notNull(),
+    iv: text("iv").notNull(),
+    authTag: text("auth_tag").notNull(),
+    wrappedDek: text("wrapped_dek").notNull(),
+    wrapIv: text("wrap_iv").notNull(),
+    wrapAuthTag: text("wrap_auth_tag").notNull(),
+    keyId: text("key_id").notNull(),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    ownerMembershipFk: foreignKey({
+      columns: [t.orgId, t.ownerId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "companion_mcp_accounts_owner_membership_fk",
+    }).onDelete("cascade"),
+    uniqueProviderLabel: uniqueIndex("companion_mcp_accounts_provider_label_uq").on(
+      t.orgId,
+      t.ownerId,
+      t.provider,
+      sql`lower(${t.label})`,
+    ),
+    byOwner: index("companion_mcp_accounts_owner_idx").on(t.orgId, t.ownerId, t.updatedAt),
+    providerShape: check(
+      "companion_mcp_accounts_provider_check",
+      sql`${t.provider} ~ '^[a-z][a-z0-9-]{0,62}$'`,
+    ),
+    labelLength: check(
+      "companion_mcp_accounts_label_check",
+      sql`char_length(${t.label}) between 1 and 40`,
+    ),
+    transportShape: check(
+      "companion_mcp_accounts_transport_check",
+      sql`${t.transport} in ('http', 'stdio')`,
+    ),
+  }),
+);
+
 export const invitations = pgTable(
   "invitations",
   {
