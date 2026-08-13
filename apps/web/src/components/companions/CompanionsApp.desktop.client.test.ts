@@ -136,6 +136,28 @@ async function clickBoxChip(container: HTMLElement) {
   return chip;
 }
 
+/** Stands in for the tab a click claims: it records where it was sent and whether it was closed. */
+function tabStub() {
+  return {
+    opener: {} as unknown,
+    location: { replace: vi.fn() },
+    close: vi.fn(),
+  };
+}
+
+/** A handoff that stays in flight until the test resolves it, the way a real POST does. */
+function deferredDesktop() {
+  let settle: (value: unknown) => void = () => {};
+  companionsApi.openCompanionDesktop.mockReturnValue(
+    new Promise((resolve) => { settle = resolve; }),
+  );
+  return async (value: unknown) => {
+    await act(async () => {
+      settle(value);
+    });
+  };
+}
+
 describe("CompanionsApp Box desktop", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -152,26 +174,39 @@ describe("CompanionsApp Box desktop", () => {
   });
 
   it("opens the Lux desktop of a running Box in its own tab for a runner", async () => {
-    companionsApi.openCompanionDesktop.mockResolvedValue({
-      desktop_url: "https://box.ascii.dev/desktop/bx_23456789?token=opaque",
-      provisioning: false,
-      automation: "lux",
-    });
+    const tab = tabStub();
+    (window.open as ReturnType<typeof vi.fn>).mockReturnValue(tab);
+    const resolveDesktop = deferredDesktop();
     const container = await open(companion());
 
     await clickBoxChip(container);
 
+    // A browser only honours a tab the click itself asked for, so it is claimed blank while the
+    // handoff is still in flight rather than after it answers.
+    expect(window.open).toHaveBeenCalledWith("", "_blank");
+    expect(tab.location.replace).not.toHaveBeenCalled();
     expect(companionsApi.openCompanionDesktop).toHaveBeenCalledWith("org-1", companionId);
-    expect(window.open).toHaveBeenCalledWith(
+    expect(container.textContent).toContain("Box · opening desktop");
+
+    await resolveDesktop({
+      desktop_url: "https://box.ascii.dev/desktop/bx_23456789?token=opaque",
+      provisioning: false,
+      automation: "lux",
+    });
+
+    expect(tab.location.replace).toHaveBeenCalledWith(
       "https://box.ascii.dev/desktop/bx_23456789?token=opaque",
-      "_blank",
-      "noopener,noreferrer",
     );
+    // The claimed tab must not keep a handle on this one, and it must survive the handoff.
+    expect(tab.opener).toBeNull();
+    expect(tab.close).not.toHaveBeenCalled();
     // Reaching the desktop observes the Box; it must never start one.
     expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
   });
 
-  it("explains a desktop Box is still provisioning instead of opening a blank tab", async () => {
+  it("explains a desktop Box is still provisioning instead of leaving a blank tab", async () => {
+    const tab = tabStub();
+    (window.open as ReturnType<typeof vi.fn>).mockReturnValue(tab);
     companionsApi.openCompanionDesktop.mockResolvedValue({
       desktop_url: null,
       provisioning: true,
@@ -181,7 +216,63 @@ describe("CompanionsApp Box desktop", () => {
 
     await clickBoxChip(container);
 
-    expect(window.open).not.toHaveBeenCalled();
+    expect(tab.location.replace).not.toHaveBeenCalled();
+    expect(tab.close).toHaveBeenCalled();
+    expect(container.textContent).toContain("The Box desktop is still starting");
+  });
+
+  it("says so on the thread when the browser blocks the desktop tab", async () => {
+    (window.open as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    companionsApi.openCompanionDesktop.mockResolvedValue({
+      desktop_url: "https://box.ascii.dev/desktop/bx_23456789?token=opaque",
+      provisioning: false,
+      automation: "lux",
+    });
+    const container = await open(companion());
+
+    await clickBoxChip(container);
+
+    expect(container.textContent).toContain("blocked the Box desktop tab");
+    // The handoff URL carries a Box token, so a failure never spells it out on the thread.
+    expect(container.textContent).not.toContain("token=opaque");
+    expect(container.textContent).toContain("Box · online");
+  });
+
+  it("closes the claimed tab and reports a failed handoff", async () => {
+    const tab = tabStub();
+    (window.open as ReturnType<typeof vi.fn>).mockReturnValue(tab);
+    companionsApi.openCompanionDesktop.mockRejectedValue(new Error("Box is unreachable."));
+    const container = await open(companion());
+
+    await clickBoxChip(container);
+
+    expect(tab.close).toHaveBeenCalled();
+    expect(tab.location.replace).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Box is unreachable.");
+    expect(container.textContent).toContain("Box · online");
+  });
+
+  it("keeps a failed handoff readable while the thread keeps polling", async () => {
+    vi.useFakeTimers();
+    const tab = tabStub();
+    (window.open as ReturnType<typeof vi.fn>).mockReturnValue(tab);
+    companionsApi.openCompanionDesktop.mockResolvedValue({
+      desktop_url: null,
+      provisioning: true,
+      automation: "lux",
+    });
+    const container = await open(companion());
+
+    await clickBoxChip(container);
+    expect(container.textContent).toContain("The Box desktop is still starting");
+
+    // An awake thread re-reads itself every couple of seconds. That refresh clears its own load
+    // failure, and it must not take this answer with it: a wiped notice reads as nothing happened.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    expect(companionsApi.syncCompanionThread).toHaveBeenCalled();
     expect(container.textContent).toContain("The Box desktop is still starting");
   });
 
@@ -204,6 +295,7 @@ describe("CompanionsApp Box desktop", () => {
     expect(companionsApi.openCompanionDesktop).not.toHaveBeenCalled();
     expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
     expect(companionsApi.syncCompanionThread).not.toHaveBeenCalled();
+    expect(window.open).not.toHaveBeenCalled();
     // A Viewer's chip is a read-only projection: no live observation is requested for them.
     expect(companionsApi.getCompanionRuntime).not.toHaveBeenCalled();
     expect(companionsApi.getCompanionThread).toHaveBeenCalled();
