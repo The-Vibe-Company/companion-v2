@@ -2,6 +2,12 @@ import type { CompanionAccess, CompanionRuntimeState } from "@companion/contract
 
 /** An error line is one short sentence, never a transcript. */
 const MAX_LENGTH = 240;
+/**
+ * The same bound, for callers that compose a line out of several pieces. A caller that budgets
+ * against its own copy of this number would silently start losing its last piece the day this one
+ * changed.
+ */
+export const COMPANION_RUNTIME_ERROR_MAX_LENGTH = MAX_LENGTH;
 const REDACTED = "[redacted]";
 
 /**
