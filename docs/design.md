@@ -121,7 +121,10 @@ retry takes, clears the line.
 Pi sessions, RPC events, and logs live only under `~/.companion/runtime` on snapshotted Box disk.
 PostgreSQL stores Box id and last-observed lifecycle metadata so list/open never wakes Box. A start
 whose assigned Box failed Pi setup, reached its terminal error state, or no longer exists retires
-that Box and provisions a replacement, so no Companion becomes permanently un-wakeable. Desktop
+that Box and provisions a replacement, and a start also clears the start-limit failure systemd
+latches onto a unit that crash-looped, so no Companion becomes permanently un-wakeable. The daemon
+wrapper records its own failures in the log that reason is read from, so a start that dies before Pi
+runs still names itself rather than reporting only an exit status. Desktop
 URLs are secret-bearing response-only values. See `docs/companions-runtime.md`.
 
 ## Process and database roles

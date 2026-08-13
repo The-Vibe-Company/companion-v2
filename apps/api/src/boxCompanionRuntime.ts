@@ -57,8 +57,8 @@ export const PI_DAEMON_FAILURE_MESSAGE = "Pi daemon is not running after start";
  * systemd's own account leads because it is the only account that always exists: `Active:` says
  * whether the unit is starting, dead, or back in the restart queue, the exit status says what Pi
  * died of, and the restart count is what separates a slow first start from a crash loop. Pi's own
- * words come next, and the journal claims whatever is left, because the journal is only account left
- * for a failure the wrapper could not write down itself.
+ * words come next, and the journal claims whatever is left, because the journal is the only account
+ * left for a failure the wrapper could not write down itself.
  */
 const PI_DAEMON_DIAGNOSTIC_BUDGETS = [
   { key: "active", prefix: "", limit: 64 },
