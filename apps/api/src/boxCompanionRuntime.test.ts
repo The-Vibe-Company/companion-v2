@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -86,6 +86,95 @@ async function readEventsOnBoxDisk(input: {
   const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
   const chunk = await runtime.readEvents({ boxId: "bx_23456789", offset: input.offset });
   return { ...chunk, exitCode };
+}
+
+/**
+ * The layout script the adapter stages on a Box, captured from one wake. It is the same text the
+ * create `setupScript` carries, and running it is the only way to get the daemon wrapper it writes.
+ */
+async function stagedPiLayoutScript(): Promise<string> {
+  let script = "";
+  vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+    const url = String(rawUrl);
+    const method = init?.method ?? "GET";
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+    if (url.endsWith("/files") && method === "PUT") {
+      if (String(body.path) === LAYOUT_SCRIPT_PATH) script = String(body.content);
+      return json({ ok: true });
+    }
+    if (url.endsWith("/commands") && method === "POST") {
+      return json({
+        success: true,
+        exitCode: 0,
+        stdout: String(body.command).includes("is-active") ? "active\n" : "",
+        stderr: "",
+      });
+    }
+    throw new Error(`unexpected Box request: ${method} ${url}`);
+  }));
+  const runtime = new AsciiBoxCompanionRuntime({
+    COMPANION_BOX_API_KEY: "box_test",
+    COMPANION_PI_INSTALL_COMMAND: "printf 'pi is preinstalled\\n'",
+    COMPANION_BOX_POLL_INTERVAL_MS: "1",
+  });
+  await runtime.start({
+    companionId: "11111111-1111-4111-8111-111111111111",
+    orgId: "22222222-2222-4222-8222-222222222222",
+    boxId: "bx_23456789",
+    clientSurface: "web",
+    providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+    replaceProviderAuth: true,
+    mcpCredentials: [],
+    mcpAccounts: [],
+    skills: [],
+    onBoxAssigned: async () => undefined,
+  });
+  vi.unstubAllGlobals();
+  return script;
+}
+
+/**
+ * A throwaway Box HOME whose Pi layout the staged script installed for real, so the daemon wrapper
+ * under test is the one a Box runs rather than a copy of it. Pi is a stub that records the argv it
+ * was handed, because what the wrapper does before and instead of reaching Pi is the behavior here.
+ */
+async function boxDiskWithPiDaemon(): Promise<{
+  home: string;
+  daemon: string;
+  stderrLog: string;
+  argv: string;
+}> {
+  const home = await mkdtemp(join(tmpdir(), "companion-pi-daemon-"));
+  const bin = await mkdtemp(join(tmpdir(), "companion-pi-bin-"));
+  const argv = join(home, "pi-argv.log");
+  await writeFile(
+    join(bin, "pi"),
+    "#!/bin/sh\n"
+    + `printf '%s\\n' "$*" >> ${JSON.stringify(argv)}\n`
+    + "exit 0\n",
+  );
+  await chmod(join(bin, "pi"), 0o755);
+  const script = join(home, LAYOUT_SCRIPT_PATH);
+  await mkdir(join(home, ".companion", "bin"), { recursive: true });
+  await writeFile(script, await stagedPiLayoutScript());
+  const installed = await runOnBoxDisk(`bash ${JSON.stringify(script)}`, home, bin);
+  expect(installed.exitCode).toBe(0);
+  return {
+    home,
+    daemon: join(home, ".companion", "bin", "pi-daemon"),
+    stderrLog: join(home, ".companion", "runtime", "logs", "pi.stderr.log"),
+    argv,
+  };
+}
+
+/** The line the failure diagnostic would report from this disk's Pi stderr log. */
+async function reportedStderrLine(stderrLog: string): Promise<string> {
+  const lines = (await readFile(stderrLog, "utf8"))
+    .split(/[\r\n]+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines.at(-1) ?? "";
 }
 
 /** A directory holding one command that fails, shadowing the Box's own copy for this read. */
@@ -983,8 +1072,10 @@ describe("AsciiBoxCompanionRuntime", () => {
     // The bare sentence cost a production probe to diagnose: the stored line has to say what the
     // unit reported and what Pi complained about.
     expect(error.message).toContain("Pi daemon is not running after start");
-    expect(error.message).toContain("is-active: failed");
     expect(error.message).toContain("Active: failed (Result: exit-code)");
+    // `is-active` prints the word `Active:` opens with, so storing both spent the line twice on one
+    // verdict. It is kept only for a unit whose status the Box would not print.
+    expect(error.message).not.toContain("is-active:");
     expect(error.message).toContain("pi.stderr.log: pi: error: unknown option '--skill'");
     // The control plane keeps only the first sanitized line of bounded length, so the detail has to
     // survive that unchanged rather than be truncated away or redacted as credential-shaped text.
@@ -1074,6 +1165,148 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(companionRuntimeErrorMessage(error)).toBe(error.message);
   });
 
+  it("names the crash loop and systemd's own account when Pi wrote nothing anywhere", async () => {
+    // The production wake this replaces: the daemon answered `activating` for the whole window and
+    // the stored line said only that, an auto-restart, and `exit 1`. Nothing in it separated a Pi
+    // that was still starting from one that had already died five times, and nothing said why.
+    const commands: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        if (command.includes("companion_label")) {
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: [
+              "companion-pi-state activating",
+              "companion-pi-status      Active: activating (auto-restart) (Result: exit-code) since"
+              + " Thu 2026-08-13 21:23:14 UTC; 1s ago",
+              "companion-pi-status     Process: 4242 ExecStart=/root/.companion/bin/pi-daemon"
+              + " (code=exited, status=1/FAILURE)",
+              "companion-pi-restarts 5",
+              // Pi never wrote a line, so systemd's journal is the only account of the failure.
+              "companion-pi-journal companion-pi-daemon.service: Start request repeated too quickly.",
+              "",
+            ].join("\n"),
+            stderr: "",
+          });
+        }
+        if (command.includes("is-active")) {
+          return json({ success: true, exitCode: 0, stdout: "activating\n", stderr: "" });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS: "20",
+    });
+
+    const error = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [{ env_key: "GITHUB_TOKEN_WORK", value: "mcp-secret" }],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    }).then(
+      (): never => {
+        throw new Error("start returned running for a daemon that never became active");
+      },
+      (thrown: unknown) => thrown as Error,
+    );
+
+    expect(error.message).toContain("Active: activating (auto-restart) (Result: exit-code)");
+    expect(error.message).toContain("exit: code=exited, status=1/FAILURE");
+    // A restart count is what makes a crash loop read as one instead of as a slow first start.
+    expect(error.message).toContain("restarts: 5");
+    expect(error.message).toContain("journal: companion-pi-daemon.service: Start request repeated");
+    expect(error.message.split("\n")).toHaveLength(1);
+    expect(companionRuntimeErrorMessage(error)).toBe(error.message);
+    const diagnostic = commands.find((command) => command.includes("companion_label")) ?? "";
+    expect(diagnostic).toContain("--property=NRestarts");
+    // systemd keeps the unit's whole history, so the journal is read for the same window Pi's log is:
+    // a line from an earlier wake must not be reported as the reason this one failed.
+    expect(diagnostic).toContain("journalctl --user --unit companion-pi-daemon.service");
+    expect(diagnostic).toContain("--since=-2min");
+    expect(diagnostic).not.toContain("providers.env");
+    expect(diagnostic).not.toContain("auth.json");
+    for (const command of commands) expect(command).not.toContain("mcp-secret");
+  });
+
+  it("clears a latched start limit so a wake after a crash loop starts Pi again", async () => {
+    // systemd stops restarting a unit that failed too often and refuses every later start until the
+    // latched failure is cleared, so a Companion that crash-looped once answered the next wake with
+    // systemd's own rate-limit complaint instead of starting Pi — for as long as the Box lived.
+    let restartAttempts = 0;
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        const restart = command.indexOf("restart companion-pi-daemon.service");
+        if (restart >= 0) {
+          restartAttempts += 1;
+          const cleared = command.indexOf("reset-failed companion-pi-daemon.service");
+          if (cleared < 0 || cleared > restart) {
+            return json({
+              success: false,
+              exitCode: 1,
+              stdout: "",
+              stderr: "Job for companion-pi-daemon.service failed because start of the service was"
+                + " attempted too often\n",
+            });
+          }
+        }
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: command.includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    // One start attempt, and it is the one that cleared the latch first rather than a retry.
+    expect(restartAttempts).toBe(1);
+    expect(result).toMatchObject({ runtimeState: "running", daemonState: "running" });
+  });
+
   it("keeps every daemon failure fragment inside the line the Companion row stores", async () => {
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
@@ -1136,12 +1369,16 @@ describe("AsciiBoxCompanionRuntime", () => {
     // sanitizer has to pass the whole message through rather than truncate its tail away.
     expect(companionRuntimeErrorMessage(error)).toBe(error.message);
     expect(error.message.length).toBeLessThanOrEqual(COMPANION_RUNTIME_ERROR_MAX_LENGTH);
-    expect(error.message).toContain("is-active: deactivating");
     expect(error.message).toContain("Active: failed (Result: exit-code)");
+    // The `Active:` line closes with the clock time the unit entered that state, which the control
+    // plane already knows from when it asked, so the timestamp is dropped rather than clamping Pi's
+    // own words out of the line.
+    expect(error.message).not.toContain("since");
+    expect(error.message).not.toContain("is-active:");
     // systemd's account is the only one that always exists, so it survives the squeeze whole and
     // Pi's log — supplementary, and absent for the failures that motivated this — is what clamps.
     expect(error.message).toContain("exit: code=exited, status=1/FAILURE");
-    expect(error.message).toContain("pi.stderr.log: pi: error: could not open");
+    expect(error.message).toContain("pi.stderr.log: pi: error: could not open the session");
     expect(error.message.indexOf("exit:")).toBeLessThan(error.message.indexOf("pi.stderr.log:"));
   });
 
@@ -1217,21 +1454,26 @@ describe("AsciiBoxCompanionRuntime", () => {
       for (const activeSize of sizes) {
         for (const stderrSize of sizes) {
           for (const exitSize of sizes) {
-            const stdout = [
-              stateSize ? `companion-pi-state ${filler(stateSize)}` : "",
-              activeSize ? `companion-pi-status Active: ${filler(activeSize)}` : "",
-              exitSize
-                ? `companion-pi-status Process: 42 ExecStart=/x (code=${filler(exitSize)})`
-                : "",
-              stderrSize ? `companion-pi-stderr ${filler(stderrSize)}` : "",
-            ].filter(Boolean).join("\n");
+            for (const journalSize of sizes) {
+              const stdout = [
+                stateSize ? `companion-pi-state ${filler(stateSize)}` : "",
+                activeSize ? `companion-pi-status Active: ${filler(activeSize)}` : "",
+                exitSize
+                  ? `companion-pi-status Process: 42 ExecStart=/x (code=${filler(exitSize)})`
+                  : "",
+                // systemd counts restarts, so this fragment is a number or nothing at all.
+                `companion-pi-restarts ${stateSize * 7}`,
+                stderrSize ? `companion-pi-stderr ${filler(stderrSize)}` : "",
+                journalSize ? `companion-pi-journal ${filler(journalSize)}` : "",
+              ].filter(Boolean).join("\n");
 
-            const message = `${PI_DAEMON_FAILURE_MESSAGE}${composeDaemonFailureDetail(stdout)}`;
-            const error = new BoxRuntimeProviderError(message, 502);
+              const message = `${PI_DAEMON_FAILURE_MESSAGE}${composeDaemonFailureDetail(stdout)}`;
+              const error = new BoxRuntimeProviderError(message, 502);
 
-            expect(message.length).toBeLessThanOrEqual(COMPANION_RUNTIME_ERROR_MAX_LENGTH);
-            // Nothing the Box printed may survive as a second line or be dropped by the sanitizer.
-            expect(companionRuntimeErrorMessage(error)).toBe(message);
+              expect(message.length).toBeLessThanOrEqual(COMPANION_RUNTIME_ERROR_MAX_LENGTH);
+              // Nothing the Box printed may survive as a second line or be dropped by the sanitizer.
+              expect(companionRuntimeErrorMessage(error)).toBe(message);
+            }
           }
         }
       }
@@ -2232,6 +2474,80 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(command).toContain("offset=4096");
     expect(command).toContain("logs/pi.rpc.ndjson");
     expect(result).toEqual({ chunk: "{\"type\":\"agent_settled\"}\n", offset: 0 });
+  });
+
+  /**
+   * The wrapper systemd runs is a shell script, and the wake that failed in production failed inside
+   * it: the unit reported `exit 1` and an auto-restart, and every account of the reason was empty.
+   * These run the installed wrapper the way the unit does, so what it writes down when it cannot
+   * reach Pi is behavior rather than intention.
+   */
+  describe("starting the Pi daemon against a real disk", () => {
+    it("records the Pi invocation it made so a silent death is still attributable", async () => {
+      const disk = await boxDiskWithPiDaemon();
+
+      const started = await runOnBoxDisk(`bash ${JSON.stringify(disk.daemon)}`, disk.home);
+
+      expect(started.exitCode).toBe(0);
+      // Pi ran with the isolated agent directory, the Companion session directory, and no ambient
+      // skills, and the wrapper wrote that invocation down before handing over to it.
+      expect(await readFile(disk.argv, "utf8")).toContain("--mode rpc");
+      expect(await reportedStderrLine(disk.stderrLog)).toMatch(/^pi-daemon: starting \S+pi --no-skills$/);
+    });
+
+    it("names the reason a start died before Pi ever ran", async () => {
+      // Reproduces the production signature: the unit exits 1 and neither Pi's log nor its stdout
+      // has anything in it, because the failure happened before the wrapper reached `exec`. Anything
+      // the wrapper said went to the journal alone, and the log kept an older start's timestamp, so
+      // the freshness window dropped it too and the wake reported an exit status with no reason.
+      const disk = await boxDiskWithPiDaemon();
+      // Something at the FIFO path the wrapper cannot replace. Any pre-`exec` failure has the same
+      // shape; this one needs no permission the test user might already have.
+      await mkdir(join(disk.home, ".companion", "runtime", "state", "pi.rpc.in", "held"), {
+        recursive: true,
+      });
+      const attemptedAt = Date.now();
+
+      const started = await runOnBoxDisk(`bash ${JSON.stringify(disk.daemon)}`, disk.home);
+
+      expect(started.exitCode).not.toBe(0);
+      // Pi was never handed the daemon invocation; the only argv on this disk is the layout install.
+      expect(await readFile(disk.argv, "utf8")).not.toContain("--mode rpc");
+      // The wrapper's own account of the failure, in the log the failure diagnostic reads, with the
+      // line and the command that failed rather than only the status systemd recorded.
+      const reported = await reportedStderrLine(disk.stderrLog);
+      expect(reported).toContain("pi-daemon: line");
+      expect(reported).toContain('rm -f "$fifo"');
+      expect(reported).toContain("failed with status 1");
+      // And it is this start's line: the log was written now, so the freshness window keeps it.
+      expect((await stat(disk.stderrLog)).mtimeMs).toBeGreaterThanOrEqual(attemptedAt);
+      const detail = composeDaemonFailureDetail([
+        "companion-pi-state activating",
+        "companion-pi-status Active: activating (auto-restart) (Result: exit-code) since now",
+        "companion-pi-status Process: 42 ExecStart=/root/.companion/bin/pi-daemon"
+        + " (code=exited, status=1/FAILURE)",
+        `companion-pi-stderr ${reported}`,
+      ].join("\n"));
+      const message = `${PI_DAEMON_FAILURE_MESSAGE}${detail}`;
+      expect(message).toContain("pi.stderr.log: pi-daemon: line");
+      expect(message.length).toBeLessThanOrEqual(COMPANION_RUNTIME_ERROR_MAX_LENGTH);
+      expect(companionRuntimeErrorMessage(new BoxRuntimeProviderError(message, 502))).toBe(message);
+    });
+
+    it("rolls the log a crash loop keeps appending to instead of filling the disk", async () => {
+      const disk = await boxDiskWithPiDaemon();
+      await writeFile(disk.stderrLog, "old crash reasons\n".repeat(70_000));
+
+      const started = await runOnBoxDisk(`bash ${JSON.stringify(disk.daemon)}`, disk.home);
+
+      expect(started.exitCode).toBe(0);
+      const rolled = await readFile(`${disk.stderrLog}.1`, "utf8");
+      expect(rolled).toContain("old crash reasons");
+      // The live log carries this start and nothing older, so it starts over well under the ceiling.
+      const kept = await readFile(disk.stderrLog, "utf8");
+      expect(kept).toContain("pi-daemon: starting");
+      expect(kept).not.toContain("old crash reasons");
+    });
   });
 
   /**

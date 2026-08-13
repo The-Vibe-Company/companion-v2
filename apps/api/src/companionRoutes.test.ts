@@ -2,7 +2,11 @@ import { CompanionPluginConflictError, CompanionRegistryUnavailableError } from 
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthenticationRequiredError, type ApiVariables } from "./context";
-import { BoxRuntimeConfigurationError, BoxRuntimeProviderError } from "./boxCompanionRuntime";
+import {
+  BoxRuntimeConfigurationError,
+  BoxRuntimeProviderError,
+  COMPANION_PI_DISK_LAYOUT_VERSION,
+} from "./boxCompanionRuntime";
 import { COMPANION_RUNTIME_UNKNOWN_ERROR } from "./companionRuntimeError";
 import { registerCompanionRoutes as registerCompanionRoutesImpl } from "./companionRoutes";
 
@@ -1107,7 +1111,7 @@ describe("Companions API feature gate", () => {
       "keeps a refreshed subscription file on an already provisioned Box at the current layout",
       {
         box_id: "bx_23456789",
-        disk_layout_version: 4,
+        disk_layout_version: COMPANION_PI_DISK_LAYOUT_VERSION,
         provider_credential_generation: "22222222-2222-4222-8222-222222222222",
       },
       false,
@@ -1116,7 +1120,7 @@ describe("Companions API feature gate", () => {
       "rewrites provider auth for a Companion that has no Box yet",
       {
         box_id: null,
-        disk_layout_version: 4,
+        disk_layout_version: COMPANION_PI_DISK_LAYOUT_VERSION,
         provider_credential_generation: "22222222-2222-4222-8222-222222222222",
       },
       true,
@@ -1134,7 +1138,7 @@ describe("Companions API feature gate", () => {
       "rewrites provider auth after the workspace connection was rotated",
       {
         box_id: "bx_23456789",
-        disk_layout_version: 4,
+        disk_layout_version: COMPANION_PI_DISK_LAYOUT_VERSION,
         provider_credential_generation: "33333333-3333-4333-8333-333333333333",
       },
       true,

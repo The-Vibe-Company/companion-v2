@@ -203,10 +203,10 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
     │   └── pi.rpc.in      # owner-only FIFO for the Pi JSON RPC stream
     └── logs/
         ├── pi.rpc.ndjson  # Pi JSON RPC output
-        └── pi.stderr.log
+        └── pi.stderr.log  # Pi's stderr and the daemon wrapper's own account of a failed start
 ```
 
-Layout version `2` is written to the control-plane row after a successful Skills/MCP-aware start and
+Layout version `5` is written to the control-plane row after a successful Skills/MCP-aware start and
 to an on-disk marker keyed by the adapter package. Starts repair older Box snapshots before resource
 injection. Runtime transcripts and files do not enter PostgreSQL. A systemd user unit supervises Pi
 while Box is active; the lifecycle API restarts it after a Box resume.
@@ -248,32 +248,51 @@ of ending on the first answer that is not `active`. The window also outlasts sys
 `StartLimitBurst`, which gives up after five `RestartSec=2` attempts: a daemon that is genuinely
 crash-looping reaches its terminal `failed` state inside the window, so the wake reports that verdict
 rather than a start still in flight. A daemon that never
-gets there fails the wake with what the Box actually reported: the unit's `is-active` word, its
-`Active:` line from `systemctl --user status`, the last non-empty line of
-`~/.companion/runtime/logs/pi.stderr.log`, and the `code=exited, status=` detail systemd recorded for
-the process, gathered by one command that reads neither the provider auth file nor the transient MCP
-credential file.
+gets there fails the wake with what the Box actually reported: the unit's `Active:` line from
+`systemctl --user status`, the `code=exited, status=` detail systemd recorded for the process, the
+restart count systemd is keeping, the last non-empty line of
+`~/.companion/runtime/logs/pi.stderr.log`, and the last thing the unit's journal said, gathered by one
+command that reads neither the provider auth file nor the transient MCP credential file.
 
-systemd's account is what the reason is built from, because it is the only account that always
-exists. The unit declares no `StandardError=`, and the wrapper redirects Pi only after it has
-`exec`ed, so a daemon that dies on its environment or its arguments writes nothing to its log and
-nothing to the journal beyond systemd's own `exit 1`/restart records. A failure of that shape is
-described solely by `Active:` and the recorded exit status, and both are read from
-`systemctl --user status` rather than from any Pi log.
+The restart count is what separates a Pi that is merely slow to start from one that keeps dying and
+being brought back, and it is stored whenever it is not zero: the wake that motivated this reported
+`activating`, an auto-restart, and `exit 1`, and nothing in that line said whether the daemon had
+died once or five times.
 
-Fragments therefore claim the stored line in priority order — `is-active`, `Active:`, the exit
-status, then the Pi stderr line — and one the Box had nothing to say for spends nothing. A systemd
-`Process:` or `Main PID:` line opens with the full `ExecStart` path and closes with the code that
-matters, so its `(code=…)` is parsed out first and only that token is then clamped to its budget;
-clamping the raw line would have dropped the code and kept the path. The status lines are selected
-by what they say rather than by where they landed, so a unit that prints only one of them cannot
-have it read as the other, and the diagnostic runs under `LC_ALL=C` so those names are the ones the
-Box prints. A fragment left too short to read is dropped whole instead of stored as a stub.
+The daemon wrapper reports its own failures. It redirects its stderr into Pi's stderr log before it
+does anything that can fail and writes one line naming the invocation it is about to make, so a start
+that dies before `exec` — a directory it cannot create, a FIFO it cannot replace, a Pi binary it
+cannot run — names the failing line and command in the log the control plane reads, and a Pi that
+dies without complaining is still attributable to the command it was. Redirecting only Pi left those
+failures in the journal alone with the log's timestamp untouched, which is how a crash-looping wake
+reported an exit status and no reason at all. A crash loop appends a line every couple of seconds, so
+the wrapper rolls the log aside once it passes 1 MiB rather than growing it until the disk notices.
 
-Pi's stderr log is supplementary and is read only when it was written during this start. The log
-outlives the start that wrote it, so an untouched one still holds whatever an earlier run left
+Fragments claim the stored line in priority order — `Active:`, the exit status, the restart count,
+the Pi stderr line, then the journal line — and one the Box had nothing to say for spends nothing.
+`is-active` prints the same word `Active:` opens with, so it is stored only for a unit whose status
+the Box would not print, and the `Active:` line's trailing timestamp is dropped because the control
+plane already knows when it asked; both were spending room the reason needed. A systemd `Process:` or
+`Main PID:` line opens with the full `ExecStart` path and closes with the code that matters, so its
+`(code=…)` is parsed out first and only that token is then clamped to its budget; clamping the raw
+line would have dropped the code and kept the path. The status lines are selected by what they say
+rather than by where they landed, so a unit that prints only one of them cannot have it read as the
+other, and the diagnostic runs under `LC_ALL=C` so those names are the ones the Box prints. A quoted
+fragment left too short to read is dropped whole instead of stored as a stub; a count is stored at
+whatever length fits, because its digits are all of what it has to say.
+
+Pi's stderr log and the journal are both read only for the couple of minutes around this start. They
+outlive the start that wrote them, so an untouched log still holds whatever an earlier run left
 behind; without a freshness window a line from hours ago would be reported as the reason a wake just
-failed. The result fits the single sanitized line `companions.last_error` stores. Neither the poll nor the failure stops,
+failed. The journal is read last and only for what systemd could not have written down elsewhere: its
+narration of ordinary starts and stops is dropped, so what survives is a unit systemd refused to
+execute, a process the kernel killed, or a restart loop systemd gave up on. The result fits the single
+sanitized line `companions.last_error` stores.
+
+A start clears any latched start-limit failure before it restarts the unit. systemd stops restarting
+a unit that failed too often and refuses every later start until that failure is cleared, so a
+Companion that crash-looped once answered the next wake with systemd's own rate-limit complaint
+instead of a real start attempt, for as long as the Box lived. Neither the poll nor the failure stops,
 archives, or retires the Box: only a Box already beyond recovery — terminal `error` state or failed
 Pi setup — is replaced, and that decision is made before the daemon is ever restarted.
 
