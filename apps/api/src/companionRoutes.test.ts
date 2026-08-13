@@ -137,11 +137,17 @@ const message = {
 
 function boxRuntime(overrides: Record<string, unknown> = {}) {
   return {
-    start: vi.fn(),
+    start: vi.fn(async () => ({
+      boxId: companion.runtime.box_id,
+      runtimeState: "running" as const,
+      daemonState: "running" as const,
+      desktopAvailable: true,
+    })),
     stop: vi.fn(),
     status: vi.fn(),
     desktop: vi.fn(),
     prompt: vi.fn(),
+    refreshTtl: vi.fn(),
     readEvents: vi.fn(async () => ({ chunk: "", offset: 0 })),
     ...overrides,
   };
@@ -457,12 +463,15 @@ describe("Companions API feature gate", () => {
     expect(coreMocks.sendCompanionMessage).not.toHaveBeenCalled();
   });
 
-  it("persists a message for a sleeping Companion without contacting Box", async () => {
-    const app = new Hono<{ Variables: ApiVariables }>();
-    const runtimeFactory = vi.fn(() => {
-      throw new Error("Box client must not be created");
+  it("persists a message, wakes a sleeping Companion, and delivers it without a Wake click", async () => {
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
     });
-    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
 
     const response = await app.request(`/v1/companions/${companion.id}/messages`, {
       method: "POST",
@@ -471,12 +480,58 @@ describe("Companions API feature gate", () => {
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
+    await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
     expect(coreMocks.sendCompanionMessage).toHaveBeenCalledWith(expect.objectContaining({
       companionId: companion.id,
       content: "Summarize the incident",
     }));
-    expect(runtimeFactory).not.toHaveBeenCalled();
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
+      boxId: companion.runtime.box_id,
+      clientSurface: "web",
+    }));
+    expect(runtime.prompt).toHaveBeenCalledWith({
+      boxId: companion.runtime.box_id,
+      message: message.content,
+      requestId: message.event_id,
+    });
+  });
+
+  it("keeps the persisted message pending and records last_error when automatic wake fails", async () => {
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    const runtime = boxRuntime({
+      start: vi.fn(async () => {
+        throw new BoxRuntimeProviderError("Box resume failed", 502);
+      }),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "Summarize the incident",
+        client_message_id: "33333333-3333-4333-8333-333333333333",
+      }),
+    });
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({ error: "Box resume failed" });
+    expect(coreMocks.sendCompanionMessage).toHaveBeenCalledOnce();
+    expect(coreMocks.recordCompanionPiProjection).not.toHaveBeenCalled();
+    expect(runtime.prompt).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: companion.id,
+      patch: expect.objectContaining({
+        runtimeState: "error",
+        daemonState: "error",
+        lastError: "Box resume failed",
+      }),
+    }));
   });
 
   it("hands a message to a running Pi daemon and records the delivery watermark", async () => {
@@ -507,6 +562,7 @@ describe("Companions API feature gate", () => {
       deliveredOrdinal: 0,
       entries: [],
     }));
+    expect(runtime.refreshTtl).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
   });
 
   it("delivers the backlog a sleeping Box missed before the message that woke the send", async () => {
@@ -669,6 +725,7 @@ describe("Companions API feature gate", () => {
     // Already delivered stays delivered: a replay must not report the turn as still waiting.
     await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
     expect(runtime.prompt).not.toHaveBeenCalled();
+    expect(runtime.refreshTtl).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
     expect(coreMocks.recordCompanionPiProjection).not.toHaveBeenCalled();
   });
 

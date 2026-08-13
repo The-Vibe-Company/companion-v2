@@ -200,6 +200,10 @@ Optional tuning variables (`COMPANION_BOX_API_BASE`, `COMPANION_BOX_ENVIRONMENT`
 the API still boots and logs a single startup warning naming the missing variables; Box and provider
 actions fail until they are set.
 
+Set `COMPANION_BOX_TTL_SECONDS=21600` on the Railway `api` service. Successful message delivery
+refreshes that TTL, making the six-hour idle window run from the last message rather than the last
+wake. The web and worker services do not contact Box and do not need this variable.
+
 For the initial production rollout, set these exact values on both the Railway `api` and `web`
 services:
 

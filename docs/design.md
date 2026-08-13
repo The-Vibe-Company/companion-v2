@@ -82,17 +82,20 @@ member-grant row so a stale grant can never open a Companion. Live status, start
 injection, and desktop require owner/editor access before the Box adapter is created, while provider
 and share management remain owner-only. Each Companion owns exactly one chat thread. `companion_threads` carries its ordinal and
 delivery watermarks and `companion_transcript_entries` carries its messages, so sending persists in
-the control plane before any Box contact and an undelivered message stays pending until a later
-owner/editor sync. One send is one turn: the sender names the message it is creating with a
+the control plane before any Box contact and an undelivered message stays pending for the same
+idempotent send to retry. An Owner/Editor send then starts the Companion through the same lifecycle
+path as Wake: an archived Box resumes, a stopped Pi starts, and an already-active layout-6 Pi takes
+the warm path without resource injection or a systemd restart. One send is one turn: the sender names the message it is creating with a
 `client_message_id` UUID that becomes the entry's event id, so the transcript's
 `(companion_id, event_id)` primary key decides how many turns a send produces and the same send
 arriving twice — retried, replayed by a proxy, submitted twice — resolves to the turn already stored
 rather than persisting a second one. Because that message is then no longer pending it is never handed
 to Pi again either, so a replayed send cannot produce a second reply. Sent messages and projected Pi
 output keep separate event-id namespaces, so a sender can never name an entry the Pi log will claim.
-Sync is the only path that reaches Pi: it delivers pending messages through the
-owner-only FIFO and projects new Pi output from a recorded byte offset, which makes retries
-idempotent. Every user message records its author, and the thread payload names the reading member,
+Send and sync reach Pi through its owner-only FIFO, while sync also projects new Pi output from a
+recorded byte offset. A send that Pi accepts refreshes the Box TTL to six hours, so idle is measured
+from the last successful message rather than the last wake. Every user message records its author,
+and the thread payload names the reading member,
 so a thread shared with Editors attributes each message to the member who sent it. Viewers can read the control-plane thread but cannot send or contact Box. The default remains fail-closed: when
 the flag is absent or false, none of these routes are registered. Owner/Admin-managed workspace
 model-provider credentials are envelope-encrypted, write-only, and decrypted only after the

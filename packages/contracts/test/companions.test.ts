@@ -154,6 +154,7 @@ describe("Companion chat contracts", () => {
   it("trims one message and rejects empty or oversized content", () => {
     expect(sendCompanionMessageInputSchema.parse({ content: "  Ship it  " })).toEqual({
       content: "Ship it",
+      client_surface: "web",
     });
     expect(() => sendCompanionMessageInputSchema.parse({ content: "   " })).toThrow();
     expect(() => sendCompanionMessageInputSchema.parse({ content: "x".repeat(16_385) })).toThrow();
@@ -173,7 +174,12 @@ describe("Companion chat contracts", () => {
     })).toEqual({
       content: "Ship it",
       client_message_id: "33333333-3333-4333-8333-333333333333",
+      client_surface: "web",
     });
+    expect(sendCompanionMessageInputSchema.parse({
+      content: "Ship it",
+      client_surface: "native_mobile",
+    }).client_surface).toBe("native_mobile");
     expect(() => sendCompanionMessageInputSchema.parse({
       content: "Ship it",
       client_message_id: "pi:512",

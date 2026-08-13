@@ -59,7 +59,7 @@ an empty skill set. This is enforced by the API and again by the Box adapter bef
 | `PUT` | `/v1/companions/:id/provider` | Never; owner-only, unconfigured Companions only |
 | `GET/PUT/PATCH/DELETE` | `/v1/companions/:id/shares/...` | Never; owner-only |
 | `GET` | `/v1/companions/:id/thread` | Never; authorized read-only control-plane projection |
-| `POST` | `/v1/companions/:id/messages` | Owner/editor only; persists first, delivers only to a running Pi |
+| `POST` | `/v1/companions/:id/messages` | Owner/editor only; persists first, starts through the warm lifecycle path, then delivers |
 | `POST` | `/v1/companions/:id/thread/sync` | Owner/editor only; delivers and projects without resuming Box |
 | `GET` | `/v1/companions/:id/runtime` | Never |
 | `GET` | `/v1/companions/:id/runtime?live=true` | Owner/editor only; observes without resuming |
@@ -128,12 +128,14 @@ A shared thread has several writers, so each user message records its author
 `viewer_id`. Only a reader's own messages render as their own; a teammate's message keeps that
 teammate's name. Pi output carries no author.
 
-`POST /v1/companions/:id/messages` is Owner/Editor only and persists first. Sending never creates or
-resumes a Box: the message becomes durable, and delivery is attempted only when the Box is already
-running and Pi is up. Delivery then hands Pi every still-pending message oldest first, not just the
-new one, so a backlog a sleeping Box missed keeps its order and never skips the watermark. An
-undelivered message stays pending and the response reports `delivery: "pending"`, so a later wake
-still delivers it in order.
+`POST /v1/companions/:id/messages` is Owner/Editor only and persists first. It then claims the same
+lifecycle start as Wake: an archived Box resumes, a stopped Pi starts, and an already-active
+layout-6 Pi takes the warm path without resource injection or a systemd start. Only after that start
+does delivery hand Pi every still-pending message oldest first, not just the new one, so a backlog a
+sleeping Box missed keeps its order and never skips the watermark. An undelivered message stays
+pending under its idempotency key; if automatic wake fails, the lifecycle records `last_error` and a
+composer retry resumes the same durable turn instead of storing another one. Viewers fail
+authorization before persistence or Box construction.
 
 One send is one turn. The sender names the message it is creating with `client_message_id`, a UUID,
 and the control plane stores it as that entry's event id (`msg:<client_message_id>`), so the
@@ -310,6 +312,11 @@ refreshes the files, but uses idempotent `systemctl start`, never `restart`, so 
 killed during the upgrade. An already-running process keeps the environment it inherited; refreshed
 layout and MCP environment take effect on its next automatic start or after an explicit stop/wake.
 
+After Pi accepts at least one durable message, the API PATCHes that Box with the configured TTL. The
+default is six hours (`21600` seconds), so provider idle expiry is measured from the last successful
+message rather than from provisioning, resume, or an explicit Wake. A refused prompt does not move
+the idle clock.
+
 ## Pi Skills injection
 
 Pi starts with `--no-skills` so ambient Box or package skills cannot leak into a Companion. For a
@@ -425,7 +432,7 @@ Optional settings:
 
 - `COMPANION_BOX_API_BASE` (default `https://ascii.dev/api/box/v1`)
 - `COMPANION_BOX_ENVIRONMENT`
-- `COMPANION_BOX_TTL_SECONDS` (default `3600`)
+- `COMPANION_BOX_TTL_SECONDS` (default `21600`)
 - `COMPANION_BOX_POLL_INTERVAL_MS` (default `1000`)
 - `COMPANION_BOX_READY_TIMEOUT_MS` (default `120000`)
 - `COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS` (default `20000`)

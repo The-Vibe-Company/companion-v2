@@ -172,9 +172,13 @@ export function companionMessageEventId(clientMessageId: string): string {
   return `msg:${clientMessageId}`;
 }
 
+export const companionClientSurfaceSchema = z.enum(["web", "mobile_web", "native_mobile"]);
+export type CompanionClientSurface = z.infer<typeof companionClientSurfaceSchema>;
+
 export const sendCompanionMessageInputSchema = z.object({
   content: z.string().trim().min(1).max(16_384),
   client_message_id: companionClientMessageIdSchema.optional(),
+  client_surface: companionClientSurfaceSchema.default("web"),
 }).strict();
 export type SendCompanionMessageInput = z.infer<typeof sendCompanionMessageInputSchema>;
 
@@ -229,9 +233,6 @@ export const companionMcpCredentialSchema = z.object({
   }),
 }).strict();
 export type CompanionMcpCredential = z.infer<typeof companionMcpCredentialSchema>;
-
-export const companionClientSurfaceSchema = z.enum(["web", "mobile_web", "native_mobile"]);
-export type CompanionClientSurface = z.infer<typeof companionClientSurfaceSchema>;
 
 const mcpRuntimeEnvKeySchema = z.string().regex(/^[A-Z][A-Z0-9_]{0,127}$/);
 const mcpEnvironmentBindingsSchema = z.record(
