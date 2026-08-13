@@ -31,7 +31,7 @@ const BOX_FILE_PART_BYTES = 3 * 1024 * 1024;
 /** A multi-megabyte part takes longer to upload than the short control calls share a budget with. */
 const BOX_FILE_PART_TIMEOUT_MS = 120_000;
 /** Bytes of Pi RPC output one control-plane sync may pull; the rest is read by the next sync. */
-const COMPANION_PI_EVENT_READ_LIMIT = 262_144;
+export const COMPANION_PI_EVENT_READ_LIMIT = 262_144;
 /**
  * How long a restarted Pi daemon has to answer `active`. `systemctl --user restart` returns once
  * systemd has forked `ExecStart`, and the unit is `Type=simple` with `Restart=on-failure`, so a
@@ -1011,23 +1011,45 @@ printf '%s\\n' ${shellQuote(command)} > "$fifo"`,
     }
   }
 
+  /**
+   * Read the next slice of this Box's Pi event log. A log that is missing, unreadable, of unreadable
+   * size, or longer than the read limit is a normal read that returns a chunk and the offset to
+   * resume from, because none of those mean the thread is broken. Only a Box that could not run the
+   * read at all fails, and that failure carries the exit status and the last line the Box printed.
+   */
   async readEvents(input: { boxId: string; offset: number }): Promise<CompanionPiEventChunk> {
     const result = await this.#command(
       input.boxId,
-      `set -euo pipefail
+      `set -eu
 log="$HOME/.companion/runtime/logs/pi.rpc.ndjson"
 offset=${Math.max(0, Math.trunc(input.offset))}
-if [ ! -f "$log" ]; then printf '%s\\n' 0; exit 0; fi
-size="$(wc -c < "$log")"
+# A Companion that has not spoken yet has no log at all, so an absent log reads as empty from the top.
+if [ ! -e "$log" ]; then printf '%s\\n' 0; exit 0; fi
+# A log that exists but cannot be read, or whose size the Box will not report, is an empty read at the
+# offset this sync came in with. Rewinding to 0 would reproject the whole transcript once the log can
+# be read again, and failing would report a broken thread over a transient unreadable file.
+if [ ! -r "$log" ]; then printf '%s\\n' "$offset"; exit 0; fi
+# 'wc' still prints a 0 on the way out when it cannot size what it was handed, so its exit status
+# decides whether that 0 is the log's length or the reason there isn't one.
+if size="$(wc -c < "$log" 2>/dev/null)"; then size="$(printf '%s' "$size" | tr -cd '0-9')"; else size=""; fi
+case "$size" in ''|*[!0-9]*) printf '%s\\n' "$offset"; exit 0 ;; esac
 # A resumed Box keeps the log, but a rebuilt disk can shrink it; restart from the top instead of
 # reading a stale byte range.
 if [ "$size" -lt "$offset" ]; then offset=0; fi
 printf '%s\\n' "$offset"
-tail -c "+$((offset + 1))" "$log" | head -c ${COMPANION_PI_EVENT_READ_LIMIT}`,
+# Deliberately no 'pipefail' on this read. 'head' closes the pipe the moment it has the read limit, so
+# 'tail' dies of SIGPIPE and exits 141; under 'pipefail' that failed the whole read and told the
+# operator a healthy thread could not be read as soon as its log outgrew one chunk. The pipeline
+# reports 'head' instead, and the bytes past the limit are read by the next sync.
+tail -c "+$((offset + 1))" "$log" 2>/dev/null | head -c ${COMPANION_PI_EVENT_READ_LIMIT} || true
+exit 0`,
       30,
     );
     if (!result.success) {
-      throw new BoxRuntimeProviderError("Pi event log could not be read from Box", 502);
+      throw new BoxRuntimeProviderError(
+        `Pi event log could not be read from Box${commandFailureDetail(result)}`,
+        502,
+      );
     }
     const separator = result.stdout.indexOf("\n");
     if (separator < 0) return { chunk: "", offset: input.offset };

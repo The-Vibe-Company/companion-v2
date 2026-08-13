@@ -135,6 +135,14 @@ nothing new. Both watermarks only move forward, except when Pi's log shrank: tha
 log's beginning and owns the offset outright. When the Box is asleep, sync degrades to the same
 read-model response as the thread read and reports `source: "control_plane"`.
 
+One sync reads at most 256 KiB of that log, and the projection consumes whole lines only, so a busy
+thread arrives across consecutive syncs and a chunk cut mid-line leaves the remainder to the next
+read. A log that is missing, that cannot be read, or whose size the Box will not report is an empty
+read rather than a failure, because none of those mean the thread is broken; the unreadable ones keep
+the offset the sync came in with instead of rewinding and reprojecting the transcript. Only a Box that
+could not run the read at all fails, and that failure carries the exit status and the last line the
+Box printed.
+
 The projection deliberately keeps only conversation: Pi assistant text, plus a system note when a
 turn errors or is aborted. Tool calls and tool results are dropped, so no Pi tool or Skills chrome
 reaches the thread UI. Thinking is dropped the same way whenever the turn produced text; a turn that

@@ -1,9 +1,14 @@
+import { execFile } from "node:child_process";
+import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { COMPANION_RUNTIME_ERROR_MAX_LENGTH } from "@companion/core";
 import {
   AsciiBoxCompanionRuntime,
   BoxRuntimeConfigurationError,
   BoxRuntimeProviderError,
+  COMPANION_PI_EVENT_READ_LIMIT,
   composeDaemonFailureDetail,
   PI_DAEMON_FAILURE_MESSAGE,
 } from "./boxCompanionRuntime";
@@ -24,6 +29,59 @@ const LAYOUT_RUN_COMMAND = `bash "$HOME/${LAYOUT_SCRIPT_PATH}"`;
 
 function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
+}
+
+/**
+ * Run one Box command the way a Box runs it — bash, with the Box's HOME — and answer in the
+ * provider's envelope. The Pi event read is a shell script whose failure modes are shell failure
+ * modes, so the reads below execute the script the adapter sends rather than assert on its text.
+ */
+function runOnBoxDisk(command: string, home: string): Promise<{
+  success: boolean;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}> {
+  return new Promise((resolve) => {
+    execFile(
+      "bash",
+      ["-c", command],
+      { env: { HOME: home, PATH: process.env.PATH ?? "/usr/bin:/bin" }, maxBuffer: 8 * 1024 * 1024 },
+      (error, stdout, stderr) => {
+        const code = (error as { code?: unknown } | null)?.code;
+        const exitCode = typeof code === "number" ? code : error ? 1 : 0;
+        resolve({ success: exitCode === 0, exitCode, stdout, stderr });
+      },
+    );
+  });
+}
+
+/** A throwaway Box HOME holding the log the Pi daemon writes, or no log at all for `null`. */
+async function boxDiskWithPiLog(contents: string | null): Promise<{ home: string; log: string }> {
+  const home = await mkdtemp(join(tmpdir(), "companion-pi-log-"));
+  const logs = join(home, ".companion", "runtime", "logs");
+  await mkdir(logs, { recursive: true });
+  const log = join(logs, "pi.rpc.ndjson");
+  if (contents !== null) await writeFile(log, contents);
+  return { home, log };
+}
+
+/** Read events against one of those disks, reporting the status the script exited with. */
+async function readEventsOnBoxDisk(input: { home: string; offset: number }): Promise<{
+  chunk: string;
+  offset: number;
+  exitCode: number;
+}> {
+  let exitCode = -1;
+  vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    const executed = await runOnBoxDisk(String(body.command), input.home);
+    exitCode = executed.exitCode;
+    return json(executed);
+  }));
+  const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+  const chunk = await runtime.readEvents({ boxId: "bx_23456789", offset: input.offset });
+  return { ...chunk, exitCode };
 }
 
 describe("AsciiBoxCompanionRuntime", () => {
@@ -1957,6 +2015,98 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(command).toContain("offset=4096");
     expect(command).toContain("logs/pi.rpc.ndjson");
     expect(result).toEqual({ chunk: "{\"type\":\"agent_settled\"}\n", offset: 0 });
+  });
+
+  /**
+   * A read is how a live thread reaches the operator, so every state a Box disk can be in has to come
+   * back as a chunk. Only a Box that could not run the read at all is a failure, and it says why.
+   */
+  describe("reading the Pi event log against a real disk", () => {
+    const event = (index: number) => `{"type":"agent_message","text":"line ${index}"}`;
+
+    it("reads a log longer than the read limit one chunk at a time instead of failing", async () => {
+      let log = "";
+      for (let index = 0; log.length < COMPANION_PI_EVENT_READ_LIMIT * 3; index += 1) {
+        log += `${event(index)}\n`;
+      }
+      const { home } = await boxDiskWithPiLog(log);
+
+      const first = await readEventsOnBoxDisk({ home, offset: 0 });
+
+      // `head` stops at the read limit and closes the pipe, which kills `tail` with SIGPIPE. This read
+      // exited 141 under `pipefail` and reported an unreadable log for a thread that was fine.
+      expect(first.exitCode).toBe(0);
+      expect(first.offset).toBe(0);
+      expect(Buffer.byteLength(first.chunk, "utf8")).toBe(COMPANION_PI_EVENT_READ_LIMIT);
+      expect(first.chunk.startsWith(`${event(0)}\n`)).toBe(true);
+
+      // The bytes past the limit are not lost: the next sync resumes at the offset it stopped on.
+      const next = await readEventsOnBoxDisk({ home, offset: COMPANION_PI_EVENT_READ_LIMIT });
+
+      expect(next.exitCode).toBe(0);
+      expect(next.offset).toBe(COMPANION_PI_EVENT_READ_LIMIT);
+      expect(Buffer.byteLength(next.chunk, "utf8")).toBe(COMPANION_PI_EVENT_READ_LIMIT);
+      expect(next.chunk).not.toBe(first.chunk);
+    });
+
+    it("reads a log the daemon has not written yet as an empty log at the top", async () => {
+      const absent = await boxDiskWithPiLog(null);
+      const untouched = await boxDiskWithPiLog("");
+
+      await expect(readEventsOnBoxDisk({ home: absent.home, offset: 0 }))
+        .resolves.toEqual({ chunk: "", offset: 0, exitCode: 0 });
+      await expect(readEventsOnBoxDisk({ home: untouched.home, offset: 0 }))
+        .resolves.toEqual({ chunk: "", offset: 0, exitCode: 0 });
+    });
+
+    it("holds the offset when the Box will not report the log size", async () => {
+      // Something at the log path that does not answer as a byte stream. Rewinding to the top here
+      // would reproject the whole transcript, and failing would blame a thread that is fine.
+      const { home, log } = await boxDiskWithPiLog(null);
+      await mkdir(log, { recursive: true });
+
+      await expect(readEventsOnBoxDisk({ home, offset: 4_096 }))
+        .resolves.toEqual({ chunk: "", offset: 4_096, exitCode: 0 });
+    });
+
+    it.skipIf(process.getuid?.() === 0)("holds the offset when the log cannot be read", async () => {
+      const { home, log } = await boxDiskWithPiLog(`${event(0)}\n`);
+      await chmod(log, 0o000);
+
+      await expect(readEventsOnBoxDisk({ home, offset: 4_096 }))
+        .resolves.toEqual({ chunk: "", offset: 4_096, exitCode: 0 });
+    });
+
+    it("restarts from the top when a rebuilt disk shrank the log", async () => {
+      const { home } = await boxDiskWithPiLog(`${event(0)}\n`);
+
+      await expect(readEventsOnBoxDisk({ home, offset: 4_096 }))
+        .resolves.toEqual({ chunk: `${event(0)}\n`, offset: 0, exitCode: 0 });
+    });
+
+    it("reads only the bytes after the offset it was given", async () => {
+      const read = `${event(0)}\n`;
+      const { home } = await boxDiskWithPiLog(`${read}${event(1)}\n`);
+      const offset = Buffer.byteLength(read, "utf8");
+
+      await expect(readEventsOnBoxDisk({ home, offset }))
+        .resolves.toEqual({ chunk: `${event(1)}\n`, offset, exitCode: 0 });
+    });
+
+    it("reports the Box exit status and last line when a read genuinely fails", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => json({
+        success: false,
+        exitCode: 127,
+        stdout: "",
+        stderr: "bash: line 2: wc: command not found",
+      })));
+      const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+      await expect(runtime.readEvents({ boxId: "bx_23456789", offset: 0 })).rejects.toMatchObject({
+        status: 502,
+        message: "Pi event log could not be read from Box (exit 127): bash: line 2: wc: command not found",
+      });
+    });
   });
 
   it("best-effort archives a newly created Box when its id cannot be persisted", async () => {
