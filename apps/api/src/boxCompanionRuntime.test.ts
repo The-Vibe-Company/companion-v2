@@ -3,6 +3,9 @@ import { COMPANION_RUNTIME_ERROR_MAX_LENGTH } from "@companion/core";
 import {
   AsciiBoxCompanionRuntime,
   BoxRuntimeConfigurationError,
+  BoxRuntimeProviderError,
+  composeDaemonFailureDetail,
+  PI_DAEMON_FAILURE_MESSAGE,
 } from "./boxCompanionRuntime";
 import { companionRuntimeErrorMessage } from "./companionRuntimeError";
 
@@ -1112,10 +1115,12 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(error.message).not.toContain("ExecStart");
   });
 
-  it("stays inside the stored line for any mix of fragments the Box reports", async () => {
+  it("stays inside the stored line for any mix of fragments the Box reports", () => {
     // The fragments are clamped against a shared allowance, so the arithmetic has to hold for
     // every combination of present, absent, short, and overlong lines rather than the few shapes
     // production has shown so far. A message over the limit loses its tail to the sanitizer.
+    // The sweep reads one stdout at a time because that is all the arithmetic depends on; the wake
+    // that hands it this stdout is covered by the failures above.
     // Prose-shaped filler: an unbroken run of 40+ word characters is credential-shaped and would
     // be redacted, which is a different behavior than the length arithmetic under test here.
     const filler = (size: number): string => "chars ".repeat(size).slice(0, size).trim();
@@ -1132,54 +1137,13 @@ describe("AsciiBoxCompanionRuntime", () => {
                 : "",
               stderrSize ? `companion-pi-stderr ${filler(stderrSize)}` : "",
             ].filter(Boolean).join("\n");
-            const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
-              const url = String(rawUrl);
-              const method = init?.method ?? "GET";
-              const body = init?.body
-                ? JSON.parse(String(init.body)) as Record<string, unknown>
-                : {};
-              if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
-              if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
-              if (url.endsWith("/commands") && method === "POST") {
-                const command = String(body.command);
-                if (command.includes("companion_label")) {
-                  return json({ success: true, exitCode: 0, stdout, stderr: "" });
-                }
-                if (command.includes("is-active")) {
-                  return json({ success: true, exitCode: 0, stdout: "activating\n", stderr: "" });
-                }
-                return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
-              }
-              throw new Error(`unexpected Box request: ${method} ${url}`);
-            });
-            vi.stubGlobal("fetch", fetchMock);
-            const runtime = new AsciiBoxCompanionRuntime({
-              COMPANION_BOX_API_KEY: "box_test",
-              COMPANION_BOX_POLL_INTERVAL_MS: "1",
-              COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS: "1",
-            });
 
-            const error = await runtime.start({
-              companionId: "11111111-1111-4111-8111-111111111111",
-              orgId: "22222222-2222-4222-8222-222222222222",
-              boxId: "bx_23456789",
-              clientSurface: "web",
-              providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
-              replaceProviderAuth: true,
-              mcpCredentials: [],
-              mcpAccounts: [],
-              skills: [],
-              onBoxAssigned: async () => undefined,
-            }).then(
-              (): never => {
-                throw new Error("start returned running for a daemon that never became active");
-              },
-              (thrown: unknown) => thrown as Error,
-            );
+            const message = `${PI_DAEMON_FAILURE_MESSAGE}${composeDaemonFailureDetail(stdout)}`;
+            const error = new BoxRuntimeProviderError(message, 502);
 
-            expect(error.message.length).toBeLessThanOrEqual(COMPANION_RUNTIME_ERROR_MAX_LENGTH);
+            expect(message.length).toBeLessThanOrEqual(COMPANION_RUNTIME_ERROR_MAX_LENGTH);
             // Nothing the Box printed may survive as a second line or be dropped by the sanitizer.
-            expect(companionRuntimeErrorMessage(error)).toBe(error.message);
+            expect(companionRuntimeErrorMessage(error)).toBe(message);
           }
         }
       }
