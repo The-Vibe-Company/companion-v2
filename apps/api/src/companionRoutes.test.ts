@@ -569,6 +569,40 @@ describe("Companions API feature gate", () => {
     }));
   });
 
+  it("records a reply when Pi answered inside a thinking block and settled", async () => {
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [{ ...message, content: "What year is it? One word." }],
+      piLogOffset: 512,
+    });
+    const chunk = [
+      { type: "message_end", message: { role: "user", content: "What year is it? One word." } },
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "\n2025" }],
+          stopReason: "stop",
+        },
+      },
+      { type: "agent_settled" },
+    ].map((event) => `${JSON.stringify(event)}\n`).join("");
+    const runtime = boxRuntime({ readEvents: vi.fn(async () => ({ chunk, offset: 512 })) });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    expect(coreMocks.recordCompanionPiProjection).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      entries: [expect.objectContaining({ role: "assistant", content: "2025" })],
+    }));
+  });
+
   it("keeps the delivery watermark when reading the Pi log fails after the prompt", async () => {
     coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
     coreMocks.listPendingCompanionMessages.mockResolvedValue({ pending: [message], piLogOffset: 512 });
