@@ -3,6 +3,7 @@ import {
   AsciiBoxCompanionRuntime,
   BoxRuntimeConfigurationError,
 } from "./boxCompanionRuntime";
+import { companionRuntimeErrorMessage } from "./companionRuntimeError";
 
 const box = {
   id: "bx_23456789",
@@ -711,6 +712,224 @@ describe("AsciiBoxCompanionRuntime", () => {
       skills: [],
       onBoxAssigned: async () => undefined,
     })).rejects.toThrow("Pi daemon failed to start");
+  });
+
+  it("waits for a restarted Pi daemon that is still activating instead of failing the wake", async () => {
+    const probes: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        if (command.includes("is-active") && !command.includes("companion_label")) {
+          probes.push(command);
+          // systemd forks ExecStart and returns from `restart` before Type=simple is up, so the
+          // first probes legitimately answer `activating`.
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: probes.length < 3 ? "activating\n" : "active\n",
+            stderr: "",
+          });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS: "5000",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    // The wake succeeds on the probe that observes `active`, and the Box is never replaced or
+    // stopped on the way there.
+    expect(probes.length).toBeGreaterThanOrEqual(3);
+    expect(result).toMatchObject({ runtimeState: "running", daemonState: "running" });
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/stop"))).toBe(false);
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
+  });
+
+  it("names the unit status and Pi's own stderr when the daemon never becomes active", async () => {
+    const commands: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        if (command.includes("companion_label")) {
+          return json({
+            success: true,
+            exitCode: 0,
+            // Verbatim shape of the labeled command's output, systemd's own indentation included.
+            stdout: [
+              "companion-pi-state failed",
+              "companion-pi-status      Active: failed (Result: exit-code) since Thu 2026-08-13"
+              + " 07:12:03 UTC; 1s ago",
+              "companion-pi-status     Process: 4242 ExecStart=/home/user/.companion/bin/pi-daemon"
+              + " (code=exited, status=1/FAILURE)",
+              "companion-pi-stderr pi: error: unknown option '--skill'",
+              "",
+            ].join("\n"),
+            stderr: "",
+          });
+        }
+        if (command.includes("is-active")) {
+          // A crash-looping unit answers `activating` between restarts and never settles.
+          return json({ success: true, exitCode: 0, stdout: "activating\n", stderr: "" });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS: "20",
+    });
+
+    const error = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [{ env_key: "GITHUB_TOKEN_WORK", value: "mcp-secret" }],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    }).then(
+      (): never => {
+        throw new Error("start returned running for a daemon that never became active");
+      },
+      (thrown: unknown) => thrown as Error,
+    );
+
+    // The bare sentence cost a production probe to diagnose: the stored line has to say what the
+    // unit reported and what Pi complained about.
+    expect(error.message).toContain("Pi daemon is not running after start");
+    expect(error.message).toContain("is-active: failed");
+    expect(error.message).toContain("Active: failed (Result: exit-code)");
+    expect(error.message).toContain("pi.stderr.log: pi: error: unknown option '--skill'");
+    // The control plane keeps only the first sanitized line of bounded length, so the detail has to
+    // survive that unchanged rather than be truncated away or redacted as credential-shaped text.
+    expect(error.message.split("\n")).toHaveLength(1);
+    expect(companionRuntimeErrorMessage(error)).toBe(error.message);
+    // Diagnosing the failure may not read the credential files or archive the Box.
+    const diagnostic = commands.find((command) => command.includes("companion_label")) ?? "";
+    expect(diagnostic).toContain("logs/pi.stderr.log");
+    expect(diagnostic).not.toContain("providers.env");
+    expect(diagnostic).not.toContain("auth.json");
+    for (const command of commands) expect(command).not.toContain("mcp-secret");
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/stop"))).toBe(false);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
+  });
+
+  it("keeps the generic daemon failure when the Box cannot answer the diagnostic", async () => {
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        if (command.includes("companion_label")) {
+          return json({ code: "box_direct_failed", message: "command transport failed" }, 502);
+        }
+        if (command.includes("is-active")) {
+          return json({ success: true, exitCode: 0, stdout: "inactive\n", stderr: "" });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS: "20",
+    });
+
+    // A Box that will not run the diagnostic still has to fail the wake with its own reason rather
+    // than replacing it with the transport error.
+    await expect(runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    })).rejects.toThrow("Pi daemon is not running after start");
+  });
+
+  it("never starts a Box or a daemon from the status and desktop paths", async () => {
+    const commands: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/commands") && method === "POST") {
+        commands.push(String(body.command));
+        // The daemon is down, which a read-only path reports rather than repairs.
+        return json({ success: true, exitCode: 0, stdout: "inactive\n", stderr: "" });
+      }
+      if (url.includes("/desktop") && method === "POST") {
+        return json({ desktopUrl: "https://desktop.example.test/session", provisioning: false });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS: "5000",
+    });
+
+    const status = await runtime.status({ boxId: "bx_23456789" });
+    const desktop = await runtime.desktop({ boxId: "bx_23456789" });
+
+    expect(status).toMatchObject({ runtimeState: "stopped", daemonState: "stopped" });
+    expect(desktop).toEqual({ url: "https://desktop.example.test/session", provisioning: false });
+    // The wake poll belongs to start alone: status reads the daemon once and neither path restarts
+    // the unit, creates a Box, or resumes one.
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("is-active");
+    expect(commands[0]).not.toContain("restart companion-pi-daemon.service");
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
   });
 
   it("recovers a deterministically named archived Box before restarting Pi", async () => {

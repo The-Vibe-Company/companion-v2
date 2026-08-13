@@ -199,6 +199,20 @@ waits briefly before failing with a message that names the missing user bus. Sto
 for the same reason: a Box that never started Pi has no loaded unit, so only a daemon still active
 after the stop attempt is reported as a failure.
 
+A successful `systemctl --user restart` only means systemd accepted the job. The unit is
+`Type=simple` with `Restart=on-failure`, so a daemon that is merely slow to open its RPC FIFO and one
+that is crash-looping both answer `activating` for the first seconds, and reading a single `is-active`
+probe as the verdict turned healthy starts into `Pi daemon is not running after start` wakes. A start
+therefore polls `is-active` for up to `COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS` (20s by default) at the
+Box poll interval and returns running on the first probe that observes `active`. A daemon that never
+gets there fails the wake with what the Box actually reported: the unit's `is-active` word, its
+`Active:` line from `systemctl --user status`, and the last non-empty line of
+`~/.companion/runtime/logs/pi.stderr.log`, gathered by one command that reads neither the provider
+auth file nor the transient MCP credential file. The fragments are clamped so the whole reason fits
+the single sanitized line `companions.last_error` stores. Neither the poll nor the failure stops,
+archives, or retires the Box: only a Box already beyond recovery — terminal `error` state or failed
+Pi setup — is replaced, and that decision is made before the daemon is ever restarted.
+
 ## Pi Skills injection
 
 Pi starts with `--no-skills` so ambient Box or package skills cannot leak into a Companion. For a
@@ -314,6 +328,7 @@ Optional settings:
 - `COMPANION_BOX_TTL_SECONDS` (default `3600`)
 - `COMPANION_BOX_POLL_INTERVAL_MS` (default `1000`)
 - `COMPANION_BOX_READY_TIMEOUT_MS` (default `120000`)
+- `COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS` (default `20000`)
 - `COMPANION_PI_INSTALL_COMMAND`
 - `COMPANION_PI_MCP_ADAPTER_PACKAGE` (default pinned to `npm:pi-mcp-adapter@2.12.1`)
 
