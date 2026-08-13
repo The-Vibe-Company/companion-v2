@@ -252,6 +252,30 @@ describe("CompanionsApp Box desktop", () => {
     expect(container.textContent).toContain("Box · online");
   });
 
+  it("keeps a failed handoff readable while the thread keeps polling", async () => {
+    vi.useFakeTimers();
+    const tab = tabStub();
+    (window.open as ReturnType<typeof vi.fn>).mockReturnValue(tab);
+    companionsApi.openCompanionDesktop.mockResolvedValue({
+      desktop_url: null,
+      provisioning: true,
+      automation: "lux",
+    });
+    const container = await open(companion());
+
+    await clickBoxChip(container);
+    expect(container.textContent).toContain("The Box desktop is still starting");
+
+    // An awake thread re-reads itself every couple of seconds. That refresh clears its own load
+    // failure, and it must not take this answer with it: a wiped notice reads as nothing happened.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    expect(companionsApi.syncCompanionThread).toHaveBeenCalled();
+    expect(container.textContent).toContain("The Box desktop is still starting");
+  });
+
   it("keeps a Viewer's open thread free of every Box call, including status", async () => {
     vi.useFakeTimers();
     companionsApi.getCompanionThread.mockResolvedValue(

@@ -110,6 +110,12 @@ export function CompanionsApp({
   );
   const [thread, setThread] = useState<Thread | null>(null);
   const [threadError, setThreadError] = useState<string | null>(null);
+  /**
+   * Why the last desktop handoff opened nothing. It is kept apart from `threadError` because the
+   * live thread poll clears that one every couple of seconds, which would erase this answer before
+   * anyone could read it and leave a failed handoff looking like nothing happened at all.
+   */
+  const [desktopError, setDesktopError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [waking, setWaking] = useState(false);
   const [openingDesktop, setOpeningDesktop] = useState(false);
@@ -152,6 +158,7 @@ export function CompanionsApp({
     setOpenedId(companion.id);
     setThread(null);
     setThreadError(null);
+    setDesktopError(null);
     setPluginsOpen(false);
     threadUrl(companion.id);
   };
@@ -162,6 +169,7 @@ export function CompanionsApp({
     setOpenedId(null);
     setThread(null);
     setThreadError(null);
+    setDesktopError(null);
     threadUrl(null);
     // Leaving the thread unmounts the back button, so focus returns to the row it came from.
     window.requestAnimationFrame(() => {
@@ -301,7 +309,7 @@ export function CompanionsApp({
     const tab = window.open("", "_blank");
     if (tab) tab.opener = null;
     setOpeningDesktop(true);
-    setThreadError(null);
+    setDesktopError(null);
     try {
       const desktop = await openCompanionDesktop(currentOrg.id, opened.id);
       if (desktop.desktop_url && tab) {
@@ -310,15 +318,15 @@ export function CompanionsApp({
       }
       tab?.close();
       if (!desktop.desktop_url) {
-        setThreadError(desktop.provisioning
+        setDesktopError(desktop.provisioning
           ? "The Box desktop is still starting. Try again in a moment."
           : "This Box has no desktop to open yet.");
         return;
       }
-      setThreadError("This browser blocked the Box desktop tab. Allow pop-ups here, then try again.");
+      setDesktopError("This browser blocked the Box desktop tab. Allow pop-ups here, then try again.");
     } catch (cause) {
       tab?.close();
-      setThreadError(cause instanceof Error ? cause.message : "The Box desktop could not be opened.");
+      setDesktopError(cause instanceof Error ? cause.message : "The Box desktop could not be opened.");
     } finally {
       setOpeningDesktop(false);
     }
@@ -472,7 +480,7 @@ export function CompanionsApp({
             <CompanionThread
               companion={opened}
               thread={thread}
-              error={threadError}
+              error={desktopError ?? threadError}
               busy={sending}
               waking={waking}
               openingDesktop={openingDesktop}
