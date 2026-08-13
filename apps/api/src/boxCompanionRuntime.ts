@@ -39,6 +39,12 @@ const PI_DAEMON_DIAGNOSTIC_LABELS = {
   status: "companion-pi-status",
   stderr: "companion-pi-stderr",
 } as const;
+/**
+ * Characters each diagnostic fragment may spend. `companions.last_error` keeps one sanitized line
+ * of bounded length, so the three fragments and their labels have to fit it together: a status line
+ * long enough on its own would push out the Pi stderr line the diagnostic exists to surface.
+ */
+const PI_DAEMON_DIAGNOSTIC_BUDGETS = { state: 24, status: 74, stderr: 74 } as const;
 const READY_STATES = new Set<BoxState>(["ready", "idle", "running"]);
 const STARTING_STATES = new Set<BoxState>(["init", "provisioning", "provisioned", "cloning"]);
 const ARCHIVED_STATES = new Set<BoxState>(["archiving", "archived"]);
@@ -577,9 +583,11 @@ exit 0`,
     // `Active:` is systemd's own verdict and is printed before the process detail, so it leads.
     const status = lines(PI_DAEMON_DIAGNOSTIC_LABELS.status).at(0);
     const stderr = lines(PI_DAEMON_DIAGNOSTIC_LABELS.stderr).at(-1);
-    if (state) fragments.push(`is-active: ${clampDiagnostic(state, 32)}`);
-    if (status) fragments.push(clampDiagnostic(status, 80));
-    if (stderr) fragments.push(`pi.stderr.log: ${clampDiagnostic(stderr, 80)}`);
+    if (state) fragments.push(`is-active: ${clampDiagnostic(state, PI_DAEMON_DIAGNOSTIC_BUDGETS.state)}`);
+    if (status) fragments.push(clampDiagnostic(status, PI_DAEMON_DIAGNOSTIC_BUDGETS.status));
+    if (stderr) {
+      fragments.push(`pi.stderr.log: ${clampDiagnostic(stderr, PI_DAEMON_DIAGNOSTIC_BUDGETS.stderr)}`);
+    }
     return fragments.length ? `: ${fragments.join("; ")}` : "";
   }
 
