@@ -26,6 +26,19 @@ const BOX_FILE_PART_BYTES = 3 * 1024 * 1024;
 const BOX_FILE_PART_TIMEOUT_MS = 120_000;
 /** Bytes of Pi RPC output one control-plane sync may pull; the rest is read by the next sync. */
 const COMPANION_PI_EVENT_READ_LIMIT = 262_144;
+/**
+ * How long a restarted Pi daemon has to answer `active`. `systemctl --user restart` returns once
+ * systemd has forked `ExecStart`, and the unit is `Type=simple` with `Restart=on-failure`, so a
+ * daemon that is merely slow and one that is crash-looping both answer `activating` for the first
+ * seconds. Reading a single probe as the verdict is what turned healthy starts into wake failures.
+ */
+const PI_DAEMON_ACTIVE_TIMEOUT_MS = 20_000;
+/** Labels the diagnostic command prints so each fragment can be recovered from one stdout. */
+const PI_DAEMON_DIAGNOSTIC_LABELS = {
+  state: "companion-pi-state",
+  status: "companion-pi-status",
+  stderr: "companion-pi-stderr",
+} as const;
 const READY_STATES = new Set<BoxState>(["ready", "idle", "running"]);
 const STARTING_STATES = new Set<BoxState>(["init", "provisioning", "provisioned", "cloning"]);
 const ARCHIVED_STATES = new Set<BoxState>(["archiving", "archived"]);
@@ -150,6 +163,29 @@ function commandFailureDetail(result: CommandEnvelope): string {
   const output = lastLine(result.stderr) ?? lastLine(result.stdout);
   const exit = result.exitCode === null ? "" : ` (exit ${result.exitCode})`;
   return output ? `${exit}: ${output}` : exit;
+}
+
+/**
+ * Recover the lines the diagnostic command tagged with one label. Each fragment is emitted on its
+ * own line so a status line and a Pi stderr line can be told apart without parsing systemctl's
+ * layout, and anything the Box printed unlabeled is discarded rather than guessed at.
+ */
+function labeledDiagnosticLines(stdout: string, label: string): string[] {
+  return stdout
+    .split(/[\r\n]+/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(`${label} `))
+    .map((line) => line.slice(label.length + 1).trim())
+    .filter(Boolean);
+}
+
+/**
+ * Keep one diagnostic fragment short. The control plane stores a single sanitized line of bounded
+ * length, so a status line and a stderr line that both ran long would push each other out of it.
+ */
+function clampDiagnostic(value: string, limit: number): string {
+  const collapsed = value.replace(/\s+/g, " ").trim();
+  return collapsed.length <= limit ? collapsed : `${collapsed.slice(0, limit - 1).trimEnd()}…`;
 }
 
 /** Where the layout script is staged on the Box disk so it runs as a file, never as a command. */
@@ -324,6 +360,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
   readonly #ttlSeconds: number;
   readonly #pollIntervalMs: number;
   readonly #readyTimeoutMs: number;
+  readonly #daemonActiveTimeoutMs: number;
   readonly #installCommand: string | undefined;
   readonly #mcpAdapterPackage: string;
 
@@ -340,6 +377,10 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     this.#ttlSeconds = positiveInteger(env.COMPANION_BOX_TTL_SECONDS, 3600);
     this.#pollIntervalMs = positiveInteger(env.COMPANION_BOX_POLL_INTERVAL_MS, 1000);
     this.#readyTimeoutMs = positiveInteger(env.COMPANION_BOX_READY_TIMEOUT_MS, 120_000);
+    this.#daemonActiveTimeoutMs = positiveInteger(
+      env.COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS,
+      PI_DAEMON_ACTIVE_TIMEOUT_MS,
+    );
     this.#installCommand = env.COMPANION_PI_INSTALL_COMMAND;
     this.#mcpAdapterPackage =
       env.COMPANION_PI_MCP_ADAPTER_PACKAGE?.trim() || DEFAULT_PI_MCP_ADAPTER_PACKAGE;
@@ -494,6 +535,52 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
 systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true`,
     );
     return result.stdout.trim() === "active" ? "running" : "stopped";
+  }
+
+  /**
+   * Wait for the restarted unit to actually be running. A successful `restart` only means systemd
+   * accepted the job, so the daemon is given the whole window to reach `active` and the wait ends
+   * on the first probe that says it did.
+   */
+  async #waitDaemonActive(boxId: string): Promise<CompanionDaemonState> {
+    const deadline = Date.now() + this.#daemonActiveTimeoutMs;
+    let daemonState = await this.#daemonState(boxId);
+    while (daemonState !== "running" && Date.now() < deadline) {
+      await sleep(this.#pollIntervalMs);
+      daemonState = await this.#daemonState(boxId);
+    }
+    return daemonState;
+  }
+
+  /**
+   * Say why Pi is not running. A daemon that never reached `active` is either still starting, dead,
+   * or restarting on failure, and the generic sentence cannot tell those apart, so the unit's own
+   * verdict and the last line Pi wrote to its stderr log travel with the failure. Only systemd's
+   * summary lines and that log are read: the provider auth file and the transient MCP credential
+   * file are never opened, and the control plane redacts and truncates whatever is stored anyway.
+   */
+  async #daemonFailureDetail(boxId: string): Promise<string> {
+    const result = await this.#command(
+      boxId,
+      `${USER_BUS_ENVIRONMENT}
+companion_label() { while IFS= read -r line; do printf '%s %s\\n' "$1" "$line"; done; }
+systemctl --user is-active companion-pi-daemon.service 2>&1 | tail -n 1 | companion_label ${PI_DAEMON_DIAGNOSTIC_LABELS.state}
+systemctl --user status --no-pager --full companion-pi-daemon.service 2>&1 | grep -E '^ *(Active|Process|Main PID):' | head -n 2 | companion_label ${PI_DAEMON_DIAGNOSTIC_LABELS.status}
+tail -n 20 "$HOME/.companion/runtime/logs/pi.stderr.log" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 | companion_label ${PI_DAEMON_DIAGNOSTIC_LABELS.stderr}
+exit 0`,
+      30,
+    ).catch(() => null);
+    if (!result) return "";
+    const lines = (label: string): string[] => labeledDiagnosticLines(result.stdout, label);
+    const fragments: string[] = [];
+    const state = lines(PI_DAEMON_DIAGNOSTIC_LABELS.state).at(-1);
+    // `Active:` is systemd's own verdict and is printed before the process detail, so it leads.
+    const status = lines(PI_DAEMON_DIAGNOSTIC_LABELS.status).at(0);
+    const stderr = lines(PI_DAEMON_DIAGNOSTIC_LABELS.stderr).at(-1);
+    if (state) fragments.push(`is-active: ${clampDiagnostic(state, 32)}`);
+    if (status) fragments.push(clampDiagnostic(status, 80));
+    if (stderr) fragments.push(`pi.stderr.log: ${clampDiagnostic(stderr, 80)}`);
+    return fragments.length ? `: ${fragments.join("; ")}` : "";
   }
 
   async #removeProviderFile(boxId: string): Promise<void> {
@@ -784,8 +871,13 @@ trap - EXIT`,
         502,
       );
     }
-    const daemonState = await this.#daemonState(box.id);
-    if (daemonState !== "running") throw new BoxRuntimeProviderError("Pi daemon is not running after start", 502);
+    const daemonState = await this.#waitDaemonActive(box.id);
+    if (daemonState !== "running") {
+      throw new BoxRuntimeProviderError(
+        `Pi daemon is not running after start${await this.#daemonFailureDetail(box.id)}`,
+        502,
+      );
+    }
     return observation(await this.#get(box.id), daemonState);
   }
 
