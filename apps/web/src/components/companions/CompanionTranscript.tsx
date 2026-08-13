@@ -250,9 +250,13 @@ export function CompanionTranscript({
           >
             <div className="chat-column">
               {thread === null && (
-                <p className="chat-loading" aria-hidden="true">
-                  <span /><span /><span />
-                </p>
+                <>
+                  {/* The skeleton is decorative; the wait itself still has to be announced. */}
+                  <span className="sr-only" role="status">Loading conversation...</span>
+                  <p className="chat-loading" aria-hidden="true">
+                    <span /><span /><span />
+                  </p>
+                </>
               )}
               {empty && (
                 <div className="chat-start">

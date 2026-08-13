@@ -248,6 +248,15 @@ describe("CompanionThread", () => {
     expect(markup).toContain("Messages are saved here. Wake Luna when you want a reply.");
   });
 
+  it("announces the wait while the transcript is still loading", () => {
+    const markup = render({ thread: null });
+
+    // The skeleton lines are decorative, so the wait needs its own announcement or a reader is told
+    // nothing at all until the conversation arrives.
+    expect(markup).toContain("Loading conversation...");
+    expect(markup).toContain('aria-busy="true"');
+  });
+
   it("keys every turn to its transcript entry so a re-read updates in place", () => {
     const markup = render({});
 
