@@ -13,6 +13,7 @@
     "coverage": "vitest run --coverage --coverage.reporter=text-summary --coverage.reporter=json-summary"
   },
   "dependencies": {
+    "@assistant-ui/react": "0.15.14",
     "@companion/contracts": "workspace:*",
     "@companion/core": "workspace:*",
     "@companion/skills": "workspace:*",

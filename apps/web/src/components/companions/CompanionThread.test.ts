@@ -241,9 +241,105 @@ describe("CompanionThread", () => {
     expect(markup).not.toContain("Box entered error state");
   });
 
-  it("shows an empty thread as an invitation rather than a dead surface", () => {
+  it("shows an empty thread as what to do next rather than a dead surface", () => {
     const markup = render({ thread: thread({ entries: [], pending_count: 0, last_message_at: null }) });
 
-    expect(markup).toContain("Say hello to Luna");
+    expect(markup).toContain("No messages yet");
+    expect(markup).toContain("Messages are saved here. Wake Luna when you want a reply.");
+  });
+
+  it("keys every turn to its transcript entry so a re-read updates in place", () => {
+    const markup = render({});
+
+    // The primitives render one message per entry under the entry's own id, so the two-second thread
+    // re-read reconciles the turns that already exist instead of replacing the conversation.
+    expect(markup).toContain('data-message-id="msg:1"');
+    expect(markup).toContain('data-message-id="pi:0"');
+  });
+
+  it("names a writer once per passage instead of on every line", () => {
+    const markup = render({
+      thread: thread({
+        entries: [
+          {
+            event_id: "msg:1",
+            ordinal: 0,
+            role: "user",
+            content: "Draft the launch note",
+            author_id: "user-1",
+            author_name: "Ada",
+            created_at: "2026-08-12T12:01:00.000Z",
+          },
+          {
+            event_id: "msg:2",
+            ordinal: 1,
+            role: "user",
+            content: "Keep it under 200 words",
+            author_id: "user-1",
+            author_name: "Ada",
+            created_at: "2026-08-12T12:01:30.000Z",
+          },
+        ],
+      }),
+    });
+
+    expect(markup).toContain("Draft the launch note");
+    expect(markup).toContain("Keep it under 200 words");
+    expect(markup.match(/>You</g)).toHaveLength(1);
+  });
+
+  it("re-announces a writer once the conversation has moved on", () => {
+    const markup = render({
+      thread: thread({
+        entries: [
+          ...thread().entries,
+          {
+            event_id: "msg:9",
+            ordinal: 2,
+            role: "user",
+            content: "One more thing",
+            author_id: "user-1",
+            author_name: "Ada",
+            created_at: "2026-08-12T12:40:00.000Z",
+          },
+        ],
+      }),
+    });
+
+    // Two passages from the reader: the first message and the one that reopens the thread.
+    expect(markup.match(/>You</g)).toHaveLength(2);
+  });
+
+  it("shows a turn that only produced reasoning as the reply it is", () => {
+    const markup = render({
+      thread: thread({
+        entries: [
+          {
+            event_id: "pi:184",
+            ordinal: 0,
+            role: "assistant",
+            content: "Checking the changelog before answering.",
+            author_id: null,
+            author_name: null,
+            created_at: "2026-08-12T12:01:20.000Z",
+          },
+        ],
+      }),
+    });
+
+    expect(markup).toContain("Checking the changelog before answering.");
+  });
+
+  it("says a running Box owes a reply while the transcript ends on a member's message", () => {
+    const awaiting = thread({
+      entries: [thread().entries[0]!],
+      pending_count: 1,
+    });
+
+    expect(render({ thread: awaiting })).toContain("is replying...");
+    // A sleeping Box owes nothing until it is woken, and the composer hint says so instead.
+    expect(render({ companion: asleep, thread: awaiting })).not.toContain("is replying...");
+    // A reply that already landed ends the wait.
+    expect(render({})).not.toContain("is replying...");
   });
 });

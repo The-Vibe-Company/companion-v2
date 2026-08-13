@@ -814,8 +814,8 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  /* The conversation and the composer share one readable column on wide screens. */
-  --chat-gutter: max(20px, (100% - 900px) / 2);
+  /* Every turn is left-aligned in one reading column, so the column stays narrower than the page. */
+  --chat-gutter: max(20px, (100% - 720px) / 2);
 }
 
 .chat-head {
@@ -915,47 +915,64 @@ button.chat-box:focus-visible {
   margin: 12px var(--chat-gutter) 0;
 }
 
+.chat-thread {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .chat-log {
   flex: 1;
   min-height: 0;
-  padding: 20px var(--chat-gutter);
+  padding: 18px var(--chat-gutter) 6px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 14px;
 }
 
-/* A short conversation rests on the composer instead of floating under the header. Once the log
+/* A short conversation rests on the composer instead of floating under the header. Once the column
    overflows, `auto` resolves to zero, so scrolling back to the first message still works. */
-.chat-log > :first-child {
+.chat-column {
   margin-top: auto;
+  display: flex;
+  flex-direction: column;
 }
 
-.chat-msg {
-  max-width: min(72ch, 82%);
+/* One transcript, one column. A writer keeps the floor across consecutive turns, so the name and the
+   clock appear once per passage and the turns underneath are just the words. */
+.chat-turn {
   display: grid;
-  gap: 4px;
+  gap: 3px;
 }
 
-.chat-msg--user {
-  align-self: flex-end;
-  justify-items: end;
+.chat-turn--lead {
+  margin-top: 20px;
 }
 
-.chat-msg__who,
-.chat-msg time {
-  color: var(--color-muted);
-  font-size: var(--text-xs);
-  font-weight: 500;
+.chat-column > :first-child {
+  margin-top: 0;
 }
 
-.chat-msg p {
+.chat-turn__meta {
   margin: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-lg);
-  background: var(--color-surface);
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  color: var(--color-faint);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-turn__author {
+  color: var(--color-fg);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
+}
+
+.chat-turn__text {
+  margin: 0;
   color: var(--color-fg);
   font-size: var(--text-base);
   line-height: var(--leading-relaxed);
@@ -963,70 +980,174 @@ button.chat-box:focus-visible {
   overflow-wrap: anywhere;
 }
 
-.chat-msg--user p {
-  border-color: var(--color-accent-line);
+/* A member's message is a tinted block so the ask is scannable; the reply is plain text on the page,
+   which is what a reader is here to read. */
+.chat-turn--said .chat-turn__text {
+  justify-self: start;
+  padding: 7px 11px;
+  border-radius: var(--radius-md);
   background: var(--color-accent-tint);
 }
 
-.chat-msg--system p {
-  background: var(--color-surface-sunken);
+/* Sent, not yet saved: the message is on screen immediately and settles once the API answers. */
+.chat-turn--sending .chat-turn__text {
+  color: var(--color-muted);
+}
+
+/* What happened to the run rather than something anyone said. */
+.chat-note {
+  margin-top: 16px;
+}
+
+.chat-note .chat-turn__text {
   color: var(--color-muted);
   font-size: var(--text-sm);
 }
 
-.chat-empty {
-  max-width: 38ch;
-  margin: auto;
+/* A running Box that owes a reply says so; there is nothing to animate, the line is the state. */
+.chat-replying {
+  margin: 20px 0 0;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
   color: var(--color-muted);
   font-size: var(--text-sm);
-  text-align: center;
 }
 
-.chat-empty strong {
+.chat-loading {
+  margin: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.chat-loading span {
+  height: 11px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+}
+
+.chat-loading span:nth-child(1) { width: 38%; }
+.chat-loading span:nth-child(2) { width: 74%; }
+.chat-loading span:nth-child(3) { width: 56%; }
+
+.chat-start {
+  max-width: 48ch;
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+
+.chat-start strong {
+  display: block;
+  color: var(--color-fg);
+  font-size: var(--text-base);
+}
+
+.chat-start p {
+  margin: 4px 0 0;
+}
+
+/* Only reachable while the log is scrolled away from the newest turn; the primitive disables it at
+   the bottom, and a disabled jump has nothing to say. */
+.chat-jump {
+  position: sticky;
+  bottom: 2px;
+  align-self: center;
+  margin-top: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-full);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+  color: var(--color-muted);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.chat-jump:hover {
   color: var(--color-fg);
 }
 
-.chat-empty p {
-  margin: 5px 0 0;
+.chat-jump:disabled {
+  display: none;
 }
 
 .chat-composer {
   flex: none;
-  padding: 12px var(--chat-gutter) 16px;
+  padding: 10px var(--chat-gutter) 14px;
   border-top: 1px solid var(--color-line);
   background: var(--color-surface);
+}
+
+/* The field and its send control are one object, so the composer reads as a single place to type. */
+.chat-composer__field {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
   gap: 8px;
-}
-
-.chat-composer textarea {
-  min-height: 40px;
-  max-height: 180px;
-  padding: 10px 12px;
+  padding: 6px 6px 6px 12px;
   border: 1px solid var(--color-line-strong);
   border-radius: var(--radius-lg);
   background: var(--color-canvas);
-  color: var(--color-fg);
-  font: inherit;
-  line-height: var(--leading-normal);
-  resize: vertical;
-  field-sizing: content;
 }
 
-.chat-composer textarea:focus-visible {
+.chat-composer__field:focus-within {
   outline: 2px solid var(--color-accent-ring);
   outline-offset: 1px;
 }
 
-.chat-composer .cds-btn {
-  height: 40px;
+.chat-composer__input {
+  min-height: 30px;
+  max-height: 168px;
+  padding: 5px 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-fg);
+  font: inherit;
+  line-height: var(--leading-normal);
+  resize: none;
+  overflow-y: auto;
+}
+
+.chat-composer__input::placeholder {
+  color: var(--color-faint);
+}
+
+.chat-composer__input:focus-visible {
+  outline: none;
+}
+
+.chat-send {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--color-accent);
+  color: var(--color-accent-fg);
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-out-quint);
+}
+
+.chat-send:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
+.chat-send:disabled {
+  border-color: var(--color-line);
+  background: var(--color-surface-raised);
+  color: var(--color-faint);
+  cursor: not-allowed;
 }
 
 .chat-hint {
-  grid-column: 1 / -1;
-  margin: 0;
+  margin: 7px 0 0;
   color: var(--color-muted);
   font-size: var(--text-xs);
 }
@@ -1094,15 +1215,15 @@ button.chat-box:focus-visible {
   }
 
   .chat-log {
-    padding: 14px var(--chat-gutter);
+    padding: 14px var(--chat-gutter) 4px;
   }
 
   .chat-composer {
-    padding: 10px var(--chat-gutter) 14px;
+    padding: 8px var(--chat-gutter) 12px;
   }
 
-  .chat-msg {
-    max-width: 92%;
+  .chat-turn--lead {
+    margin-top: 16px;
   }
 
   .companions-head {

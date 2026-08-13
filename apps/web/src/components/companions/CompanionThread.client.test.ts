@@ -71,6 +71,10 @@ async function mount(
   return container;
 }
 
+function log(container: HTMLElement) {
+  return (container.querySelector(".chat-log") as HTMLElement).textContent ?? "";
+}
+
 function boxChip(container: HTMLElement) {
   return container.querySelector(".chat-box") as HTMLElement;
 }
@@ -120,6 +124,54 @@ describe("CompanionThread composer", () => {
     const container = await mount(async () => true);
 
     expect(document.activeElement).toBe(container.querySelector("h1"));
+  });
+
+  it("shows the message while the control plane is still saving it", async () => {
+    let settle: (saved: boolean) => void = () => {};
+    const container = await mount(() => new Promise<boolean>((resolve) => { settle = resolve; }));
+    type(container, "Draft the launch note");
+
+    await send(container);
+
+    // The composer clears on send, so the message has to appear in the transcript immediately or the
+    // text disappears with nothing to show for it.
+    expect(log(container)).toContain("Draft the launch note");
+
+    await act(async () => {
+      settle(true);
+    });
+
+    // Once the saved thread arrives it owns the message; the sent copy is dropped in the same update.
+    expect(container.querySelectorAll(".chat-turn--sending")).toHaveLength(0);
+  });
+
+  it("sends one message even when the composer is submitted twice", async () => {
+    const sent: string[] = [];
+    let settle: (saved: boolean) => void = () => {};
+    const container = await mount((content) => {
+      sent.push(content);
+      return new Promise<boolean>((resolve) => { settle = resolve; });
+    });
+    type(container, "Draft the launch note");
+
+    await send(container);
+    await send(container);
+    await act(async () => {
+      settle(true);
+    });
+
+    expect(sent).toEqual(["Draft the launch note"]);
+  });
+
+  it("keeps the draft when Escape is pressed in the composer", async () => {
+    const container = await mount(async () => true);
+    const composer = type(container, "Draft the launch note");
+
+    await act(async () => {
+      composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+
+    expect(composer.value).toBe("Draft the launch note");
   });
 });
 
