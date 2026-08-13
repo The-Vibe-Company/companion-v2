@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.42.0");
+    expect(pkg.version).toBe("1.43.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -126,7 +126,7 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("1:1 chat thread");
+    expect(changelog).toContain("member-private labeled MCP account metadata");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
@@ -135,6 +135,10 @@ describe("companion skill package + row", () => {
       ?.changes?.join("\n") ?? "";
     expect(sharingChanges).toContain("Owner, Editor, and Viewer sharing");
     expect(sharingChanges).toContain("outside delegated Skills Hub Agent Auth");
+    const threadChanges = manifest.metadata?.changelog
+      ?.find((entry) => entry.version === "1.42.0")
+      ?.changes?.join("\n") ?? "";
+    expect(threadChanges).toContain("1:1 chat thread");
     const toolchainChanges = manifest.metadata?.changelog
       ?.find((entry) => entry.version === "1.38.0")
       ?.changes?.join("\n") ?? "";
