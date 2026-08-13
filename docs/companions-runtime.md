@@ -72,7 +72,9 @@ Owner or Editor whose Box is already running the chip itself requests the deskto
 returned URL in a new tab. Because a browser only honours a tab the click itself asked for, the click
 claims a blank tab before the request and points it at the URL when it answers; a still-provisioning
 Box, a blocked tab, or a failed request closes that tab and states why on the thread without ever
-naming the secret-bearing URL. The URL is used once and never stored by the browser surface either. A
+naming the secret-bearing URL. That reason is held apart from the thread's own load failure, so the
+two-second refresh of an awake thread cannot clear it and leave a failed handoff looking like nothing
+happened. The URL is used once and never stored by the browser surface either. A
 Companion that is asleep offers Wake instead, because a desktop request cannot resume a Box, and a
 Viewer reads the chip as text: their thread polls only the control-plane projection, while a runner's
 open thread refreshes `GET /v1/companions/:id/runtime?live=true` on a slow interval, so a stale chip
