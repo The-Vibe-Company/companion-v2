@@ -45,9 +45,12 @@ describe("Companion runtime error reporting", () => {
     database,
   }));
 
+  // THE-330: the runtime chip (including `last_error`) lives on the shared workspace pool, not the
+  // Companion row. orgA is a team workspace, so its Companions share the one `org` pool.
   const storedError = async () => {
     const [row] = await integrationSql<Array<{ last_error: string | null }>>`
-      select last_error from companions where id = ${companionId}
+      select last_error from companion_runtime_pools
+      where org_id = ${fixture.orgA} and scope = 'org'
     `;
     return row?.last_error ?? null;
   };
@@ -120,8 +123,9 @@ describe("Companion runtime error reporting", () => {
 
   it("clears the reason when a live observation finds the Box healthy", async () => {
     await integrationSql`
-      update companions set runtime_state = 'error', daemon_state = 'error', last_error = ${failure}
-      where id = ${companionId}
+      update companion_runtime_pools
+      set runtime_state = 'error', daemon_state = 'error', last_error = ${failure}
+      where org_id = ${fixture.orgA} and scope = 'org'
     `;
 
     const observed = await asOwner((database) => updateCompanionObservation({
