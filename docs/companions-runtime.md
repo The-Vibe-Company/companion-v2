@@ -88,6 +88,12 @@ The projection deliberately keeps only conversation: Pi assistant text, plus a s
 turn errors or is aborted. Thinking blocks, tool calls, and tool results are dropped, so no Pi tool
 or Skills chrome reaches the thread UI.
 
+Delivery reads the pending list and advances the watermark in separate statements, so two requests
+that overlap can hand Pi the same prompt twice. One client cannot do this: the web surface runs its
+sends and syncs one at a time, skipping a poll that an in-flight request already covers. Two clients
+syncing the same thread in the same instant still can, and V1 accepts that: the transcript stays
+correct because projection is keyed by log byte offset, and the visible cost is a repeated prompt.
+
 ## Box disk layout
 
 Box stop archives the disk, so runtime sessions survive stop/resume at:

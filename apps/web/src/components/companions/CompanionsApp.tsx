@@ -21,6 +21,7 @@ import { CompanionThread } from "./CompanionThread";
 import { NewCompanionDialog } from "./NewCompanionDialog";
 import { ShareCompanionDialog } from "./ShareCompanionDialog";
 import { companionStatus, relativeTime } from "./status";
+import { createThreadQueue } from "./threadQueue";
 import { Onboarding } from "../org/Onboarding";
 import { useOrgActions } from "../org/useOrgActions";
 import { Sidebar } from "../skills/Sidebar";
@@ -94,6 +95,7 @@ export function CompanionsApp({
   const [sending, setSending] = useState(false);
   const [waking, setWaking] = useState(false);
   const threadRequestRef = useRef(0);
+  const threadQueueRef = useRef(createThreadQueue());
   const noop = () => {};
 
   const opened = useMemo(
@@ -146,10 +148,13 @@ export function CompanionsApp({
     if (!openedId) return;
     const requestId = ++threadRequestRef.current;
     try {
-      const next = live
-        ? await syncCompanionThread(currentOrg.id, openedId)
-        : await getCompanionThread(currentOrg.id, openedId);
-      if (requestId === threadRequestRef.current) {
+      const next = await threadQueueRef.current.run(
+        () => live
+          ? syncCompanionThread(currentOrg.id, openedId)
+          : getCompanionThread(currentOrg.id, openedId),
+        { skipWhenBusy: true },
+      );
+      if (next && requestId === threadRequestRef.current) {
         setThread(next);
         setThreadError(null);
       }
@@ -180,9 +185,13 @@ export function CompanionsApp({
     setSending(true);
     setThreadError(null);
     try {
-      const next = await sendCompanionMessage(currentOrg.id, openedId, content);
+      // Sending also delivers the backlog, so it waits for an in-flight sync instead of racing it.
+      const next = await threadQueueRef.current.run(
+        () => sendCompanionMessage(currentOrg.id, openedId, content),
+        { skipWhenBusy: false },
+      );
       threadRequestRef.current += 1;
-      setThread(next);
+      if (next) setThread(next);
     } catch (cause) {
       setThreadError(cause instanceof Error ? cause.message : "The message could not be sent.");
     } finally {
