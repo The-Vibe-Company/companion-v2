@@ -26,9 +26,9 @@ import type {
   CompanionThread as Thread,
   CompanionTranscriptEntry,
 } from "@companion/contracts";
+import { companionMessageEventId } from "@companion/contracts";
 import { Icon } from "../Icon";
 import {
-  SENDING_EVENT_ID,
   composerHint,
   replyExpected,
   transcriptTurns,
@@ -169,7 +169,7 @@ export function CompanionTranscript({
   companion: Companion;
   thread: Thread | null;
   busy: boolean;
-  onSend: (content: string) => Promise<boolean>;
+  onSend: (content: string, clientMessageId: string) => Promise<boolean>;
 }) {
   const canSend = thread ? thread.can_send : companion.access !== "viewer";
   const awake = companion.runtime.state === "running";
@@ -177,21 +177,27 @@ export function CompanionTranscript({
   const runtimeRef = useRef<AssistantRuntime | null>(null);
   const inFlight = useRef(false);
   /**
-   * The message this composer just sent, shown before the control plane answers. It is dropped in the
-   * same update that accepts the saved thread, so the sent message never appears twice, and a refused
-   * send drops it and hands the text back to the composer.
+   * The message this composer just sent, shown before the control plane answers. It already carries
+   * the event id the control plane will store it under, so the saved entry replaces it rather than
+   * joining it: the sent message cannot appear twice even if a thread read lands first. A refused send
+   * drops it and hands the text back to the composer.
    */
   const [outgoing, setOutgoing] = useState<CompanionTranscriptEntry | null>(null);
 
   const entries = useMemo(() => {
     const saved = thread?.entries ?? [];
-    return outgoing ? [...saved, outgoing] : [...saved];
+    if (!outgoing || saved.some((entry) => entry.event_id === outgoing.event_id)) return [...saved];
+    return [...saved, outgoing];
   }, [outgoing, thread]);
   const messages = useStableEntries(entries);
 
   const turns = useMemo(
-    () => transcriptTurns(messages, { viewerId, companionName: companion.name }),
-    [companion.name, messages, viewerId],
+    () => transcriptTurns(messages, {
+      viewerId,
+      companionName: companion.name,
+      sendingEventId: outgoing?.event_id ?? null,
+    }),
+    [companion.name, messages, outgoing, viewerId],
   );
   const turnsById = useMemo(
     () => new Map(turns.map((turn) => [turn.entry.event_id, turn])),
@@ -204,8 +210,11 @@ export function CompanionTranscript({
     // programmatic one, so one message is never sent twice.
     if (!content || !canSend || inFlight.current) return;
     inFlight.current = true;
+    // One submission, one id, kept for as long as this send lasts: whatever happens to the request,
+    // the control plane can only ever store the turn it names once.
+    const clientMessageId = crypto.randomUUID();
     setOutgoing({
-      event_id: SENDING_EVENT_ID,
+      event_id: companionMessageEventId(clientMessageId),
       ordinal: Number.MAX_SAFE_INTEGER,
       role: "user",
       content,
@@ -214,7 +223,7 @@ export function CompanionTranscript({
       created_at: new Date().toISOString(),
     });
     try {
-      const saved = await onSend(content);
+      const saved = await onSend(content, clientMessageId);
       if (!saved) restoreDraft(runtimeRef.current, content);
     } finally {
       inFlight.current = false;

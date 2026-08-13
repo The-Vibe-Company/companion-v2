@@ -226,7 +226,11 @@ describe("Companions API feature gate", () => {
       thread: { ...viewerThread, access: "owner", read_only: false, can_send: true },
       entry: message,
     });
-    coreMocks.listPendingCompanionMessages.mockResolvedValue({ pending: [], piLogOffset: 0 });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
     coreMocks.recordCompanionPiProjection.mockResolvedValue({
       ...viewerThread,
       access: "owner",
@@ -473,7 +477,11 @@ describe("Companions API feature gate", () => {
 
   it("hands a message to a running Pi daemon and records the delivery watermark", async () => {
     coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
-    coreMocks.listPendingCompanionMessages.mockResolvedValue({ pending: [message], piLogOffset: 0 });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
     const runtime = boxRuntime();
     const app = new Hono<{ Variables: ApiVariables }>();
     registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
@@ -508,6 +516,7 @@ describe("Companions API feature gate", () => {
     coreMocks.listPendingCompanionMessages.mockResolvedValue({
       pending: [backlog, latest],
       piLogOffset: 0,
+      deliveredOrdinal: null,
     });
     const runtime = boxRuntime();
     const app = new Hono<{ Variables: ApiVariables }>();
@@ -542,6 +551,7 @@ describe("Companions API feature gate", () => {
     coreMocks.listPendingCompanionMessages.mockResolvedValue({
       pending: [backlog, latest],
       piLogOffset: 0,
+      deliveredOrdinal: null,
     });
     const runtime = boxRuntime({
       prompt: vi.fn(async (input: { message: string }) => {
@@ -567,7 +577,11 @@ describe("Companions API feature gate", () => {
 
   it("keeps a message pending when Pi refuses it", async () => {
     coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
-    coreMocks.listPendingCompanionMessages.mockResolvedValue({ pending: [message], piLogOffset: 0 });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
     const runtime = boxRuntime({
       prompt: vi.fn(async () => {
         throw new Error("pi daemon is not running");
@@ -585,6 +599,104 @@ describe("Companions API feature gate", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
     expect(coreMocks.recordCompanionPiProjection).not.toHaveBeenCalled();
+  });
+
+  it("carries the sender's message id into persistence so one send is one turn", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => boxRuntime());
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "Summarize the incident",
+        client_message_id: "33333333-3333-4333-8333-333333333333",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(coreMocks.sendCompanionMessage).toHaveBeenCalledWith(expect.objectContaining({
+      clientMessageId: "33333333-3333-4333-8333-333333333333",
+    }));
+  });
+
+  it("rejects a message id that is not one", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident", client_message_id: "msg:33" }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(coreMocks.sendCompanionMessage).not.toHaveBeenCalled();
+  });
+
+  it("answers a resent send with the turn it already stored and never prompts Pi twice", async () => {
+    // The same send arriving again: the message is already in the transcript and already delivered, so
+    // nothing is pending. Pi must not be handed the prompt a second time, or the turn is answered
+    // twice over a message that was only ever sent once.
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.sendCompanionMessage.mockResolvedValue({
+      thread: { ...viewerThread, access: "owner", read_only: false, can_send: true },
+      entry: message,
+    });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [],
+      piLogOffset: 0,
+      deliveredOrdinal: message.ordinal,
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "Summarize the incident",
+        client_message_id: "33333333-3333-4333-8333-333333333333",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    // Already delivered stays delivered: a replay must not report the turn as still waiting.
+    await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
+    expect(runtime.prompt).not.toHaveBeenCalled();
+    expect(coreMocks.recordCompanionPiProjection).not.toHaveBeenCalled();
+  });
+
+  it("delivers a resent send whose first attempt never reached Pi", async () => {
+    // The retry semantics the watermark already owns: a message that is durable but undelivered is
+    // still pending, so resending it hands it to Pi once rather than storing it again.
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.sendCompanionMessage.mockResolvedValue({
+      thread: { ...viewerThread, access: "owner", read_only: false, can_send: true },
+      entry: message,
+    });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "Summarize the incident",
+        client_message_id: "33333333-3333-4333-8333-333333333333",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
+    expect(runtime.prompt).toHaveBeenCalledTimes(1);
   });
 
   it("rejects an empty message before any persistence", async () => {
@@ -606,6 +718,7 @@ describe("Companions API feature gate", () => {
     coreMocks.listPendingCompanionMessages.mockResolvedValue({
       pending: [message],
       piLogOffset: 512,
+      deliveredOrdinal: null,
     });
     const reply = `${JSON.stringify({
       type: "message_end",
@@ -722,7 +835,11 @@ describe("Companions API feature gate", () => {
   });
 
   it("syncs a sleeping thread from the control plane without contacting Box", async () => {
-    coreMocks.listPendingCompanionMessages.mockResolvedValue({ pending: [message], piLogOffset: 0 });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
     const runtimeFactory = vi.fn(() => {
       throw new Error("Box client must not be created");
     });

@@ -254,14 +254,16 @@ export function CompanionsApp({
   }, [canRunOpened, openedAwake, openedId, refreshCompanion]);
 
   /** Resolves false when the message never reached the control plane, so the composer keeps its text. */
-  const onSend = async (content: string): Promise<boolean> => {
+  const onSend = async (content: string, clientMessageId: string): Promise<boolean> => {
     if (!openedId) return false;
     setSending(true);
     setThreadError(null);
     try {
       // Sending also delivers the backlog, so it waits for an in-flight sync instead of racing it.
+      // The composer's message id travels with the request, so one submission is one turn however
+      // many times the request itself reaches the control plane.
       const next = await threadQueueRef.current.run(
-        () => sendCompanionMessage(currentOrg.id, openedId, content),
+        () => sendCompanionMessage(currentOrg.id, openedId, content, clientMessageId),
         { skipWhenBusy: false },
       );
       threadRequestRef.current += 1;

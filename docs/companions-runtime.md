@@ -135,6 +135,19 @@ new one, so a backlog a sleeping Box missed keeps its order and never skips the 
 undelivered message stays pending and the response reports `delivery: "pending"`, so a later wake
 still delivers it in order.
 
+One send is one turn. The sender names the message it is creating with `client_message_id`, a UUID,
+and the control plane stores it as that entry's event id (`msg:<client_message_id>`), so the
+transcript's `(companion_id, event_id)` primary key is what decides how many turns a send produces.
+The same send arriving twice — a retried request, one a proxy replayed, a client that submitted twice
+— resolves to the turn already stored instead of a second copy of it, and because that message is no
+longer pending it is never handed to Pi again either, so the reply cannot be produced twice. A send
+that is durable but undelivered is still pending, so resending it completes the delivery its first
+attempt never made. Sent messages and projected Pi events keep separate id namespaces (`msg:` against
+`pi:`), so a sender can never name an entry the log will claim later. A request without the id is
+still accepted and gets a server-generated one, which is the pre-THE-337 behavior and carries no
+protection; the web composer always sends one, and it is the same id the message carries on screen
+before the control plane answers, so an optimistic message and its saved entry are one message.
+
 `POST /v1/companions/:id/thread/sync` is the single Owner/Editor step that reconciles a live thread.
 It hands pending messages to the running Pi daemon in ordinal order through the owner-only
 `pi.rpc.in` FIFO, reads `pi.rpc.ndjson` from the recorded byte offset, and appends the projected

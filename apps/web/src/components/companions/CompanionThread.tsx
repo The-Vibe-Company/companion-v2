@@ -31,7 +31,7 @@ export function CompanionThread({
   waking: boolean;
   openingDesktop: boolean;
   onBack: () => void;
-  onSend: (content: string) => Promise<boolean>;
+  onSend: (content: string, clientMessageId: string) => Promise<boolean>;
   onWake: () => void;
   onDesktop: () => void;
 }) {

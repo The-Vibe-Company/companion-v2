@@ -7,9 +7,6 @@ import type { CompanionThread, CompanionTranscriptEntry } from "@companion/contr
  */
 const PASSAGE_WINDOW_MS = 15 * 60 * 1000;
 
-/** The event id the composer's own message carries until the control plane returns the saved one. */
-export const SENDING_EVENT_ID = "sending";
-
 /** One transcript entry with everything the render needs that the entry itself does not carry. */
 export interface TranscriptTurn {
   entry: CompanionTranscriptEntry;
@@ -49,7 +46,12 @@ function millis(iso: string): number {
  */
 export function transcriptTurns(
   entries: readonly CompanionTranscriptEntry[],
-  context: { viewerId: string; companionName: string },
+  context: {
+    viewerId: string;
+    companionName: string;
+    /** The message this composer is still sending, named by the event id it will be stored under. */
+    sendingEventId?: string | null;
+  },
 ): TranscriptTurn[] {
   let previous: { author: string | null; role: string; at: number } | null = null;
   return entries.map((entry) => {
@@ -61,7 +63,14 @@ export function transcriptTurns(
       || previous.role !== entry.role
       || at - previous.at > PASSAGE_WINDOW_MS;
     previous = { author, role: entry.role, at };
-    return { entry, author, lead, sending: entry.event_id === SENDING_EVENT_ID };
+    return {
+      entry,
+      author,
+      lead,
+      sending: context.sendingEventId !== undefined
+        && context.sendingEventId !== null
+        && entry.event_id === context.sendingEventId,
+    };
   });
 }
 

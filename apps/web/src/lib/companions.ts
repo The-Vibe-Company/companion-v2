@@ -172,17 +172,22 @@ export async function getCompanionThread(
   return result.thread;
 }
 
+/**
+ * Send one message. `clientMessageId` names the turn this send creates, so the control plane stores
+ * it once however many times the request reaches it: a resend can only ever resolve to the same turn.
+ */
 export async function sendCompanionMessage(
   orgId: string,
   companionId: string,
   content: string,
+  clientMessageId: string,
 ): Promise<CompanionThread> {
   const result = await apiFetch<{ thread: CompanionThread }>(
     `/v1/companions/${encodeURIComponent(companionId)}/messages`,
     {
       method: "POST",
       headers: orgHeaders(orgId),
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, client_message_id: clientMessageId }),
     },
   );
   return result.thread;

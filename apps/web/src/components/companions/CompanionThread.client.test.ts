@@ -47,7 +47,7 @@ const thread: Thread = {
 const roots: Root[] = [];
 
 async function mount(
-  onSend: (content: string) => Promise<boolean>,
+  onSend: (content: string, clientMessageId: string) => Promise<boolean>,
   overrides: { companion?: Companion; thread?: Thread; onDesktop?: () => void } = {},
 ) {
   const container = document.createElement("div");
@@ -187,6 +187,81 @@ describe("CompanionThread composer", () => {
     });
 
     expect(sent).toEqual(["Draft the launch note"]);
+  });
+
+  it("names each message once, so a resent request can only be the same turn", async () => {
+    const ids: string[] = [];
+    const container = await mount(async (_content, clientMessageId) => {
+      ids.push(clientMessageId);
+      return true;
+    });
+
+    type(container, "Draft the launch note");
+    await send(container);
+    type(container, "And the changelog entry");
+    await send(container);
+
+    // One id per submission: the control plane stores the turn a resent request names once, and two
+    // separate messages are still two turns.
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
+    for (const id of ids) {
+      expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    }
+  });
+
+  it("shows one message when the saved thread arrives while the send is still in flight", async () => {
+    // The message a composer shows carries the id the control plane stores it under, so a thread read
+    // that lands mid-send replaces it instead of adding a second copy of the same turn.
+    let sentId = "";
+    let settle: (saved: boolean) => void = () => {};
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+    const render = (next: Thread) => React.createElement(CompanionThread, {
+      companion,
+      thread: next,
+      error: null,
+      busy: false,
+      waking: false,
+      openingDesktop: false,
+      onBack: () => {},
+      onSend: (_content: string, clientMessageId: string) => {
+        sentId = clientMessageId;
+        return new Promise<boolean>((resolve) => { settle = resolve; });
+      },
+      onWake: () => {},
+      onDesktop: () => {},
+    });
+    await act(async () => {
+      root.render(render(thread));
+    });
+    type(container, "Draft the launch note");
+    await send(container);
+
+    await act(async () => {
+      root.render(render({
+        ...thread,
+        entries: [{
+          event_id: `msg:${sentId}`,
+          ordinal: 0,
+          role: "user",
+          content: "Draft the launch note",
+          author_id: "user-1",
+          author_name: null,
+          created_at: "2026-08-12T12:01:00.000Z",
+        }],
+      }));
+    });
+
+    expect(container.querySelectorAll(".chat-turn--said")).toHaveLength(1);
+
+    await act(async () => {
+      settle(true);
+    });
+
+    expect(container.querySelectorAll(".chat-turn--said")).toHaveLength(1);
   });
 
   it("hands the next Companion an empty composer instead of the previous draft", async () => {
