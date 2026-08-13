@@ -24,6 +24,9 @@ describe("member-private Companion Plugins", () => {
   });
 
   afterEach(async () => {
+    await integrationDb
+      .delete(schema.companions)
+      .where(eq(schema.companions.orgId, fixture.orgA));
     await fixture.cleanup();
   });
 
