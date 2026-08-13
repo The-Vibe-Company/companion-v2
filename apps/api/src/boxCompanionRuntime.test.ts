@@ -23,6 +23,7 @@ const box = {
 /** Printed by the adapter's staging command when Pi's auth file already exists on the Box disk. */
 const AUTH_PRESENT_MARKER = "companion-provider-auth-present";
 const PROVIDER_FILE_REMOVAL = "rm -f \"$HOME/.companion/runtime/state/providers.env\"";
+const RUNTIME_PROVIDER_FILE = '"/run/user/$(id -u)/companion/providers.env"';
 /** The layout script is staged on disk and run as a file, so the command itself stays this short. */
 const LAYOUT_SCRIPT_PATH = ".companion/bin/ensure-pi-layout.sh";
 const LAYOUT_RUN_COMMAND = `bash "$HOME/${LAYOUT_SCRIPT_PATH}"`;
@@ -370,6 +371,58 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/files"))).toBe(false);
     expect(fetchMock.mock.calls.some(([, init]) =>
       String(JSON.parse(String(init?.body ?? "{}")).command ?? "").includes("skills.next"))).toBe(false);
+  });
+
+  it("does not take the warm fast path when layout or provider auth needs replacement", async () => {
+    const commands: string[] = [];
+    const writtenPaths: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") {
+        writtenPaths.push(String(body.path));
+        return json({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: command.includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "rotated-provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(commands.some((command) => command.includes("companion-pi-warm-ready"))).toBe(false);
+    expect(commands.some((command) =>
+      command.includes("systemctl --user start companion-pi-daemon.service"))).toBe(true);
+    expect(commands.every((command) =>
+      !command.includes("systemctl --user restart companion-pi-daemon.service"))).toBe(true);
+    expect(writtenPaths).toContain(".companion/pi/auth.json");
+    expect(writtenPaths).toContain(".companion/runtime/state/providers.env");
   });
 
   it("stages a skill archive too large for one file write as parts a short command joins", async () => {
@@ -1798,6 +1851,7 @@ describe("AsciiBoxCompanionRuntime", () => {
 
   it("writes Pi auth onto a disk that has none even when the caller skipped the rewrite", async () => {
     const writtenPaths: string[] = [];
+    const commands: string[] = [];
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const method = init?.method ?? "GET";
@@ -1808,12 +1862,14 @@ describe("AsciiBoxCompanionRuntime", () => {
         return json({ ok: true });
       }
       if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
         // The staging command reports no auth file, as on a replacement disk an earlier start
         // provisioned but never finished configuring.
         return json({
           success: true,
           exitCode: 0,
-          stdout: String(body.command).includes("is-active") ? "active\n" : "",
+          stdout: command.includes("is-active") ? "active\n" : "",
           stderr: "",
         });
       }
@@ -1840,6 +1896,11 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     expect(writtenPaths).toContain(".companion/pi/auth.json");
+    // `active` alone is insufficient: without the warm-ready marker proving the tmpfs credential
+    // file exists, the adapter repairs resources and uses the idempotent start path.
+    expect(commands.some((command) => command.includes("companion-pi-warm-ready"))).toBe(true);
+    expect(commands.some((command) =>
+      command.includes("systemctl --user start companion-pi-daemon.service"))).toBe(true);
     expect(result.runtimeState).toBe("running");
   });
 
@@ -2353,6 +2414,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(stopCommand).not.toContain("${XDG_RUNTIME_DIR:-");
     expect(stopCommand).toContain("systemctl --user stop companion-pi-daemon.service >/dev/null 2>&1 || true");
     expect(stopCommand).toContain("is-active --quiet companion-pi-daemon.service");
+    expect(stopCommand).toContain(`rm -f ${RUNTIME_PROVIDER_FILE}`);
     expect(archived).toBe(true);
     expect(result).toMatchObject({ runtimeState: "stopping", daemonState: "stopped" });
   });
@@ -2432,6 +2494,7 @@ describe("AsciiBoxCompanionRuntime", () => {
 
     expect(commands.some((command) =>
       command.startsWith(PROVIDER_FILE_REMOVAL))).toBe(true);
+    expect(commands.some((command) => command.includes(RUNTIME_PROVIDER_FILE))).toBe(true);
   });
 
   it("best-effort removes the provider file when skill preparation transport fails", async () => {
@@ -2475,6 +2538,7 @@ describe("AsciiBoxCompanionRuntime", () => {
 
     expect(commands.some((command) =>
       command.startsWith(PROVIDER_FILE_REMOVAL))).toBe(true);
+    expect(commands.some((command) => command.includes(RUNTIME_PROVIDER_FILE))).toBe(true);
   });
 
   it("writes one JSONL prompt into the Pi FIFO without touching Box lifecycle", async () => {

@@ -307,7 +307,8 @@ provider generation. If the unit is `active` and its tmpfs MCP credential file i
 returns that observation without repairing layout, injecting resources, or calling systemd start at
 all. This keeps an in-flight turn alive. The first start after a layout or credential change still
 refreshes the files, but uses idempotent `systemctl start`, never `restart`, so an active unit is not
-killed during the upgrade.
+killed during the upgrade. An already-running process keeps the environment it inherited; refreshed
+layout and MCP environment take effect on its next automatic start or after an explicit stop/wake.
 
 ## Pi Skills injection
 
