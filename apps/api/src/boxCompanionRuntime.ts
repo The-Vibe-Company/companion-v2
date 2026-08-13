@@ -605,10 +605,10 @@ exit 0`,
     const status = lines(PI_DAEMON_DIAGNOSTIC_LABELS.status);
     const values: Record<PiDaemonDiagnosticKey, string | undefined> = {
       state: lines(PI_DAEMON_DIAGNOSTIC_LABELS.state).at(-1),
-      // systemctl prints `Active:` before the process detail, so its verdict leads and the
-      // `code=exited, status=` line behind it carries what Pi exited with.
-      active: status.at(0),
-      exit: daemonExitDetail(status.at(1)),
+      // Both come from the same grep, so each is picked by what it says rather than by where it
+      // landed: a unit that prints only one of them must not have it read as the other.
+      active: status.find((line) => line.startsWith("Active:")),
+      exit: status.map(daemonExitDetail).find(Boolean),
       stderr: lines(PI_DAEMON_DIAGNOSTIC_LABELS.stderr).at(-1),
     };
     const fragments: string[] = [];
