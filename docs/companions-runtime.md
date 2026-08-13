@@ -214,10 +214,19 @@ of ending on the first answer that is not `active`. The window also outlasts sys
 crash-looping reaches its terminal `failed` state inside the window, so the wake reports that verdict
 rather than a start still in flight. A daemon that never
 gets there fails the wake with what the Box actually reported: the unit's `is-active` word, its
-`Active:` line from `systemctl --user status`, and the last non-empty line of
-`~/.companion/runtime/logs/pi.stderr.log`, gathered by one command that reads neither the provider
-auth file nor the transient MCP credential file. The fragments are clamped so the whole reason fits
-the single sanitized line `companions.last_error` stores. Neither the poll nor the failure stops,
+`Active:` line from `systemctl --user status`, the last non-empty line of
+`~/.companion/runtime/logs/pi.stderr.log`, and the `code=exited, status=` detail systemd recorded for
+the process, gathered by one command that reads neither the provider auth file nor the transient MCP
+credential file.
+
+Pi routinely exits before writing anything to its stderr log, so that fragment is frequently absent
+and the failure has to stay diagnosable without it. Fragments claim the stored line in priority
+order — `is-active`, `Active:`, the Pi stderr line, then the exit status — and one the Box had
+nothing to say for spends nothing, so a wake whose stderr log is empty puts the exit status on the
+room the missing log line did not take. The exit status is extracted rather than clamped, because a
+systemd `Process:` line opens with the full `ExecStart` path and closes with the code that matters.
+A fragment left too short to read is dropped whole instead of stored as a stub. The result fits the
+single sanitized line `companions.last_error` stores. Neither the poll nor the failure stops,
 archives, or retires the Box: only a Box already beyond recovery — terminal `error` state or failed
 Pi setup — is replaced, and that decision is made before the daemon is ever restarted.
 

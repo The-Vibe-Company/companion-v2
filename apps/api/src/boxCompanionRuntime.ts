@@ -6,6 +6,7 @@ import type {
   CompanionMcpCredential,
   CompanionRuntimeState,
 } from "@companion/contracts";
+import { COMPANION_RUNTIME_ERROR_MAX_LENGTH } from "@companion/core";
 import {
   buildMcpAdapterInjection,
   runtimeSkillArchivePath,
@@ -39,12 +40,25 @@ const PI_DAEMON_DIAGNOSTIC_LABELS = {
   status: "companion-pi-status",
   stderr: "companion-pi-stderr",
 } as const;
+/** The sentence a failed wait reports, and the room its fragments have left inside the stored line. */
+const PI_DAEMON_FAILURE_MESSAGE = "Pi daemon is not running after start";
 /**
- * Characters each diagnostic fragment may spend. `companions.last_error` keeps one sanitized line
- * of bounded length, so the three fragments and their labels have to fit it together: a status line
- * long enough on its own would push out the Pi stderr line the diagnostic exists to surface.
+ * What each diagnostic fragment may spend, in the order fragments are allowed to claim it.
+ * `companions.last_error` keeps one sanitized line of bounded length, so the fragments have to fit
+ * it together and a fragment the Box had nothing to say for spends nothing. Pi routinely exits
+ * before writing to its stderr log, so the exit status systemd recorded is ordered last but reaches
+ * the line precisely then, on the room the absent log line did not take.
  */
-const PI_DAEMON_DIAGNOSTIC_BUDGETS = { state: 16, status: 82, stderr: 74 } as const;
+const PI_DAEMON_DIAGNOSTIC_BUDGETS = [
+  { key: "state", prefix: "is-active: ", limit: 16 },
+  { key: "active", prefix: "", limit: 82 },
+  { key: "stderr", prefix: "pi.stderr.log: ", limit: 74 },
+  { key: "exit", prefix: "exit: ", limit: 40 },
+] as const;
+/** A fragment clamped shorter than this says less than the characters it costs. */
+const PI_DAEMON_DIAGNOSTIC_MINIMUM = 12;
+const PI_DAEMON_DIAGNOSTIC_SEPARATOR = "; ";
+type PiDaemonDiagnosticKey = (typeof PI_DAEMON_DIAGNOSTIC_BUDGETS)[number]["key"];
 const READY_STATES = new Set<BoxState>(["ready", "idle", "running"]);
 const STARTING_STATES = new Set<BoxState>(["init", "provisioning", "provisioned", "cloning"]);
 const ARCHIVED_STATES = new Set<BoxState>(["archiving", "archived"]);
@@ -183,6 +197,16 @@ function labeledDiagnosticLines(stdout: string, label: string): string[] {
     .filter((line) => line.startsWith(`${label} `))
     .map((line) => line.slice(label.length + 1).trim())
     .filter(Boolean);
+}
+
+/**
+ * The part of a systemd `Process:` or `Main PID:` line worth storing. The line opens with the full
+ * ExecStart path and closes with the exit code, so clamping its head would spend the budget on a
+ * path the control plane already knows and drop the status Pi actually died with. A daemon that is
+ * merely slow has a live main process and no exit code, and reports nothing here.
+ */
+function daemonExitDetail(line: string | undefined): string | undefined {
+  return line ? /\((code=[^)]*)\)/.exec(line)?.[1] : undefined;
 }
 
 /**
@@ -578,17 +602,29 @@ exit 0`,
     ).catch(() => null);
     if (!result) return "";
     const lines = (label: string): string[] => labeledDiagnosticLines(result.stdout, label);
+    const status = lines(PI_DAEMON_DIAGNOSTIC_LABELS.status);
+    const values: Record<PiDaemonDiagnosticKey, string | undefined> = {
+      state: lines(PI_DAEMON_DIAGNOSTIC_LABELS.state).at(-1),
+      // systemctl prints `Active:` before the process detail, so its verdict leads and the
+      // `code=exited, status=` line behind it carries what Pi exited with.
+      active: status.at(0),
+      exit: daemonExitDetail(status.at(1)),
+      stderr: lines(PI_DAEMON_DIAGNOSTIC_LABELS.stderr).at(-1),
+    };
     const fragments: string[] = [];
-    const state = lines(PI_DAEMON_DIAGNOSTIC_LABELS.state).at(-1);
-    // `Active:` is systemd's own verdict and is printed before the process detail, so it leads.
-    const status = lines(PI_DAEMON_DIAGNOSTIC_LABELS.status).at(0);
-    const stderr = lines(PI_DAEMON_DIAGNOSTIC_LABELS.stderr).at(-1);
-    if (state) fragments.push(`is-active: ${clampDiagnostic(state, PI_DAEMON_DIAGNOSTIC_BUDGETS.state)}`);
-    if (status) fragments.push(clampDiagnostic(status, PI_DAEMON_DIAGNOSTIC_BUDGETS.status));
-    if (stderr) {
-      fragments.push(`pi.stderr.log: ${clampDiagnostic(stderr, PI_DAEMON_DIAGNOSTIC_BUDGETS.stderr)}`);
+    let remaining =
+      COMPANION_RUNTIME_ERROR_MAX_LENGTH - PI_DAEMON_FAILURE_MESSAGE.length - ": ".length;
+    for (const budget of PI_DAEMON_DIAGNOSTIC_BUDGETS) {
+      const value = values[budget.key];
+      if (!value) continue;
+      const separator = fragments.length ? PI_DAEMON_DIAGNOSTIC_SEPARATOR.length : 0;
+      const room = Math.min(budget.limit, remaining - separator - budget.prefix.length);
+      if (room < PI_DAEMON_DIAGNOSTIC_MINIMUM) continue;
+      const fragment = `${budget.prefix}${clampDiagnostic(value, room)}`;
+      fragments.push(fragment);
+      remaining -= separator + fragment.length;
     }
-    return fragments.length ? `: ${fragments.join("; ")}` : "";
+    return fragments.length ? `: ${fragments.join(PI_DAEMON_DIAGNOSTIC_SEPARATOR)}` : "";
   }
 
   async #removeProviderFile(boxId: string): Promise<void> {
@@ -882,7 +918,7 @@ trap - EXIT`,
     const daemonState = await this.#waitDaemonActive(box.id);
     if (daemonState !== "running") {
       throw new BoxRuntimeProviderError(
-        `Pi daemon is not running after start${await this.#daemonFailureDetail(box.id)}`,
+        `${PI_DAEMON_FAILURE_MESSAGE}${await this.#daemonFailureDetail(box.id)}`,
         502,
       );
     }

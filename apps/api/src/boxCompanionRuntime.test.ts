@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { COMPANION_RUNTIME_ERROR_MAX_LENGTH } from "@companion/core";
 import {
   AsciiBoxCompanionRuntime,
   BoxRuntimeConfigurationError,
@@ -910,6 +911,75 @@ describe("AsciiBoxCompanionRuntime", () => {
       String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
   });
 
+  it("reports the exit status systemd recorded when Pi died without writing to its stderr log", async () => {
+    // The production shape: Pi exited 1 twice and left a 0-byte stderr log, so the labeled tail
+    // prints nothing and the only account of the failure is systemd's own.
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        if (command.includes("companion_label")) {
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: [
+              "companion-pi-state activating",
+              "companion-pi-status      Active: activating (auto-restart) (Result: exit-code) since"
+              + " Thu 2026-08-13 07:34:59 UTC; 1s ago",
+              "companion-pi-status     Process: 4242 ExecStart=/home/user/.companion/bin/pi-daemon"
+              + " (code=exited, status=1/FAILURE)",
+              "",
+            ].join("\n"),
+            stderr: "",
+          });
+        }
+        if (command.includes("is-active")) {
+          return json({ success: true, exitCode: 0, stdout: "activating\n", stderr: "" });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS: "20",
+    });
+
+    const error = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    }).then(
+      (): never => {
+        throw new Error("start returned running for a daemon that never became active");
+      },
+      (thrown: unknown) => thrown as Error,
+    );
+
+    // An empty log costs the wake nothing: the fragment is left out rather than reported blank,
+    // and the exit status spends the room it would have taken.
+    expect(error.message).not.toContain("pi.stderr.log");
+    expect(error.message).toContain("Active: activating (auto-restart) (Result: exit-code)");
+    // The exit code, not the ExecStart path the line opens with.
+    expect(error.message).toContain("exit: code=exited, status=1/FAILURE");
+    expect(error.message).not.toContain("ExecStart");
+    expect(error.message.split("\n")).toHaveLength(1);
+    expect(companionRuntimeErrorMessage(error)).toBe(error.message);
+  });
+
   it("keeps every daemon failure fragment inside the line the Companion row stores", async () => {
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
@@ -928,6 +998,8 @@ describe("AsciiBoxCompanionRuntime", () => {
             stdout: [
               `companion-pi-state ${"deactivating-and-then-some".repeat(4)}`,
               `companion-pi-status Active: ${"failed (Result: exit-code) since ".repeat(6)}`,
+              `companion-pi-status Process: 4242 ExecStart=${"/very/long/path".repeat(6)}`
+              + " (code=exited, status=1/FAILURE)",
               `companion-pi-stderr pi: error: ${"could not open the session directory ".repeat(6)}`,
               "",
             ].join("\n"),
@@ -966,12 +1038,16 @@ describe("AsciiBoxCompanionRuntime", () => {
       (thrown: unknown) => thrown as Error,
     );
 
-    // The three fragments share one stored line, so a long status must not cost the stderr line:
-    // the sanitizer has to pass the whole message through rather than truncate its tail away.
+    // The fragments share one stored line, so a long status must not cost the stderr line: the
+    // sanitizer has to pass the whole message through rather than truncate its tail away.
     expect(companionRuntimeErrorMessage(error)).toBe(error.message);
+    expect(error.message.length).toBeLessThanOrEqual(COMPANION_RUNTIME_ERROR_MAX_LENGTH);
     expect(error.message).toContain("is-active: deactivating");
     expect(error.message).toContain("Active: failed (Result: exit-code)");
     expect(error.message).toContain("pi.stderr.log: pi: error: could not open");
+    // Pi's own words outrank the exit status, so the fragment that cannot fit is dropped whole
+    // rather than stored as a stub too short to read.
+    expect(error.message).not.toContain("exit:");
   });
 
   it("keeps the generic daemon failure when the Box cannot answer the diagnostic", async () => {
