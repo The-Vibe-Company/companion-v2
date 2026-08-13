@@ -19,6 +19,9 @@ export const COMPANION_PI_DISK_LAYOUT_VERSION = 2;
 const COMPANION_PI_EVENT_READ_LIMIT = 262_144;
 const READY_STATES = new Set<BoxState>(["ready", "idle", "running"]);
 const STARTING_STATES = new Set<BoxState>(["init", "provisioning", "provisioned", "cloning"]);
+const ARCHIVED_STATES = new Set<BoxState>(["archiving", "archived"]);
+/** Printed by the staging command when Pi's auth file already exists on the Box disk. */
+const PROVIDER_AUTH_PRESENT_MARKER = "companion-provider-auth-present";
 
 export type BoxState =
   | "init"
@@ -175,16 +178,67 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 COMPANION_PI_SERVICE
-systemctl --user daemon-reload
+# A Box running its create setupScript has no user D-Bus session yet, so no user-manager command
+# belongs here: it would fail with "Failed to connect to bus" and mark the whole setup failed even
+# though Pi installed correctly. The unit is loaded by the post-ready control-plane command instead.
 printf '%s\n' "$expected_layout" > "$layout_marker"
 `;
 }
+
+/**
+ * Point `systemctl --user` at the caller's bus. Every Box command runs in its own shell, so any
+ * command that talks to the user manager has to locate the bus again.
+ */
+const USER_BUS_ENVIRONMENT = 'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"';
+
+/**
+ * Bring up the systemd user manager the Pi unit needs. A Box that never had an interactive login has
+ * no `/run/user/<uid>` and no user bus, which is exactly what breaks `systemctl --user` at create
+ * time, so the daemon start enables lingering for the account and waits for the manager to answer.
+ */
+const PREPARE_USER_BUS = `${USER_BUS_ENVIRONMENT}
+companion_uid="$(id -u)"
+if ! systemctl --user show-environment >/dev/null 2>&1; then
+  if command -v loginctl >/dev/null 2>&1; then
+    if [ "$companion_uid" = 0 ]; then
+      loginctl enable-linger "$companion_uid" >/dev/null 2>&1 || true
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo -n loginctl enable-linger "$companion_uid" >/dev/null 2>&1 || true
+    fi
+  fi
+  if [ "$companion_uid" = 0 ]; then
+    systemctl start "user@$companion_uid.service" >/dev/null 2>&1 || true
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo -n systemctl start "user@$companion_uid.service" >/dev/null 2>&1 || true
+  fi
+  for _ in 1 2 3 4 5; do
+    if systemctl --user show-environment >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+fi
+if ! systemctl --user show-environment >/dev/null 2>&1; then
+  echo 'Companion cannot reach the systemd user bus on this Box' >&2
+  exit 1
+fi`;
 
 function encodeEnvironmentFile(credentials: McpRuntimeCredential[]): string {
   return credentials
     .map(({ env_key: envKey, value }) => `${envKey}=${JSON.stringify(value)}`)
     .join("\n")
     .concat(credentials.length ? "\n" : "");
+}
+
+function companionBoxName(companionId: string): string {
+  return `Companion ${companionId}`;
+}
+
+/**
+ * Box setup runs once per disk, so a Box whose Pi setup failed can never run Pi, and neither can one
+ * in the terminal error state. Waking such a Box again only repeats the same failure, so the
+ * Companion has to be moved onto a new Box instead.
+ */
+function isBeyondRecovery(box: BoxInfo): boolean {
+  return box.state === "error" || box.setupStatus === "failed";
 }
 
 function observation(box: BoxInfo, daemonState: CompanionDaemonState): CompanionRuntimeObservation {
@@ -261,8 +315,18 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     return (await this.#request<BoxEnvelope>(`/boxes/${encodeURIComponent(boxId)}`)).box;
   }
 
+  /** A Box the provider no longer knows about is reported as missing so the start can replace it. */
+  async #getAssignedBox(boxId: string): Promise<BoxInfo | null> {
+    try {
+      return await this.#get(boxId);
+    } catch (error) {
+      if (error instanceof BoxRuntimeProviderError && error.status === 404) return null;
+      throw error;
+    }
+  }
+
   async #findCompanionBox(companionId: string): Promise<BoxInfo | null> {
-    const name = `Companion ${companionId}`;
+    const name = companionBoxName(companionId);
     let cursor: string | null = null;
     do {
       const query = new URLSearchParams({ limit: "200", sort: "desc" });
@@ -273,6 +337,70 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
       cursor = result.pageInfo?.hasMore ? result.pageInfo.nextCursor : null;
     } while (cursor);
     return null;
+  }
+
+  /**
+   * Create the Box for one Companion and persist its id before the configured TTL and deterministic
+   * name are applied, so a crash between the two can only leak a short-lived, unnamed Box.
+   */
+  async #createCompanionBox(input: {
+    companionId: string;
+    orgId: string;
+    onBoxAssigned: (boxId: string) => Promise<void>;
+  }): Promise<BoxInfo> {
+    const created = await this.#request<BoxEnvelope>("/boxes", {
+      method: "POST",
+      body: JSON.stringify({
+        // Bound the cost of the irreducible POST-response/process-crash window. The desired TTL
+        // is applied only after the returned id is durable in the control plane.
+        ttlSeconds: Math.min(this.#ttlSeconds, 300),
+        noEnv: true,
+        ...(this.#environment ? { environment: this.#environment } : {}),
+        env: {
+          COMPANION_ID: input.companionId,
+          COMPANION_ORG_ID: input.orgId,
+        },
+        setupScript: setupScript(this.#installCommand, this.#mcpAdapterPackage),
+      }),
+    });
+    try {
+      await input.onBoxAssigned(created.box.id);
+      return (await this.#request<BoxEnvelope>(
+        `/boxes/${encodeURIComponent(created.box.id)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            name: companionBoxName(input.companionId),
+            ttlSeconds: this.#ttlSeconds,
+          }),
+        },
+      )).box;
+    } catch (error) {
+      await this.#request(`/boxes/${encodeURIComponent(created.box.id)}/stop`, {
+        method: "POST",
+        body: JSON.stringify({ force: false }),
+      }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  /**
+   * Release a Box that can never run Pi again. Renaming it first frees the deterministic Companion
+   * name so the replacement Box owns it and no later start re-adopts the broken disk. Both calls are
+   * best-effort: a Box the provider will not rename or stop must not keep the Companion un-wakeable.
+   */
+  async #retireBox(box: BoxInfo, companionId: string): Promise<void> {
+    await this.#request(`/boxes/${encodeURIComponent(box.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: `Retired ${companionBoxName(companionId)} ${Date.now()}` }),
+    }).catch(() => undefined);
+    if (!ARCHIVED_STATES.has(box.state)) {
+      await this.#request(`/boxes/${encodeURIComponent(box.id)}/stop`, {
+        method: "POST",
+        // The disk is unusable, so it is discarded instead of snapshotted for a later resume.
+        body: JSON.stringify({ force: true }),
+      }).catch(() => undefined);
+    }
   }
 
   async #waitReady(boxId: string): Promise<BoxInfo> {
@@ -305,7 +433,8 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
   async #daemonState(boxId: string): Promise<CompanionDaemonState> {
     const result = await this.#command(
       boxId,
-      "systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true",
+      `${USER_BUS_ENVIRONMENT}
+systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true`,
     );
     return result.stdout.trim() === "active" ? "running" : "stopped";
   }
@@ -346,12 +475,15 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     const mcp = buildMcpAdapterInjection(input.mcpAccounts);
     const cleared = await this.#command(
       input.boxId,
-      "set -e; root=\"$HOME/.companion/runtime\"; rm -rf \"$root/state/skill-archives\"; mkdir -p \"$root/state/skill-archives\"",
+      `set -e; root="$HOME/.companion/runtime"; rm -rf "$root/state/skill-archives"; mkdir -p "$root/state/skill-archives"; if [ -f "$HOME/.companion/pi/auth.json" ]; then printf '%s\\n' ${shellQuote(PROVIDER_AUTH_PRESENT_MARKER)}; fi`,
     );
     if (!cleared.success) throw new BoxRuntimeProviderError("Pi resource staging failed", 502);
     // Pi keeps refreshed subscription tokens in its own agent directory, so the auth file is
-    // replaced only when the encrypted workspace connection generation changes.
-    if (input.replaceProviderAuth) {
+    // replaced only when the encrypted workspace connection generation changes. The disk itself is
+    // the authority on whether the file exists: a Box the control plane recorded at the current
+    // generation can still be a replacement disk that never received it, for example when an earlier
+    // start failed after the new Box id was persisted.
+    if (input.replaceProviderAuth || !cleared.stdout.includes(PROVIDER_AUTH_PRESENT_MARKER)) {
       await this.#writeFile(
         input.boxId,
         ".companion/pi/auth.json",
@@ -413,52 +545,22 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     skills: CompanionRuntimeSkill[];
     onBoxAssigned: (boxId: string) => Promise<void>;
   }): Promise<CompanionRuntimeObservation> {
-    let box: BoxInfo;
+    let box = input.boxId ? await this.#getAssignedBox(input.boxId) : null;
+    if (!box) box = await this.#findCompanionBox(input.companionId);
+    if (box && isBeyondRecovery(box)) {
+      // The assigned Box failed setup or died, so the Companion moves onto a new Box instead of
+      // failing every future wake against the same broken disk.
+      await this.#retireBox(box, input.companionId);
+      box = null;
+    }
     let boxIdPersisted = false;
-    if (!input.boxId) {
-      const recovered = await this.#findCompanionBox(input.companionId);
-      if (recovered) {
-        box = recovered;
-      } else {
-        const created = await this.#request<BoxEnvelope>("/boxes", {
-          method: "POST",
-          body: JSON.stringify({
-            // Bound the cost of the irreducible POST-response/process-crash window. The desired TTL
-            // is applied only after the returned id is durable in the control plane.
-            ttlSeconds: Math.min(this.#ttlSeconds, 300),
-            noEnv: true,
-            ...(this.#environment ? { environment: this.#environment } : {}),
-            env: {
-              COMPANION_ID: input.companionId,
-              COMPANION_ORG_ID: input.orgId,
-            },
-            setupScript: setupScript(this.#installCommand, this.#mcpAdapterPackage),
-          }),
-        });
-        box = created.box;
-        try {
-          await input.onBoxAssigned(box.id);
-          boxIdPersisted = true;
-          box = (await this.#request<BoxEnvelope>(
-            `/boxes/${encodeURIComponent(box.id)}`,
-            {
-              method: "PATCH",
-              body: JSON.stringify({
-                name: `Companion ${input.companionId}`,
-                ttlSeconds: this.#ttlSeconds,
-              }),
-            },
-          )).box;
-        } catch (error) {
-          await this.#request(`/boxes/${encodeURIComponent(box.id)}/stop`, {
-            method: "POST",
-            body: JSON.stringify({ force: false }),
-          }).catch(() => undefined);
-          throw error;
-        }
-      }
-    } else {
-      box = await this.#get(input.boxId);
+    let replaceProviderAuth = input.replaceProviderAuth;
+    if (!box) {
+      box = await this.#createCompanionBox(input);
+      boxIdPersisted = true;
+      // Pi's auth file lives on the Box disk, so a new disk needs it written whatever generation the
+      // control plane recorded for the Box this start replaced.
+      replaceProviderAuth = true;
     }
     if (box.state === "archived") {
       const resumed = await this.#request<BoxEnvelope>(
@@ -494,7 +596,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
       boxId: box.id,
       clientSurface: input.clientSurface,
       providerAuth: input.providerAuth,
-      replaceProviderAuth: input.replaceProviderAuth,
+      replaceProviderAuth,
       mcpCredentials: input.mcpCredentials,
       mcpAccounts: input.mcpAccounts,
       skills: input.skills,
@@ -503,7 +605,19 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     try {
       started = await this.#command(
         box.id,
-        "set -e; credential_file=\"$HOME/.companion/runtime/state/providers.env\"; trap 'rm -f \"$credential_file\"' EXIT; chmod 600 \"$credential_file\"; auth_file=\"$HOME/.companion/pi/auth.json\"; if [ ! -f \"$auth_file\" ]; then echo 'Companion provider auth file is missing' >&2; exit 1; fi; chmod 700 \"$HOME/.companion/pi\"; chmod 600 \"$auth_file\"; systemctl --user daemon-reload; systemctl --user restart companion-pi-daemon.service",
+        `set -e
+credential_file="$HOME/.companion/runtime/state/providers.env"
+trap 'rm -f "$credential_file"' EXIT
+chmod 600 "$credential_file"
+auth_file="$HOME/.companion/pi/auth.json"
+if [ ! -f "$auth_file" ]; then echo 'Companion provider auth file is missing' >&2; exit 1; fi
+chmod 700 "$HOME/.companion/pi"
+chmod 600 "$auth_file"
+${PREPARE_USER_BUS}
+# The create setupScript only writes the unit file, so this is the first load of the Pi daemon unit.
+systemctl --user daemon-reload
+systemctl --user restart companion-pi-daemon.service`,
+        120,
       );
     } catch (error) {
       await this.#removeProviderFile(box.id).catch(() => undefined);
@@ -523,7 +637,15 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     if (READY_STATES.has(box.state)) {
       const stopped = await this.#command(
         input.boxId,
-        "systemctl --user stop companion-pi-daemon.service",
+        // The unit is loaded by the first start, so a Box that never started Pi has nothing to stop.
+        // Only a daemon still active after the stop attempt is a failure worth reporting.
+        `${USER_BUS_ENVIRONMENT}
+if ! systemctl --user show-environment >/dev/null 2>&1; then exit 0; fi
+systemctl --user stop companion-pi-daemon.service >/dev/null 2>&1 || true
+if systemctl --user is-active --quiet companion-pi-daemon.service; then
+  echo 'Pi daemon is still active after stop' >&2
+  exit 1
+fi`,
       );
       if (!stopped.success) throw new BoxRuntimeProviderError("Pi daemon failed to stop", 502);
     }
@@ -553,6 +675,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     const result = await this.#command(
       input.boxId,
       `set -euo pipefail
+${USER_BUS_ENVIRONMENT}
 fifo="$HOME/.companion/runtime/state/pi.rpc.in"
 systemctl --user is-active --quiet companion-pi-daemon.service
 test -p "$fifo"

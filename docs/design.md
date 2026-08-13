@@ -100,7 +100,9 @@ before skill storage or Box is contacted.
 The web has no `/projects` route and no Run/Session state in the Skills URL grammar. Old query parameters are ignored and canonical navigation returns to the Skills detail. By default the only product workspace navigation is Skills. The `COMPANION_COMPANIONS_ENABLED` server-side flag plus a non-empty email-domain allowlist expose an authenticated `/companions` list/create shell, the 1:1 chat thread it opens into, plus the Skills | Companions sidebar mode segment that reaches it; without either setting neither the route nor the segment exists. The route and segment are also absent for authenticated users without a matching email. Opening a Companion replaces the list with its thread and deep-links through a `companion` search parameter. The thread shows only the conversation and, for a runner whose Box is asleep, one Wake control; Pi tools, Skills, and desktop chrome stay out of it, and a Viewer gets the transcript with no composer. A Companion carries an optional persona of at most 280 characters, stored as one descriptive line and never as a system prompt. Creation asks for the name, that persona, and one compact picker over connected Claude, Codex, and z.ai providers defaulting to the workspace default. Native mobile clients get the Companion list and its thread only; Skills management stays on web and mobile web. Pi/Box controls, provider catalogs, and desktop chrome remain invisible.
 
 Pi sessions, RPC events, and logs live only under `~/.companion/runtime` on snapshotted Box disk.
-PostgreSQL stores Box id and last-observed lifecycle metadata so list/open never wakes Box. Desktop
+PostgreSQL stores Box id and last-observed lifecycle metadata so list/open never wakes Box. A start
+whose assigned Box failed Pi setup, reached its terminal error state, or no longer exists retires
+that Box and provisions a replacement, so no Companion becomes permanently un-wakeable. Desktop
 URLs are secret-bearing response-only values. See `docs/companions-runtime.md`.
 
 ## Process and database roles
