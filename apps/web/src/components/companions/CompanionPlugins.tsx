@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, useMemo, useState } from "react";
+import { type FormEvent, useMemo, useRef, useState } from "react";
 import type {
   CompanionPluginAccount,
   SaveCompanionPluginInput,
@@ -25,44 +25,54 @@ function AddMcpDialog({
   onAdded: (account: CompanionPluginAccount) => void;
   onClose: () => void;
 }) {
-  const [provider, setProvider] = useState("");
-  const [label, setLabel] = useState("");
+  const formRef = useRef<HTMLFormElement>(null);
+  // Only transport is React-controlled (drives conditional fields). Everything else is a
+  // native uncontrolled form so submit reads the live DOM via FormData — the same path a
+  // normal browser user and Chrome automation share after real input.
   const [transport, setTransport] = useState<"http" | "stdio">("http");
-  const [endpoint, setEndpoint] = useState("");
-  const [args, setArgs] = useState("");
-  const [credentialName, setCredentialName] = useState("Authorization");
-  const [credentialValue, setCredentialValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const busyRef = useRef(false);
 
-  const submit = async (event: FormEvent) => {
+  const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (busy) return;
-    const nextProvider = provider.trim().toLocaleLowerCase("en-US");
-    const nextLabel = label.trim();
-    const nextEndpoint = endpoint.trim();
-    // Keep client checks aligned with the HTML pattern and fail closed before Connecting...
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const nextProvider = String(data.get("provider") ?? "").trim().toLocaleLowerCase("en-US");
+    const nextLabel = String(data.get("label") ?? "").trim();
+    const nextTransport = (String(data.get("transport") ?? transport) || "http") as "http" | "stdio";
+    const nextEndpoint = String(data.get("endpoint") ?? "").trim();
+    const nextArgs = String(data.get("args") ?? "").trim();
+    const nextCredentialName = String(data.get("credential_name") ?? "").trim();
+    const nextCredentialValue = String(data.get("credential_value") ?? "");
+
+    if (busyRef.current) return;
+
+    if (!nextProvider || !nextLabel || !nextEndpoint) {
+      setError("Provider, account label, and endpoint are required.");
+      return;
+    }
     if (!/^[a-z][a-z0-9-]*$/.test(nextProvider)) {
       setError("Provider must be lowercase letters, digits, or hyphens, and start with a letter.");
       return;
     }
-    if (!nextLabel || !nextEndpoint) {
-      setError("Provider, account label, and endpoint are required.");
-      return;
-    }
+
+    busyRef.current = true;
     setBusy(true);
     setError(null);
-    const credential = credentialValue.trim()
+    if (nextTransport !== transport) setTransport(nextTransport);
+
+    const credential = nextCredentialValue.trim()
       ? {
-          credential_name: credentialName.trim(),
-          credential_value: credentialValue,
+          credential_name: nextCredentialName || (nextTransport === "http" ? "Authorization" : "MCP_TOKEN"),
+          credential_value: nextCredentialValue,
         }
       : {};
-    const input: SaveCompanionPluginInput = transport === "http"
+    const input: SaveCompanionPluginInput = nextTransport === "http"
       ? {
           provider: nextProvider,
           label: nextLabel,
-          transport,
+          transport: nextTransport,
           url: nextEndpoint,
           args: [],
           ...credential,
@@ -70,15 +80,19 @@ function AddMcpDialog({
       : {
           provider: nextProvider,
           label: nextLabel,
-          transport,
+          transport: nextTransport,
           command: nextEndpoint,
-          args: args.trim() ? args.trim().split(/\s+/) : [],
+          args: nextArgs ? nextArgs.split(/\s+/) : [],
           ...credential,
         };
+
     try {
-      onAdded(await saveCompanionPlugin(orgId, input));
+      const account = await saveCompanionPlugin(orgId, input);
+      onAdded(account);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "This MCP account could not be connected.");
+    } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   };
@@ -105,7 +119,8 @@ function AddMcpDialog({
             type="submit"
             form="companion-plugin-create"
             className="cds-btn cds-btn--primary cds-btn--md"
-            disabled={busy || !provider.trim() || !label.trim() || !endpoint.trim()}
+            disabled={busy}
+            aria-busy={busy}
           >
             {busy ? "Connecting..." : "Connect MCP"}
           </button>
@@ -115,48 +130,54 @@ function AddMcpDialog({
       {error && <div className="companions-error" role="alert">{error}</div>}
       <form
         id="companion-plugin-create"
+        ref={formRef}
         className="companions-plugin-form"
         noValidate
-        onSubmit={(event) => void submit(event)}
+        autoComplete="off"
+        onSubmit={(event) => void onSubmit(event)}
       >
         <div className="companions-plugin-form__pair">
           <label>
             Provider
             <input
+              name="provider"
               autoFocus
               required
-              // Chrome compiles HTML pattern with the Unicode sets (`v`) flag, where a literal
-              // hyphen inside a character class must be escaped or the attribute is ignored and
-              // the console reports an uncaught invalid regular expression.
-              pattern={"[a-z][a-z0-9\\-]*"}
               maxLength={63}
-              value={provider}
-              onChange={(event) => setProvider(event.target.value)}
-              placeholder="linear"
+              placeholder="e.g. linear"
               title="Lowercase letters, digits, and hyphens; must start with a letter"
+              autoComplete="off"
             />
           </label>
           <label>
             Account label
             <input
+              name="label"
               required
               maxLength={40}
-              value={label}
-              onChange={(event) => setLabel(event.target.value)}
-              placeholder="work"
+              placeholder="e.g. work"
+              autoComplete="off"
             />
           </label>
         </div>
         <label>
           Transport
           <select
+            name="transport"
             value={transport}
             onChange={(event) => {
               const next = event.target.value as "http" | "stdio";
               setTransport(next);
-              setEndpoint("");
-              setArgs("");
-              setCredentialName(next === "http" ? "Authorization" : "MCP_TOKEN");
+              const form = formRef.current;
+              if (!form) return;
+              const endpointInput = form.elements.namedItem("endpoint");
+              const argsInput = form.elements.namedItem("args");
+              const credNameInput = form.elements.namedItem("credential_name");
+              if (endpointInput instanceof HTMLInputElement) endpointInput.value = "";
+              if (argsInput instanceof HTMLInputElement) argsInput.value = "";
+              if (credNameInput instanceof HTMLInputElement) {
+                credNameInput.value = next === "http" ? "Authorization" : "MCP_TOKEN";
+              }
             }}
           >
             <option value="http">HTTP</option>
@@ -166,19 +187,19 @@ function AddMcpDialog({
         <label>
           {transport === "http" ? "MCP URL" : "Command"}
           <input
+            name="endpoint"
             required
-            value={endpoint}
-            onChange={(event) => setEndpoint(event.target.value)}
             placeholder={transport === "http" ? "https://mcp.example.com" : "github-mcp-server"}
+            autoComplete="off"
           />
         </label>
         {transport === "stdio" && (
           <label>
             Arguments
             <input
-              value={args}
-              onChange={(event) => setArgs(event.target.value)}
+              name="args"
               placeholder="stdio"
+              autoComplete="off"
             />
           </label>
         )}
@@ -186,17 +207,18 @@ function AddMcpDialog({
           <label>
             {transport === "http" ? "Auth header" : "Secret environment variable"}
             <input
-              value={credentialName}
-              onChange={(event) => setCredentialName(event.target.value)}
+              name="credential_name"
+              key={`credential-name-${transport}`}
+              defaultValue={transport === "http" ? "Authorization" : "MCP_TOKEN"}
               placeholder={transport === "http" ? "Authorization" : "MCP_TOKEN"}
+              autoComplete="off"
             />
           </label>
           <label>
             Credential
             <input
               type="password"
-              value={credentialValue}
-              onChange={(event) => setCredentialValue(event.target.value)}
+              name="credential_value"
               placeholder="Optional"
               autoComplete="off"
             />

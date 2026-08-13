@@ -303,6 +303,10 @@
   font-weight: 400;
 }
 
+.companions-plugin-form :is(input, select)::placeholder {
+  color: var(--color-faint);
+}
+
 .companions-plugin-form :is(input, select):focus-visible {
   outline: 2px solid var(--color-accent-ring);
   outline-offset: 1px;

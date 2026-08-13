@@ -36,6 +36,8 @@ export async function saveCompanionPlugin(
     method: "POST",
     headers: orgHeaders(orgId),
     body: JSON.stringify(input),
+    // Fail closed before a stuck proxy leaves the dialog spinning.
+    signal: AbortSignal.timeout(10_000),
   });
   return result.account;
 }
