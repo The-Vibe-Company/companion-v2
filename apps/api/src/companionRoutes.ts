@@ -640,6 +640,8 @@ export function registerCompanionRoutes(
           ? []
           : [...mutation.plugins.accounts, ...body.mcp_accounts],
         skills,
+        // `null` clears the recorded Box: the adapter found that the id this row carried names a
+        // machine this Companion does not own, so no other path may reach it either.
         onBoxAssigned: async (boxId) => {
           await withTenantContext(
             { orgId: mutation!.orgId, userId: mutation!.actor.id },

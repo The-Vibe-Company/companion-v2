@@ -146,6 +146,42 @@ describe("Companion per-Companion runtime isolation", () => {
       getCompanionForRuntime({ actor: member, orgId: org, companionId: companionA, database }),
     )).rejects.toBeInstanceOf(CompanionRuntimeForbiddenError);
   });
+
+  it("clears one Companion's shared Box id on its own wake and leaves the other's row alone", async () => {
+    // The state the runtime restore produced in production: both Companions in the workspace record
+    // the one Box a THE-330 pool owned. The adapter refuses to adopt it and the wake records the Box
+    // this Companion does own instead, which has to be a write to exactly one row.
+    const pooled = "bx_5neg83t4";
+    await integrationSql`
+      update companions set box_id = ${pooled}, runtime_state = 'running', daemon_state = 'running'
+      where org_id = ${org}
+    `;
+
+    await asActorIn(owner.id, (database) =>
+      claimCompanionRuntimeStart({ actor: owner, orgId: org, companionId: companionA, database }));
+    // The adapter's cleared assignment, then the Box it created for this Companion alone.
+    for (const boxId of [null, "bx_23456789"]) {
+      await asActorIn(owner.id, (database) =>
+        updateCompanionRuntime({
+          actor: owner,
+          orgId: org,
+          companionId: companionA,
+          patch: { boxId, runtimeState: "provisioning", daemonState: "starting" },
+          database,
+        }));
+    }
+
+    const [chipA, chipB] = await Promise.all([
+      asActorIn(owner.id, (database) =>
+        getCompanion({ actor: owner, orgId: org, companionId: companionA, database })),
+      asActorIn(owner.id, (database) =>
+        getCompanion({ actor: owner, orgId: org, companionId: companionB, database })),
+    ]);
+    expect(chipA.runtime.box_id).toBe("bx_23456789");
+    // B is still pointing at the shared id its own wake will clear; A's wake did not touch it.
+    expect(chipB.runtime.box_id).toBe(pooled);
+    expect(chipB.runtime.state).toBe("running");
+  });
 });
 
 function actor(prefix: string, suffix: string): TestActor {
