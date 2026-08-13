@@ -18,6 +18,16 @@ before creating another one, following every Box-list page. A new Box initially 
 five-minute TTL; only after its id is durable does the adapter apply the configured TTL and name.
 If the id cannot be persisted, the adapter best-effort archives the Box immediately.
 
+One Companion is one Box is one Pi, and that deterministic name is the only evidence of it. A start
+adopts a recorded Box id only while the Box carries this Companion's own name, or no name yet — the
+window in which a Box the adapter just created is not named until its id is durable. A recorded id
+that names a workspace-shared `Companion org <uuid>`/`Companion personal <uuid>` Box or a sibling's
+Box is treated as no assignment: the row's Box id is cleared through the same assignment callback so
+no stop, live status, or thread sync reaches that machine either, and the Companion is moved onto its
+own Box. Such a Box is never renamed or archived, because it is not this Companion's to retire and
+another row may still be pointing at it, and an archived one is never resumed. Migration 0075 drops
+the same ids from rows the shared-pool restore had copied them onto.
+
 Box setup runs once per disk, so a Box whose Pi setup reports `failed`, that reached the terminal
 `error` state, or that the provider no longer knows about can never run Pi again. A start replaces
 such a Box instead of failing: it renames the broken Box out of the deterministic name, best-effort

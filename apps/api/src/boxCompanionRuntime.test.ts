@@ -1410,7 +1410,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       setupError: "pi: command not found",
     };
     const files = new Map<string, string>();
-    const assigned: string[] = [];
+    const assigned: Array<string | null> = [];
     let retiredName: unknown;
     let retiredStop: Record<string, unknown> | undefined;
     let createdName: unknown;
@@ -1779,6 +1779,193 @@ describe("AsciiBoxCompanionRuntime", () => {
 
     expect(listed).toBe(1);
     expect(createdBox).toBe(true);
+    expect(result.boxId).toBe("bx_23456789");
+  });
+
+  /**
+   * Product promise (THE-332): 1 Companion = 1 Box = 1 Pi. The restore that undid the shared-workspace
+   * Box copied one pool Box id onto every Companion row in its scope, so a recorded id alone can name
+   * a machine that belongs to a workspace or to a sibling. Adopting it would run one Pi for several
+   * Companions, which is the cardinality the restore existed to remove.
+   */
+  it("gives each Companion its own Box when the restore left a shared workspace id on both rows", async () => {
+    const orgId = "22222222-2222-4222-8222-222222222222";
+    const first = "11111111-1111-4111-8111-111111111111";
+    const second = "33333333-3333-4333-8333-333333333333";
+    const shared = {
+      id: "bx_5neg83t4",
+      name: `Companion org ${orgId}`,
+      // A Box the provider reports idle is ready to take commands, so nothing else would have
+      // stopped this wake from starting Pi on the machine a whole workspace was pointed at.
+      state: "idle",
+      desktopAvailable: false,
+      setupStatus: "done",
+    };
+    // The two Companion rows as migration 0074 left them, updated the way the route's callback does.
+    const recorded: Record<string, string | null> = { [first]: shared.id, [second]: shared.id };
+    const assignments: Array<[string, string | null]> = [];
+    const created: string[] = [];
+    const createdNames = new Map<string, string>();
+    const sharedRequests: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.includes(shared.id)) {
+        sharedRequests.push(`${method} ${url.slice(url.indexOf("/boxes"))}`);
+        if (method === "GET") return json({ box: shared });
+        throw new Error(`the shared Box must stay untouched: ${method} ${url}`);
+      }
+      if (url.includes("/boxes?limit=200") && method === "GET") {
+        // Everything the provider knows: the shared machine plus a third Companion's archived Box.
+        return json({
+          boxes: [
+            shared,
+            {
+              ...shared,
+              id: "bx_dauymk5m",
+              name: "Companion 44444444-4444-4444-8444-444444444444",
+              state: "archived",
+            },
+          ],
+        });
+      }
+      if (url.endsWith("/boxes") && method === "POST") {
+        const id = ["bx_23456789", "bx_abcdefgh"][created.length]!;
+        created.push(id);
+        return json({ box: { id, state: "provisioning", desktopAvailable: true, setupStatus: "pending" } }, 202);
+      }
+      const target = created.find((id) => url.includes(id));
+      if (target && method === "PATCH") {
+        createdNames.set(target, String(body.name));
+        return json({ box: { ...box, id: target, name: String(body.name) } });
+      }
+      if (target && url.endsWith(`/boxes/${target}`) && method === "GET") {
+        return json({ box: { ...box, id: target, name: createdNames.get(target) } });
+      }
+      if (target && url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (target && url.endsWith("/commands") && method === "POST") {
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+    const wake = (companionId: string) => runtime.start({
+      companionId,
+      orgId,
+      boxId: recorded[companionId] ?? null,
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: false,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async (boxId) => {
+        assignments.push([companionId, boxId]);
+        recorded[companionId] = boxId;
+      },
+    });
+
+    const wokeFirst = await wake(first);
+    // The other Companion's row is untouched by this wake: it is a separate machine and a separate row.
+    expect(recorded[second]).toBe(shared.id);
+    const wokeSecond = await wake(second);
+
+    expect(wokeFirst.boxId).toBe("bx_23456789");
+    expect(wokeSecond.boxId).toBe("bx_abcdefgh");
+    expect(recorded).toEqual({ [first]: "bx_23456789", [second]: "bx_abcdefgh" });
+    expect(createdNames.get("bx_23456789")).toBe(`Companion ${first}`);
+    expect(createdNames.get("bx_abcdefgh")).toBe(`Companion ${second}`);
+    // Each wake clears the shared id first, so no other path can reach that machine either.
+    expect(assignments).toEqual([
+      [first, null],
+      [first, "bx_23456789"],
+      [second, null],
+      [second, "bx_abcdefgh"],
+    ]);
+    // The shared machine is read to see whose it is and then left alone: never woken, resumed,
+    // renamed, or stopped, because another Companion's row may still be pointing at it.
+    expect(sharedRequests).toEqual([
+      `GET /boxes/${shared.id}`,
+      `GET /boxes/${shared.id}`,
+    ]);
+  });
+
+  it("refuses an archived Box that carries another Companion's name instead of resuming it", async () => {
+    const sibling = {
+      id: "bx_sbngxyzw",
+      name: "Companion 44444444-4444-4444-8444-444444444444",
+      state: "archived",
+      desktopAvailable: false,
+      setupStatus: "done",
+    };
+    let createdBox = false;
+    let createdName: unknown;
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.includes(sibling.id)) {
+        if (method === "GET") return json({ box: sibling });
+        throw new Error(`another Companion's Box must stay untouched: ${method} ${url}`);
+      }
+      if (url.includes("/boxes?limit=200") && method === "GET") return json({ boxes: [sibling] });
+      if (url.endsWith("/boxes") && method === "POST") {
+        createdBox = true;
+        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } }, 202);
+      }
+      if (url.endsWith("/boxes/bx_23456789") && method === "PATCH") {
+        createdName = body.name;
+        return json({ box });
+      }
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/boxes/bx_23456789/commands") && method === "POST") {
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+    const assigned: Array<string | null> = [];
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: sibling.id,
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: false,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async (boxId) => {
+        assigned.push(boxId);
+      },
+    });
+
+    // An archived Box a sibling owns is not a disk to resume into; this Companion gets its own name.
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
+    expect(createdBox).toBe(true);
+    expect(createdName).toBe("Companion 11111111-1111-4111-8111-111111111111");
+    expect(assigned).toEqual([null, "bx_23456789"]);
     expect(result.boxId).toBe("bx_23456789");
   });
 

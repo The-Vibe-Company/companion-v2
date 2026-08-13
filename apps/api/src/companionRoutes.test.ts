@@ -956,6 +956,35 @@ describe("Companions API feature gate", () => {
     expect(JSON.stringify(await response.json())).not.toContain("secret-");
   });
 
+  it("clears the recorded Box when the adapter reports it is not this Companion's", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    // The wake found that the id this row carried names a machine the Companion does not own — the
+    // shared workspace Box the runtime restore copied onto every row — and moved onto its own.
+    const start = vi.fn(async (input) => {
+      await input.onBoxAssigned(null);
+      await input.onBoxAssigned("bx_abcdefgh");
+      return {
+        boxId: "bx_abcdefgh",
+        runtimeState: "running" as const,
+        daemonState: "running" as const,
+        desktopAvailable: true,
+      };
+    });
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, vi.fn(() => boxRuntime({ start })));
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    const recorded = coreMocks.updateCompanionRuntime.mock.calls
+      .map(([call]) => call.patch.boxId)
+      .filter((boxId) => boxId !== undefined);
+    expect(recorded).toEqual([null, "bx_abcdefgh", "bx_abcdefgh"]);
+  });
+
   it.each([
     [
       "keeps a refreshed subscription file on an already provisioned Box at the current layout",

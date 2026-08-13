@@ -151,7 +151,8 @@ export interface CompanionBoxRuntime {
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
-    onBoxAssigned: (boxId: string) => Promise<void>;
+    /** Record which Box backs this Companion, or `null` when the recorded one is not its own. */
+    onBoxAssigned: (boxId: string | null) => Promise<void>;
   }): Promise<CompanionRuntimeObservation>;
   stop(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
   status(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
@@ -417,6 +418,33 @@ function companionBoxName(companionId: string): string {
 }
 
 /**
+ * The names THE-330 gave the Boxes a whole workspace shared. They are recognized here so the Box that
+ * backed a scope can never become the Box that backs one Companion.
+ */
+const SHARED_SCOPE_BOX_NAME_PREFIXES = ["Companion org ", "Companion personal "];
+
+function isSharedScopeBoxName(name: string): boolean {
+  return SHARED_SCOPE_BOX_NAME_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
+/**
+ * Whether one Box is this Companion's own machine. 1 Companion = 1 Box = 1 Pi, and the deterministic
+ * name is the only evidence of that: THE-330 pointed every Companion in a workspace at one shared Box
+ * and the restore that undid it copied that shared id onto every Companion row, so an id the control
+ * plane recorded can still name a machine that belongs to a scope or to a sibling. Waking it would
+ * start one Pi for several Companions.
+ *
+ * A Box with no name is this Companion's own creation caught between the two writes of the create
+ * path, which names a Box only once its id is durable, so it stays adoptable. A shared-scope name is
+ * refused whatever id is asked about, because the caller's identifier is not this adapter's to trust.
+ */
+function isCompanionOwnBox(box: BoxInfo, companionId: string): boolean {
+  const name = box.name?.trim() ?? "";
+  if (isSharedScopeBoxName(name)) return false;
+  return name === "" || name === companionBoxName(companionId);
+}
+
+/**
  * Box setup runs once per disk, so a Box whose Pi setup failed can never run Pi, and neither can one
  * in the terminal error state. Waking such a Box again only repeats the same failure, so the
  * Companion has to be moved onto a new Box instead.
@@ -516,6 +544,9 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
 
   async #findCompanionBox(companionId: string): Promise<BoxInfo | null> {
     const name = companionBoxName(companionId);
+    // The lookup itself is refused rather than its rows: an identifier that spelled out a shared-scope
+    // name would otherwise adopt the Box a whole workspace once shared.
+    if (isSharedScopeBoxName(name)) return null;
     let cursor: string | null = null;
     do {
       const query = new URLSearchParams({ limit: "200", sort: "desc" });
@@ -870,9 +901,16 @@ exit 0`,
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
-    onBoxAssigned: (boxId: string) => Promise<void>;
+    onBoxAssigned: (boxId: string | null) => Promise<void>;
   }): Promise<CompanionRuntimeObservation> {
-    let box = input.boxId ? await this.#getAssignedBox(input.boxId) : null;
+    const assigned = input.boxId ? await this.#getAssignedBox(input.boxId) : null;
+    // A recorded id that names a machine this Companion does not own is treated as no assignment at
+    // all, and the row is cleared so nothing else — a stop, a live status, a thread sync — reaches
+    // that machine either. The Box itself is left untouched: it is not this Companion's to rename or
+    // archive, and another Companion's row may still be pointing at it.
+    let box = assigned && isCompanionOwnBox(assigned, input.companionId) ? assigned : null;
+    const keptAssignment = box !== null;
+    if (assigned && !keptAssignment) await input.onBoxAssigned(null);
     if (!box) box = await this.#findCompanionBox(input.companionId);
     if (box && isBeyondRecovery(box)) {
       // The assigned Box failed setup or died, so the Companion moves onto a new Box instead of
@@ -908,7 +946,9 @@ exit 0`,
       try {
         await input.onBoxAssigned(box.id);
       } catch (error) {
-        if (!input.boxId) {
+        // A Box recovered by name is recorded nowhere until this write lands, so a write that fails
+        // leaves it to be archived here. The Box the control plane already had recorded is left alone.
+        if (!keptAssignment) {
           await this.#request(`/boxes/${encodeURIComponent(box.id)}/stop`, {
             method: "POST",
             body: JSON.stringify({ force: false }),
