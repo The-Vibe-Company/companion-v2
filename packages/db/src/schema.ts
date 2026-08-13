@@ -40,6 +40,12 @@ export const companionDaemonStateEnum = pgEnum("companion_daemon_state", [
   "stopped",
   "error",
 ]);
+// A shared Box runtime pool is scoped to a workspace: 'personal' is one Box for a user in their
+// personal workspace (keyed by owner); 'org' is one Box shared by every member of a team workspace.
+export const companionRuntimePoolScopeEnum = pgEnum("companion_runtime_pool_scope", [
+  "personal",
+  "org",
+]);
 export const companionProviderAuthMethodEnum = pgEnum("companion_provider_auth_method", [
   "api_key",
   "subscription",
@@ -369,11 +375,48 @@ export const companions = pgTable(
     name: text("name").notNull(),
     /** One short operator-authored line describing the Companion; never a system prompt. */
     persona: text("persona"),
+    providerIds: jsonb("provider_ids").$type<string[]>().notNull().default([]),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgId: unique("companions_org_id_id_uq").on(t.orgId, t.id),
+    uniqueOwnerIdentity: unique("companions_org_id_id_owner_id_uq").on(t.orgId, t.id, t.ownerId),
+    byOrgUpdated: index("companions_org_updated_idx").on(t.orgId, t.updatedAt),
+    ownerMembershipFk: foreignKey({
+      columns: [t.orgId, t.ownerId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "companions_owner_membership_fk",
+    }),
+    personaLength: check(
+      "companions_persona_check",
+      sql`${t.persona} is null or char_length(${t.persona}) <= 280`,
+    ),
+  }),
+);
+
+/**
+ * The shared Box runtime for a workspace. THE-330 makes Box cardinality a workspace property, not a
+ * per-Companion one: every personal Companion of a user shares the single `personal` pool for their
+ * personal workspace, and every Companion of a team organization shares that org's single `org`
+ * pool. Companions project `box_id` and the whole runtime chip from the pool row for their scope, so
+ * waking one Companion starts the shared machine for the entire scope and stopping it stops the
+ * machine for everyone. Threads stay 1:1 per Companion; only the compute surface is shared here.
+ */
+export const companionRuntimePools = pgTable(
+  "companion_runtime_pools",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    scope: companionRuntimePoolScopeEnum("scope").notNull(),
+    /** The member for a `personal` pool (keyed by owner); null for an `org` pool shared by all. */
+    ownerId: text("owner_id"),
     boxId: text("box_id"),
     runtimeState: companionRuntimeStateEnum("runtime_state").notNull().default("not_created"),
     daemonState: companionDaemonStateEnum("daemon_state").notNull().default("unknown"),
-    providerIds: jsonb("provider_ids").$type<string[]>().notNull().default([]),
-    /** Encrypted provider credential generation last applied to the Box Pi auth file. */
+    /** Encrypted provider credential generation last applied to the shared Box Pi auth file. */
     providerCredentialGeneration: uuid("provider_credential_generation"),
     diskLayoutVersion: integer("disk_layout_version").notNull().default(1),
     desktopAvailable: boolean("desktop_available").notNull().default(false),
@@ -390,25 +433,32 @@ export const companions = pgTable(
     updatedAt: updatedAt(),
   },
   (t) => ({
-    uniqueOrgId: unique("companions_org_id_id_uq").on(t.orgId, t.id),
-    uniqueOwnerIdentity: unique("companions_org_id_id_owner_id_uq").on(t.orgId, t.id, t.ownerId),
-    byOrgUpdated: index("companions_org_updated_idx").on(t.orgId, t.updatedAt),
+    // One shared pool per personal workspace (org + owner) and one per team organization.
+    personalPoolUq: uniqueIndex("companion_runtime_pools_personal_uq")
+      .on(t.orgId, t.ownerId)
+      .where(sql`${t.scope} = 'personal' and ${t.ownerId} is not null`),
+    orgPoolUq: uniqueIndex("companion_runtime_pools_org_uq")
+      .on(t.orgId)
+      .where(sql`${t.scope} = 'org' and ${t.ownerId} is null`),
     ownerMembershipFk: foreignKey({
       columns: [t.orgId, t.ownerId],
       foreignColumns: [memberships.orgId, memberships.userId],
-      name: "companions_owner_membership_fk",
-    }),
-    positiveDiskLayout: check("companions_disk_layout_version_check", sql`${t.diskLayoutVersion} >= 1`),
-    personaLength: check(
-      "companions_persona_check",
-      sql`${t.persona} is null or char_length(${t.persona}) <= 280`,
+      name: "companion_runtime_pools_owner_membership_fk",
+    }).onDelete("cascade"),
+    scopeOwner: check(
+      "companion_runtime_pools_scope_owner_check",
+      sql`(${t.scope} = 'personal' and ${t.ownerId} is not null) or (${t.scope} = 'org' and ${t.ownerId} is null)`,
+    ),
+    positiveDiskLayout: check(
+      "companion_runtime_pools_disk_layout_version_check",
+      sql`${t.diskLayoutVersion} >= 1`,
     ),
     boxIdShape: check(
-      "companions_box_id_check",
+      "companion_runtime_pools_box_id_check",
       sql`${t.boxId} is null or ${t.boxId} ~ '^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$'`,
     ),
     lastErrorLength: check(
-      "companions_last_error_check",
+      "companion_runtime_pools_last_error_check",
       sql`${t.lastError} is null or char_length(${t.lastError}) <= 500`,
     ),
   }),

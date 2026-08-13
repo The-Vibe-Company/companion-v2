@@ -512,6 +512,13 @@
       "when": 1786587600000,
       "tag": "0072_drop_companion_member_access",
       "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1786591200000,
+      "tag": "0073_companion_runtime_pools",
+      "breakpoints": true
     }
   ]
 }

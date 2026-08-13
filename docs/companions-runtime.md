@@ -12,11 +12,33 @@ provider id, authentication method, and timestamps. `GET /v1/companions`,
 `GET /v1/companions/:id`, and the default
 `GET /v1/companions/:id/runtime` read only this projection and never call Box.
 
-Lifecycle claims are conditional updates. A claim abandoned by a crashed API process becomes
-retryable after five minutes; starts recover a Box by its deterministic `Companion <uuid>` name
-before creating another one, following every Box-list page. A new Box initially gets a maximum
-five-minute TTL; only after its id is durable does the adapter apply the configured TTL and name.
-If the id cannot be persisted, the adapter best-effort archives the Box immediately.
+## Box scope
+
+The Box is a workspace resource, not a per-Companion one. A personal workspace (an organization of
+kind `personal`) shares one Box across every Companion its user owns; a team workspace shares one Box
+across every Companion in the organization. The shared runtime lives on `companion_runtime_pools`,
+one row per scope: a `personal` pool keyed by `(org_id, owner_id)` and an `org` pool keyed by
+`(org_id)`, both enforced by partial unique indexes so two Companions racing their first wake still
+converge on one Box. Each Companion projects `box_id`, runtime and daemon state, desktop
+availability, and the last error from the one pool its scope resolves to, so the status chip is
+identical on every Companion in the scope. `companions` keeps only durable identity plus the
+provider the owner selected; threads stay 1:1 per Companion. Waking any Companion starts the shared
+machine for the whole scope and stopping any Companion stops it for everyone; the desktop Lux opens
+is that same shared machine.
+
+The pool row is created on first wake. RLS lets every member read the chip for their workspace (a
+`personal` pool only for its owner, an `org` pool for any member) while restricting writes to a
+caller who can wake a Companion in the scope — a Companion owner in scope or a workspace Editor — so
+the read model never contacts Box and a Viewer can never claim one.
+
+Lifecycle claims are conditional updates against the scope's pool row. A claim abandoned by a crashed
+API process becomes retryable after five minutes; starts recover a Box by the scope's deterministic
+name — `Companion personal <userId>` or `Companion org <orgId>` — before creating another one,
+following every Box-list page. A Box left by the earlier per-Companion design and named
+`Companion <uuid>` carries a different name and is therefore never re-adopted on wake. A new Box
+initially gets a maximum five-minute TTL; only after its id is durable does the adapter apply the
+configured TTL and name. If the id cannot be persisted, the adapter best-effort archives the Box
+immediately.
 
 Box setup runs once per disk, so a Box whose Pi setup reports `failed`, that reached the terminal
 `error` state, or that the provider no longer knows about can never run Pi again. A start replaces
@@ -86,7 +108,7 @@ is corrected by an observation rather than by a wake.
 ## Lifecycle failure reporting
 
 A failure is diagnosable without server logs. A failed start or stop records `runtime_state: error`
-together with one sanitized line in `companions.last_error`, and the failing start, stop, and sync
+together with one sanitized line in the scope pool's `last_error`, and the failing start, stop, and sync
 responses carry that same line as `error`, so the operator who pressed Wake and the operator who
 reloads later read the same reason.
 
@@ -238,7 +260,7 @@ Box prints. A fragment left too short to read is dropped whole instead of stored
 Pi's stderr log is supplementary and is read only when it was written during this start. The log
 outlives the start that wrote it, so an untouched one still holds whatever an earlier run left
 behind; without a freshness window a line from hours ago would be reported as the reason a wake just
-failed. The result fits the single sanitized line `companions.last_error` stores. Neither the poll nor the failure stops,
+failed. The result fits the single sanitized line the scope pool's `last_error` stores. Neither the poll nor the failure stops,
 archives, or retires the Box: only a Box already beyond recovery — terminal `error` state or failed
 Pi setup — is replaced, and that decision is made before the daemon is ever restarted.
 
