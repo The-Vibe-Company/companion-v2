@@ -693,6 +693,8 @@ export async function recordCompanionPiProjection(input: {
   companionId: string;
   entries: CompanionPiEntry[];
   piLogOffset?: number;
+  /** Set when the caller reread a shrunken log from its start, so the offset may move backwards. */
+  piLogRewound?: boolean;
   deliveredOrdinal?: number;
   database?: Db;
 }): Promise<CompanionThread> {
@@ -727,7 +729,15 @@ export async function recordCompanionPiProjection(input: {
     await database
       .update(schema.companionThreads)
       .set({
-        ...(input.piLogOffset !== undefined ? { piLogOffset: input.piLogOffset } : {}),
+        ...(input.piLogOffset !== undefined
+          ? {
+            // Two awake syncs can overlap, and the one that read less of the log must not pull the
+            // offset back and make the next sync reproject what the other already stored.
+            piLogOffset: input.piLogRewound
+              ? input.piLogOffset
+              : sql`greatest(${schema.companionThreads.piLogOffset}, ${input.piLogOffset})`,
+          }
+          : {}),
         ...(input.deliveredOrdinal !== undefined
           ? { deliveredOrdinal: sql`greatest(coalesce(${schema.companionThreads.deliveredOrdinal}, -1), ${input.deliveredOrdinal})` }
           : {}),

@@ -11,6 +11,7 @@ import {
   CompanionShareTargetError,
   claimCompanionRuntimeStart,
   claimCompanionRuntimeStop,
+  companionsAvailableToUser,
   companionsEnabled,
   createCompanion,
   deleteCompanionPlugin,
@@ -81,8 +82,16 @@ const companionIdSchema = z.string().uuid();
 
 type RuntimeFactory = () => CompanionBoxRuntime;
 
+class CompanionAccessForbiddenError extends Error {
+  constructor() {
+    super("Companions access is not available for this user");
+    this.name = "CompanionAccessForbiddenError";
+  }
+}
+
 function errorStatus(error: unknown): number {
   if (error instanceof AuthenticationRequiredError) return 401;
+  if (error instanceof CompanionAccessForbiddenError) return 403;
   if (error instanceof CompanionNotFoundError) return 404;
   if (error instanceof CompanionRuntimeForbiddenError) return 403;
   if (error instanceof CompanionProviderForbiddenError) return 403;
@@ -115,6 +124,7 @@ function recordProjection(input: {
   companionId: string;
   entries: CompanionPiEntry[];
   piLogOffset?: number;
+  piLogRewound?: boolean;
   deliveredOrdinal?: number;
 }): Promise<CompanionThread> {
   return withTenantContext(
@@ -189,6 +199,9 @@ export function registerCompanionRoutes(
     }) => Promise<T>,
   ): Promise<T> {
     const actor = actorFromContext(c);
+    if (!companionsAvailableToUser(actor.email, env)) {
+      throw new CompanionAccessForbiddenError();
+    }
     const orgId = await orgIdFromContext(c);
     return withTenantContext({ orgId, userId: actor.id }, (database) =>
       fn({ actor, orgId, database }));
@@ -485,7 +498,9 @@ export function registerCompanionRoutes(
           await runtime.prompt({ boxId, message: message.content, requestId: message.event_id });
           deliveredOrdinal = message.ordinal;
         }
-      } catch (error) {
+      } finally {
+        // Record what Pi accepted before reading its log. Whatever happens next — a failed read, a
+        // failed projection, a refused prompt — a retry must not prompt the same message twice.
         if (deliveredOrdinal !== undefined) {
           await recordProjection({
             actor: resolved.actor,
@@ -495,7 +510,6 @@ export function registerCompanionRoutes(
             deliveredOrdinal,
           }).catch(() => undefined);
         }
-        throw error;
       }
       const events = await runtime.readEvents({ boxId, offset: resolved.piLogOffset });
       const projection = projectCompanionPiEvents({ chunk: events.chunk, offset: events.offset });
@@ -505,7 +519,9 @@ export function registerCompanionRoutes(
         companionId,
         entries: projection.entries,
         piLogOffset: events.offset + projection.consumedBytes,
-        deliveredOrdinal,
+        // Pi rereads its log from the start when it shrank, so that projection owns the offset
+        // outright; otherwise the offset only moves forward.
+        piLogRewound: events.offset < resolved.piLogOffset,
       });
       return c.json({ thread, source: "box" as const });
     } catch (error) {

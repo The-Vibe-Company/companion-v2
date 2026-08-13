@@ -78,7 +78,7 @@ function render(props: {
     busy: props.busy ?? false,
     waking: props.waking ?? false,
     onBack: () => {},
-    onSend: () => {},
+    onSend: async () => true,
     onWake: () => {},
   }));
 }

@@ -106,6 +106,7 @@ export function CompanionsApp({
   const [waking, setWaking] = useState(false);
   const threadRequestRef = useRef(0);
   const threadQueueRef = useRef(createThreadQueue());
+  const rowRefs = useRef(new Map<string, HTMLButtonElement>());
   const noop = () => {};
 
   const opened = useMemo(
@@ -147,11 +148,16 @@ export function CompanionsApp({
   };
 
   const closeThread = () => {
+    const wasOpen = openedId;
     threadRequestRef.current += 1;
     setOpenedId(null);
     setThread(null);
     setThreadError(null);
     threadUrl(null);
+    // Leaving the thread unmounts the back button, so focus returns to the row it came from.
+    window.requestAnimationFrame(() => {
+      (wasOpen ? rowRefs.current.get(wasOpen) : null)?.focus();
+    });
   };
 
   const openPlugins = () => {
@@ -208,8 +214,9 @@ export function CompanionsApp({
     return () => clearInterval(timer);
   }, [canRunOpened, openedAwake, openedId, refreshThread]);
 
-  const onSend = async (content: string) => {
-    if (!openedId) return;
+  /** Resolves false when the message never reached the control plane, so the composer keeps its text. */
+  const onSend = async (content: string): Promise<boolean> => {
+    if (!openedId) return false;
     setSending(true);
     setThreadError(null);
     try {
@@ -220,8 +227,10 @@ export function CompanionsApp({
       );
       threadRequestRef.current += 1;
       if (next) setThread(next);
+      return true;
     } catch (cause) {
       setThreadError(cause instanceof Error ? cause.message : "The message could not be sent.");
+      return false;
     } finally {
       setSending(false);
     }
@@ -394,7 +403,7 @@ export function CompanionsApp({
               busy={sending}
               waking={waking}
               onBack={closeThread}
-              onSend={(content) => void onSend(content)}
+              onSend={onSend}
               onWake={() => void onWake()}
             />
           </>
@@ -481,6 +490,10 @@ export function CompanionsApp({
                           <button
                             type="button"
                             className="companions-row__main"
+                            ref={(node) => {
+                              if (node) rowRefs.current.set(companion.id, node);
+                              else rowRefs.current.delete(companion.id);
+                            }}
                             onClick={() => openCompanion(companion)}
                           >
                             <span className="companions-avatar" aria-hidden="true">

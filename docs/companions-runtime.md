@@ -80,17 +80,19 @@ still delivers it in order.
 `POST /v1/companions/:id/thread/sync` is the single Owner/Editor step that reconciles a live thread.
 It hands pending messages to the running Pi daemon in ordinal order through the owner-only
 `pi.rpc.in` FIFO, reads `pi.rpc.ndjson` from the recorded byte offset, and appends the projected
-entries. Both watermarks (`delivered_ordinal` and `pi_log_offset`) advance inside the same tenant
-transaction, and event ids derive from log byte offsets, so a retried sync is idempotent. When the
-Box is asleep, sync degrades to the same read-model response as the thread read and reports
-`source: "control_plane"`.
+entries. `delivered_ordinal` is claimed as soon as Pi accepts a prompt and before the log is read, so
+a failed read or projection cannot make a retry hand Pi the same message again. `pi_log_offset` then
+advances with the projection, and event ids derive from log byte offsets, so a retried sync appends
+nothing new. Both watermarks only move forward, except when Pi's log shrank: that read starts at the
+log's beginning and owns the offset outright. When the Box is asleep, sync degrades to the same
+read-model response as the thread read and reports `source: "control_plane"`.
 
 The projection deliberately keeps only conversation: Pi assistant text, plus a system note when a
 turn errors or is aborted. Thinking blocks, tool calls, and tool results are dropped, so no Pi tool
 or Skills chrome reaches the thread UI.
 
-Delivery reads the pending list and advances the watermark in separate statements, so two requests
-that overlap can hand Pi the same prompt twice. One client cannot do this: the web surface runs its
+Delivery reads the pending list before it claims the watermark, so two requests that overlap inside
+that window can hand Pi the same prompt twice. One client cannot do this: the web surface runs its
 sends and syncs one at a time, skipping a poll that an in-flight request already covers. Two clients
 syncing the same thread in the same instant still can, and V1 accepts that: the transcript stays
 correct because projection is keyed by log byte offset, and the visible cost is a repeated prompt.

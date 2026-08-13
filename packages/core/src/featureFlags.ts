@@ -1,9 +1,49 @@
 const ENABLED_VALUE = "true";
 
 export const COMPANIONS_FEATURE_FLAG = "COMPANION_COMPANIONS_ENABLED";
+export const COMPANIONS_ALLOWED_EMAIL_DOMAINS_ENV =
+  "COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS";
 
 export function companionsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env[COMPANIONS_FEATURE_FLAG]?.trim().toLowerCase() === ENABLED_VALUE;
+  return (
+    env[COMPANIONS_FEATURE_FLAG]?.trim().toLowerCase() === ENABLED_VALUE
+    && companionsAllowedEmailDomains(env).size > 0
+  );
+}
+
+/**
+ * Resolve the required, case-insensitive email-domain allowlist. Empty entries are ignored. An
+ * unset, blank, or comma-only value keeps Companions disabled even when the master flag is true.
+ */
+export function companionsAllowedEmailDomains(
+  env: NodeJS.ProcessEnv = process.env,
+): ReadonlySet<string> {
+  return new Set(
+    (env[COMPANIONS_ALLOWED_EMAIL_DOMAINS_ENV] ?? "")
+      .split(",")
+      .map((domain) => domain.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+/**
+ * Decide whether an authenticated user may access Companions. The master switch and a non-empty
+ * allowlist are both required. Missing or malformed emails fail closed.
+ */
+export function companionsAvailableToUser(
+  email: string | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (!companionsEnabled(env) || !email) return false;
+
+  const normalizedEmail = email.trim().toLowerCase();
+  const at = normalizedEmail.indexOf("@");
+  if (at <= 0 || at !== normalizedEmail.lastIndexOf("@") || at === normalizedEmail.length - 1) {
+    return false;
+  }
+
+  const allowedDomains = companionsAllowedEmailDomains(env);
+  return allowedDomains.has(normalizedEmail.slice(at + 1));
 }
 
 // Defaults intentionally mirror AsciiBoxCompanionRuntime and .env.example so that a deployment can
