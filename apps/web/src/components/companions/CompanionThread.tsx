@@ -51,11 +51,12 @@ export function CompanionThread({
   busy: boolean;
   waking: boolean;
   onBack: () => void;
-  onSend: (content: string) => void;
+  onSend: (content: string) => Promise<boolean>;
   onWake: () => void;
 }) {
   const [draft, setDraft] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
   const status = companionStatus(companion.runtime.state);
   const canSend = thread ? thread.can_send : companion.access !== "viewer";
   const awake = companion.runtime.state === "running";
@@ -66,11 +67,17 @@ export function CompanionThread({
     if (log) log.scrollTop = log.scrollHeight;
   }, [entries.length]);
 
-  const submit = () => {
+  // Opening a thread unmounts the list control that was focused, so focus moves to this thread.
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, [companion.id]);
+
+  const submit = async () => {
     const content = draft.trim();
     if (!content || busy) return;
     setDraft("");
-    onSend(content);
+    // A failed send keeps its text: restore the draft unless something newer was typed meanwhile.
+    if (!await onSend(content)) setDraft((current) => current || content);
   };
 
   return (
@@ -83,7 +90,7 @@ export function CompanionThread({
           {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
         </span>
         <div className="chat-identity">
-          <h1>{companion.name}</h1>
+          <h1 ref={headingRef} tabIndex={-1}>{companion.name}</h1>
           {companion.persona && <p>{companion.persona}</p>}
         </div>
         <span className={`companions-state companions-state--${status.tone}`}>
@@ -132,7 +139,7 @@ export function CompanionThread({
           className="chat-composer"
           onSubmit={(event) => {
             event.preventDefault();
-            submit();
+            void submit();
           }}
         >
           <textarea
@@ -144,7 +151,7 @@ export function CompanionThread({
             onKeyDown={(event) => {
               if (event.key !== "Enter" || event.shiftKey) return;
               event.preventDefault();
-              submit();
+              void submit();
             }}
           />
           <button
