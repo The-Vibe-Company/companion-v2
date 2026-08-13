@@ -15,12 +15,12 @@ import {
 
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
 const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
-// THE-332 restores one Pi daemon per Box (1 Companion = 1 Box = 1 Pi), reverting the THE-330 shared
-// daemon that routed RPC output through a per-Companion active-session marker. The daemon wrapper
-// changes back to writing a single `runtime/logs/pi.rpc.ndjson`, so the layout is bumped past the
-// THE-330 value (3) to force every Box that installed the shared daemon to reinstall this one on its
-// next wake.
-export const COMPANION_PI_DISK_LAYOUT_VERSION = 4;
+// THE-336 makes the daemon wrapper report its own failures into the log the control plane reads,
+// because a wrapper that died before `exec` wrote only to the journal and left the log's timestamp
+// untouched, which is how a crash-looping wake reported an exit status and no reason at all. The
+// wrapper is written by the layout script and cached behind the layout marker, so the version is
+// bumped past the THE-332 value (4) to force every Box to reinstall it on its next wake.
+export const COMPANION_PI_DISK_LAYOUT_VERSION = 5;
 /** Content bytes the provider's file API refuses in one `PUT /boxes/:id/files` body. */
 const BOX_FILE_WRITE_LIMIT_BYTES = 5 * 1024 * 1024;
 /**
@@ -43,7 +43,9 @@ const PI_DAEMON_ACTIVE_TIMEOUT_MS = 20_000;
 const PI_DAEMON_DIAGNOSTIC_LABELS = {
   state: "companion-pi-state",
   status: "companion-pi-status",
+  restarts: "companion-pi-restarts",
   stderr: "companion-pi-stderr",
+  journal: "companion-pi-journal",
 } as const;
 /** The sentence a failed wait reports, and the room its fragments have left inside the stored line. */
 export const PI_DAEMON_FAILURE_MESSAGE = "Pi daemon is not running after start";
@@ -52,16 +54,21 @@ export const PI_DAEMON_FAILURE_MESSAGE = "Pi daemon is not running after start";
  * `companions.last_error` keeps one sanitized line of bounded length, so the fragments have to fit
  * it together and a fragment the Box had nothing to say for spends nothing.
  *
- * systemd's own account leads because it is the only account that always exists. The unit declares
- * no `StandardError=`, and the wrapper redirects Pi only after it has `exec`ed, so a daemon that
- * dies on its environment or its arguments writes nothing anywhere and is described solely by
- * `Active:` and the exit status. Pi's log is supplementary and claims what is left.
+ * systemd's own account leads because it is the only account that always exists: `Active:` says
+ * whether the unit is starting, dead, or back in the restart queue, the exit status says what Pi
+ * died of, and the restart count is what separates a slow first start from a crash loop. Pi's own
+ * words come next, and the journal claims whatever is left, because the journal is only account left
+ * for a failure the wrapper could not write down itself.
  */
 const PI_DAEMON_DIAGNOSTIC_BUDGETS = [
+  { key: "active", prefix: "", limit: 64 },
   { key: "state", prefix: "is-active: ", limit: 16 },
-  { key: "active", prefix: "", limit: 82 },
   { key: "exit", prefix: "exit: ", limit: 40 },
+  // A count says all of what it has to say in its digits, so unlike the quoted fragments it is worth
+  // storing at any length that fits.
+  { key: "restarts", prefix: "restarts: ", limit: 4, minimum: 1 },
   { key: "stderr", prefix: "pi.stderr.log: ", limit: 74 },
+  { key: "journal", prefix: "journal: ", limit: 74 },
 ] as const;
 /**
  * How recently Pi's stderr log must have been written to be read as this failure's reason. The log
@@ -69,7 +76,20 @@ const PI_DAEMON_DIAGNOSTIC_BUDGETS = [
  * without this window a line from hours ago would be reported as the reason a wake just failed.
  */
 const PI_DAEMON_STDERR_FRESH_MINUTES = 2;
-/** A fragment clamped shorter than this says less than the characters it costs. */
+/**
+ * How large Pi's stderr log may grow before the daemon rolls it aside on its next start. A crash
+ * loop restarts every couple of seconds for as long as it goes unnoticed, and the wrapper now writes
+ * a line for each of those starts, so the log needs a ceiling that is still far more history than
+ * one failure diagnosis reads.
+ */
+const PI_DAEMON_STDERR_ROLL_KILOBYTES = 1024;
+/**
+ * How far back the journal is read for this start's reason. systemd keeps the unit's whole history,
+ * so without a window the line that explains a wake could be one from a wake hours ago; this is the
+ * same reasoning as the stderr log's freshness window.
+ */
+const PI_DAEMON_JOURNAL_FRESH_MINUTES = 2;
+/** A quoted fragment clamped shorter than this says less than the characters it costs. */
 const PI_DAEMON_DIAGNOSTIC_MINIMUM = 12;
 const PI_DAEMON_DIAGNOSTIC_SEPARATOR = "; ";
 type PiDaemonDiagnosticKey = (typeof PI_DAEMON_DIAGNOSTIC_BUDGETS)[number]["key"];
@@ -225,6 +245,25 @@ function daemonExitDetail(line: string | undefined): string | undefined {
 }
 
 /**
+ * The part of systemd's `Active:` line worth storing. Its tail is the clock time the unit entered
+ * that state, which the control plane already knows from when it asked, so the timestamp is dropped
+ * and the room it was spending goes to whatever said why the start failed.
+ */
+function daemonActiveDetail(line: string | undefined): string | undefined {
+  return line?.replace(/\s+since\s+.*$/i, "").trim() || undefined;
+}
+
+/**
+ * How many times systemd has restarted the unit, and only when it has. A restart count is what tells
+ * a Pi that is merely slow to start from one that keeps dying and being brought back, so a zero — or
+ * a unit whose count the Box would not report — says nothing worth spending the line on.
+ */
+function daemonRestartDetail(value: string | undefined): string | undefined {
+  const restarts = Number.parseInt(value ?? "", 10);
+  return Number.isSafeInteger(restarts) && restarts > 0 ? String(restarts) : undefined;
+}
+
+/**
  * Keep one diagnostic fragment short. The control plane stores a single sanitized line of bounded
  * length, so a status line and a stderr line that both ran long would push each other out of it.
  */
@@ -242,13 +281,18 @@ function clampDiagnostic(value: string, limit: number): string {
 export function composeDaemonFailureDetail(stdout: string): string {
   const lines = (label: string): string[] => labeledDiagnosticLines(stdout, label);
   const status = lines(PI_DAEMON_DIAGNOSTIC_LABELS.status);
+  // Both come from the same grep, so each is picked by what it says rather than by where it landed:
+  // a unit that prints only one of them must not have it read as the other.
+  const active = daemonActiveDetail(status.find((line) => line.startsWith("Active:")));
   const values: Record<PiDaemonDiagnosticKey, string | undefined> = {
-    state: lines(PI_DAEMON_DIAGNOSTIC_LABELS.state).at(-1),
-    // Both come from the same grep, so each is picked by what it says rather than by where it
-    // landed: a unit that prints only one of them must not have it read as the other.
-    active: status.find((line) => line.startsWith("Active:")),
+    active,
+    // `is-active` prints the same word `Active:` opens with, so it is the account for a unit whose
+    // status the Box would not print rather than a second copy of one it did.
+    state: active ? undefined : lines(PI_DAEMON_DIAGNOSTIC_LABELS.state).at(-1),
     exit: status.map(daemonExitDetail).find(Boolean),
+    restarts: daemonRestartDetail(lines(PI_DAEMON_DIAGNOSTIC_LABELS.restarts).at(-1)),
     stderr: lines(PI_DAEMON_DIAGNOSTIC_LABELS.stderr).at(-1),
+    journal: lines(PI_DAEMON_DIAGNOSTIC_LABELS.journal).at(-1),
   };
   const fragments: string[] = [];
   let remaining =
@@ -258,7 +302,7 @@ export function composeDaemonFailureDetail(stdout: string): string {
     if (!value) continue;
     const separator = fragments.length ? PI_DAEMON_DIAGNOSTIC_SEPARATOR.length : 0;
     const room = Math.min(budget.limit, remaining - separator - budget.prefix.length);
-    if (room < PI_DAEMON_DIAGNOSTIC_MINIMUM) continue;
+    if (room < ("minimum" in budget ? budget.minimum : PI_DAEMON_DIAGNOSTIC_MINIMUM)) continue;
     const fragment = `${budget.prefix}${clampDiagnostic(value, room)}`;
     fragments.push(fragment);
     remaining -= separator + fragment.length;
@@ -314,7 +358,19 @@ PI_CODING_AGENT_DIR="$HOME/.companion/pi" "$pi_bin" install ${shellQuote(mcpAdap
   printf '%s\n' 'export PATH'
   cat <<'COMPANION_PI_DAEMON'
 root="$HOME/.companion/runtime"
+stderr_log="$root/logs/pi.stderr.log"
 mkdir -p "$root/sessions" "$root/state" "$root/logs"
+# A crash loop appends one line every couple of seconds for as long as it runs, so the log is rolled
+# once instead of growing until the Box disk notices.
+if [ -f "$stderr_log" ] && [ -n "$(find "$stderr_log" -size +${PI_DAEMON_STDERR_ROLL_KILOBYTES}k 2>/dev/null)" ]; then
+  mv -f "$stderr_log" "$stderr_log.1" 2>/dev/null || true
+fi
+# Everything this wrapper says from here on lands in the log the control plane reads for the reason a
+# start failed. Redirecting only Pi left every failure before the final 'exec' — a directory it could
+# not create, a FIFO it could not replace, a Pi binary it could not run — in the journal alone, with
+# the log's timestamp untouched, so the wake reported systemd's exit status and no reason.
+exec 2>>"$stderr_log"
+trap 'companion_status=$?; printf "pi-daemon: line %s: %s failed with status %s\\n" "$LINENO" "$BASH_COMMAND" "$companion_status" >&2' ERR
 export PI_CODING_AGENT_DIR="$HOME/.companion/pi"
 fifo="$root/state/pi.rpc.in"
 rm -f "$fifo"
@@ -324,7 +380,10 @@ skill_args=(--no-skills)
 if find "$root/skills" -type f -name SKILL.md -print -quit 2>/dev/null | grep -q .; then
   skill_args+=(--skill "$root/skills")
 fi
-exec "$PI_BIN" --mode rpc --session-dir "$root/sessions" "\${skill_args[@]}" <&3 >>"$root/logs/pi.rpc.ndjson" 2>>"$root/logs/pi.stderr.log"
+# One line per start, so the log always carries this start's timestamp and the invocation it made:
+# a Pi that dies without complaining is then reported as the command it was, not as silence.
+printf 'pi-daemon: starting %s %s\\n' "$PI_BIN" "\${skill_args[*]}" >&2
+exec "$PI_BIN" --mode rpc --session-dir "$root/sessions" "\${skill_args[@]}" <&3 >>"$root/logs/pi.rpc.ndjson" 2>>"$stderr_log"
 COMPANION_PI_DAEMON
 } > "$HOME/.companion/bin/pi-daemon"
 chmod 700 "$HOME/.companion/bin/pi-daemon"
@@ -679,11 +738,15 @@ systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true`,
 
   /**
    * Say why Pi is not running. A daemon that never reached `active` is either still starting, dead,
-   * or restarting on failure, and the generic sentence cannot tell those apart, so systemd's verdict
-   * and the exit status it recorded travel with the failure. Pi's stderr log is read only when it
-   * was written during this start, because an untouched log describes an earlier one. Only those
-   * systemd summary lines and that log are read: the provider auth file and the transient MCP
-   * credential file are never opened, and the control plane redacts and truncates what it stores.
+   * or restarting on failure, and the generic sentence cannot tell those apart, so systemd's verdict,
+   * the exit status it recorded, and how many times it has already restarted the unit travel with
+   * the failure. Pi's stderr log is read only when it was written during this start, because an
+   * untouched log describes an earlier one. The journal is read last and for the same window,
+   * because it is the only account of a failure that happened before the daemon wrapper could write
+   * anything down — a unit systemd refused to execute, a process the kernel killed, or a restart
+   * loop systemd gave up on. Only those systemd records and that log are read: the provider auth
+   * file and the transient MCP credential file are never opened, and the control plane redacts and
+   * truncates what it stores.
    */
   async #daemonFailureDetail(boxId: string): Promise<string> {
     const result = await this.#command(
@@ -696,9 +759,15 @@ export LC_ALL
 companion_label() { while IFS= read -r line; do printf '%s %s\\n' "$1" "$line"; done; }
 systemctl --user is-active companion-pi-daemon.service 2>&1 | tail -n 1 | companion_label ${PI_DAEMON_DIAGNOSTIC_LABELS.state}
 systemctl --user status --no-pager --full companion-pi-daemon.service 2>&1 | grep -E '^ *(Active|Process|Main PID):' | head -n 2 | companion_label ${PI_DAEMON_DIAGNOSTIC_LABELS.status}
+systemctl --user show --property=NRestarts --value companion-pi-daemon.service 2>/dev/null | tail -n 1 | companion_label ${PI_DAEMON_DIAGNOSTIC_LABELS.restarts}
 companion_log="$HOME/.companion/runtime/logs/pi.stderr.log"
 if [ -n "$(find "$companion_log" -mmin -${PI_DAEMON_STDERR_FRESH_MINUTES} 2>/dev/null)" ]; then
   tail -n 20 "$companion_log" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 | companion_label ${PI_DAEMON_DIAGNOSTIC_LABELS.stderr}
+fi
+if command -v journalctl >/dev/null 2>&1; then
+  # systemd narrates every start and stop of the unit, so those lines are dropped and the last thing
+  # left is the last thing that went wrong rather than the last thing that happened.
+  journalctl --user --unit companion-pi-daemon.service --since=-${PI_DAEMON_JOURNAL_FRESH_MINUTES}min --no-pager --output=cat --lines=25 2>/dev/null | grep -Ev '^(Started|Starting|Stopping|Stopped|Deactivated|Succeeded|Consumed|Scheduled restart job|[[:space:]]*$)' | tail -n 1 | companion_label ${PI_DAEMON_DIAGNOSTIC_LABELS.journal}
 fi
 exit 0`,
       30,
@@ -989,6 +1058,12 @@ chmod 600 "$auth_file"
 ${PREPARE_USER_BUS}
 # The create setupScript only writes the unit file, so this is the first load of the Pi daemon unit.
 systemctl --user daemon-reload
+# A unit that crash-looped past systemd's start limit refuses every later start until its failure is
+# cleared, so a Companion that once crash-looped would answer the next wake with "Start request
+# repeated too quickly" instead of starting Pi — even after whatever broke Pi was fixed. Clearing the
+# latched failure first makes this a real start attempt again; a unit with nothing latched is
+# unaffected, and a Box that will not clear it still gets its restart.
+systemctl --user reset-failed companion-pi-daemon.service >/dev/null 2>&1 || true
 systemctl --user restart companion-pi-daemon.service
 # restart waits until systemd has read EnvironmentFile; remove transient MCP credentials immediately after.
 rm -f "$credential_file"
