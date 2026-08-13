@@ -599,6 +599,8 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* The conversation and the composer share one readable column on wide screens. */
+  --chat-gutter: max(20px, (100% - 900px) / 2);
 }
 
 .chat-head {
@@ -646,17 +648,24 @@
 
 .chat .companions-error {
   flex: none;
-  margin: 12px 20px 0;
+  margin: 12px var(--chat-gutter) 0;
 }
 
 .chat-log {
   flex: 1;
   min-height: 0;
-  padding: 20px;
+  padding: 20px var(--chat-gutter);
   overflow-y: auto;
-  display: grid;
-  align-content: start;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 14px;
+}
+
+/* A short conversation rests on the composer instead of floating under the header. Once the log
+   overflows, `auto` resolves to zero, so scrolling back to the first message still works. */
+.chat-log > :first-child {
+  margin-top: auto;
 }
 
 .chat-msg {
@@ -666,7 +675,7 @@
 }
 
 .chat-msg--user {
-  justify-self: end;
+  align-self: flex-end;
   justify-items: end;
 }
 
@@ -702,10 +711,8 @@
 }
 
 .chat-empty {
-  align-self: center;
-  justify-self: center;
   max-width: 38ch;
-  margin: 0;
+  margin: auto;
   color: var(--color-muted);
   font-size: var(--text-sm);
   text-align: center;
@@ -721,7 +728,7 @@
 
 .chat-composer {
   flex: none;
-  padding: 12px 20px 16px;
+  padding: 12px var(--chat-gutter) 16px;
   border-top: 1px solid var(--color-line);
   background: var(--color-surface);
   display: grid;
@@ -762,7 +769,7 @@
 
 .chat-readonly {
   flex: none;
-  padding: 12px 20px;
+  padding: 12px var(--chat-gutter);
   border-top: 1px solid var(--color-line);
   background: var(--color-surface);
   color: var(--color-muted);
@@ -814,16 +821,20 @@
     padding: 0;
   }
 
+  .chat {
+    --chat-gutter: 14px;
+  }
+
   .chat-head {
     padding: 10px 14px;
   }
 
   .chat-log {
-    padding: 14px;
+    padding: 14px var(--chat-gutter);
   }
 
   .chat-composer {
-    padding: 10px 14px 14px;
+    padding: 10px var(--chat-gutter) 14px;
   }
 
   .chat-msg {
