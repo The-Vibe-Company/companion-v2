@@ -178,10 +178,48 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 COMPANION_PI_SERVICE
-systemctl --user daemon-reload
+# A Box running its create setupScript has no user D-Bus session yet, so no user-manager command
+# belongs here: it would fail with "Failed to connect to bus" and mark the whole setup failed even
+# though Pi installed correctly. The unit is loaded by the post-ready control-plane command instead.
 printf '%s\n' "$expected_layout" > "$layout_marker"
 `;
 }
+
+/**
+ * Point `systemctl --user` at the caller's bus. Every Box command runs in its own shell, so any
+ * command that talks to the user manager has to locate the bus again.
+ */
+const USER_BUS_ENVIRONMENT = 'export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"';
+
+/**
+ * Bring up the systemd user manager the Pi unit needs. A Box that never had an interactive login has
+ * no `/run/user/<uid>` and no user bus, which is exactly what breaks `systemctl --user` at create
+ * time, so the daemon start enables lingering for the account and waits for the manager to answer.
+ */
+const PREPARE_USER_BUS = `${USER_BUS_ENVIRONMENT}
+companion_uid="$(id -u)"
+if ! systemctl --user show-environment >/dev/null 2>&1; then
+  if command -v loginctl >/dev/null 2>&1; then
+    if [ "$companion_uid" = 0 ]; then
+      loginctl enable-linger "$companion_uid" >/dev/null 2>&1 || true
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo -n loginctl enable-linger "$companion_uid" >/dev/null 2>&1 || true
+    fi
+  fi
+  if [ "$companion_uid" = 0 ]; then
+    systemctl start "user@$companion_uid.service" >/dev/null 2>&1 || true
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo -n systemctl start "user@$companion_uid.service" >/dev/null 2>&1 || true
+  fi
+  for _ in 1 2 3 4 5; do
+    if systemctl --user show-environment >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+fi
+if ! systemctl --user show-environment >/dev/null 2>&1; then
+  echo 'Companion cannot reach the systemd user bus on this Box' >&2
+  exit 1
+fi`;
 
 function encodeEnvironmentFile(credentials: McpRuntimeCredential[]): string {
   return credentials
@@ -395,7 +433,8 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
   async #daemonState(boxId: string): Promise<CompanionDaemonState> {
     const result = await this.#command(
       boxId,
-      "systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true",
+      `${USER_BUS_ENVIRONMENT}
+systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true`,
     );
     return result.stdout.trim() === "active" ? "running" : "stopped";
   }
@@ -566,7 +605,19 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     try {
       started = await this.#command(
         box.id,
-        "set -e; credential_file=\"$HOME/.companion/runtime/state/providers.env\"; trap 'rm -f \"$credential_file\"' EXIT; chmod 600 \"$credential_file\"; auth_file=\"$HOME/.companion/pi/auth.json\"; if [ ! -f \"$auth_file\" ]; then echo 'Companion provider auth file is missing' >&2; exit 1; fi; chmod 700 \"$HOME/.companion/pi\"; chmod 600 \"$auth_file\"; systemctl --user daemon-reload; systemctl --user restart companion-pi-daemon.service",
+        `set -e
+credential_file="$HOME/.companion/runtime/state/providers.env"
+trap 'rm -f "$credential_file"' EXIT
+chmod 600 "$credential_file"
+auth_file="$HOME/.companion/pi/auth.json"
+if [ ! -f "$auth_file" ]; then echo 'Companion provider auth file is missing' >&2; exit 1; fi
+chmod 700 "$HOME/.companion/pi"
+chmod 600 "$auth_file"
+${PREPARE_USER_BUS}
+# The create setupScript only writes the unit file, so this is the first load of the Pi daemon unit.
+systemctl --user daemon-reload
+systemctl --user restart companion-pi-daemon.service`,
+        120,
       );
     } catch (error) {
       await this.#removeProviderFile(box.id).catch(() => undefined);
@@ -586,7 +637,15 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     if (READY_STATES.has(box.state)) {
       const stopped = await this.#command(
         input.boxId,
-        "systemctl --user stop companion-pi-daemon.service",
+        // The unit is loaded by the first start, so a Box that never started Pi has nothing to stop.
+        // Only a daemon still active after the stop attempt is a failure worth reporting.
+        `${USER_BUS_ENVIRONMENT}
+if ! systemctl --user show-environment >/dev/null 2>&1; then exit 0; fi
+systemctl --user stop companion-pi-daemon.service >/dev/null 2>&1 || true
+if systemctl --user is-active --quiet companion-pi-daemon.service; then
+  echo 'Pi daemon is still active after stop' >&2
+  exit 1
+fi`,
       );
       if (!stopped.success) throw new BoxRuntimeProviderError("Pi daemon failed to stop", 502);
     }
@@ -616,6 +675,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     const result = await this.#command(
       input.boxId,
       `set -euo pipefail
+${USER_BUS_ENVIRONMENT}
 fifo="$HOME/.companion/runtime/state/pi.rpc.in"
 systemctl --user is-active --quiet companion-pi-daemon.service
 test -p "$fifo"

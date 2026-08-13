@@ -135,6 +135,17 @@ to an on-disk marker keyed by the adapter package. Starts repair older Box snaps
 injection. Runtime transcripts and files do not enter PostgreSQL. A systemd user unit supervises Pi
 while Box is active; the lifecycle API restarts it after a Box resume.
 
+The create `setupScript` installs Pi, writes the daemon wrapper, and writes the systemd user unit,
+and it deliberately runs no user-manager command. A Box executing its create script has no user D-Bus
+session, so `systemctl --user` there fails with `Failed to connect to bus: No medium found` and marks
+the whole setup `failed` even when Pi installed correctly. Loading the unit is therefore deferred to
+the post-ready control-plane command that restarts Pi. That command locates the bus itself: every Box
+command runs in its own shell, so it exports `XDG_RUNTIME_DIR`, and when the user manager still does
+not answer it enables lingering for the account, asks the system manager to start `user@<uid>`, and
+waits briefly before failing with a message that names the missing user bus. Stopping is idempotent
+for the same reason: a Box that never started Pi has no loaded unit, so only a daemon still active
+after the stop attempt is reported as a failure.
+
 ## Pi Skills injection
 
 Pi starts with `--no-skills` so ambient Box or package skills cannot leak into a Companion. For a
