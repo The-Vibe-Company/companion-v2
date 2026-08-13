@@ -236,6 +236,135 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(result.runtimeState).toBe("running");
   });
 
+  it("injects labeled MCP accounts alongside a 13 MiB chunked skill archive", async () => {
+    // Production wakes a catalogue skill of this size, and THE-321's labeled MCP accounts are
+    // written by the same #writeFile the archive chunking lives in: the small config files must
+    // still land whole while the archive splits, and no secret may reach a command string.
+    const archive = Buffer.alloc(13 * 1024 * 1024, "relecture-catalogue-payload");
+    const encoded = archive.toString("base64");
+    const archivePath = ".companion/runtime/state/skill-archives/relecture-catalogue.tar.gz.b64";
+    const writes: { path: string; content: string; encoding?: string }[] = [];
+    const commands: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") {
+        const content = String(body.content);
+        if (Buffer.byteLength(content, "utf8") > 5_242_880) {
+          return json({
+            code: "file_too_large",
+            message: `File is too large for write_file (${content.length} bytes > 5242880).`,
+          }, 413);
+        }
+        writes.push({
+          path: String(body.path),
+          content,
+          ...(body.encoding ? { encoding: String(body.encoding) } : {}),
+        });
+        return json({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: command.includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [
+        { env_key: "LINEAR_TOKEN_WORK", value: "linear-work-secret" },
+        { env_key: "LINEAR_TOKEN_PERSONAL", value: "linear-personal-secret" },
+      ],
+      mcpAccounts: [
+        {
+          id: "linear-work",
+          label: "Linear work",
+          transport: "http",
+          url: "https://mcp.example.test/linear",
+          headers: { Authorization: "LINEAR_TOKEN_WORK" },
+          lifecycle: "lazy",
+          direct_tools: false,
+        },
+        {
+          id: "linear-personal",
+          label: "Linear personal",
+          transport: "http",
+          url: "https://mcp.example.test/linear",
+          headers: { Authorization: "LINEAR_TOKEN_PERSONAL" },
+          lifecycle: "lazy",
+          direct_tools: false,
+        },
+      ],
+      skills: [{
+        slug: "relecture-catalogue",
+        version: "4.5.6",
+        checksum: `sha256:${"b".repeat(64)}`,
+        archive,
+      }],
+      onBoxAssigned: async () => undefined,
+    });
+
+    // A 13 MiB archive base64s past the cap several times over, so it splits into 3 MiB parts.
+    const parts = writes.filter((write) => write.path.startsWith(`${archivePath}.part`));
+    expect(parts.map((part) => part.path)).toEqual(
+      Array.from({ length: 6 }, (_, index) => `${archivePath}.part${index}`),
+    );
+    expect(parts.every((part) => part.encoding === "base64")).toBe(true);
+    for (const write of writes) {
+      expect(Buffer.byteLength(write.content, "utf8")).toBeLessThan(5_242_880);
+    }
+    // The archive is delivered whole: reassembling the parts yields the exact base64 the extract
+    // loop decodes, so nothing was truncated by the split.
+    expect(Buffer.concat(parts.map((part) => Buffer.from(part.content, "base64"))).toString("utf8"))
+      .toBe(encoded);
+    const join = commands.find((command) => command.includes(`${archivePath}.part0`));
+    expect(join).toContain(`cat '${archivePath}.part0'`);
+    expect(join).toContain(`> '${archivePath}'`);
+    expect(join!.length).toBeLessThan(1200);
+
+    // MCP injection composes with the chunked write: both config files are small, so they land
+    // whole in one PUT each rather than being split.
+    const written = new Map(writes.map((write) => [write.path, write.content]));
+    expect([...written.keys()].filter((path) => path.startsWith(".companion/pi/mcp.json.part")))
+      .toEqual([]);
+    const mcpConfig = written.get(".companion/pi/mcp.json") ?? "";
+    expect(mcpConfig).toContain("${LINEAR_TOKEN_WORK}");
+    expect(mcpConfig).toContain("${LINEAR_TOKEN_PERSONAL}");
+    const accounts = written.get(".companion/runtime/state/mcp-accounts.json") ?? "";
+    expect(accounts).toContain("Linear work");
+    expect(accounts).toContain("Linear personal");
+
+    // No secret and no archive body may travel as a command string.
+    for (const command of commands) {
+      expect(command).not.toContain("linear-work-secret");
+      expect(command).not.toContain("linear-personal-secret");
+      expect(command).not.toContain("provider-secret");
+      expect(command).not.toContain(encoded.slice(0, 128));
+    }
+    expect(mcpConfig).not.toContain("linear-work-secret");
+    expect(mcpConfig).not.toContain("linear-personal-secret");
+    expect(result.runtimeState).toBe("running");
+  });
+
   it("names the file the Box refused when a write exceeds the provider's cap", async () => {
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
