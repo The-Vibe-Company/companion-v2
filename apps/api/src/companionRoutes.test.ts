@@ -333,6 +333,7 @@ describe("Companions API feature gate", () => {
 
   it("hands a message to a running Pi daemon and records the delivery watermark", async () => {
     coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({ pending: [message], piLogOffset: 0 });
     const runtime = boxRuntime();
     const app = new Hono<{ Variables: ApiVariables }>();
     registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
@@ -356,8 +357,77 @@ describe("Companions API feature gate", () => {
     }));
   });
 
+  it("delivers the backlog a sleeping Box missed before the message that woke the send", async () => {
+    const backlog = { ...message, event_id: "msg:earlier", ordinal: 0, content: "Earlier ask" };
+    const latest = { ...message, event_id: "msg:latest", ordinal: 1, content: "Summarize the incident" };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.sendCompanionMessage.mockResolvedValue({
+      thread: { ...viewerThread, access: "owner", read_only: false, can_send: true },
+      entry: latest,
+    });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [backlog, latest],
+      piLogOffset: 0,
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
+    // Oldest first, so Pi reads the conversation in the order the members wrote it.
+    expect(runtime.prompt.mock.calls.map(([input]) => input.message)).toEqual([
+      "Earlier ask",
+      "Summarize the incident",
+    ]);
+    expect(coreMocks.recordCompanionPiProjection).toHaveBeenCalledWith(expect.objectContaining({
+      deliveredOrdinal: 1,
+    }));
+  });
+
+  it("leaves the newest message pending when Pi accepts only the backlog", async () => {
+    const backlog = { ...message, event_id: "msg:earlier", ordinal: 0, content: "Earlier ask" };
+    const latest = { ...message, event_id: "msg:latest", ordinal: 1, content: "Summarize the incident" };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.sendCompanionMessage.mockResolvedValue({
+      thread: { ...viewerThread, access: "owner", read_only: false, can_send: true },
+      entry: latest,
+    });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [backlog, latest],
+      piLogOffset: 0,
+    });
+    const runtime = boxRuntime({
+      prompt: vi.fn(async (input: { message: string }) => {
+        if (input.message === "Summarize the incident") throw new Error("pi daemon stopped");
+      }),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
+    // The watermark stops at what Pi accepted, so the refused message is retried instead of lost.
+    expect(coreMocks.recordCompanionPiProjection).toHaveBeenCalledWith(expect.objectContaining({
+      deliveredOrdinal: 0,
+    }));
+  });
+
   it("keeps a message pending when Pi refuses it", async () => {
     coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({ pending: [message], piLogOffset: 0 });
     const runtime = boxRuntime({
       prompt: vi.fn(async () => {
         throw new Error("pi daemon is not running");

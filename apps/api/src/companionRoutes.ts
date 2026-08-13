@@ -118,7 +118,8 @@ function recordProjection(input: {
 
 /**
  * Hand persisted messages to Pi in order and record how far delivery reached. A refusal is not an
- * error for the caller: the message is already durable, so the next sync retries it.
+ * error for the caller: the message is already durable, so the next sync retries it. The watermark
+ * only ever advances to a message Pi accepted, so an undelivered tail stays pending.
  */
 async function deliverCompanionMessages(input: {
   actor: ReturnType<typeof actorFromContext>;
@@ -127,7 +128,7 @@ async function deliverCompanionMessages(input: {
   boxId: string;
   messages: CompanionTranscriptEntry[];
   runtimeFactory: RuntimeFactory;
-}): Promise<CompanionThread | null> {
+}): Promise<{ thread: CompanionThread; deliveredOrdinal: number } | null> {
   const runtime = input.runtimeFactory();
   let deliveredOrdinal: number | undefined;
   try {
@@ -143,13 +144,14 @@ async function deliverCompanionMessages(input: {
     // Leave the undelivered tail pending instead of losing it or failing the persisted send.
   }
   if (deliveredOrdinal === undefined) return null;
-  return recordProjection({
+  const thread = await recordProjection({
     actor: input.actor,
     orgId: input.orgId,
     companionId: input.companionId,
     entries: [],
     deliveredOrdinal,
   });
+  return { thread, deliveredOrdinal };
 }
 
 function routeError(c: Context, error: unknown): Response {
@@ -392,7 +394,10 @@ export function registerCompanionRoutes(
         const result = await sendCompanionMessage({
           actor, orgId, companionId, content: body.content, database,
         });
-        return { actor, orgId, companion, ...result };
+        // Anything a sleeping Box never received is still pending, so Pi receives the whole
+        // backlog in order rather than this message alone.
+        const state = await listPendingCompanionMessages({ actor, orgId, companionId, database });
+        return { actor, orgId, companion, pending: state.pending, ...result };
       });
       if (!piIsReachable(sent.companion)) {
         return c.json({ thread: sent.thread, delivery: "pending" as const });
@@ -402,12 +407,14 @@ export function registerCompanionRoutes(
         orgId: sent.orgId,
         companionId,
         boxId: sent.companion.runtime.box_id!,
-        messages: [sent.entry],
+        messages: sent.pending,
         runtimeFactory,
       });
       return c.json({
-        thread: delivered ?? sent.thread,
-        delivery: delivered ? ("delivered" as const) : ("pending" as const),
+        thread: delivered?.thread ?? sent.thread,
+        delivery: delivered && delivered.deliveredOrdinal >= sent.entry.ordinal
+          ? ("delivered" as const)
+          : ("pending" as const),
       });
     } catch (error) {
       return routeError(c, error);

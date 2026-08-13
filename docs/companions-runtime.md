@@ -71,8 +71,10 @@ teammate's name. Pi output carries no author.
 
 `POST /v1/companions/:id/messages` is Owner/Editor only and persists first. Sending never creates or
 resumes a Box: the message becomes durable, and delivery is attempted only when the Box is already
-running and Pi is up. An undelivered message stays pending and the response reports
-`delivery: "pending"`, so a later wake still delivers it in order.
+running and Pi is up. Delivery then hands Pi every still-pending message oldest first, not just the
+new one, so a backlog a sleeping Box missed keeps its order and never skips the watermark. An
+undelivered message stays pending and the response reports `delivery: "pending"`, so a later wake
+still delivers it in order.
 
 `POST /v1/companions/:id/thread/sync` is the single Owner/Editor step that reconciles a live thread.
 It hands pending messages to the running Pi daemon in ordinal order through the owner-only
