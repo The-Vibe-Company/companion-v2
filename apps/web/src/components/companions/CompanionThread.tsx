@@ -97,7 +97,14 @@ export function CompanionThread({
 
       {notice && <div className="companions-error" role="alert">{notice}</div>}
 
+      {/*
+        Keyed by Companion: the transcript owns the runtime and the composer, and a half-typed message
+        belongs to the conversation it was meant for. Opening another Companion must hand over an empty
+        composer rather than the previous draft, which would otherwise be one Enter away from the wrong
+        thread.
+      */}
       <CompanionTranscript
+        key={companion.id}
         companion={companion}
         thread={thread}
         busy={busy}

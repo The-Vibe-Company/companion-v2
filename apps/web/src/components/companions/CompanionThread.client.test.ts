@@ -77,10 +77,10 @@ async function mountPolling(initial: Thread) {
   document.body.appendChild(container);
   const root = createRoot(container);
   roots.push(root);
-  const poll = async (next: Thread) => {
+  const poll = async (next: Thread, who: Companion = companion) => {
     await act(async () => {
       root.render(React.createElement(CompanionThread, {
-        companion,
+        companion: who,
         thread: next,
         error: null,
         busy: false,
@@ -187,6 +187,18 @@ describe("CompanionThread composer", () => {
     });
 
     expect(sent).toEqual(["Draft the launch note"]);
+  });
+
+  it("hands the next Companion an empty composer instead of the previous draft", async () => {
+    const atlas: Companion = { ...companion, id: "22222222-2222-4222-8222-222222222222", name: "Atlas" };
+    const { container, poll } = await mountPolling(thread);
+    type(container, "Draft the launch note");
+
+    await poll(thread, atlas);
+
+    // A draft belongs to the conversation it was written for; carrying it over would put it one
+    // Enter away from the wrong Companion.
+    expect((container.querySelector("textarea") as HTMLTextAreaElement).value).toBe("");
   });
 
   it("keeps the draft when Escape is pressed in the composer", async () => {
