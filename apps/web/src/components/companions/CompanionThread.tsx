@@ -16,6 +16,21 @@ function SentAt({ iso }: { iso: string }) {
 }
 
 /**
+ * Who wrote this entry. A thread shared with Editors has several writers, so only the reader's own
+ * messages say "You"; a teammate's message keeps their name.
+ */
+function author(
+  entry: Thread["entries"][number],
+  viewerId: string,
+  companionName: string,
+): string {
+  if (entry.role === "assistant") return companionName;
+  if (entry.role === "system") return "Companion";
+  if (entry.author_id === viewerId) return "You";
+  return entry.author_name ?? "Member";
+}
+
+/**
  * One Companion, one thread. The transcript is the control-plane read model, so a Viewer sees the
  * conversation without any Box contact and gets no composer. Pi's tools and skills stay out of this
  * surface by design: only the conversation belongs here.
@@ -95,9 +110,7 @@ export function CompanionThread({
         ) : entries.length ? (
           entries.map((entry) => (
             <article className={`chat-msg chat-msg--${entry.role}`} key={entry.event_id}>
-              <span className="chat-msg__who">
-                {entry.role === "assistant" ? companion.name : entry.role === "user" ? "You" : "Companion"}
-              </span>
+              <span className="chat-msg__who">{author(entry, thread.viewer_id, companion.name)}</span>
               <p>{entry.content}</p>
               <SentAt iso={entry.created_at} />
             </article>

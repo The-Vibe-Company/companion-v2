@@ -521,6 +521,8 @@ export const companionTranscriptEntries = pgTable(
     ordinal: integer("ordinal").notNull(),
     role: companionTranscriptRoleEnum("role").notNull(),
     content: text("content").notNull(),
+    /** Member who sent a user message; null for Pi output and for entries written before sharing. */
+    authorId: text("author_id").references(() => user.id, { onDelete: "set null" }),
     createdAt: now(),
   },
   (t) => ({

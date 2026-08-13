@@ -64,6 +64,11 @@ conversation is readable without Box.
 reads Box disk, starts Pi, or wakes Box, and the payload carries `can_send: false` so the surface
 renders read-only.
 
+A shared thread has several writers, so each user message records its author
+(`companion_transcript_entries.author_id`) and the payload carries the reading member as
+`viewer_id`. Only a reader's own messages render as their own; a teammate's message keeps that
+teammate's name. Pi output carries no author.
+
 `POST /v1/companions/:id/messages` is Owner/Editor only and persists first. Sending never creates or
 resumes a Box: the message becomes durable, and delivery is attempted only when the Box is already
 running and Pi is up. An undelivered message stays pending and the response reports

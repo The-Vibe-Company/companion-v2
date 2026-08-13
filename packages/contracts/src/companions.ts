@@ -135,6 +135,12 @@ export const companionTranscriptEntrySchema = z.object({
   ordinal: z.number().int().nonnegative(),
   role: z.enum(["user", "assistant", "system"]),
   content: z.string(),
+  /**
+   * Member who sent a user message. A shared thread has several writers, so the reader compares
+   * this against `viewer_id` instead of assuming every user message is its own. Null for Pi.
+   */
+  author_id: z.string().nullable(),
+  author_name: z.string().nullable(),
   created_at: z.string().datetime(),
 });
 export type CompanionTranscriptEntry = z.infer<typeof companionTranscriptEntrySchema>;
@@ -147,6 +153,8 @@ export type CompanionTranscriptRole = CompanionTranscriptEntry["role"];
  */
 export const companionThreadSchema = z.object({
   companion_id: z.string().uuid(),
+  /** The reader this payload was built for; entries authored by them render as their own. */
+  viewer_id: z.string(),
   access: companionAccessSchema,
   read_only: z.boolean(),
   can_send: z.boolean(),

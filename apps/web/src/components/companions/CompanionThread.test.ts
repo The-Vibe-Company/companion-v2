@@ -34,6 +34,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
 function thread(overrides: Partial<Thread> = {}): Thread {
   return {
     companion_id: companionId,
+    viewer_id: "user-1",
     access: "owner",
     read_only: false,
     can_send: true,
@@ -43,6 +44,8 @@ function thread(overrides: Partial<Thread> = {}): Thread {
         ordinal: 0,
         role: "user",
         content: "Draft the launch note",
+        author_id: "user-1",
+        author_name: "Ada",
         created_at: "2026-08-12T12:01:00.000Z",
       },
       {
@@ -50,6 +53,8 @@ function thread(overrides: Partial<Thread> = {}): Thread {
         ordinal: 1,
         role: "assistant",
         content: "Here is a first pass at the launch note.",
+        author_id: null,
+        author_name: null,
         created_at: "2026-08-12T12:01:20.000Z",
       },
     ],
@@ -99,6 +104,8 @@ describe("CompanionThread", () => {
             ordinal: 2,
             role: "system",
             content: "The run stopped before Pi replied.",
+            author_id: null,
+            author_name: null,
             created_at: "2026-08-12T12:02:00.000Z",
           },
         ],
@@ -115,13 +122,22 @@ describe("CompanionThread", () => {
         access: "viewer",
         runtime: { ...companion().runtime, state: "stopped", daemon_state: "stopped", box_id: null },
       }),
-      thread: thread({ access: "viewer", read_only: true, can_send: false }),
+      thread: thread({ viewer_id: "user-9", access: "viewer", read_only: true, can_send: false }),
     });
 
     expect(markup).toContain("Draft the launch note");
     expect(markup).toContain("Viewer access is read-only");
     expect(markup).not.toContain("Message Luna");
     expect(markup).not.toContain(">Wake<");
+  });
+
+  it("credits a teammate's message to its author instead of the reader", () => {
+    const shared = thread({ viewer_id: "user-9" });
+
+    expect(render({ thread: shared })).toContain(">Ada<");
+    expect(render({ thread: shared })).not.toContain(">You<");
+    // The reader's own message still reads as their own.
+    expect(render({ thread: thread() })).toContain(">You<");
   });
 
   it("offers a wake control only to a runner whose Box is asleep", () => {

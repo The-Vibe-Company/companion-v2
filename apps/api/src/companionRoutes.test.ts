@@ -92,6 +92,7 @@ const companion = {
 
 const viewerThread = {
   companion_id: companion.id,
+  viewer_id: "user-2",
   access: "viewer" as const,
   read_only: true,
   can_send: false,
@@ -105,6 +106,8 @@ const message = {
   ordinal: 0,
   role: "user" as const,
   content: "Summarize the incident",
+  author_id: "user-1",
+  author_name: "User",
   created_at: companion.created_at,
 };
 

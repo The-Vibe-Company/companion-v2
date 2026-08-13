@@ -127,9 +127,10 @@ describe("Companion chat contracts", () => {
     })).toThrow();
   });
 
-  it("describes one thread per Companion with its run boundary", () => {
+  it("describes one thread per Companion with its run boundary and message authors", () => {
     const thread = companionThreadSchema.parse({
       companion_id: "11111111-1111-4111-8111-111111111111",
+      viewer_id: "user-2",
       access: "viewer",
       read_only: true,
       can_send: false,
@@ -138,7 +139,17 @@ describe("Companion chat contracts", () => {
         ordinal: 0,
         role: "user",
         content: "Hello",
+        author_id: "user-1",
+        author_name: "Owner",
         created_at: "2026-08-12T12:00:00.000Z",
+      }, {
+        event_id: "pi:0",
+        ordinal: 1,
+        role: "assistant",
+        content: "Hi",
+        author_id: null,
+        author_name: null,
+        created_at: "2026-08-12T12:00:01.000Z",
       }],
       pending_count: 0,
       last_message_at: "2026-08-12T12:00:00.000Z",
@@ -146,7 +157,9 @@ describe("Companion chat contracts", () => {
 
     expect(thread.read_only).toBe(true);
     expect(thread.can_send).toBe(false);
-    expect(thread.entries[0]?.role).toBe("user");
+    // The reader is not the author, so the surface can attribute the message to the Owner.
+    expect(thread.entries[0]?.author_id).not.toBe(thread.viewer_id);
+    expect(thread.entries[1]?.author_id).toBeNull();
   });
 });
 

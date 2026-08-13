@@ -32,7 +32,7 @@
         "version": "1.42.0",
         "date": "2026-08-12",
         "changes": [
-          "Refreshes the bundled Agent Auth client after the Companions contract added the 1:1 chat thread and message schemas.",
+          "Refreshes the bundled Agent Auth client after the Companions contract added the 1:1 chat thread, message, and message-author schemas.",
           "Keeps Companion chat threads, message sending, and thread sync outside delegated Skills Hub Agent Auth.",
           "No change to Companion skill commands, permissions, or installation behavior."
         ]

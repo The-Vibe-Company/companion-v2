@@ -478,8 +478,17 @@ async function readCompanionTranscript(
   companionId: string,
 ): Promise<CompanionTranscriptEntry[]> {
   const rows = await database
-    .select()
+    .select({
+      eventId: schema.companionTranscriptEntries.eventId,
+      ordinal: schema.companionTranscriptEntries.ordinal,
+      role: schema.companionTranscriptEntries.role,
+      content: schema.companionTranscriptEntries.content,
+      authorId: schema.companionTranscriptEntries.authorId,
+      authorName: schema.profiles.name,
+      createdAt: schema.companionTranscriptEntries.createdAt,
+    })
     .from(schema.companionTranscriptEntries)
+    .leftJoin(schema.profiles, eq(schema.profiles.id, schema.companionTranscriptEntries.authorId))
     .where(and(
       eq(schema.companionTranscriptEntries.orgId, orgId),
       eq(schema.companionTranscriptEntries.companionId, companionId),
@@ -490,11 +499,14 @@ async function readCompanionTranscript(
     ordinal: row.ordinal,
     role: row.role,
     content: row.content,
+    author_id: row.authorId,
+    author_name: row.authorName,
     created_at: row.createdAt.toISOString(),
   }));
 }
 
 function toThread(input: {
+  actor: ActorContext;
   companion: Companion;
   row: CompanionThreadRow | undefined;
   entries: CompanionTranscriptEntry[];
@@ -504,6 +516,7 @@ function toThread(input: {
     entry.role === "user" && (deliveredOrdinal === null || entry.ordinal > deliveredOrdinal));
   return {
     companion_id: input.companion.id,
+    viewer_id: input.actor.id,
     access: input.companion.access,
     read_only: input.companion.access === "viewer",
     can_send: canWakeCompanion(input.companion.access),
@@ -531,7 +544,7 @@ export async function getCompanionThread(input: {
     readCompanionThreadRow(database, input.orgId, input.companionId),
     readCompanionTranscript(database, input.orgId, input.companionId),
   ]);
-  return toThread({ companion, row, entries });
+  return toThread({ actor: input.actor, companion, row, entries });
 }
 
 /**
@@ -601,13 +614,14 @@ export async function sendCompanionMessage(input: {
     ordinal,
     role: "user",
     content: input.content,
+    authorId: input.actor.id,
     createdAt,
   });
   const [row, entries] = await Promise.all([
     readCompanionThreadRow(database, input.orgId, input.companionId),
     readCompanionTranscript(database, input.orgId, input.companionId),
   ]);
-  const thread = toThread({ companion, row, entries });
+  const thread = toThread({ actor: input.actor, companion, row, entries });
   const entry = entries.find((item) => item.ordinal === ordinal);
   if (!entry) throw new Error("failed to persist companion message");
   return { thread, entry };
@@ -696,7 +710,7 @@ export async function recordCompanionPiProjection(input: {
     readCompanionThreadRow(database, input.orgId, input.companionId),
     readCompanionTranscript(database, input.orgId, input.companionId),
   ]);
-  return toThread({ companion, row, entries });
+  return toThread({ actor: input.actor, companion, row, entries });
 }
 
 function providerName(providerId: string): string {

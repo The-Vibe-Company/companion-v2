@@ -79,7 +79,8 @@ delivery watermarks and `companion_transcript_entries` carries its messages, so 
 the control plane before any Box contact and an undelivered message stays pending until a later
 owner/editor sync. Sync is the only path that reaches Pi: it delivers pending messages through the
 owner-only FIFO and projects new Pi output from a recorded byte offset, which makes retries
-idempotent. Viewers can read the control-plane thread but cannot send or contact Box. The default remains fail-closed: when
+idempotent. Every user message records its author, and the thread payload names the reading member,
+so a thread shared with Editors attributes each message to the member who sent it. Viewers can read the control-plane thread but cannot send or contact Box. The default remains fail-closed: when
 the flag is absent or false, none of these routes are registered. Owner/Admin-managed workspace
 model-provider credentials are envelope-encrypted, write-only, and decrypted only after the
 Companion wake guard. Start never accepts caller-supplied model-provider credentials; it writes only
