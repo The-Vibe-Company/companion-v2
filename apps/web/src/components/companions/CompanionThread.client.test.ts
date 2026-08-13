@@ -249,8 +249,8 @@ describe("CompanionThread stream", () => {
     expect(after).toHaveLength(1);
     // The same element carries the longer text: the reply is rewritten, never torn down and rebuilt,
     // which is what would make a streamed turn flicker.
-    expect(after[0]).toBe(before);
-    expect(after[0].textContent).toContain("The migration is idempotent.");
+    expect(after.item(0)).toBe(before);
+    expect(after.item(0).textContent).toContain("The migration is idempotent.");
   });
 
   it("announces Luna once when a turn arrives as more than one reply", async () => {
