@@ -10,6 +10,7 @@ import {
   claimCompanionRuntimeStop,
   inviteCompanionMember,
   listCompanionShares,
+  recordCompanionPiProjection,
   revokeCompanionMember,
   updateCompanionMemberRole,
   updateCompanionObservation,
@@ -389,5 +390,35 @@ describe("Skills Hub PostgreSQL isolation", () => {
       { orgId: fixture.orgA, userId: fixture.owner.id },
       (database) => claimCompanionRuntimeStop({ ...input, database }),
     )).rejects.toBeInstanceOf(CompanionRuntimeTransitionError);
+  });
+
+  it("only rewinds the Pi log offset when Pi's log itself rewound", async () => {
+    const project = (piLogOffset: number, piLogRewound?: boolean) => withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.owner.id },
+      (database) => recordCompanionPiProjection({
+        actor: fixture.owner,
+        orgId: fixture.orgA,
+        companionId,
+        entries: [],
+        piLogOffset,
+        piLogRewound,
+        database,
+      }),
+    );
+    const storedOffset = async () => {
+      const [row] = await integrationSql<Array<{ pi_log_offset: string }>>`
+        select pi_log_offset from companion_threads where companion_id = ${companionId}
+      `;
+      return Number(row?.pi_log_offset);
+    };
+
+    await project(4096);
+    // A slower overlapping sync read less of the log; it must not make the next sync reproject it.
+    await project(512);
+    expect(await storedOffset()).toBe(4096);
+
+    // A restarted Box truncates the log, so that read owns the offset and replays from the start.
+    await project(128, true);
+    expect(await storedOffset()).toBe(128);
   });
 });
