@@ -423,8 +423,9 @@ export const companions = pgTable(
 /**
  * Retained-but-unused shared Box pool from THE-330. THE-332 reverts Box cardinality to one Box per
  * Companion (1 Companion = 1 Box = 1 Pi): the runtime chip lives on the `companions` row again, and
- * no code reads or writes this table. It is kept only so migration 0074 stays a non-destructive
- * clean cut — leftover pool rows are left in place, unreferenced, rather than dropped.
+ * no code reads or writes this table. It is kept only so migrations 0074 and 0075 stay a
+ * non-destructive clean cut — leftover pool rows are left in place, unreferenced, rather than
+ * dropped, and 0075 reads them to find the Companion rows 0074 handed a shared Box id.
  */
 export const companionRuntimePools = pgTable(
   "companion_runtime_pools",

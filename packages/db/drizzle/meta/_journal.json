@@ -526,6 +526,13 @@
       "when": 1786594800000,
       "tag": "0074_companion_box_runtime_restore",
       "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1786598400000,
+      "tag": "0075_companion_box_unshare",
+      "breakpoints": true
     }
   ]
 }
