@@ -256,6 +256,7 @@ describe("Companions API feature gate", () => {
 
     expect((await app.request("/v1/companions")).status).toBe(404);
     expect((await app.request("/v1/companion-providers")).status).toBe(404);
+    expect((await app.request("/v1/companion-plugins")).status).toBe(404);
     expect(contextMocks.actorFromContext).not.toHaveBeenCalled();
   });
 
@@ -311,6 +312,44 @@ describe("Companions API feature gate", () => {
     expect(response.status).toBe(403);
     expect(contextMocks.orgIdFromContext).not.toHaveBeenCalled();
     expect(coreMocks.listCompanions).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["GET", "/v1/companion-plugins", undefined],
+    ["POST", "/v1/companion-plugins", JSON.stringify({
+      provider: "linear",
+      label: "work",
+      transport: "http",
+      url: "https://mcp.example.test/linear",
+      args: [],
+    })],
+    ["DELETE", "/v1/companion-plugins/44444444-4444-4444-8444-444444444444", undefined],
+  ])("returns 403 before tenant resolution for %s %s outside the allowlist", async (
+    method,
+    path,
+    body,
+  ) => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    contextMocks.actorFromContext.mockReturnValueOnce({
+      id: "user-1",
+      email: "user@example.test",
+      name: "User",
+    });
+    registerCompanionRoutes(app, {
+      COMPANION_COMPANIONS_ENABLED: "true",
+      COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "thevibecompany.co",
+    });
+
+    const response = await app.request(path, {
+      method,
+      ...(body ? { body, headers: { "content-type": "application/json" } } : {}),
+    });
+
+    expect(response.status).toBe(403);
+    expect(contextMocks.orgIdFromContext).not.toHaveBeenCalled();
+    expect(coreMocks.listCompanionPlugins).not.toHaveBeenCalled();
+    expect(coreMocks.saveCompanionPlugin).not.toHaveBeenCalled();
+    expect(coreMocks.deleteCompanionPlugin).not.toHaveBeenCalled();
   });
 
   it("returns 401 before tenant resolution when no session exists", async () => {
