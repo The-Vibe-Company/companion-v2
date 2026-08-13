@@ -188,13 +188,26 @@ describe("AsciiBoxCompanionRuntime", () => {
     const restart = commands.find((command) => command.includes("restart companion-pi-daemon.service"));
     expect(restart).toBeDefined();
     expect(restart).toContain("systemctl --user daemon-reload");
-    expect(restart).toContain("XDG_RUNTIME_DIR");
+    expect(restart).toContain('companion_user_runtime_dir="/run/user/$(id -u)"');
+    expect(restart).toContain('export XDG_RUNTIME_DIR="$companion_user_runtime_dir"');
+    expect(restart).not.toContain("${XDG_RUNTIME_DIR:-");
+    expect(restart).toContain('export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"');
     expect(restart).toContain("loginctl enable-linger");
     expect(restart).toContain("systemctl --user show-environment");
+    expect(restart).toMatch(
+      /for _ in \$\(seq 1 20\); do\n\s+companion_export_user_bus\n\s+if systemctl --user show-environment/,
+    );
+    expect(restart).toContain("trap 'rm -f \"$credential_file\"' EXIT");
+    expect(restart!.indexOf("restart companion-pi-daemon.service"))
+      .toBeLessThan(restart!.lastIndexOf('rm -f "$credential_file"'));
+    expect(restart).toContain("trap - EXIT");
     // Every Box command runs in its own shell, so the status probe locates the bus again too.
-    expect(commands.some((command) =>
-      command.includes("XDG_RUNTIME_DIR") && command.includes("is-active companion-pi-daemon.service")))
-      .toBe(true);
+    const userManagerCommands = commands.filter((command) => command.includes("systemctl --user"));
+    expect(userManagerCommands.length).toBeGreaterThan(0);
+    for (const command of userManagerCommands) {
+      expect(command).toContain('export XDG_RUNTIME_DIR="$companion_user_runtime_dir"');
+      expect(command).not.toContain("${XDG_RUNTIME_DIR:-");
+    }
   });
 
   it("fails the daemon start with a distinct message when no user bus can be reached", async () => {
@@ -772,7 +785,9 @@ describe("AsciiBoxCompanionRuntime", () => {
     const result = await runtime.stop({ boxId: "bx_23456789" });
 
     expect(stopCommand).toContain("systemctl --user show-environment");
-    expect(stopCommand).toContain("XDG_RUNTIME_DIR");
+    expect(stopCommand).toContain('companion_user_runtime_dir="/run/user/$(id -u)"');
+    expect(stopCommand).toContain('export XDG_RUNTIME_DIR="$companion_user_runtime_dir"');
+    expect(stopCommand).not.toContain("${XDG_RUNTIME_DIR:-");
     expect(stopCommand).toContain("systemctl --user stop companion-pi-daemon.service >/dev/null 2>&1 || true");
     expect(stopCommand).toContain("is-active --quiet companion-pi-daemon.service");
     expect(archived).toBe(true);
@@ -920,6 +935,9 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain('companion_user_runtime_dir="/run/user/$(id -u)"');
+    expect(commands[0]).toContain('export XDG_RUNTIME_DIR="$companion_user_runtime_dir"');
+    expect(commands[0]).not.toContain("${XDG_RUNTIME_DIR:-");
     expect(commands[0]).toContain("is-active --quiet companion-pi-daemon.service");
     expect(commands[0]).toContain("state/pi.rpc.in");
     expect(commands[0]).toContain(
