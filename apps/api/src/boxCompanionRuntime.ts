@@ -603,6 +603,10 @@ systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true`,
     const result = await this.#command(
       boxId,
       `${USER_BUS_ENVIRONMENT}
+# The status fields are matched by name here and read by name again by the caller, so the Box
+# reports them in the one language both sides agree on rather than in its own locale.
+LC_ALL=C
+export LC_ALL
 companion_label() { while IFS= read -r line; do printf '%s %s\\n' "$1" "$line"; done; }
 systemctl --user is-active companion-pi-daemon.service 2>&1 | tail -n 1 | companion_label ${PI_DAEMON_DIAGNOSTIC_LABELS.state}
 systemctl --user status --no-pager --full companion-pi-daemon.service 2>&1 | grep -E '^ *(Active|Process|Main PID):' | head -n 2 | companion_label ${PI_DAEMON_DIAGNOSTIC_LABELS.status}

@@ -227,11 +227,13 @@ described solely by `Active:` and the recorded exit status, and both are read fr
 `systemctl --user status` rather than from any Pi log.
 
 Fragments therefore claim the stored line in priority order — `is-active`, `Active:`, the exit
-status, then the Pi stderr line — and one the Box had nothing to say for spends nothing. The exit
-status is extracted rather than clamped, because a systemd `Process:` line opens with the full
-`ExecStart` path and closes with the code that matters. The two status lines are selected by what
-they say rather than by where they landed, so a unit that prints only one of them cannot have it
-read as the other. A fragment left too short to read is dropped whole instead of stored as a stub.
+status, then the Pi stderr line — and one the Box had nothing to say for spends nothing. A systemd
+`Process:` or `Main PID:` line opens with the full `ExecStart` path and closes with the code that
+matters, so its `(code=…)` is parsed out first and only that token is then clamped to its budget;
+clamping the raw line would have dropped the code and kept the path. The status lines are selected
+by what they say rather than by where they landed, so a unit that prints only one of them cannot
+have it read as the other, and the diagnostic runs under `LC_ALL=C` so those names are the ones the
+Box prints. A fragment left too short to read is dropped whole instead of stored as a stub.
 
 Pi's stderr log is supplementary and is read only when it was written during this start. The log
 outlives the start that wrote it, so an untouched one still holds whatever an earlier run left
