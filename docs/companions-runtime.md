@@ -380,8 +380,10 @@ Box, an older layout, or a rotated connection always rewrites the file. The disk
 authority: the staging step reports whether `auth.json` exists, and a start rewrites the file
 whenever it does not, so a replacement disk provisioned by an earlier start that failed before Pi
 was configured cannot inherit a recorded generation it never satisfied. Start fails closed when the
-file is absent, and a failed daemon start still best-effort removes both staged and runtime
-`mcp_credentials` environment files.
+file is absent, and a failed injection or systemd start command best-effort removes both staged and
+runtime `mcp_credentials` files. A later active-wait timeout keeps the runtime file because systemd
+may still recover Pi through `Restart=on-failure`; explicit stop and Box stop/reboot remain its
+cleanup boundary.
 
 Migration `0065` clears `provider_ids` for existing rows. Before it, that column recorded whichever
 credential tags a start request carried, including MCP account tags, so no legacy value can name a

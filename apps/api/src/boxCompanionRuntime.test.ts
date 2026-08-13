@@ -1205,6 +1205,9 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(diagnostic).not.toContain("providers.env");
     expect(diagnostic).not.toContain("auth.json");
     for (const command of commands) expect(command).not.toContain("mcp-secret");
+    // A timed-out observation does not prove systemd stopped recovering. Keep the tmpfs file so an
+    // on-failure restart after this response still receives MCP credentials.
+    expect(commands.some((command) => command.startsWith(PROVIDER_FILE_REMOVAL))).toBe(false);
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/stop"))).toBe(false);
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
     expect(fetchMock.mock.calls.some(([url, init]) =>

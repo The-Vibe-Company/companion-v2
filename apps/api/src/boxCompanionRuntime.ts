@@ -31,7 +31,7 @@ const BOX_FILE_PART_TIMEOUT_MS = 120_000;
 /** Bytes of Pi RPC output one control-plane sync may pull; the rest is read by the next sync. */
 export const COMPANION_PI_EVENT_READ_LIMIT = 262_144;
 /**
- * How long a restarted Pi daemon has to answer `active`. `systemctl --user restart` returns once
+ * How long a started Pi daemon has to answer `active`. `systemctl --user start` returns once
  * systemd has forked `ExecStart`, and the unit is `Type=simple` with `Restart=on-failure`, so a
  * daemon that is merely slow and one that is crash-looping both answer `activating` for the first
  * seconds. Reading a single probe as the verdict is what turned healthy starts into wake failures.
@@ -1119,7 +1119,6 @@ trap - EXIT`,
     }
     const daemonState = await this.#waitDaemonActive(box.id);
     if (daemonState !== "running") {
-      await this.#removeProviderFile(box.id).catch(() => undefined);
       throw new BoxRuntimeProviderError(
         `${PI_DAEMON_FAILURE_MESSAGE}${await this.#daemonFailureDetail(box.id)}`,
         502,
