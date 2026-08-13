@@ -71,6 +71,36 @@ async function mount(
   return container;
 }
 
+/** A mounted thread whose read model can be replaced, the way each poll replaces it in the app. */
+async function mountPolling(initial: Thread) {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  roots.push(root);
+  const poll = async (next: Thread, who: Companion = companion) => {
+    await act(async () => {
+      root.render(React.createElement(CompanionThread, {
+        companion: who,
+        thread: next,
+        error: null,
+        busy: false,
+        waking: false,
+        openingDesktop: false,
+        onBack: () => {},
+        onSend: async () => true,
+        onWake: () => {},
+        onDesktop: () => {},
+      }));
+    });
+  };
+  await poll(initial);
+  return { container, poll };
+}
+
+function log(container: HTMLElement) {
+  return (container.querySelector(".chat-log") as HTMLElement).textContent ?? "";
+}
+
 function boxChip(container: HTMLElement) {
   return container.querySelector(".chat-box") as HTMLElement;
 }
@@ -120,6 +150,173 @@ describe("CompanionThread composer", () => {
     const container = await mount(async () => true);
 
     expect(document.activeElement).toBe(container.querySelector("h1"));
+  });
+
+  it("shows the message while the control plane is still saving it", async () => {
+    let settle: (saved: boolean) => void = () => {};
+    const container = await mount(() => new Promise<boolean>((resolve) => { settle = resolve; }));
+    type(container, "Draft the launch note");
+
+    await send(container);
+
+    // The composer clears on send, so the message has to appear in the transcript immediately or the
+    // text disappears with nothing to show for it.
+    expect(log(container)).toContain("Draft the launch note");
+
+    await act(async () => {
+      settle(true);
+    });
+
+    // Once the saved thread arrives it owns the message; the sent copy is dropped in the same update.
+    expect(container.querySelectorAll(".chat-turn--sending")).toHaveLength(0);
+  });
+
+  it("sends one message even when the composer is submitted twice", async () => {
+    const sent: string[] = [];
+    let settle: (saved: boolean) => void = () => {};
+    const container = await mount((content) => {
+      sent.push(content);
+      return new Promise<boolean>((resolve) => { settle = resolve; });
+    });
+    type(container, "Draft the launch note");
+
+    await send(container);
+    await send(container);
+    await act(async () => {
+      settle(true);
+    });
+
+    expect(sent).toEqual(["Draft the launch note"]);
+  });
+
+  it("hands the next Companion an empty composer instead of the previous draft", async () => {
+    const atlas: Companion = { ...companion, id: "22222222-2222-4222-8222-222222222222", name: "Atlas" };
+    const { container, poll } = await mountPolling(thread);
+    type(container, "Draft the launch note");
+
+    await poll(thread, atlas);
+
+    // A draft belongs to the conversation it was written for; carrying it over would put it one
+    // Enter away from the wrong Companion.
+    expect((container.querySelector("textarea") as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("keeps the draft when Escape is pressed in the composer", async () => {
+    const container = await mount(async () => true);
+    const composer = type(container, "Draft the launch note");
+
+    await act(async () => {
+      composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+
+    expect(composer.value).toBe("Draft the launch note");
+  });
+});
+
+describe("CompanionThread stream", () => {
+  afterEach(() => {
+    act(() => roots.splice(0).forEach((root) => root.unmount()));
+    document.body.innerHTML = "";
+  });
+
+  const said = {
+    event_id: "msg:1",
+    ordinal: 0,
+    role: "user" as const,
+    content: "Draft the launch note",
+    author_id: "user-1",
+    author_name: null,
+    created_at: "2026-08-12T12:01:00.000Z",
+  };
+
+  const reply = (content: string) => ({
+    event_id: "pi:512",
+    ordinal: 1,
+    role: "assistant" as const,
+    content,
+    author_id: null,
+    author_name: null,
+    created_at: "2026-08-12T12:01:20.000Z",
+  });
+
+  it("grows a streamed reply in place instead of appending a second one", async () => {
+    const { container, poll } = await mountPolling({ ...thread, entries: [said, reply("Skills Hub")] });
+    const before = container.querySelector(".chat-turn--reply");
+
+    await poll({ ...thread, entries: [said, reply("Skills Hub 2.4 is out. The migration is idempotent.")] });
+
+    const after = container.querySelectorAll(".chat-turn--reply");
+    expect(after).toHaveLength(1);
+    // The same element carries the longer text: the reply is rewritten, never torn down and rebuilt,
+    // which is what would make a streamed turn flicker.
+    expect(after.item(0)).toBe(before);
+    expect(after.item(0).textContent).toContain("The migration is idempotent.");
+  });
+
+  it("announces Luna once when a turn arrives as more than one reply", async () => {
+    const { container, poll } = await mountPolling({
+      ...thread,
+      entries: [said, reply("Skills Hub 2.4 is out.")],
+    });
+
+    await poll({
+      ...thread,
+      entries: [
+        said,
+        reply("Skills Hub 2.4 is out."),
+        {
+          event_id: "pi:1180",
+          ordinal: 2,
+          role: "assistant" as const,
+          content: "The migration is idempotent.",
+          author_id: null,
+          author_name: null,
+          created_at: "2026-08-12T12:01:24.000Z",
+        },
+      ],
+    });
+
+    expect(container.querySelectorAll(".chat-turn--reply")).toHaveLength(2);
+    // Two entries, one passage: the second reply continues the first instead of restating who is
+    // talking and when.
+    expect(log(container).match(/Luna/g)).toHaveLength(1);
+    expect(container.querySelectorAll(".chat-turn--reply.chat-turn--lead")).toHaveLength(1);
+  });
+
+  it("shows a turn that only produced reasoning as Luna's reply", async () => {
+    // A turn with no text part falls back to its thinking, so it arrives as an ordinary assistant
+    // entry and has to read as a reply rather than as a note about the run.
+    const { container } = await mountPolling({
+      ...thread,
+      entries: [said, reply("The note is already accurate, so there is nothing to change.")],
+    });
+
+    expect(container.querySelectorAll(".chat-turn--reply")).toHaveLength(1);
+    expect(container.querySelectorAll(".chat-note")).toHaveLength(0);
+    expect(log(container)).toContain("The note is already accurate");
+  });
+
+  it("closes a turn that produced nothing with a note instead of leaving the thread pending", async () => {
+    const { container } = await mountPolling({
+      ...thread,
+      entries: [
+        said,
+        {
+          event_id: "pi:1602",
+          ordinal: 1,
+          role: "system" as const,
+          content: "Pi ended the turn without a visible reply.",
+          author_id: null,
+          author_name: null,
+          created_at: "2026-08-12T12:01:20.000Z",
+        },
+      ],
+    });
+
+    expect(container.querySelectorAll(".chat-note")).toHaveLength(1);
+    expect(log(container)).toContain("Pi ended the turn without a visible reply.");
+    // The turn is closed, so nothing should still claim Luna is replying.
+    expect(container.querySelectorAll(".chat-replying")).toHaveLength(0);
   });
 });
 
