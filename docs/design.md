@@ -83,9 +83,10 @@ injection, and desktop require owner/editor access before the Box adapter is cre
 and share management remain owner-only. Each Companion owns exactly one chat thread. `companion_threads` carries its ordinal and
 delivery watermarks and `companion_transcript_entries` carries its messages, so sending persists in
 the control plane before any Box contact and an undelivered message stays pending for the same
-idempotent send to retry. An Owner/Editor send then starts the Companion through the same lifecycle
-path as Wake: an archived Box resumes, a stopped Pi starts, and an already-active layout-6 Pi takes
-the warm path without resource injection or a systemd restart. One send is one turn: the sender names the message it is creating with a
+idempotent send to retry. An Owner/Editor send uses a lightweight runtime observation to deliver
+directly when Box and Pi are already running; otherwise it starts the Companion through the same lifecycle path as Wake, so an
+archived Box resumes and a stopped Pi starts without making the common online path claim or inject
+anything. One send is one turn: the sender names the message it is creating with a
 `client_message_id` UUID that becomes the entry's event id, so the transcript's
 `(companion_id, event_id)` primary key decides how many turns a send produces and the same send
 arriving twice — retried, replayed by a proxy, submitted twice — resolves to the turn already stored

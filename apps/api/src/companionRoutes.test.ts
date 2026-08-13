@@ -144,10 +144,15 @@ function boxRuntime(overrides: Record<string, unknown> = {}) {
       desktopAvailable: true,
     })),
     stop: vi.fn(),
-    status: vi.fn(),
+    status: vi.fn(async () => ({
+      boxId: companion.runtime.box_id,
+      runtimeState: "running" as const,
+      daemonState: "running" as const,
+      desktopAvailable: true,
+    })),
     desktop: vi.fn(),
     prompt: vi.fn(),
-    refreshTtl: vi.fn(),
+    refreshTtl: vi.fn(async () => undefined),
     readEvents: vi.fn(async () => ({ chunk: "", offset: 0 })),
     ...overrides,
   };
@@ -496,6 +501,63 @@ describe("Companions API feature gate", () => {
     });
   });
 
+  it("starts Pi before delivery when the Box is online but the daemon is stopped", async () => {
+    coreMocks.getCompanionForRuntime.mockResolvedValue({
+      ...runningCompanion,
+      runtime: { ...runningCompanion.runtime, daemon_state: "stopped" as const },
+    });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
+    expect(runtime.start).toHaveBeenCalledOnce();
+    expect(runtime.start.mock.invocationCallOrder[0]!)
+      .toBeLessThan(runtime.prompt.mock.invocationCallOrder[0]!);
+  });
+
+  it("keeps native-mobile Skills and plugins empty during automatic wake", async () => {
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "Summarize the incident",
+        client_surface: "native_mobile",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(coreMocks.resolveCompanionPluginInjection).not.toHaveBeenCalled();
+    expect(coreMocks.listCompanionRuntimeSkillPackages).not.toHaveBeenCalled();
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
+      clientSurface: "native_mobile",
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+    }));
+  });
+
   it("keeps the persisted message pending and records last_error when automatic wake fails", async () => {
     coreMocks.listPendingCompanionMessages.mockResolvedValue({
       pending: [message],
@@ -519,8 +581,8 @@ describe("Companions API feature gate", () => {
       }),
     });
 
-    expect(response.status).toBe(502);
-    await expect(response.json()).resolves.toMatchObject({ error: "Box resume failed" });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
     expect(coreMocks.sendCompanionMessage).toHaveBeenCalledOnce();
     expect(coreMocks.recordCompanionPiProjection).not.toHaveBeenCalled();
     expect(runtime.prompt).not.toHaveBeenCalled();
@@ -563,6 +625,69 @@ describe("Companions API feature gate", () => {
       entries: [],
     }));
     expect(runtime.refreshTtl).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
+    expect(runtime.start).not.toHaveBeenCalled();
+    expect(coreMocks.claimCompanionRuntimeStart).not.toHaveBeenCalled();
+    expect(coreMocks.resolveCompanionProviderAuth).not.toHaveBeenCalled();
+    expect(coreMocks.listCompanionRuntimeSkillPackages).not.toHaveBeenCalled();
+  });
+
+  it("wakes a provider-archived Box when the running projection is stale", async () => {
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    const runtime = boxRuntime({
+      status: vi.fn(async () => ({
+        boxId: companion.runtime.box_id,
+        runtimeState: "stopped" as const,
+        daemonState: "stopped" as const,
+        desktopAvailable: false,
+      })),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Wake from provider idle" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
+    expect(runtime.status).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
+    expect(runtime.start).toHaveBeenCalledOnce();
+    expect(runtime.prompt).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a delivered send successful when the TTL refresh fails", async () => {
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    const runtime = boxRuntime({
+      refreshTtl: vi.fn(async () => {
+        throw new BoxRuntimeProviderError("Box TTL refresh failed", 502);
+      }),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
+    expect(coreMocks.recordCompanionPiProjection).toHaveBeenCalledWith(expect.objectContaining({
+      deliveredOrdinal: message.ordinal,
+    }));
   });
 
   it("delivers the backlog a sleeping Box missed before the message that woke the send", async () => {
@@ -708,7 +833,11 @@ describe("Companions API feature gate", () => {
       piLogOffset: 0,
       deliveredOrdinal: message.ordinal,
     });
-    const runtime = boxRuntime();
+    const runtime = boxRuntime({
+      refreshTtl: vi.fn(async () => {
+        throw new BoxRuntimeProviderError("Box is archived", 409);
+      }),
+    });
     const app = new Hono<{ Variables: ApiVariables }>();
     registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
 
@@ -814,6 +943,7 @@ describe("Companions API feature gate", () => {
       piLogRewound: false,
       entries: [expect.objectContaining({ role: "assistant", content: "Two services timed out." })],
     }));
+    expect(runtime.refreshTtl).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
   });
 
   it("records a reply when Pi answered inside a thinking block and settled", async () => {

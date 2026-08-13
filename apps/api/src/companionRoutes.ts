@@ -114,7 +114,9 @@ function errorStatus(error: unknown): number {
 
 /** Thread sync observes the control-plane projection and never wakes an unreachable Pi. */
 function piIsReachable(companion: Companion): boolean {
-  return Boolean(companion.runtime.box_id) && companion.runtime.state === "running";
+  return Boolean(companion.runtime.box_id)
+    && companion.runtime.state === "running"
+    && companion.runtime.daemon_state === "running";
 }
 
 function recordProjection(input: {
@@ -168,7 +170,7 @@ async function deliverCompanionMessages(input: {
   });
   // Move the Box idle clock only after Pi accepted at least one durable message. A failed prompt
   // remains pending and therefore cannot lengthen the machine's lifetime.
-  await input.runtime.refreshTtl({ boxId: input.boxId });
+  await input.runtime.refreshTtl({ boxId: input.boxId }).catch(() => undefined);
   return { thread, deliveredOrdinal };
 }
 
@@ -609,37 +611,61 @@ export function registerCompanionRoutes(
           ...result,
         };
       });
-      // A replay of an already-delivered send has nothing to wake or hand to Pi. Fresh and still-
-      // pending sends all pass through start(), which resumes a sleeping Box and uses THE-336's warm
-      // fast path when the current daemon is already active.
+      // A replay of an already-delivered send has nothing to wake or hand to Pi.
       if (sent.pending.length === 0) {
         const delivered =
           sent.deliveredOrdinal !== null && sent.deliveredOrdinal >= sent.entry.ordinal;
         // A prior attempt may have delivered and persisted the watermark but failed its TTL PATCH.
         // Retrying the same idempotent send repairs that clock without prompting Pi a second time.
         if (delivered && sent.companion.runtime.box_id) {
-          await runtimeFactory().refreshTtl({ boxId: sent.companion.runtime.box_id });
+          await runtimeFactory().refreshTtl({ boxId: sent.companion.runtime.box_id })
+            .catch(() => undefined);
         }
         return c.json({
           thread: sent.thread,
           delivery: delivered ? ("delivered" as const) : ("pending" as const),
         });
       }
-      const started = await startRuntime(
-        c,
-        companionId,
-        startCompanionRuntimeInputSchema.parse({ client_surface: body.client_surface }),
-      );
-      if (!started.companion.runtime.box_id) {
-        throw new CompanionRuntimeTransitionError("companion start completed without a Box");
+      let runtime: CompanionBoxRuntime | undefined;
+      let boxId: string | undefined;
+      if (piIsReachable(sent.companion)) {
+        // Provider TTL can archive a Box while the control-plane projection still says running.
+        // Observe without resuming; a genuinely warm daemon stays on the prompt-only path, while a
+        // stale projection falls through to the same start path as an explicitly asleep Companion.
+        const candidate = runtimeFactory();
+        const observed = await candidate.status({
+          boxId: sent.companion.runtime.box_id!,
+        }).catch(() => null);
+        if (observed?.runtimeState === "running" && observed.daemonState === "running") {
+          runtime = candidate;
+          boxId = sent.companion.runtime.box_id!;
+        }
+      }
+      if (!runtime || !boxId) {
+        try {
+          const started = await startRuntime(
+            c,
+            companionId,
+            startCompanionRuntimeInputSchema.parse({ client_surface: body.client_surface }),
+          );
+          if (!started.companion.runtime.box_id) {
+            throw new CompanionRuntimeTransitionError("companion start completed without a Box");
+          }
+          runtime = started.runtime;
+          boxId = started.companion.runtime.box_id;
+        } catch {
+          // Persistence happened first and startRuntime recorded last_error. Returning the durable
+          // pending turn keeps the composer from creating a second id for the same user action.
+          return c.json({ thread: sent.thread, delivery: "pending" as const });
+        }
       }
       const delivered = await deliverCompanionMessages({
         actor: sent.actor,
         orgId: sent.orgId,
         companionId,
-        boxId: started.companion.runtime.box_id,
+        boxId,
         messages: sent.pending,
-        runtime: started.runtime,
+        runtime,
       });
       const deliveredOrdinal = delivered?.deliveredOrdinal ?? sent.deliveredOrdinal;
       return c.json({
@@ -682,13 +708,16 @@ export function registerCompanionRoutes(
         // Record what Pi accepted before reading its log. Whatever happens next — a failed read, a
         // failed projection, a refused prompt — a retry must not prompt the same message twice.
         if (deliveredOrdinal !== undefined) {
-          await recordProjection({
+          const recorded = await recordProjection({
             actor: resolved.actor,
             orgId: resolved.orgId,
             companionId,
             entries: [],
             deliveredOrdinal,
-          }).catch(() => undefined);
+          }).then(() => true, () => false);
+          if (recorded) {
+            await runtime.refreshTtl({ boxId }).catch(() => undefined);
+          }
         }
       }
       const events = await runtime.readEvents({ boxId, offset: resolved.piLogOffset });
