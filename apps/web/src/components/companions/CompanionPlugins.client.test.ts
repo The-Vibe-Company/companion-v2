@@ -37,9 +37,11 @@ async function mount() {
   const root = createRoot(container);
   roots.push(root);
   await act(async () => {
-    root.render(
-      <CompanionPlugins orgId="org-1" initialAccounts={[]} onBack={() => {}} />,
-    );
+    root.render(React.createElement(CompanionPlugins, {
+      orgId: "org-1",
+      initialAccounts: [],
+      onBack: () => {},
+    }));
   });
   return container;
 }
