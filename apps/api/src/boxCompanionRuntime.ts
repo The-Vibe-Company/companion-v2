@@ -15,12 +15,10 @@ import {
 
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
 const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
-// THE-336 makes the daemon wrapper report its own failures into the log the control plane reads,
-// because a wrapper that died before `exec` wrote only to the journal and left the log's timestamp
-// untouched, which is how a crash-looping wake reported an exit status and no reason at all. The
-// wrapper is written by the layout script and cached behind the layout marker, so the version is
-// bumped past the THE-332 value (4) to force every Box to reinstall it on its next wake.
-export const COMPANION_PI_DISK_LAYOUT_VERSION = 5;
+// Layout 5 made the daemon wrapper report its own failures. Layout 6 moves MCP credentials off the
+// snapshotted Box disk and into the user runtime directory: systemd can reread them for an automatic
+// restart, but Box stop/reboot still destroys them with the tmpfs that held them.
+export const COMPANION_PI_DISK_LAYOUT_VERSION = 6;
 /** Content bytes the provider's file API refuses in one `PUT /boxes/:id/files` body. */
 const BOX_FILE_WRITE_LIMIT_BYTES = 5 * 1024 * 1024;
 /**
@@ -33,7 +31,7 @@ const BOX_FILE_PART_TIMEOUT_MS = 120_000;
 /** Bytes of Pi RPC output one control-plane sync may pull; the rest is read by the next sync. */
 export const COMPANION_PI_EVENT_READ_LIMIT = 262_144;
 /**
- * How long a restarted Pi daemon has to answer `active`. `systemctl --user restart` returns once
+ * How long a started Pi daemon has to answer `active`. `systemctl --user start` returns once
  * systemd has forked `ExecStart`, and the unit is `Type=simple` with `Restart=on-failure`, so a
  * daemon that is merely slow and one that is crash-looping both answer `activating` for the first
  * seconds. Reading a single probe as the verdict is what turned healthy starts into wake failures.
@@ -98,6 +96,8 @@ const STARTING_STATES = new Set<BoxState>(["init", "provisioning", "provisioned"
 const ARCHIVED_STATES = new Set<BoxState>(["archiving", "archived"]);
 /** Printed by the staging command when Pi's auth file already exists on the Box disk. */
 const PROVIDER_AUTH_PRESENT_MARKER = "companion-provider-auth-present";
+/** Printed only when a warm Box already has everything an automatic Pi restart needs. */
+const WARM_DAEMON_READY_MARKER = "companion-pi-warm-ready";
 
 export type BoxState =
   | "init"
@@ -401,7 +401,9 @@ COMPANION_PI_SERVICE_HEAD
   printf 'Environment=PATH=%s:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n' "$pi_bin_dir"
   cat <<'COMPANION_PI_SERVICE_TAIL'
 ExecStart=%h/.companion/bin/pi-daemon
-EnvironmentFile=-%h/.companion/runtime/state/providers.env
+# The user runtime directory is tmpfs: credentials survive Pi's on-failure restart, but are neither
+# snapshotted with the Box disk nor left behind after the Box stops.
+EnvironmentFile=-%t/companion/providers.env
 Restart=on-failure
 RestartSec=2
 
@@ -722,7 +724,25 @@ systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true`,
   }
 
   /**
-   * Wait for the restarted unit to actually be running. A successful `restart` only means systemd
+   * A current-layout active daemon with its runtime credential file is already fully started.
+   * Returning from that state avoids replacing Skills/MCP files underneath an in-flight turn and,
+   * most importantly, avoids killing that turn with an unnecessary systemd restart.
+   */
+  async #warmDaemonReady(boxId: string): Promise<boolean> {
+    const result = await this.#command(
+      boxId,
+      `${USER_BUS_ENVIRONMENT}
+if systemctl --user show-environment >/dev/null 2>&1 &&
+  systemctl --user is-active --quiet companion-pi-daemon.service &&
+  [ -f "$XDG_RUNTIME_DIR/companion/providers.env" ]; then
+  printf '%s\\n' ${shellQuote(WARM_DAEMON_READY_MARKER)}
+fi`,
+    );
+    return result.success && result.stdout.split(/[\r\n]+/).includes(WARM_DAEMON_READY_MARKER);
+  }
+
+  /**
+   * Wait for the started unit to actually be running. A successful `start` only means systemd
    * accepted the job, so the daemon is given the whole window to reach `active` and the wait ends
    * on the first probe that says it did.
    */
@@ -778,7 +798,8 @@ exit 0`,
   async #removeProviderFile(boxId: string): Promise<void> {
     await this.#command(
       boxId,
-      "rm -f \"$HOME/.companion/runtime/state/providers.env\"",
+      `rm -f "$HOME/.companion/runtime/state/providers.env" \
+"/run/user/$(id -u)/companion/providers.env"`,
     );
   }
 
@@ -1033,6 +1054,12 @@ exit 0`,
       }
     }
     box = await this.#waitReady(box.id);
+    // `replaceProviderAuth=false` proves the control-plane row already records this layout and the
+    // current provider generation. The runtime-file probe supplies the missing volatile half of the
+    // proof: a later systemd auto-restart can still inherit this daemon's MCP credentials.
+    if (!replaceProviderAuth && await this.#warmDaemonReady(box.id)) {
+      return observation(await this.#get(box.id), "running");
+    }
     await this.#ensurePiLayout(box.id);
     await this.#injectPiResources({
       boxId: box.id,
@@ -1048,25 +1075,34 @@ exit 0`,
       started = await this.#command(
         box.id,
         `set -e
-credential_file="$HOME/.companion/runtime/state/providers.env"
-trap 'rm -f "$credential_file"' EXIT
-chmod 600 "$credential_file"
+staged_credential_file="$HOME/.companion/runtime/state/providers.env"
+runtime_credential_file="/run/user/$(id -u)/companion/providers.env"
+trap 'rm -f "$staged_credential_file" "$runtime_credential_file"' EXIT
+chmod 600 "$staged_credential_file"
 auth_file="$HOME/.companion/pi/auth.json"
 if [ ! -f "$auth_file" ]; then echo 'Companion provider auth file is missing' >&2; exit 1; fi
 chmod 700 "$HOME/.companion/pi"
 chmod 600 "$auth_file"
 ${PREPARE_USER_BUS}
+runtime_credential_dir="$XDG_RUNTIME_DIR/companion"
+runtime_credential_file="$runtime_credential_dir/providers.env"
+mkdir -p "$runtime_credential_dir"
+chmod 700 "$runtime_credential_dir"
+mv -f "$staged_credential_file" "$runtime_credential_file"
+chmod 600 "$runtime_credential_file"
 # The create setupScript only writes the unit file, so this is the first load of the Pi daemon unit.
 systemctl --user daemon-reload
 # A unit that crash-looped past systemd's start limit refuses every later start until its failure is
 # cleared, so a Companion that once crash-looped would answer the next wake with "Start request
 # repeated too quickly" instead of starting Pi — even after whatever broke Pi was fixed. Clearing the
 # latched failure first makes this a real start attempt again; a unit with nothing latched is
-# unaffected, and a Box that will not clear it still gets its restart.
+# unaffected, and a Box that will not clear it still gets its start attempt.
 systemctl --user reset-failed companion-pi-daemon.service >/dev/null 2>&1 || true
-systemctl --user restart companion-pi-daemon.service
-# restart waits until systemd has read EnvironmentFile; remove transient MCP credentials immediately after.
-rm -f "$credential_file"
+# systemctl start is deliberately idempotent for an active unit. A first post-upgrade start refreshes
+# the tmpfs credential file and unit definition without killing a turn that is already in flight.
+systemctl --user start companion-pi-daemon.service
+# Keep the tmpfs file while the Box is awake so Restart=on-failure can reread the same credentials.
+# Box stop/reboot destroys /run, and the explicit stop path removes it as soon as Pi is down.
 trap - EXIT`,
         120,
       );
@@ -1099,12 +1135,14 @@ trap - EXIT`,
         // The unit is loaded by the first start, so a Box that never started Pi has nothing to stop.
         // Only a daemon still active after the stop attempt is a failure worth reporting.
         `${USER_BUS_ENVIRONMENT}
-if ! systemctl --user show-environment >/dev/null 2>&1; then exit 0; fi
-systemctl --user stop companion-pi-daemon.service >/dev/null 2>&1 || true
-if systemctl --user is-active --quiet companion-pi-daemon.service; then
-  echo 'Pi daemon is still active after stop' >&2
-  exit 1
-fi`,
+if systemctl --user show-environment >/dev/null 2>&1; then
+  systemctl --user stop companion-pi-daemon.service >/dev/null 2>&1 || true
+  if systemctl --user is-active --quiet companion-pi-daemon.service; then
+    echo 'Pi daemon is still active after stop' >&2
+    exit 1
+  fi
+fi
+rm -f "/run/user/$(id -u)/companion/providers.env"`,
       );
       if (!stopped.success) throw new BoxRuntimeProviderError("Pi daemon failed to stop", 502);
     }

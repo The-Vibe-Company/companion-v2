@@ -23,6 +23,7 @@ const box = {
 /** Printed by the adapter's staging command when Pi's auth file already exists on the Box disk. */
 const AUTH_PRESENT_MARKER = "companion-provider-auth-present";
 const PROVIDER_FILE_REMOVAL = "rm -f \"$HOME/.companion/runtime/state/providers.env\"";
+const RUNTIME_PROVIDER_FILE = '"/run/user/$(id -u)/companion/providers.env"';
 /** The layout script is staged on disk and run as a file, so the command itself stays this short. */
 const LAYOUT_SCRIPT_PATH = ".companion/bin/ensure-pi-layout.sh";
 const LAYOUT_RUN_COMMAND = `bash "$HOME/${LAYOUT_SCRIPT_PATH}"`;
@@ -318,6 +319,110 @@ describe("AsciiBoxCompanionRuntime", () => {
       daemonState: "running",
       desktopAvailable: true,
     });
+  });
+
+  it("returns an already active current-layout daemon without injecting or starting it again", async () => {
+    const commands: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: command.includes("companion-pi-warm-ready")
+            ? "companion-pi-warm-ready\n"
+            : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      // The route sends false only when this Box records the current layout and provider generation.
+      replaceProviderAuth: false,
+      mcpCredentials: [{ env_key: "GITHUB_TOKEN_WORK", value: "new-secret-not-injected" }],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(result).toMatchObject({ runtimeState: "running", daemonState: "running" });
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("is-active --quiet companion-pi-daemon.service");
+    expect(commands[0]).toContain('[ -f "$XDG_RUNTIME_DIR/companion/providers.env" ]');
+    expect(commands[0]).not.toContain("systemctl --user start companion-pi-daemon.service");
+    expect(commands[0]).not.toContain("systemctl --user restart companion-pi-daemon.service");
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/files"))).toBe(false);
+    expect(fetchMock.mock.calls.some(([, init]) =>
+      String(JSON.parse(String(init?.body ?? "{}")).command ?? "").includes("skills.next"))).toBe(false);
+  });
+
+  it("does not take the warm fast path when layout or provider auth needs replacement", async () => {
+    const commands: string[] = [];
+    const writtenPaths: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") {
+        writtenPaths.push(String(body.path));
+        return json({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: command.includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "rotated-provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(commands.some((command) => command.includes("companion-pi-warm-ready"))).toBe(false);
+    expect(commands.some((command) =>
+      command.includes("systemctl --user start companion-pi-daemon.service"))).toBe(true);
+    expect(commands.every((command) =>
+      !command.includes("systemctl --user restart companion-pi-daemon.service"))).toBe(true);
+    expect(writtenPaths).toContain(".companion/pi/auth.json");
+    expect(writtenPaths).toContain(".companion/runtime/state/providers.env");
   });
 
   it("stages a skill archive too large for one file write as parts a short command joins", async () => {
@@ -776,7 +881,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(createdSetupScript).toContain("Environment=PATH=");
   });
 
-  it("keeps systemctl out of the create setupScript and loads the unit once the Box is ready", async () => {
+  it("keeps systemctl out of setup and leaves MCP credentials in tmpfs for auto-restart", async () => {
     const commands: string[] = [];
     let createdSetupScript = "";
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
@@ -829,22 +934,32 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(createdSetupScript).not.toMatch(/loginctl/);
     expect(createdSetupScript).toContain("/.config/systemd/user/companion-pi-daemon.service");
     expect(createdSetupScript).toContain("npm install --global @earendil-works/pi-coding-agent@1.2.3");
-    const restart = commands.find((command) => command.includes("restart companion-pi-daemon.service"));
-    expect(restart).toBeDefined();
-    expect(restart).toContain("systemctl --user daemon-reload");
-    expect(restart).toContain('companion_user_runtime_dir="/run/user/$(id -u)"');
-    expect(restart).toContain('export XDG_RUNTIME_DIR="$companion_user_runtime_dir"');
-    expect(restart).not.toContain("${XDG_RUNTIME_DIR:-");
-    expect(restart).toContain('export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"');
-    expect(restart).toContain("loginctl enable-linger");
-    expect(restart).toContain("systemctl --user show-environment");
-    expect(restart).toMatch(
+    // EnvironmentFile is read for every ExecStart, including Restart=on-failure. Keeping its source
+    // in %t (the user runtime tmpfs) makes credentials available to that restart without putting
+    // them on the snapshotted Box disk.
+    expect(createdSetupScript).toContain("EnvironmentFile=-%t/companion/providers.env");
+    expect(createdSetupScript).not.toContain(
+      "EnvironmentFile=-%h/.companion/runtime/state/providers.env",
+    );
+    const start = commands.find((command) =>
+      command.includes("systemctl --user start companion-pi-daemon.service"));
+    expect(start).toBeDefined();
+    expect(start).toContain("systemctl --user daemon-reload");
+    expect(start).toContain('companion_user_runtime_dir="/run/user/$(id -u)"');
+    expect(start).toContain('export XDG_RUNTIME_DIR="$companion_user_runtime_dir"');
+    expect(start).not.toContain("${XDG_RUNTIME_DIR:-");
+    expect(start).toContain('export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"');
+    expect(start).toContain("loginctl enable-linger");
+    expect(start).toContain("systemctl --user show-environment");
+    expect(start).toMatch(
       /for _ in \$\(seq 1 20\); do\n\s+companion_export_user_bus\n\s+if systemctl --user show-environment/,
     );
-    expect(restart).toContain("trap 'rm -f \"$credential_file\"' EXIT");
-    expect(restart!.indexOf("restart companion-pi-daemon.service"))
-      .toBeLessThan(restart!.lastIndexOf('rm -f "$credential_file"'));
-    expect(restart).toContain("trap - EXIT");
+    expect(start).toContain('mv -f "$staged_credential_file" "$runtime_credential_file"');
+    expect(start).toContain('runtime_credential_dir="$XDG_RUNTIME_DIR/companion"');
+    expect(start).toContain("trap - EXIT");
+    expect(start!.indexOf("systemctl --user start companion-pi-daemon.service"))
+      .toBeLessThan(start!.indexOf("trap - EXIT"));
+    expect(start).not.toContain("systemctl --user restart companion-pi-daemon.service");
     // Every Box command runs in its own shell, so the status probe locates the bus again too.
     const userManagerCommands = commands.filter((command) => command.includes("systemctl --user"));
     expect(userManagerCommands.length).toBeGreaterThan(0);
@@ -863,7 +978,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
       if (url.endsWith("/commands") && method === "POST") {
         const command = String(body.command);
-        if (command.includes("restart companion-pi-daemon.service")) {
+        if (command.includes("start companion-pi-daemon.service")) {
           return json({
             success: false,
             exitCode: 1,
@@ -956,7 +1071,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     // that recovered daemon dead.
     const journal = ["activating", "failed", "activating", "active"];
     const probes: string[] = [];
-    const restarts: string[] = [];
+    const starts: string[] = [];
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const method = init?.method ?? "GET";
@@ -965,7 +1080,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
       if (url.endsWith("/commands") && method === "POST") {
         const command = String(body.command);
-        if (command.includes("systemctl --user restart")) restarts.push(command);
+        if (command.includes("systemctl --user start")) starts.push(command);
         if (command.includes("is-active") && !command.includes("companion_label")) {
           probes.push(command);
           return json({
@@ -1002,9 +1117,9 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(result).toMatchObject({ runtimeState: "running", daemonState: "running" });
     // The wait has to outlast the `failed` answer rather than stop on it.
     expect(probes.length).toBe(journal.length);
-    // Only the wake's own restart is issued: re-restarting on a later probe would knock the
-    // recovered daemon back into the same crash window.
-    expect(restarts).toHaveLength(1);
+    // Only the wake's own start is issued: another start on a later probe would add needless work
+    // while systemd is already recovering the daemon.
+    expect(starts).toHaveLength(1);
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/stop"))).toBe(false);
   });
 
@@ -1090,6 +1205,9 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(diagnostic).not.toContain("providers.env");
     expect(diagnostic).not.toContain("auth.json");
     for (const command of commands) expect(command).not.toContain("mcp-secret");
+    // A timed-out observation does not prove systemd stopped recovering. Keep the tmpfs file so an
+    // on-failure restart after this response still receives MCP credentials.
+    expect(commands.some((command) => command.startsWith(PROVIDER_FILE_REMOVAL))).toBe(false);
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/stop"))).toBe(false);
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
     expect(fetchMock.mock.calls.some(([url, init]) =>
@@ -1251,7 +1369,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     // systemd stops restarting a unit that failed too often and refuses every later start until the
     // latched failure is cleared, so a Companion that crash-looped once answered the next wake with
     // systemd's own rate-limit complaint instead of starting Pi — for as long as the Box lived.
-    let restartAttempts = 0;
+    let startAttempts = 0;
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const method = init?.method ?? "GET";
@@ -1260,11 +1378,11 @@ describe("AsciiBoxCompanionRuntime", () => {
       if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
       if (url.endsWith("/commands") && method === "POST") {
         const command = String(body.command);
-        const restart = command.indexOf("restart companion-pi-daemon.service");
-        if (restart >= 0) {
-          restartAttempts += 1;
+        const start = command.indexOf("start companion-pi-daemon.service");
+        if (start >= 0) {
+          startAttempts += 1;
           const cleared = command.indexOf("reset-failed companion-pi-daemon.service");
-          if (cleared < 0 || cleared > restart) {
+          if (cleared < 0 || cleared > start) {
             return json({
               success: false,
               exitCode: 1,
@@ -1303,7 +1421,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     // One start attempt, and it is the one that cleared the latch first rather than a retry.
-    expect(restartAttempts).toBe(1);
+    expect(startAttempts).toBe(1);
     expect(result).toMatchObject({ runtimeState: "running", daemonState: "running" });
   });
 
@@ -1736,6 +1854,7 @@ describe("AsciiBoxCompanionRuntime", () => {
 
   it("writes Pi auth onto a disk that has none even when the caller skipped the rewrite", async () => {
     const writtenPaths: string[] = [];
+    const commands: string[] = [];
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const method = init?.method ?? "GET";
@@ -1746,12 +1865,14 @@ describe("AsciiBoxCompanionRuntime", () => {
         return json({ ok: true });
       }
       if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
         // The staging command reports no auth file, as on a replacement disk an earlier start
         // provisioned but never finished configuring.
         return json({
           success: true,
           exitCode: 0,
-          stdout: String(body.command).includes("is-active") ? "active\n" : "",
+          stdout: command.includes("is-active") ? "active\n" : "",
           stderr: "",
         });
       }
@@ -1778,6 +1899,11 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     expect(writtenPaths).toContain(".companion/pi/auth.json");
+    // `active` alone is insufficient: without the warm-ready marker proving the tmpfs credential
+    // file exists, the adapter repairs resources and uses the idempotent start path.
+    expect(commands.some((command) => command.includes("companion-pi-warm-ready"))).toBe(true);
+    expect(commands.some((command) =>
+      command.includes("systemctl --user start companion-pi-daemon.service"))).toBe(true);
     expect(result.runtimeState).toBe("running");
   });
 
@@ -2291,6 +2417,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(stopCommand).not.toContain("${XDG_RUNTIME_DIR:-");
     expect(stopCommand).toContain("systemctl --user stop companion-pi-daemon.service >/dev/null 2>&1 || true");
     expect(stopCommand).toContain("is-active --quiet companion-pi-daemon.service");
+    expect(stopCommand).toContain(`rm -f ${RUNTIME_PROVIDER_FILE}`);
     expect(archived).toBe(true);
     expect(result).toMatchObject({ runtimeState: "stopping", daemonState: "stopped" });
   });
@@ -2341,7 +2468,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       if (url.endsWith("/commands") && init?.method === "POST") {
         const command = String(body.command);
         commands.push(command);
-        if (command.includes("restart companion-pi-daemon")) {
+        if (command.includes("start companion-pi-daemon")) {
           return json({ code: "box_direct_failed", message: "command transport failed" }, 502);
         }
         return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
@@ -2369,7 +2496,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     })).rejects.toThrow("command transport failed");
 
     expect(commands.some((command) =>
-      command === PROVIDER_FILE_REMOVAL)).toBe(true);
+      command.startsWith(PROVIDER_FILE_REMOVAL))).toBe(true);
+    expect(commands.some((command) => command.includes(RUNTIME_PROVIDER_FILE))).toBe(true);
   });
 
   it("best-effort removes the provider file when skill preparation transport fails", async () => {
@@ -2412,7 +2540,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     })).rejects.toThrow("prepare transport failed");
 
     expect(commands.some((command) =>
-      command === PROVIDER_FILE_REMOVAL)).toBe(true);
+      command.startsWith(PROVIDER_FILE_REMOVAL))).toBe(true);
+    expect(commands.some((command) => command.includes(RUNTIME_PROVIDER_FILE))).toBe(true);
   });
 
   it("writes one JSONL prompt into the Pi FIFO without touching Box lifecycle", async () => {

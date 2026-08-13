@@ -49,7 +49,7 @@ skill storage or a Box adapter is created.
 Runtime starts identify their client surface as `web`, `mobile_web`, or `native_mobile`. Web and
 mobile-web starts resolve the actor's Installed library (personal skills they own plus organization
 skills they installed) and inject only valid current packages. Native-mobile starts always inject
-an empty skill set. This is enforced by the API and again by the Box adapter before Pi is restarted.
+an empty skill set. This is enforced by the API and again by the Box adapter before Pi is started.
 
 | Method | Path | Box contact |
 |---|---|---|
@@ -206,10 +206,16 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
         └── pi.stderr.log  # Pi's stderr and the daemon wrapper's own account of a failed start
 ```
 
-Layout version `5` is written to the control-plane row after a successful Skills/MCP-aware start and
+Layout version `6` is written to the control-plane row after a successful Skills/MCP-aware start and
 to an on-disk marker keyed by the adapter package. Starts repair older Box snapshots before resource
 injection. Runtime transcripts and files do not enter PostgreSQL. A systemd user unit supervises Pi
-while Box is active; the lifecycle API restarts it after a Box resume.
+while Box is active; the lifecycle API starts it after a Box resume.
+
+MCP credential values are not part of that snapshotted tree. A start stages them through the
+owner-only Box file channel, moves the file into `%t/companion/providers.env` in the systemd user
+runtime tmpfs, and removes the staged disk copy before it returns. The unit reads that same tmpfs
+file on every `ExecStart`, so `Restart=on-failure` does not silently come back without MCP servers.
+An explicit stop removes it after Pi is down, and Box stop/reboot destroys the runtime tmpfs.
 
 A start repairs the layout of a Box that already exists by running the same script the create path
 uses, and it runs it the same way: the script is staged onto the disk through the file API as
@@ -230,14 +236,14 @@ The create `setupScript` installs Pi, writes the daemon wrapper, and writes the 
 and it deliberately runs no user-manager command. A Box executing its create script has no user D-Bus
 session, so `systemctl --user` there fails with `Failed to connect to bus: No medium found` and marks
 the whole setup `failed` even when Pi installed correctly. Loading the unit is therefore deferred to
-the post-ready control-plane command that restarts Pi. That command locates the bus itself: every Box
+the post-ready control-plane command that starts Pi. That command locates the bus itself: every Box
 command runs in its own shell, so it exports `XDG_RUNTIME_DIR`, and when the user manager still does
 not answer it enables lingering for the account, asks the system manager to start `user@<uid>`, and
 waits briefly before failing with a message that names the missing user bus. Stopping is idempotent
 for the same reason: a Box that never started Pi has no loaded unit, so only a daemon still active
 after the stop attempt is reported as a failure.
 
-A successful `systemctl --user restart` only means systemd accepted the job. The unit is
+A successful `systemctl --user start` only means systemd accepted the job. The unit is
 `Type=simple` with `Restart=on-failure`, so a daemon that is merely slow to open its RPC FIFO and one
 that is crash-looping both answer `activating` for the first seconds, and reading a single `is-active`
 probe as the verdict turned healthy starts into `Pi daemon is not running after start` wakes. A start
@@ -289,12 +295,20 @@ narration of ordinary starts and stops is dropped, so what survives is a unit sy
 execute, a process the kernel killed, or a restart loop systemd gave up on. The result fits the single
 sanitized line `companions.last_error` stores.
 
-A start clears any latched start-limit failure before it restarts the unit. systemd stops restarting
+A cold start clears any latched start-limit failure before it starts the unit. systemd stops restarting
 a unit that failed too often and refuses every later start until that failure is cleared, so a
 Companion that crash-looped once answered the next wake with systemd's own rate-limit complaint
 instead of a real start attempt, for as long as the Box lived. Neither the poll nor the failure stops,
 archives, or retires the Box: only a Box already beyond recovery — terminal `error` state or failed
-Pi setup — is replaced, and that decision is made before the daemon is ever restarted.
+Pi setup — is replaced, and that decision is made before the daemon is ever started.
+
+A start first checks the warm path when the control-plane row already records the current layout and
+provider generation. If the unit is `active` and its tmpfs MCP credential file is present, start
+returns that observation without repairing layout, injecting resources, or calling systemd start at
+all. This keeps an in-flight turn alive. The first start after a layout or credential change still
+refreshes the files, but uses idempotent `systemctl start`, never `restart`, so an active unit is not
+killed during the upgrade. An already-running process keeps the environment it inherited; refreshed
+layout and MCP environment take effect on its next automatic start or after an explicit stop/wake.
 
 ## Pi Skills injection
 
@@ -336,9 +350,10 @@ accounts for one MCP provider cannot collide.
 Adapter JSON contains only transport metadata and `${ENV_KEY}` references. Plugin credentials are
 write-only and envelope-encrypted per member in `companion_mcp_accounts`; ordinary reads expose only
 provider, label, transport, endpoint, and timestamps. After Owner/Editor runtime authorization, the
-API decrypts the current member's accounts into THE-325's `mcp_credentials` channel. Values are
-written to a transient environment file that the systemd unit reads and removes immediately after
-Pi inherits them. Every referenced env key must have a matching credential. Model-provider
+API decrypts the current member's accounts into THE-325's `mcp_credentials` channel. Values cross
+the snapshotted disk only as a staged owner-only file, then live in the Box's user runtime tmpfs for
+as long as Pi may auto-restart. The systemd unit rereads that file on every start; stop removes it,
+and Box stop/reboot destroys the tmpfs. Every referenced env key must have a matching credential. Model-provider
 authentication never uses this channel. Host-config discovery, MCP sampling, and MCP elicitation are
 disabled. Native-mobile starts discard both saved and caller-supplied MCP accounts.
 
@@ -365,8 +380,10 @@ Box, an older layout, or a rotated connection always rewrites the file. The disk
 authority: the staging step reports whether `auth.json` exists, and a start rewrites the file
 whenever it does not, so a replacement disk provisioned by an earlier start that failed before Pi
 was configured cannot inherit a recorded generation it never satisfied. Start fails closed when the
-file is absent, and a failed daemon start still best-effort removes the transient `mcp_credentials`
-environment file.
+file is absent, and a failed injection or systemd start command best-effort removes both staged and
+runtime `mcp_credentials` files. A later active-wait timeout keeps the runtime file because systemd
+may still recover Pi through `Restart=on-failure`; explicit stop and Box stop/reboot remain its
+cleanup boundary.
 
 Migration `0065` clears `provider_ids` for existing rows. Before it, that column recorded whichever
 credential tags a start request carried, including MCP account tags, so no legacy value can name a
