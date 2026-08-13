@@ -136,13 +136,29 @@ async function clickBoxChip(container: HTMLElement) {
   return chip;
 }
 
-/** Stands in for the tab a click claims: it records where it was sent and whether it was closed. */
-function tabStub() {
-  return {
+/**
+ * Stands in for the tab a click claims: it records where it was sent, whether it still had a handle
+ * on this window at that moment, and whether it was closed.
+ */
+function tabStub(refuses: { replace?: Error; disown?: Error } = {}) {
+  const tab = {
     opener: {} as unknown,
+    openerWhenSent: null as unknown,
     location: { replace: vi.fn() },
     close: vi.fn(),
   };
+  tab.location.replace.mockImplementation(() => {
+    tab.openerWhenSent = tab.opener;
+    if (refuses.replace) throw refuses.replace;
+  });
+  if (refuses.disown) {
+    // A tab that has left for a cross-origin desktop refuses to have its opener written.
+    Object.defineProperty(tab, "opener", {
+      get: () => "held",
+      set: () => { throw refuses.disown; },
+    });
+  }
+  return tab;
 }
 
 /** A handoff that stays in flight until the test resolves it, the way a real POST does. */
@@ -181,9 +197,11 @@ describe("CompanionsApp Box desktop", () => {
 
     await clickBoxChip(container);
 
-    // A browser only honours a tab the click itself asked for, so it is claimed blank while the
-    // handoff is still in flight rather than after it answers.
-    expect(window.open).toHaveBeenCalledWith("", "_blank");
+    // A browser only honours a tab the click itself asked for, so it is claimed while the handoff is
+    // still in flight rather than after it answers. The claim names `about:blank`: asked for the
+    // empty URL, a browser may claim a copy of this page instead of a tab to hand off.
+    expect(window.open).toHaveBeenCalledWith("about:blank", "_blank");
+    expect(window.open).not.toHaveBeenCalledWith("", "_blank");
     expect(tab.location.replace).not.toHaveBeenCalled();
     expect(companionsApi.openCompanionDesktop).toHaveBeenCalledWith("org-1", companionId);
     expect(container.textContent).toContain("Box · opening desktop");
@@ -197,6 +215,9 @@ describe("CompanionsApp Box desktop", () => {
     expect(tab.location.replace).toHaveBeenCalledWith(
       "https://box.ascii.dev/desktop/bx_23456789?token=opaque",
     );
+    // Disowning the tab before the handoff can detach the handle the handoff needs, and the desktop
+    // URL then silently never lands, so the tab still holds its handle while it is being sent.
+    expect(tab.openerWhenSent).not.toBeNull();
     // The claimed tab must not keep a handle on this one, and it must survive the handoff.
     expect(tab.opener).toBeNull();
     expect(tab.close).not.toHaveBeenCalled();
@@ -216,9 +237,53 @@ describe("CompanionsApp Box desktop", () => {
 
     await clickBoxChip(container);
 
+    // The claimed tab is blank, so closing it is allowed and no copy of the app is left behind.
+    expect(window.open).toHaveBeenCalledWith("about:blank", "_blank");
     expect(tab.location.replace).not.toHaveBeenCalled();
     expect(tab.close).toHaveBeenCalled();
     expect(container.textContent).toContain("The Box desktop is still starting");
+  });
+
+  it("keeps a handed-off tab when it refuses to be disowned afterwards", async () => {
+    const tab = tabStub({ disown: new Error("Blocked a frame from accessing a cross-origin frame.") });
+    (window.open as ReturnType<typeof vi.fn>).mockReturnValue(tab);
+    companionsApi.openCompanionDesktop.mockResolvedValue({
+      desktop_url: "https://box.ascii.dev/desktop/bx_23456789?token=opaque",
+      provisioning: false,
+      automation: "lux",
+    });
+    const container = await open(companion());
+
+    await clickBoxChip(container);
+
+    // The desktop was reached, so a refused disown is not a failed handoff: the tab stays and the
+    // thread says nothing went wrong.
+    expect(tab.location.replace).toHaveBeenCalledWith(
+      "https://box.ascii.dev/desktop/bx_23456789?token=opaque",
+    );
+    expect(tab.close).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain("cross-origin");
+    expect(container.textContent).toContain("Box · online");
+  });
+
+  it("closes the claimed tab when the browser refuses to send it to the desktop", async () => {
+    const tab = tabStub({ replace: new Error("The desktop tab could not be reached.") });
+    (window.open as ReturnType<typeof vi.fn>).mockReturnValue(tab);
+    companionsApi.openCompanionDesktop.mockResolvedValue({
+      desktop_url: "https://box.ascii.dev/desktop/bx_23456789?token=opaque",
+      provisioning: false,
+      automation: "lux",
+    });
+    const container = await open(companion());
+
+    await clickBoxChip(container);
+
+    // A refused handoff must never read as a success: the blank tab goes and the reason is said,
+    // without the Box token the URL carries.
+    expect(tab.close).toHaveBeenCalled();
+    expect(container.textContent).toContain("The desktop tab could not be reached.");
+    expect(container.textContent).not.toContain("token=opaque");
+    expect(container.textContent).toContain("Box · online");
   });
 
   it("says so on the thread when the browser blocks the desktop tab", async () => {

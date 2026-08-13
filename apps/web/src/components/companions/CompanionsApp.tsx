@@ -299,21 +299,31 @@ export function CompanionsApp({
    * running, so this never creates or resumes one, and the returned URL opens in its own tab instead
    * of being stored anywhere.
    *
-   * A browser only honours a new tab that the click itself asked for, so the tab is claimed blank
-   * before the handoff request and pointed at the desktop once the URL arrives; anything else leaves
-   * the tab closed and the reason on the thread. `noopener` cannot be passed as a window feature
-   * without losing the handle, so the blank tab disowns this one instead.
+   * A browser only honours a new tab that the click itself asked for, so the tab is claimed on
+   * `about:blank` before the handoff request and pointed at the desktop once the URL arrives;
+   * anything else closes the claimed tab and leaves the reason on the thread. The claim never asks
+   * for the empty URL: a browser may read that as this page and leave a copy of the app behind
+   * instead of a tab to hand off. `noopener` cannot be passed as a window feature without losing the
+   * handle the handoff needs, so the tab disowns this one only once it is on its way to the desktop:
+   * disowning it first can detach the handle, and the handoff then silently never lands.
    */
   const onDesktop = async () => {
     if (!opened || !canRunOpened || !openedAwake) return;
-    const tab = window.open("", "_blank");
-    if (tab) tab.opener = null;
+    const tab = window.open("about:blank", "_blank");
     setOpeningDesktop(true);
     setDesktopError(null);
     try {
       const desktop = await openCompanionDesktop(currentOrg.id, opened.id);
       if (desktop.desktop_url && tab) {
+        // A refused handoff throws, and the catch below closes the tab and says why rather than
+        // leaving a blank tab open as if the desktop had been reached.
         tab.location.replace(desktop.desktop_url);
+        try {
+          tab.opener = null;
+        } catch {
+          // A tab already on its way to the desktop may refuse the write; it cannot reach back
+          // through a stale handle either way, and the handoff itself has already happened.
+        }
         return;
       }
       tab?.close();
