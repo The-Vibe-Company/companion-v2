@@ -2417,5 +2417,58 @@ describe("AsciiBoxCompanionRuntime", () => {
 
     expect(stopped).toBe(true);
   });
+
+  it("puts a name-recovered Box to sleep resumably when its id cannot be persisted", async () => {
+    // The wake refuses the shared id the row carried, recovers this Companion's own Box by name, and
+    // then cannot record it. That Box is awake with nothing pointing at it, so it is slept the ordinary
+    // way — snapshotted, not discarded, and still deterministically named — and the next start resumes
+    // the same disk. Anything that force-stopped or renamed it here would lose the thread's disk to a
+    // transient write failure.
+    const own = {
+      ...box,
+      id: "bx_ownzxyw4",
+      name: "Companion 11111111-1111-4111-8111-111111111111",
+    };
+    const stops: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_5neg83t4") && method === "GET") {
+        return json({
+          box: { ...box, id: "bx_5neg83t4", name: "Companion org 22222222-2222-4222-8222-222222222222" },
+        });
+      }
+      if (url.includes("/boxes?limit=200") && method === "GET") return json({ boxes: [own] });
+      if (url.endsWith(`/boxes/${own.id}/stop`) && method === "POST") {
+        stops.push(body);
+        return json({ box: { ...own, state: "archiving" } }, 202);
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_5neg83t4",
+      clientSurface: "web",
+      providerAuth: {},
+      replaceProviderAuth: false,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async (boxId) => {
+        if (boxId !== null) throw new Error("database unavailable");
+      },
+    })).rejects.toThrow("database unavailable");
+
+    expect(stops).toEqual([{ force: false }]);
+    // No Box was created, and the recovered Box keeps the name the next start looks it up by.
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
+  });
 });
 

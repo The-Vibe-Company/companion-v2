@@ -542,17 +542,20 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     }
   }
 
+  /**
+   * The Box already carrying this Companion's name, if the provider has one. Ownership is decided by
+   * the same predicate the recorded id goes through, so neither route can adopt what the other
+   * refuses; a Box with no name is not a match here, because a name lookup must not answer with a Box
+   * that has yet to be named.
+   */
   async #findCompanionBox(companionId: string): Promise<BoxInfo | null> {
-    const name = companionBoxName(companionId);
-    // The lookup itself is refused rather than its rows: an identifier that spelled out a shared-scope
-    // name would otherwise adopt the Box a whole workspace once shared.
-    if (isSharedScopeBoxName(name)) return null;
     let cursor: string | null = null;
     do {
       const query = new URLSearchParams({ limit: "200", sort: "desc" });
       if (cursor) query.set("cursor", cursor);
       const result = await this.#request<BoxListEnvelope>(`/boxes?${query}`);
-      const found = result.boxes.find((box) => box.name === name);
+      const found = result.boxes.find((candidate) =>
+        (candidate.name?.trim() ?? "") !== "" && isCompanionOwnBox(candidate, companionId));
       if (found) return found;
       cursor = result.pageInfo?.hasMore ? result.pageInfo.nextCursor : null;
     } while (cursor);
@@ -947,7 +950,10 @@ exit 0`,
         await input.onBoxAssigned(box.id);
       } catch (error) {
         // A Box recovered by name is recorded nowhere until this write lands, so a write that fails
-        // leaves it to be archived here. The Box the control plane already had recorded is left alone.
+        // would leave it awake with nothing pointing at it. It is put to sleep the ordinary way, which
+        // snapshots the disk rather than discarding it, and it still carries the deterministic name, so
+        // the next start finds the same disk and resumes it. The Box the control plane already had
+        // recorded stays awake and stays recorded.
         if (!keptAssignment) {
           await this.#request(`/boxes/${encodeURIComponent(box.id)}/stop`, {
             method: "POST",
