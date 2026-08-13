@@ -123,6 +123,8 @@ describe("AsciiBoxCompanionRuntime", () => {
       .toBe("{\"anthropic\":{\"type\":\"api_key\",\"key\":\"provider-secret\"}}\n");
     expect(files.get(".companion/runtime/state/skill-archives/incident-summary.tar.gz.b64"))
       .toBe(Buffer.from("archive").toString("base64"));
+    // A payload the file API accepts whole is written whole; only an oversized one is split.
+    expect([...files.keys()].filter((path) => path.includes(".part"))).toEqual([]);
     expect(files.get(".companion/pi/mcp.json")).toContain("${GITHUB_TOKEN_WORK}");
     expect(files.get(".companion/pi/mcp.json")).not.toContain("mcp-secret");
     expect(files.get(".companion/pi/mcp.json")).not.toContain("provider-secret");
@@ -134,6 +136,154 @@ describe("AsciiBoxCompanionRuntime", () => {
       daemonState: "running",
       desktopAvailable: true,
     });
+  });
+
+  it("stages a skill archive too large for one file write as parts a short command joins", async () => {
+    // Production wake died writing a single ~12.7 MiB base64 body; this archive base64s to ~6.7 MiB,
+    // which the file API refuses the same way.
+    const archive = Buffer.alloc(5 * 1024 * 1024, "companion-skill-archive-payload");
+    const encoded = archive.toString("base64");
+    const archivePath = ".companion/runtime/state/skill-archives/incident-summary.tar.gz.b64";
+    const writes: { path: string; content: string; encoding?: string }[] = [];
+    const commands: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") {
+        const content = String(body.content);
+        // The provider rejects any body over its cap, so the adapter may never send one.
+        if (Buffer.byteLength(content, "utf8") > 5_242_880) {
+          return json({
+            code: "file_too_large",
+            message: `File is too large for write_file (${content.length} bytes > 5242880).`,
+          }, 413);
+        }
+        writes.push({
+          path: String(body.path),
+          content,
+          ...(body.encoding ? { encoding: String(body.encoding) } : {}),
+        });
+        return json({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: command.includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [{
+        slug: "incident-summary",
+        version: "1.2.3",
+        checksum: `sha256:${"a".repeat(64)}`,
+        archive,
+      }],
+      onBoxAssigned: async () => undefined,
+    });
+
+    // The skill is staged, never skipped or truncated, and no request approaches the provider's cap.
+    const parts = writes.filter((write) => write.path.startsWith(`${archivePath}.part`));
+    expect(parts.map((part) => part.path)).toEqual([
+      `${archivePath}.part0`,
+      `${archivePath}.part1`,
+      `${archivePath}.part2`,
+    ]);
+    for (const write of writes) {
+      expect(Buffer.byteLength(write.content, "utf8")).toBeLessThan(5_242_880);
+    }
+    expect(parts.every((part) => part.encoding === "base64")).toBe(true);
+    // What the parts reassemble into is exactly the base64 the extract loop decodes.
+    expect(Buffer.concat(parts.map((part) => Buffer.from(part.content, "base64"))).toString("utf8"))
+      .toBe(encoded);
+    expect(writes.some((write) => write.path === archivePath)).toBe(false);
+    const join = commands.find((command) => command.includes(`${archivePath}.part0`));
+    expect(join).toBe(
+      `set -e; cd "$HOME"; cat '${archivePath}.part0' '${archivePath}.part1' `
+      + `'${archivePath}.part2' > '${archivePath}'; `
+      + `rm -f '${archivePath}.part0' '${archivePath}.part1' '${archivePath}.part2'`,
+    );
+    // The archive body may never travel as a command string, which is what mangles a large payload;
+    // the join is one short line, like the staged layout script's.
+    for (const command of commands) expect(command).not.toContain(encoded.slice(0, 128));
+    expect(join!.length).toBeLessThan(600);
+    // The joined file carries the name the existing extract loop globs, and the parts are gone
+    // before it runs.
+    const extract = commands.findIndex((command) => command.includes("skills.next"));
+    expect(commands[extract]).toContain("*.tar.gz.b64");
+    expect(commands.indexOf(join!)).toBeLessThan(extract);
+    expect(result.runtimeState).toBe("running");
+  });
+
+  it("names the file the Box refused when a write exceeds the provider's cap", async () => {
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") {
+        if (String(body.path).endsWith(".tar.gz.b64")) {
+          return json({
+            code: "file_too_large",
+            message: "File is too large for write_file (13308656 bytes > 5242880).",
+          }, 413);
+        }
+        return json({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    // The provider names the limit but not the file, so a stored line that only repeats it cannot
+    // say which payload overflowed.
+    await expect(runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [{
+        slug: "incident-summary",
+        version: "1.2.3",
+        checksum: `sha256:${"a".repeat(64)}`,
+        archive: Buffer.from("archive"),
+      }],
+      onBoxAssigned: async () => undefined,
+    })).rejects.toThrow(
+      "Box rejected the write of .companion/runtime/state/skill-archives/incident-summary.tar.gz.b64:"
+      + " File is too large for write_file (13308656 bytes > 5242880).",
+    );
   });
 
   it("names the shell's own complaint when the Pi layout command fails", async () => {
