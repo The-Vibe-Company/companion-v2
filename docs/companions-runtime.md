@@ -219,14 +219,24 @@ gets there fails the wake with what the Box actually reported: the unit's `is-ac
 the process, gathered by one command that reads neither the provider auth file nor the transient MCP
 credential file.
 
-Pi routinely exits before writing anything to its stderr log, so that fragment is frequently absent
-and the failure has to stay diagnosable without it. Fragments claim the stored line in priority
-order — `is-active`, `Active:`, the Pi stderr line, then the exit status — and one the Box had
-nothing to say for spends nothing, so a wake whose stderr log is empty puts the exit status on the
-room the missing log line did not take. The exit status is extracted rather than clamped, because a
-systemd `Process:` line opens with the full `ExecStart` path and closes with the code that matters.
-A fragment left too short to read is dropped whole instead of stored as a stub. The result fits the
-single sanitized line `companions.last_error` stores. Neither the poll nor the failure stops,
+systemd's account is what the reason is built from, because it is the only account that always
+exists. The unit declares no `StandardError=`, and the wrapper redirects Pi only after it has
+`exec`ed, so a daemon that dies on its environment or its arguments writes nothing to its log and
+nothing to the journal beyond systemd's own `exit 1`/restart records. A failure of that shape is
+described solely by `Active:` and the recorded exit status, and both are read from
+`systemctl --user status` rather than from any Pi log.
+
+Fragments therefore claim the stored line in priority order — `is-active`, `Active:`, the exit
+status, then the Pi stderr line — and one the Box had nothing to say for spends nothing. The exit
+status is extracted rather than clamped, because a systemd `Process:` line opens with the full
+`ExecStart` path and closes with the code that matters. The two status lines are selected by what
+they say rather than by where they landed, so a unit that prints only one of them cannot have it
+read as the other. A fragment left too short to read is dropped whole instead of stored as a stub.
+
+Pi's stderr log is supplementary and is read only when it was written during this start. The log
+outlives the start that wrote it, so an untouched one still holds whatever an earlier run left
+behind; without a freshness window a line from hours ago would be reported as the reason a wake just
+failed. The result fits the single sanitized line `companions.last_error` stores. Neither the poll nor the failure stops,
 archives, or retires the Box: only a Box already beyond recovery — terminal `error` state or failed
 Pi setup — is replaced, and that decision is made before the daemon is ever restarted.
 

@@ -45,16 +45,25 @@ const PI_DAEMON_FAILURE_MESSAGE = "Pi daemon is not running after start";
 /**
  * What each diagnostic fragment may spend, in the order fragments are allowed to claim it.
  * `companions.last_error` keeps one sanitized line of bounded length, so the fragments have to fit
- * it together and a fragment the Box had nothing to say for spends nothing. Pi routinely exits
- * before writing to its stderr log, so the exit status systemd recorded is ordered last but reaches
- * the line precisely then, on the room the absent log line did not take.
+ * it together and a fragment the Box had nothing to say for spends nothing.
+ *
+ * systemd's own account leads because it is the only account that always exists. The unit declares
+ * no `StandardError=`, and the wrapper redirects Pi only after it has `exec`ed, so a daemon that
+ * dies on its environment or its arguments writes nothing anywhere and is described solely by
+ * `Active:` and the exit status. Pi's log is supplementary and claims what is left.
  */
 const PI_DAEMON_DIAGNOSTIC_BUDGETS = [
   { key: "state", prefix: "is-active: ", limit: 16 },
   { key: "active", prefix: "", limit: 82 },
-  { key: "stderr", prefix: "pi.stderr.log: ", limit: 74 },
   { key: "exit", prefix: "exit: ", limit: 40 },
+  { key: "stderr", prefix: "pi.stderr.log: ", limit: 74 },
 ] as const;
+/**
+ * How recently Pi's stderr log must have been written to be read as this failure's reason. The log
+ * outlives the start that wrote it, so an untouched one holds whatever an earlier run left behind:
+ * without this window a line from hours ago would be reported as the reason a wake just failed.
+ */
+const PI_DAEMON_STDERR_FRESH_MINUTES = 2;
 /** A fragment clamped shorter than this says less than the characters it costs. */
 const PI_DAEMON_DIAGNOSTIC_MINIMUM = 12;
 const PI_DAEMON_DIAGNOSTIC_SEPARATOR = "; ";
@@ -584,10 +593,11 @@ systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true`,
 
   /**
    * Say why Pi is not running. A daemon that never reached `active` is either still starting, dead,
-   * or restarting on failure, and the generic sentence cannot tell those apart, so the unit's own
-   * verdict and the last line Pi wrote to its stderr log travel with the failure. Only systemd's
-   * summary lines and that log are read: the provider auth file and the transient MCP credential
-   * file are never opened, and the control plane redacts and truncates whatever is stored anyway.
+   * or restarting on failure, and the generic sentence cannot tell those apart, so systemd's verdict
+   * and the exit status it recorded travel with the failure. Pi's stderr log is read only when it
+   * was written during this start, because an untouched log describes an earlier one. Only those
+   * systemd summary lines and that log are read: the provider auth file and the transient MCP
+   * credential file are never opened, and the control plane redacts and truncates what it stores.
    */
   async #daemonFailureDetail(boxId: string): Promise<string> {
     const result = await this.#command(
@@ -596,7 +606,10 @@ systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true`,
 companion_label() { while IFS= read -r line; do printf '%s %s\\n' "$1" "$line"; done; }
 systemctl --user is-active companion-pi-daemon.service 2>&1 | tail -n 1 | companion_label ${PI_DAEMON_DIAGNOSTIC_LABELS.state}
 systemctl --user status --no-pager --full companion-pi-daemon.service 2>&1 | grep -E '^ *(Active|Process|Main PID):' | head -n 2 | companion_label ${PI_DAEMON_DIAGNOSTIC_LABELS.status}
-tail -n 20 "$HOME/.companion/runtime/logs/pi.stderr.log" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 | companion_label ${PI_DAEMON_DIAGNOSTIC_LABELS.stderr}
+companion_log="$HOME/.companion/runtime/logs/pi.stderr.log"
+if [ -n "$(find "$companion_log" -mmin -${PI_DAEMON_STDERR_FRESH_MINUTES} 2>/dev/null)" ]; then
+  tail -n 20 "$companion_log" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 1 | companion_label ${PI_DAEMON_DIAGNOSTIC_LABELS.stderr}
+fi
 exit 0`,
       30,
     ).catch(() => null);

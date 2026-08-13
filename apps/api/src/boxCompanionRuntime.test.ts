@@ -902,6 +902,9 @@ describe("AsciiBoxCompanionRuntime", () => {
     // Diagnosing the failure may not read the credential files or archive the Box.
     const diagnostic = commands.find((command) => command.includes("companion_label")) ?? "";
     expect(diagnostic).toContain("logs/pi.stderr.log");
+    // The log outlives the start that wrote it, so it is only read when this start wrote it:
+    // reporting an untouched log would attribute an earlier run's line to this failure.
+    expect(diagnostic).toContain("-mmin -2");
     expect(diagnostic).not.toContain("providers.env");
     expect(diagnostic).not.toContain("auth.json");
     for (const command of commands) expect(command).not.toContain("mcp-secret");
@@ -1044,10 +1047,11 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(error.message.length).toBeLessThanOrEqual(COMPANION_RUNTIME_ERROR_MAX_LENGTH);
     expect(error.message).toContain("is-active: deactivating");
     expect(error.message).toContain("Active: failed (Result: exit-code)");
+    // systemd's account is the only one that always exists, so it survives the squeeze whole and
+    // Pi's log — supplementary, and absent for the failures that motivated this — is what clamps.
+    expect(error.message).toContain("exit: code=exited, status=1/FAILURE");
     expect(error.message).toContain("pi.stderr.log: pi: error: could not open");
-    // Pi's own words outrank the exit status, so the fragment that cannot fit is dropped whole
-    // rather than stored as a stub too short to read.
-    expect(error.message).not.toContain("exit:");
+    expect(error.message.indexOf("exit:")).toBeLessThan(error.message.indexOf("pi.stderr.log:"));
   });
 
   it("reads each systemd status line by what it says rather than where it landed", async () => {
