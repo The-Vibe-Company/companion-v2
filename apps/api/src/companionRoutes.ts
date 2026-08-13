@@ -77,6 +77,7 @@ import {
   COMPANION_PI_DISK_LAYOUT_VERSION,
   type CompanionBoxRuntime,
 } from "./boxCompanionRuntime";
+import { companionRuntimeErrorMessage, isBoxRuntimeFailure } from "./companionRuntimeError";
 
 const companionIdSchema = z.string().uuid();
 
@@ -181,6 +182,21 @@ function routeError(c: Context, error: unknown): Response {
     }, errorStatus(error) as never);
   }
   return jsonError(c, error, errorStatus(error));
+}
+
+/**
+ * A lifecycle failure the caller can act on. Configuration and Box/Pi failures answer with the same
+ * sanitized line the Companion row keeps, so a red status always comes with its reason; anything
+ * else stays on the generic error path rather than returning internal text.
+ */
+function runtimeRouteError(c: Context, error: unknown): Response {
+  if (!isBoxRuntimeFailure(error)) return routeError(c, error);
+  const code = error instanceof BoxRuntimeProviderError ? error.code : undefined;
+  return c.json({
+    ok: false,
+    error: companionRuntimeErrorMessage(error),
+    ...(code ? { code } : {}),
+  }, errorStatus(error) as never);
 }
 
 export function registerCompanionRoutes(
@@ -525,7 +541,7 @@ export function registerCompanionRoutes(
       });
       return c.json({ thread, source: "box" as const });
     } catch (error) {
-      return routeError(c, error);
+      return runtimeRouteError(c, error);
     }
   });
 
@@ -676,12 +692,19 @@ export function registerCompanionRoutes(
             actor: mutation!.actor,
             orgId: mutation!.orgId,
             companionId,
-            patch: { runtimeState: "error", daemonState: "error", observedAt: new Date() },
+            patch: {
+              runtimeState: "error",
+              daemonState: "error",
+              // The row carries the reason so a reload still explains the red status instead of
+              // leaving the operator with the word "Error" and nothing else.
+              lastError: companionRuntimeErrorMessage(error),
+              observedAt: new Date(),
+            },
             database,
           }),
         ).catch(() => undefined);
       }
-      return routeError(c, error);
+      return runtimeRouteError(c, error);
     }
   });
 
@@ -729,12 +752,17 @@ export function registerCompanionRoutes(
             actor: mutation!.actor,
             orgId: mutation!.orgId,
             companionId,
-            patch: { runtimeState: "error", daemonState: "error", observedAt: new Date() },
+            patch: {
+              runtimeState: "error",
+              daemonState: "error",
+              lastError: companionRuntimeErrorMessage(error),
+              observedAt: new Date(),
+            },
             database,
           }),
         ).catch(() => undefined);
       }
-      return jsonError(c, error, errorStatus(error));
+      return runtimeRouteError(c, error);
     }
   });
 

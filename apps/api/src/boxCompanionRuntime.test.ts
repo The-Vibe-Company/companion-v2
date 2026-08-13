@@ -10,6 +10,8 @@ const box = {
   desktopAvailable: true,
   setupStatus: "done",
 };
+/** Printed by the adapter's staging command when Pi's auth file already exists on the Box disk. */
+const AUTH_PRESENT_MARKER = "companion-provider-auth-present";
 
 function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
@@ -130,6 +132,125 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
   });
 
+  it("keeps systemctl out of the create setupScript and loads the unit once the Box is ready", async () => {
+    const commands: string[] = [];
+    let createdSetupScript = "";
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.includes("/boxes?limit=200") && method === "GET") return json({ boxes: [] });
+      if (url.endsWith("/boxes") && method === "POST") {
+        createdSetupScript = String(body.setupScript);
+        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } }, 202);
+      }
+      if (url.endsWith("/boxes/bx_23456789") && method === "PATCH") return json({ box });
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: command.includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_PI_INSTALL_COMMAND: "npm install --global @earendil-works/pi-coding-agent@1.2.3",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: null,
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    // A Box has no user D-Bus session while it runs its create setupScript, so any systemctl call
+    // there fails the whole setup even when Pi installed correctly.
+    expect(createdSetupScript).not.toMatch(/systemctl/);
+    expect(createdSetupScript).not.toMatch(/loginctl/);
+    expect(createdSetupScript).toContain("/.config/systemd/user/companion-pi-daemon.service");
+    expect(createdSetupScript).toContain("npm install --global @earendil-works/pi-coding-agent@1.2.3");
+    const restart = commands.find((command) => command.includes("restart companion-pi-daemon.service"));
+    expect(restart).toBeDefined();
+    expect(restart).toContain("systemctl --user daemon-reload");
+    expect(restart).toContain('companion_user_runtime_dir="/run/user/$(id -u)"');
+    expect(restart).toContain('export XDG_RUNTIME_DIR="$companion_user_runtime_dir"');
+    expect(restart).not.toContain("${XDG_RUNTIME_DIR:-");
+    expect(restart).toContain('export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"');
+    expect(restart).toContain("loginctl enable-linger");
+    expect(restart).toContain("systemctl --user show-environment");
+    expect(restart).toMatch(
+      /for _ in \$\(seq 1 20\); do\n\s+companion_export_user_bus\n\s+if systemctl --user show-environment/,
+    );
+    expect(restart).toContain("trap 'rm -f \"$credential_file\"' EXIT");
+    expect(restart!.indexOf("restart companion-pi-daemon.service"))
+      .toBeLessThan(restart!.lastIndexOf('rm -f "$credential_file"'));
+    expect(restart).toContain("trap - EXIT");
+    // Every Box command runs in its own shell, so the status probe locates the bus again too.
+    const userManagerCommands = commands.filter((command) => command.includes("systemctl --user"));
+    expect(userManagerCommands.length).toBeGreaterThan(0);
+    for (const command of userManagerCommands) {
+      expect(command).toContain('export XDG_RUNTIME_DIR="$companion_user_runtime_dir"');
+      expect(command).not.toContain("${XDG_RUNTIME_DIR:-");
+    }
+  });
+
+  it("fails the daemon start with a distinct message when no user bus can be reached", async () => {
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        if (command.includes("restart companion-pi-daemon.service")) {
+          return json({
+            success: false,
+            exitCode: 1,
+            stdout: "",
+            stderr: "Companion cannot reach the systemd user bus on this Box\n",
+          });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    await expect(runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    })).rejects.toThrow("Pi daemon failed to start");
+  });
+
   it("recovers a deterministically named archived Box before restarting Pi", async () => {
     const commands: string[] = [];
     const writtenPaths: string[] = [];
@@ -164,11 +285,15 @@ describe("AsciiBoxCompanionRuntime", () => {
         return json({ ok: true });
       }
       if (url.endsWith("/commands") && init?.method === "POST") {
-        commands.push(String(body.command));
+        const command = String(body.command);
+        commands.push(command);
         return json({
           success: true,
           exitCode: 0,
-          stdout: String(body.command).includes("is-active") ? "active\n" : "",
+          // The resumed disk still carries the Pi auth file Companion wrote before it was archived.
+          stdout: command.includes("is-active")
+            ? "active\n"
+            : command.includes(AUTH_PRESENT_MARKER) ? `${AUTH_PRESENT_MARKER}\n` : "",
           stderr: "",
         });
       }
@@ -201,6 +326,494 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(writtenPaths).not.toContain(".companion/pi/auth.json");
     expect(commands.some((command) =>
       command.includes("pi-layout.version") && command.includes("pi-mcp-adapter@2.12.1"))).toBe(true);
+  });
+
+  it("replaces the assigned Box when its Pi setup failed and rewrites provider auth", async () => {
+    const failed = {
+      id: "bx_pdddbvx9",
+      name: "Companion 11111111-1111-4111-8111-111111111111",
+      state: "idle",
+      desktopAvailable: false,
+      setupStatus: "failed",
+      setupError: "pi: command not found",
+    };
+    const files = new Map<string, string>();
+    const assigned: string[] = [];
+    let retiredName: unknown;
+    let retiredStop: Record<string, unknown> | undefined;
+    let createdName: unknown;
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_pdddbvx9") && method === "GET") return json({ box: failed });
+      if (url.endsWith("/boxes/bx_pdddbvx9") && method === "PATCH") {
+        retiredName = body.name;
+        return json({ box: { ...failed, name: String(body.name) } });
+      }
+      if (url.endsWith("/boxes/bx_pdddbvx9/stop") && method === "POST") {
+        retiredStop = body;
+        return json({ box: { ...failed, state: "archiving" } }, 202);
+      }
+      if (url.endsWith("/boxes") && method === "POST") {
+        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } }, 202);
+      }
+      if (url.endsWith("/boxes/bx_23456789") && method === "PATCH") {
+        createdName = body.name;
+        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } });
+      }
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") {
+        files.set(String(body.path), String(body.content));
+        return json({ ok: true });
+      }
+      if (url.endsWith("/boxes/bx_23456789/commands") && method === "POST") {
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_pdddbvx9",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      // The control plane recorded the failed Box at the current layout and generation, so the
+      // replacement disk still has to receive Pi's auth file.
+      replaceProviderAuth: false,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async (boxId) => {
+        assigned.push(boxId);
+      },
+    });
+
+    expect(String(retiredName)).toMatch(
+      /^Retired Companion 11111111-1111-4111-8111-111111111111 \d+$/,
+    );
+    expect(retiredStop).toEqual({ force: true });
+    expect(createdName).toBe("Companion 11111111-1111-4111-8111-111111111111");
+    expect(assigned).toEqual(["bx_23456789"]);
+    expect(files.get(".companion/pi/auth.json"))
+      .toBe("{\"anthropic\":{\"type\":\"api_key\",\"key\":\"provider-secret\"}}\n");
+    // The replacement Box owns the deterministic name, and no name lookup could re-adopt the
+    // retired disk even if the provider refused to rename it.
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/boxes?limit=200")))
+      .toBe(false);
+    expect(result).toEqual({
+      boxId: "bx_23456789",
+      runtimeState: "running",
+      daemonState: "running",
+      desktopAvailable: true,
+    });
+  });
+
+  it("writes Pi auth onto a disk that has none even when the caller skipped the rewrite", async () => {
+    const writtenPaths: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") {
+        writtenPaths.push(String(body.path));
+        return json({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        // The staging command reports no auth file, as on a replacement disk an earlier start
+        // provisioned but never finished configuring.
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      // The control plane recorded this Box at the current layout and generation.
+      replaceProviderAuth: false,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(writtenPaths).toContain(".companion/pi/auth.json");
+    expect(result.runtimeState).toBe("running");
+  });
+
+  it("replaces a Box whose Pi setup failed even when the provider refuses the rename", async () => {
+    const failed = {
+      ...box,
+      id: "bx_pdddbvx9",
+      name: "Companion 11111111-1111-4111-8111-111111111111",
+      state: "idle",
+      setupStatus: "failed",
+    };
+    let stopped = false;
+    let createdBox = false;
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_pdddbvx9") && method === "GET") return json({ box: failed });
+      if (url.endsWith("/boxes/bx_pdddbvx9") && method === "PATCH") {
+        return json({ code: "box_immutable", message: "name cannot be changed" }, 409);
+      }
+      if (url.endsWith("/boxes/bx_pdddbvx9/stop") && method === "POST") {
+        stopped = true;
+        return json({ box: { ...failed, state: "archiving" } }, 202);
+      }
+      if (url.endsWith("/boxes") && method === "POST") {
+        createdBox = true;
+        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } }, 202);
+      }
+      if (url.endsWith("/boxes/bx_23456789") && method === "PATCH") return json({ box });
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/boxes/bx_23456789/commands") && method === "POST") {
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_pdddbvx9",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(stopped).toBe(true);
+    expect(createdBox).toBe(true);
+    expect(result.boxId).toBe("bx_23456789");
+  });
+
+  it("retires an archived Box whose Pi setup failed instead of resuming it", async () => {
+    let renamed = "";
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_asleepbad") && method === "GET") {
+        return json({
+          box: {
+            ...box,
+            id: "bx_asleepbad",
+            name: "Companion 11111111-1111-4111-8111-111111111111",
+            state: "archived",
+            setupStatus: "failed",
+          },
+        });
+      }
+      if (url.endsWith("/boxes/bx_asleepbad") && method === "PATCH") {
+        renamed = String(body.name);
+        return json({ box: { ...box, id: "bx_asleepbad", state: "archived" } });
+      }
+      if (url.endsWith("/boxes") && method === "POST") {
+        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } }, 202);
+      }
+      if (url.endsWith("/boxes/bx_23456789") && method === "PATCH") return json({ box });
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/boxes/bx_23456789/commands") && method === "POST") {
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_asleepbad",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(renamed).toMatch(/^Retired Companion 11111111-1111-4111-8111-111111111111 \d+$/);
+    // An archived Box is already stopped, and its broken disk must never be resumed.
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/bx_asleepbad/stop")))
+      .toBe(false);
+    expect(result.boxId).toBe("bx_23456789");
+  });
+
+  it("replaces the assigned Box when it entered the terminal error state", async () => {
+    const created: string[] = [];
+    const retired: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_broken00") && method === "GET") {
+        return json({ box: { ...box, id: "bx_broken00", state: "error" } });
+      }
+      if (url.endsWith("/boxes/bx_broken00") && method === "PATCH") {
+        retired.push(String(body.name));
+        return json({ box: { ...box, id: "bx_broken00", state: "error" } });
+      }
+      if (url.endsWith("/boxes/bx_broken00/stop") && method === "POST") {
+        return json({ box: { ...box, id: "bx_broken00", state: "archiving" } }, 202);
+      }
+      if (url.endsWith("/boxes") && method === "POST") {
+        created.push(String(body.setupScript));
+        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } }, 202);
+      }
+      if (url.endsWith("/boxes/bx_23456789") && method === "PATCH") return json({ box });
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/boxes/bx_23456789/commands") && method === "POST") {
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_broken00",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(retired).toHaveLength(1);
+    expect(created).toHaveLength(1);
+    expect(created[0]).toContain("pi --mode rpc --session-dir");
+    expect(String(created[0])).not.toContain("bx_broken00");
+    expect(result.boxId).toBe("bx_23456789");
+    expect(result.runtimeState).toBe("running");
+  });
+
+  it("replaces an assigned Box the provider no longer knows about", async () => {
+    let listed = 0;
+    let createdBox = false;
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_deleted0") && method === "GET") {
+        return json({ code: "not_found", message: "box not found" }, 404);
+      }
+      if (url.includes("/boxes?limit=200") && method === "GET") {
+        listed += 1;
+        return json({ boxes: [] });
+      }
+      if (url.endsWith("/boxes") && method === "POST") {
+        createdBox = true;
+        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } }, 202);
+      }
+      if (url.endsWith("/boxes/bx_23456789") && method === "PATCH") return json({ box });
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/boxes/bx_23456789/commands") && method === "POST") {
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_deleted0",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(listed).toBe(1);
+    expect(createdBox).toBe(true);
+    expect(result.boxId).toBe("bx_23456789");
+  });
+
+  it("keeps a Box whose Pi setup is still running instead of replacing it", async () => {
+    let reads = 0;
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        reads += 1;
+        if (reads < 3) {
+          return json({ box: { ...box, state: "provisioning", setupStatus: "running" } });
+        }
+        return json({ box });
+      }
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(result.boxId).toBe("bx_23456789");
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/stop"))).toBe(false);
+  });
+
+  it("archives a Box whose Pi unit was never loaded instead of failing the stop", async () => {
+    let stopCommand = "";
+    let archived = false;
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/commands") && method === "POST") {
+        stopCommand = String(body.command);
+        // The Box never started Pi, so the shell guard exits 0 without stopping anything.
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      if (url.endsWith("/boxes/bx_23456789/stop") && method === "POST") {
+        archived = true;
+        return json({ box: { ...box, state: "archiving" } }, 202);
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    const result = await runtime.stop({ boxId: "bx_23456789" });
+
+    expect(stopCommand).toContain("systemctl --user show-environment");
+    expect(stopCommand).toContain('companion_user_runtime_dir="/run/user/$(id -u)"');
+    expect(stopCommand).toContain('export XDG_RUNTIME_DIR="$companion_user_runtime_dir"');
+    expect(stopCommand).not.toContain("${XDG_RUNTIME_DIR:-");
+    expect(stopCommand).toContain("systemctl --user stop companion-pi-daemon.service >/dev/null 2>&1 || true");
+    expect(stopCommand).toContain("is-active --quiet companion-pi-daemon.service");
+    expect(archived).toBe(true);
+    expect(result).toMatchObject({ runtimeState: "stopping", daemonState: "stopped" });
+  });
+
+  it("refuses to archive a Box whose Pi daemon is still active after the stop", async () => {
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/commands") && method === "POST") {
+        return json({
+          success: false,
+          exitCode: 1,
+          stdout: "",
+          stderr: "Pi daemon is still active after stop\n",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.stop({ boxId: "bx_23456789" })).rejects.toThrow("Pi daemon failed to stop");
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/bx_23456789/stop"))).toBe(false);
   });
 
   it("reports archived status without executing a command or waking the Box", async () => {
@@ -322,6 +935,9 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain('companion_user_runtime_dir="/run/user/$(id -u)"');
+    expect(commands[0]).toContain('export XDG_RUNTIME_DIR="$companion_user_runtime_dir"');
+    expect(commands[0]).not.toContain("${XDG_RUNTIME_DIR:-");
     expect(commands[0]).toContain("is-active --quiet companion-pi-daemon.service");
     expect(commands[0]).toContain("state/pi.rpc.in");
     expect(commands[0]).toContain(

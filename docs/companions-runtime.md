@@ -18,6 +18,18 @@ before creating another one, following every Box-list page. A new Box initially 
 five-minute TTL; only after its id is durable does the adapter apply the configured TTL and name.
 If the id cannot be persisted, the adapter best-effort archives the Box immediately.
 
+Box setup runs once per disk, so a Box whose Pi setup reports `failed`, that reached the terminal
+`error` state, or that the provider no longer knows about can never run Pi again. A start replaces
+such a Box instead of failing: it renames the broken Box out of the deterministic name, best-effort
+force-stops it so the unusable disk is discarded rather than snapshotted, creates a replacement Box,
+and records the new id through the same assignment callback. Renaming happens before the
+replacement is created, so no later start can re-adopt the retired disk, and both retirement calls
+are best-effort because a Box the provider will not rename or stop must never leave a Companion
+permanently un-wakeable. A replacement disk always receives Pi's auth file again, whatever provider
+generation the control plane recorded for the Box it replaced, including on a later start that finds
+the file missing on a disk an earlier start had already assigned. A Box that is merely still
+provisioning, including one whose setup is `pending` or `running`, is waited on as before.
+
 Each Companion has one immutable Owner, an optional workspace-wide Editor/Viewer grant, and
 member-specific Editor/Viewer grants. A member grant overrides the workspace default. Only the Owner
 manages sharing or the selected provider. Owner and Editor may chat and use lifecycle, plugin
@@ -53,6 +65,25 @@ an empty skill set. This is enforced by the API and again by the Box adapter bef
 Desktop responses are secret-bearing and are returned only to the authorized caller. They are never
 stored. The response advertises `automation: "lux"` so THE-323 can attach the Box desktop/Lux UI
 without changing the lifecycle boundary.
+
+## Lifecycle failure reporting
+
+A failure is diagnosable without server logs. A failed start or stop records `runtime_state: error`
+together with one sanitized line in `companions.last_error`, and the failing start, stop, and sync
+responses carry that same line as `error`, so the operator who pressed Wake and the operator who
+reloads later read the same reason.
+
+Only recognized failures explain themselves: Box configuration (`COMPANION_BOX_API_KEY` unset), Box
+and Pi provider failures, provider resolution, and lifecycle conflicts. Every other failure — object
+storage, PostgreSQL, an unexpected adapter fault — records a generic line, so internal text cannot
+reach a stored row or a response. Sanitizing keeps the first line only, redacts credential-shaped
+text and the query string of any URL, and truncates to one status line.
+
+`runtime.last_error` is returned only while the state is `error`. Owner and Editor read the recorded
+reason. A Viewer reads a generic unavailable line instead: a Viewer never runs Box, so a hint about a
+missing service key would only invite them to try. Any lifecycle write that leaves `error` — a
+successful start, a live observation, or the claim a retry takes — clears the line, so a recovered
+Companion never keeps explaining a failure it already retried past.
 
 ## Chat thread
 
@@ -124,6 +155,17 @@ to an on-disk marker keyed by the adapter package. Starts repair older Box snaps
 injection. Runtime transcripts and files do not enter PostgreSQL. A systemd user unit supervises Pi
 while Box is active; the lifecycle API restarts it after a Box resume.
 
+The create `setupScript` installs Pi, writes the daemon wrapper, and writes the systemd user unit,
+and it deliberately runs no user-manager command. A Box executing its create script has no user D-Bus
+session, so `systemctl --user` there fails with `Failed to connect to bus: No medium found` and marks
+the whole setup `failed` even when Pi installed correctly. Loading the unit is therefore deferred to
+the post-ready control-plane command that restarts Pi. That command locates the bus itself: every Box
+command runs in its own shell, so it exports `XDG_RUNTIME_DIR`, and when the user manager still does
+not answer it enables lingering for the account, asks the system manager to start `user@<uid>`, and
+waits briefly before failing with a message that names the missing user bus. Stopping is idempotent
+for the same reason: a Box that never started Pi has no loaded unit, so only a daemon still active
+after the stop attempt is reported as a failure.
+
 ## Pi Skills injection
 
 Pi starts with `--no-skills` so ambient Box or package skills cannot leak into a Companion. For a
@@ -177,7 +219,10 @@ tokens. Reconnecting or disconnecting a provider replaces or removes the control
 next start replaces the Box file with only the selected provider. Later starts preserve Pi's
 possibly refreshed OAuth entry, and skip the rewrite only for a Box this Companion already
 provisioned at the current disk layout whose recorded credential generation still matches. A new
-Box, an older layout, or a rotated connection always rewrites the file. Start fails closed when the
+Box, an older layout, or a rotated connection always rewrites the file. The disk is the final
+authority: the staging step reports whether `auth.json` exists, and a start rewrites the file
+whenever it does not, so a replacement disk provisioned by an earlier start that failed before Pi
+was configured cannot inherit a recorded generation it never satisfied. Start fails closed when the
 file is absent, and a failed daemon start still best-effort removes the transient `mcp_credentials`
 environment file.
 

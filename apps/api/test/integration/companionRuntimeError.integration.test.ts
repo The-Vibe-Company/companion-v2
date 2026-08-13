@@ -1,0 +1,143 @@
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  COMPANION_RUNTIME_ERROR_VIEWER_MESSAGE,
+  claimCompanionRuntimeStart,
+  getCompanion,
+  updateCompanionObservation,
+  updateCompanionRuntime,
+} from "@companion/core";
+import { withTenantContext } from "@companion/db";
+import { createIntegrationFixture, integrationSql, type IntegrationFixture } from "./testDatabase";
+
+/**
+ * Product promise: a Companion in `error` explains itself. The Owner and Editor read the reason the
+ * failed lifecycle attempt recorded, a Viewer reads only a generic unavailable line, and no
+ * credential material is stored or returned.
+ *
+ * Regression caught: dropping the stored reason (leaving a bare red status), leaking an operator
+ * configuration hint to a Viewer, or keeping a stale reason after a retry recovers.
+ *
+ * Why integrated: the reason has to survive the write, the row, and the authorized read, so a
+ * mocked query builder cannot prove it.
+ *
+ * Failure proof: returning `row.lastError` regardless of access makes the Viewer read the missing
+ * `COMPANION_BOX_API_KEY` hint; skipping the clear on claim keeps the reason after a retry starts.
+ */
+describe("Companion runtime error reporting", () => {
+  let fixture: IntegrationFixture;
+  const companionId = randomUUID();
+  const failure = "Box runtime is not configured; set COMPANION_BOX_API_KEY";
+
+  const asOwner = <T>(fn: (database: Parameters<Parameters<typeof withTenantContext>[1]>[0]) => Promise<T>) =>
+    withTenantContext({ orgId: fixture.orgA, userId: fixture.owner.id }, fn);
+
+  const recordFailure = (lastError: string) => asOwner((database) => updateCompanionRuntime({
+    actor: fixture.owner,
+    orgId: fixture.orgA,
+    companionId,
+    patch: {
+      runtimeState: "error",
+      daemonState: "error",
+      lastError,
+      observedAt: new Date(),
+    },
+    database,
+  }));
+
+  const storedError = async () => {
+    const [row] = await integrationSql<Array<{ last_error: string | null }>>`
+      select last_error from companions where id = ${companionId}
+    `;
+    return row?.last_error ?? null;
+  };
+
+  beforeAll(async () => {
+    fixture = await createIntegrationFixture();
+    await integrationSql`
+      insert into companions (id, org_id, owner_id, name)
+      values (${companionId}, ${fixture.orgA}, ${fixture.owner.id}, 'Runtime error companion')
+    `;
+    await integrationSql`
+      insert into companion_member_access (org_id, companion_id, user_id, owner_id, role, granted_by)
+      values (
+        ${fixture.orgA}, ${companionId}, ${fixture.developer.id}, ${fixture.owner.id}, 'viewer',
+        ${fixture.owner.id}
+      )
+    `;
+  });
+
+  afterAll(async () => {
+    await integrationSql`delete from companions where id = ${companionId}`;
+    await fixture.cleanup();
+  });
+
+  it("keeps the recorded reason for the Owner and hides it from a Viewer", async () => {
+    const recorded = await recordFailure(failure);
+    expect(recorded.runtime.state).toBe("error");
+    expect(recorded.runtime.last_error).toBe(failure);
+
+    const viewerRead = await withTenantContext(
+      { orgId: fixture.orgA, userId: fixture.developer.id },
+      (database) => getCompanion({
+        actor: fixture.developer,
+        orgId: fixture.orgA,
+        companionId,
+        database,
+      }),
+    );
+
+    expect(viewerRead.access).toBe("viewer");
+    expect(viewerRead.runtime.state).toBe("error");
+    expect(viewerRead.runtime.last_error).toBe(COMPANION_RUNTIME_ERROR_VIEWER_MESSAGE);
+    expect(viewerRead.runtime.last_error).not.toContain("COMPANION_BOX_API_KEY");
+  });
+
+  it("stores a credential-shaped Box message without its credential", async () => {
+    const recorded = await recordFailure(
+      "Box rejected the request: authorization: Bearer abcdef0123456789abcdef0123456789",
+    );
+
+    expect(await storedError()).toBe("Box rejected the request: authorization: [redacted]");
+    expect(recorded.runtime.last_error).not.toContain("abcdef0123456789");
+  });
+
+  it("clears the reason as soon as a retry claims the start", async () => {
+    await recordFailure(failure);
+
+    const claimed = await asOwner((database) => claimCompanionRuntimeStart({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      companionId,
+      database,
+    }));
+
+    expect(claimed.runtime.state).toBe("provisioning");
+    expect(claimed.runtime.last_error).toBeNull();
+    expect(await storedError()).toBeNull();
+  });
+
+  it("clears the reason when a live observation finds the Box healthy", async () => {
+    await integrationSql`
+      update companions set runtime_state = 'error', daemon_state = 'error', last_error = ${failure}
+      where id = ${companionId}
+    `;
+
+    const observed = await asOwner((database) => updateCompanionObservation({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      companionId,
+      patch: {
+        runtimeState: "running",
+        daemonState: "running",
+        desktopAvailable: false,
+        observedAt: new Date(),
+      },
+      database,
+    }));
+
+    expect(observed.runtime.state).toBe("running");
+    expect(observed.runtime.last_error).toBeNull();
+    expect(await storedError()).toBeNull();
+  });
+});

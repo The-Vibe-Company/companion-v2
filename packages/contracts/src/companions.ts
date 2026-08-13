@@ -92,6 +92,12 @@ export const companionSchema = z.object({
     provider_credential_generation: z.string().uuid().nullable(),
     disk_layout_version: z.number().int().positive(),
     desktop_available: z.boolean(),
+    /**
+     * One sanitized line explaining an `error` state, so the surface never shows a bare status
+     * word. Null in every other state. A Viewer receives a generic line instead of the operator
+     * detail, and no configuration or credential material appears here for anyone.
+     */
+    last_error: z.string().nullable(),
     last_observed_at: z.string().datetime().nullable(),
     last_started_at: z.string().datetime().nullable(),
     last_stopped_at: z.string().datetime().nullable(),

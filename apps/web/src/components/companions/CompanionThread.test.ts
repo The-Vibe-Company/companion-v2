@@ -21,6 +21,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
       provider_credential_generation: null,
       disk_layout_version: 2,
       desktop_available: false,
+      last_error: null,
       last_observed_at: null,
       last_started_at: null,
       last_stopped_at: null,
@@ -158,6 +159,54 @@ describe("CompanionThread", () => {
     });
 
     expect(markup).toContain("2 messages saved. Wake Luna to deliver.");
+  });
+
+  it("explains an Error status to a runner with the reason the API recorded", () => {
+    const markup = render({
+      companion: companion({
+        runtime: {
+          ...companion().runtime,
+          state: "error",
+          daemon_state: "error",
+          last_error: "Box runtime is not configured; set COMPANION_BOX_API_KEY",
+        },
+      }),
+    });
+
+    expect(markup).toContain("Error");
+    expect(markup).toContain("Box runtime is not configured; set COMPANION_BOX_API_KEY");
+  });
+
+  it("gives a Viewer the generic unavailable line the API redacted for them", () => {
+    const markup = render({
+      companion: companion({
+        access: "viewer",
+        runtime: {
+          ...companion().runtime,
+          state: "error",
+          daemon_state: "error",
+          box_id: null,
+          last_error: "This Companion is unavailable right now.",
+        },
+      }),
+      thread: thread({ viewer_id: "user-9", access: "viewer", read_only: true, can_send: false }),
+    });
+
+    expect(markup).toContain("This Companion is unavailable right now.");
+    expect(markup).not.toContain("COMPANION_BOX_API_KEY");
+    expect(markup).not.toContain(">Wake<");
+  });
+
+  it("prefers the failure this request saw over the reason already on the row", () => {
+    const markup = render({
+      companion: companion({
+        runtime: { ...companion().runtime, state: "error", last_error: "Box entered error state" },
+      }),
+      error: "Box did not become ready before the configured timeout",
+    });
+
+    expect(markup).toContain("Box did not become ready before the configured timeout");
+    expect(markup).not.toContain("Box entered error state");
   });
 
   it("shows an empty thread as an invitation rather than a dead surface", () => {

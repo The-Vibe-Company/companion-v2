@@ -10,4 +10,5 @@ export * from "./billingService";
 export * from "./featureFlags";
 export * from "./companions";
 export * from "./companionPiEvents";
+export * from "./companionRuntimeErrors";
 export { listCompanionRuntimeSkillPackages } from "./services";

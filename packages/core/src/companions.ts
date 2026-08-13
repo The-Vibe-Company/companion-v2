@@ -26,6 +26,10 @@ import {
 import { db, schema, type Db } from "@companion/db";
 import { canManageOrg } from "./authz";
 import type { CompanionPiEntry } from "./companionPiEvents";
+import {
+  companionRuntimeErrorForAccess,
+  sanitizeCompanionRuntimeError,
+} from "./companionRuntimeErrors";
 import { decryptOpaqueValue, encryptOpaqueValue, type OpaqueCiphertext } from "./secretsCrypto";
 import { assertMember, getOrgRole, type ActorContext } from "./services";
 
@@ -148,6 +152,11 @@ function toCompanion(row: CompanionRow, access: CompanionAccess): Companion {
       provider_credential_generation: row.providerCredentialGeneration,
       disk_layout_version: row.diskLayoutVersion,
       desktop_available: access === "viewer" ? false : row.desktopAvailable,
+      last_error: companionRuntimeErrorForAccess({
+        state: row.runtimeState,
+        lastError: row.lastError,
+        access,
+      }),
       last_observed_at: row.lastObservedAt?.toISOString() ?? null,
       last_started_at: row.lastStartedAt?.toISOString() ?? null,
       last_stopped_at: row.lastStoppedAt?.toISOString() ?? null,
@@ -1309,6 +1318,23 @@ export async function getCompanionForRuntime(input: {
   return companion;
 }
 
+/**
+ * A recorded failure lives exactly as long as the `error` state it explains: any lifecycle write
+ * that leaves `error` clears the line, so a successful retry cannot keep showing the old reason.
+ */
+function runtimeErrorPatch(patch: {
+  runtimeState?: CompanionRuntimeState;
+  lastError?: string | null;
+}): { lastError?: string | null } {
+  if (patch.lastError !== undefined) {
+    return {
+      lastError: patch.lastError ? sanitizeCompanionRuntimeError(patch.lastError) || null : null,
+    };
+  }
+  if (patch.runtimeState && patch.runtimeState !== "error") return { lastError: null };
+  return {};
+}
+
 export async function updateCompanionRuntime(input: {
   actor: ActorContext;
   orgId: string;
@@ -1321,6 +1347,8 @@ export async function updateCompanionRuntime(input: {
     providerCredentialGeneration?: string | null;
     diskLayoutVersion?: number;
     desktopAvailable?: boolean;
+    /** Sanitized before it is stored; any state other than `error` clears it instead. */
+    lastError?: string | null;
     observedAt?: Date;
     startedAt?: Date;
     stoppedAt?: Date;
@@ -1346,6 +1374,7 @@ export async function updateCompanionRuntime(input: {
       ...(input.patch.desktopAvailable !== undefined
         ? { desktopAvailable: input.patch.desktopAvailable }
         : {}),
+      ...runtimeErrorPatch(input.patch),
       ...(input.patch.observedAt ? { lastObservedAt: input.patch.observedAt } : {}),
       ...(input.patch.startedAt ? { lastStartedAt: input.patch.startedAt } : {}),
       ...(input.patch.stoppedAt ? { lastStoppedAt: input.patch.stoppedAt } : {}),
@@ -1381,6 +1410,7 @@ export async function updateCompanionObservation(input: {
       runtimeState: input.patch.runtimeState,
       daemonState: input.patch.daemonState,
       desktopAvailable: input.patch.desktopAvailable,
+      ...runtimeErrorPatch({ runtimeState: input.patch.runtimeState }),
       lastObservedAt: input.patch.observedAt,
       updatedAt: new Date(),
     })
@@ -1404,7 +1434,12 @@ export async function claimCompanionRuntimeStart(input: {
   const currentAccess = await getCompanionForRuntime({ ...input, database });
   const [row] = await database
     .update(schema.companions)
-    .set({ runtimeState: "provisioning", daemonState: "starting", updatedAt: new Date() })
+    .set({
+      runtimeState: "provisioning",
+      daemonState: "starting",
+      lastError: null,
+      updatedAt: new Date(),
+    })
     .where(and(
       eq(schema.companions.orgId, input.orgId),
       eq(schema.companions.id, input.companionId),
@@ -1424,7 +1459,12 @@ export async function claimCompanionRuntimeStart(input: {
   }
   const [claimed] = await database
     .update(schema.companions)
-    .set({ runtimeState: "provisioning", daemonState: "starting", updatedAt: new Date() })
+    .set({
+      runtimeState: "provisioning",
+      daemonState: "starting",
+      lastError: null,
+      updatedAt: new Date(),
+    })
     .where(and(
       eq(schema.companions.orgId, input.orgId),
       eq(schema.companions.id, input.companionId),
@@ -1455,7 +1495,7 @@ export async function claimCompanionRuntimeStop(input: {
   }
   const [claimed] = await database
     .update(schema.companions)
-    .set({ runtimeState: "stopping", updatedAt: new Date() })
+    .set({ runtimeState: "stopping", lastError: null, updatedAt: new Date() })
     .where(and(
       eq(schema.companions.orgId, input.orgId),
       eq(schema.companions.id, input.companionId),
