@@ -375,7 +375,23 @@ export const companions = pgTable(
     name: text("name").notNull(),
     /** One short operator-authored line describing the Companion; never a system prompt. */
     persona: text("persona"),
+    boxId: text("box_id"),
+    runtimeState: companionRuntimeStateEnum("runtime_state").notNull().default("not_created"),
+    daemonState: companionDaemonStateEnum("daemon_state").notNull().default("unknown"),
     providerIds: jsonb("provider_ids").$type<string[]>().notNull().default([]),
+    /** Encrypted provider credential generation last applied to the Box Pi auth file. */
+    providerCredentialGeneration: uuid("provider_credential_generation"),
+    diskLayoutVersion: integer("disk_layout_version").notNull().default(1),
+    desktopAvailable: boolean("desktop_available").notNull().default(false),
+    /**
+     * Why the last lifecycle attempt failed, as one sanitized operator line. It exists so a
+     * refreshed `error` state still explains itself; credential material and provider payloads
+     * must never reach it.
+     */
+    lastError: text("last_error"),
+    lastObservedAt: timestamp("last_observed_at", { withTimezone: true }),
+    lastStartedAt: timestamp("last_started_at", { withTimezone: true }),
+    lastStoppedAt: timestamp("last_stopped_at", { withTimezone: true }),
     createdAt: now(),
     updatedAt: updatedAt(),
   },
@@ -388,20 +404,27 @@ export const companions = pgTable(
       foreignColumns: [memberships.orgId, memberships.userId],
       name: "companions_owner_membership_fk",
     }),
+    positiveDiskLayout: check("companions_disk_layout_version_check", sql`${t.diskLayoutVersion} >= 1`),
     personaLength: check(
       "companions_persona_check",
       sql`${t.persona} is null or char_length(${t.persona}) <= 280`,
+    ),
+    boxIdShape: check(
+      "companions_box_id_check",
+      sql`${t.boxId} is null or ${t.boxId} ~ '^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$'`,
+    ),
+    lastErrorLength: check(
+      "companions_last_error_check",
+      sql`${t.lastError} is null or char_length(${t.lastError}) <= 500`,
     ),
   }),
 );
 
 /**
- * The shared Box runtime for a workspace. THE-330 makes Box cardinality a workspace property, not a
- * per-Companion one: every personal Companion of a user shares the single `personal` pool for their
- * personal workspace, and every Companion of a team organization shares that org's single `org`
- * pool. Companions project `box_id` and the whole runtime chip from the pool row for their scope, so
- * waking one Companion starts the shared machine for the entire scope and stopping it stops the
- * machine for everyone. Threads stay 1:1 per Companion; only the compute surface is shared here.
+ * Retained-but-unused shared Box pool from THE-330. THE-332 reverts Box cardinality to one Box per
+ * Companion (1 Companion = 1 Box = 1 Pi): the runtime chip lives on the `companions` row again, and
+ * no code reads or writes this table. It is kept only so migration 0074 stays a non-destructive
+ * clean cut — leftover pool rows are left in place, unreferenced, rather than dropped.
  */
 export const companionRuntimePools = pgTable(
   "companion_runtime_pools",

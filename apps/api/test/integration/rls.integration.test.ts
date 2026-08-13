@@ -117,11 +117,6 @@ describe("Skills Hub PostgreSQL isolation", () => {
         insert into companion_threads (org_id, companion_id, next_ordinal)
         values (${fixture.orgA}, ${companionId}, 1)
       `;
-      // THE-330: the runtime chip is a workspace pool, not a per-Companion row. orgA is a team
-      // workspace, so the owner (who owns a Companion in scope) may create its one `org` pool.
-      await tx`
-        insert into companion_runtime_pools (org_id, scope) values (${fixture.orgA}, 'org')
-      `;
     });
 
     const viewerResult = await integrationSql.begin(async (tx) => {
@@ -138,25 +133,17 @@ describe("Skills Hub PostgreSQL isolation", () => {
         update companion_threads set next_ordinal = 9 where companion_id = ${companionId}
         returning companion_id
       `;
-      // A Viewer reads the shared runtime chip (THE-320/322 read model) but cannot wake it: the
-      // pool UPDATE policy admits only a Companion owner in scope or a workspace Editor.
-      const chip = await tx<Array<{ runtime_state: string }>>`
-        select runtime_state from companion_runtime_pools
-        where org_id = ${fixture.orgA} and scope = 'org'
+      const updated = await tx<Array<{ id: string }>>`
+        update companions set runtime_state = 'running' where id = ${companionId} returning id
       `;
-      const runtimeWrite = await tx<Array<{ scope: string }>>`
-        update companion_runtime_pools set runtime_state = 'running'
-        where org_id = ${fixture.orgA} and scope = 'org' returning scope
-      `;
-      return { visible, transcript, thread, threadWrite, chip, runtimeWrite };
+      return { visible, transcript, thread, threadWrite, updated };
     });
     expect(viewerResult.visible).toEqual([{ id: companionId }]);
     expect(viewerResult.transcript).toEqual([{ content: "Control-plane message" }]);
     // A Viewer reads the thread read model but cannot advance the ordinals a send would consume.
     expect(viewerResult.thread).toEqual([{ next_ordinal: 1 }]);
     expect(viewerResult.threadWrite).toEqual([]);
-    expect(viewerResult.chip).toEqual([{ runtime_state: "not_created" }]);
-    expect(viewerResult.runtimeWrite).toEqual([]);
+    expect(viewerResult.updated).toEqual([]);
 
     // A Viewer cannot write the transcript either.
     await expect(integrationSql.begin(async (tx) => {
@@ -184,12 +171,11 @@ describe("Skills Hub PostgreSQL isolation", () => {
     const editorUpdate = await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${apiRole}`);
       await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
-      return tx<Array<{ scope: string }>>`
-        update companion_runtime_pools set runtime_state = 'running'
-        where org_id = ${fixture.orgA} and scope = 'org' returning scope
+      return tx<Array<{ id: string }>>`
+        update companions set runtime_state = 'running' where id = ${companionId} returning id
       `;
     });
-    expect(editorUpdate).toEqual([{ scope: "org" }]);
+    expect(editorUpdate).toEqual([{ id: companionId }]);
 
     const editorThreadWrite = await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${apiRole}`);
@@ -201,16 +187,14 @@ describe("Skills Hub PostgreSQL isolation", () => {
     });
     expect(editorThreadWrite).toEqual([{ next_ordinal: 2 }]);
 
-    // The Editor grant is workspace-wide, so a second member wakes the same shared pool too.
     const secondMemberUpdate = await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${apiRole}`);
       await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.developer.id}, true)`;
-      return tx<Array<{ scope: string }>>`
-        update companion_runtime_pools set runtime_state = 'stopped'
-        where org_id = ${fixture.orgA} and scope = 'org' returning scope
+      return tx<Array<{ id: string }>>`
+        update companions set runtime_state = 'stopped' where id = ${companionId} returning id
       `;
     });
-    expect(secondMemberUpdate).toEqual([{ scope: "org" }]);
+    expect(secondMemberUpdate).toEqual([{ id: companionId }]);
 
     // Removing the workspace grant returns the Companion to private: members lose all access.
     await integrationSql.begin(async (tx) => {
@@ -222,11 +206,8 @@ describe("Skills Hub PostgreSQL isolation", () => {
       await tx.unsafe(`set local role ${apiRole}`);
       await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
       const visible = await tx<Array<{ id: string }>>`select id from companions`;
-      // Losing the workspace grant hides the Companion and blocks any wake of the shared pool, even
-      // though the org chip stays readable to every member as the plain workspace read model.
-      const updated = await tx<Array<{ scope: string }>>`
-        update companion_runtime_pools set runtime_state = 'running'
-        where org_id = ${fixture.orgA} and scope = 'org' returning scope
+      const updated = await tx<Array<{ id: string }>>`
+        update companions set runtime_state = 'running' where id = ${companionId} returning id
       `;
       return { visible, updated };
     });
@@ -238,13 +219,10 @@ describe("Skills Hub PostgreSQL isolation", () => {
       await tx`select set_config('app.org_id', ${fixture.orgB}, true), set_config('app.user_id', ${fixture.outsider.id}, true)`;
       const companionRows = await tx<Array<{ id: string }>>`select id from companions`;
       const threadRows = await tx<Array<{ companion_id: string }>>`select companion_id from companion_threads`;
-      // A different tenant never reads another workspace's shared runtime pool.
-      const poolRows = await tx<Array<{ id: string }>>`select id from companion_runtime_pools`;
-      return { companionRows, threadRows, poolRows };
+      return { companionRows, threadRows };
     });
     expect(outsiderVisible.companionRows).toEqual([]);
     expect(outsiderVisible.threadRows).toEqual([]);
-    expect(outsiderVisible.poolRows).toEqual([]);
   });
 
   it("ensures the dropped per-member grant table cannot leak access", async () => {
@@ -353,12 +331,10 @@ describe("Skills Hub PostgreSQL isolation", () => {
   });
 
   it("CAS-claims lifecycle transitions and keeps live observations from clobbering them", async () => {
-    // Reset the workspace pool to a stopped Box the claim can start. The claim targets the shared
-    // `org` pool, so the transition it makes is what every Companion in the workspace then projects.
-    await integrationSql`delete from companion_runtime_pools where org_id = ${fixture.orgA}`;
     await integrationSql`
-      insert into companion_runtime_pools (org_id, scope, box_id, runtime_state, daemon_state)
-      values (${fixture.orgA}, 'org', 'bx_23456789', 'stopped', 'stopped')
+      update companions
+      set box_id = 'bx_23456789', runtime_state = 'stopped', daemon_state = 'stopped'
+      where id = ${companionId}
     `;
     const input = {
       actor: fixture.owner,
@@ -392,8 +368,8 @@ describe("Skills Hub PostgreSQL isolation", () => {
     expect(observed.runtime.state).toBe("provisioning");
 
     await integrationSql`
-      update companion_runtime_pools set runtime_state = 'running', daemon_state = 'running'
-      where org_id = ${fixture.orgA} and scope = 'org'
+      update companions set runtime_state = 'running', daemon_state = 'running'
+      where id = ${companionId}
     `;
     const stopped = await withTenantContext(
       { orgId: fixture.orgA, userId: fixture.owner.id },

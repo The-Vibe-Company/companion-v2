@@ -21,12 +21,6 @@ const PROVIDER_FILE_REMOVAL = "rm -f \"$HOME/.companion/runtime/state/providers.
 /** The layout script is staged on disk and run as a file, so the command itself stays this short. */
 const LAYOUT_SCRIPT_PATH = ".companion/bin/ensure-pi-layout.sh";
 const LAYOUT_RUN_COMMAND = `bash "$HOME/${LAYOUT_SCRIPT_PATH}"`;
-/** THE-330: the Box is shared per workspace, so the adapter is driven by a scoped name, not a uuid. */
-const COMPANION_ID = "11111111-1111-4111-8111-111111111111";
-const SCOPE_ORG_ID = "22222222-2222-4222-8222-222222222222";
-const SCOPE_BOX_NAME = `Companion org ${SCOPE_ORG_ID}`;
-const SCOPE_BOX_ENV = { COMPANION_SCOPE: "org", COMPANION_ORG_ID: SCOPE_ORG_ID };
-const RETIRED_BOX_PATTERN = new RegExp(`^Retired ${SCOPE_BOX_NAME} \\d+$`);
 
 function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
@@ -83,8 +77,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     const assigned = vi.fn(async () => undefined);
 
     const result = await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: null,
       clientSurface: "web",
       providerAuth: {
@@ -116,12 +110,12 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(createBody).toMatchObject({
       noEnv: true,
       ttlSeconds: 300,
-      env: SCOPE_BOX_ENV,
+      env: {
+        COMPANION_ID: "11111111-1111-4111-8111-111111111111",
+        COMPANION_ORG_ID: "22222222-2222-4222-8222-222222222222",
+      },
     });
-    // THE-330: one Pi daemon serves the shared Box; it keeps its own conversation state under
-    // pi-sessions and routes RPC output into the per-Companion session log via the active marker.
-    expect(String(createBody?.setupScript)).toContain("\"$PI_BIN\" --mode rpc --session-dir \"$root/pi-sessions\"");
-    expect(String(createBody?.setupScript)).toContain("$root/sessions/$active/pi.rpc.ndjson");
+    expect(String(createBody?.setupScript)).toContain("exec \"$PI_BIN\" --mode rpc --session-dir");
     expect(String(createBody?.setupScript)).toContain("ExecStart=%h/.companion/bin/pi-daemon");
     expect(String(createBody?.setupScript)).toContain("npm:pi-mcp-adapter@2.12.1");
     expect(String(createBody?.setupScript)).toContain("--no-skills");
@@ -197,8 +191,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     const result = await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -295,8 +289,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     const result = await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -405,8 +399,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     // The provider names the limit but not the file, so a stored line that only repeats it cannot
     // say which payload overflowed.
     await expect(runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -455,8 +449,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     // A bare "Pi runtime layout failed to install" cost a production probe to diagnose; the stored
     // line now carries the exit code and the last thing the shell said.
     await expect(runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -511,8 +505,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: null,
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -580,8 +574,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: null,
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -601,7 +595,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     // The supervised daemon gets a minimal PATH from the systemd user manager, so Pi is resolved at
     // layout time and pinned both in the wrapper and on the unit.
     expect(createdSetupScript).toContain("pi_bin=\"$(command -v pi)\"");
-    expect(createdSetupScript).toContain("\"$PI_BIN\" --mode rpc --session-dir \"$root/pi-sessions\"");
+    expect(createdSetupScript).toContain("exec \"$PI_BIN\" --mode rpc");
     expect(createdSetupScript).toContain("Environment=PATH=");
   });
 
@@ -640,8 +634,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: null,
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -711,8 +705,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     await expect(runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -757,8 +751,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     const result = await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -816,8 +810,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     const result = await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -881,8 +875,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     const error = await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -964,8 +958,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     const error = await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -1033,8 +1027,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     const error = await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -1099,8 +1093,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     const error = await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -1185,8 +1179,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     // A Box that will not run the diagnostic still has to fail the wake with its own reason rather
     // than replacing it with the transport error.
     await expect(runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -1254,7 +1248,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         return json({
           boxes: [{
             ...box,
-            name: SCOPE_BOX_NAME,
+            name: "Companion 11111111-1111-4111-8111-111111111111",
             state: "archived",
           }],
           pageInfo: { hasMore: false, nextCursor: null },
@@ -1294,8 +1288,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     const result = await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: null,
       clientSurface: "mobile_web",
       providerAuth: {},
@@ -1321,7 +1315,7 @@ describe("AsciiBoxCompanionRuntime", () => {
   it("replaces the assigned Box when its Pi setup failed and rewrites provider auth", async () => {
     const failed = {
       id: "bx_pdddbvx9",
-      name: SCOPE_BOX_NAME,
+      name: "Companion 11111111-1111-4111-8111-111111111111",
       state: "idle",
       desktopAvailable: false,
       setupStatus: "failed",
@@ -1374,8 +1368,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     const result = await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_pdddbvx9",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -1390,9 +1384,11 @@ describe("AsciiBoxCompanionRuntime", () => {
       },
     });
 
-    expect(String(retiredName)).toMatch(RETIRED_BOX_PATTERN);
+    expect(String(retiredName)).toMatch(
+      /^Retired Companion 11111111-1111-4111-8111-111111111111 \d+$/,
+    );
     expect(retiredStop).toEqual({ force: true });
-    expect(createdName).toBe(SCOPE_BOX_NAME);
+    expect(createdName).toBe("Companion 11111111-1111-4111-8111-111111111111");
     expect(assigned).toEqual(["bx_23456789"]);
     expect(files.get(".companion/pi/auth.json"))
       .toBe("{\"anthropic\":{\"type\":\"api_key\",\"key\":\"provider-secret\"}}\n");
@@ -1438,8 +1434,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     const result = await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -1459,7 +1455,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     const failed = {
       ...box,
       id: "bx_pdddbvx9",
-      name: SCOPE_BOX_NAME,
+      name: "Companion 11111111-1111-4111-8111-111111111111",
       state: "idle",
       setupStatus: "failed",
     };
@@ -1501,8 +1497,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     const result = await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_pdddbvx9",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -1529,7 +1525,7 @@ describe("AsciiBoxCompanionRuntime", () => {
           box: {
             ...box,
             id: "bx_asleepbad",
-            name: SCOPE_BOX_NAME,
+            name: "Companion 11111111-1111-4111-8111-111111111111",
             state: "archived",
             setupStatus: "failed",
           },
@@ -1562,8 +1558,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     const result = await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_asleepbad",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -1574,7 +1570,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       onBoxAssigned: async () => undefined,
     });
 
-    expect(renamed).toMatch(RETIRED_BOX_PATTERN);
+    expect(renamed).toMatch(/^Retired Companion 11111111-1111-4111-8111-111111111111 \d+$/);
     // An archived Box is already stopped, and its broken disk must never be resumed.
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/bx_asleepbad/stop")))
@@ -1623,8 +1619,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     const result = await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_broken00",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -1637,7 +1633,7 @@ describe("AsciiBoxCompanionRuntime", () => {
 
     expect(retired).toHaveLength(1);
     expect(created).toHaveLength(1);
-    expect(created[0]).toContain("\"$PI_BIN\" --mode rpc --session-dir \"$root/pi-sessions\"");
+    expect(created[0]).toContain("exec \"$PI_BIN\" --mode rpc --session-dir");
     expect(String(created[0])).not.toContain("bx_broken00");
     expect(result.boxId).toBe("bx_23456789");
     expect(result.runtimeState).toBe("running");
@@ -1681,8 +1677,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     const result = await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_deleted0",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -1729,8 +1725,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
 
     const result = await runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
@@ -1839,8 +1835,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
 
     await expect(runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
       providerAuth: {
@@ -1882,8 +1878,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
 
     await expect(runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: "bx_23456789",
       clientSurface: "web",
       providerAuth: {
@@ -1918,7 +1914,6 @@ describe("AsciiBoxCompanionRuntime", () => {
 
     await runtime.prompt({
       boxId: "bx_23456789",
-      companionId: COMPANION_ID,
       message: "Summarize the incident",
       requestId: "msg:1",
     });
@@ -1929,12 +1924,6 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(commands[0]).not.toContain("${XDG_RUNTIME_DIR:-");
     expect(commands[0]).toContain("is-active --quiet companion-pi-daemon.service");
     expect(commands[0]).toContain("state/pi.rpc.in");
-    // The prompt path names this Companion's session and, under a lock, points the daemon's output
-    // router at it before the message reaches Pi so concurrent chats on the shared Box stay apart.
-    expect(commands[0]).toContain(`session='${COMPANION_ID}'`);
-    expect(commands[0]).toContain("state/pi.rpc.lock");
-    expect(commands[0]).toContain("flock 9");
-    expect(commands[0]).toContain("state/active-session");
     expect(commands[0]).toContain(
       '{"id":"msg:1","type":"prompt","message":"Summarize the incident","streamingBehavior":"followUp"}',
     );
@@ -1948,7 +1937,6 @@ describe("AsciiBoxCompanionRuntime", () => {
 
     await expect(runtime.prompt({
       boxId: "bx_23456789",
-      companionId: COMPANION_ID,
       message: "Anyone home?",
       requestId: "msg:2",
     })).rejects.toMatchObject({ status: 409 });
@@ -1964,16 +1952,10 @@ describe("AsciiBoxCompanionRuntime", () => {
     }));
     const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
 
-    const result = await runtime.readEvents({
-      boxId: "bx_23456789",
-      companionId: COMPANION_ID,
-      offset: 4_096,
-    });
+    const result = await runtime.readEvents({ boxId: "bx_23456789", offset: 4_096 });
 
     expect(command).toContain("offset=4096");
-    // Events are read from this Companion's own session log on the shared Box, not a shared log.
-    expect(command).toContain(`session='${COMPANION_ID}'`);
-    expect(command).toContain("sessions/$session/pi.rpc.ndjson");
+    expect(command).toContain("logs/pi.rpc.ndjson");
     expect(result).toEqual({ chunk: "{\"type\":\"agent_settled\"}\n", offset: 0 });
   });
 
@@ -2000,8 +1982,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
 
     await expect(runtime.start({
-      boxName: SCOPE_BOX_NAME,
-      boxEnv: SCOPE_BOX_ENV,
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
       boxId: null,
       clientSurface: "web",
       providerAuth: {},

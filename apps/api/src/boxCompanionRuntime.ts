@@ -15,10 +15,12 @@ import {
 
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
 const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
-// THE-330 reshapes the on-disk runtime: one Pi daemon serves every Companion sharing the Box, so
-// the daemon routes its RPC output into per-Companion session logs. Bumping the layout forces the
-// new daemon wrapper and session directories onto every Box at its next wake.
-export const COMPANION_PI_DISK_LAYOUT_VERSION = 3;
+// THE-332 restores one Pi daemon per Box (1 Companion = 1 Box = 1 Pi), reverting the THE-330 shared
+// daemon that routed RPC output through a per-Companion active-session marker. The daemon wrapper
+// changes back to writing a single `runtime/logs/pi.rpc.ndjson`, so the layout is bumped past the
+// THE-330 value (3) to force every Box that installed the shared daemon to reinstall this one on its
+// next wake.
+export const COMPANION_PI_DISK_LAYOUT_VERSION = 4;
 /** Content bytes the provider's file API refuses in one `PUT /boxes/:id/files` body. */
 const BOX_FILE_WRITE_LIMIT_BYTES = 5 * 1024 * 1024;
 /**
@@ -140,10 +142,8 @@ export interface CompanionPiEventChunk {
 
 export interface CompanionBoxRuntime {
   start(input: {
-    /** Deterministic Box name for the scope; the Box is shared by every Companion in the scope. */
-    boxName: string;
-    /** Scope facts written to the Box at create time; never a per-Companion id. */
-    boxEnv: Record<string, string>;
+    companionId: string;
+    orgId: string;
     boxId: string | null;
     clientSurface: CompanionClientSurface;
     providerAuth: Record<string, Record<string, unknown>>;
@@ -156,22 +156,10 @@ export interface CompanionBoxRuntime {
   stop(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
   status(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
   desktop(input: { boxId: string }): Promise<{ url: string | null; provisioning: boolean }>;
-  /**
-   * Hand one chat message to the already running Pi daemon on the shared Box; never creates or
-   * resumes a Box. The Companion id names the session the daemon routes Pi's reply into.
-   */
-  prompt(input: {
-    boxId: string;
-    companionId: string;
-    message: string;
-    requestId: string;
-  }): Promise<void>;
-  /** Read this Companion's Pi RPC session log from `offset` so the control plane can project it. */
-  readEvents(input: {
-    boxId: string;
-    companionId: string;
-    offset: number;
-  }): Promise<CompanionPiEventChunk>;
+  /** Hand one chat message to the already running Pi daemon; never creates or resumes a Box. */
+  prompt(input: { boxId: string; message: string; requestId: string }): Promise<void>;
+  /** Read Pi RPC output from `offset` so the control plane can project new events. */
+  readEvents(input: { boxId: string; offset: number }): Promise<CompanionPiEventChunk>;
 }
 
 export class BoxRuntimeConfigurationError extends Error {
@@ -311,7 +299,7 @@ PI_CODING_AGENT_DIR="$HOME/.companion/pi" "$pi_bin" install ${shellQuote(mcpAdap
   printf '%s\n' 'export PATH'
   cat <<'COMPANION_PI_DAEMON'
 root="$HOME/.companion/runtime"
-mkdir -p "$root/sessions" "$root/state" "$root/logs" "$root/pi-sessions"
+mkdir -p "$root/sessions" "$root/state" "$root/logs"
 export PI_CODING_AGENT_DIR="$HOME/.companion/pi"
 fifo="$root/state/pi.rpc.in"
 rm -f "$fifo"
@@ -321,19 +309,7 @@ skill_args=(--no-skills)
 if find "$root/skills" -type f -name SKILL.md -print -quit 2>/dev/null | grep -q .; then
   skill_args+=(--skill "$root/skills")
 fi
-# One Pi daemon serves every Companion sharing this Box. Pi keeps its own conversation state under
-# pi-sessions; its RPC stdout is routed line by line into the per-Companion log named by the
-# active-session marker the prompt path sets under a lock, so concurrent chats land in
-# runtime/sessions/<companionId>/pi.rpc.ndjson and never require a second harness. pipefail keeps
-# Pi's own non-zero exit as the daemon's exit so systemd still restarts a crashed harness.
-"$PI_BIN" --mode rpc --session-dir "$root/pi-sessions" "\${skill_args[@]}" <&3 2>>"$root/logs/pi.stderr.log" | while IFS= read -r line; do
-  active="$(cat "$root/state/active-session" 2>/dev/null || true)"
-  case "$active" in
-    ""|*[!a-zA-Z0-9-]*) active="_unrouted" ;;
-  esac
-  mkdir -p "$root/sessions/$active"
-  printf '%s\n' "$line" >> "$root/sessions/$active/pi.rpc.ndjson"
-done
+exec "$PI_BIN" --mode rpc --session-dir "$root/sessions" "\${skill_args[@]}" <&3 >>"$root/logs/pi.rpc.ndjson" 2>>"$root/logs/pi.stderr.log"
 COMPANION_PI_DAEMON
 } > "$HOME/.companion/bin/pi-daemon"
 chmod 700 "$HOME/.companion/bin/pi-daemon"
@@ -422,6 +398,9 @@ function encodeEnvironmentFile(credentials: McpRuntimeCredential[]): string {
     .concat(credentials.length ? "\n" : "");
 }
 
+function companionBoxName(companionId: string): string {
+  return `Companion ${companionId}`;
+}
 
 /**
  * Box setup runs once per disk, so a Box whose Pi setup failed can never run Pi, and neither can one
@@ -521,8 +500,8 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     }
   }
 
-  async #findScopedBox(boxName: string): Promise<BoxInfo | null> {
-    const name = boxName;
+  async #findCompanionBox(companionId: string): Promise<BoxInfo | null> {
+    const name = companionBoxName(companionId);
     let cursor: string | null = null;
     do {
       const query = new URLSearchParams({ limit: "200", sort: "desc" });
@@ -540,8 +519,8 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
    * name are applied, so a crash between the two can only leak a short-lived, unnamed Box.
    */
   async #createCompanionBox(input: {
-    boxName: string;
-    boxEnv: Record<string, string>;
+    companionId: string;
+    orgId: string;
     onBoxAssigned: (boxId: string) => Promise<void>;
   }): Promise<BoxInfo> {
     const created = await this.#request<BoxEnvelope>("/boxes", {
@@ -552,7 +531,10 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
         ttlSeconds: Math.min(this.#ttlSeconds, 300),
         noEnv: true,
         ...(this.#environment ? { environment: this.#environment } : {}),
-        env: input.boxEnv,
+        env: {
+          COMPANION_ID: input.companionId,
+          COMPANION_ORG_ID: input.orgId,
+        },
         setupScript: setupScript(this.#installCommand, this.#mcpAdapterPackage),
       }),
     });
@@ -563,7 +545,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
         {
           method: "PATCH",
           body: JSON.stringify({
-            name: input.boxName,
+            name: companionBoxName(input.companionId),
             ttlSeconds: this.#ttlSeconds,
           }),
         },
@@ -582,10 +564,10 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
    * name so the replacement Box owns it and no later start re-adopts the broken disk. Both calls are
    * best-effort: a Box the provider will not rename or stop must not keep the Companion un-wakeable.
    */
-  async #retireBox(box: BoxInfo, boxName: string): Promise<void> {
+  async #retireBox(box: BoxInfo, companionId: string): Promise<void> {
     await this.#request(`/boxes/${encodeURIComponent(box.id)}`, {
       method: "PATCH",
-      body: JSON.stringify({ name: `Retired ${boxName} ${Date.now()}` }),
+      body: JSON.stringify({ name: `Retired ${companionBoxName(companionId)} ${Date.now()}` }),
     }).catch(() => undefined);
     if (!ARCHIVED_STATES.has(box.state)) {
       await this.#request(`/boxes/${encodeURIComponent(box.id)}/stop`, {
@@ -865,8 +847,8 @@ exit 0`,
   }
 
   async start(input: {
-    boxName: string;
-    boxEnv: Record<string, string>;
+    companionId: string;
+    orgId: string;
     boxId: string | null;
     clientSurface: CompanionClientSurface;
     providerAuth: Record<string, Record<string, unknown>>;
@@ -877,14 +859,11 @@ exit 0`,
     onBoxAssigned: (boxId: string) => Promise<void>;
   }): Promise<CompanionRuntimeObservation> {
     let box = input.boxId ? await this.#getAssignedBox(input.boxId) : null;
-    // Adopt only the Box that carries this scope's deterministic name. A per-Companion `Companion
-    // <uuid>` Box left by an earlier design has a different name and is therefore never found here,
-    // so an old box is not re-adopted when the shared scope wakes.
-    if (!box) box = await this.#findScopedBox(input.boxName);
+    if (!box) box = await this.#findCompanionBox(input.companionId);
     if (box && isBeyondRecovery(box)) {
-      // The assigned Box failed setup or died, so the scope moves onto a new Box instead of
+      // The assigned Box failed setup or died, so the Companion moves onto a new Box instead of
       // failing every future wake against the same broken disk.
-      await this.#retireBox(box, input.boxName);
+      await this.#retireBox(box, input.companionId);
       box = null;
     }
     let boxIdPersisted = false;
@@ -1010,35 +989,20 @@ fi`,
     return observation(box, daemonState);
   }
 
-  async prompt(input: {
-    boxId: string;
-    companionId: string;
-    message: string;
-    requestId: string;
-  }): Promise<void> {
+  async prompt(input: { boxId: string; message: string; requestId: string }): Promise<void> {
     const command = JSON.stringify({
       id: input.requestId,
       type: "prompt",
       message: input.message,
       streamingBehavior: "followUp",
     });
-    // Point the daemon's output router at this Companion's session before the prompt reaches Pi, and
-    // hold a lock across both writes so a concurrent chat on the shared Box cannot interleave the
-    // marker update with the FIFO write. Pi then serves one turn at a time and its reply is appended
-    // to this Companion's session log, never another's.
     const result = await this.#command(
       input.boxId,
       `set -euo pipefail
 ${USER_BUS_ENVIRONMENT}
-root="$HOME/.companion/runtime"
-fifo="$root/state/pi.rpc.in"
-session=${shellQuote(input.companionId)}
+fifo="$HOME/.companion/runtime/state/pi.rpc.in"
 systemctl --user is-active --quiet companion-pi-daemon.service
 test -p "$fifo"
-mkdir -p "$root/sessions/$session"
-exec 9>"$root/state/pi.rpc.lock"
-flock 9
-printf '%s' "$session" > "$root/state/active-session"
 printf '%s\\n' ${shellQuote(command)} > "$fifo"`,
       20,
     );
@@ -1047,16 +1011,11 @@ printf '%s\\n' ${shellQuote(command)} > "$fifo"`,
     }
   }
 
-  async readEvents(input: {
-    boxId: string;
-    companionId: string;
-    offset: number;
-  }): Promise<CompanionPiEventChunk> {
+  async readEvents(input: { boxId: string; offset: number }): Promise<CompanionPiEventChunk> {
     const result = await this.#command(
       input.boxId,
       `set -euo pipefail
-session=${shellQuote(input.companionId)}
-log="$HOME/.companion/runtime/sessions/$session/pi.rpc.ndjson"
+log="$HOME/.companion/runtime/logs/pi.rpc.ndjson"
 offset=${Math.max(0, Math.trunc(input.offset))}
 if [ ! -f "$log" ]; then printf '%s\\n' 0; exit 0; fi
 size="$(wc -c < "$log")"
