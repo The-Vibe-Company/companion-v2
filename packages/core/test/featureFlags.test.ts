@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  COMPANIONS_ALLOWED_EMAIL_DOMAINS_ENV,
   COMPANIONS_FEATURE_FLAG,
+  companionsAllowedEmailDomains,
+  companionsAvailableToUser,
   companionsEnabled,
   companionsRuntimeConfig,
   warnIfCompanionsMisconfigured,
@@ -17,6 +20,57 @@ describe("companionsEnabled", () => {
     expect(companionsEnabled({ [COMPANIONS_FEATURE_FLAG]: "true" })).toBe(true);
     expect(companionsEnabled({ [COMPANIONS_FEATURE_FLAG]: " TRUE " })).toBe(true);
   });
+});
+
+describe("companionsAvailableToUser", () => {
+  const enabledEnv = { [COMPANIONS_FEATURE_FLAG]: "true" };
+
+  it("keeps the master switch fail closed regardless of the allowlist", () => {
+    expect(
+      companionsAvailableToUser("member@thevibecompany.co", {
+        [COMPANIONS_ALLOWED_EMAIL_DOMAINS_ENV]: "thevibecompany.co",
+      }),
+    ).toBe(false);
+  });
+
+  it("preserves all-authenticated-user access when the allowlist is unset or empty", () => {
+    expect(companionsAvailableToUser("member@example.com", enabledEnv)).toBe(true);
+    expect(
+      companionsAvailableToUser("member@example.com", {
+        ...enabledEnv,
+        [COMPANIONS_ALLOWED_EMAIL_DOMAINS_ENV]: " , ",
+      }),
+    ).toBe(true);
+  });
+
+  it("matches configured domains case-insensitively and ignores surrounding whitespace", () => {
+    const env = {
+      ...enabledEnv,
+      [COMPANIONS_ALLOWED_EMAIL_DOMAINS_ENV]: " example.com, THEVIBECOMPANY.CO ",
+    };
+
+    expect(companionsAllowedEmailDomains(env)).toEqual(
+      new Set(["example.com", "thevibecompany.co"]),
+    );
+    expect(companionsAvailableToUser("Member@TheVibeCompany.Co", env)).toBe(true);
+    expect(companionsAvailableToUser("member@other.example", env)).toBe(false);
+  });
+
+  it("requires an exact domain match rather than allowing subdomains", () => {
+    expect(
+      companionsAvailableToUser("member@sub.thevibecompany.co", {
+        ...enabledEnv,
+        [COMPANIONS_ALLOWED_EMAIL_DOMAINS_ENV]: "thevibecompany.co",
+      }),
+    ).toBe(false);
+  });
+
+  it.each([undefined, null, "", "member", "@example.com", "member@", "a@b@example.com"])(
+    "denies a missing or malformed email (%s)",
+    (email) => {
+      expect(companionsAvailableToUser(email, enabledEnv)).toBe(false);
+    },
+  );
 });
 
 describe("companionsRuntimeConfig", () => {

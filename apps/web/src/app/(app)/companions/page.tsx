@@ -1,4 +1,4 @@
-import { companionsEnabled } from "@companion/core";
+import { companionsAvailableToUser, companionsEnabled } from "@companion/core";
 import type {
   Companion,
   CompanionProvidersResponse,
@@ -27,9 +27,13 @@ export default async function CompanionsPage({
   const openedCompanion = (await searchParams).companion;
   const initialCompanionId = typeof openedCompanion === "string" ? openedCompanion : null;
 
-  const authState = await loadServerAuth<{ needsOnboarding?: boolean }>();
+  const authState = await loadServerAuth<{
+    email?: string | null;
+    needsOnboarding?: boolean;
+  }>();
   if (authState.status === "unauthenticated") redirect("/login");
   if (authState.status === "unavailable") return <AuthUnavailable />;
+  if (!companionsAvailableToUser(authState.user.email)) notFound();
   if (authState.user.needsOnboarding) redirect("/onboarding");
 
   const orgContext = await loadOrgContext().catch(() => null);

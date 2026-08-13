@@ -50,4 +50,5 @@ test("the indirect Companions variables stay documented", () => {
 test("Companions stays off by default so a deploy boots without Box or provider secrets", () => {
   const envExample = readFileSync(`${repoRoot}.env.example`, "utf8");
   assert.match(envExample, /^COMPANION_COMPANIONS_ENABLED=false$/m);
+  assert.match(envExample, /^COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=$/m);
 });
