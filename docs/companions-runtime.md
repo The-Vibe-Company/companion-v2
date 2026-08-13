@@ -192,6 +192,18 @@ web or mobile-web start, the API:
    `~/.companion/runtime/skills` tree;
 4. starts Pi with that tree as an explicit repeatable native `--skill` source.
 
+The file API takes one whole body per JSON request, refuses content over 5 MiB, and offers no
+append, multipart, or streaming write, so a base64 archive of a few megabytes cannot be written in a
+single call — which is how a wake that had already laid the disk out died with `File is too large for
+write_file`. Any payload at or over the cap is therefore staged as `<path>.part<n>` writes, each a
+base64 slice a megabyte clear of the limit, and one short `cat` command joins the parts back into
+`<path>` and removes them. Parts are split on byte boundaries and sent base64, so a payload that is
+not plain ASCII cannot lose a character to the split, and the payload itself never travels as a
+command string. Smaller files stay one plain write. Skills are never skipped or truncated to fit, and
+the extract loop still reads exactly `~/.companion/runtime/state/skill-archives/*.tar.gz.b64`, which
+no part file matches. A rejected write now names the file it was writing, because the provider's
+message carries the limit it enforced but not the path.
+
 The replacement is prepared before the old tree is swapped, and invalid, archived, unpublished,
 or inaccessible packages are excluded. The browser chat consumes Pi's normal Skills capability;
 Companion does not add Pi tool/skill chrome inside the thread. Native mobile receives no skill
