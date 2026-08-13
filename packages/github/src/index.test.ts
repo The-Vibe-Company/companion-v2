@@ -23,6 +23,16 @@ import {
 
 const tempDirs: string[] = [];
 const execFile = promisify(execFileCallback);
+/**
+ * One App key for the whole file. Every test here needs a usable RSA key to sign the App JWT and
+ * none needs its own, but `generateKeyPairSync` blocks while it searches for primes and its cost
+ * swings with load, so a key per test spent seconds of the per-test budget on a busy CI runner.
+ */
+const { privateKey: appPrivateKey } = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  publicKeyEncoding: { type: "spki", format: "pem" },
+});
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -49,18 +59,13 @@ describe("GitHub App configuration", () => {
   });
 
   it("accepts operator-owned OAuth metadata without exposing the worker private key to the API", () => {
-    const { privateKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      privateKeyEncoding: { type: "pkcs8", format: "pem" },
-      publicKeyEncoding: { type: "spki", format: "pem" },
-    });
     expect(githubOAuthConfig({
       GITHUB_APP_SLUG: "acme-app", GITHUB_APP_CLIENT_ID: "client", GITHUB_APP_CLIENT_SECRET: "secret",
       GITHUB_APP_NAME: "Acme Skills",
     }))?.toMatchObject({ slug: "acme-app", name: "Acme Skills", managed: false });
     expect(githubAppConfig({
       GITHUB_APP_ID: "1",
-      GITHUB_APP_PRIVATE_KEY: privateKey,
+      GITHUB_APP_PRIVATE_KEY: appPrivateKey,
     }))?.toMatchObject({ appId: "1" });
   });
 });
@@ -399,13 +404,12 @@ describe("managed README merging", () => {
 
 describe("atomic Git writes", () => {
   it("creates a root tree and returns a no-op when GitHub already has that exact tree", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
     const bodies = [
       { token: "installation-token" }, { id: 700, default_branch: "main" }, { object: { sha: "old-commit" } },
       { tree: { sha: "same-tree" } }, { sha: "blob" }, { sha: "same-tree" },
     ];
     const execute = vi.fn<typeof fetch>().mockImplementation(async () => response(bodies.shift()));
-    const result = await new GitHubAppClient(appConfig(privateKey), execute).writeRepository({
+    const result = await new GitHubAppClient(appConfig(appPrivateKey), execute).writeRepository({
       installationId: "91", repositoryId: "700", owner: "acme", repo: "skills", branch: "main",
       files: [{ path: "README.md", data: Buffer.from("managed"), executable: false }], message: "Sync skills",
     });
@@ -416,7 +420,6 @@ describe("atomic Git writes", () => {
   });
 
   it("overlays managed paths on the current tree while preserving custom files and manual skill folders", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
     const previousManifest = Buffer.from(JSON.stringify({
       schema: 1,
       skills: [
@@ -476,7 +479,7 @@ describe("atomic Git writes", () => {
       throw new Error(`unexpected GitHub request: ${method} ${url}`);
     });
 
-    await expect(new GitHubAppClient(appConfig(privateKey), execute).writeRepository({
+    await expect(new GitHubAppClient(appConfig(appPrivateKey), execute).writeRepository({
       installationId: "91", repositoryId: "700", owner: "acme", repo: "skills", branch: "main",
       previousCommitSha: "previous-companion",
       managedSlugs: ["managed", "new"],
@@ -511,7 +514,6 @@ describe("atomic Git writes", () => {
   });
 
   it("blocks a new managed slug that collides with a manual skill folder before creating Git objects", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
     const execute = vi.fn<typeof fetch>(async (request, init) => {
       const url = String(request);
       const method = init?.method ?? (init?.body ? "POST" : "GET");
@@ -527,7 +529,7 @@ describe("atomic Git writes", () => {
       ] });
       throw new Error(`unexpected GitHub request: ${method} ${url}`);
     });
-    await expect(new GitHubAppClient(appConfig(privateKey), execute).writeRepository({
+    await expect(new GitHubAppClient(appConfig(appPrivateKey), execute).writeRepository({
       installationId: "91", repositoryId: "700", owner: "acme", repo: "skills", branch: "main",
       managedSlugs: ["manual"],
       files: [{ path: "skills/manual/SKILL.md", data: Buffer.from("managed"), executable: false }],
@@ -537,11 +539,10 @@ describe("atomic Git writes", () => {
   });
 
   it("refuses a replacement repository at the same owner/name before creating Git objects", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
     const execute = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(response({ token: "installation-token" }))
       .mockResolvedValueOnce(response({ id: 701, default_branch: "main" }));
-    await expect(new GitHubAppClient(appConfig(privateKey), execute).writeRepository({
+    await expect(new GitHubAppClient(appConfig(appPrivateKey), execute).writeRepository({
       installationId: "91", repositoryId: "700", owner: "acme", repo: "skills", branch: "main",
       files: [{ path: "README.md", data: Buffer.from("managed"), executable: false }], message: "Sync skills",
     })).rejects.toThrow("repository identity changed");
@@ -549,7 +550,6 @@ describe("atomic Git writes", () => {
   });
 
   it("does not trust ownership from a previous Companion commit outside the observed branch history", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
     const execute = vi.fn<typeof fetch>(async (request, init) => {
       const url = String(request);
       const method = init?.method ?? (init?.body ? "POST" : "GET");
@@ -567,7 +567,7 @@ describe("atomic Git writes", () => {
       throw new Error(`unexpected GitHub request: ${method} ${url}`);
     });
 
-    await expect(new GitHubAppClient(appConfig(privateKey), execute).writeRepository({
+    await expect(new GitHubAppClient(appConfig(appPrivateKey), execute).writeRepository({
       installationId: "91", repositoryId: "700", owner: "acme", repo: "skills", branch: "main",
       previousCommitSha: "previous-companion", managedSlugs: ["managed"],
       files: [{ path: "skills/managed/SKILL.md", data: Buffer.from("managed"), executable: false }],
@@ -577,7 +577,6 @@ describe("atomic Git writes", () => {
   });
 
   it("bootstraps a truly empty repository before publishing the managed tree as a fast-forward", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
     let refReads = 0;
     const commitParents: string[][] = [];
     const finalizedCommits: Array<string | null> = [];
@@ -621,7 +620,7 @@ describe("atomic Git writes", () => {
       throw new Error(`unexpected GitHub request: ${method} ${url}`);
     });
 
-    const result = await new GitHubAppClient(appConfig(privateKey), execute).writeRepository({
+    const result = await new GitHubAppClient(appConfig(appPrivateKey), execute).writeRepository({
       installationId: "91",
       repositoryId: "700",
       owner: "acme",
@@ -656,7 +655,6 @@ describe("atomic Git writes", () => {
   });
 
   it("aborts and settles active blob uploads before a failed pool returns", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
     let blobStarts = 0;
     const execute = vi.fn<typeof fetch>(async (request, init) => {
       const url = String(request);
@@ -676,7 +674,7 @@ describe("atomic Git writes", () => {
     const files = Array.from({ length: 20 }, (_, index) => ({
       path: `skills/test/file-${index}.txt`, data: Buffer.from(String(index)), executable: false,
     }));
-    await expect(new GitHubAppClient(appConfig(privateKey), execute).writeRepository({
+    await expect(new GitHubAppClient(appConfig(appPrivateKey), execute).writeRepository({
       installationId: "91", repositoryId: "700", owner: "acme", repo: "skills", branch: "main",
       files, message: "Sync skills",
     })).rejects.toThrow("blob failed");
@@ -687,7 +685,6 @@ describe("atomic Git writes", () => {
   });
 
   it("rebuilds from the new branch head after a fast-forward race before retrying the publication fence", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
     let observedHead = 0;
     let refUpdates = 0;
     const commitParents: string[][] = [];
@@ -716,7 +713,7 @@ describe("atomic Git writes", () => {
     });
     const assertFence = vi.fn(async () => undefined);
 
-    const result = await new GitHubAppClient(appConfig(privateKey), execute).writeRepository({
+    const result = await new GitHubAppClient(appConfig(appPrivateKey), execute).writeRepository({
       installationId: "91",
       repositoryId: "700",
       owner: "acme",
@@ -738,7 +735,6 @@ describe("atomic Git writes", () => {
   });
 
   it("recovers signed ownership after an ambiguous publication and a subsequent user README commit", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
     let published = false;
     let completed = false;
     let signedManifest = Buffer.alloc(0);
@@ -812,7 +808,7 @@ describe("atomic Git writes", () => {
       throw new Error(`unexpected GitHub request: ${method} ${url}`);
     });
 
-    const client = new GitHubAppClient(appConfig(privateKey), execute);
+    const client = new GitHubAppClient(appConfig(appPrivateKey), execute);
     const writeInput = {
       installationId: "91", repositoryId: "700", owner: "acme", repo: "skills", branch: "main",
       managedSlugs: ["new"],
@@ -830,7 +826,6 @@ describe("atomic Git writes", () => {
   });
 
   it("re-merges custom README content from the new head after a fast-forward race", async () => {
-    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
     let observedHead = 0;
     let refUpdates = 0;
     const mergedReadmes: string[] = [];
@@ -873,7 +868,7 @@ describe("atomic Git writes", () => {
       throw new Error(`unexpected GitHub request: ${method} ${url}`);
     });
 
-    await expect(new GitHubAppClient(appConfig(privateKey), execute).writeRepository({
+    await expect(new GitHubAppClient(appConfig(appPrivateKey), execute).writeRepository({
       installationId: "91", repositoryId: "700", owner: "acme", repo: "skills", branch: "main",
       files: [], managedSlugs: [], manifest: Buffer.from('{"schema":1,"skills":[]}\n'),
       readmeBlock: Buffer.from(`${COMPANION_README_START}\nmanaged\n${COMPANION_README_END}`),
