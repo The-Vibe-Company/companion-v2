@@ -2,6 +2,7 @@ import {
   CompanionPluginConflictError,
   CompanionProviderError,
   CompanionRegistryUnavailableError,
+  CompanionRuntimeTransitionError,
 } from "@companion/core";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -633,6 +634,31 @@ describe("Companions API feature gate", () => {
         lastError: "The provider connection is unavailable.",
       }),
     }));
+  });
+
+  it("preserves another send's provisioning claim during concurrent automatic wake", async () => {
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    coreMocks.claimCompanionRuntimeStart.mockRejectedValueOnce(
+      new CompanionRuntimeTransitionError("companion is already provisioning"),
+    );
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
+    expect(runtime.start).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionRuntime).not.toHaveBeenCalled();
   });
 
   it("hands a message to a running Pi daemon and records the delivery watermark", async () => {

@@ -346,7 +346,10 @@ export function registerCompanionRoutes(
       );
       return { companion, runtime };
     } catch (error) {
-      const context = mutation ?? failureContext;
+      // A pre-claim transition conflict means another request owns the wake. Preserve its
+      // provisioning lock; all other authorized failures remain visible through last_error.
+      const context = mutation
+        ?? (error instanceof CompanionRuntimeTransitionError ? undefined : failureContext);
       if (context) {
         await withTenantContext(
           { orgId: context.orgId, userId: context.actor.id },
