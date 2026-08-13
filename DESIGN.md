@@ -343,6 +343,17 @@ rows; empty, revoked, conflicted, failed, and archived-read-only states explain 
 offer Retry where useful. On narrow screens preserve every capability through progressive
 table → rows → full-screen panel navigation rather than shrinking the grid or removing actions.
 
+**Companion thread** is one transcript in one reading column, not a two-sided bubble chat. Turns are
+left-aligned in a column narrower than the page; a writer keeps the floor across consecutive turns, so
+the writer and the time appear once per passage and the turns under it are only the words. A member's
+message is a tinted block with `md` radius and no border; a Companion reply is plain text on the page;
+a run note is one quiet muted line. Loading uses static skeleton lines, and a running Box that owes a
+reply says so as a muted line, never as an animated indicator. The composer is one field with its send
+control inside it, one hint line underneath, and no toolbar: no attachments, dictation, slash commands,
+mentions, model picker, or tool controls belong in the thread. A Viewer gets the same transcript with a
+read-only note in place of the composer. Empty threads state what happens next instead of greeting the
+reader, and there is no centered welcome panel and no thread list.
+
 **Status dot plus label** is mandatory for health and lifecycle state. Dots are static 6px to 8px circles. No pulse, no glow, no animation.
 
 **Badges** are compact chips for scope, lifecycle, role, validation, and status. Use mono only for machine-like values. Status badges use low-tint backgrounds and borders; neutral badges use raised surface and muted text.
