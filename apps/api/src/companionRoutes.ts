@@ -117,6 +117,7 @@ function recordProjection(input: {
   companionId: string;
   entries: CompanionPiEntry[];
   piLogOffset?: number;
+  piLogRewound?: boolean;
   deliveredOrdinal?: number;
 }): Promise<CompanionThread> {
   return withTenantContext(
@@ -458,7 +459,9 @@ export function registerCompanionRoutes(
           await runtime.prompt({ boxId, message: message.content, requestId: message.event_id });
           deliveredOrdinal = message.ordinal;
         }
-      } catch (error) {
+      } finally {
+        // Record what Pi accepted before reading its log. Whatever happens next — a failed read, a
+        // failed projection, a refused prompt — a retry must not prompt the same message twice.
         if (deliveredOrdinal !== undefined) {
           await recordProjection({
             actor: resolved.actor,
@@ -468,7 +471,6 @@ export function registerCompanionRoutes(
             deliveredOrdinal,
           }).catch(() => undefined);
         }
-        throw error;
       }
       const events = await runtime.readEvents({ boxId, offset: resolved.piLogOffset });
       const projection = projectCompanionPiEvents({ chunk: events.chunk, offset: events.offset });
@@ -478,7 +480,9 @@ export function registerCompanionRoutes(
         companionId,
         entries: projection.entries,
         piLogOffset: events.offset + projection.consumedBytes,
-        deliveredOrdinal,
+        // Pi rereads its log from the start when it shrank, so that projection owns the offset
+        // outright; otherwise the offset only moves forward.
+        piLogRewound: events.offset < resolved.piLogOffset,
       });
       return c.json({ thread, source: "box" as const });
     } catch (error) {
