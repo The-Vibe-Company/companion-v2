@@ -1098,8 +1098,8 @@ systemctl --user daemon-reload
 # latched failure first makes this a real start attempt again; a unit with nothing latched is
 # unaffected, and a Box that will not clear it still gets its start attempt.
 systemctl --user reset-failed companion-pi-daemon.service >/dev/null 2>&1 || true
-# `start` is deliberately idempotent for an active unit. A first post-upgrade start can refresh the
-# tmpfs credential file and unit definition without killing a turn that is already in flight.
+# systemctl start is deliberately idempotent for an active unit. A first post-upgrade start refreshes
+# the tmpfs credential file and unit definition without killing a turn that is already in flight.
 systemctl --user start companion-pi-daemon.service
 # Keep the tmpfs file while the Box is awake so Restart=on-failure can reread the same credentials.
 # Box stop/reboot destroys /run, and the explicit stop path removes it as soon as Pi is down.
