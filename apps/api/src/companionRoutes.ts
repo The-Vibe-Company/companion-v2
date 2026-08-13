@@ -26,6 +26,7 @@ import {
   listPendingCompanionMessages,
   projectCompanionPiEvents,
   recordCompanionPiProjection,
+  resolveCompanionBoxScope,
   resolveCompanionProviderAuth,
   resolveCompanionPluginInjection,
   saveCompanionProvider,
@@ -147,6 +148,7 @@ async function deliverCompanionMessages(input: {
     for (const message of input.messages) {
       await runtime.prompt({
         boxId: input.boxId,
+        companionId: input.companionId,
         message: message.content,
         requestId: message.event_id,
       });
@@ -454,7 +456,12 @@ export function registerCompanionRoutes(
       let deliveredOrdinal: number | undefined;
       try {
         for (const message of resolved.pending) {
-          await runtime.prompt({ boxId, message: message.content, requestId: message.event_id });
+          await runtime.prompt({
+            boxId,
+            companionId,
+            message: message.content,
+            requestId: message.event_id,
+          });
           deliveredOrdinal = message.ordinal;
         }
       } finally {
@@ -470,7 +477,7 @@ export function registerCompanionRoutes(
           }).catch(() => undefined);
         }
       }
-      const events = await runtime.readEvents({ boxId, offset: resolved.piLogOffset });
+      const events = await runtime.readEvents({ boxId, companionId, offset: resolved.piLogOffset });
       const projection = projectCompanionPiEvents({ chunk: events.chunk, offset: events.offset });
       const thread = await recordProjection({
         actor: resolved.actor,
@@ -530,6 +537,7 @@ export function registerCompanionRoutes(
           actor: ReturnType<typeof actorFromContext>;
           orgId: string;
           companion: Awaited<ReturnType<typeof getCompanionForRuntime>>;
+          scope: Awaited<ReturnType<typeof resolveCompanionBoxScope>>;
           provider: Awaited<ReturnType<typeof resolveCompanionProviderAuth>>;
           plugins: Awaited<ReturnType<typeof resolveCompanionPluginInjection>>;
           skillPackages: Awaited<ReturnType<typeof listCompanionRuntimeSkillPackages>>;
@@ -547,13 +555,15 @@ export function registerCompanionRoutes(
           : await resolveCompanionPluginInjection({
               actor, orgId, companionId, database,
             });
+        // The wake targets the Box the whole scope shares, named deterministically per workspace.
+        const scope = await resolveCompanionBoxScope({ orgId, companionId, database });
         const companion = await claimCompanionRuntimeStart({
           actor, orgId, companionId, database,
         });
         const skillPackages = body.client_surface === "native_mobile"
           ? []
           : await listCompanionRuntimeSkillPackages({ actor, orgId, database });
-        return { actor, orgId, companion, provider, plugins, skillPackages };
+        return { actor, orgId, companion, scope, provider, plugins, skillPackages };
       });
       const skills = await Promise.all(mutation.skillPackages.map(async (skill) => {
         const archive = await getSkillArchive({ key: skill.storagePath });
@@ -571,8 +581,8 @@ export function registerCompanionRoutes(
         };
       }));
       const observed = await runtimeFactory().start({
-        companionId,
-        orgId: mutation.orgId,
+        boxName: mutation.scope.boxName,
+        boxEnv: mutation.scope.boxEnv,
         boxId: mutation.companion.runtime.box_id,
         clientSurface: body.client_surface,
         providerAuth: {
@@ -616,7 +626,6 @@ export function registerCompanionRoutes(
             boxId: observed.boxId,
             runtimeState: observed.runtimeState,
             daemonState: observed.daemonState,
-            providerIds: [mutation!.provider.providerId],
             providerCredentialGeneration: mutation!.provider.credentialGeneration,
             diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
             desktopAvailable: observed.desktopAvailable,

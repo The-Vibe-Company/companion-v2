@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, lt, notInArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, lt, notInArray, sql } from "drizzle-orm";
 import type {
   Companion,
   CompanionAccess,
@@ -33,6 +33,7 @@ import { decryptOpaqueValue, encryptOpaqueValue, type OpaqueCiphertext } from ".
 import { assertMember, getOrgRole, type ActorContext } from "./services";
 
 type CompanionRow = typeof schema.companions.$inferSelect;
+type CompanionRuntimePoolRow = typeof schema.companionRuntimePools.$inferSelect;
 const COMPANION_RUNTIME_CLAIM_STALE_MS = 5 * 60_000;
 const PROVIDER_CREDENTIAL_PURPOSE = "companion-provider-credential";
 const MCP_CREDENTIAL_PURPOSE = "companion-mcp-credential";
@@ -133,7 +134,109 @@ export function canWakeCompanion(access: CompanionAccess): boolean {
   return access === "owner" || access === "editor";
 }
 
-function toCompanion(row: CompanionRow, access: CompanionAccess): Companion {
+/**
+ * THE-330 makes the Box a workspace resource. A `personal` scope is one Box per user in their
+ * personal workspace (keyed by owner); an `org` scope is one Box shared by every member of a team
+ * workspace. The scope of a Companion is decided entirely by its organization's kind, never by the
+ * Companion, so every Companion in a workspace resolves to the same shared runtime pool.
+ */
+export interface CompanionBoxScope {
+  scope: "personal" | "org";
+  orgId: string;
+  ownerId: string | null;
+}
+
+/**
+ * The deterministic Box name for a scope. It replaces the per-Companion `Companion <uuid>` name so a
+ * wake finds and reuses the one Box the whole scope shares instead of minting a Box per Companion.
+ */
+export function companionBoxName(scope: CompanionBoxScope): string {
+  return scope.scope === "personal"
+    ? `Companion personal ${scope.ownerId}`
+    : `Companion org ${scope.orgId}`;
+}
+
+/** Scope facts handed to the Box as create-time environment; never carries a per-Companion id. */
+export function companionBoxEnv(scope: CompanionBoxScope): Record<string, string> {
+  return {
+    COMPANION_SCOPE: scope.scope,
+    COMPANION_ORG_ID: scope.orgId,
+    ...(scope.ownerId ? { COMPANION_OWNER_ID: scope.ownerId } : {}),
+  };
+}
+
+async function resolveBoxScope(
+  database: Db,
+  orgId: string,
+  ownerId: string,
+): Promise<CompanionBoxScope> {
+  const org = await database.query.organizations.findFirst({
+    where: eq(schema.organizations.id, orgId),
+    columns: { kind: true },
+  });
+  return org?.kind === "personal"
+    ? { scope: "personal", orgId, ownerId }
+    : { scope: "org", orgId, ownerId: null };
+}
+
+function runtimePoolWhere(scope: CompanionBoxScope) {
+  return scope.scope === "personal"
+    ? and(
+        eq(schema.companionRuntimePools.orgId, scope.orgId),
+        eq(schema.companionRuntimePools.scope, "personal"),
+        eq(schema.companionRuntimePools.ownerId, scope.ownerId as string),
+      )
+    : and(
+        eq(schema.companionRuntimePools.orgId, scope.orgId),
+        eq(schema.companionRuntimePools.scope, "org"),
+        isNull(schema.companionRuntimePools.ownerId),
+      );
+}
+
+async function readRuntimePool(
+  database: Db,
+  scope: CompanionBoxScope,
+): Promise<CompanionRuntimePoolRow | undefined> {
+  const [row] = await database
+    .select()
+    .from(schema.companionRuntimePools)
+    .where(runtimePoolWhere(scope))
+    .limit(1);
+  return row;
+}
+
+/**
+ * The shared runtime pool for a scope, created on first use. The partial unique indexes make the
+ * insert a no-op when a concurrent wake already claimed the scope, so two Companions racing their
+ * first wake still converge on one pool row rather than two Boxes.
+ */
+async function ensureRuntimePool(
+  database: Db,
+  scope: CompanionBoxScope,
+): Promise<CompanionRuntimePoolRow> {
+  const existing = await readRuntimePool(database, scope);
+  if (existing) return existing;
+  await database
+    .insert(schema.companionRuntimePools)
+    .values({ orgId: scope.orgId, scope: scope.scope, ownerId: scope.ownerId })
+    .onConflictDoNothing();
+  const created = await readRuntimePool(database, scope);
+  if (!created) throw new Error("failed to ensure companion runtime pool");
+  return created;
+}
+
+/**
+ * Project a Companion by joining its durable identity to the shared runtime pool for its scope. The
+ * pool owns `box_id` and the whole runtime chip, so every Companion in the scope shows the same
+ * state; a scope that has never woken has no pool row and reads as `not_created`. A Viewer never
+ * receives the Box id or desktop flag, matching the read-model boundary.
+ */
+function toCompanion(
+  row: CompanionRow,
+  pool: CompanionRuntimePoolRow | undefined,
+  access: CompanionAccess,
+): Companion {
+  const state = pool?.runtimeState ?? "not_created";
   return {
     id: row.id,
     name: row.name,
@@ -141,25 +244,51 @@ function toCompanion(row: CompanionRow, access: CompanionAccess): Companion {
     owner_id: row.ownerId,
     access,
     runtime: {
-      state: row.runtimeState,
-      daemon_state: row.daemonState,
-      box_id: access === "viewer" ? null : row.boxId,
+      state,
+      daemon_state: pool?.daemonState ?? "unknown",
+      box_id: access === "viewer" ? null : (pool?.boxId ?? null),
       provider_ids: row.providerIds,
-      provider_credential_generation: row.providerCredentialGeneration,
-      disk_layout_version: row.diskLayoutVersion,
-      desktop_available: access === "viewer" ? false : row.desktopAvailable,
+      provider_credential_generation: pool?.providerCredentialGeneration ?? null,
+      disk_layout_version: pool?.diskLayoutVersion ?? 1,
+      desktop_available: access === "viewer" ? false : (pool?.desktopAvailable ?? false),
       last_error: companionRuntimeErrorForAccess({
-        state: row.runtimeState,
-        lastError: row.lastError,
+        state,
+        lastError: pool?.lastError ?? null,
         access,
       }),
-      last_observed_at: row.lastObservedAt?.toISOString() ?? null,
-      last_started_at: row.lastStartedAt?.toISOString() ?? null,
-      last_stopped_at: row.lastStoppedAt?.toISOString() ?? null,
+      last_observed_at: pool?.lastObservedAt?.toISOString() ?? null,
+      last_started_at: pool?.lastStartedAt?.toISOString() ?? null,
+      last_stopped_at: pool?.lastStoppedAt?.toISOString() ?? null,
     },
     created_at: row.createdAt.toISOString(),
     updated_at: row.updatedAt.toISOString(),
   };
+}
+
+interface CompanionContext {
+  row: CompanionRow;
+  access: CompanionAccess;
+  scope: CompanionBoxScope;
+  pool: CompanionRuntimePoolRow | undefined;
+}
+
+async function loadCompanionContext(
+  database: Db,
+  orgId: string,
+  companionId: string,
+  actorId: string,
+): Promise<CompanionContext> {
+  const [row] = await database
+    .select()
+    .from(schema.companions)
+    .where(and(eq(schema.companions.orgId, orgId), eq(schema.companions.id, companionId)))
+    .limit(1);
+  if (!row) throw new CompanionNotFoundError();
+  const access = await loadCompanionAccess(database, row, actorId);
+  if (!access) throw new CompanionNotFoundError();
+  const scope = await resolveBoxScope(database, orgId, row.ownerId);
+  const pool = await readRuntimePool(database, scope);
+  return { row, access, scope, pool };
 }
 
 async function loadCompanionAccess(
@@ -182,14 +311,32 @@ export async function listCompanions(input: {
 }): Promise<Companion[]> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
-  const rows = await database
-    .select()
-    .from(schema.companions)
-    .where(eq(schema.companions.orgId, input.orgId))
-    .orderBy(desc(schema.companions.updatedAt));
+  const [rows, org, pools] = await Promise.all([
+    database
+      .select()
+      .from(schema.companions)
+      .where(eq(schema.companions.orgId, input.orgId))
+      .orderBy(desc(schema.companions.updatedAt)),
+    database.query.organizations.findFirst({
+      where: eq(schema.organizations.id, input.orgId),
+      columns: { kind: true },
+    }),
+    database
+      .select()
+      .from(schema.companionRuntimePools)
+      .where(eq(schema.companionRuntimePools.orgId, input.orgId)),
+  ]);
+  // A team workspace shares one org pool across every Companion; a personal workspace keys its pool
+  // by owner. Either way the chip a Companion shows is read from the one pool its scope resolves to.
+  const orgPool = pools.find((pool) => pool.scope === "org");
+  const personalPools = new Map(
+    pools.filter((pool) => pool.scope === "personal").map((pool) => [pool.ownerId, pool]),
+  );
   const visible = await Promise.all(rows.map(async (row) => {
     const access = await loadCompanionAccess(database, row, input.actor.id);
-    return access ? toCompanion(row, access) : null;
+    if (!access) return null;
+    const pool = org?.kind === "personal" ? personalPools.get(row.ownerId) : orgPool;
+    return toCompanion(row, pool, access);
   }));
   return visible.filter((item): item is Companion => item !== null);
 }
@@ -202,15 +349,29 @@ export async function getCompanion(input: {
 }): Promise<Companion> {
   const database = input.database ?? db;
   await assertMember(database, input.actor, input.orgId);
+  const ctx = await loadCompanionContext(database, input.orgId, input.companionId, input.actor.id);
+  return toCompanion(ctx.row, ctx.pool, ctx.access);
+}
+
+/**
+ * Resolve the shared Box scope for a Companion: its deterministic Box name and the scope facts the
+ * Box adapter needs. The scope follows the workspace kind, so every Companion in the workspace maps
+ * to the same Box, and the old per-Companion `Companion <uuid>` name is never used again.
+ */
+export async function resolveCompanionBoxScope(input: {
+  orgId: string;
+  companionId: string;
+  database?: Db;
+}): Promise<CompanionBoxScope & { boxName: string; boxEnv: Record<string, string> }> {
+  const database = input.database ?? db;
   const [row] = await database
-    .select()
+    .select({ ownerId: schema.companions.ownerId })
     .from(schema.companions)
     .where(and(eq(schema.companions.orgId, input.orgId), eq(schema.companions.id, input.companionId)))
     .limit(1);
   if (!row) throw new CompanionNotFoundError();
-  const access = await loadCompanionAccess(database, row, input.actor.id);
-  if (!access) throw new CompanionNotFoundError();
-  return toCompanion(row, access);
+  const scope = await resolveBoxScope(database, input.orgId, row.ownerId);
+  return { ...scope, boxName: companionBoxName(scope), boxEnv: companionBoxEnv(scope) };
 }
 
 export async function createCompanion(input: {
@@ -259,7 +420,9 @@ export async function createCompanion(input: {
     })
     .returning();
   if (!row) throw new Error("failed to create companion");
-  return toCompanion(row, "owner");
+  // A brand-new Companion has never woken its scope, so it has no pool row yet and reads as
+  // `not_created`; the shared pool is created on the first wake of any Companion in the scope.
+  return toCompanion(row, undefined, "owner");
 }
 
 async function assertCompanionOwner(input: {
@@ -924,7 +1087,6 @@ export async function setCompanionProvider(input: {
     .update(schema.companions)
     .set({
       providerIds: [input.providerId],
-      providerCredentialGeneration: null,
       updatedAt: new Date(),
     })
     .where(and(
@@ -939,7 +1101,11 @@ export async function setCompanionProvider(input: {
       "this Companion provider was already configured",
     );
   }
-  return toCompanion(row, "owner");
+  // The Companion keeps its own provider selection; the shared Box re-applies whichever provider the
+  // waking Companion chose, so the pool's recorded credential generation is left untouched here.
+  const scope = await resolveBoxScope(database, input.orgId, row.ownerId);
+  const pool = await readRuntimePool(database, scope);
+  return toCompanion(row, pool, "owner");
 }
 
 export async function saveCompanionProvider(input: {
@@ -1159,6 +1325,27 @@ export async function getCompanionForRuntime(input: {
 }
 
 /**
+ * Load a Companion for a lifecycle write and assert the Owner/Editor boundary. It returns the
+ * Companion row, its scope, and the shared pool so a start/stop mutates the one pool the whole scope
+ * shares rather than a per-Companion runtime row.
+ */
+async function loadRuntimeContext(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  database: Db;
+}): Promise<CompanionContext> {
+  const ctx = await loadCompanionContext(
+    input.database,
+    input.orgId,
+    input.companionId,
+    input.actor.id,
+  );
+  if (!canWakeCompanion(ctx.access)) throw new CompanionRuntimeForbiddenError();
+  return ctx;
+}
+
+/**
  * A recorded failure lives exactly as long as the `error` state it explains: any lifecycle write
  * that leaves `error` clears the line, so a successful retry cannot keep showing the old reason.
  */
@@ -1183,7 +1370,6 @@ export async function updateCompanionRuntime(input: {
     boxId?: string | null;
     runtimeState?: CompanionRuntimeState;
     daemonState?: CompanionDaemonState;
-    providerIds?: string[];
     providerCredentialGeneration?: string | null;
     diskLayoutVersion?: number;
     desktopAvailable?: boolean;
@@ -1196,15 +1382,15 @@ export async function updateCompanionRuntime(input: {
   database?: Db;
 }): Promise<Companion> {
   const database = input.database ?? db;
-  const current = await getCompanionForRuntime({ ...input, database });
+  const ctx = await loadRuntimeContext({ ...input, database });
+  await ensureRuntimePool(database, ctx.scope);
   const now = new Date();
-  const [row] = await database
-    .update(schema.companions)
+  const [pool] = await database
+    .update(schema.companionRuntimePools)
     .set({
       ...(input.patch.boxId !== undefined ? { boxId: input.patch.boxId } : {}),
       ...(input.patch.runtimeState ? { runtimeState: input.patch.runtimeState } : {}),
       ...(input.patch.daemonState ? { daemonState: input.patch.daemonState } : {}),
-      ...(input.patch.providerIds ? { providerIds: input.patch.providerIds } : {}),
       ...(input.patch.providerCredentialGeneration !== undefined
         ? { providerCredentialGeneration: input.patch.providerCredentialGeneration }
         : {}),
@@ -1220,10 +1406,10 @@ export async function updateCompanionRuntime(input: {
       ...(input.patch.stoppedAt ? { lastStoppedAt: input.patch.stoppedAt } : {}),
       updatedAt: now,
     })
-    .where(and(eq(schema.companions.orgId, input.orgId), eq(schema.companions.id, input.companionId)))
+    .where(runtimePoolWhere(ctx.scope))
     .returning();
-  if (!row) throw new CompanionNotFoundError();
-  return toCompanion(row, current.access);
+  if (!pool) throw new CompanionNotFoundError();
+  return toCompanion(ctx.row, pool, ctx.access);
 }
 
 /**
@@ -1243,9 +1429,10 @@ export async function updateCompanionObservation(input: {
   database?: Db;
 }): Promise<Companion> {
   const database = input.database ?? db;
-  const current = await getCompanionForRuntime({ ...input, database });
-  const [row] = await database
-    .update(schema.companions)
+  const ctx = await loadRuntimeContext({ ...input, database });
+  const current = await ensureRuntimePool(database, ctx.scope);
+  const [pool] = await database
+    .update(schema.companionRuntimePools)
     .set({
       runtimeState: input.patch.runtimeState,
       daemonState: input.patch.daemonState,
@@ -1255,13 +1442,11 @@ export async function updateCompanionObservation(input: {
       updatedAt: new Date(),
     })
     .where(and(
-      eq(schema.companions.orgId, input.orgId),
-      eq(schema.companions.id, input.companionId),
-      notInArray(schema.companions.runtimeState, ["provisioning", "stopping"]),
+      runtimePoolWhere(ctx.scope),
+      notInArray(schema.companionRuntimePools.runtimeState, ["provisioning", "stopping"]),
     ))
     .returning();
-  if (row) return toCompanion(row, current.access);
-  return getCompanionForRuntime({ ...input, database });
+  return toCompanion(ctx.row, pool ?? current, ctx.access);
 }
 
 export async function claimCompanionRuntimeStart(input: {
@@ -1271,9 +1456,13 @@ export async function claimCompanionRuntimeStart(input: {
   database?: Db;
 }): Promise<Companion> {
   const database = input.database ?? db;
-  const currentAccess = await getCompanionForRuntime({ ...input, database });
-  const [row] = await database
-    .update(schema.companions)
+  const ctx = await loadRuntimeContext({ ...input, database });
+  // The wake starts the shared machine for the whole scope, so the claim is made against the scope's
+  // pool row: whichever Companion wakes first moves the pool out of `not_created`, and every other
+  // Companion in the scope then reads the same running chip without a wake of its own.
+  await ensureRuntimePool(database, ctx.scope);
+  const [pool] = await database
+    .update(schema.companionRuntimePools)
     .set({
       runtimeState: "provisioning",
       daemonState: "starting",
@@ -1281,24 +1470,24 @@ export async function claimCompanionRuntimeStart(input: {
       updatedAt: new Date(),
     })
     .where(and(
-      eq(schema.companions.orgId, input.orgId),
-      eq(schema.companions.id, input.companionId),
-      eq(schema.companions.runtimeState, "not_created"),
+      runtimePoolWhere(ctx.scope),
+      eq(schema.companionRuntimePools.runtimeState, "not_created"),
     ))
     .returning();
-  if (row) return toCompanion(row, currentAccess.access);
+  if (pool) return toCompanion(ctx.row, pool, ctx.access);
 
-  const current = await getCompanionForRuntime({ ...input, database });
+  const current = await readRuntimePool(database, ctx.scope);
+  if (!current) throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
   const transitional =
-    current.runtime.state === "provisioning" || current.runtime.state === "stopping";
+    current.runtimeState === "provisioning" || current.runtimeState === "stopping";
   const staleBefore = new Date(Date.now() - COMPANION_RUNTIME_CLAIM_STALE_MS);
-  if (transitional && new Date(current.updated_at) >= staleBefore) {
+  if (transitional && current.updatedAt >= staleBefore) {
     throw new CompanionRuntimeTransitionError(
-      `companion runtime is already ${current.runtime.state}`,
+      `companion runtime is already ${current.runtimeState}`,
     );
   }
   const [claimed] = await database
-    .update(schema.companions)
+    .update(schema.companionRuntimePools)
     .set({
       runtimeState: "provisioning",
       daemonState: "starting",
@@ -1306,14 +1495,13 @@ export async function claimCompanionRuntimeStart(input: {
       updatedAt: new Date(),
     })
     .where(and(
-      eq(schema.companions.orgId, input.orgId),
-      eq(schema.companions.id, input.companionId),
-      eq(schema.companions.runtimeState, current.runtime.state),
-      transitional ? lt(schema.companions.updatedAt, staleBefore) : undefined,
+      runtimePoolWhere(ctx.scope),
+      eq(schema.companionRuntimePools.runtimeState, current.runtimeState),
+      transitional ? lt(schema.companionRuntimePools.updatedAt, staleBefore) : undefined,
     ))
     .returning();
   if (!claimed) throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
-  return toCompanion(claimed, current.access);
+  return toCompanion(ctx.row, claimed, ctx.access);
 }
 
 export async function claimCompanionRuntimeStop(input: {
@@ -1323,27 +1511,29 @@ export async function claimCompanionRuntimeStop(input: {
   database?: Db;
 }): Promise<Companion> {
   const database = input.database ?? db;
-  const current = await getCompanionForRuntime({ ...input, database });
-  if (!current.runtime.box_id) throw new CompanionRuntimeTransitionError("companion has no Box to stop");
+  const ctx = await loadRuntimeContext({ ...input, database });
+  // Stop stops the machine for the whole scope, not "this Companion only", so the claim targets the
+  // shared pool row that carries the Box id every Companion in the scope projects.
+  const current = ctx.pool;
+  if (!current?.boxId) throw new CompanionRuntimeTransitionError("companion has no Box to stop");
   const transitional =
-    current.runtime.state === "provisioning" || current.runtime.state === "stopping";
+    current.runtimeState === "provisioning" || current.runtimeState === "stopping";
   const staleBefore = new Date(Date.now() - COMPANION_RUNTIME_CLAIM_STALE_MS);
-  if (transitional && new Date(current.updated_at) >= staleBefore) {
+  if (transitional && current.updatedAt >= staleBefore) {
     throw new CompanionRuntimeTransitionError(
-      `companion runtime is already ${current.runtime.state}`,
+      `companion runtime is already ${current.runtimeState}`,
     );
   }
   const [claimed] = await database
-    .update(schema.companions)
+    .update(schema.companionRuntimePools)
     .set({ runtimeState: "stopping", lastError: null, updatedAt: new Date() })
     .where(and(
-      eq(schema.companions.orgId, input.orgId),
-      eq(schema.companions.id, input.companionId),
-      eq(schema.companions.runtimeState, current.runtime.state),
-      transitional ? lt(schema.companions.updatedAt, staleBefore) : undefined,
+      runtimePoolWhere(ctx.scope),
+      eq(schema.companionRuntimePools.runtimeState, current.runtimeState),
+      transitional ? lt(schema.companionRuntimePools.updatedAt, staleBefore) : undefined,
     ))
     .returning();
   if (!claimed) throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
-  return toCompanion(claimed, current.access);
+  return toCompanion(ctx.row, claimed, ctx.access);
 }
 
