@@ -106,7 +106,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         COMPANION_ORG_ID: "22222222-2222-4222-8222-222222222222",
       },
     });
-    expect(String(createBody?.setupScript)).toContain("pi --mode rpc --session-dir");
+    expect(String(createBody?.setupScript)).toContain("exec \"$PI_BIN\" --mode rpc --session-dir");
     expect(String(createBody?.setupScript)).toContain("ExecStart=%h/.companion/bin/pi-daemon");
     expect(String(createBody?.setupScript)).toContain("npm:pi-mcp-adapter@2.12.1");
     expect(String(createBody?.setupScript)).toContain("--no-skills");
@@ -130,6 +130,77 @@ describe("AsciiBoxCompanionRuntime", () => {
       daemonState: "running",
       desktopAvailable: true,
     });
+  });
+
+  it("short-circuits an already-laid-out disk before requiring pi on PATH and bootstraps PATH", async () => {
+    let createdSetupScript = "";
+    let layoutCommand = "";
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.includes("/boxes?limit=200") && method === "GET") return json({ boxes: [] });
+      if (url.endsWith("/boxes") && method === "POST") {
+        createdSetupScript = String(body.setupScript);
+        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } }, 202);
+      }
+      if (url.endsWith("/boxes/bx_23456789") && method === "PATCH") return json({ box });
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        // The layout command re-runs the full setupScript as a Box command on Wake.
+        if (command.includes("pi-layout.version") && command.includes("expected_layout")) {
+          layoutCommand = command;
+        }
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: command.includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_PI_INSTALL_COMMAND: "npm install --global @earendil-works/pi-coding-agent@1.2.3",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: null,
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    for (const script of [createdSetupScript, layoutCommand]) {
+      expect(script).not.toBe("");
+      const markerIndex = script.indexOf("[ -f \"$layout_marker\" ]");
+      const piResolveIndex = script.indexOf("command -v pi");
+      // A Wake must exit 0 on an already-laid-out disk before it ever requires pi on PATH.
+      expect(markerIndex).toBeGreaterThan(-1);
+      expect(piResolveIndex).toBeGreaterThan(-1);
+      expect(markerIndex).toBeLessThan(piResolveIndex);
+      // Box commands do not inherit the interactive nvm PATH, so the script re-derives it.
+      expect(script).toContain(".nvm/versions/node");
+      expect(script).toContain("npm prefix -g");
+      expect(script).toContain("$HOME/.local/bin");
+      expect(script).toContain(".nvm/nvm.sh");
+    }
+    // The daemon wrapper and unit resolve Pi without a login-shell PATH.
+    expect(createdSetupScript).toContain("pi_bin=\"$(command -v pi)\"");
+    expect(createdSetupScript).toContain("PI_BIN=%q");
+    expect(createdSetupScript).toContain("exec \"$PI_BIN\" --mode rpc");
+    expect(createdSetupScript).toContain("Environment=PATH=");
   });
 
   it("keeps systemctl out of the create setupScript and loads the unit once the Box is ready", async () => {
@@ -649,7 +720,7 @@ describe("AsciiBoxCompanionRuntime", () => {
 
     expect(retired).toHaveLength(1);
     expect(created).toHaveLength(1);
-    expect(created[0]).toContain("pi --mode rpc --session-dir");
+    expect(created[0]).toContain("exec \"$PI_BIN\" --mode rpc --session-dir");
     expect(String(created[0])).not.toContain("bx_broken00");
     expect(result.boxId).toBe("bx_23456789");
     expect(result.runtimeState).toBe("running");
