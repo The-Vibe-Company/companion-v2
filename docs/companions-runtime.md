@@ -119,8 +119,12 @@ log's beginning and owns the offset outright. When the Box is asleep, sync degra
 read-model response as the thread read and reports `source: "control_plane"`.
 
 The projection deliberately keeps only conversation: Pi assistant text, plus a system note when a
-turn errors or is aborted. Thinking blocks, tool calls, and tool results are dropped, so no Pi tool
-or Skills chrome reaches the thread UI.
+turn errors or is aborted. Tool calls and tool results are dropped, so no Pi tool or Skills chrome
+reaches the thread UI. Thinking is dropped the same way whenever the turn produced text; a turn that
+ended with thinking and no text part at all shows that reasoning as the reply, because some models
+answer a short question inside the thinking block. A turn that ends with nothing visible records a
+system note instead, so a settled turn is never silence the reader has to interpret as a hang. A
+mid-turn tool step carries no visible content either and stays out of the thread.
 
 Delivery reads the pending list before it claims the watermark, so two requests that overlap inside
 that window can hand Pi the same prompt twice. One client cannot do this: the web surface runs its
