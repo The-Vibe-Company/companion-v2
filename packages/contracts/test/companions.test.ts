@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   companionDesktopSchema,
   companionThreadSchema,
+  companionSharesSchema,
   createCompanionInputSchema,
-  inviteCompanionMemberInputSchema,
   saveCompanionProviderInputSchema,
   saveCompanionPluginInputSchema,
   sendCompanionMessageInputSchema,
@@ -228,18 +228,29 @@ describe("Companion desktop contract", () => {
 });
 
 describe("Companion sharing contracts", () => {
-  it("accepts only Editor or Viewer for workspace and member grants", () => {
+  it("accepts only Editor or Viewer for the workspace-wide grant", () => {
     expect(setCompanionWorkspaceShareInputSchema.parse({ role: "viewer" })).toEqual({
       role: "viewer",
     });
     expect(setCompanionWorkspaceShareInputSchema.parse({ role: null })).toEqual({ role: null });
-    expect(inviteCompanionMemberInputSchema.parse({
-      email: "editor@example.test",
-      role: "editor",
-    })).toEqual({ email: "editor@example.test", role: "editor" });
-    expect(() => inviteCompanionMemberInputSchema.parse({
-      email: "owner@example.test",
-      role: "owner",
-    })).toThrow();
+    expect(() => setCompanionWorkspaceShareInputSchema.parse({ role: "owner" })).toThrow();
+  });
+
+  it("carries the workspace role only — sharing is workspace-only after THE-329", () => {
+    const shares = companionSharesSchema.parse({
+      companion_id: "11111111-1111-1111-1111-111111111111",
+      workspace_role: "editor",
+    });
+    expect(shares).toEqual({
+      companion_id: "11111111-1111-1111-1111-111111111111",
+      workspace_role: "editor",
+    });
+    // No per-member list survives on the contract.
+    expect("members" in shares).toBe(false);
+    expect(() => companionSharesSchema.parse({
+      companion_id: "11111111-1111-1111-1111-111111111111",
+      workspace_role: null,
+      members: [],
+    })).not.toThrow();
   });
 });

@@ -505,6 +505,13 @@
       "when": 1786584000000,
       "tag": "0071_companion_mcp_accounts",
       "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1786587600000,
+      "tag": "0072_drop_companion_member_access",
+      "breakpoints": true
     }
   ]
 }

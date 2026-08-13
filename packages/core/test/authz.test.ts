@@ -54,11 +54,11 @@ describe("canPerform — flat skill capability gate (every member ⇒ every acti
 });
 
 describe("Companion wake boundary", () => {
-  it("resolves owner, member override, workspace default, and no access", () => {
+  it("resolves owner, the workspace-wide grant, and no access (no per-member overrides)", () => {
     expect(companionAccessForActor({ ownerId: "u-owner" }, "u-owner")).toBe("owner");
-    expect(companionAccessForActor({ ownerId: "u-owner" }, "u-member", "editor", "viewer"))
+    expect(companionAccessForActor({ ownerId: "u-owner" }, "u-member", "editor"))
       .toBe("editor");
-    expect(companionAccessForActor({ ownerId: "u-owner" }, "u-member", null, "viewer"))
+    expect(companionAccessForActor({ ownerId: "u-owner" }, "u-member", "viewer"))
       .toBe("viewer");
     expect(companionAccessForActor({ ownerId: "u-owner" }, "u-member")).toBeNull();
   });

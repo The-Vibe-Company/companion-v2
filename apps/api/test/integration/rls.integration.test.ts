@@ -8,11 +8,9 @@ import {
   CompanionNotFoundError,
   claimCompanionRuntimeStart,
   claimCompanionRuntimeStop,
-  inviteCompanionMember,
   listCompanionShares,
   recordCompanionPiProjection,
-  revokeCompanionMember,
-  updateCompanionMemberRole,
+  setCompanionWorkspaceShare,
   updateCompanionObservation,
 } from "@companion/core";
 import { withTenantContext } from "@companion/db";
@@ -88,7 +86,7 @@ describe("Skills Hub PostgreSQL isolation", () => {
     expect(await visibleSlugs(fixture.orgB, fixture.outsider.id)).toEqual([otherOrgSlug]);
   });
 
-  it("enforces Companion member and workspace ACL roles in PostgreSQL", async () => {
+  it("enforces the workspace-only Companion ACL in PostgreSQL (no per-member overrides)", async () => {
     const initiallyVisible = await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${apiRole}`);
       await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
@@ -96,15 +94,16 @@ describe("Skills Hub PostgreSQL isolation", () => {
     });
     expect(initiallyVisible).toEqual([]);
 
+    // The owner seeds the thread read model and grants the whole workspace Viewer access. There is
+    // no per-member grant table any more, so every current member reads through this one row.
     await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${apiRole}`);
       await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.owner.id}, true)`;
       await tx`
-        insert into companion_member_access (
-          org_id, companion_id, user_id, owner_id, role, granted_by
+        insert into companion_workspace_access (
+          org_id, companion_id, owner_id, role, granted_by
         ) values (
-          ${fixture.orgA}, ${companionId}, ${fixture.admin.id}, ${fixture.owner.id}, 'viewer',
-          ${fixture.owner.id}
+          ${fixture.orgA}, ${companionId}, ${fixture.owner.id}, 'viewer', ${fixture.owner.id}
         )
       `;
       await tx`
@@ -146,19 +145,26 @@ describe("Skills Hub PostgreSQL isolation", () => {
     expect(viewerResult.threadWrite).toEqual([]);
     expect(viewerResult.updated).toEqual([]);
 
+    // A Viewer cannot write the transcript either.
+    await expect(integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
+      await tx`
+        insert into companion_transcript_entries (
+          org_id, companion_id, event_id, ordinal, role, content
+        ) values (
+          ${fixture.orgA}, ${companionId}, 'viewer-write', 1, 'user', 'must be rejected'
+        )
+      `;
+    })).rejects.toThrow();
+
+    // Raising the workspace grant to Editor lets every member run the Companion.
     await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${apiRole}`);
       await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.owner.id}, true)`;
       await tx`
-        update companion_member_access set role = 'editor'
-        where companion_id = ${companionId} and user_id = ${fixture.admin.id}
-      `;
-      await tx`
-        insert into companion_workspace_access (
-          org_id, companion_id, owner_id, role, granted_by
-        ) values (
-          ${fixture.orgA}, ${companionId}, ${fixture.owner.id}, 'editor', ${fixture.owner.id}
-        )
+        update companion_workspace_access set role = 'editor'
+        where companion_id = ${companionId}
       `;
     });
 
@@ -181,42 +187,32 @@ describe("Skills Hub PostgreSQL isolation", () => {
     });
     expect(editorThreadWrite).toEqual([{ next_ordinal: 2 }]);
 
-    const workspaceEditorUpdate = await integrationSql.begin(async (tx) => {
+    const secondMemberUpdate = await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${apiRole}`);
       await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.developer.id}, true)`;
       return tx<Array<{ id: string }>>`
         update companions set runtime_state = 'stopped' where id = ${companionId} returning id
       `;
     });
-    expect(workspaceEditorUpdate).toEqual([{ id: companionId }]);
+    expect(secondMemberUpdate).toEqual([{ id: companionId }]);
 
+    // Removing the workspace grant returns the Companion to private: members lose all access.
     await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${apiRole}`);
       await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.owner.id}, true)`;
-      await tx`
-        update companion_member_access set role = 'viewer'
-        where companion_id = ${companionId} and user_id = ${fixture.admin.id}
-      `;
+      await tx`delete from companion_workspace_access where companion_id = ${companionId}`;
     });
-    const overriddenViewerUpdate = await integrationSql.begin(async (tx) => {
+    const revokedAccess = await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${apiRole}`);
       await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
-      return tx<Array<{ id: string }>>`
+      const visible = await tx<Array<{ id: string }>>`select id from companions`;
+      const updated = await tx<Array<{ id: string }>>`
         update companions set runtime_state = 'running' where id = ${companionId} returning id
       `;
+      return { visible, updated };
     });
-    expect(overriddenViewerUpdate).toEqual([]);
-    await expect(integrationSql.begin(async (tx) => {
-      await tx.unsafe(`set local role ${apiRole}`);
-      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
-      await tx`
-        insert into companion_transcript_entries (
-          org_id, companion_id, event_id, ordinal, role, content
-        ) values (
-          ${fixture.orgA}, ${companionId}, 'viewer-write', 1, 'user', 'must be rejected'
-        )
-      `;
-    })).rejects.toThrow();
+    expect(revokedAccess.visible).toEqual([]);
+    expect(revokedAccess.updated).toEqual([]);
 
     const outsiderVisible = await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${apiRole}`);
@@ -227,6 +223,13 @@ describe("Skills Hub PostgreSQL isolation", () => {
     });
     expect(outsiderVisible.companionRows).toEqual([]);
     expect(outsiderVisible.threadRows).toEqual([]);
+  });
+
+  it("ensures the dropped per-member grant table cannot leak access", async () => {
+    const [row] = await integrationSql<Array<{ exists: boolean }>>`
+      select to_regclass('public.companion_member_access') is not null as exists
+    `;
+    expect(row?.exists).toBe(false);
   });
 
   it("lets admins manage provider ciphertext while members see metadata only within the tenant", async () => {
@@ -275,38 +278,31 @@ describe("Skills Hub PostgreSQL isolation", () => {
     expect(outsiderVisible).toEqual([]);
   });
 
-  it("enforces owner-only invite, role change, and revoke services", async () => {
+  it("enforces owner-only workspace share management", async () => {
     const ownerInput = {
       actor: fixture.owner,
       orgId: fixture.orgA,
       companionId,
     };
-    const invited = await withTenantContext(
+    const shared = await withTenantContext(
       { orgId: fixture.orgA, userId: fixture.owner.id },
-      (database) => inviteCompanionMember({
+      (database) => setCompanionWorkspaceShare({
         ...ownerInput,
-        email: fixture.admin.email,
         role: "editor",
         database,
       }),
     );
-    expect(invited.members).toEqual(expect.arrayContaining([
-      expect.objectContaining({ user_id: fixture.admin.id, role: "editor" }),
-    ]));
+    expect(shared).toEqual({ companion_id: companionId, workspace_role: "editor" });
 
-    const changed = await withTenantContext(
+    const listed = await withTenantContext(
       { orgId: fixture.orgA, userId: fixture.owner.id },
-      (database) => updateCompanionMemberRole({
-        ...ownerInput,
-        userId: fixture.admin.id,
-        role: "viewer",
-        database,
-      }),
+      (database) => listCompanionShares({ ...ownerInput, database }),
     );
-    expect(changed.members).toEqual(expect.arrayContaining([
-      expect.objectContaining({ user_id: fixture.admin.id, role: "viewer" }),
-    ]));
+    expect(listed).toEqual({ companion_id: companionId, workspace_role: "editor" });
+    // The workspace-only share payload carries no per-member list.
+    expect("members" in listed).toBe(false);
 
+    // A non-owner member cannot read or manage sharing, even with workspace Editor access.
     await expect(withTenantContext(
       { orgId: fixture.orgA, userId: fixture.admin.id },
       (database) => listCompanionShares({
@@ -329,15 +325,9 @@ describe("Skills Hub PostgreSQL isolation", () => {
 
     const revoked = await withTenantContext(
       { orgId: fixture.orgA, userId: fixture.owner.id },
-      (database) => revokeCompanionMember({
-        ...ownerInput,
-        userId: fixture.admin.id,
-        database,
-      }),
+      (database) => setCompanionWorkspaceShare({ ...ownerInput, role: null, database }),
     );
-    expect(revoked.members).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ user_id: fixture.admin.id }),
-    ]));
+    expect(revoked).toEqual({ companion_id: companionId, workspace_role: null });
   });
 
   it("CAS-claims lifecycle transitions and keeps live observations from clobbering them", async () => {

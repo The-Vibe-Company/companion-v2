@@ -652,38 +652,32 @@
   gap: 16px;
 }
 
-.companions-share-workspace,
-.companions-share-member {
+.companions-share-workspace {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
 }
 
-.companions-share-workspace > div,
-.companions-share-member > div:first-child {
+.companions-share-workspace > div {
   min-width: 0;
   display: grid;
   gap: 2px;
 }
 
-.companions-share-workspace strong,
-.companions-share-member strong {
+.companions-share-workspace strong {
   color: var(--color-fg);
   font-size: var(--text-sm);
 }
 
-.companions-share-workspace span,
-.companions-share-member span,
-.companions-share-members > p {
+.companions-share-workspace span {
   margin: 0;
   color: var(--color-muted);
   font-size: var(--text-xs);
   overflow-wrap: anywhere;
 }
 
-.companions-share-dialog select,
-.companions-share-dialog input {
+.companions-share-dialog select {
   min-height: 36px;
   padding: 0 10px;
   border: 1px solid var(--color-line-strong);
@@ -693,52 +687,9 @@
   font: inherit;
 }
 
-.companions-share-dialog :is(select, input):focus-visible {
+.companions-share-dialog select:focus-visible {
   outline: 2px solid var(--color-accent-ring);
   outline-offset: 1px;
-}
-
-.companions-share-invite {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 120px auto;
-  align-items: end;
-  gap: 10px;
-  padding-block: 16px;
-  border-block: 1px solid var(--color-line);
-}
-
-.companions-share-invite label {
-  min-width: 0;
-  display: grid;
-  gap: 5px;
-  color: var(--color-fg);
-  font-size: var(--text-sm);
-  font-weight: 500;
-}
-
-.companions-share-members {
-  display: grid;
-}
-
-.companions-share-members h4 {
-  margin: 0 0 6px;
-  color: var(--color-fg);
-  font-size: var(--text-sm);
-}
-
-.companions-share-member {
-  min-height: 52px;
-  border-bottom: 1px solid var(--color-line);
-}
-
-.companions-share-member:last-child {
-  border-bottom: 0;
-}
-
-.companions-share-member-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
 }
 
 /* One Companion, one thread: the page itself never scrolls, only the conversation does. */
@@ -1115,18 +1066,8 @@ button.chat-box:focus-visible {
     padding-left: 16px;
   }
 
-  .companions-share-workspace,
-  .companions-share-member {
+  .companions-share-workspace {
     align-items: flex-start;
-  }
-
-  .companions-share-invite {
-    grid-template-columns: 1fr;
-  }
-
-  .companions-share-member-actions {
-    align-items: flex-end;
-    flex-direction: column;
   }
 }
 

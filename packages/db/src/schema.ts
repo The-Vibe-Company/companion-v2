@@ -439,41 +439,6 @@ export const companionWorkspaceAccess = pgTable(
   }),
 );
 
-/** A member-specific grant overrides workspace-wide access for the same Companion. */
-export const companionMemberAccess = pgTable(
-  "companion_member_access",
-  {
-    orgId: uuid("org_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    companionId: uuid("companion_id")
-      .notNull()
-      .references(() => companions.id, { onDelete: "cascade" }),
-    userId: text("user_id")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
-    ownerId: text("owner_id").notNull(),
-    role: companionShareRoleEnum("role").notNull(),
-    grantedBy: text("granted_by").references(() => user.id, { onDelete: "set null" }),
-    createdAt: now(),
-    updatedAt: updatedAt(),
-  },
-  (t) => ({
-    pk: primaryKey({ columns: [t.companionId, t.userId] }),
-    companionOrgFk: foreignKey({
-      columns: [t.orgId, t.companionId, t.ownerId],
-      foreignColumns: [companions.orgId, companions.id, companions.ownerId],
-      name: "companion_member_access_companion_fk",
-    }),
-    memberFk: foreignKey({
-      columns: [t.orgId, t.userId],
-      foreignColumns: [memberships.orgId, memberships.userId],
-      name: "companion_member_access_membership_fk",
-    }),
-    byMember: index("companion_member_access_member_idx").on(t.orgId, t.userId),
-  }),
-);
-
 /**
  * One chat thread per Companion. The primary key is the Companion id, so a Companion can never own
  * a second thread and a thread can never span Companions. The row also carries the two watermarks

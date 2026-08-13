@@ -127,52 +127,6 @@ export async function setCompanionWorkspaceShare(
   return result.shares;
 }
 
-export async function inviteCompanionMember(
-  orgId: string,
-  companionId: string,
-  email: string,
-  role: CompanionShareRole,
-): Promise<CompanionShares> {
-  const result = await apiFetch<{ shares: CompanionShares }>(
-    `/v1/companions/${encodeURIComponent(companionId)}/shares/members`,
-    {
-      method: "PUT",
-      headers: orgHeaders(orgId),
-      body: JSON.stringify({ email, role }),
-    },
-  );
-  return result.shares;
-}
-
-export async function updateCompanionMemberRole(
-  orgId: string,
-  companionId: string,
-  userId: string,
-  role: CompanionShareRole,
-): Promise<CompanionShares> {
-  const result = await apiFetch<{ shares: CompanionShares }>(
-    `/v1/companions/${encodeURIComponent(companionId)}/shares/members/${encodeURIComponent(userId)}`,
-    {
-      method: "PATCH",
-      headers: orgHeaders(orgId),
-      body: JSON.stringify({ role }),
-    },
-  );
-  return result.shares;
-}
-
-export async function revokeCompanionMember(
-  orgId: string,
-  companionId: string,
-  userId: string,
-): Promise<CompanionShares> {
-  const result = await apiFetch<{ shares: CompanionShares }>(
-    `/v1/companions/${encodeURIComponent(companionId)}/shares/members/${encodeURIComponent(userId)}`,
-    { method: "DELETE", headers: orgHeaders(orgId) },
-  );
-  return result.shares;
-}
-
 export async function getCompanionThread(
   orgId: string,
   companionId: string,
