@@ -11,12 +11,13 @@ import type {
   CompanionShareMember,
   CompanionShareRole,
   CompanionShares,
-  CompanionTranscript,
+  CompanionThread,
   CompanionTranscriptEntry,
 } from "@companion/contracts";
 import { COMPANION_PROVIDER_CATALOG } from "@companion/contracts";
 import { db, schema, type Db } from "@companion/db";
 import { canManageOrg } from "./authz";
+import type { CompanionPiEntry } from "./companionPiEvents";
 import { decryptOpaqueValue, encryptOpaqueValue, type OpaqueCiphertext } from "./secretsCrypto";
 import { assertMember, getOrgRole, type ActorContext } from "./services";
 
@@ -453,59 +454,263 @@ export async function revokeCompanionMember(input: {
   return listCompanionShares({ ...input, database });
 }
 
-export async function getCompanionTranscript(input: {
-  actor: ActorContext;
-  orgId: string;
-  companionId: string;
-  database?: Db;
-}): Promise<CompanionTranscript> {
-  const database = input.database ?? db;
-  const companion = await getCompanion({ ...input, database });
-  const rows = await database
+type CompanionThreadRow = typeof schema.companionThreads.$inferSelect;
+
+async function readCompanionThreadRow(
+  database: Db,
+  orgId: string,
+  companionId: string,
+): Promise<CompanionThreadRow | undefined> {
+  const [row] = await database
     .select()
-    .from(schema.companionTranscriptEntries)
+    .from(schema.companionThreads)
     .where(and(
-      eq(schema.companionTranscriptEntries.orgId, input.orgId),
-      eq(schema.companionTranscriptEntries.companionId, input.companionId),
+      eq(schema.companionThreads.orgId, orgId),
+      eq(schema.companionThreads.companionId, companionId),
+    ))
+    .limit(1);
+  return row;
+}
+
+async function readCompanionTranscript(
+  database: Db,
+  orgId: string,
+  companionId: string,
+): Promise<CompanionTranscriptEntry[]> {
+  const rows = await database
+    .select({
+      eventId: schema.companionTranscriptEntries.eventId,
+      ordinal: schema.companionTranscriptEntries.ordinal,
+      role: schema.companionTranscriptEntries.role,
+      content: schema.companionTranscriptEntries.content,
+      authorId: schema.companionTranscriptEntries.authorId,
+      authorName: schema.profiles.name,
+      createdAt: schema.companionTranscriptEntries.createdAt,
+    })
+    .from(schema.companionTranscriptEntries)
+    .leftJoin(schema.profiles, eq(schema.profiles.id, schema.companionTranscriptEntries.authorId))
+    .where(and(
+      eq(schema.companionTranscriptEntries.orgId, orgId),
+      eq(schema.companionTranscriptEntries.companionId, companionId),
     ))
     .orderBy(asc(schema.companionTranscriptEntries.ordinal));
+  return rows.map((row) => ({
+    event_id: row.eventId,
+    ordinal: row.ordinal,
+    role: row.role,
+    content: row.content,
+    author_id: row.authorId,
+    author_name: row.authorName,
+    created_at: row.createdAt.toISOString(),
+  }));
+}
+
+function toThread(input: {
+  actor: ActorContext;
+  companion: Companion;
+  row: CompanionThreadRow | undefined;
+  entries: CompanionTranscriptEntry[];
+}): CompanionThread {
+  const deliveredOrdinal = input.row?.deliveredOrdinal ?? null;
+  const pending = input.entries.filter((entry) =>
+    entry.role === "user" && (deliveredOrdinal === null || entry.ordinal > deliveredOrdinal));
   return {
-    companion_id: input.companionId,
-    access: companion.access,
-    read_only: companion.access === "viewer",
-    entries: rows.map((row) => ({
-      event_id: row.eventId,
-      ordinal: row.ordinal,
-      role: row.role,
-      content: row.content,
-      created_at: row.createdAt.toISOString(),
-    })),
+    companion_id: input.companion.id,
+    viewer_id: input.actor.id,
+    access: input.companion.access,
+    read_only: input.companion.access === "viewer",
+    can_send: canWakeCompanion(input.companion.access),
+    entries: input.entries,
+    pending_count: pending.length,
+    last_message_at: input.row?.lastMessageAt?.toISOString()
+      ?? input.entries.at(-1)?.created_at
+      ?? null,
   };
 }
 
-/** THE-320 consumes this idempotent sink while Pi is already active; it never wakes Box itself. */
-export async function appendCompanionTranscriptEntries(input: {
+/**
+ * The one thread a Companion owns, read from PostgreSQL only. Every access level uses this path, so
+ * opening a thread — including a Viewer's read-only thread — never contacts or wakes Box.
+ */
+export async function getCompanionThread(input: {
   actor: ActorContext;
   orgId: string;
   companionId: string;
-  entries: CompanionTranscriptEntry[];
   database?: Db;
-}): Promise<void> {
+}): Promise<CompanionThread> {
   const database = input.database ?? db;
-  await getCompanionForRuntime({ ...input, database });
-  if (!input.entries.length) return;
-  await database
-    .insert(schema.companionTranscriptEntries)
-    .values(input.entries.map((entry) => ({
+  const companion = await getCompanion({ ...input, database });
+  const [row, entries] = await Promise.all([
+    readCompanionThreadRow(database, input.orgId, input.companionId),
+    readCompanionTranscript(database, input.orgId, input.companionId),
+  ]);
+  return toThread({ actor: input.actor, companion, row, entries });
+}
+
+/**
+ * Allocate `count` consecutive transcript ordinals for this Companion's thread, creating the thread
+ * row on first use. The conditional update is the serialization point, so two concurrent sends can
+ * never claim the same ordinal.
+ */
+async function allocateThreadOrdinals(input: {
+  database: Db;
+  orgId: string;
+  companionId: string;
+  count: number;
+  lastMessageAt?: Date;
+}): Promise<number> {
+  const [created] = await input.database
+    .insert(schema.companionThreads)
+    .values({
       orgId: input.orgId,
       companionId: input.companionId,
-      eventId: entry.event_id,
-      ordinal: entry.ordinal,
-      role: entry.role,
-      content: entry.content,
-      createdAt: new Date(entry.created_at),
-    })))
-    .onConflictDoNothing();
+      nextOrdinal: input.count,
+      ...(input.lastMessageAt ? { lastMessageAt: input.lastMessageAt } : {}),
+    })
+    .onConflictDoNothing()
+    .returning({ nextOrdinal: schema.companionThreads.nextOrdinal });
+  if (created) return 0;
+  const [updated] = await input.database
+    .update(schema.companionThreads)
+    .set({
+      nextOrdinal: sql`${schema.companionThreads.nextOrdinal} + ${input.count}`,
+      ...(input.lastMessageAt ? { lastMessageAt: input.lastMessageAt } : {}),
+      updatedAt: new Date(),
+    })
+    .where(and(
+      eq(schema.companionThreads.orgId, input.orgId),
+      eq(schema.companionThreads.companionId, input.companionId),
+    ))
+    .returning({ nextOrdinal: schema.companionThreads.nextOrdinal });
+  if (!updated) throw new CompanionNotFoundError();
+  return updated.nextOrdinal - input.count;
+}
+
+/**
+ * Persist one Owner/Editor message in the control plane. Persistence is deliberately independent of
+ * the harness: the message survives a sleeping Box and is handed to Pi by the delivery path.
+ */
+export async function sendCompanionMessage(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  content: string;
+  database?: Db;
+}): Promise<{ thread: CompanionThread; entry: CompanionTranscriptEntry }> {
+  const database = input.database ?? db;
+  const companion = await getCompanionForRuntime({ ...input, database });
+  const createdAt = new Date();
+  const ordinal = await allocateThreadOrdinals({
+    database,
+    orgId: input.orgId,
+    companionId: input.companionId,
+    count: 1,
+    lastMessageAt: createdAt,
+  });
+  await database.insert(schema.companionTranscriptEntries).values({
+    orgId: input.orgId,
+    companionId: input.companionId,
+    eventId: `msg:${randomUUID()}`,
+    ordinal,
+    role: "user",
+    content: input.content,
+    authorId: input.actor.id,
+    createdAt,
+  });
+  const [row, entries] = await Promise.all([
+    readCompanionThreadRow(database, input.orgId, input.companionId),
+    readCompanionTranscript(database, input.orgId, input.companionId),
+  ]);
+  const thread = toThread({ actor: input.actor, companion, row, entries });
+  const entry = entries.find((item) => item.ordinal === ordinal);
+  if (!entry) throw new Error("failed to persist companion message");
+  return { thread, entry };
+}
+
+/**
+ * Messages Pi has not received yet, oldest first. The caller delivers them in this order and then
+ * records the watermark, so a failed delivery is retried instead of silently dropped.
+ */
+export async function listPendingCompanionMessages(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  database?: Db;
+}): Promise<{ pending: CompanionTranscriptEntry[]; piLogOffset: number }> {
+  const database = input.database ?? db;
+  await getCompanionForRuntime({ ...input, database });
+  const [row, entries] = await Promise.all([
+    readCompanionThreadRow(database, input.orgId, input.companionId),
+    readCompanionTranscript(database, input.orgId, input.companionId),
+  ]);
+  const deliveredOrdinal = row?.deliveredOrdinal ?? null;
+  return {
+    pending: entries.filter((entry) =>
+      entry.role === "user" && (deliveredOrdinal === null || entry.ordinal > deliveredOrdinal)),
+    piLogOffset: row?.piLogOffset ?? 0,
+  };
+}
+
+/**
+ * Append entries projected from the Pi RPC log and advance both watermarks. Pi is authoritative
+ * while it runs; this idempotent sink only mirrors what it already produced and never wakes Box.
+ */
+export async function recordCompanionPiProjection(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  entries: CompanionPiEntry[];
+  piLogOffset?: number;
+  deliveredOrdinal?: number;
+  database?: Db;
+}): Promise<CompanionThread> {
+  const database = input.database ?? db;
+  const companion = await getCompanionForRuntime({ ...input, database });
+  if (input.entries.length) {
+    const ordinal = await allocateThreadOrdinals({
+      database,
+      orgId: input.orgId,
+      companionId: input.companionId,
+      count: input.entries.length,
+      lastMessageAt: input.entries.at(-1)?.createdAt,
+    });
+    await database
+      .insert(schema.companionTranscriptEntries)
+      .values(input.entries.map((entry, index) => ({
+        orgId: input.orgId,
+        companionId: input.companionId,
+        eventId: entry.eventId,
+        ordinal: ordinal + index,
+        role: entry.role,
+        content: entry.content,
+        createdAt: entry.createdAt,
+      })))
+      .onConflictDoNothing();
+  }
+  if (input.piLogOffset !== undefined || input.deliveredOrdinal !== undefined) {
+    await database
+      .insert(schema.companionThreads)
+      .values({ orgId: input.orgId, companionId: input.companionId })
+      .onConflictDoNothing();
+    await database
+      .update(schema.companionThreads)
+      .set({
+        ...(input.piLogOffset !== undefined ? { piLogOffset: input.piLogOffset } : {}),
+        ...(input.deliveredOrdinal !== undefined
+          ? { deliveredOrdinal: sql`greatest(coalesce(${schema.companionThreads.deliveredOrdinal}, -1), ${input.deliveredOrdinal})` }
+          : {}),
+        updatedAt: new Date(),
+      })
+      .where(and(
+        eq(schema.companionThreads.orgId, input.orgId),
+        eq(schema.companionThreads.companionId, input.companionId),
+      ));
+  }
+  const [row, entries] = await Promise.all([
+    readCompanionThreadRow(database, input.orgId, input.companionId),
+    readCompanionTranscript(database, input.orgId, input.companionId),
+  ]);
+  return toThread({ actor: input.actor, companion, row, entries });
 }
 
 function providerName(providerId: string): string {

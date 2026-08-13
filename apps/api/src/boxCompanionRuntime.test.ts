@@ -301,6 +301,64 @@ describe("AsciiBoxCompanionRuntime", () => {
       command === "rm -f \"$HOME/.companion/runtime/state/providers.env\"")).toBe(true);
   });
 
+  it("writes one JSONL prompt into the Pi FIFO without touching Box lifecycle", async () => {
+    const commands: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/commands") && init?.method === "POST") {
+        commands.push(String(body.command));
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await runtime.prompt({
+      boxId: "bx_23456789",
+      message: "Summarize the incident",
+      requestId: "msg:1",
+    });
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("is-active --quiet companion-pi-daemon.service");
+    expect(commands[0]).toContain("state/pi.rpc.in");
+    expect(commands[0]).toContain(
+      '{"id":"msg:1","type":"prompt","message":"Summarize the incident","streamingBehavior":"followUp"}',
+    );
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a prompt as a conflict when the Pi daemon is not running", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      json({ success: false, exitCode: 3, stdout: "", stderr: "inactive" })));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.prompt({
+      boxId: "bx_23456789",
+      message: "Anyone home?",
+      requestId: "msg:2",
+    })).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("reads the Pi event log from the requested offset and reports the offset it used", async () => {
+    let command = "";
+    vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      command = String(body.command);
+      // A rebuilt disk shrank the log, so the Box script restarted from the top.
+      return json({ success: true, exitCode: 0, stdout: "0\n{\"type\":\"agent_settled\"}\n", stderr: "" });
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    const result = await runtime.readEvents({ boxId: "bx_23456789", offset: 4_096 });
+
+    expect(command).toContain("offset=4096");
+    expect(command).toContain("logs/pi.rpc.ndjson");
+    expect(result).toEqual({ chunk: "{\"type\":\"agent_settled\"}\n", offset: 0 });
+  });
+
   it("best-effort archives a newly created Box when its id cannot be persisted", async () => {
     let stopped = false;
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {

@@ -24,11 +24,6 @@ manages sharing or the selected provider. Owner and Editor may chat and use life
 injection, live status, and desktop routes. Viewer is read-only: authorization completes before
 skill storage or a Box adapter is created.
 
-`companion_transcript_entries` is the control-plane read model for the one-thread-per-Companion chat.
-Pi remains authoritative while active; THE-320 appends idempotent Pi events to this projection while
-the Box is already running. `GET /v1/companions/:id/transcript` reads PostgreSQL only, so opening a
-Viewer thread never reads Box disk, starts Pi, or wakes Box.
-
 Runtime starts identify their client surface as `web`, `mobile_web`, or `native_mobile`. Web and
 mobile-web starts resolve the actor's Installed library (personal skills they own plus organization
 skills they installed) and inject only valid current packages. Native-mobile starts always inject
@@ -41,7 +36,9 @@ an empty skill set. This is enforced by the API and again by the Box adapter bef
 | `GET` | `/v1/companions/:id` | Never |
 | `PUT` | `/v1/companions/:id/provider` | Never; owner-only, unconfigured Companions only |
 | `GET/PUT/PATCH/DELETE` | `/v1/companions/:id/shares/...` | Never; owner-only |
-| `GET` | `/v1/companions/:id/transcript` | Never; authorized read-only control-plane projection |
+| `GET` | `/v1/companions/:id/thread` | Never; authorized read-only control-plane projection |
+| `POST` | `/v1/companions/:id/messages` | Owner/editor only; persists first, delivers only to a running Pi |
+| `POST` | `/v1/companions/:id/thread/sync` | Owner/editor only; delivers and projects without resuming Box |
 | `GET` | `/v1/companions/:id/runtime` | Never |
 | `GET` | `/v1/companions/:id/runtime?live=true` | Owner/editor only; observes without resuming |
 | `POST` | `/v1/companions/:id/runtime/start` | Creates or resumes Box, then starts Pi |
@@ -55,6 +52,47 @@ an empty skill set. This is enforced by the API and again by the Box adapter bef
 Desktop responses are secret-bearing and are returned only to the authorized caller. They are never
 stored. The response advertises `automation: "lux"` so THE-323 can attach the Box desktop/Lux UI
 without changing the lifecycle boundary.
+
+## Chat thread
+
+One Companion owns exactly one thread; there are no rooms and no multi-party chats.
+`companion_threads` holds that thread's ordinal counters and delivery watermarks, and
+`companion_transcript_entries` holds its messages. Both are control-plane tables, so the whole
+conversation is readable without Box.
+
+`GET /v1/companions/:id/thread` reads PostgreSQL only. A Viewer opening a thread therefore never
+reads Box disk, starts Pi, or wakes Box, and the payload carries `can_send: false` so the surface
+renders read-only.
+
+A shared thread has several writers, so each user message records its author
+(`companion_transcript_entries.author_id`) and the payload carries the reading member as
+`viewer_id`. Only a reader's own messages render as their own; a teammate's message keeps that
+teammate's name. Pi output carries no author.
+
+`POST /v1/companions/:id/messages` is Owner/Editor only and persists first. Sending never creates or
+resumes a Box: the message becomes durable, and delivery is attempted only when the Box is already
+running and Pi is up. Delivery then hands Pi every still-pending message oldest first, not just the
+new one, so a backlog a sleeping Box missed keeps its order and never skips the watermark. An
+undelivered message stays pending and the response reports `delivery: "pending"`, so a later wake
+still delivers it in order.
+
+`POST /v1/companions/:id/thread/sync` is the single Owner/Editor step that reconciles a live thread.
+It hands pending messages to the running Pi daemon in ordinal order through the owner-only
+`pi.rpc.in` FIFO, reads `pi.rpc.ndjson` from the recorded byte offset, and appends the projected
+entries. Both watermarks (`delivered_ordinal` and `pi_log_offset`) advance inside the same tenant
+transaction, and event ids derive from log byte offsets, so a retried sync is idempotent. When the
+Box is asleep, sync degrades to the same read-model response as the thread read and reports
+`source: "control_plane"`.
+
+The projection deliberately keeps only conversation: Pi assistant text, plus a system note when a
+turn errors or is aborted. Thinking blocks, tool calls, and tool results are dropped, so no Pi tool
+or Skills chrome reaches the thread UI.
+
+Delivery reads the pending list and advances the watermark in separate statements, so two requests
+that overlap can hand Pi the same prompt twice. One client cannot do this: the web surface runs its
+sends and syncs one at a time, skipping a poll that an in-flight request already covers. Two clients
+syncing the same thread in the same instant still can, and V1 accepts that: the transcript stays
+correct because projection is keyed by log byte offset, and the visible cost is a repeated prompt.
 
 ## Box disk layout
 

@@ -4,7 +4,7 @@ import type {
   CompanionProvidersResponse,
   CompanionShareRole,
   CompanionShares,
-  CompanionTranscript,
+  CompanionThread,
   SaveCompanionProviderInput,
 } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
@@ -148,15 +148,58 @@ export async function revokeCompanionMember(
   return result.shares;
 }
 
-export async function getCompanionTranscript(
+export async function getCompanionThread(
   orgId: string,
   companionId: string,
-): Promise<CompanionTranscript> {
-  const result = await apiFetch<{ transcript: CompanionTranscript }>(
-    `/v1/companions/${encodeURIComponent(companionId)}/transcript`,
+): Promise<CompanionThread> {
+  const result = await apiFetch<{ thread: CompanionThread }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/thread`,
     { headers: orgHeaders(orgId) },
   );
-  return result.transcript;
+  return result.thread;
+}
+
+export async function sendCompanionMessage(
+  orgId: string,
+  companionId: string,
+  content: string,
+): Promise<CompanionThread> {
+  const result = await apiFetch<{ thread: CompanionThread }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/messages`,
+    {
+      method: "POST",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify({ content }),
+    },
+  );
+  return result.thread;
+}
+
+/** Hands pending messages to Pi and projects new Pi events; only Owner/Editor may call it. */
+export async function syncCompanionThread(
+  orgId: string,
+  companionId: string,
+): Promise<CompanionThread> {
+  const result = await apiFetch<{ thread: CompanionThread }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/thread/sync`,
+    { method: "POST", headers: orgHeaders(orgId), body: "{}" },
+  );
+  return result.thread;
+}
+
+export async function startCompanionRuntime(
+  orgId: string,
+  companionId: string,
+): Promise<Companion> {
+  const result = await apiFetch<{ companion: Companion }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/runtime/start`,
+    {
+      method: "POST",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify({ client_surface: "web" }),
+    },
+  );
+  return result.companion;
 }
 
 export type { CompanionProvidersResponse };

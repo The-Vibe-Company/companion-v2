@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  companionThreadSchema,
   createCompanionInputSchema,
   inviteCompanionMemberInputSchema,
   saveCompanionProviderInputSchema,
+  sendCompanionMessageInputSchema,
   setCompanionWorkspaceShareInputSchema,
   startCompanionRuntimeInputSchema,
 } from "../src/companions";
@@ -108,6 +110,56 @@ describe("Companion runtime injection contract", () => {
         "MCP environment reference MISSING_TOKEN has no matching mcp_credentials entry",
       ]));
     }
+  });
+});
+
+describe("Companion chat contracts", () => {
+  it("trims one message and rejects empty or oversized content", () => {
+    expect(sendCompanionMessageInputSchema.parse({ content: "  Ship it  " })).toEqual({
+      content: "Ship it",
+    });
+    expect(() => sendCompanionMessageInputSchema.parse({ content: "   " })).toThrow();
+    expect(() => sendCompanionMessageInputSchema.parse({ content: "x".repeat(16_385) })).toThrow();
+    // A thread carries no harness controls, so no client can smuggle tools into a message.
+    expect(() => sendCompanionMessageInputSchema.parse({
+      content: "Ship it",
+      tools: ["bash"],
+    })).toThrow();
+  });
+
+  it("describes one thread per Companion with its run boundary and message authors", () => {
+    const thread = companionThreadSchema.parse({
+      companion_id: "11111111-1111-4111-8111-111111111111",
+      viewer_id: "user-2",
+      access: "viewer",
+      read_only: true,
+      can_send: false,
+      entries: [{
+        event_id: "msg:1",
+        ordinal: 0,
+        role: "user",
+        content: "Hello",
+        author_id: "user-1",
+        author_name: "Owner",
+        created_at: "2026-08-12T12:00:00.000Z",
+      }, {
+        event_id: "pi:0",
+        ordinal: 1,
+        role: "assistant",
+        content: "Hi",
+        author_id: null,
+        author_name: null,
+        created_at: "2026-08-12T12:00:01.000Z",
+      }],
+      pending_count: 0,
+      last_message_at: "2026-08-12T12:00:00.000Z",
+    });
+
+    expect(thread.read_only).toBe(true);
+    expect(thread.can_send).toBe(false);
+    // The reader is not the author, so the surface can attribute the message to the Owner.
+    expect(thread.entries[0]?.author_id).not.toBe(thread.viewer_id);
+    expect(thread.entries[1]?.author_id).toBeNull();
   });
 });
 

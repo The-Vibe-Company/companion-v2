@@ -20,7 +20,10 @@ const coreMocks = vi.hoisted(() => ({
   resolveCompanionProviderAuth: vi.fn(),
   getCompanion: vi.fn(),
   getCompanionForRuntime: vi.fn(),
-  getCompanionTranscript: vi.fn(),
+  getCompanionThread: vi.fn(),
+  sendCompanionMessage: vi.fn(),
+  listPendingCompanionMessages: vi.fn(),
+  recordCompanionPiProjection: vi.fn(),
   listCompanionShares: vi.fn(),
   setCompanionWorkspaceShare: vi.fn(),
   inviteCompanionMember: vi.fn(),
@@ -87,6 +90,44 @@ const companion = {
   updated_at: "2026-08-12T12:00:00.000Z",
 };
 
+const viewerThread = {
+  companion_id: companion.id,
+  viewer_id: "user-2",
+  access: "viewer" as const,
+  read_only: true,
+  can_send: false,
+  entries: [],
+  pending_count: 0,
+  last_message_at: null,
+};
+
+const message = {
+  event_id: "msg:33333333-3333-4333-8333-333333333333",
+  ordinal: 0,
+  role: "user" as const,
+  content: "Summarize the incident",
+  author_id: "user-1",
+  author_name: "User",
+  created_at: companion.created_at,
+};
+
+function boxRuntime(overrides: Record<string, unknown> = {}) {
+  return {
+    start: vi.fn(),
+    stop: vi.fn(),
+    status: vi.fn(),
+    desktop: vi.fn(),
+    prompt: vi.fn(),
+    readEvents: vi.fn(async () => ({ chunk: "", offset: 0 })),
+    ...overrides,
+  };
+}
+
+const runningCompanion = {
+  ...companion,
+  runtime: { ...companion.runtime, state: "running" as const, daemon_state: "running" as const },
+};
+
 describe("Companions API feature gate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -124,11 +165,17 @@ describe("Companions API feature gate", () => {
     });
     coreMocks.getCompanion.mockResolvedValue(companion);
     coreMocks.getCompanionForRuntime.mockResolvedValue(companion);
-    coreMocks.getCompanionTranscript.mockResolvedValue({
-      companion_id: companion.id,
-      access: "viewer",
-      read_only: true,
-      entries: [],
+    coreMocks.getCompanionThread.mockResolvedValue(viewerThread);
+    coreMocks.sendCompanionMessage.mockResolvedValue({
+      thread: { ...viewerThread, access: "owner", read_only: false, can_send: true },
+      entry: message,
+    });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({ pending: [], piLogOffset: 0 });
+    coreMocks.recordCompanionPiProjection.mockResolvedValue({
+      ...viewerThread,
+      access: "owner",
+      read_only: false,
+      can_send: true,
     });
     const shares = {
       companion_id: companion.id,
@@ -223,26 +270,272 @@ describe("Companions API feature gate", () => {
     expect(runtimeFactory).not.toHaveBeenCalled();
   });
 
-  it("serves a viewer transcript from the control plane without creating a Box client", async () => {
+  it("serves a viewer thread from the control plane without creating a Box client", async () => {
     const app = new Hono<{ Variables: ApiVariables }>();
     const runtimeFactory = vi.fn(() => {
       throw new Error("Box client must not be created");
     });
     registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
 
-    const response = await app.request(`/v1/companions/${companion.id}/transcript`);
+    const response = await app.request(`/v1/companions/${companion.id}/thread`);
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
-      transcript: {
-        companion_id: companion.id,
-        access: "viewer",
-        read_only: true,
-        entries: [],
-      },
-    });
-    expect(coreMocks.getCompanionTranscript).toHaveBeenCalledOnce();
+    expect(await response.json()).toEqual({ thread: viewerThread });
+    expect(coreMocks.getCompanionThread).toHaveBeenCalledOnce();
     expect(runtimeFactory).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["send", `/v1/companions/${companion.id}/messages`, JSON.stringify({ content: "Hello" })],
+    ["sync", `/v1/companions/${companion.id}/thread/sync`, "{}"],
+  ])("guards viewer %s before creating or calling the Box client", async (_action, path, body) => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const runtimeFactory = vi.fn(() => {
+      throw new Error("Box client must not be created");
+    });
+    coreMocks.getCompanionForRuntime.mockRejectedValue(
+      new (await import("@companion/core")).CompanionRuntimeForbiddenError(),
+    );
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+
+    expect(response.status).toBe(403);
+    expect(runtimeFactory).not.toHaveBeenCalled();
+    expect(coreMocks.sendCompanionMessage).not.toHaveBeenCalled();
+  });
+
+  it("persists a message for a sleeping Companion without contacting Box", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const runtimeFactory = vi.fn(() => {
+      throw new Error("Box client must not be created");
+    });
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
+    expect(coreMocks.sendCompanionMessage).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: companion.id,
+      content: "Summarize the incident",
+    }));
+    expect(runtimeFactory).not.toHaveBeenCalled();
+  });
+
+  it("hands a message to a running Pi daemon and records the delivery watermark", async () => {
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({ pending: [message], piLogOffset: 0 });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
+    expect(runtime.prompt).toHaveBeenCalledWith({
+      boxId: companion.runtime.box_id,
+      message: message.content,
+      requestId: message.event_id,
+    });
+    expect(coreMocks.recordCompanionPiProjection).toHaveBeenCalledWith(expect.objectContaining({
+      deliveredOrdinal: 0,
+      entries: [],
+    }));
+  });
+
+  it("delivers the backlog a sleeping Box missed before the message that woke the send", async () => {
+    const backlog = { ...message, event_id: "msg:earlier", ordinal: 0, content: "Earlier ask" };
+    const latest = { ...message, event_id: "msg:latest", ordinal: 1, content: "Summarize the incident" };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.sendCompanionMessage.mockResolvedValue({
+      thread: { ...viewerThread, access: "owner", read_only: false, can_send: true },
+      entry: latest,
+    });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [backlog, latest],
+      piLogOffset: 0,
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
+    // Oldest first, so Pi reads the conversation in the order the members wrote it.
+    expect(runtime.prompt.mock.calls.map(([input]) => input.message)).toEqual([
+      "Earlier ask",
+      "Summarize the incident",
+    ]);
+    expect(coreMocks.recordCompanionPiProjection).toHaveBeenCalledWith(expect.objectContaining({
+      deliveredOrdinal: 1,
+    }));
+  });
+
+  it("leaves the newest message pending when Pi accepts only the backlog", async () => {
+    const backlog = { ...message, event_id: "msg:earlier", ordinal: 0, content: "Earlier ask" };
+    const latest = { ...message, event_id: "msg:latest", ordinal: 1, content: "Summarize the incident" };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.sendCompanionMessage.mockResolvedValue({
+      thread: { ...viewerThread, access: "owner", read_only: false, can_send: true },
+      entry: latest,
+    });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [backlog, latest],
+      piLogOffset: 0,
+    });
+    const runtime = boxRuntime({
+      prompt: vi.fn(async (input: { message: string }) => {
+        if (input.message === "Summarize the incident") throw new Error("pi daemon stopped");
+      }),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
+    // The watermark stops at what Pi accepted, so the refused message is retried instead of lost.
+    expect(coreMocks.recordCompanionPiProjection).toHaveBeenCalledWith(expect.objectContaining({
+      deliveredOrdinal: 0,
+    }));
+  });
+
+  it("keeps a message pending when Pi refuses it", async () => {
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({ pending: [message], piLogOffset: 0 });
+    const runtime = boxRuntime({
+      prompt: vi.fn(async () => {
+        throw new Error("pi daemon is not running");
+      }),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
+    expect(coreMocks.recordCompanionPiProjection).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty message before any persistence", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "   " }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(coreMocks.sendCompanionMessage).not.toHaveBeenCalled();
+  });
+
+  it("syncs a running thread by delivering pending messages and projecting Pi events", async () => {
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 512,
+    });
+    const reply = `${JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "Two services timed out." }] },
+    })}\n`;
+    const runtime = boxRuntime({
+      readEvents: vi.fn(async () => ({ chunk: reply, offset: 512 })),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ source: "box" });
+    expect(runtime.prompt).toHaveBeenCalledOnce();
+    expect(runtime.readEvents).toHaveBeenCalledWith({
+      boxId: companion.runtime.box_id,
+      offset: 512,
+    });
+    expect(coreMocks.recordCompanionPiProjection).toHaveBeenCalledWith(expect.objectContaining({
+      deliveredOrdinal: 0,
+      piLogOffset: 512 + Buffer.byteLength(reply, "utf8"),
+      entries: [expect.objectContaining({ role: "assistant", content: "Two services timed out." })],
+    }));
+  });
+
+  it("syncs a sleeping thread from the control plane without contacting Box", async () => {
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({ pending: [message], piLogOffset: 0 });
+    const runtimeFactory = vi.fn(() => {
+      throw new Error("Box client must not be created");
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ source: "control_plane" });
+    expect(runtimeFactory).not.toHaveBeenCalled();
+    expect(coreMocks.recordCompanionPiProjection).not.toHaveBeenCalled();
+  });
+
+  it("does not register chat routes when the flag is off", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+
+    registerCompanionRoutes(app, {});
+
+    expect((await app.request(`/v1/companions/${companion.id}/thread`)).status).toBe(404);
+    const send = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Hello" }),
+    });
+    expect(send.status).toBe(404);
+    const sync = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(sync.status).toBe(404);
+    expect(contextMocks.actorFromContext).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -386,12 +679,7 @@ describe("Companions API feature gate", () => {
         desktopAvailable: true,
       };
     });
-    const runtimeFactory = vi.fn(() => ({
-      start,
-      stop: vi.fn(),
-      status: vi.fn(),
-      desktop: vi.fn(),
-    }));
+    const runtimeFactory = vi.fn(() => boxRuntime({ start }));
     registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
 
     const response = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
@@ -486,12 +774,7 @@ describe("Companions API feature gate", () => {
       };
     });
     const app = new Hono<{ Variables: ApiVariables }>();
-    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, vi.fn(() => ({
-      start,
-      stop: vi.fn(),
-      status: vi.fn(),
-      desktop: vi.fn(),
-    })));
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, vi.fn(() => boxRuntime({ start })));
 
     const response = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
       method: "POST",
@@ -549,7 +832,7 @@ describe("Companions API feature gate", () => {
     coreMocks.listCompanionRuntimeSkillPackages.mockResolvedValue([skillPackage]);
     storageMocks.getSkillArchive.mockResolvedValue(Buffer.from("skill-archive"));
     const starts: Array<Record<string, unknown>> = [];
-    const runtimeFactory = vi.fn(() => ({
+    const runtimeFactory = vi.fn(() => boxRuntime({
       start: vi.fn(async (input) => {
         starts.push(input);
         return {
@@ -559,9 +842,6 @@ describe("Companions API feature gate", () => {
           desktopAvailable: true,
         };
       }),
-      stop: vi.fn(),
-      status: vi.fn(),
-      desktop: vi.fn(),
     }));
     const app = new Hono<{ Variables: ApiVariables }>();
     registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);

@@ -586,122 +586,192 @@
   gap: 6px;
 }
 
-.companions-thread-scrim {
-  position: fixed;
-  inset: 0;
-  z-index: 70;
-  display: flex;
-  justify-content: flex-end;
-  background: var(--color-scrim);
-}
-
-.companions-thread {
-  width: min(var(--drawer-width), 100vw);
-  height: 100%;
+/* One Companion, one thread: the page itself never scrolls, only the conversation does. */
+.companions-main--chat {
+  padding: 0;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
-  background: var(--color-surface);
-  box-shadow: var(--shadow-lg);
 }
 
-.companions-thread > header,
-.companions-thread-notice,
-.companions-thread > footer {
-  flex: none;
-}
-
-.companions-thread > header {
-  min-height: 68px;
-  padding: 14px 16px;
+.chat {
+  flex: 1;
+  min-height: 0;
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
+  flex-direction: column;
+  /* The conversation and the composer share one readable column on wide screens. */
+  --chat-gutter: max(20px, (100% - 900px) / 2);
+}
+
+.chat-head {
+  flex: none;
+  min-height: 62px;
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   border-bottom: 1px solid var(--color-line);
+  background: var(--color-surface);
 }
 
-.companions-thread h2,
-.companions-thread header p {
+.chat-identity {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.chat-identity h1 {
   margin: 0;
-}
-
-.companions-thread h2 {
   color: var(--color-fg);
-  font-size: var(--text-lg);
+  font-size: var(--text-md);
+  line-height: var(--leading-tight);
+  letter-spacing: var(--tracking-tight);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.companions-thread header p {
-  margin-top: 3px;
+.chat-identity p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-head .companions-state {
   color: var(--color-muted);
   font-size: var(--text-xs);
 }
 
-.companions-thread-body {
-  flex: 1;
-  min-height: 0;
-  padding: 16px;
-  overflow-y: auto;
-  display: grid;
-  align-content: start;
-  gap: 12px;
+.chat .companions-error {
+  flex: none;
+  margin: 12px var(--chat-gutter) 0;
 }
 
-.companions-message {
-  max-width: 88%;
+.chat-log {
+  flex: 1;
+  min-height: 0;
+  padding: 20px var(--chat-gutter);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+/* A short conversation rests on the composer instead of floating under the header. Once the log
+   overflows, `auto` resolves to zero, so scrolling back to the first message still works. */
+.chat-log > :first-child {
+  margin-top: auto;
+}
+
+.chat-msg {
+  max-width: min(72ch, 82%);
   display: grid;
   gap: 4px;
 }
 
-.companions-message--user {
-  justify-self: end;
+.chat-msg--user {
+  align-self: flex-end;
+  justify-items: end;
 }
 
-.companions-message strong,
-.companions-message time {
+.chat-msg__who,
+.chat-msg time {
   color: var(--color-muted);
   font-size: var(--text-xs);
   font-weight: 500;
-  text-transform: capitalize;
 }
 
-.companions-message p {
+.chat-msg p {
   margin: 0;
-  padding: 9px 11px;
+  padding: 10px 12px;
   border: 1px solid var(--color-line);
-  border-radius: var(--radius-md);
-  background: var(--color-surface-sunken);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
   color: var(--color-fg);
-  font-size: var(--text-sm);
+  font-size: var(--text-base);
+  line-height: var(--leading-relaxed);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-.companions-message--user p {
-  background: var(--color-accent-tint);
+.chat-msg--user p {
   border-color: var(--color-accent-line);
+  background: var(--color-accent-tint);
 }
 
-.companions-thread-empty {
-  align-self: center;
-  justify-self: center;
-  max-width: 34ch;
-  margin: 0;
+.chat-msg--system p {
+  background: var(--color-surface-sunken);
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+
+.chat-empty {
+  max-width: 38ch;
+  margin: auto;
   color: var(--color-muted);
   font-size: var(--text-sm);
   text-align: center;
 }
 
-.companions-thread-empty strong {
+.chat-empty strong {
   color: var(--color-fg);
 }
 
-.companions-thread-empty p {
-  margin: 4px 0 0;
+.chat-empty p {
+  margin: 5px 0 0;
 }
 
-.companions-thread > footer {
-  padding: 11px 16px;
+.chat-composer {
+  flex: none;
+  padding: 12px var(--chat-gutter) 16px;
   border-top: 1px solid var(--color-line);
+  background: var(--color-surface);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.chat-composer textarea {
+  min-height: 40px;
+  max-height: 180px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--color-canvas);
+  color: var(--color-fg);
+  font: inherit;
+  line-height: var(--leading-normal);
+  resize: vertical;
+  field-sizing: content;
+}
+
+.chat-composer textarea:focus-visible {
+  outline: 2px solid var(--color-accent-ring);
+  outline-offset: 1px;
+}
+
+.chat-composer .cds-btn {
+  height: 40px;
+}
+
+.chat-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+}
+
+.chat-readonly {
+  flex: none;
+  padding: 12px var(--chat-gutter);
+  border-top: 1px solid var(--color-line);
+  background: var(--color-surface);
   color: var(--color-muted);
   font-size: var(--text-xs);
 }
@@ -718,6 +788,10 @@
 @media (max-width: 860px) {
   .companions-main {
     padding: 28px 20px 40px;
+  }
+
+  .companions-main--chat {
+    padding: 0;
   }
 
   /* Status stays next to the name; the timestamp column is the first thing to go. */
@@ -740,6 +814,31 @@
 @media (max-width: 560px) {
   .companions-main {
     padding: 22px 14px 32px;
+  }
+
+  /* Phones keep the chat full-bleed; the composer stays reachable above the log. */
+  .companions-main--chat {
+    padding: 0;
+  }
+
+  .chat {
+    --chat-gutter: 14px;
+  }
+
+  .chat-head {
+    padding: 10px 14px;
+  }
+
+  .chat-log {
+    padding: 14px var(--chat-gutter);
+  }
+
+  .chat-composer {
+    padding: 10px var(--chat-gutter) 14px;
+  }
+
+  .chat-msg {
+    max-width: 92%;
   }
 
   .companions-head {

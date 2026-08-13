@@ -113,6 +113,10 @@ describe("Skills Hub PostgreSQL isolation", () => {
           ${fixture.orgA}, ${companionId}, 'event-1', 0, 'assistant', 'Control-plane message'
         )
       `;
+      await tx`
+        insert into companion_threads (org_id, companion_id, next_ordinal)
+        values (${fixture.orgA}, ${companionId}, 1)
+      `;
     });
 
     const viewerResult = await integrationSql.begin(async (tx) => {
@@ -122,13 +126,23 @@ describe("Skills Hub PostgreSQL isolation", () => {
       const transcript = await tx<Array<{ content: string }>>`
         select content from companion_transcript_entries where companion_id = ${companionId}
       `;
+      const thread = await tx<Array<{ next_ordinal: number }>>`
+        select next_ordinal from companion_threads where companion_id = ${companionId}
+      `;
+      const threadWrite = await tx<Array<{ companion_id: string }>>`
+        update companion_threads set next_ordinal = 9 where companion_id = ${companionId}
+        returning companion_id
+      `;
       const updated = await tx<Array<{ id: string }>>`
         update companions set runtime_state = 'running' where id = ${companionId} returning id
       `;
-      return { visible, transcript, updated };
+      return { visible, transcript, thread, threadWrite, updated };
     });
     expect(viewerResult.visible).toEqual([{ id: companionId }]);
     expect(viewerResult.transcript).toEqual([{ content: "Control-plane message" }]);
+    // A Viewer reads the thread read model but cannot advance the ordinals a send would consume.
+    expect(viewerResult.thread).toEqual([{ next_ordinal: 1 }]);
+    expect(viewerResult.threadWrite).toEqual([]);
     expect(viewerResult.updated).toEqual([]);
 
     await integrationSql.begin(async (tx) => {
@@ -155,6 +169,16 @@ describe("Skills Hub PostgreSQL isolation", () => {
       `;
     });
     expect(editorUpdate).toEqual([{ id: companionId }]);
+
+    const editorThreadWrite = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
+      return tx<Array<{ next_ordinal: number }>>`
+        update companion_threads set next_ordinal = 2 where companion_id = ${companionId}
+        returning next_ordinal
+      `;
+    });
+    expect(editorThreadWrite).toEqual([{ next_ordinal: 2 }]);
 
     const workspaceEditorUpdate = await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${apiRole}`);
@@ -196,9 +220,12 @@ describe("Skills Hub PostgreSQL isolation", () => {
     const outsiderVisible = await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${apiRole}`);
       await tx`select set_config('app.org_id', ${fixture.orgB}, true), set_config('app.user_id', ${fixture.outsider.id}, true)`;
-      return tx<Array<{ id: string }>>`select id from companions`;
+      const companionRows = await tx<Array<{ id: string }>>`select id from companions`;
+      const threadRows = await tx<Array<{ companion_id: string }>>`select companion_id from companion_threads`;
+      return { companionRows, threadRows };
     });
-    expect(outsiderVisible).toEqual([]);
+    expect(outsiderVisible.companionRows).toEqual([]);
+    expect(outsiderVisible.threadRows).toEqual([]);
   });
 
   it("lets admins manage provider ciphertext while members see metadata only within the tenant", async () => {
