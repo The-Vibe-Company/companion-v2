@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthenticationRequiredError, type ApiVariables } from "./context";
+import { BoxRuntimeConfigurationError, BoxRuntimeProviderError } from "./boxCompanionRuntime";
+import { COMPANION_RUNTIME_UNKNOWN_ERROR } from "./companionRuntimeError";
 import { registerCompanionRoutes as registerCompanionRoutesImpl } from "./companionRoutes";
 
 const contextMocks = vi.hoisted(() => ({
@@ -95,6 +97,7 @@ const companion = {
     provider_credential_generation: null,
     disk_layout_version: 1,
     desktop_available: true,
+    last_error: null,
     last_observed_at: null,
     last_started_at: null,
     last_stopped_at: null,
@@ -1004,6 +1007,111 @@ describe("Companions API feature gate", () => {
 
     expect(response.status).toBe(502);
     expect(runtimeFactory).not.toHaveBeenCalled();
+  });
+
+  it("answers a wake with the configuration failure and records it on the Companion", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const runtimeFactory = vi.fn(() => boxRuntime({
+      start: vi.fn(async () => {
+        throw new BoxRuntimeConfigurationError(
+          "Box runtime is not configured; set COMPANION_BOX_API_KEY",
+        );
+      }),
+    }));
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: "Box runtime is not configured; set COMPANION_BOX_API_KEY",
+    });
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenLastCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({
+        runtimeState: "error",
+        daemonState: "error",
+        lastError: "Box runtime is not configured; set COMPANION_BOX_API_KEY",
+      }),
+    }));
+  });
+
+  it("answers a wake with the Box failure and its code", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const runtimeFactory = vi.fn(() => boxRuntime({
+      start: vi.fn(async () => {
+        throw new BoxRuntimeProviderError("Box Pi setup failed: exit 1", 502, "setup_failed");
+      }),
+    }));
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: "Box Pi setup failed: exit 1",
+      code: "setup_failed",
+    });
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenLastCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({ lastError: "Box Pi setup failed: exit 1" }),
+    }));
+  });
+
+  it("records an unrecognized wake failure as a generic line instead of internal text", async () => {
+    coreMocks.listCompanionRuntimeSkillPackages.mockResolvedValue([{
+      slug: "incident-summary",
+      version: "1.2.3",
+      checksum: `sha256:${"a".repeat(64)}`,
+      storagePath: "org-1/incident-summary/1.2.3.tar.gz",
+    }]);
+    storageMocks.getSkillArchive.mockRejectedValueOnce(
+      new Error("connect ECONNREFUSED 10.1.2.3:443 while reading org-1/incident-summary/1.2.3.tar.gz"),
+    );
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, vi.fn(() => boxRuntime()));
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(400);
+    const recorded = coreMocks.updateCompanionRuntime.mock.calls.at(-1)?.[0].patch.lastError;
+    expect(recorded).toBe(COMPANION_RUNTIME_UNKNOWN_ERROR);
+    expect(recorded).not.toContain("ECONNREFUSED");
+  });
+
+  it("answers a failed sync with the Box failure rather than a bare status", async () => {
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const runtimeFactory = vi.fn(() => boxRuntime({
+      readEvents: vi.fn(async () => {
+        throw new BoxRuntimeProviderError("Pi event log could not be read from Box", 502);
+      }),
+    }));
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: "Pi event log could not be read from Box",
+    });
   });
 
   it("returns a transition conflict when desktop is requested before Box creation", async () => {

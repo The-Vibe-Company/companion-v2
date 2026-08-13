@@ -377,6 +377,12 @@ export const companions = pgTable(
     providerCredentialGeneration: uuid("provider_credential_generation"),
     diskLayoutVersion: integer("disk_layout_version").notNull().default(1),
     desktopAvailable: boolean("desktop_available").notNull().default(false),
+    /**
+     * Why the last lifecycle attempt failed, as one sanitized operator line. It exists so a
+     * refreshed `error` state still explains itself; credential material and provider payloads
+     * must never reach it.
+     */
+    lastError: text("last_error"),
     lastObservedAt: timestamp("last_observed_at", { withTimezone: true }),
     lastStartedAt: timestamp("last_started_at", { withTimezone: true }),
     lastStoppedAt: timestamp("last_stopped_at", { withTimezone: true }),
@@ -400,6 +406,10 @@ export const companions = pgTable(
     boxIdShape: check(
       "companions_box_id_check",
       sql`${t.boxId} is null or ${t.boxId} ~ '^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$'`,
+    ),
+    lastErrorLength: check(
+      "companions_last_error_check",
+      sql`${t.lastError} is null or char_length(${t.lastError}) <= 500`,
     ),
   }),
 );

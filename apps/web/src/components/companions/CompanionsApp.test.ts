@@ -57,6 +57,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
       provider_credential_generation: null,
       disk_layout_version: 2,
       desktop_available: false,
+      last_error: null,
       last_observed_at: null,
       last_started_at: null,
       last_stopped_at: null,
@@ -99,6 +100,22 @@ describe("CompanionsApp", () => {
     expect(markup).toContain("Search companions");
     // The Companion Owner keeps sharing; a Viewer row must not offer it.
     expect(markup.match(/>Share</g)).toHaveLength(1);
+  });
+
+  it("carries the recorded reason next to an Error status in the list", () => {
+    const markup = render([
+      companion({
+        runtime: {
+          ...companion().runtime,
+          state: "error",
+          daemon_state: "error",
+          last_error: "Box runtime is not configured; set COMPANION_BOX_API_KEY",
+        },
+      }),
+    ]);
+
+    expect(markup).toContain("Error");
+    expect(markup).toContain('title="Box runtime is not configured; set COMPANION_BOX_API_KEY"');
   });
 
   it("offers creation from the empty state instead of a dead list", () => {

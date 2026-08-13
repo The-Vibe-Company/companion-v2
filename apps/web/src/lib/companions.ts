@@ -187,6 +187,18 @@ export async function syncCompanionThread(
   return result.thread;
 }
 
+/** Control-plane runtime read: never contacts Box, so it is safe after a failed wake. */
+export async function getCompanionRuntime(
+  orgId: string,
+  companionId: string,
+): Promise<Companion> {
+  const result = await apiFetch<{ companion: Companion }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/runtime`,
+    { headers: orgHeaders(orgId) },
+  );
+  return result.companion;
+}
+
 export async function startCompanionRuntime(
   orgId: string,
   companionId: string,

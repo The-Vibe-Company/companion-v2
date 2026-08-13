@@ -9,6 +9,7 @@ import type {
 } from "@companion/contracts";
 import type { OrgVM } from "@/lib/types";
 import {
+  getCompanionRuntime,
   getCompanionThread,
   sendCompanionMessage,
   setCompanionProvider,
@@ -186,6 +187,16 @@ export function CompanionsApp({
     return () => clearInterval(timer);
   }, [canRunOpened, openedAwake, openedId, refreshThread]);
 
+  /** Re-read one Companion from the control plane; a failed read leaves the current row alone. */
+  const refreshCompanion = async (companionId: string) => {
+    try {
+      const latest = await getCompanionRuntime(currentOrg.id, companionId);
+      setCompanions((current) => current.map((item) => item.id === latest.id ? latest : item));
+    } catch {
+      // The failure that prompted this read is already on screen; do not replace it with this one.
+    }
+  };
+
   /** Resolves false when the message never reached the control plane, so the composer keeps its text. */
   const onSend = async (content: string): Promise<boolean> => {
     if (!openedId) return false;
@@ -210,14 +221,18 @@ export function CompanionsApp({
 
   const onWake = async () => {
     if (!opened) return;
+    const companionId = opened.id;
     setWaking(true);
     setThreadError(null);
     try {
-      const updated = await startCompanionRuntime(currentOrg.id, opened.id);
+      const updated = await startCompanionRuntime(currentOrg.id, companionId);
       setCompanions((current) => current.map((item) => item.id === updated.id ? updated : item));
       await refreshThread(true);
     } catch (cause) {
       setThreadError(cause instanceof Error ? cause.message : "This Companion could not be woken.");
+      // A failed start records why on the Companion, so re-read it: the status pill must show Error
+      // rather than the state the wake started from, and the reason must survive a reload.
+      await refreshCompanion(companionId);
     } finally {
       setWaking(false);
     }
@@ -466,7 +481,10 @@ export function CompanionsApp({
                               </span>
                             </span>
                           </button>
-                          <span className={`companions-state companions-state--${status.tone}`}>
+                          <span
+                            className={`companions-state companions-state--${status.tone}`}
+                            title={companion.runtime.last_error ?? undefined}
+                          >
                             <i aria-hidden="true" />
                             {status.label}
                           </span>
