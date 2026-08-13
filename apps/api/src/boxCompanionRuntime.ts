@@ -129,26 +129,53 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\"'\"'")}'`;
 }
 
+/**
+ * Keep one Box command failure readable as a single stored line. The control plane sanitizes and
+ * truncates whatever it records, so the useful part is the last thing the shell complained about
+ * rather than the transcript, which is the difference between "Pi runtime layout failed to install"
+ * and a message that names the failing line.
+ */
+function commandFailureDetail(result: CommandEnvelope): string {
+  const lastLine = (text: string | undefined): string | undefined =>
+    (text ?? "").split(/[\r\n]+/).map((line) => line.trim()).filter(Boolean).at(-1);
+  const output = lastLine(result.stderr) ?? lastLine(result.stdout);
+  const exit = result.exitCode === null ? "" : ` (exit ${result.exitCode})`;
+  return output ? `${exit}: ${output}` : exit;
+}
+
+/** Where the layout script is staged on the Box disk so it runs as a file, never as a command. */
+const PI_LAYOUT_SCRIPT_PATH = ".companion/bin/ensure-pi-layout.sh";
+
 function setupScript(installCommand: string | undefined, mcpAdapterPackage: string): string {
   const install = installCommand?.trim()
     ? installCommand
     : "echo 'Pi is not installed; configure COMPANION_PI_INSTALL_COMMAND or preinstall pi in the Box image' >&2; exit 1";
   return `#!/usr/bin/env bash
 set -euo pipefail
-if ! command -v pi >/dev/null 2>&1; then
-  ${install}
-fi
-command -v pi >/dev/null 2>&1
-mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.config/systemd/user"
+# An already-laid-out disk short-circuits before anything else, so repairing the layout on a Box that
+# is already correct costs one file read and cannot fail on a dependency it does not need.
 layout_marker="$HOME/.companion/runtime/state/pi-layout.version"
 expected_layout=${shellQuote(`${COMPANION_PI_DISK_LAYOUT_VERSION}:${mcpAdapterPackage}`)}
 if [ -f "$layout_marker" ] && [ "$(cat "$layout_marker")" = "$expected_layout" ]; then
   exit 0
 fi
-PI_CODING_AGENT_DIR="$HOME/.companion/pi" pi install ${shellQuote(mcpAdapterPackage)}
-cat > "$HOME/.companion/bin/pi-daemon" <<'COMPANION_PI_DAEMON'
-#!/usr/bin/env bash
-set -euo pipefail
+if ! command -v pi >/dev/null 2>&1; then
+  ${install}
+fi
+command -v pi >/dev/null 2>&1
+mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.config/systemd/user"
+# Resolve Pi's absolute path now so the daemon does not depend on a login-shell PATH it will never
+# have under the minimal systemd user manager environment.
+pi_bin="$(command -v pi)"
+pi_bin_dir="$(dirname "$pi_bin")"
+PI_CODING_AGENT_DIR="$HOME/.companion/pi" "$pi_bin" install ${shellQuote(mcpAdapterPackage)}
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -euo pipefail'
+  printf 'PI_BIN=%q\n' "$pi_bin"
+  printf 'PATH=%q:"$PATH"\n' "$pi_bin_dir"
+  printf '%s\n' 'export PATH'
+  cat <<'COMPANION_PI_DAEMON'
 root="$HOME/.companion/runtime"
 mkdir -p "$root/sessions" "$root/state" "$root/logs"
 export PI_CODING_AGENT_DIR="$HOME/.companion/pi"
@@ -160,16 +187,23 @@ skill_args=(--no-skills)
 if find "$root/skills" -type f -name SKILL.md -print -quit 2>/dev/null | grep -q .; then
   skill_args+=(--skill "$root/skills")
 fi
-exec pi --mode rpc --session-dir "$root/sessions" "\${skill_args[@]}" <&3 >>"$root/logs/pi.rpc.ndjson" 2>>"$root/logs/pi.stderr.log"
+exec "$PI_BIN" --mode rpc --session-dir "$root/sessions" "\${skill_args[@]}" <&3 >>"$root/logs/pi.rpc.ndjson" 2>>"$root/logs/pi.stderr.log"
 COMPANION_PI_DAEMON
+} > "$HOME/.companion/bin/pi-daemon"
 chmod 700 "$HOME/.companion/bin/pi-daemon"
-cat > "$HOME/.config/systemd/user/companion-pi-daemon.service" <<'COMPANION_PI_SERVICE'
+{
+  cat <<'COMPANION_PI_SERVICE_HEAD'
 [Unit]
 Description=Companion Pi daemon
 After=network-online.target
 
 [Service]
 Type=simple
+COMPANION_PI_SERVICE_HEAD
+  # Pin the systemd user unit's PATH to the resolved Pi bin directory so the daemon starts without a
+  # login-shell PATH, matching the absolute path baked into the wrapper above.
+  printf 'Environment=PATH=%s:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n' "$pi_bin_dir"
+  cat <<'COMPANION_PI_SERVICE_TAIL'
 ExecStart=%h/.companion/bin/pi-daemon
 EnvironmentFile=-%h/.companion/runtime/state/providers.env
 Restart=on-failure
@@ -177,7 +211,8 @@ RestartSec=2
 
 [Install]
 WantedBy=default.target
-COMPANION_PI_SERVICE
+COMPANION_PI_SERVICE_TAIL
+} > "$HOME/.config/systemd/user/companion-pi-daemon.service"
 # A Box running its create setupScript has no user D-Bus session yet, so no user-manager command
 # belongs here: it would fail with "Failed to connect to bus" and mark the whole setup failed even
 # though Pi installed correctly. The unit is loaded by the post-ready control-plane command instead.
@@ -466,13 +501,36 @@ systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true`,
     });
   }
 
+  /**
+   * Repair the Pi layout on a Box that already exists.
+   *
+   * The identical script installs Pi correctly as the create `setupScript`, which the provider runs
+   * as a file with its shebang, and fails when it is sent as a command string instead: the payload
+   * carries heredocs, nested single and double quotes, and several kilobytes, none of which survive
+   * the command transport intact. So this stages the script through the file API the same way the
+   * create path gets it, and the command it does send is one short, quote-light line.
+   */
   async #ensurePiLayout(boxId: string): Promise<void> {
-    const result = await this.#command(
+    const prepared = await this.#command(boxId, 'mkdir -p "$HOME/.companion/bin"');
+    if (!prepared.success) {
+      throw new BoxRuntimeProviderError(
+        `Pi runtime layout failed to install${commandFailureDetail(prepared)}`,
+        502,
+      );
+    }
+    await this.#writeFile(
       boxId,
+      PI_LAYOUT_SCRIPT_PATH,
       setupScript(this.#installCommand, this.#mcpAdapterPackage),
-      180,
     );
-    if (!result.success) throw new BoxRuntimeProviderError("Pi runtime layout failed to install", 502);
+    const result = await this.#command(boxId, `bash "$HOME/${PI_LAYOUT_SCRIPT_PATH}"`, 180);
+    if (!result.success) {
+      // The bare message cost a production probe to diagnose, so the failing line travels with it.
+      throw new BoxRuntimeProviderError(
+        `Pi runtime layout failed to install${commandFailureDetail(result)}`,
+        502,
+      );
+    }
   }
 
   async #injectPiResources(input: {
@@ -641,7 +699,10 @@ trap - EXIT`,
     }
     if (!started.success) {
       await this.#removeProviderFile(box.id).catch(() => undefined);
-      throw new BoxRuntimeProviderError("Pi daemon failed to start", 502);
+      throw new BoxRuntimeProviderError(
+        `Pi daemon failed to start${commandFailureDetail(started)}`,
+        502,
+      );
     }
     const daemonState = await this.#daemonState(box.id);
     if (daemonState !== "running") throw new BoxRuntimeProviderError("Pi daemon is not running after start", 502);

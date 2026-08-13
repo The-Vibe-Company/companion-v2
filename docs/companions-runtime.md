@@ -155,6 +155,21 @@ to an on-disk marker keyed by the adapter package. Starts repair older Box snaps
 injection. Runtime transcripts and files do not enter PostgreSQL. A systemd user unit supervises Pi
 while Box is active; the lifecycle API restarts it after a Box resume.
 
+A start repairs the layout of a Box that already exists by running the same script the create path
+uses, and it runs it the same way: the script is staged onto the disk through the file API as
+`~/.companion/bin/ensure-pi-layout.sh`, and the only thing handed to the command API is the short
+`bash "$HOME/.companion/bin/ensure-pi-layout.sh"`. The identical text sent directly as a command
+string does not survive that transport — it carries heredocs, nested single and double quotes, and
+several kilobytes — which is how a Box whose disk was already correct still reported `Pi runtime
+layout failed to install`. Layout failures now record the command's exit code and the last line the
+shell emitted, so the next one names itself instead of costing a production probe.
+
+The script checks the on-disk marker before anything else, so repairing a Box that is already at
+`<layout version>:<adapter package>` costs one file read and cannot fail on a dependency it does not
+need. When a relayout is genuinely required it resolves Pi's absolute path, bakes that path into the
+daemon wrapper, and pins the unit's `Environment=PATH` to Pi's bin directory, because the systemd
+user manager gives the supervised daemon a minimal PATH that a login shell's would never match.
+
 The create `setupScript` installs Pi, writes the daemon wrapper, and writes the systemd user unit,
 and it deliberately runs no user-manager command. A Box executing its create script has no user D-Bus
 session, so `systemctl --user` there fails with `Failed to connect to bus: No medium found` and marks

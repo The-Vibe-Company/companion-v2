@@ -12,6 +12,10 @@ const box = {
 };
 /** Printed by the adapter's staging command when Pi's auth file already exists on the Box disk. */
 const AUTH_PRESENT_MARKER = "companion-provider-auth-present";
+const PROVIDER_FILE_REMOVAL = "rm -f \"$HOME/.companion/runtime/state/providers.env\"";
+/** The layout script is staged on disk and run as a file, so the command itself stays this short. */
+const LAYOUT_SCRIPT_PATH = ".companion/bin/ensure-pi-layout.sh";
+const LAYOUT_RUN_COMMAND = `bash "$HOME/${LAYOUT_SCRIPT_PATH}"`;
 
 function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
@@ -106,7 +110,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         COMPANION_ORG_ID: "22222222-2222-4222-8222-222222222222",
       },
     });
-    expect(String(createBody?.setupScript)).toContain("pi --mode rpc --session-dir");
+    expect(String(createBody?.setupScript)).toContain("exec \"$PI_BIN\" --mode rpc --session-dir");
     expect(String(createBody?.setupScript)).toContain("ExecStart=%h/.companion/bin/pi-daemon");
     expect(String(createBody?.setupScript)).toContain("npm:pi-mcp-adapter@2.12.1");
     expect(String(createBody?.setupScript)).toContain("--no-skills");
@@ -130,6 +134,185 @@ describe("AsciiBoxCompanionRuntime", () => {
       daemonState: "running",
       desktopAvailable: true,
     });
+  });
+
+  it("names the shell's own complaint when the Pi layout command fails", async () => {
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        if (String(body.command).includes(LAYOUT_SCRIPT_PATH)) {
+          return json({
+            success: false,
+            exitCode: 127,
+            stdout: "",
+            stderr: "/home/user/.companion/bin/ensure-pi-layout.sh: line 21: pi: command not found\n",
+          });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    // A bare "Pi runtime layout failed to install" cost a production probe to diagnose; the stored
+    // line now carries the exit code and the last thing the shell said.
+    await expect(runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    })).rejects.toThrow(
+      "Pi runtime layout failed to install (exit 127): "
+      + "/home/user/.companion/bin/ensure-pi-layout.sh: line 21: pi: command not found",
+    );
+  });
+
+  it("stages the layout script as a file and never sends the script body as a command", async () => {
+    const commands: string[] = [];
+    const files = new Map<string, string>();
+    let createdSetupScript = "";
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.includes("/boxes?limit=200") && method === "GET") return json({ boxes: [] });
+      if (url.endsWith("/boxes") && method === "POST") {
+        createdSetupScript = String(body.setupScript);
+        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } }, 202);
+      }
+      if (url.endsWith("/boxes/bx_23456789") && method === "PATCH") return json({ box });
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") {
+        files.set(String(body.path), String(body.content));
+        return json({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        if (command === LAYOUT_RUN_COMMAND) expect(body.timeoutSeconds).toBe(180);
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: command.includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_PI_INSTALL_COMMAND: "npm install --global @earendil-works/pi-coding-agent@1.2.3",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: null,
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    // The script the create path installs as a file is the same text the repair path stages, so a
+    // Box can only ever be laid out by one script.
+    expect(files.get(LAYOUT_SCRIPT_PATH)).toBe(createdSetupScript);
+    expect(commands).toContain('mkdir -p "$HOME/.companion/bin"');
+    expect(commands).toContain(LAYOUT_RUN_COMMAND);
+    // The directory has to exist before the file API can land the script in it.
+    expect(commands.indexOf('mkdir -p "$HOME/.companion/bin"'))
+      .toBeLessThan(commands.indexOf(LAYOUT_RUN_COMMAND));
+    // The create setupScript runs as a file with a shebang and succeeds; the identical text sent as
+    // a command string does not survive the transport, so no command may carry the script body.
+    for (const command of commands) {
+      expect(command).not.toContain("COMPANION_PI_DAEMON");
+      expect(command).not.toContain("COMPANION_PI_SERVICE");
+      expect(command).not.toContain("expected_layout");
+      expect(command).not.toContain("pi-layout.version");
+      expect(command).not.toContain("<<");
+    }
+    // Both commands the repair does send are short, quote-light lines, unlike the staged script.
+    for (const command of commands.filter((sent) => sent.includes(".companion/bin"))) {
+      expect(command.length).toBeLessThan(100);
+    }
+    expect(createdSetupScript.length).toBeGreaterThan(2_500);
+  });
+
+  it("short-circuits an already-laid-out disk before it resolves pi", async () => {
+    let createdSetupScript = "";
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.includes("/boxes?limit=200") && method === "GET") return json({ boxes: [] });
+      if (url.endsWith("/boxes") && method === "POST") {
+        createdSetupScript = String(body.setupScript);
+        return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } }, 202);
+      }
+      if (url.endsWith("/boxes/bx_23456789") && method === "PATCH") return json({ box });
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: command.includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_PI_INSTALL_COMMAND: "npm install --global @earendil-works/pi-coding-agent@1.2.3",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: null,
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    // Repairing a Box that is already correct must not depend on anything the layout already has.
+    const markerIndex = createdSetupScript.indexOf("[ -f \"$layout_marker\" ]");
+    const piResolveIndex = createdSetupScript.indexOf("command -v pi");
+    expect(markerIndex).toBeGreaterThan(-1);
+    expect(piResolveIndex).toBeGreaterThan(-1);
+    expect(markerIndex).toBeLessThan(piResolveIndex);
+    // The supervised daemon gets a minimal PATH from the systemd user manager, so Pi is resolved at
+    // layout time and pinned both in the wrapper and on the unit.
+    expect(createdSetupScript).toContain("pi_bin=\"$(command -v pi)\"");
+    expect(createdSetupScript).toContain("exec \"$PI_BIN\" --mode rpc");
+    expect(createdSetupScript).toContain("Environment=PATH=");
   });
 
   it("keeps systemctl out of the create setupScript and loads the unit once the Box is ready", async () => {
@@ -254,6 +437,7 @@ describe("AsciiBoxCompanionRuntime", () => {
   it("recovers a deterministically named archived Box before restarting Pi", async () => {
     const commands: string[] = [];
     const writtenPaths: string[] = [];
+    const writtenFiles = new Map<string, string>();
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
@@ -282,6 +466,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       }
       if (url.endsWith("/files") && init?.method === "PUT") {
         writtenPaths.push(String(body.path));
+        writtenFiles.set(String(body.path), String(body.content));
         return json({ ok: true });
       }
       if (url.endsWith("/commands") && init?.method === "POST") {
@@ -324,8 +509,10 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(fetchMock.mock.calls.some(([url, init]) =>
       String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
     expect(writtenPaths).not.toContain(".companion/pi/auth.json");
-    expect(commands.some((command) =>
-      command.includes("pi-layout.version") && command.includes("pi-mcp-adapter@2.12.1"))).toBe(true);
+    // The resumed disk is repaired against the current adapter version, from the staged file.
+    expect(writtenFiles.get(LAYOUT_SCRIPT_PATH)).toContain("pi-layout.version");
+    expect(writtenFiles.get(LAYOUT_SCRIPT_PATH)).toContain("pi-mcp-adapter@2.12.1");
+    expect(commands).toContain(LAYOUT_RUN_COMMAND);
   });
 
   it("replaces the assigned Box when its Pi setup failed and rewrites provider auth", async () => {
@@ -649,7 +836,7 @@ describe("AsciiBoxCompanionRuntime", () => {
 
     expect(retired).toHaveLength(1);
     expect(created).toHaveLength(1);
-    expect(created[0]).toContain("pi --mode rpc --session-dir");
+    expect(created[0]).toContain("exec \"$PI_BIN\" --mode rpc --session-dir");
     expect(String(created[0])).not.toContain("bx_broken00");
     expect(result.boxId).toBe("bx_23456789");
     expect(result.runtimeState).toBe("running");
@@ -868,7 +1055,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     })).rejects.toThrow("command transport failed");
 
     expect(commands.some((command) =>
-      command === "rm -f \"$HOME/.companion/runtime/state/providers.env\"")).toBe(true);
+      command === PROVIDER_FILE_REMOVAL)).toBe(true);
   });
 
   it("best-effort removes the provider file when skill preparation transport fails", async () => {
@@ -911,7 +1098,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     })).rejects.toThrow("prepare transport failed");
 
     expect(commands.some((command) =>
-      command === "rm -f \"$HOME/.companion/runtime/state/providers.env\"")).toBe(true);
+      command === PROVIDER_FILE_REMOVAL)).toBe(true);
   });
 
   it("writes one JSONL prompt into the Pi FIFO without touching Box lifecycle", async () => {
