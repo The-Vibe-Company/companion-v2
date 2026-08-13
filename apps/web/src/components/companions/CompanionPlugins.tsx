@@ -38,6 +38,18 @@ function AddMcpDialog({
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (busy) return;
+    const nextProvider = provider.trim().toLocaleLowerCase("en-US");
+    const nextLabel = label.trim();
+    const nextEndpoint = endpoint.trim();
+    // Keep client checks aligned with the HTML pattern and fail closed before Connecting...
+    if (!/^[a-z][a-z0-9-]*$/.test(nextProvider)) {
+      setError("Provider must be lowercase letters, digits, or hyphens, and start with a letter.");
+      return;
+    }
+    if (!nextLabel || !nextEndpoint) {
+      setError("Provider, account label, and endpoint are required.");
+      return;
+    }
     setBusy(true);
     setError(null);
     const credential = credentialValue.trim()
@@ -48,18 +60,18 @@ function AddMcpDialog({
       : {};
     const input: SaveCompanionPluginInput = transport === "http"
       ? {
-          provider: provider.trim().toLocaleLowerCase("en-US"),
-          label: label.trim(),
+          provider: nextProvider,
+          label: nextLabel,
           transport,
-          url: endpoint.trim(),
+          url: nextEndpoint,
           args: [],
           ...credential,
         }
       : {
-          provider: provider.trim().toLocaleLowerCase("en-US"),
-          label: label.trim(),
+          provider: nextProvider,
+          label: nextLabel,
           transport,
-          command: endpoint.trim(),
+          command: nextEndpoint,
           args: args.trim() ? args.trim().split(/\s+/) : [],
           ...credential,
         };
@@ -101,18 +113,27 @@ function AddMcpDialog({
       )}
     >
       {error && <div className="companions-error" role="alert">{error}</div>}
-      <form id="companion-plugin-create" className="companions-plugin-form" onSubmit={submit}>
+      <form
+        id="companion-plugin-create"
+        className="companions-plugin-form"
+        noValidate
+        onSubmit={(event) => void submit(event)}
+      >
         <div className="companions-plugin-form__pair">
           <label>
             Provider
             <input
               autoFocus
               required
-              pattern="[a-z][a-z0-9-]*"
+              // Chrome compiles HTML pattern with the Unicode sets (`v`) flag, where a literal
+              // hyphen inside a character class must be escaped or the attribute is ignored and
+              // the console reports an uncaught invalid regular expression.
+              pattern={"[a-z][a-z0-9\\-]*"}
               maxLength={63}
               value={provider}
               onChange={(event) => setProvider(event.target.value)}
               placeholder="linear"
+              title="Lowercase letters, digits, and hyphens; must start with a letter"
             />
           </label>
           <label>
