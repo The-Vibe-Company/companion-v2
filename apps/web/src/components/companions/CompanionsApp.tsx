@@ -290,21 +290,34 @@ export function CompanionsApp({
    * Computer use for a runner: one handoff to the Box desktop Lux drives. The Box must already be
    * running, so this never creates or resumes one, and the returned URL opens in its own tab instead
    * of being stored anywhere.
+   *
+   * A browser only honours a new tab that the click itself asked for, so the tab is claimed blank
+   * before the handoff request and pointed at the desktop once the URL arrives; anything else leaves
+   * the tab closed and the reason on the thread. `noopener` cannot be passed as a window feature
+   * without losing the handle, so the blank tab disowns this one instead.
    */
   const onDesktop = async () => {
     if (!opened || !canRunOpened || !openedAwake) return;
+    const tab = window.open("", "_blank");
+    if (tab) tab.opener = null;
     setOpeningDesktop(true);
     setThreadError(null);
     try {
       const desktop = await openCompanionDesktop(currentOrg.id, opened.id);
-      if (desktop.desktop_url) {
-        window.open(desktop.desktop_url, "_blank", "noopener,noreferrer");
+      if (desktop.desktop_url && tab) {
+        tab.location.replace(desktop.desktop_url);
         return;
       }
-      setThreadError(desktop.provisioning
-        ? "The Box desktop is still starting. Try again in a moment."
-        : "This Box has no desktop to open yet.");
+      tab?.close();
+      if (!desktop.desktop_url) {
+        setThreadError(desktop.provisioning
+          ? "The Box desktop is still starting. Try again in a moment."
+          : "This Box has no desktop to open yet.");
+        return;
+      }
+      setThreadError("This browser blocked the Box desktop tab. Allow pop-ups here, then try again.");
     } catch (cause) {
+      tab?.close();
       setThreadError(cause instanceof Error ? cause.message : "The Box desktop could not be opened.");
     } finally {
       setOpeningDesktop(false);

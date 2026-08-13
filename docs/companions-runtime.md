@@ -69,7 +69,10 @@ and nothing else; no second computer-use surface may be added beside it.
 The web chat header carries that boundary as one chip. It reads `Box · online`, `Box · starting`,
 `Box · asleep`, or `Box · error` from the same runtime state the list and sidebar show, and for an
 Owner or Editor whose Box is already running the chip itself requests the desktop and opens the
-returned URL in a new tab. The URL is used once and never stored by the browser surface either. A
+returned URL in a new tab. Because a browser only honours a tab the click itself asked for, the click
+claims a blank tab before the request and points it at the URL when it answers; a still-provisioning
+Box, a blocked tab, or a failed request closes that tab and states why on the thread without ever
+naming the secret-bearing URL. The URL is used once and never stored by the browser surface either. A
 Companion that is asleep offers Wake instead, because a desktop request cannot resume a Box, and a
 Viewer reads the chip as text: their thread polls only the control-plane projection, while a runner's
 open thread refreshes `GET /v1/companions/:id/runtime?live=true` on a slow interval, so a stale chip
