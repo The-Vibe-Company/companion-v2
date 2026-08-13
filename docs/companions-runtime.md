@@ -207,7 +207,12 @@ A successful `systemctl --user restart` only means systemd accepted the job. The
 that is crash-looping both answer `activating` for the first seconds, and reading a single `is-active`
 probe as the verdict turned healthy starts into `Pi daemon is not running after start` wakes. A start
 therefore polls `is-active` for up to `COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS` (20s by default) at the
-Box poll interval and returns running on the first probe that observes `active`. A daemon that never
+Box poll interval and returns running on the first probe that observes `active`. Between restart
+attempts the unit reports `failed` rather than `activating`, so the poll runs to its deadline instead
+of ending on the first answer that is not `active`. The window also outlasts systemd's own
+`StartLimitBurst`, which gives up after five `RestartSec=2` attempts: a daemon that is genuinely
+crash-looping reaches its terminal `failed` state inside the window, so the wake reports that verdict
+rather than a start still in flight. A daemon that never
 gets there fails the wake with what the Box actually reported: the unit's `is-active` word, its
 `Active:` line from `systemctl --user status`, and the last non-empty line of
 `~/.companion/runtime/logs/pi.stderr.log`, gathered by one command that reads neither the provider

@@ -768,6 +768,65 @@ describe("AsciiBoxCompanionRuntime", () => {
       String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
   });
 
+  it("rides out the crash-restarts a failing Pi recovers from instead of latching their failure", async () => {
+    // Replays a wake that reported the daemon down in production: Pi exited 1 twice and systemd's
+    // own `Restart=on-failure` brought it up healthy on the third try, so the unit answers
+    // `failed` between attempts. A wait that stopped at the first non-running answer would call
+    // that recovered daemon dead.
+    const journal = ["activating", "failed", "activating", "active"];
+    const probes: string[] = [];
+    const restarts: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        if (command.includes("systemctl --user restart")) restarts.push(command);
+        if (command.includes("is-active") && !command.includes("companion_label")) {
+          probes.push(command);
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: `${journal[Math.min(probes.length - 1, journal.length - 1)]}\n`,
+            stderr: "",
+          });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS: "5000",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(result).toMatchObject({ runtimeState: "running", daemonState: "running" });
+    // The wait has to outlast the `failed` answer rather than stop on it.
+    expect(probes.length).toBe(journal.length);
+    // Only the wake's own restart is issued: re-restarting on a later probe would knock the
+    // recovered daemon back into the same crash window.
+    expect(restarts).toHaveLength(1);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/stop"))).toBe(false);
+  });
+
   it("names the unit status and Pi's own stderr when the daemon never becomes active", async () => {
     const commands: string[] = [];
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
