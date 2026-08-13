@@ -851,6 +851,70 @@ describe("AsciiBoxCompanionRuntime", () => {
       String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
   });
 
+  it("keeps every daemon failure fragment inside the line the Companion row stores", async () => {
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        if (command.includes("companion_label")) {
+          // A unit whose every line runs long: systemd status lines carry timestamps and full
+          // ExecStart paths, and a Pi stack line is longer still.
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: [
+              `companion-pi-state ${"deactivating-and-then-some".repeat(4)}`,
+              `companion-pi-status Active: ${"failed (Result: exit-code) since ".repeat(6)}`,
+              `companion-pi-stderr pi: error: ${"could not open the session directory ".repeat(6)}`,
+              "",
+            ].join("\n"),
+            stderr: "",
+          });
+        }
+        if (command.includes("is-active")) {
+          return json({ success: true, exitCode: 0, stdout: "activating\n", stderr: "" });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS: "20",
+    });
+
+    const error = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    }).then(
+      (): never => {
+        throw new Error("start returned running for a daemon that never became active");
+      },
+      (thrown: unknown) => thrown as Error,
+    );
+
+    // The three fragments share one stored line, so a long status must not cost the stderr line:
+    // the sanitizer has to pass the whole message through rather than truncate its tail away.
+    expect(companionRuntimeErrorMessage(error)).toBe(error.message);
+    expect(error.message).toContain("is-active: deactivating");
+    expect(error.message).toContain("Active: failed (Result: exit-code)");
+    expect(error.message).toContain("pi.stderr.log: pi: error: could not open");
+  });
+
   it("keeps the generic daemon failure when the Box cannot answer the diagnostic", async () => {
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
