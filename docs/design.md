@@ -72,7 +72,8 @@ The API exposes auth, organizations, skills, labels, dependencies, comments, fil
 metadata, ACL, chat thread, provider, and Box/Pi lifecycle endpoints. An optional
 `COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS` exact-domain allowlist gates every registered endpoint
 after authentication and before tenant resolution; missing or malformed emails fail closed. An
-unset or empty allowlist preserves access for every authenticated user while the master flag is on.
+unset or empty allowlist preserves access for every authenticated user with a valid email while the
+master flag is on.
 List, detail, ACL,
 thread, provider metadata, and default status reads use PostgreSQL only. A Companion Owner can
 grant Editor or Viewer access to the workspace or individual current members; an individual grant

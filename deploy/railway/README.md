@@ -186,8 +186,8 @@ runtime secrets it needs:
 - `COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS` — optional comma-separated, case-insensitive exact
   domains. When set, only authenticated users with a matching email domain can see the web surface or
   use Companion API routes. Missing or malformed user emails are denied. When unset or empty, the
-  current behavior is preserved: every authenticated workspace user can use Companions while the
-  master flag is `true`.
+  current behavior is preserved for authenticated workspace users with valid emails while the master
+  flag is `true`.
 - `COMPANION_BOX_API_KEY` — required for Box lifecycle calls (start/stop/status).
 - `COMPANION_SECRETS_MASTER_KEY` — the base64 32-byte Skills master key also envelope-encrypts
   companion provider subscription credentials; it is already required by Secrets in production.
