@@ -1,5 +1,6 @@
 import type {
   Companion,
+  CompanionDesktop,
   CompanionPluginAccount,
   CompanionPluginsResponse,
   CompanionProviderConnection,
@@ -211,13 +212,18 @@ export async function syncCompanionThread(
   return result.thread;
 }
 
-/** Control-plane runtime read: never contacts Box, so it is safe after a failed wake. */
+/**
+ * Runtime read. The default is the control-plane projection, so it is safe after a failed wake and
+ * for a Viewer. `live` observes the Box an Owner or Editor already runs; it never resumes one, so a
+ * status read cannot become a wake.
+ */
 export async function getCompanionRuntime(
   orgId: string,
   companionId: string,
+  options: { live?: boolean } = {},
 ): Promise<Companion> {
   const result = await apiFetch<{ companion: Companion }>(
-    `/v1/companions/${encodeURIComponent(companionId)}/runtime`,
+    `/v1/companions/${encodeURIComponent(companionId)}/runtime${options.live ? "?live=true" : ""}`,
     { headers: orgHeaders(orgId) },
   );
   return result.companion;
@@ -236,6 +242,21 @@ export async function startCompanionRuntime(
     },
   );
   return result.companion;
+}
+
+/**
+ * Owner/Editor computer use: one handoff to the Box desktop Lux drives. The request observes a Box
+ * that is already running and never resumes one, and the returned URL is used immediately instead of
+ * being kept anywhere.
+ */
+export async function openCompanionDesktop(
+  orgId: string,
+  companionId: string,
+): Promise<CompanionDesktop> {
+  return apiFetch<CompanionDesktop>(
+    `/v1/companions/${encodeURIComponent(companionId)}/runtime/desktop`,
+    { method: "POST", headers: orgHeaders(orgId), body: "{}" },
+  );
 }
 
 export type { CompanionProvidersResponse };

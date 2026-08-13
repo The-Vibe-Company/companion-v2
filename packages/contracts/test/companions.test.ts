@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  companionDesktopSchema,
   companionThreadSchema,
   createCompanionInputSchema,
   inviteCompanionMemberInputSchema,
@@ -195,6 +196,34 @@ describe("Companion chat contracts", () => {
     // The reader is not the author, so the surface can attribute the message to the Owner.
     expect(thread.entries[0]?.author_id).not.toBe(thread.viewer_id);
     expect(thread.entries[1]?.author_id).toBeNull();
+  });
+});
+
+describe("Companion desktop contract", () => {
+  it("names Lux as the only computer-use surface and allows a provisioning desktop", () => {
+    expect(companionDesktopSchema.parse({
+      desktop_url: "https://ascii.dev/desktop/bx_23456789",
+      provisioning: false,
+      automation: "lux",
+    })).toMatchObject({ automation: "lux" });
+    expect(companionDesktopSchema.parse({
+      desktop_url: null,
+      provisioning: true,
+      automation: "lux",
+    }).desktop_url).toBeNull();
+    // A second computer-use surface cannot be introduced through this payload.
+    expect(() => companionDesktopSchema.parse({
+      desktop_url: "https://ascii.dev/desktop/bx_23456789",
+      provisioning: false,
+      automation: "vnc",
+    })).toThrow();
+    // Nothing else travels with a secret-bearing URL.
+    expect(() => companionDesktopSchema.parse({
+      desktop_url: "https://ascii.dev/desktop/bx_23456789",
+      provisioning: false,
+      automation: "lux",
+      box_token: "must-not-enter-the-contract",
+    })).toThrow();
   });
 });
 

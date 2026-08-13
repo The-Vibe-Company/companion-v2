@@ -57,6 +57,7 @@ import {
 } from "@companion/contracts";
 import type {
   Companion,
+  CompanionDesktop,
   CompanionThread,
   CompanionTranscriptEntry,
 } from "@companion/contracts";
@@ -775,11 +776,14 @@ export function registerCompanionRoutes(
         throw new CompanionRuntimeTransitionError("companion has no Box");
       }
       const desktop = await runtimeFactory().desktop({ boxId: companion.runtime.box_id });
-      return c.json({
+      // Computer use is the Box desktop Lux drives. The URL is secret-bearing, so it reaches this
+      // authorized caller and is never stored, logged, or projected onto the Companion row.
+      const payload: CompanionDesktop = {
         desktop_url: desktop.url,
         provisioning: desktop.provisioning,
-        automation: "lux" as const,
-      });
+        automation: "lux",
+      };
+      return c.json(payload);
     } catch (error) {
       return jsonError(c, error, errorStatus(error));
     }

@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.44.0");
+    expect(pkg.version).toBe("1.45.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -126,10 +126,14 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("member-private labeled MCP account metadata");
+    expect(changelog).toContain("Box desktop handoff");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
+    const pluginAccountChanges = manifest.metadata?.changelog
+      ?.find((entry) => entry.version === "1.44.0")
+      ?.changes?.join("\n") ?? "";
+    expect(pluginAccountChanges).toContain("member-private labeled MCP account metadata");
     const runtimeErrorChanges = manifest.metadata?.changelog
       ?.find((entry) => entry.version === "1.43.0")
       ?.changes?.join("\n") ?? "";
