@@ -67,12 +67,15 @@ describe("Companions page access gate", () => {
     expect(authMocks.loadServerAuth).not.toHaveBeenCalled();
   });
 
-  it("returns not found before workspace loading for a non-allowlisted user", async () => {
+  it.each([
+    ["a non-allowlisted user", "user@example.com"],
+    ["a user with no email", undefined],
+  ])("returns not found before workspace loading for %s", async (_case, email) => {
     process.env.COMPANION_COMPANIONS_ENABLED = "true";
     process.env.COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS = "thevibecompany.co";
     authMocks.loadServerAuth.mockResolvedValue({
       status: "authenticated",
-      user: { email: "user@example.com" },
+      user: { email },
     });
 
     await expect(CompanionsPage({ searchParams: Promise.resolve({}) })).rejects.toThrow(
