@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthenticationRequiredError, type ApiVariables } from "./context";
-import { registerCompanionRoutes } from "./companionRoutes";
+import { registerCompanionRoutes as registerCompanionRoutesImpl } from "./companionRoutes";
 
 const contextMocks = vi.hoisted(() => ({
   actorFromContext: vi.fn(),
@@ -44,6 +44,19 @@ const skillsMocks = vi.hoisted(() => ({
   skillChecksum: vi.fn(),
   toTar: vi.fn((archive) => archive),
 }));
+
+function registerCompanionRoutes(
+  ...[app, env, runtimeFactory]: Parameters<typeof registerCompanionRoutesImpl>
+): void {
+  registerCompanionRoutesImpl(
+    app,
+    {
+      COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "example.test",
+      ...env,
+    },
+    runtimeFactory,
+  );
+}
 
 vi.mock("./context", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./context")>()),
@@ -211,6 +224,16 @@ describe("Companions API feature gate", () => {
     expect(contextMocks.actorFromContext).not.toHaveBeenCalled();
   });
 
+  it("does not register routes when the master flag is on without an allowlist", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+
+    registerCompanionRoutesImpl(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    expect((await app.request("/v1/companions")).status).toBe(404);
+    expect((await app.request("/v1/companion-providers")).status).toBe(404);
+    expect(contextMocks.actorFromContext).not.toHaveBeenCalled();
+  });
+
   it("registers an authenticated empty list when the flag is on", async () => {
     const app = new Hono<{ Variables: ApiVariables }>();
 
@@ -222,6 +245,47 @@ describe("Companions API feature gate", () => {
     expect(contextMocks.actorFromContext).toHaveBeenCalledOnce();
     expect(contextMocks.orgIdFromContext).toHaveBeenCalledOnce();
     expect(coreMocks.listCompanions).toHaveBeenCalledOnce();
+  });
+
+  it("allows an authenticated user whose email domain is allowlisted", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    contextMocks.actorFromContext.mockReturnValueOnce({
+      id: "user-1",
+      email: "User@TheVibeCompany.Co",
+      name: "User",
+    });
+    registerCompanionRoutes(app, {
+      COMPANION_COMPANIONS_ENABLED: "true",
+      COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "other.example, thevibecompany.co",
+    });
+
+    const response = await app.request("/v1/companions");
+
+    expect(response.status).toBe(200);
+    expect(contextMocks.orgIdFromContext).toHaveBeenCalledOnce();
+    expect(coreMocks.listCompanions).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["a non-allowlisted domain", "user@example.test"],
+    ["a missing email", undefined],
+  ])("returns 403 before tenant resolution for %s", async (_case, email) => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    contextMocks.actorFromContext.mockReturnValueOnce({
+      id: "user-1",
+      email,
+      name: "User",
+    });
+    registerCompanionRoutes(app, {
+      COMPANION_COMPANIONS_ENABLED: "true",
+      COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "thevibecompany.co",
+    });
+
+    const response = await app.request("/v1/companions");
+
+    expect(response.status).toBe(403);
+    expect(contextMocks.orgIdFromContext).not.toHaveBeenCalled();
+    expect(coreMocks.listCompanions).not.toHaveBeenCalled();
   });
 
   it("returns 401 before tenant resolution when no session exists", async () => {

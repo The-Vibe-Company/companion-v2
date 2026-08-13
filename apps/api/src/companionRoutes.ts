@@ -10,6 +10,7 @@ import {
   CompanionShareTargetError,
   claimCompanionRuntimeStart,
   claimCompanionRuntimeStop,
+  companionsAvailableToUser,
   companionsEnabled,
   createCompanion,
   deleteCompanionProvider,
@@ -75,8 +76,16 @@ const companionIdSchema = z.string().uuid();
 
 type RuntimeFactory = () => CompanionBoxRuntime;
 
+class CompanionAccessForbiddenError extends Error {
+  constructor() {
+    super("Companions access is not available for this user");
+    this.name = "CompanionAccessForbiddenError";
+  }
+}
+
 function errorStatus(error: unknown): number {
   if (error instanceof AuthenticationRequiredError) return 401;
+  if (error instanceof CompanionAccessForbiddenError) return 403;
   if (error instanceof CompanionNotFoundError) return 404;
   if (error instanceof CompanionRuntimeForbiddenError) return 403;
   if (error instanceof CompanionProviderForbiddenError) return 403;
@@ -183,6 +192,9 @@ export function registerCompanionRoutes(
     }) => Promise<T>,
   ): Promise<T> {
     const actor = actorFromContext(c);
+    if (!companionsAvailableToUser(actor.email, env)) {
+      throw new CompanionAccessForbiddenError();
+    }
     const orgId = await orgIdFromContext(c);
     return withTenantContext({ orgId, userId: actor.id }, (database) =>
       fn({ actor, orgId, database }));

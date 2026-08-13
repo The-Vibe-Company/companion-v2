@@ -69,7 +69,12 @@ An authenticated Agent Auth identity may issue a short-lived child PAT only thro
 The API exposes auth, organizations, skills, labels, dependencies, comments, files/versions, installs, public releases, GitHub, secrets, Skill Databases, billing, tokens, onboarding, and skill-facing Agent Auth. Historical Project, skill-run, prompt, attachment/artifact, and model-provider endpoints remain unregistered.
 
 `COMPANION_COMPANIONS_ENABLED=true` additionally registers authenticated, tenant-scoped Companion
-metadata, ACL, chat thread, provider, and Box/Pi lifecycle endpoints. List, detail, ACL,
+metadata, ACL, chat thread, provider, and Box/Pi lifecycle endpoints. A required
+`COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS` exact-domain allowlist is also required before routes
+are registered. An unset or empty allowlist keeps Companions disabled even when the master flag is
+true. Once enabled, the allowlist gates every endpoint after authentication and before tenant
+resolution; missing or malformed emails fail closed.
+List, detail, ACL,
 thread, provider metadata, and default status reads use PostgreSQL only. A Companion Owner can
 grant Editor or Viewer access to the workspace or individual current members; an individual grant
 overrides the workspace default. Live status, start/stop, plugin injection, and desktop require
@@ -92,7 +97,7 @@ the durable JSON contains environment references only, while their values use th
 `mcp_credentials` channel and never persist in the control plane. Viewer authorization completes
 before skill storage or Box is contacted.
 
-The web has no `/projects` route and no Run/Session state in the Skills URL grammar. Old query parameters are ignored and canonical navigation returns to the Skills detail. By default the only product workspace navigation is Skills. The same `COMPANION_COMPANIONS_ENABLED` server-side flag exposes an authenticated `/companions` list/create shell, the 1:1 chat thread it opens into, plus the Skills | Companions sidebar mode segment that reaches it; with the flag off neither the route nor the segment exists. Opening a Companion replaces the list with its thread and deep-links through a `companion` search parameter. The thread shows only the conversation and, for a runner whose Box is asleep, one Wake control; Pi tools, Skills, and desktop chrome stay out of it, and a Viewer gets the transcript with no composer. A Companion carries an optional persona of at most 280 characters, stored as one descriptive line and never as a system prompt. Creation asks for the name, that persona, and one compact picker over connected Claude, Codex, and z.ai providers defaulting to the workspace default. Native mobile clients get the Companion list and its thread only; Skills management stays on web and mobile web. Pi/Box controls, provider catalogs, and desktop chrome remain invisible.
+The web has no `/projects` route and no Run/Session state in the Skills URL grammar. Old query parameters are ignored and canonical navigation returns to the Skills detail. By default the only product workspace navigation is Skills. The `COMPANION_COMPANIONS_ENABLED` server-side flag plus a non-empty email-domain allowlist expose an authenticated `/companions` list/create shell, the 1:1 chat thread it opens into, plus the Skills | Companions sidebar mode segment that reaches it; without either setting neither the route nor the segment exists. The route and segment are also absent for authenticated users without a matching email. Opening a Companion replaces the list with its thread and deep-links through a `companion` search parameter. The thread shows only the conversation and, for a runner whose Box is asleep, one Wake control; Pi tools, Skills, and desktop chrome stay out of it, and a Viewer gets the transcript with no composer. A Companion carries an optional persona of at most 280 characters, stored as one descriptive line and never as a system prompt. Creation asks for the name, that persona, and one compact picker over connected Claude, Codex, and z.ai providers defaulting to the workspace default. Native mobile clients get the Companion list and its thread only; Skills management stays on web and mobile web. Pi/Box controls, provider catalogs, and desktop chrome remain invisible.
 
 Pi sessions, RPC events, and logs live only under `~/.companion/runtime` on snapshotted Box disk.
 PostgreSQL stores Box id and last-observed lifecycle metadata so list/open never wakes Box. Desktop

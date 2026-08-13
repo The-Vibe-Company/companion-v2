@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import type { LabelsResponse, LocalSkillRow, OrgSettingsResponse, SecretRow, SkillListRow } from "@companion/contracts";
-import { companionsEnabled } from "@companion/core";
+import { companionsAvailableToUser } from "@companion/core";
 import { loadOrgContext } from "@/lib/currentOrg";
 import { serverApiFetch } from "@/lib/apiServer";
 import { AuthUnavailable, WorkspaceLoadError } from "@/components/org/WorkspaceLoadError";
@@ -66,7 +66,7 @@ export default async function SecretsPage({ searchParams }: { searchParams: Prom
       orgs={orgs}
       currentOrg={current}
       initialCreateKey={initialCreateKey}
-      companionsEnabled={companionsEnabled()}
+      companionsEnabled={companionsAvailableToUser(whoami.email)}
       navigation={{
         mineTreeRows: deriveTreeRows(mineSkills.filter((skill) => skill.source === "authored"), personalLabels.flat),
         orgTreeRows: deriveTreeRows(orgSkills, orgLabels.flat),

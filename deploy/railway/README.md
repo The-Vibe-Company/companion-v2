@@ -178,11 +178,16 @@ The worker needs no Vercel, OpenCode, model-provider, golden snapshot, or runtim
 `COMPANION_COMPANIONS_ENABLED` gates the Companions control plane on both web and API. It defaults to
 `false` when unset, so a fresh Railway deployment boots with Companions disabled and none of the
 Box/Pi/provider variables are required — leave the flag unset to keep it off. The API registers no
-Companion routes and the web shell hides the Companions surface until the flag is `true`.
+Companion routes and the web shell hides the Companions surface until the flag is `true` and a
+non-empty allowlist is configured.
 
-Set the flag to `true` on both `web` and `api` only when you intend to run Companions, and provide the
-runtime secrets it needs:
+Set the flag and allowlist on both `web` and `api` only when you intend to run Companions, and
+provide the runtime secrets it needs:
 
+- `COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS` — required comma-separated, case-insensitive exact
+  domains. Only authenticated users with a matching email domain can see the web surface or use
+  Companion API routes. Missing or malformed user emails are denied. When unset or empty, Companions
+  stays disabled and the API registers no Companion routes even if the master flag is `true`.
 - `COMPANION_BOX_API_KEY` — required for Box lifecycle calls (start/stop/status).
 - `COMPANION_SECRETS_MASTER_KEY` — the base64 32-byte Skills master key also envelope-encrypts
   companion provider subscription credentials; it is already required by Secrets in production.
@@ -191,8 +196,17 @@ runtime secrets it needs:
 
 Optional tuning variables (`COMPANION_BOX_API_BASE`, `COMPANION_BOX_ENVIRONMENT`,
 `COMPANION_BOX_TTL_SECONDS`, `COMPANION_PI_MCP_ADAPTER_PACKAGE`) fall back to the safe defaults in
-`.env.example`. When the flag is `true` but a required secret is unset, the API still boots and logs a
-single startup warning naming the missing variables; Box and provider actions fail until they are set.
+`.env.example`. When the flag is `true`, the allowlist is non-empty, and a required secret is unset,
+the API still boots and logs a single startup warning naming the missing variables; Box and provider
+actions fail until they are set.
+
+For the initial production rollout, set these exact values on both the Railway `api` and `web`
+services:
+
+```dotenv
+COMPANION_COMPANIONS_ENABLED=true
+COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=thevibecompany.co
+```
 
 ## Health and rollback
 
