@@ -246,6 +246,21 @@ function companionBoxName(companionId: string): string {
 }
 
 /**
+ * The Box's own reason for a failed lifecycle command. `PREPARE_USER_BUS`, the auth-file guard, and
+ * `systemctl` each emit one operator-readable line to stderr before the command exits non-zero, so
+ * the first non-empty line explains a specific failure — an unreachable systemd user bus, a missing
+ * provider auth file — instead of a bare fallback. Only the first line is taken; the core sanitizer
+ * still redacts and truncates it before it reaches a stored row, a response, or the thread.
+ */
+function boxCommandDetail(result: CommandEnvelope): string | null {
+  for (const stream of [result.stderr, result.stdout]) {
+    const line = stream.split(/[\r\n]/).map((value) => value.trim()).find(Boolean);
+    if (line) return line;
+  }
+  return null;
+}
+
+/**
  * Box setup runs once per disk, so a Box whose Pi setup failed can never run Pi, and neither can one
  * in the terminal error state. Waking such a Box again only repeats the same failure, so the
  * Companion has to be moved onto a new Box instead.
@@ -641,7 +656,7 @@ trap - EXIT`,
     }
     if (!started.success) {
       await this.#removeProviderFile(box.id).catch(() => undefined);
-      throw new BoxRuntimeProviderError("Pi daemon failed to start", 502);
+      throw new BoxRuntimeProviderError(boxCommandDetail(started) ?? "Pi daemon failed to start", 502);
     }
     const daemonState = await this.#daemonState(box.id);
     if (daemonState !== "running") throw new BoxRuntimeProviderError("Pi daemon is not running after start", 502);
