@@ -112,6 +112,8 @@ const WARM_DAEMON_READY_MARKER = "companion-pi-warm-ready";
 const STAGED_ARCHIVE_DIRECTORY = ".companion/runtime/state/skill-archives";
 /** Labels each staged archive's size so one stdout can be read back as a measurement. */
 const STAGED_ARCHIVE_SIZE_LABEL = "companion-archive-bytes";
+/** How long a start will wait to be told what the Box kept before it gives up asking. */
+const STAGED_ARCHIVE_MEASURE_TIMEOUT_SECONDS = 10;
 
 export type BoxState =
   | "init"
@@ -1078,7 +1080,9 @@ exit 0`,
       const bytes = measured.get(path);
       // An archive the Box did not report is not an archive known to be short.
       if (bytes === undefined || bytes === Buffer.byteLength(content, "utf8")) continue;
-      await this.#writeFile(boxId, path, content);
+      // A rewrite that will not land is not a reason to stop: the extract that follows is a better
+      // judge of whether the tree can be built than a repair that was only ever an attempt.
+      await this.#writeFile(boxId, path, content).catch(() => undefined);
     }
   }
 
@@ -1092,6 +1096,10 @@ exit 0`,
       `set -e; cd "$HOME/${STAGED_ARCHIVE_DIRECTORY}" 2>/dev/null || exit 0;`
       + ` for archive in *.tar.gz.b64; do [ -e "$archive" ] || continue;`
       + ` printf '${STAGED_ARCHIVE_SIZE_LABEL} %s %s\\n' "$archive" "$(wc -c < "$archive")"; done`,
+      // Counting bytes already on the disk is the cheapest thing a start asks for, so it is given a
+      // short window rather than the default minute: a Box slow enough to miss this would otherwise
+      // spend a chunk of the wake's whole budget on a step whose answer is optional.
+      STAGED_ARCHIVE_MEASURE_TIMEOUT_SECONDS,
     ).catch(() => null);
     if (!listed?.success) return null;
     const sizes = new Map<string, number>();

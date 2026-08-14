@@ -128,6 +128,8 @@ export function CompanionsApp({
   const [waking, setWaking] = useState(false);
   const [openingDesktop, setOpeningDesktop] = useState(false);
   const threadRequestRef = useRef(0);
+  /** Newest runtime read per Companion, so a slower one cannot answer over it. */
+  const companionReadRef = useRef(new Map<string, number>());
   const threadQueueRef = useRef(createThreadQueue());
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
   const noop = () => {};
@@ -248,8 +250,14 @@ export function CompanionsApp({
    * running Box for a runner and still never resumes one.
    */
   const refreshCompanion = useCallback(async (companionId: string, live = false) => {
+    // Reads of one Companion can overlap, and a lifecycle is watched closely enough that they will:
+    // an older read that answers late must not put a state the Companion has already left back on
+    // screen, which is how a chip that had reached Online would blink back to Starting.
+    const readId = (companionReadRef.current.get(companionId) ?? 0) + 1;
+    companionReadRef.current.set(companionId, readId);
     try {
       const latest = await getCompanionRuntime(currentOrg.id, companionId, { live });
+      if (companionReadRef.current.get(companionId) !== readId) return;
       setCompanions((current) => current.map((item) => item.id === latest.id ? latest : item));
     } catch {
       // The failure that prompted this read is already on screen; do not replace it with this one.

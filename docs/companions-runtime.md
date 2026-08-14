@@ -126,7 +126,9 @@ reading `Box · starting`, still offering Wake, beside a reply Pi had already se
 control, and the composer footer all derive from that row, so they leave Starting together, and
 because this read is the projection it never resumes a Box and is as safe for a Viewer as their own.
 Watching stops as soon as the state settles, `error` included: that is where a failed lifecycle
-finishes, and its reason is already on screen.
+finishes, and its reason is already on screen. Watching that closely means these reads overlap, so each
+one is kept only while it is the newest for that Companion; an older read that answers late would
+otherwise put a state the Companion has already left back on a chip that had reached Online.
 
 ## Lifecycle failure reporting
 
@@ -401,8 +403,12 @@ same Box — a transfer that had not landed rather than a package that could not
 the write is what that second attempt was doing by hand. The measurement is only ever used to repair,
 never to refuse. A Box that will not report sizes, or does not report one for some archive, is left to
 the extract step exactly as it was before, because a probe added to save a wake must not be able to
-cost one that would have worked; an archive that is still wrong after being sent again fails
-extraction, naming itself.
+cost one that would have worked. A rewrite that will not land is swallowed for the same reason: the
+extract is the better judge of whether the tree can be built than a repair that was only an attempt,
+and an archive still wrong after being sent again fails extraction, naming itself. Counting bytes
+already on the disk is also the cheapest thing a start asks for, so it is asked on a ten-second window
+rather than the default minute — a Box too slow to answer it would otherwise spend a large part of the
+wake's whole budget on a step whose answer was optional.
 
 The replacement is prepared before the old tree is swapped, and invalid, archived, unpublished,
 or inaccessible packages are excluded. The browser chat consumes Pi's normal Skills capability;

@@ -106,9 +106,12 @@ const emptyThread: Thread = {
  * the test can land the wake the way the control plane does — by writing the row — rather than by
  * answering a request the browser may never hear back from.
  */
-function controlPlane(options: { wakeAnswers?: boolean } = {}) {
+function controlPlane(options: { wakeAnswers?: boolean; holdFirstRead?: boolean } = {}) {
   let settled = companionIn("provisioning");
   const runtimeReads: string[] = [];
+  let held = 0;
+  let release = () => {};
+  const holding = new Promise<void>((resolve) => { release = resolve; });
 
   const json = (body: unknown) => new Response(JSON.stringify(body), {
     status: 200,
@@ -126,6 +129,12 @@ function controlPlane(options: { wakeAnswers?: boolean } = {}) {
     }
     if (url.includes("/runtime")) {
       runtimeReads.push(url);
+      // The first read answers last, carrying the state the Companion has since left.
+      if (options.holdFirstRead && held++ === 0) {
+        const stale = settled;
+        await holding;
+        return json({ companion: stale, source: "control_plane" });
+      }
       return json({ companion: settled, source: "control_plane" });
     }
     if (url.includes("/thread")) return json({ thread: emptyThread });
@@ -139,6 +148,8 @@ function controlPlane(options: { wakeAnswers?: boolean } = {}) {
     boxCameUp: () => { settled = companionIn("running"); },
     /** What a wake that fails writes instead. */
     wakeFailed: () => { settled = companionIn("error"); },
+    /** Let the overtaken read finally answer. */
+    releaseFirstRead: () => release(),
   };
 }
 
@@ -224,6 +235,26 @@ describe("CompanionsApp while a Companion is starting", () => {
 
     expect(api.runtimeReads.length).toBeGreaterThan(1);
     expect(api.runtimeReads.filter((url) => url.includes("live=true"))).toHaveLength(0);
+  });
+
+  it("keeps the Box online when an overtaken read finally answers", async () => {
+    // Watching a lifecycle closely means these reads overlap, so one that answers late is carrying a
+    // state the Companion has already left. It must not put Starting back on a chip that has arrived.
+    api = controlPlane({ holdFirstRead: true });
+    vi.stubGlobal("fetch", api.fetchMock);
+    const container = await openThread(companionIn("provisioning"));
+
+    await wait(4);
+    api.boxCameUp();
+    await wait(8);
+    expect(chip(container)).toContain("Box · online");
+
+    await act(async () => {
+      api.releaseFirstRead();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(chip(container)).toContain("Box · online");
   });
 
   it("stops watching once the lifecycle settles", async () => {

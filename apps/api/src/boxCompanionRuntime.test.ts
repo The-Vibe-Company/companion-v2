@@ -1005,6 +1005,27 @@ describe("AsciiBoxCompanionRuntime", () => {
       expect(result.runtimeState).toBe("running");
     });
 
+    it("starts anyway when the rewrite it tried will not land either", async () => {
+      // The repair is an attempt, not a requirement. The extract that follows is the better judge of
+      // whether the tree can be built, so a refused rewrite must not be what ends the wake.
+      const stub = boxWithDisk({ truncateFirstWriteOf: archivePath, measures: true });
+      let rewrites = 0;
+      const refusing = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+        if (String(rawUrl).endsWith("/files") && String(body.path) === archivePath) {
+          rewrites += 1;
+          if (rewrites > 1) return json({ code: "internal", message: "disk is unavailable" }, 500);
+        }
+        return await stub.fetchMock(rawUrl, init);
+      });
+
+      const result = await wake(refusing as unknown as ReturnType<typeof vi.fn>);
+
+      expect(rewrites).toBe(2);
+      expect(stub.commands.some((command) => command.includes("skills.next"))).toBe(true);
+      expect(result.runtimeState).toBe("running");
+    });
+
     it("starts anyway on a Box that will not measure what it holds", async () => {
       // The measurement is only ever used to repair. A Box that cannot answer it is left to the
       // extract step exactly as before, because this probe may not cost a wake that would have worked.
@@ -1015,6 +1036,24 @@ describe("AsciiBoxCompanionRuntime", () => {
       expect(stub.writes.filter((path) => path === archivePath)).toHaveLength(1);
       expect(stub.commands.some((command) => command.includes("skills.next"))).toBe(true);
       expect(result.runtimeState).toBe("running");
+    });
+
+    it("asks for the measurement on a short window rather than a start's whole budget", async () => {
+      // A Box slow enough to miss this would otherwise spend a large part of the wake on a step whose
+      // answer was only ever optional, so the request it makes has to say how little it will wait.
+      const stub = boxWithDisk({ measures: true });
+      const asked: unknown[] = [];
+      const watching = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+        if (String(body.command ?? "").includes("companion-archive-bytes")) {
+          asked.push(body.timeoutSeconds);
+        }
+        return await stub.fetchMock(rawUrl, init);
+      });
+
+      await wake(watching as unknown as ReturnType<typeof vi.fn>);
+
+      expect(asked).toEqual([10]);
     });
   });
 
