@@ -34,7 +34,26 @@ import { decryptOpaqueValue, encryptOpaqueValue, type OpaqueCiphertext } from ".
 import { assertMember, getOrgRole, type ActorContext } from "./services";
 
 type CompanionRow = typeof schema.companions.$inferSelect;
-const COMPANION_RUNTIME_CLAIM_STALE_MS = 5 * 60_000;
+/**
+ * How long one wake may hold its `provisioning` claim. The lifecycle caller stops waiting at this
+ * deadline and records why, so a wake that hangs — an object-storage read that never answers, a Box
+ * call that never returns — becomes a retryable `error` instead of a Companion that says Starting
+ * for as long as nobody looks at it.
+ *
+ * It is sized to cover a cold start's own two long waits — the Box becoming ready and Pi becoming
+ * active — with room for the commands between them, and deliberately not to cover their sum with
+ * every per-command timeout on top: that sum is minutes, which is how a wake outlived every deadline
+ * it had while each individual call stayed inside its own. A slow start it does cut off fails
+ * retryably against a Box that is now warm, so the wake after it is the fast one.
+ */
+export const COMPANION_RUNTIME_START_BUDGET_MS = 3 * 60_000;
+/**
+ * When a claim may be taken over. A wake that is still inside its budget owns the lifecycle, so the
+ * window is that budget plus room for the failure it records on the way out; past it the claim can
+ * only belong to an attempt whose process died without writing anything, and the next send or Wake
+ * is allowed to take it.
+ */
+const COMPANION_RUNTIME_CLAIM_STALE_MS = COMPANION_RUNTIME_START_BUDGET_MS + 30_000;
 const PROVIDER_CREDENTIAL_PURPOSE = "companion-provider-credential";
 const MCP_CREDENTIAL_PURPOSE = "companion-mcp-credential";
 

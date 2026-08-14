@@ -12,11 +12,34 @@ provider id, authentication method, and timestamps. `GET /v1/companions`,
 `GET /v1/companions/:id`, and the default
 `GET /v1/companions/:id/runtime` read only this projection and never call Box.
 
+One wake is bounded. The claim is written before any Box work, so every step after it runs under one
+three-minute start budget: object storage reads, Box calls, the waits for a ready Box and an active
+Pi, and the final lifecycle write. At the deadline the wake stops working — the same signal cancels
+whatever call is in flight and the adapter's poll intervals — and records why, so the Companion leaves
+`provisioning` for a retryable `error` carrying that reason. Per-step timeouts alone did not bound a
+wake: each call answered inside its own limit while their sum ran for minutes, which is how a send
+could leave a Companion reporting Starting against a Box that was doing nothing. Nor was every step
+timed at all — a Box whose own record is untouched during the stall places the wake before the first
+Box call, where the reads of the skill archives are, and the storage client carries no request
+timeout, so a bucket that accepted the connection and then said nothing waited without end. A start that returns
+without a running Box and a running Pi is a failure with an observation attached, not a wake still in
+flight, so that observation is never written back as `provisioning`.
+
+That recorded failure is the last state the wake writes. Cancellation does not wait for the call it
+interrupts, so an abandoned start can still be inside a Box-assignment write, and what that callback
+writes is `provisioning`: the failure therefore waits for an assignment already in flight, and refuses
+one offered after the deadline. Refusing it is also how the adapter learns no row points at that Box,
+which is what puts a Box the wake had just woken back to sleep.
+
 Lifecycle claims are conditional updates. A claim abandoned by a crashed API process becomes
-retryable after five minutes; starts recover a Box by its deterministic `Companion <uuid>` name
+retryable half a minute past that budget — long enough for a live wake to record its own failure
+first, and short enough that a process that died writing nothing does not hold the Companion.
+Starts recover a Box by its deterministic `Companion <uuid>` name
 before creating another one, following every Box-list page. A new Box initially gets a maximum
 five-minute TTL; only after its id is durable does the adapter apply the configured TTL and name.
-If the id cannot be persisted, the adapter best-effort archives the Box immediately.
+If the id cannot be persisted, the adapter best-effort archives the Box immediately, on a request that
+carries no start budget of its own: a spent deadline is the common reason the id was refused, and a
+stop that inherited it would put nothing to sleep.
 
 One Companion is one Box is one Pi, and that deterministic name is the only evidence of it. A start
 adopts a recorded Box id only while the Box carries this Companion's own name, or no name yet — the
@@ -93,6 +116,20 @@ Viewer reads the chip as text: their thread polls only the control-plane project
 open thread refreshes `GET /v1/companions/:id/runtime?live=true` on a slow interval, so a stale chip
 is corrected by an observation rather than by a wake.
 
+A Companion the control plane is still resolving is watched more closely, and on the plain projection
+read: every few seconds while its state is `provisioning` or `stopping`. That window used to be the
+one nothing watched at all. The observation above begins only once the state is already `running`, and
+the request that starts a lifecycle reports it once — before it finishes, if the wake outlives the
+proxy in front of the API, and not at all if the browser has gone. Production spent about a minute
+reading `Box · starting`, still offering Wake, beside a reply Pi had already sent: the row had said
+`running` within a second of the Box coming up, and nothing had read it since. The chip, the wake
+control, and the composer footer all derive from that row, so they leave Starting together, and
+because this read is the projection it never resumes a Box and is as safe for a Viewer as their own.
+Watching stops as soon as the state settles, `error` included: that is where a failed lifecycle
+finishes, and its reason is already on screen. Watching that closely means these reads overlap, so each
+one is kept only while it is the newest for that Companion; an older read that answers late would
+otherwise put a state the Companion has already left back on a chip that had reached Online.
+
 ## Lifecycle failure reporting
 
 A failure is diagnosable without server logs. A failed start or stop records `runtime_state: error`
@@ -101,7 +138,7 @@ responses carry that same line as `error`, so the operator who pressed Wake and 
 reloads later read the same reason.
 
 Only recognized failures explain themselves: Box configuration (`COMPANION_BOX_API_KEY` unset), Box
-and Pi provider failures, provider resolution, and lifecycle conflicts. Every other failure — object
+and Pi provider failures, provider resolution, an exhausted start budget, and lifecycle conflicts. Every other failure — object
 storage, PostgreSQL, an unexpected adapter fault — records a generic line, so internal text cannot
 reach a stored row or a response. Sanitizing keeps the first line only, redacts credential-shaped
 text and the query string of any URL, and truncates to one status line.
@@ -305,10 +342,20 @@ instead of a real start attempt, for as long as the Box lived. Neither the poll 
 archives, or retires the Box: only a Box already beyond recovery — terminal `error` state or failed
 Pi setup — is replaced, and that decision is made before the daemon is ever started.
 
+A ready state is not a machine that answers. `idle` is a resting state the provider's own idle
+handling can leave a Box in, and such a Box normally still runs commands, so a start treats it as
+ready — but production found Boxes at `idle` that ran nothing while the wake against them reported
+`provisioning`. Every step of a start after the Box is ready is a command, so the first of those
+commands is also the proof that the machine is listening. A Box that refuses it, by envelope or by
+refusing the command endpoint at all, is resumed and asked once more; one that still says nothing
+fails the wake with what it said. A Box in a state no resume applies to fails immediately.
+
 A start first checks the warm path when the control-plane row already records the current layout and
 provider generation. If the unit is `active` and its tmpfs MCP credential file is present, start
 returns that observation without repairing layout, injecting resources, or calling systemd start at
-all. This keeps an in-flight turn alive. The first start after a layout or credential change still
+all. This keeps an in-flight turn alive. That warm probe is the start's first command whenever the
+start is warm-eligible, so its answer carries the reachability proof too and a warm Box is still
+touched exactly once. The first start after a layout or credential change still
 refreshes the files, but uses idempotent `systemctl start`, never `restart`, so an active unit is not
 killed during the upgrade. An already-running process keeps the environment it inherited; refreshed
 layout and MCP environment take effect on its next automatic start or after an explicit stop/wake.
@@ -340,6 +387,28 @@ command string. Smaller files stay one plain write. Skills are never skipped or 
 the extract loop still reads exactly `~/.companion/runtime/state/skill-archives/*.tar.gz.b64`, which
 no part file matches. A rejected write now names the file it was writing, because the provider's
 message carries the limit it enforced but not the path.
+
+Staging and extraction each name what went wrong. Both steps used to record only which step it was,
+so one stored `Pi resources failed to prepare` covered a corrupt archive, a disk with no room, and a
+tree that would not swap, and the wake that hit it could not be told from a wake that hit any other.
+They now carry the exit code and the shell's last word, and because `tar` reports a bad member over
+three lines and ends on the one that says nothing, the extract loop appends the slug it was working on
+after `tar` has finished complaining — that slug is the line a stored reason has room for.
+
+A write the file API accepted is also checked against what the Box kept. Once the archives are staged,
+one command reports the byte count of each, and any that is short of what was sent is written again.
+This is why: the wake reported in production died extracting a package on a Box the provider had just
+brought back from `idle`, and the identical payload extracted on the very next attempt against that
+same Box — a transfer that had not landed rather than a package that could not be read, and repeating
+the write is what that second attempt was doing by hand. The measurement is only ever used to repair,
+never to refuse. A Box that will not report sizes, or does not report one for some archive, is left to
+the extract step exactly as it was before, because a probe added to save a wake must not be able to
+cost one that would have worked. A rewrite that will not land is swallowed for the same reason: the
+extract is the better judge of whether the tree can be built than a repair that was only an attempt,
+and an archive still wrong after being sent again fails extraction, naming itself. Counting bytes
+already on the disk is also the cheapest thing a start asks for, so it is asked on a ten-second window
+rather than the default minute — a Box too slow to answer it would otherwise spend a large part of the
+wake's whole budget on a step whose answer was optional.
 
 The replacement is prepared before the old tree is swapped, and invalid, archived, unpublished,
 or inaccessible packages are excluded. The browser chat consumes Pi's normal Skills capability;

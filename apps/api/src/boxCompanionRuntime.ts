@@ -94,10 +94,26 @@ type PiDaemonDiagnosticKey = (typeof PI_DAEMON_DIAGNOSTIC_BUDGETS)[number]["key"
 const READY_STATES = new Set<BoxState>(["ready", "idle", "running"]);
 const STARTING_STATES = new Set<BoxState>(["init", "provisioning", "provisioned", "cloning"]);
 const ARCHIVED_STATES = new Set<BoxState>(["archiving", "archived"]);
+/**
+ * States a Box can be brought back from with `resume`. `archived` is the state an explicit stop
+ * leaves, and `idle` is the resting state the provider's own idle handling can put a Box into: it
+ * normally still runs commands, which is why a start treats it as ready, but a start that finds it
+ * will not answer has to resume it rather than run the wake's commands against a machine that is not
+ * listening.
+ */
+const RESUMABLE_STATES = new Set<BoxState>(["archived", "idle"]);
+/** Printed by the probe that proves this Box is running commands for the start. */
+const BOX_RUNNABLE_MARKER = "companion-box-runnable";
 /** Printed by the staging command when Pi's auth file already exists on the Box disk. */
 const PROVIDER_AUTH_PRESENT_MARKER = "companion-provider-auth-present";
 /** Printed only when a warm Box already has everything an automatic Pi restart needs. */
 const WARM_DAEMON_READY_MARKER = "companion-pi-warm-ready";
+/** Where staged skill archives wait on the Box disk between the file writes and the extract. */
+const STAGED_ARCHIVE_DIRECTORY = ".companion/runtime/state/skill-archives";
+/** Labels each staged archive's size so one stdout can be read back as a measurement. */
+const STAGED_ARCHIVE_SIZE_LABEL = "companion-archive-bytes";
+/** How long a start will wait to be told what the Box kept before it gives up asking. */
+const STAGED_ARCHIVE_MEASURE_TIMEOUT_SECONDS = 10;
 
 export type BoxState =
   | "init"
@@ -173,6 +189,11 @@ export interface CompanionBoxRuntime {
     skills: CompanionRuntimeSkill[];
     /** Record which Box backs this Companion, or `null` when the recorded one is not its own. */
     onBoxAssigned: (boxId: string | null) => Promise<void>;
+    /**
+     * The lifecycle caller's start budget. Every Box call and every wait this start makes ends when
+     * it does, so a wake the control plane stopped waiting for stops working too.
+     */
+    signal?: AbortSignal;
   }): Promise<CompanionRuntimeObservation>;
   stop(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
   status(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
@@ -469,6 +490,27 @@ if ! systemctl --user show-environment >/dev/null 2>&1; then
   exit 1
 fi`;
 
+/**
+ * A cold start's first command. It proves nothing about Pi and is not meant to: its only job is to
+ * establish that this Box runs the commands the rest of the start is made of, so a machine that will
+ * not answer is discovered here rather than reported as a wake in progress.
+ */
+const BOX_RUNNABLE_COMMAND = `printf '%s\\n' ${shellQuote(BOX_RUNNABLE_MARKER)}`;
+
+/**
+ * A warm-eligible start's first command. A current-layout active daemon with its runtime credential
+ * file is already fully started. Returning from that state avoids replacing Skills/MCP files
+ * underneath an in-flight turn and, most importantly, avoids killing that turn with an unnecessary
+ * systemd restart. Printing nothing is the ordinary answer for a Box whose Pi is not warm, so this
+ * exits 0 either way and its exit status carries the same reachability proof as the cold probe.
+ */
+const WARM_DAEMON_READY_COMMAND = `${USER_BUS_ENVIRONMENT}
+if systemctl --user show-environment >/dev/null 2>&1 &&
+  systemctl --user is-active --quiet companion-pi-daemon.service &&
+  [ -f "$XDG_RUNTIME_DIR/companion/providers.env" ]; then
+  printf '%s\\n' ${shellQuote(WARM_DAEMON_READY_MARKER)}
+fi`;
+
 function encodeEnvironmentFile(credentials: McpRuntimeCredential[]): string {
   return credentials
     .map(({ env_key: envKey, value }) => `${envKey}=${JSON.stringify(value)}`)
@@ -545,6 +587,13 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
   readonly #daemonActiveTimeoutMs: number;
   readonly #installCommand: string | undefined;
   readonly #mcpAdapterPackage: string;
+  /**
+   * The current start's budget, held for as long as that start runs. Every Box request and every
+   * poll interval reads it, so one field cancels the whole tree of calls a wake makes without
+   * threading the signal through each private step, and delivery on the same adapter instance is
+   * unaffected because the field is cleared when the start returns.
+   */
+  #startSignal: AbortSignal | undefined;
 
   constructor(env: NodeJS.ProcessEnv = process.env) {
     const apiKey = env.COMPANION_BOX_API_KEY?.trim();
@@ -568,7 +617,31 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
       env.COMPANION_PI_MCP_ADAPTER_PACKAGE?.trim() || DEFAULT_PI_MCP_ADAPTER_PACKAGE;
   }
 
-  async #request<T>(path: string, init?: RequestInit, timeoutMs = 30_000): Promise<T> {
+  /**
+   * What ends one Box request: its own timeout, whatever the caller passed, and the running start's
+   * budget. The per-call timeout alone is what let a wake outlive every deadline it had — each call
+   * answered inside its own limit while their sum ran for minutes.
+   */
+  #requestSignal(
+    timeoutMs: number,
+    callerSignal?: AbortSignal | null,
+    budget?: AbortSignal | null,
+  ): AbortSignal {
+    const signals = [AbortSignal.timeout(timeoutMs)];
+    if (callerSignal) signals.push(callerSignal);
+    if (budget) signals.push(budget);
+    return signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
+  }
+
+  async #request<T>(
+    path: string,
+    init?: RequestInit,
+    timeoutMs = 30_000,
+    // The running start's budget, unless a caller passes `null` to leave it out. Only a call that
+    // undoes what a cancelled start left behind does that: the cancellation is the reason it has work
+    // to do, so inheriting it would cancel the repair along with the wake.
+    budget: AbortSignal | null = this.#startSignal ?? null,
+  ): Promise<T> {
     const response = await fetch(`${this.#baseUrl}${path}`, {
       ...init,
       headers: {
@@ -576,7 +649,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
         ...(init?.body ? { "Content-Type": "application/json" } : {}),
         ...init?.headers,
       },
-      signal: init?.signal ?? AbortSignal.timeout(timeoutMs),
+      signal: this.#requestSignal(timeoutMs, init?.signal, budget),
     });
     if (!response.ok) {
       const body = await response.json().catch(() => null) as
@@ -662,12 +735,28 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
         },
       )).box;
     } catch (error) {
-      await this.#request(`/boxes/${encodeURIComponent(created.box.id)}/stop`, {
-        method: "POST",
-        body: JSON.stringify({ force: false }),
-      }).catch(() => undefined);
+      await this.#sleepUnrecordedBox(created.box.id);
       throw error;
     }
+  }
+
+  /**
+   * Put a Box back to sleep after this start failed to record which Companion it belongs to. Stopping
+   * it the ordinary way snapshots the disk and keeps the deterministic name, so the next start finds
+   * the same Box and resumes it rather than building another one.
+   *
+   * The call is deliberately off the start's budget. A wake cancelled at its deadline is the main way
+   * a Box ends up awake with nothing pointing at it, and a stop that inherited that cancellation would
+   * put nothing to sleep. It stays best-effort: a Box the provider will not stop must not replace the
+   * failure the caller is already reporting.
+   */
+  async #sleepUnrecordedBox(boxId: string): Promise<void> {
+    await this.#request(
+      `/boxes/${encodeURIComponent(boxId)}/stop`,
+      { method: "POST", body: JSON.stringify({ force: false }) },
+      undefined,
+      null,
+    ).catch(() => undefined);
   }
 
   /**
@@ -689,6 +778,11 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     }
   }
 
+  /** One poll interval, ended early by the running start's budget. */
+  async #pause(): Promise<void> {
+    await sleep(this.#pollIntervalMs, undefined, { signal: this.#startSignal });
+  }
+
   async #waitReady(boxId: string): Promise<BoxInfo> {
     const deadline = Date.now() + this.#readyTimeoutMs;
     while (Date.now() < deadline) {
@@ -700,9 +794,76 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
       if (box.setupStatus === "failed") {
         throw new BoxRuntimeProviderError(`Box Pi setup failed: ${box.setupError || "unknown error"}`, 502);
       }
-      await sleep(this.#pollIntervalMs);
+      await this.#pause();
     }
     throw new BoxRuntimeProviderError("Box did not become ready before the configured timeout", 504);
+  }
+
+  async #resume(boxId: string): Promise<BoxInfo> {
+    const resumed = await this.#request<BoxEnvelope>(
+      `/boxes/${encodeURIComponent(boxId)}/resume`,
+      {
+        method: "POST",
+        body: JSON.stringify({ noEnv: true, ttlSeconds: this.#ttlSeconds }),
+      },
+    );
+    return resumed.box;
+  }
+
+  /**
+   * Run one command and treat a refusal as an answer rather than a failure, because the caller's next
+   * move is to resume the machine. Only cancellation travels on: a wake the control plane stopped
+   * waiting for has nothing left to resume.
+   */
+  async #attemptCommand(
+    boxId: string,
+    command: string,
+  ): Promise<{ ran: boolean; stdout: string; detail: string }> {
+    try {
+      const result = await this.#command(boxId, command);
+      if (result.success) return { ran: true, stdout: result.stdout, detail: "" };
+      return { ran: false, stdout: result.stdout, detail: commandFailureDetail(result) };
+    } catch (error) {
+      if (this.#startSignal?.aborted) throw error;
+      const detail = error instanceof BoxRuntimeProviderError ? error.message : "";
+      return { ran: false, stdout: "", detail: detail ? `: ${detail}` : "" };
+    }
+  }
+
+  /**
+   * Run this start's first command, resuming the Box when it will not run it.
+   *
+   * `idle` is a ready state for a Box that answers, and the start's own commands are what discover
+   * that this one does not. A Box whose compute the provider parked is resumed and asked again, and
+   * one that still says nothing fails the start with what it said: reporting a start as
+   * `provisioning` against a machine that is not listening is what left a Companion waking forever.
+   *
+   * The command is the warm probe whenever this start could still return early, so a warm Box is
+   * touched exactly once — the answer that proves it is listening is the same answer that says its Pi
+   * is already running.
+   */
+  async #firstCommand(box: BoxInfo, warmEligible: boolean): Promise<{ box: BoxInfo; warm: boolean }> {
+    const command = warmEligible ? WARM_DAEMON_READY_COMMAND : BOX_RUNNABLE_COMMAND;
+    let attempt = await this.#attemptCommand(box.id, command);
+    if (!attempt.ran) {
+      if (!RESUMABLE_STATES.has(box.state)) {
+        throw new BoxRuntimeProviderError(
+          `Box in state ${box.state} did not run this start's first command${attempt.detail}`,
+          502,
+        );
+      }
+      box = await this.#waitReady((await this.#resume(box.id)).id);
+      attempt = await this.#attemptCommand(box.id, command);
+      if (!attempt.ran) {
+        throw new BoxRuntimeProviderError(
+          `Box in state ${box.state} did not run this start's first command after a resume`
+          + attempt.detail,
+          502,
+        );
+      }
+    }
+    const warm = warmEligible && attempt.stdout.split(/[\r\n]+/).includes(WARM_DAEMON_READY_MARKER);
+    return { box, warm };
   }
 
   async #command(
@@ -726,24 +887,6 @@ systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true`,
   }
 
   /**
-   * A current-layout active daemon with its runtime credential file is already fully started.
-   * Returning from that state avoids replacing Skills/MCP files underneath an in-flight turn and,
-   * most importantly, avoids killing that turn with an unnecessary systemd restart.
-   */
-  async #warmDaemonReady(boxId: string): Promise<boolean> {
-    const result = await this.#command(
-      boxId,
-      `${USER_BUS_ENVIRONMENT}
-if systemctl --user show-environment >/dev/null 2>&1 &&
-  systemctl --user is-active --quiet companion-pi-daemon.service &&
-  [ -f "$XDG_RUNTIME_DIR/companion/providers.env" ]; then
-  printf '%s\\n' ${shellQuote(WARM_DAEMON_READY_MARKER)}
-fi`,
-    );
-    return result.success && result.stdout.split(/[\r\n]+/).includes(WARM_DAEMON_READY_MARKER);
-  }
-
-  /**
    * Wait for the started unit to actually be running. A successful `start` only means systemd
    * accepted the job, so the daemon is given the whole window to reach `active` and the wait ends
    * on the first probe that says it did.
@@ -752,7 +895,7 @@ fi`,
     const deadline = Date.now() + this.#daemonActiveTimeoutMs;
     let daemonState = await this.#daemonState(boxId);
     while (daemonState !== "running" && Date.now() < deadline) {
-      await sleep(this.#pollIntervalMs);
+      await this.#pause();
       daemonState = await this.#daemonState(boxId);
     }
     return daemonState;
@@ -915,6 +1058,61 @@ exit 0`,
     }
   }
 
+  /**
+   * Rewrite any staged archive the Box is holding short of what was sent.
+   *
+   * A write the file API accepted is not the same as a file that landed whole. The reported wake died
+   * extracting an archive on a Box the provider had just brought back from `idle`, and the identical
+   * payload extracted on the next attempt against that same Box — which is a transfer that did not
+   * land, not a package that cannot be read. The control plane knows exactly how many bytes it sent,
+   * so it can notice that and send them again, which is all the second attempt was doing by hand.
+   *
+   * This is advisory on purpose. A measurement is only ever used to repair, never to fail: a Box that
+   * will not report sizes, or does not report one for some archive, is left to the extract step
+   * exactly as before, because a new command that can refuse is not allowed to break a wake that
+   * works today. An archive that is still wrong after the rewrite fails extraction, naming itself.
+   */
+  async #repairShortStagedArchives(boxId: string, staged: Map<string, string>): Promise<void> {
+    if (staged.size === 0) return;
+    const measured = await this.#stagedArchiveSizes(boxId);
+    if (!measured) return;
+    for (const [path, content] of staged) {
+      const bytes = measured.get(path);
+      // An archive the Box did not report is not an archive known to be short.
+      if (bytes === undefined || bytes === Buffer.byteLength(content, "utf8")) continue;
+      // A rewrite that will not land is not a reason to stop: the extract that follows is a better
+      // judge of whether the tree can be built than a repair that was only ever an attempt.
+      await this.#writeFile(boxId, path, content).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Bytes the Box holds for each staged archive, keyed by the path it was written to, or `null` when
+   * the Box would not say. Nothing here is load-bearing enough to fail a start over.
+   */
+  async #stagedArchiveSizes(boxId: string): Promise<Map<string, number> | null> {
+    const listed = await this.#command(
+      boxId,
+      `set -e; cd "$HOME/${STAGED_ARCHIVE_DIRECTORY}" 2>/dev/null || exit 0;`
+      + ` for archive in *.tar.gz.b64; do [ -e "$archive" ] || continue;`
+      + ` printf '${STAGED_ARCHIVE_SIZE_LABEL} %s %s\\n' "$archive" "$(wc -c < "$archive")"; done`,
+      // Counting bytes already on the disk is the cheapest thing a start asks for, so it is given a
+      // short window rather than the default minute: a Box slow enough to miss this would otherwise
+      // spend a chunk of the wake's whole budget on a step whose answer is optional.
+      STAGED_ARCHIVE_MEASURE_TIMEOUT_SECONDS,
+    ).catch(() => null);
+    if (!listed?.success) return null;
+    const sizes = new Map<string, number>();
+    for (const line of labeledDiagnosticLines(listed.stdout, STAGED_ARCHIVE_SIZE_LABEL)) {
+      // The name cannot carry a space: it is `<slug>.tar.gz.b64`, and a slug is slug-shaped.
+      const [name, bytes] = line.split(/\s+/);
+      if (name && bytes && /^\d+$/.test(bytes)) {
+        sizes.set(`${STAGED_ARCHIVE_DIRECTORY}/${name}`, Number(bytes));
+      }
+    }
+    return sizes;
+  }
+
   async #injectPiResources(input: {
     boxId: string;
     clientSurface: CompanionClientSurface;
@@ -930,7 +1128,12 @@ exit 0`,
       input.boxId,
       `set -e; root="$HOME/.companion/runtime"; rm -rf "$root/state/skill-archives"; mkdir -p "$root/state/skill-archives"; if [ -f "$HOME/.companion/pi/auth.json" ]; then printf '%s\\n' ${shellQuote(PROVIDER_AUTH_PRESENT_MARKER)}; fi`,
     );
-    if (!cleared.success) throw new BoxRuntimeProviderError("Pi resource staging failed", 502);
+    if (!cleared.success) {
+      throw new BoxRuntimeProviderError(
+        `Pi resource staging failed${commandFailureDetail(cleared)}`,
+        502,
+      );
+    }
     // Pi keeps refreshed subscription tokens in its own agent directory, so the auth file is
     // replaced only when the encrypted workspace connection generation changes. The disk itself is
     // the authority on whether the file exists: a Box the control plane recorded at the current
@@ -961,13 +1164,14 @@ exit 0`,
         skills: injectedSkills.map(({ slug, version, checksum }) => ({ slug, version, checksum })),
       }, null, 2)}\n`,
     );
+    const staged = new Map<string, string>();
     for (const skill of injectedSkills) {
-      await this.#writeFile(
-        input.boxId,
-        runtimeSkillArchivePath(skill),
-        skill.archive.toString("base64"),
-      );
+      const path = runtimeSkillArchivePath(skill);
+      const content = skill.archive.toString("base64");
+      staged.set(path, content);
+      await this.#writeFile(input.boxId, path, content);
     }
+    await this.#repairShortStagedArchives(input.boxId, staged);
     try {
       await this.#writeFile(
         input.boxId,
@@ -976,10 +1180,23 @@ exit 0`,
       );
       const prepared = await this.#command(
         input.boxId,
-        "set -euo pipefail; root=\"$HOME/.companion/runtime\"; rm -rf \"$root/skills.next\"; mkdir -p \"$root/skills.next\"; shopt -s nullglob; for archive in \"$root/state/skill-archives\"/*.tar.gz.b64; do slug=\"$(basename \"$archive\" .tar.gz.b64)\"; mkdir -p \"$root/skills.next/$slug\"; base64 --decode \"$archive\" | tar --extract --gzip --file=- --directory=\"$root/skills.next/$slug\" --no-same-owner --no-same-permissions; done; rm -rf \"$root/skills.prev\"; if [ -d \"$root/skills\" ]; then mv \"$root/skills\" \"$root/skills.prev\"; fi; mv \"$root/skills.next\" \"$root/skills\"; rm -rf \"$root/skills.prev\" \"$root/state/skill-archives\"",
+        // One archive that will not decode or extract has to name itself. `tar` reports a failed
+        // member over three lines and ends on `Error is not recoverable`, which is the one line a
+        // stored reason has room for and the only one that says nothing, so the loop appends the slug
+        // it was working on after tar has finished complaining.
+        "set -euo pipefail; root=\"$HOME/.companion/runtime\"; rm -rf \"$root/skills.next\"; mkdir -p \"$root/skills.next\"; shopt -s nullglob; for archive in \"$root/state/skill-archives\"/*.tar.gz.b64; do slug=\"$(basename \"$archive\" .tar.gz.b64)\"; mkdir -p \"$root/skills.next/$slug\"; if ! base64 --decode \"$archive\" | tar --extract --gzip --file=- --directory=\"$root/skills.next/$slug\" --no-same-owner --no-same-permissions; then echo \"skill package $slug did not extract\" >&2; exit 1; fi; done; rm -rf \"$root/skills.prev\"; if [ -d \"$root/skills\" ]; then mv \"$root/skills\" \"$root/skills.prev\"; fi; mv \"$root/skills.next\" \"$root/skills\"; rm -rf \"$root/skills.prev\" \"$root/state/skill-archives\"",
         180,
       );
-      if (!prepared.success) throw new BoxRuntimeProviderError("Pi resources failed to prepare", 502);
+      // Production read this failure as the bare sentence, which named the step and nothing else: the
+      // same wake could have died decoding a staged archive, extracting one, or swapping the tree in,
+      // and every one of those is a different fault. The failing line travels with it for the same
+      // reason it travels with a failed layout install.
+      if (!prepared.success) {
+        throw new BoxRuntimeProviderError(
+          `Pi resources failed to prepare${commandFailureDetail(prepared)}`,
+          502,
+        );
+      }
     } catch (error) {
       await this.#removeProviderFile(input.boxId).catch(() => undefined);
       throw error;
@@ -987,6 +1204,28 @@ exit 0`,
   }
 
   async start(input: {
+    companionId: string;
+    orgId: string;
+    boxId: string | null;
+    clientSurface: CompanionClientSurface;
+    providerAuth: Record<string, Record<string, unknown>>;
+    replaceProviderAuth: boolean;
+    mcpCredentials: McpRuntimeCredential[];
+    mcpAccounts: CompanionMcpAccount[];
+    skills: CompanionRuntimeSkill[];
+    onBoxAssigned: (boxId: string | null) => Promise<void>;
+    signal?: AbortSignal;
+  }): Promise<CompanionRuntimeObservation> {
+    this.#startSignal = input.signal;
+    try {
+      return await this.#startBox(input);
+    } finally {
+      // Delivery runs on this same adapter instance, so the wake's deadline must not outlive it.
+      this.#startSignal = undefined;
+    }
+  }
+
+  async #startBox(input: {
     companionId: string;
     orgId: string;
     boxId: string | null;
@@ -1023,14 +1262,7 @@ exit 0`,
       replaceProviderAuth = true;
     }
     if (box.state === "archived") {
-      const resumed = await this.#request<BoxEnvelope>(
-        `/boxes/${encodeURIComponent(box.id)}/resume`,
-        {
-          method: "POST",
-          body: JSON.stringify({ noEnv: true, ttlSeconds: this.#ttlSeconds }),
-        },
-      );
-      box = resumed.box;
+      box = await this.#resume(box.id);
     } else if (box.state === "archiving") {
       throw new BoxRuntimeProviderError("Box is still archiving; retry start after it is archived", 409);
     } else if (!READY_STATES.has(box.state) && !STARTING_STATES.has(box.state)) {
@@ -1041,27 +1273,24 @@ exit 0`,
       try {
         await input.onBoxAssigned(box.id);
       } catch (error) {
-        // A Box recovered by name is recorded nowhere until this write lands, so a write that fails
-        // would leave it awake with nothing pointing at it. It is put to sleep the ordinary way, which
-        // snapshots the disk rather than discarding it, and it still carries the deterministic name, so
-        // the next start finds the same disk and resumes it. The Box the control plane already had
-        // recorded stays awake and stays recorded.
-        if (!keptAssignment) {
-          await this.#request(`/boxes/${encodeURIComponent(box.id)}/stop`, {
-            method: "POST",
-            body: JSON.stringify({ force: false }),
-          }).catch(() => undefined);
-        }
+        // A Box recovered by name is recorded nowhere until this write lands, so a refused write —
+        // whether the control plane could not store the id or a cancelled wake no longer owns the
+        // lifecycle — would leave it awake with nothing pointing at it. The Box the control plane
+        // already had recorded stays awake and stays recorded.
+        if (!keptAssignment) await this.#sleepUnrecordedBox(box.id);
         throw error;
       }
     }
     box = await this.#waitReady(box.id);
+    // Everything from here on is a command, so this is where a Box that is not listening has to be
+    // found: a state that reads as ready is not the same as a machine that answers.
+    //
     // `replaceProviderAuth=false` proves the control-plane row already records this layout and the
     // current provider generation. The runtime-file probe supplies the missing volatile half of the
     // proof: a later systemd auto-restart can still inherit this daemon's MCP credentials.
-    if (!replaceProviderAuth && await this.#warmDaemonReady(box.id)) {
-      return observation(await this.#get(box.id), "running");
-    }
+    const first = await this.#firstCommand(box, !replaceProviderAuth);
+    box = first.box;
+    if (first.warm) return observation(await this.#get(box.id), "running");
     await this.#ensurePiLayout(box.id);
     await this.#injectPiResources({
       boxId: box.id,

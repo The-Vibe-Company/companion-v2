@@ -425,6 +425,254 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(writtenPaths).toContain(".companion/runtime/state/providers.env");
   });
 
+  /**
+   * THE-340: production wakes claimed `provisioning` against Boxes that sat at `idle` and never
+   * moved. `idle` is a state a Box normally runs commands from, so a start that finds one has to
+   * discover from the Box itself whether this one does, and resume it when it does not.
+   */
+  describe("a Box whose state reads ready but will not run commands", () => {
+    /**
+     * One idle Box that refuses every command until it is resumed, and — when `resumable` is false —
+     * refuses them afterwards too. The refusal is either the provider's own envelope saying the
+     * command did not run or an error from the command endpoint itself; a parked machine can produce
+     * either, and neither may be read as a wake in progress.
+     */
+    function idleBoxRefusingCommands(input: {
+      resumable: boolean;
+      refusal: "envelope" | "transport";
+    }) {
+      const commands: string[] = [];
+      let resumed = false;
+      const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const url = String(rawUrl);
+        const method = init?.method ?? "GET";
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+        if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+          return json({ box: { ...box, state: resumed ? "ready" : "idle" } });
+        }
+        if (url.endsWith("/resume") && method === "POST") {
+          resumed = input.resumable;
+          return json({ box: { ...box, state: resumed ? "ready" : "idle" } }, 202);
+        }
+        if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+        if (url.endsWith("/commands") && method === "POST") {
+          const command = String(body.command);
+          commands.push(command);
+          if (!resumed) {
+            // What a parked Box answers with: either an envelope reporting the command never ran, or
+            // no answer at all from the provider's own command endpoint.
+            return input.refusal === "envelope"
+              ? json({
+                success: false,
+                exitCode: 255,
+                stdout: "",
+                stderr: "box is not running",
+              })
+              : json({ code: "box_not_running", message: "Box is not running" }, 409);
+          }
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: command.includes("is-active") ? "active\n" : "",
+            stderr: "",
+          });
+        }
+        throw new Error(`unexpected Box request: ${method} ${url}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      return { commands, fetchMock };
+    }
+
+    const startInput = {
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web" as const,
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    };
+
+    it.each([
+      ["reports the command never ran", "envelope" as const],
+      ["will not answer the command endpoint", "transport" as const],
+    ])("resumes an idle Box that %s and starts Pi on it", async (_case, refusal) => {
+      const { commands, fetchMock } = idleBoxRefusingCommands({ resumable: true, refusal });
+      const runtime = new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      });
+
+      const result = await runtime.start(startInput);
+
+      expect(result).toMatchObject({ runtimeState: "running", daemonState: "running" });
+      expect(fetchMock.mock.calls.some(([url, init]) =>
+        String(url).endsWith("/boxes/bx_23456789/resume") && init?.method === "POST")).toBe(true);
+      // The wake it was resumed for then ran, rather than the resume being its own reported outcome.
+      expect(commands.some((command) =>
+        command.includes("systemctl --user start companion-pi-daemon.service"))).toBe(true);
+    });
+
+    it("fails the start with what an unresumable idle Box said instead of reporting provisioning", async () => {
+      idleBoxRefusingCommands({ resumable: false, refusal: "envelope" });
+      const runtime = new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      });
+
+      // A Box that will not run this start's first command even after a resume is a failed wake with
+      // a reason on it, which is what the Companion row records and what the sender is shown.
+      await expect(runtime.start(startInput)).rejects.toMatchObject({
+        status: 502,
+        message: expect.stringContaining("did not run this start's first command"),
+      });
+      await expect(runtime.start(startInput)).rejects.toMatchObject({
+        message: expect.stringContaining("box is not running"),
+      });
+    });
+
+    it("returns a warm idle Box without resuming the machine its Pi is already running on", async () => {
+      const commands: string[] = [];
+      const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const url = String(rawUrl);
+        const method = init?.method ?? "GET";
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+        if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+          return json({ box: { ...box, state: "idle" } });
+        }
+        if (url.endsWith("/commands") && method === "POST") {
+          const command = String(body.command);
+          commands.push(command);
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: command.includes("companion-pi-warm-ready") ? "companion-pi-warm-ready\n" : "",
+            stderr: "",
+          });
+        }
+        throw new Error(`unexpected Box request: ${method} ${url}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const runtime = new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      });
+
+      const result = await runtime.start({ ...startInput, replaceProviderAuth: false });
+
+      expect(result).toMatchObject({ runtimeState: "running", daemonState: "running" });
+      // The warm answer is the reachability proof, so the fast path still costs exactly one command
+      // and never restarts the turn that daemon may be in the middle of.
+      expect(commands).toHaveLength(1);
+      expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
+      expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/files"))).toBe(false);
+    });
+  });
+
+  /**
+   * THE-340: the lifecycle caller gives one wake a deadline, and the adapter is what has to end when
+   * it does. Every Box call and every poll interval runs on that signal, because a start that keeps
+   * working against a Box nobody is waiting on is what held the `provisioning` claim open.
+   */
+  describe("a start the caller's budget cancels", () => {
+    const startInput = {
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web" as const,
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    };
+
+    it("stops waiting for a Box to become ready as soon as the budget ends", async () => {
+      // A Box that never leaves setup: without the budget the start owns this wait for the adapter's
+      // whole ready timeout, which is the two minutes a stalled wake spent doing nothing.
+      const fetchMock = vi.fn(async (rawUrl: string | URL | Request) => {
+        if (String(rawUrl).endsWith("/boxes/bx_23456789")) {
+          return json({ box: { ...box, state: "provisioning", setupStatus: "running" } });
+        }
+        throw new Error(`unexpected Box request: ${String(rawUrl)}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const runtime = new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_BOX_POLL_INTERVAL_MS: "50",
+        COMPANION_BOX_READY_TIMEOUT_MS: "600000",
+      });
+      const budget = new AbortController();
+      const deadline = new Error("wake budget spent");
+
+      const started = runtime.start({ ...startInput, signal: budget.signal });
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+      budget.abort(deadline);
+
+      // Which cancellation surfaces depends on what the start was waiting on; the lifecycle caller
+      // reports the budget it spent rather than this, and what matters here is that the wait ended.
+      await expect(started).rejects.toThrow(/abort/i);
+      // The wait ended on the abort rather than on the poll interval that came after it.
+      const answered = fetchMock.mock.calls.length;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(fetchMock.mock.calls).toHaveLength(answered);
+    });
+
+    /**
+     * The one call a cancelled wake still has to make. A Box recovered by name is recorded nowhere
+     * until the control plane accepts its id, so a deadline that lands on that write leaves a Box
+     * awake with nothing pointing at it — and a stop that inherited the deadline would put nothing to
+     * sleep.
+     */
+    it("puts a Box it could not record to sleep even though the budget already ended", async () => {
+      const answered: string[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const url = String(rawUrl);
+        const method = init?.method ?? "GET";
+        // The provider is reached through `fetch`, so a request carrying a spent signal never runs.
+        if (init?.signal?.aborted) throw init.signal.reason;
+        answered.push(`${method} ${new URL(url).pathname}`);
+        if (url.includes("/boxes?") && method === "GET") {
+          return json({
+            boxes: [{
+              ...box,
+              name: `Companion ${startInput.companionId}`,
+              state: "idle",
+            }],
+          });
+        }
+        if (url.endsWith("/stop") && method === "POST") return json({ ok: true });
+        throw new Error(`unexpected Box request: ${method} ${url}`);
+      }));
+      const runtime = new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      });
+      const budget = new AbortController();
+      const deadline = new Error("wake budget spent");
+
+      // What the lifecycle caller does at its deadline: the assignment is refused, because the reason
+      // this wake failed is already on the Companion row and must stay there.
+      const started = runtime.start({
+        ...startInput,
+        boxId: null,
+        signal: budget.signal,
+        onBoxAssigned: async () => {
+          budget.abort(deadline);
+          throw deadline;
+        },
+      });
+
+      await expect(started).rejects.toBe(deadline);
+      expect(answered.some((request) =>
+        request.startsWith("POST") && request.endsWith("/boxes/bx_23456789/stop"))).toBe(true);
+    });
+  });
+
   it("stages a skill archive too large for one file write as parts a short command joins", async () => {
     // Production wake died writing a single ~12.7 MiB base64 body; this archive base64s to ~6.7 MiB,
     // which the file API refuses the same way.
@@ -652,6 +900,163 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(result.runtimeState).toBe("running");
   });
 
+  /**
+   * A Box that accepted a write is not a Box that kept it. The reported wake died extracting a skill
+   * package on a Box the provider had just brought back from `idle`, and the identical payload
+   * extracted on the very next attempt against that same Box — a transfer that did not land, not a
+   * package that cannot be read. The control plane knows what it sent, so these cover it noticing.
+   */
+  describe("an archive the Box did not keep whole", () => {
+    /**
+     * A Box with a disk that answers for itself. Whatever is written is what the size probe reports,
+     * so a truncated write is visible to the control plane exactly as it would be on a real Box.
+     */
+    function boxWithDisk(options: { truncateFirstWriteOf?: string; measures?: boolean }) {
+      const disk = new Map<string, string>();
+      const writes: string[] = [];
+      const commands: string[] = [];
+      const truncated = new Set<string>();
+      const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const url = String(rawUrl);
+        const method = init?.method ?? "GET";
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+        if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+        if (url.endsWith("/files") && method === "PUT") {
+          const path = String(body.path);
+          const content = String(body.content);
+          writes.push(path);
+          const short = path === options.truncateFirstWriteOf && !truncated.has(path);
+          if (short) truncated.add(path);
+          disk.set(path, short ? content.slice(0, content.length - 40) : content);
+          return json({ ok: true });
+        }
+        if (url.endsWith("/commands") && method === "POST") {
+          const command = String(body.command);
+          commands.push(command);
+          if (command.includes("companion-archive-bytes")) {
+            if (!options.measures) return json({ success: false, exitCode: 127, stdout: "", stderr: "wc: not found" });
+            const lines = [...disk]
+              .filter(([path]) => path.endsWith(".tar.gz.b64"))
+              .map(([path, content]) =>
+                `companion-archive-bytes ${path.split("/").at(-1)} ${Buffer.byteLength(content, "utf8")}`);
+            return json({ success: true, exitCode: 0, stdout: `${lines.join("\n")}\n`, stderr: "" });
+          }
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: command.includes("is-active") ? "active\n" : "",
+            stderr: "",
+          });
+        }
+        throw new Error(`unexpected Box request: ${method} ${url}`);
+      });
+      return { fetchMock, disk, writes, commands };
+    }
+
+    const archive = Buffer.from("relecture-catalogue-payload");
+    const archivePath = ".companion/runtime/state/skill-archives/relecture-catalogue.tar.gz.b64";
+
+    const wake = (fetchMock: ReturnType<typeof vi.fn>) => {
+      vi.stubGlobal("fetch", fetchMock);
+      return new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      }).start({
+        companionId: "11111111-1111-4111-8111-111111111111",
+        orgId: "22222222-2222-4222-8222-222222222222",
+        boxId: "bx_23456789",
+        clientSurface: "web",
+        providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+        replaceProviderAuth: true,
+        mcpCredentials: [],
+        mcpAccounts: [],
+        skills: [{
+          slug: "relecture-catalogue",
+          version: "4.5.6",
+          checksum: `sha256:${"b".repeat(64)}`,
+          archive,
+        }],
+        onBoxAssigned: async () => undefined,
+      });
+    };
+
+    it("sends it again rather than failing the wake over it", async () => {
+      const stub = boxWithDisk({ truncateFirstWriteOf: archivePath, measures: true });
+
+      const result = await wake(stub.fetchMock);
+
+      // The short write is repaired before anything tries to read it, so the archive the extract
+      // decodes is the one the control plane meant to stage.
+      expect(stub.writes.filter((path) => path === archivePath)).toHaveLength(2);
+      expect(stub.disk.get(archivePath)).toBe(archive.toString("base64"));
+      const measured = stub.commands.findIndex((command) => command.includes("companion-archive-bytes"));
+      const extract = stub.commands.findIndex((command) => command.includes("skills.next"));
+      expect(measured).toBeGreaterThanOrEqual(0);
+      expect(measured).toBeLessThan(extract);
+      expect(result.runtimeState).toBe("running");
+    });
+
+    it("leaves an archive it landed whole alone", async () => {
+      const stub = boxWithDisk({ measures: true });
+
+      const result = await wake(stub.fetchMock);
+
+      expect(stub.writes.filter((path) => path === archivePath)).toHaveLength(1);
+      expect(result.runtimeState).toBe("running");
+    });
+
+    it("starts anyway when the rewrite it tried will not land either", async () => {
+      // The repair is an attempt, not a requirement. The extract that follows is the better judge of
+      // whether the tree can be built, so a refused rewrite must not be what ends the wake.
+      const stub = boxWithDisk({ truncateFirstWriteOf: archivePath, measures: true });
+      let rewrites = 0;
+      const refusing = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+        if (String(rawUrl).endsWith("/files") && String(body.path) === archivePath) {
+          rewrites += 1;
+          if (rewrites > 1) return json({ code: "internal", message: "disk is unavailable" }, 500);
+        }
+        return await stub.fetchMock(rawUrl, init);
+      });
+
+      const result = await wake(refusing as unknown as ReturnType<typeof vi.fn>);
+
+      expect(rewrites).toBe(2);
+      expect(stub.commands.some((command) => command.includes("skills.next"))).toBe(true);
+      expect(result.runtimeState).toBe("running");
+    });
+
+    it("starts anyway on a Box that will not measure what it holds", async () => {
+      // The measurement is only ever used to repair. A Box that cannot answer it is left to the
+      // extract step exactly as before, because this probe may not cost a wake that would have worked.
+      const stub = boxWithDisk({ measures: false });
+
+      const result = await wake(stub.fetchMock);
+
+      expect(stub.writes.filter((path) => path === archivePath)).toHaveLength(1);
+      expect(stub.commands.some((command) => command.includes("skills.next"))).toBe(true);
+      expect(result.runtimeState).toBe("running");
+    });
+
+    it("asks for the measurement on a short window rather than a start's whole budget", async () => {
+      // A Box slow enough to miss this would otherwise spend a large part of the wake on a step whose
+      // answer was only ever optional, so the request it makes has to say how little it will wait.
+      const stub = boxWithDisk({ measures: true });
+      const asked: unknown[] = [];
+      const watching = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+        if (String(body.command ?? "").includes("companion-archive-bytes")) {
+          asked.push(body.timeoutSeconds);
+        }
+        return await stub.fetchMock(rawUrl, init);
+      });
+
+      await wake(watching as unknown as ReturnType<typeof vi.fn>);
+
+      expect(asked).toEqual([10]);
+    });
+  });
+
   it("names the file the Box refused when a write exceeds the provider's cap", async () => {
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
@@ -744,6 +1149,102 @@ describe("AsciiBoxCompanionRuntime", () => {
     })).rejects.toThrow(
       "Pi runtime layout failed to install (exit 127): "
       + "/home/user/.companion/bin/ensure-pi-layout.sh: line 21: pi: command not found",
+    );
+  });
+
+  /**
+   * THE-340: production recorded this failure as the bare sentence `Pi resources failed to prepare`.
+   * It names the step and nothing else, so the same stored line covered a corrupt archive, a full
+   * disk, and a tree that would not swap, and the wake that hit it could not be told apart from a
+   * wake that hit any other. The script's own last word is what separates them.
+   */
+  it("names the archive a failed skill preparation could not extract", async () => {
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        if (String(body.command).includes("skills.next")) {
+          return json({
+            success: false,
+            exitCode: 1,
+            stdout: "",
+            // tar reports a bad member over three lines and ends on the one that says nothing, so the
+            // script appends the slug after it. The stored reason keeps the last line only.
+            stderr: "gzip: stdin: not in gzip format\ntar: Child returned status 1\n"
+              + "tar: Error is not recoverable: exiting now\n"
+              + "skill package relecture-catalogue did not extract\n",
+          });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    await expect(runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    })).rejects.toThrow(
+      "Pi resources failed to prepare (exit 1): skill package relecture-catalogue did not extract",
+    );
+  });
+
+  it("names the shell's own complaint when clearing the staging directory fails", async () => {
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        // Only the staging command creates that directory; the extract command removes it.
+        if (String(body.command).includes('mkdir -p "$root/state/skill-archives"')) {
+          return json({
+            success: false,
+            exitCode: 1,
+            stdout: "",
+            stderr: "mkdir: cannot create directory '/home/user/.companion': No space left on device\n",
+          });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    await expect(runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    })).rejects.toThrow(
+      "Pi resource staging failed (exit 1): "
+      + "mkdir: cannot create directory '/home/user/.companion': No space left on device",
     );
   });
 
@@ -2652,7 +3153,12 @@ describe("AsciiBoxCompanionRuntime", () => {
       await mkdir(join(disk.home, ".companion", "runtime", "state", "pi.rpc.in", "held"), {
         recursive: true,
       });
-      const attemptedAt = Date.now();
+      // The freshness window compares one file's timestamp against another clock reading, so the
+      // reference is taken from this disk rather than from `Date.now()`: a filesystem whose timestamps
+      // trail the process clock would otherwise make a log written after this point look older.
+      const clock = join(disk.home, "attempted-at");
+      await writeFile(clock, "");
+      const attemptedAt = (await stat(clock)).mtimeMs;
 
       const started = await runOnBoxDisk(`bash ${JSON.stringify(disk.daemon)}`, disk.home);
 

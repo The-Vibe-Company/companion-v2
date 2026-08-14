@@ -84,8 +84,14 @@ test("getting started persists dismissal across contexts and resumes from Accoun
   });
   await page.reload();
   await expect(page.locator(".gs-card")).toBeVisible();
+  // Hiding is optimistic: the card goes as the click lands and the dismissal is persisted behind it.
+  // Reloading before that request arrives cancels it, and the reloaded page reads a workspace that was
+  // never dismissed, so the reload waits for the write it is about to check.
+  const dismissed = page.waitForResponse((response) =>
+    response.url().includes("/getting-started/dismiss") && response.request().method() === "POST");
   await page.getByRole("button", { name: "Hide", exact: true }).click();
   await expect(page.locator(".gs-card")).toHaveCount(0);
+  await dismissed;
   await page.reload();
   await expect(page.locator(".gs-card")).toHaveCount(0);
 

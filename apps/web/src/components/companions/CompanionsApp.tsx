@@ -41,6 +41,14 @@ const READ_MODEL_POLL_MS = 8_000;
  * without anyone's Companion being woken to find out.
  */
 const BOX_STATUS_POLL_MS = 15_000;
+/**
+ * How often a Companion mid-transition re-reads the lifecycle it is waiting on. Nothing else does:
+ * the Box-status poll below starts only once the state is already `running`, and the request that
+ * began the transition answers once, before the lifecycle finishes when it outlives a proxy. That
+ * left the chip reporting Starting against a Box that was already up, beside a reply Pi had already
+ * sent. This is the control-plane projection, so it never resumes a Box and is safe for a Viewer.
+ */
+const PENDING_POLL_MS = 3_000;
 
 export interface CompanionNavigation {
   mineTreeRows: TreeRow[];
@@ -120,6 +128,8 @@ export function CompanionsApp({
   const [waking, setWaking] = useState(false);
   const [openingDesktop, setOpeningDesktop] = useState(false);
   const threadRequestRef = useRef(0);
+  /** Newest runtime read per Companion, so a slower one cannot answer over it. */
+  const companionReadRef = useRef(new Map<string, number>());
   const threadQueueRef = useRef(createThreadQueue());
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
   const noop = () => {};
@@ -130,6 +140,9 @@ export function CompanionsApp({
   );
   const canRunOpened = opened !== null && opened.access !== "viewer";
   const openedAwake = opened?.runtime.state === "running";
+  // A lifecycle the control plane is still resolving. `error` is not one of these: it is where a
+  // failed transition settles, and its reason is already on screen.
+  const openedPending = opened?.runtime.state === "provisioning" || opened?.runtime.state === "stopping";
 
   const providerName = (providerId: string) =>
     providers.catalog.find((provider) => provider.id === providerId)?.name ?? providerId;
@@ -237,8 +250,14 @@ export function CompanionsApp({
    * running Box for a runner and still never resumes one.
    */
   const refreshCompanion = useCallback(async (companionId: string, live = false) => {
+    // Reads of one Companion can overlap, and a lifecycle is watched closely enough that they will:
+    // an older read that answers late must not put a state the Companion has already left back on
+    // screen, which is how a chip that had reached Online would blink back to Starting.
+    const readId = (companionReadRef.current.get(companionId) ?? 0) + 1;
+    companionReadRef.current.set(companionId, readId);
     try {
       const latest = await getCompanionRuntime(currentOrg.id, companionId, { live });
+      if (companionReadRef.current.get(companionId) !== readId) return;
       setCompanions((current) => current.map((item) => item.id === latest.id ? latest : item));
     } catch {
       // The failure that prompted this read is already on screen; do not replace it with this one.
@@ -252,6 +271,15 @@ export function CompanionsApp({
     const timer = setInterval(() => void refreshCompanion(openedId, true), BOX_STATUS_POLL_MS);
     return () => clearInterval(timer);
   }, [canRunOpened, openedAwake, openedId, refreshCompanion]);
+
+  // A pending lifecycle is the one window where the projection is expected to change on its own, so
+  // it is the one window that has to be watched. The chip, the wake control, and the composer footer
+  // all read this row, so they leave Starting together as soon as the wake records that it finished.
+  useEffect(() => {
+    if (!openedId || !openedPending) return;
+    const timer = setInterval(() => void refreshCompanion(openedId), PENDING_POLL_MS);
+    return () => clearInterval(timer);
+  }, [openedId, openedPending, refreshCompanion]);
 
   /** Resolves false when the message never reached the control plane, so the composer keeps its text. */
   const onSend = async (content: string, clientMessageId: string): Promise<boolean> => {
