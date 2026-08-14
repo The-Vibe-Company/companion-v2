@@ -217,6 +217,13 @@ jobs:
       - name: Build applications
         run: pnpm exec turbo run build --output-logs=errors-only
 
+      # The build regenerates the committed `companion-agent-client.mjs` bundle, which inlines
+      # `@companion/contracts`. Checking the integrity baseline here catches a commit that changed a
+      # bundle input without refreshing the artifact; otherwise the first failure is the built API
+      # refusing to serve the bundled skill during the RSC smoke (THE-363).
+      - name: Verify bundled Companion skill artifact is current
+        run: pnpm --filter @companion/companion-skill check:integrity
+
       - name: Smoke CLI
         run: |
           node cli/dist/index.js --version
