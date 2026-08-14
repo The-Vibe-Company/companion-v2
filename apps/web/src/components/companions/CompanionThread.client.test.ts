@@ -475,7 +475,7 @@ describe("CompanionThread stream", () => {
   });
 
   it("closes a turn that produced nothing with a note instead of leaving the thread pending", async () => {
-    const { container } = await mountPolling({
+    const settled = {
       ...thread,
       entries: [
         said,
@@ -491,12 +491,20 @@ describe("CompanionThread stream", () => {
           created_at: "2026-08-12T12:01:20.000Z",
         },
       ],
-    });
+    };
+    const { container, poll } = await mountPolling(settled);
 
     expect(container.querySelectorAll(".chat-note")).toHaveLength(1);
-    expect(log(container)).toContain("Pi ended the turn without a visible reply.");
+    expect(log(container)).toContain("Luna ended the turn without a visible reply.");
+    expect(log(container)).not.toContain("Pi ended the turn without a visible reply.");
     // The turn is closed, so nothing should still claim Luna is replying.
     expect(container.querySelectorAll(".chat-replying")).toHaveLength(0);
+
+    const atlas: Companion = { ...companion, name: "Atlas" };
+    await poll(settled, atlas);
+
+    expect(log(container)).toContain("Atlas ended the turn without a visible reply.");
+    expect(log(container)).not.toContain("Luna ended the turn without a visible reply.");
   });
 });
 

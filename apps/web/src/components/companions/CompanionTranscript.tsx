@@ -39,6 +39,7 @@ import { decideCompanionDecision } from "../../lib/companions";
 import {
   composerHint,
   replyExpected,
+  transcriptDisplayContent,
   transcriptTurns,
   type TranscriptTurn,
 } from "./transcript";
@@ -87,10 +88,13 @@ function useTurn(): TranscriptTurn | undefined {
  * quietest of them and is rendered from the entry itself, so the run keeps its place in the
  * conversation without the thread growing a fourth kind of message to lay out.
  */
-const convertEntry = (entry: CompanionTranscriptEntry): ThreadMessageLike => ({
+const convertEntry = (
+  entry: CompanionTranscriptEntry,
+  companionName: string,
+): ThreadMessageLike => ({
   id: entry.event_id,
   role: entry.role === "tool" || entry.role === "decision" ? "system" : entry.role,
-  content: [{ type: "text", text: entry.content }],
+  content: [{ type: "text", text: transcriptDisplayContent(entry, companionName) }],
   createdAt: new Date(entry.created_at),
 });
 
@@ -543,9 +547,13 @@ export function CompanionTranscript({
     }
   }, [canSend, onSend, viewerId]);
 
+  const convertMessage = useCallback(
+    (entry: CompanionTranscriptEntry) => convertEntry(entry, companion.name),
+    [companion.name],
+  );
   const runtime = useExternalStoreRuntime({
     messages,
-    convertMessage: convertEntry,
+    convertMessage,
     onNew: send,
     // Sending is the only thing this thread does: no editing, no branching, no regeneration, no
     // cancel, and no run of its own, so the primitives offer none of those controls.
