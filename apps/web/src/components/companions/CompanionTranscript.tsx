@@ -8,6 +8,8 @@ import {
   useMemo,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
   AssistantRuntimeProvider,
@@ -261,6 +263,38 @@ export function CompanionTranscript({
     runtimeRef.current = runtime;
   }, [runtime]);
 
+  /**
+   * A press that already sent, so the `click` the browser sends afterwards is not a second message.
+   */
+  const sentOnPress = useRef(false);
+
+  /**
+   * iOS settles a tap on the composer's own button by blurring the field first: the keyboard starts
+   * closing, the visual viewport grows, the thread pinned to it is laid out again, and the `click`
+   * meant for this button lands wherever the button used to be — THE-346, a Send that never fired.
+   * The press is the whole gesture here, so it is where the message goes: preventing the default
+   * keeps focus, and the draft, in the field, which is also what keeps the keyboard from closing
+   * under the finger in the first place.
+   */
+  const sendOnPress = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
+    const composer = runtime.thread.composer;
+    if (!composer.getState().canSend) return;
+    event.preventDefault();
+    sentOnPress.current = true;
+    composer.send();
+  }, [runtime]);
+
+  /**
+   * The primitive sends from `click`, which the browser still delivers after the press. Refusing the
+   * default is how `ComposerPrimitive.Send` is told the message is already gone: it composes its own
+   * handler after this one and skips it on a prevented event.
+   */
+  const swallowClickAfterPress = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
+    if (!sentOnPress.current) return;
+    sentOnPress.current = false;
+    event.preventDefault();
+  }, []);
+
   const replying = replyExpected({ entries: messages, awake });
   const empty = thread !== null && messages.length === 0;
 
@@ -314,11 +348,20 @@ export function CompanionTranscript({
                   className="chat-composer__input"
                   placeholder={`Message ${companion.name}`}
                   aria-label={`Message ${companion.name}`}
+                  // A phone keyboard labels its return key from this hint. Without it a textarea
+                  // offers `return`, which reads as a new line even though Enter sends here; Shift +
+                  // Enter is still the new line, on a phone as on a desktop.
+                  enterKeyHint="send"
                   // Escape belongs to the thread, not to the draft: a stray keystroke must never
                   // discard text this composer is holding on to.
                   cancelOnEscape={false}
                 />
-                <ComposerPrimitive.Send className="chat-send" aria-label="Send message">
+                <ComposerPrimitive.Send
+                  className="chat-send"
+                  aria-label="Send message"
+                  onPointerDown={sendOnPress}
+                  onClick={swallowClickAfterPress}
+                >
                   <Icon name="send" size={15} />
                 </ComposerPrimitive.Send>
               </div>

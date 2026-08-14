@@ -3,8 +3,9 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Companion, CompanionThread as Thread } from "@companion/contracts";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CompanionThread } from "./CompanionThread";
+import { CHAT_VIEWPORT_SETTLE_MS } from "./useVisualViewportPin";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -120,6 +121,25 @@ async function send(container: HTMLElement) {
   await act(async () => {
     form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
   });
+}
+
+function sendButton(container: HTMLElement) {
+  return container.querySelector(".chat-send") as HTMLButtonElement;
+}
+
+/** A finger landing on a control, which is the moment iOS starts resolving a tap. */
+function pressed(target: Element) {
+  const event = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
+  target.dispatchEvent(event);
+  return event;
+}
+
+async function keyDown(target: Element, init: KeyboardEventInit) {
+  const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+  await act(async () => {
+    target.dispatchEvent(event);
+  });
+  return event;
 }
 
 describe("CompanionThread composer", () => {
@@ -495,6 +515,148 @@ describe("CompanionThread Box chip", () => {
 
 /**
  * Product promise:
+ * A message can be sent from a phone: the Send control answers the finger that touched it, and the
+ * keyboard's own Send key sends the draft.
+ *
+ * Regression caught:
+ * THE-346 — sending from a phone stopped working. iOS resolves a tap on Send by blurring the composer
+ * first, so the keyboard closes, the visual viewport grows, the thread pinned to it is laid out again,
+ * and the `click` arrives where the button no longer is.
+ *
+ * Why this test is component-level:
+ * The composer, the runtime it sends through, and the viewport pin all take part in one tap. The
+ * failure is in how they are sequenced, which only shows up with all three mounted together.
+ *
+ * Failure proof:
+ * Moving the send back to `click`, dropping the prevented default that keeps the field focused, or
+ * letting the growing viewport through mid-tap each fails a case below.
+ */
+describe("CompanionThread mobile send", () => {
+  class FakeVisualViewport extends EventTarget {
+    height = 350;
+    offsetTop = 24;
+  }
+
+  const viewport = new FakeVisualViewport();
+
+  /** The tap iOS actually delivers: finger down, field blurred, keyboard on its way out. */
+  function tapWithKeyboardClosing(container: HTMLElement) {
+    const composer = container.querySelector("textarea") as HTMLTextAreaElement;
+    pressed(sendButton(container));
+    composer.dispatchEvent(new Event("focusout", { bubbles: true }));
+    viewport.height = 640;
+    viewport.offsetTop = 0;
+    viewport.dispatchEvent(new Event("resize"));
+  }
+
+  beforeEach(() => {
+    viewport.height = 350;
+    viewport.offsetTop = 24;
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: viewport });
+  });
+
+  afterEach(() => {
+    act(() => roots.splice(0).forEach((root) => root.unmount()));
+    document.body.innerHTML = "";
+    document.documentElement.removeAttribute("style");
+    Reflect.deleteProperty(window, "visualViewport");
+  });
+
+  it("sends the draft on the press that starts the tap", async () => {
+    const sent: string[] = [];
+    const container = await mount(async (content) => {
+      sent.push(content);
+      return true;
+    });
+    const composer = type(container, "Draft the launch note");
+
+    // The click never arrives in this test, which is exactly what the phone does when the shell moves
+    // under the finger: if the message still goes out, the tap was never the thing carrying it.
+    await act(async () => {
+      tapWithKeyboardClosing(container);
+    });
+
+    expect(sent).toEqual(["Draft the launch note"]);
+    expect(composer.value).toBe("");
+  });
+
+  it("refuses the press default so the composer keeps focus and the keyboard stays put", async () => {
+    const container = await mount(async () => true);
+    type(container, "Draft the launch note");
+
+    let press!: PointerEvent;
+    await act(async () => {
+      press = pressed(sendButton(container));
+    });
+
+    // Letting the default through is what blurs the field, and the blur is what closes the keyboard
+    // and moves everything the finger was aiming at.
+    expect(press.defaultPrevented).toBe(true);
+  });
+
+  it("sends once when the browser follows the press with a click", async () => {
+    const sent: string[] = [];
+    const container = await mount(async (content) => {
+      sent.push(content);
+      return true;
+    });
+    type(container, "Draft the launch note");
+
+    await act(async () => {
+      pressed(sendButton(container));
+      sendButton(container).dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+
+    expect(sent).toEqual(["Draft the launch note"]);
+  });
+
+  it("still sends a click no press came before, so the button stays reachable by keyboard", async () => {
+    const sent: string[] = [];
+    const container = await mount(async (content) => {
+      sent.push(content);
+      return true;
+    });
+    type(container, "Draft the launch note");
+
+    await act(async () => {
+      sendButton(container).dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+
+    expect(sent).toEqual(["Draft the launch note"]);
+  });
+
+  it("asks the phone keyboard for a Send key", async () => {
+    const container = await mount(async () => true);
+
+    // A textarea offers `return`, which reads as a new line. Enter sends here, so the key has to say
+    // so — the hint is the only thing that can tell the keyboard.
+    expect(container.querySelector("textarea")?.getAttribute("enterkeyhint")).toBe("send");
+  });
+
+  it("sends on Enter and leaves Shift + Enter to the new line", async () => {
+    const sent: string[] = [];
+    const container = await mount(async (content) => {
+      sent.push(content);
+      return true;
+    });
+    const composer = type(container, "Draft the launch note");
+
+    const newline = await keyDown(composer, { key: "Enter", shiftKey: true });
+
+    // The composer does not touch this keystroke, so the browser inserts the line break itself.
+    expect(newline.defaultPrevented).toBe(false);
+    expect(sent).toEqual([]);
+
+    const submit = await keyDown(composer, { key: "Enter" });
+
+    expect(submit.defaultPrevented).toBe(true);
+    expect(sent).toEqual(["Draft the launch note"]);
+    expect(composer.value).toBe("");
+  });
+});
+
+/**
+ * Product promise:
  * An open thread is sized on the box the phone keyboard leaves visible, so focusing the composer does
  * not push it behind the keyboard or pan the page.
  *
@@ -549,6 +711,39 @@ describe("CompanionThread visual viewport", () => {
     });
 
     expect(pinned()).toEqual({ height: "350px", top: "24px" });
+  });
+
+  it("waits out the tap that closed the keyboard before growing back", async () => {
+    // THE-346: the growth arrives between the press and the click it would move out from under the
+    // finger, so the pin holds the box it was on until that tap has been delivered.
+    vi.useFakeTimers();
+    try {
+      await mount(async () => true);
+      await act(async () => {
+        viewport.height = 350;
+        viewport.offsetTop = 24;
+        viewport.dispatchEvent(new Event("resize"));
+      });
+      expect(pinned()).toEqual({ height: "350px", top: "24px" });
+
+      await act(async () => {
+        document.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+        viewport.height = 640;
+        viewport.offsetTop = 0;
+        viewport.dispatchEvent(new Event("resize"));
+      });
+
+      expect(pinned()).toEqual({ height: "350px", top: "24px" });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(CHAT_VIEWPORT_SETTLE_MS);
+      });
+
+      // Nothing is left holding the thread short: the keyboard is gone and the page is whole again.
+      expect(pinned()).toEqual({ height: "640px", top: "0px" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stops reporting once the thread is closed", async () => {
