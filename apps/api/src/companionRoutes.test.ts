@@ -48,6 +48,7 @@ const coreMocks = vi.hoisted(() => ({
   setCompanionProvider: vi.fn(),
   deleteCompanionProvider: vi.fn(),
   setDefaultCompanionProvider: vi.fn(),
+  getCompanionProviderCredentialGeneration: vi.fn(),
   resolveCompanionProviderAuth: vi.fn(),
   resolveCompanionPluginInjection: vi.fn(),
   getCompanion: vi.fn(),
@@ -179,7 +180,13 @@ function boxRuntime(overrides: Record<string, unknown> = {}) {
 
 const runningCompanion = {
   ...companion,
-  runtime: { ...companion.runtime, state: "running" as const, daemon_state: "running" as const },
+  runtime: {
+    ...companion.runtime,
+    state: "running" as const,
+    daemon_state: "running" as const,
+    provider_credential_generation: "22222222-2222-4222-8222-222222222222",
+    disk_layout_version: COMPANION_PI_DISK_LAYOUT_VERSION,
+  },
 };
 
 describe("Companions API feature gate", () => {
@@ -329,6 +336,10 @@ describe("Companions API feature gate", () => {
     coreMocks.setCompanionProvider.mockResolvedValue(companion);
     coreMocks.deleteCompanionProvider.mockResolvedValue(undefined);
     coreMocks.setDefaultCompanionProvider.mockResolvedValue(undefined);
+    coreMocks.getCompanionProviderCredentialGeneration.mockResolvedValue({
+      providerId: "anthropic",
+      credentialGeneration: "22222222-2222-4222-8222-222222222222",
+    });
     coreMocks.resolveCompanionProviderAuth.mockResolvedValue({
       providerId: "anthropic",
       credentialGeneration: "22222222-2222-4222-8222-222222222222",
@@ -410,7 +421,7 @@ describe("Companions API feature gate", () => {
     expect(coreMocks.listCompanions).toHaveBeenCalledOnce();
   });
 
-  it("updates name, instructions, and provider without contacting the Box", async () => {
+  it("saves a provider change without waking an asleep Box", async () => {
     const runtimeFactory = vi.fn(() => {
       throw new Error("Box client must not be created");
     });
@@ -435,6 +446,118 @@ describe("Companions API feature gate", () => {
       providerId: "openai-codex",
     }));
     expect(runtimeFactory).not.toHaveBeenCalled();
+  });
+
+  it("applies a provider change immediately when Box and Pi are already running", async () => {
+    const changed = {
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        provider_ids: ["openai-codex"],
+        provider_credential_generation: null,
+      },
+    };
+    coreMocks.getCompanion.mockResolvedValueOnce(runningCompanion);
+    coreMocks.updateCompanion.mockResolvedValueOnce(changed);
+    coreMocks.getCompanionProviderCredentialGeneration.mockResolvedValueOnce({
+      providerId: "openai-codex",
+      credentialGeneration: "44444444-4444-4444-8444-444444444444",
+    });
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValueOnce(changed);
+    coreMocks.resolveCompanionProviderAuth.mockResolvedValueOnce({
+      providerId: "openai-codex",
+      credentialGeneration: "44444444-4444-4444-8444-444444444444",
+      authEntry: { type: "oauth", access: "secret-b" },
+    });
+    coreMocks.updateCompanionRuntime.mockResolvedValueOnce({
+      ...changed,
+      runtime: {
+        ...changed.runtime,
+        provider_credential_generation: "44444444-4444-4444-8444-444444444444",
+      },
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider_id: "openai-codex" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtime.status).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
+      boxId: companion.runtime.box_id,
+      providerAuth: { "openai-codex": { type: "oauth", access: "secret-b" } },
+      replaceProviderAuth: true,
+      allowBoxWake: false,
+    }));
+  });
+
+  it("does not contact or recycle Pi for a name-only save on a running Companion", async () => {
+    coreMocks.getCompanion.mockResolvedValueOnce(runningCompanion);
+    coreMocks.updateCompanion.mockResolvedValueOnce({
+      ...runningCompanion,
+      name: "Research desk",
+    });
+    const runtimeFactory = vi.fn(() => {
+      throw new Error("Box client must not be created");
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Research desk" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtimeFactory).not.toHaveBeenCalled();
+    expect(coreMocks.claimCompanionRuntimeStart).not.toHaveBeenCalled();
+  });
+
+  it("retries an unapplied provider save without requiring another provider change", async () => {
+    const unapplied = {
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        state: "error" as const,
+        daemon_state: "error" as const,
+        provider_ids: ["openai-codex"],
+        provider_credential_generation: null,
+      },
+    };
+    coreMocks.getCompanion.mockResolvedValueOnce(unapplied);
+    coreMocks.updateCompanion.mockResolvedValueOnce(unapplied);
+    coreMocks.getCompanionProviderCredentialGeneration.mockResolvedValueOnce({
+      providerId: "openai-codex",
+      credentialGeneration: "44444444-4444-4444-8444-444444444444",
+    });
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValueOnce(unapplied);
+    coreMocks.resolveCompanionProviderAuth.mockResolvedValueOnce({
+      providerId: "openai-codex",
+      credentialGeneration: "44444444-4444-4444-8444-444444444444",
+      authEntry: { type: "oauth", access: "secret-b" },
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider_id: "openai-codex" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtime.status).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
+      replaceProviderAuth: true,
+      allowBoxWake: false,
+    }));
   });
 
   it("refuses Viewer settings writes before any Box contact", async () => {
@@ -1136,6 +1259,37 @@ describe("Companions API feature gate", () => {
     expect(coreMocks.listCompanionRuntimeSkillPackages).not.toHaveBeenCalled();
   });
 
+  it("starts runtime before sending when an online Companion has no applied provider generation", async () => {
+    const stale = {
+      ...runningCompanion,
+      runtime: { ...runningCompanion.runtime, provider_credential_generation: null },
+    };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(stale);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(stale);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Use the newly selected model" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtime.status).not.toHaveBeenCalled();
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
+      replaceProviderAuth: true,
+    }));
+    expect(runtime.start.mock.invocationCallOrder[0]!)
+      .toBeLessThan(runtime.prompt.mock.invocationCallOrder[0]!);
+  });
+
   it("wakes a provider-archived Box when the running projection is stale", async () => {
     coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
     coreMocks.listPendingCompanionMessages.mockResolvedValue({
@@ -1449,6 +1603,77 @@ describe("Companions API feature gate", () => {
       entries: [expect.objectContaining({ role: "assistant", content: "Two services timed out." })],
     }));
     expect(runtime.refreshTtl).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
+  });
+
+  it("restarts runtime before syncing an online thread with stale provider auth", async () => {
+    const stale = {
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        provider_credential_generation: "33333333-3333-4333-8333-333333333333",
+      },
+    };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(stale);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(stale);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtime.status).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
+      replaceProviderAuth: true,
+      allowBoxWake: false,
+    }));
+    expect(runtime.start.mock.invocationCallOrder[0]!)
+      .toBeLessThan(runtime.prompt.mock.invocationCallOrder[0]!);
+  });
+
+  it("retries stale provider recovery when a prior sync left the projection in error", async () => {
+    const staleError = {
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        state: "error" as const,
+        daemon_state: "error" as const,
+        provider_credential_generation: null,
+      },
+    };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(staleError);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(staleError);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtime.status).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
+      replaceProviderAuth: true,
+      allowBoxWake: false,
+    }));
+    expect(runtime.prompt).toHaveBeenCalledOnce();
   });
 
   it("records a reply when Pi answered inside a thinking block and settled", async () => {
@@ -1807,6 +2032,7 @@ describe("Companions API feature gate", () => {
         provider_credential_generation: "22222222-2222-4222-8222-222222222222",
       },
       false,
+      false,
     ],
     [
       "rewrites provider auth for a Companion that has no Box yet",
@@ -1816,14 +2042,16 @@ describe("Companions API feature gate", () => {
         provider_credential_generation: "22222222-2222-4222-8222-222222222222",
       },
       true,
+      false,
     ],
     [
-      "rewrites provider auth when the Box still holds an older Pi layout",
+      "refreshes an older Pi layout without replacing current provider auth",
       {
         box_id: "bx_23456789",
         disk_layout_version: 1,
         provider_credential_generation: "22222222-2222-4222-8222-222222222222",
       },
+      false,
       true,
     ],
     [
@@ -1834,8 +2062,9 @@ describe("Companions API feature gate", () => {
         provider_credential_generation: "33333333-3333-4333-8333-333333333333",
       },
       true,
+      false,
     ],
-  ])("%s", async (_name, runtime, expected) => {
+  ])("%s", async (_name, runtime, replaceProviderAuth, refreshRuntimeLayout) => {
     const claimed = { ...companion, runtime: { ...companion.runtime, ...runtime } };
     coreMocks.getCompanionForRuntime.mockResolvedValue(claimed);
     coreMocks.claimCompanionRuntimeStart.mockResolvedValue(claimed);
@@ -1858,7 +2087,10 @@ describe("Companions API feature gate", () => {
     });
 
     expect(response.status).toBe(200);
-    expect(start).toHaveBeenCalledWith(expect.objectContaining({ replaceProviderAuth: expected }));
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      replaceProviderAuth,
+      refreshRuntimeLayout,
+    }));
   });
 
   it("stores provider credentials without returning their value", async () => {

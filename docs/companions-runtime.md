@@ -79,6 +79,7 @@ an empty skill set. This is enforced by the API and again by the Box adapter bef
 | `POST` | `/v1/companions` | Never |
 | `GET` | `/v1/companions` | Never |
 | `GET` | `/v1/companions/:id` | Never |
+| `PATCH` | `/v1/companions/:id` | Recycles Pi for an online provider change; never wakes Box |
 | `PUT` | `/v1/companions/:id/provider` | Never; owner-only, unconfigured Companions only |
 | `GET/PUT/PATCH/DELETE` | `/v1/companions/:id/shares/...` | Never; owner-only |
 | `GET` | `/v1/companions/:id/thread` | Never; authorized read-only control-plane projection |
@@ -380,10 +381,8 @@ provider generation. If the unit is `active` and its tmpfs MCP credential file i
 returns that observation without repairing layout, injecting resources, or calling systemd start at
 all. This keeps an in-flight turn alive. That warm probe is the start's first command whenever the
 start is warm-eligible, so its answer carries the reachability proof too and a warm Box is still
-touched exactly once. The first start after a layout or credential change still
-refreshes the files, but uses idempotent `systemctl start`, never `restart`, so an active unit is not
-killed during the upgrade. An already-running process keeps the environment it inherited; refreshed
-layout and MCP environment take effect on its next automatic start or after an explicit stop/wake.
+touched exactly once. A layout-only refresh keeps idempotent `systemctl start`, but replacing
+`auth.json` uses `systemctl restart` so Pi loads the new provider while the Box stays running.
 
 After Pi accepts at least one durable message through send or sync, the API best-effort PATCHes that
 Box with the configured TTL. The default is six hours (`21600` seconds), so every successful message
@@ -486,6 +485,9 @@ file is absent, and a failed injection or systemd start command best-effort remo
 runtime `mcp_credentials` files. A later active-wait timeout keeps the runtime file because systemd
 may still recover Pi through `Restart=on-failure`; explicit stop and Box stop/reboot remain its
 cleanup boundary.
+
+Changing a Companion's provider in settings rewrites `auth.json` and recycles Pi, not the Box:
+immediately when Box and Pi are online, or on the next start/send when the Box is asleep.
 
 Migration `0065` clears `provider_ids` for existing rows. Before it, that column recorded whichever
 credential tags a start request carried, including MCP account tags, so no legacy value can name a

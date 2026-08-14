@@ -378,7 +378,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       String(JSON.parse(String(init?.body ?? "{}")).command ?? "").includes("skills.next"))).toBe(false);
   });
 
-  it("does not take the warm fast path when layout or provider auth needs replacement", async () => {
+  it("rewrites provider auth and restarts Pi instead of using an idempotent start", async () => {
     const commands: string[] = [];
     const writtenPaths: string[] = [];
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
@@ -423,11 +423,64 @@ describe("AsciiBoxCompanionRuntime", () => {
 
     expect(commands.some((command) => command.includes("companion-pi-warm-ready"))).toBe(false);
     expect(commands.some((command) =>
+      command.includes("systemctl --user restart companion-pi-daemon.service"))).toBe(true);
+    expect(commands.every((command) =>
+      !command.includes("systemctl --user start companion-pi-daemon.service"))).toBe(true);
+    expect(writtenPaths).toContain(".companion/pi/auth.json");
+    expect(writtenPaths).toContain(".companion/runtime/state/providers.env");
+  });
+
+  it("refreshes an old layout with idempotent start when provider auth is still current", async () => {
+    const commands: string[] = [];
+    const writtenPaths: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") {
+        writtenPaths.push(String(body.path));
+        return json({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: command.includes("companion-provider-auth-present")
+            ? "companion-provider-auth-present\n"
+            : command.includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: false,
+      refreshRuntimeLayout: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(commands.some((command) =>
       command.includes("systemctl --user start companion-pi-daemon.service"))).toBe(true);
     expect(commands.every((command) =>
       !command.includes("systemctl --user restart companion-pi-daemon.service"))).toBe(true);
-    expect(writtenPaths).toContain(".companion/pi/auth.json");
-    expect(writtenPaths).toContain(".companion/runtime/state/providers.env");
+    expect(writtenPaths).not.toContain(".companion/pi/auth.json");
   });
 
   /**
@@ -518,7 +571,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         String(url).endsWith("/boxes/bx_23456789/resume") && init?.method === "POST")).toBe(true);
       // The wake it was resumed for then ran, rather than the resume being its own reported outcome.
       expect(commands.some((command) =>
-        command.includes("systemctl --user start companion-pi-daemon.service"))).toBe(true);
+        command.includes("systemctl --user restart companion-pi-daemon.service"))).toBe(true);
     });
 
     it("fails the start with what an unresumable idle Box said instead of reporting provisioning", async () => {
@@ -537,6 +590,20 @@ describe("AsciiBoxCompanionRuntime", () => {
       await expect(runtime.start(startInput)).rejects.toMatchObject({
         message: expect.stringContaining("box is not running"),
       });
+    });
+
+    it("does not resume a Box that stops before an apply-only command runs", async () => {
+      const { fetchMock } = idleBoxRefusingCommands({ resumable: true, refusal: "envelope" });
+      const runtime = new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      });
+
+      await expect(runtime.start({ ...startInput, allowBoxWake: false })).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringContaining("did not run this apply command"),
+      });
+      expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
     });
 
     it("returns a warm idle Box without resuming the machine its Pi is already running on", async () => {
@@ -1453,7 +1520,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       "EnvironmentFile=-%h/.companion/runtime/state/providers.env",
     );
     const start = commands.find((command) =>
-      command.includes("systemctl --user start companion-pi-daemon.service"));
+      command.includes("systemctl --user restart companion-pi-daemon.service"));
     expect(start).toBeDefined();
     expect(start).toContain("systemctl --user daemon-reload");
     expect(start).toContain('companion_user_runtime_dir="/run/user/$(id -u)"');
@@ -1468,9 +1535,9 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(start).toContain('mv -f "$staged_credential_file" "$runtime_credential_file"');
     expect(start).toContain('runtime_credential_dir="$XDG_RUNTIME_DIR/companion"');
     expect(start).toContain("trap - EXIT");
-    expect(start!.indexOf("systemctl --user start companion-pi-daemon.service"))
+    expect(start!.indexOf("systemctl --user restart companion-pi-daemon.service"))
       .toBeLessThan(start!.indexOf("trap - EXIT"));
-    expect(start).not.toContain("systemctl --user restart companion-pi-daemon.service");
+    expect(start).not.toContain("systemctl --user start companion-pi-daemon.service");
     // Every Box command runs in its own shell, so the status probe locates the bus again too.
     const userManagerCommands = commands.filter((command) => command.includes("systemctl --user"));
     expect(userManagerCommands.length).toBeGreaterThan(0);
@@ -1582,7 +1649,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     // that recovered daemon dead.
     const journal = ["activating", "failed", "activating", "active"];
     const probes: string[] = [];
-    const starts: string[] = [];
+    const launches: string[] = [];
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const method = init?.method ?? "GET";
@@ -1591,7 +1658,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
       if (url.endsWith("/commands") && method === "POST") {
         const command = String(body.command);
-        if (command.includes("systemctl --user start")) starts.push(command);
+        if (command.includes("systemctl --user restart")) launches.push(command);
         if (command.includes("is-active") && !command.includes("companion_label")) {
           probes.push(command);
           return json({
@@ -1628,9 +1695,9 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(result).toMatchObject({ runtimeState: "running", daemonState: "running" });
     // The wait has to outlast the `failed` answer rather than stop on it.
     expect(probes.length).toBe(journal.length);
-    // Only the wake's own start is issued: another start on a later probe would add needless work
+    // Only the wake's own restart is issued: another launch on a later probe would add needless work
     // while systemd is already recovering the daemon.
-    expect(starts).toHaveLength(1);
+    expect(launches).toHaveLength(1);
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/stop"))).toBe(false);
   });
 
@@ -2188,6 +2255,41 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(fetchMock.mock.calls.some(([url, init]) =>
       String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
+  });
+
+  it("refuses to resume an archived Box for an apply-only provider recycle", async () => {
+    const archived = {
+      ...box,
+      name: "Companion 11111111-1111-4111-8111-111111111111",
+      state: "archived",
+    };
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (url.endsWith("/boxes/bx_23456789") && (!init?.method || init.method === "GET")) {
+        return json({ box: archived });
+      }
+      throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    await expect(runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      allowBoxWake: false,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    })).rejects.toMatchObject({ status: 409, message: expect.stringContaining("Box is asleep") });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("recovers a deterministically named archived Box before restarting Pi", async () => {
