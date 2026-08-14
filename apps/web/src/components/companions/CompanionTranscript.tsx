@@ -5,6 +5,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -26,6 +27,8 @@ import {
 import type {
   Companion,
   CompanionThread as Thread,
+  CompanionToolRun,
+  CompanionToolRunKind,
   CompanionTranscriptEntry,
 } from "@companion/contracts";
 import { companionMessageEventId } from "@companion/contracts";
@@ -63,9 +66,14 @@ function useTurn(): TranscriptTurn | undefined {
   return id ? turns.get(id) : undefined;
 }
 
+/**
+ * A tool run is its own transcript entry, and the primitives know three roles. It rides in as the
+ * quietest of them and is rendered from the entry itself, so the run keeps its place in the
+ * conversation without the thread growing a fourth kind of message to lay out.
+ */
 const convertEntry = (entry: CompanionTranscriptEntry): ThreadMessageLike => ({
   id: entry.event_id,
-  role: entry.role,
+  role: entry.role === "tool" ? "system" : entry.role,
   content: [{ type: "text", text: entry.content }],
   createdAt: new Date(entry.created_at),
 });
@@ -118,10 +126,97 @@ function Note() {
   );
 }
 
+const TOOL_ICONS: Record<CompanionToolRunKind, string> = {
+  shell: "terminal",
+  file: "file-pen-line",
+  browse: "globe",
+  computer: "monitor",
+  tool: "braces",
+};
+
+/** What the chip says it is doing, for a reader who cannot see the spinner or the tick. */
+const TOOL_STATUS_LABELS = {
+  running: "running",
+  ok: "done",
+  error: "failed",
+} as const;
+
+/**
+ * One tool run, as a chip on the transcript. It is deliberately not a message: the run is a line of
+ * chrome between two turns, so the reply above it and the reply below it still read as a
+ * conversation. The chip carries what ran and how it ended; the arguments and whatever the tool
+ * returned stay folded away until a reader asks for them, because most runs are read at a glance and
+ * skipped.
+ *
+ * A run that moved the Box desktop also carries one frame of that desktop, shown in place. It is the
+ * screen as the run left it, not a live stream — watching the machine is what the Computer panel
+ * beside the thread is for, and this thread is still readable by someone who may not open one.
+ */
+function ToolChip({ run }: { run: CompanionToolRun }) {
+  const [open, setOpen] = useState(false);
+  const detailId = useId();
+  const status = TOOL_STATUS_LABELS[run.status];
+  const named = run.title !== run.name;
+  return (
+    <MessagePrimitive.Root
+      className={"chat-tool chat-tool--" + run.status}
+      aria-busy={run.status === "running" || undefined}
+    >
+      <button
+        type="button"
+        className="chat-tool__head"
+        aria-expanded={run.detail ? open : undefined}
+        aria-controls={run.detail ? detailId : undefined}
+        // A run Pi reported nothing about has nothing to unfold, so the chip is a plain line.
+        disabled={!run.detail}
+        onClick={() => setOpen((shown) => !shown)}
+      >
+        <Icon name={TOOL_ICONS[run.kind]} size={13} className="chat-tool__kind" />
+        <span className="chat-tool__name">{run.name}</span>
+        {named && <span className="chat-tool__title">{run.title}</span>}
+        {run.status === "running"
+          ? <span className="chat-tool__spinner" aria-hidden="true" />
+          : (
+            <Icon
+              name={run.status === "ok" ? "check" : "alert-triangle"}
+              size={13}
+              className="chat-tool__state"
+            />
+          )}
+        <span className="sr-only">{status}</span>
+        {run.detail && (
+          <Icon
+            name={open ? "chevron-down" : "chevron-right"}
+            size={13}
+            className="chat-tool__caret"
+          />
+        )}
+      </button>
+      {run.detail && open && (
+        <pre className="chat-tool__detail" id={detailId}>{run.detail}</pre>
+      )}
+      {run.screenshot && (
+        <img
+          className="chat-tool__frame"
+          src={run.screenshot}
+          alt={`The Box desktop after ${run.title}`}
+          loading="lazy"
+        />
+      )}
+    </MessagePrimitive.Root>
+  );
+}
+
+/** A tool run arrives as a system message; everything else with that role is a note. */
+function SystemTurn() {
+  const run = useTurn()?.entry.tool;
+  return run ? <ToolChip run={run} /> : <Note />;
+}
+
 const TURN_COMPONENTS = {
   UserMessage: () => <Turn tone="said" />,
   AssistantMessage: () => <Turn tone="reply" />,
-  SystemMessage: Note,
+  SystemMessage: SystemTurn,
 };
 
 /**
@@ -141,6 +236,12 @@ function useStableEntries(entries: CompanionTranscriptEntry[]): CompanionTranscr
         && kept.content === entry.content
         && kept.author_id === entry.author_id
         && kept.author_name === entry.author_name
+        // A chip is the one entry that changes after it is stored: it settles, and a visual run then
+        // gains its frame. Only those three fields ever move, so comparing them is what keeps a
+        // finished run from re-rendering on every poll for the rest of the conversation.
+        && kept.tool?.status === entry.tool?.status
+        && kept.tool?.detail === entry.tool?.detail
+        && kept.tool?.screenshot === entry.tool?.screenshot
         && kept.created_at === entry.created_at;
       const value = unchanged ? kept : entry;
       next.set(entry.event_id, value);
@@ -245,6 +346,7 @@ export function CompanionTranscript({
       content,
       author_id: viewerId,
       author_name: null,
+      tool: null,
       created_at: new Date().toISOString(),
     });
     try {

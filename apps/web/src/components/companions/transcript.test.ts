@@ -10,6 +10,7 @@ function entry(overrides: Partial<CompanionTranscriptEntry> = {}): CompanionTran
     content: "Draft the launch note",
     author_id: "user-1",
     author_name: "Ada",
+    tool: null,
     created_at: "2026-08-12T12:00:00.000Z",
     ...overrides,
   };

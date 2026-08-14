@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { projectCompanionPiEvents } from "../src/companionPiEvents";
+import type { CompanionToolRun } from "@companion/contracts";
+import {
+  matchCompanionToolCompletions,
+  projectCompanionPiEvents,
+} from "../src/companionPiEvents";
 
 function line(event: unknown): string {
   return `${JSON.stringify(event)}\n`;
@@ -8,7 +12,7 @@ function line(event: unknown): string {
 const now = new Date("2026-08-12T12:00:00.000Z");
 
 describe("Pi RPC log projection", () => {
-  it("projects assistant text and drops thinking, tool calls, and tool results", () => {
+  it("projects assistant text, drops thinking, and gives each tool call its own entry", () => {
     const chunk = [
       line({ type: "agent_start" }),
       line({ type: "message_end", message: { role: "user", content: "Summarize the incident" } }),
@@ -31,14 +35,100 @@ describe("Pi RPC log projection", () => {
 
     const projection = projectCompanionPiEvents({ chunk, offset: 0, now });
 
-    expect(projection.entries).toEqual([{
-      eventId: expect.stringMatching(/^pi:\d+$/),
-      role: "assistant",
-      content: "Two services timed out.",
-      createdAt: new Date("2026-08-12T11:59:00.000Z"),
-    }]);
+    expect(projection.entries.map((entry) => [entry.role, entry.content])).toEqual([
+      ["assistant", "Two services timed out."],
+      ["tool", "ls"],
+    ]);
+    // The reply stays the reply: the thinking is gone and the call is beside it, not inside it.
+    expect(projection.entries[0]?.tool).toBeUndefined();
+    expect(projection.entries[1]?.tool).toMatchObject({
+      call_id: "call_1",
+      kind: "shell",
+      name: "bash",
+      title: "ls",
+      status: "running",
+      screenshot: null,
+    });
     expect(projection.settled).toBe(true);
     expect(projection.consumedBytes).toBe(Buffer.byteLength(chunk, "utf8"));
+  });
+
+  it("reads a tool result as the completion of the call it names", () => {
+    const chunk = [
+      line({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "call_7", name: "bash", arguments: { command: "ls" } }],
+          stopReason: "toolUse",
+        },
+      }),
+      line({
+        type: "message_end",
+        message: {
+          role: "toolResult",
+          toolCallId: "call_7",
+          content: [{ type: "text", text: "README.md\npackage.json" }],
+        },
+      }),
+    ].join("");
+
+    const projection = projectCompanionPiEvents({ chunk, offset: 0, now });
+
+    expect(projection.toolCompletions).toEqual([{
+      callId: "call_7",
+      status: "ok",
+      result: "README.md\npackage.json",
+      completedAt: now,
+    }]);
+  });
+
+  it("reports a failed tool result as a failed run", () => {
+    const chunk = line({
+      type: "message_end",
+      message: {
+        role: "toolResult",
+        toolCallId: "call_8",
+        isError: true,
+        content: [{ type: "text", text: "bash: nope: command not found" }],
+      },
+    });
+
+    const projection = projectCompanionPiEvents({ chunk, offset: 0, now });
+
+    expect(projection.toolCompletions[0]).toMatchObject({
+      callId: "call_8",
+      status: "error",
+      result: "bash: nope: command not found",
+    });
+  });
+
+  it("names a run by what it touched rather than by the tool that touched it", () => {
+    const chunk = [
+      line({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "a", name: "str_replace_editor", input: { path: "src/app.ts" } },
+            { type: "tool_use", id: "b", name: "web_search", input: { query: "oklch support" } },
+            { type: "tool_use", id: "c", name: "computer", input: { action: "screenshot" } },
+            { type: "tool_use", id: "d", name: "summon_kraken", input: {} },
+          ],
+          stopReason: "toolUse",
+        },
+      }),
+    ].join("");
+
+    const projection = projectCompanionPiEvents({ chunk, offset: 0, now });
+
+    expect(projection.entries.map((entry) => [entry.tool?.kind, entry.tool?.title])).toEqual([
+      ["file", "src/app.ts"],
+      ["browse", "oklch support"],
+      ["computer", "screenshot"],
+      // An unrecognized tool reports itself rather than being filed under a guess.
+      ["tool", "summon_kraken"],
+    ]);
   });
 
   it("derives event ids from byte offsets so a repeated read stays idempotent", () => {
@@ -120,7 +210,7 @@ describe("Pi RPC log projection", () => {
     expect(projection.settled).toBe(true);
   });
 
-  it("leaves a mid-turn tool step invisible", () => {
+  it("leaves a mid-turn tool step as its chip and not as a reply", () => {
     const chunk = line({
       type: "message_end",
       message: {
@@ -132,7 +222,34 @@ describe("Pi RPC log projection", () => {
 
     const projection = projectCompanionPiEvents({ chunk, offset: 0, now });
 
-    expect(projection.entries).toEqual([]);
+    // A tool step is not a turn, so it must never close one with "Pi ended the turn without a
+    // visible reply" — the chip is the whole of what happened here.
+    expect(projection.entries.map((entry) => entry.role)).toEqual(["tool"]);
+  });
+
+  it("gives a call and the reply beside it ids that survive a repeated read", () => {
+    const chunk = line({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Listing the repository." },
+          { type: "toolCall", id: "call_1", name: "bash", arguments: { command: "ls" } },
+          { type: "toolCall", id: "call_2", name: "bash", arguments: { command: "pwd" } },
+        ],
+        stopReason: "toolUse",
+      },
+    });
+
+    const projection = projectCompanionPiEvents({ chunk, offset: 4_096, now });
+    const replayed = projectCompanionPiEvents({ chunk, offset: 4_096, now });
+
+    expect(projection.entries.map((entry) => entry.eventId)).toEqual([
+      "pi:4096",
+      "pi:4096:tool:0",
+      "pi:4096:tool:1",
+    ]);
+    expect(replayed.entries).toEqual(projection.entries);
   });
 
   it("skips malformed records instead of failing the whole sync", () => {
@@ -146,5 +263,81 @@ describe("Pi RPC log projection", () => {
     expect(projection.entries).toHaveLength(1);
     expect(projection.entries[0]?.content).toBe("Recovered");
     expect(projection.consumedBytes).toBe(Buffer.byteLength(chunk, "utf8"));
+  });
+});
+
+/**
+ * Product promise:
+ * A chip that starts spinning stops on the run it belongs to. A tool call and its result routinely
+ * arrive in different syncs, so the match is what keeps a finished run from spinning forever and a
+ * stray result from closing somebody else's run.
+ *
+ * Regression caught:
+ * Closing whichever chip is convenient — the newest, or any open one — which shows a shell run's
+ * output under a file run, and re-closing an already-settled run when a shrunken log is reread.
+ *
+ * Why this level:
+ * The rule is pure. It reads the open runs and the results and says which chips settle; the database
+ * around it only supplies the one list and writes the other.
+ *
+ * Failure proof:
+ * Dropping the call-id branch, or letting a result with no id close the newest run, fails a case.
+ */
+describe("Pi tool result matching", () => {
+  const run = (
+    eventId: string,
+    overrides: Partial<CompanionToolRun> = {},
+  ): { eventId: string; tool: CompanionToolRun } => ({
+    eventId,
+    tool: {
+      call_id: null,
+      kind: "shell",
+      name: "bash",
+      title: "ls",
+      status: "running",
+      detail: '{ "command": "ls" }',
+      screenshot: null,
+      ...overrides,
+    },
+  });
+
+  const result = (
+    callId: string | null,
+    overrides: Partial<{ status: "ok" | "error"; result: string | null }> = {},
+  ) => ({ callId, status: "ok" as const, result: "done", completedAt: now, ...overrides });
+
+  it("closes the run its result names, whatever order the results arrive in", () => {
+    const settled = matchCompanionToolCompletions(
+      [run("a", { call_id: "call_1" }), run("b", { call_id: "call_2" })],
+      [result("call_2"), result("call_1", { status: "error", result: "exit 1" })],
+    );
+
+    expect(settled.map((entry) => [entry.eventId, entry.tool.status])).toEqual([
+      ["b", "ok"],
+      ["a", "error"],
+    ]);
+  });
+
+  it("closes the oldest open run when the harness reports no call id", () => {
+    const settled = matchCompanionToolCompletions(
+      [run("a"), run("b")],
+      [result(null), result(null)],
+    );
+
+    expect(settled.map((entry) => entry.eventId)).toEqual(["a", "b"]);
+  });
+
+  it("drops a result that matches no open run instead of closing one at random", () => {
+    expect(matchCompanionToolCompletions([run("a", { call_id: "call_1" })], [result("call_9")]))
+      .toEqual([]);
+    expect(matchCompanionToolCompletions([], [result(null)])).toEqual([]);
+  });
+
+  it("keeps the arguments and adds what the tool answered", () => {
+    const [settled] = matchCompanionToolCompletions([run("a")], [result(null, { result: "logs" })]);
+
+    expect(settled?.tool.detail).toBe('{ "command": "ls" }\n\nlogs');
+    // Everything the call itself said about the run is untouched by its result.
+    expect(settled?.tool).toMatchObject({ kind: "shell", name: "bash", title: "ls" });
   });
 });

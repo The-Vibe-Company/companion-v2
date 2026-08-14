@@ -143,6 +143,7 @@ function controlPlane(
           content: body.content,
           author_id: "user-1",
           author_name: null,
+          tool: null,
           created_at: new Date().toISOString(),
         });
         delivered = ordinal - 1;
@@ -171,6 +172,7 @@ function controlPlane(
           content: "It's 2026.",
           author_id: null,
           author_name: null,
+          tool: null,
           created_at: new Date().toISOString(),
         });
       }

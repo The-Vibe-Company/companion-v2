@@ -7,6 +7,7 @@ import type {
   CompanionMcpCredential,
   CompanionRuntimeState,
 } from "@companion/contracts";
+import { COMPANION_TOOL_RUN_SCREENSHOT_MAX_CHARACTERS } from "@companion/contracts";
 import { COMPANION_RUNTIME_ERROR_MAX_LENGTH } from "@companion/core";
 import {
   buildMcpAdapterInjection,
@@ -31,6 +32,18 @@ const BOX_FILE_PART_BYTES = 3 * 1024 * 1024;
 const BOX_FILE_PART_TIMEOUT_MS = 120_000;
 /** Bytes of Pi RPC output one control-plane sync may pull; the rest is read by the next sync. */
 export const COMPANION_PI_EVENT_READ_LIMIT = 262_144;
+/**
+ * Bytes of encoded desktop frame one capture may return. Base64 grows it by a third and the
+ * transcript caps the whole `data:` URL, so a frame larger than this is dropped on the Box rather
+ * than carried across the wire only to be refused here.
+ */
+const COMPANION_DESKTOP_FRAME_LIMIT = 140_000;
+/**
+ * What a capture must have printed to count as a frame. A Box that answered with a diagnostic, a
+ * truncated line, or nothing at all fails this, and the run it belonged to simply keeps no picture
+ * rather than carrying whatever the shell happened to say into an `img` tag.
+ */
+const DESKTOP_FRAME_PATTERN = /^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/;
 /**
  * How long a started Pi daemon has to answer `active`. `systemctl --user start` returns once
  * systemd has forked `ExecStart`, and the unit is `Type=simple` with `Restart=on-failure`, so a
@@ -245,6 +258,12 @@ export interface CompanionBoxRuntime {
   refreshTtl(input: { boxId: string }): Promise<void>;
   /** Read Pi RPC output from `offset` so the control plane can project new events. */
   readEvents(input: { boxId: string; offset: number }): Promise<CompanionPiEventChunk>;
+  /**
+   * One frame of the running Box desktop as a `data:` image URL, or null when there is no desktop to
+   * photograph, no tool on the machine that can, or a frame too large to keep. Observing a screen is
+   * not a lifecycle action: like `desktop`, it never creates or resumes a Box.
+   */
+  captureDesktopFrame(input: { boxId: string }): Promise<string | null>;
 }
 
 export class BoxRuntimeConfigurationError extends Error {
@@ -1664,6 +1683,59 @@ exit 0`,
       );
     }
     return { chunk: "", offset: input.offset };
+  }
+
+  /**
+   * Photograph the Box desktop once, with whatever the machine already has. Every branch of this
+   * command ends in `exit 0`: a Box with no X display, no capture tool, or a frame too large is a
+   * run that simply gets no picture, which is not a reason to fail the sync that projected it.
+   */
+  async captureDesktopFrame(input: { boxId: string }): Promise<string | null> {
+    const result = await this.#command(
+      input.boxId,
+      `set -u
+frame="$(mktemp -t companion-frame.XXXXXX 2>/dev/null)" || exit 0
+trap 'rm -f "$frame" "$frame.png"' EXIT
+mime=""
+# One frame, downscaled and re-encoded on the machine that already holds it. ImageMagick and ffmpeg
+# both write JPEG straight from the root window; scrot and gnome-screenshot only write PNG, so they
+# are tried last and their bytes are sent as PNG rather than re-encoded by a tool that may be absent.
+grab() {
+  DISPLAY="$1"
+  export DISPLAY
+  if command -v import >/dev/null 2>&1 \\
+    && import -silent -window root -resize '1280x800>' -quality 55 "jpeg:$frame" 2>/dev/null \\
+    && [ -s "$frame" ]; then mime="image/jpeg"; return 0; fi
+  if command -v ffmpeg >/dev/null 2>&1 \\
+    && ffmpeg -loglevel quiet -y -f x11grab -video_size 1280x800 -i "$1" -frames:v 1 -q:v 8 \\
+      -f mjpeg "$frame" </dev/null 2>/dev/null \\
+    && [ -s "$frame" ]; then mime="image/jpeg"; return 0; fi
+  if command -v scrot >/dev/null 2>&1 \\
+    && scrot -o -F "$frame.png" 2>/dev/null && [ -s "$frame.png" ]; then
+    mv -f "$frame.png" "$frame" && mime="image/png" && return 0
+  fi
+  if command -v gnome-screenshot >/dev/null 2>&1 \\
+    && gnome-screenshot -f "$frame.png" 2>/dev/null && [ -s "$frame.png" ]; then
+    mv -f "$frame.png" "$frame" && mime="image/png" && return 0
+  fi
+  return 1
+}
+for display in "\${DISPLAY:-}" :0 :1 :99; do
+  [ -n "$display" ] || continue
+  grab "$display" || continue
+  size="$(wc -c < "$frame" 2>/dev/null | tr -cd '0-9')"
+  case "$size" in ''|*[!0-9]*) exit 0 ;; esac
+  [ "$size" -le ${COMPANION_DESKTOP_FRAME_LIMIT} ] || exit 0
+  printf 'data:%s;base64,' "$mime"
+  base64 -w0 "$frame" 2>/dev/null || base64 "$frame" | tr -d '\\n'
+  exit 0
+done
+exit 0`,
+      30,
+    );
+    const frame = result.stdout.trim();
+    if (frame.length > COMPANION_TOOL_RUN_SCREENSHOT_MAX_CHARACTERS) return null;
+    return DESKTOP_FRAME_PATTERN.test(frame) ? frame : null;
   }
 
   /**

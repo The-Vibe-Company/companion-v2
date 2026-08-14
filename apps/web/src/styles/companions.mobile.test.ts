@@ -117,7 +117,15 @@ describe("Companions mobile viewport", () => {
     expect(css).not.toContain("companions-thread-in");
     expect(css).not.toContain("companions-scrim-in");
     expect(css).not.toContain("companions-thread-scrim");
-    expect(rules.some((rule) => rule.at.some((entry) => entry.startsWith("@keyframes")))).toBe(false);
+    // Nothing in this stylesheet may animate a surface across the screen. A keyframe that only
+    // rotates in place — the tool-run spinner — is not that, so the assertion is on what the
+    // keyframes do rather than on there being none.
+    const keyframes = rules.filter((rule) =>
+      rule.at.some((entry) => entry.startsWith("@keyframes")));
+    expect(keyframes.length).toBeGreaterThan(0);
+    for (const frame of keyframes) {
+      expect(frame.declarations).not.toMatch(/translate|left|right|inset|margin/);
+    }
     expect(css).not.toContain("translateX(16px)");
   });
 
@@ -183,6 +191,16 @@ describe("Companions mobile viewport", () => {
     expect(card).toContain('"action action"');
     expect(declarationsFor(".companions-registry-card > .cds-btn", PHONE)[0])
       .toContain("min-height: 40px;");
+  });
+
+  it("holds a tool run's chip and its Box frame inside the thread's width", () => {
+    // A grid column left to size itself takes the longest command or the frame's own pixels, so a
+    // `max-width: 100%` underneath it resolves against that content rather than the thread and both
+    // parts run off a phone. Bounding the column is what makes those percentages mean the thread.
+    expect(declarationsFor(".chat-tool")[0]).toContain("grid-template-columns: minmax(0, 1fr);");
+    expect(declarationsFor(".chat-tool__head")[0]).toContain("max-width: 100%;");
+    expect(declarationsFor(".chat-tool__detail")[0]).toContain("max-width: 100%;");
+    expect(declarationsFor(".chat-tool__frame")[0]).toContain("max-width: min(100%, 460px);");
   });
 
   it("keeps Back, Wake, and Send at a 44px thumb target", () => {

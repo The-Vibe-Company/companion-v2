@@ -225,6 +225,96 @@ describe("Skills Hub PostgreSQL isolation", () => {
     expect(outsiderVisible.threadRows).toEqual([]);
   });
 
+  it("lets a runner settle a tool run and attach its frame while a Viewer cannot", async () => {
+    const running = JSON.stringify({
+      call_id: "call-1",
+      kind: "shell",
+      name: "bash",
+      title: "ls -la",
+      status: "running",
+      detail: null,
+      screenshot: null,
+    });
+    await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.owner.id}, true)`;
+      await tx`
+        insert into companion_transcript_entries (
+          org_id, companion_id, event_id, ordinal, role, content, tool
+        ) values (
+          ${fixture.orgA}, ${companionId}, 'pi:1:tool:0', 2, 'tool', '', ${running}::jsonb
+        )
+      `;
+      await tx`
+        insert into companion_workspace_access (
+          org_id, companion_id, owner_id, role, granted_by
+        ) values (
+          ${fixture.orgA}, ${companionId}, ${fixture.owner.id}, 'viewer', ${fixture.owner.id}
+        )
+      `;
+    });
+
+    // A Viewer reads the chip and never settles it, so watching a thread cannot rewrite its history.
+    const viewerSettle = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
+      const visible = await tx<Array<{ status: string }>>`
+        select tool->>'status' as status from companion_transcript_entries
+        where companion_id = ${companionId} and event_id = 'pi:1:tool:0'
+      `;
+      const settled = await tx<Array<{ event_id: string }>>`
+        update companion_transcript_entries set tool = jsonb_set(tool, '{status}', '"ok"')
+        where companion_id = ${companionId} and event_id = 'pi:1:tool:0'
+        returning event_id
+      `;
+      return { visible, settled };
+    });
+    expect(viewerSettle.visible).toEqual([{ status: "running" }]);
+    expect(viewerSettle.settled).toEqual([]);
+
+    await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.owner.id}, true)`;
+      await tx`update companion_workspace_access set role = 'editor' where companion_id = ${companionId}`;
+    });
+
+    // An Editor settles the run and attaches the frame the sync captured for it.
+    const editorSettle = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
+      return tx<Array<{ status: string; screenshot: string }>>`
+        update companion_transcript_entries
+        set tool = jsonb_set(jsonb_set(tool, '{status}', '"ok"'), '{screenshot}', '"data:image/png;base64,AAAA"')
+        where companion_id = ${companionId} and event_id = 'pi:1:tool:0'
+        returning tool->>'status' as status, tool->>'screenshot' as screenshot
+      `;
+    });
+    expect(editorSettle).toEqual([{ status: "ok", screenshot: "data:image/png;base64,AAAA" }]);
+
+    // The tenant predicate still holds: another tenant neither reads nor settles this run.
+    const outsiderSettle = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgB}, true), set_config('app.user_id', ${fixture.outsider.id}, true)`;
+      const visible = await tx<Array<{ event_id: string }>>`
+        select event_id from companion_transcript_entries where companion_id = ${companionId}
+      `;
+      const settled = await tx<Array<{ event_id: string }>>`
+        update companion_transcript_entries set tool = jsonb_set(tool, '{status}', '"error"')
+        where companion_id = ${companionId} and event_id = 'pi:1:tool:0'
+        returning event_id
+      `;
+      return { visible, settled };
+    });
+    expect(outsiderSettle.visible).toEqual([]);
+    expect(outsiderSettle.settled).toEqual([]);
+
+    await integrationSql`delete from companion_workspace_access where companion_id = ${companionId}`;
+    await integrationSql`
+      delete from companion_transcript_entries
+      where companion_id = ${companionId} and event_id = 'pi:1:tool:0'
+    `;
+  });
+
   it("ensures the dropped per-member grant table cannot leak access", async () => {
     const [row] = await integrationSql<Array<{ exists: boolean }>>`
       select to_regclass('public.companion_member_access') is not null as exists

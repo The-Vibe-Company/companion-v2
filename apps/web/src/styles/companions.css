@@ -1331,6 +1331,138 @@ button.chat-box:focus-visible {
   font-size: var(--text-sm);
 }
 
+/* One tool run. It sits between two turns as a quiet line of chrome, indented nowhere and tinted
+   nothing, so the conversation above and below it still reads as the conversation. */
+/* The single column is bounded rather than content-sized, so the `max-width: 100%` each part below
+   carries resolves against the thread's width. Left to size itself, the column grows to the longest
+   command or the frame's own pixels and pushes both past a narrow screen. */
+.chat-tool {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
+  gap: 6px;
+}
+
+.chat-tool__head {
+  max-width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 9px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-full);
+  background: var(--color-surface);
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-tool__head:disabled {
+  cursor: default;
+}
+
+.chat-tool__head:not(:disabled):hover {
+  border-color: var(--color-line-strong);
+  background: var(--color-surface-raised);
+}
+
+.chat-tool__head:focus-visible {
+  outline: 2px solid var(--color-accent-ring);
+  outline-offset: 2px;
+}
+
+.chat-tool__kind,
+.chat-tool__caret {
+  flex: none;
+  color: var(--color-faint);
+}
+
+/* The tool is named in mono because it is an identifier, and the one line under it is what the run
+   actually did — the command, the path, the address — so that line is what may be truncated. */
+.chat-tool__name {
+  flex: none;
+  color: var(--color-fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.chat-tool__title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.chat-tool__state {
+  flex: none;
+}
+
+.chat-tool--ok .chat-tool__state {
+  color: var(--color-ok);
+}
+
+.chat-tool--error .chat-tool__head {
+  border-color: var(--color-danger-line);
+  background: var(--color-danger-tint);
+}
+
+.chat-tool--error .chat-tool__state {
+  color: var(--color-danger);
+}
+
+/* A run in flight. The ring turns because the run has not ended; it stops the moment it does. */
+.chat-tool__spinner {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  border: 1.75px solid var(--color-line-strong);
+  border-top-color: var(--color-accent-edge);
+  border-radius: var(--radius-full);
+  animation: chat-tool-spin 900ms linear infinite;
+}
+
+@keyframes chat-tool-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-tool__spinner {
+    animation-duration: 3s;
+  }
+}
+
+/* Unfolded: the arguments Pi called with and whatever the tool answered, verbatim. */
+.chat-tool__detail {
+  max-width: 100%;
+  max-height: 260px;
+  margin: 0;
+  padding: 9px 11px;
+  overflow: auto;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--leading-relaxed);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The Box screen as the run left it. It is a still, so it is sized like a figure in the transcript
+   rather than like the Computer panel, and it never grows past the column it sits in. */
+.chat-tool__frame {
+  max-width: min(100%, 460px);
+  height: auto;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+}
+
 /* A running Box that owes a reply says so; there is nothing to animate, the line is the state. */
 .chat-replying {
   margin: 20px 0 0;

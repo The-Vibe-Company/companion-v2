@@ -1,4 +1,4 @@
-import type { CompanionTranscriptRole } from "@companion/contracts";
+import type { CompanionToolRun, CompanionToolRunKind, CompanionTranscriptRole } from "@companion/contracts";
 
 /** One control-plane transcript entry projected from the Pi RPC log; ordinals are assigned later. */
 export interface CompanionPiEntry {
@@ -6,10 +6,24 @@ export interface CompanionPiEntry {
   role: CompanionTranscriptRole;
   content: string;
   createdAt: Date;
+  /** Set on exactly the `tool` entries, as the run looked when Pi started it. */
+  tool?: CompanionToolRun;
+}
+
+/** The result Pi reported for a tool run, matched back to the chip that is still spinning for it. */
+export interface CompanionPiToolCompletion {
+  /** Pi's call id when it reported one; a result without one closes the oldest running run. */
+  callId: string | null;
+  status: "ok" | "error";
+  /** What the tool returned, already truncated, appended to the run's disclosed detail. */
+  result: string | null;
+  completedAt: Date;
 }
 
 export interface CompanionPiProjection {
   entries: CompanionPiEntry[];
+  /** Results for runs whose chip may already be stored from an earlier chunk. */
+  toolCompletions: CompanionPiToolCompletion[];
   /** Bytes of the chunk that formed complete records; a trailing partial line stays unconsumed. */
   consumedBytes: number;
   /** True when Pi reported that the run fully settled inside this chunk. */
@@ -18,6 +32,10 @@ export interface CompanionPiProjection {
 
 const MAX_CONTENT_CHARACTERS = 100_000;
 const TRUNCATION_SUFFIX = "\n[truncated]";
+/** Contract caps the whole detail; arguments and result each get half of it, minus the separator. */
+const MAX_TOOL_ARGUMENT_CHARACTERS = 4_000;
+const MAX_TOOL_RESULT_CHARACTERS = 8_000;
+const MAX_TOOL_TITLE_CHARACTERS = 300;
 
 interface PiContentBlock {
   type?: unknown;
@@ -42,6 +60,13 @@ interface PiEvent {
 
 const THINKING_BLOCK_TYPES = new Set(["thinking", "reasoning", "redacted_thinking"]);
 const TOOL_CALL_BLOCK_TYPES = new Set(["toolCall", "tool_call", "toolUse", "tool_use"]);
+const TOOL_RESULT_BLOCK_TYPES = new Set([
+  "toolResult",
+  "tool_result",
+  "toolOutput",
+  "tool_output",
+]);
+const TOOL_RESULT_MESSAGE_ROLES = new Set(["toolResult", "tool_result", "tool"]);
 /** Stop reasons that end a turn. A tool step is mid-turn, so its empty message stays invisible. */
 const TURN_END_STOP_REASONS = new Set([
   "stop",
@@ -64,9 +89,9 @@ function blockType(block: PiContentBlock): string {
 }
 
 /**
- * Assistant text only. Thinking blocks, tool calls, and tool results are deliberately dropped: the
- * chat thread is a conversation surface, never a Pi tool console. A turn with no text at all falls
- * back to its thinking rather than showing nothing.
+ * Assistant text only. Thinking blocks are deliberately dropped, and so is the body of a tool call:
+ * the call becomes its own chip entry instead of being rendered into the reply. A turn with no text
+ * at all falls back to its thinking rather than showing nothing.
  */
 function assistantText(message: PiMessage): string {
   if (typeof message.content === "string") return message.content.trim();
@@ -98,10 +123,198 @@ function hasToolCall(message: PiMessage): boolean {
   return blocksOf(message).some((block) => TOOL_CALL_BLOCK_TYPES.has(blockType(block)));
 }
 
-function truncate(content: string): string {
-  return content.length <= MAX_CONTENT_CHARACTERS
-    ? content
-    : content.slice(0, MAX_CONTENT_CHARACTERS) + TRUNCATION_SUFFIX;
+function truncate(content: string, limit = MAX_CONTENT_CHARACTERS): string {
+  return content.length <= limit ? content : content.slice(0, limit) + TRUNCATION_SUFFIX;
+}
+
+/**
+ * Tool names Pi and its harnesses use, grouped by what a run of them touches. Names are matched
+ * whole first and then as a word inside a longer name, so `bash` and `run_bash_command` both read as
+ * shell while an unfamiliar tool falls through to `tool` rather than being filed under a guess.
+ */
+const TOOL_KIND_NAMES: ReadonlyArray<readonly [CompanionToolRunKind, ReadonlySet<string>]> = [
+  ["computer", new Set([
+    "computer", "computeruse", "desktop", "lux", "screenshot", "screencapture", "screen",
+    "click", "doubleclick", "rightclick", "type", "key", "press", "scroll", "drag", "mouse",
+    "cursor", "hover", "wait",
+  ])],
+  ["browse", new Set([
+    "browse", "browser", "web", "websearch", "webfetch", "fetch", "search", "navigate", "goto",
+    "openurl", "url", "http", "https", "request", "curl", "crawl", "page",
+  ])],
+  ["shell", new Set([
+    "bash", "sh", "zsh", "shell", "terminal", "exec", "execute", "run", "command", "cmd",
+    "process", "script", "python", "node", "npm", "pnpm", "git",
+  ])],
+  ["file", new Set([
+    "file", "files", "read", "write", "edit", "editor", "patch", "apply", "applypatch", "create",
+    "delete", "remove", "move", "copy", "ls", "list", "dir", "glob", "grep", "find", "rg", "view",
+    "notebook", "strreplace", "replace", "insert", "open",
+  ])],
+];
+
+/** Split a tool name into comparable words: `str_replace-editor` and `strReplaceEditor` agree. */
+function toolNameWords(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+export function companionToolRunKind(name: string): CompanionToolRunKind {
+  const collapsed = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+  for (const [kind, names] of TOOL_KIND_NAMES) {
+    if (names.has(collapsed)) return kind;
+  }
+  const words = toolNameWords(name);
+  for (const [kind, names] of TOOL_KIND_NAMES) {
+    if (words.some((word) => names.has(word))) return kind;
+  }
+  return "tool";
+}
+
+/** Runs whose effect is something a reader can see, and therefore worth one frame of the desktop. */
+export function companionToolRunIsVisual(kind: CompanionToolRunKind): boolean {
+  return kind === "computer" || kind === "browse";
+}
+
+function stringField(source: Record<string, unknown>, keys: readonly string[]): string | null {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+  }
+  return null;
+}
+
+function objectOf(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+/**
+ * The one line a chip shows: the command, the path, the address, the gesture. It is read out of the
+ * arguments the tool was called with, and a tool whose arguments say nothing recognizable is named
+ * by the tool itself rather than by a rendering of its whole payload.
+ */
+function toolRunTitle(
+  kind: CompanionToolRunKind,
+  name: string,
+  args: Record<string, unknown>,
+): string {
+  const chosen = (() => {
+    switch (kind) {
+      case "shell":
+        return stringField(args, ["command", "cmd", "script", "input", "code"]);
+      case "file":
+        return stringField(args, [
+          "path", "file_path", "filePath", "file", "filename", "target_file", "pattern", "glob",
+        ]);
+      case "browse":
+        return stringField(args, ["url", "href", "query", "q", "search", "search_query", "prompt"]);
+      case "computer": {
+        const action = stringField(args, ["action", "command", "gesture"]);
+        const target = stringField(args, ["text", "coordinate", "selector", "key", "target"]);
+        if (action && target) return `${action} ${target}`;
+        return action ?? target;
+      }
+      default:
+        return null;
+    }
+  })();
+  const line = (chosen ?? name).split("\n").map((part) => part.trim()).find(Boolean) ?? name;
+  return line.length <= MAX_TOOL_TITLE_CHARACTERS
+    ? line
+    : `${line.slice(0, MAX_TOOL_TITLE_CHARACTERS - 1)}…`;
+}
+
+function toolRunArgumentDetail(args: Record<string, unknown>): string | null {
+  if (Object.keys(args).length === 0) return null;
+  try {
+    return truncate(JSON.stringify(args, null, 2), MAX_TOOL_ARGUMENT_CHARACTERS);
+  } catch {
+    return null;
+  }
+}
+
+const TOOL_CALL_ID_KEYS = [
+  "id", "callId", "call_id", "toolCallId", "tool_call_id", "toolUseId", "tool_use_id",
+] as const;
+
+/** One tool run as Pi announced it: still running, with only what the call itself said about it. */
+function toolRunFrom(block: PiContentBlock): CompanionToolRun | null {
+  const record = block as unknown as Record<string, unknown>;
+  const name = stringField(record, ["name", "toolName", "tool_name", "tool"]);
+  if (!name) return null;
+  const args = objectOf(record.arguments ?? record.input ?? record.args ?? record.parameters);
+  const kind = companionToolRunKind(name);
+  return {
+    call_id: stringField(record, TOOL_CALL_ID_KEYS),
+    kind,
+    name: name.slice(0, 120),
+    title: toolRunTitle(kind, name, args),
+    status: "running",
+    detail: toolRunArgumentDetail(args),
+    screenshot: null,
+  };
+}
+
+/** The text a tool returned, however the harness wrapped it. */
+function toolResultText(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (Array.isArray(value)) {
+    return value
+      .map((block) => {
+        if (typeof block === "string") return block;
+        const record = objectOf(block);
+        if (typeof record.text === "string") return record.text;
+        if (typeof record.content === "string") return record.content;
+        return "";
+      })
+      .join("")
+      .trim();
+  }
+  return "";
+}
+
+function toolResultFailed(source: Record<string, unknown>): boolean {
+  if (source.isError === true || source.is_error === true) return true;
+  if (source.success === false) return true;
+  return typeof source.error === "string" && source.error.trim().length > 0;
+}
+
+function completionFrom(
+  source: Record<string, unknown>,
+  fallbackText: string,
+  at: Date,
+): CompanionPiToolCompletion {
+  const text = toolResultText(source.content ?? source.result ?? source.output ?? source.text)
+    || (typeof source.error === "string" ? source.error.trim() : "")
+    || fallbackText;
+  return {
+    callId: stringField(source, TOOL_CALL_ID_KEYS),
+    status: toolResultFailed(source) ? "error" : "ok",
+    result: text ? truncate(text, MAX_TOOL_RESULT_CHARACTERS) : null,
+    completedAt: at,
+  };
+}
+
+/**
+ * Results carried by one record. Pi reports a tool result either as a message of its own or as
+ * result blocks inside one, so both are read; a record that carries neither closes nothing.
+ */
+function completionsFrom(event: PiEvent, now: Date): CompanionPiToolCompletion[] {
+  if (event.type !== "message_end") return [];
+  const message = objectOf(event.message) as PiMessage;
+  const blocks = blocksOf(message).filter((block) => TOOL_RESULT_BLOCK_TYPES.has(blockType(block)));
+  const at = messageTimestamp(message, now);
+  if (blocks.length) {
+    return blocks.map((block) => completionFrom(block as unknown as Record<string, unknown>, "", at));
+  }
+  if (typeof message.role !== "string" || !TOOL_RESULT_MESSAGE_ROLES.has(message.role)) return [];
+  return [completionFrom(message as unknown as Record<string, unknown>, "", at)];
 }
 
 function messageTimestamp(message: PiMessage, fallback: Date): Date {
@@ -154,10 +367,73 @@ function entryFrom(event: PiEvent, now: Date): Omit<CompanionPiEntry, "eventId">
 }
 
 /**
+ * Settle the runs Pi reported results for.
+ *
+ * A result naming its call closes exactly that chip. A harness that reports no call id closes the
+ * oldest chip still running, because Pi works through a turn's tools one at a time and the oldest
+ * open run is the only one such a result can belong to. A result matching nothing is dropped rather
+ * than guessed at, so a chunk read twice cannot close a run some later call started.
+ */
+export function matchCompanionToolCompletions(
+  open: ReadonlyArray<{ eventId: string; tool: CompanionToolRun }>,
+  completions: readonly CompanionPiToolCompletion[],
+): Array<{ eventId: string; tool: CompanionToolRun }> {
+  const remaining = [...open];
+  const settled: Array<{ eventId: string; tool: CompanionToolRun }> = [];
+  for (const completion of completions) {
+    const index = completion.callId
+      ? remaining.findIndex((run) => run.tool.call_id === completion.callId)
+      : (remaining.length ? 0 : -1);
+    const match = index < 0 ? undefined : remaining.splice(index, 1)[0];
+    if (!match) continue;
+    settled.push({
+      eventId: match.eventId,
+      tool: {
+        ...match.tool,
+        status: completion.status,
+        detail: [match.tool.detail, completion.result].filter(Boolean).join("\n\n") || null,
+      },
+    });
+  }
+  return settled;
+}
+
+/**
+ * The runs one record announced, as their own transcript entries. A run is not folded into the
+ * assistant turn that called it: it keeps an ordinal of its own, so the chip sits between the turns
+ * it happened between and stays there once the turn around it has been written.
+ */
+function toolEntriesFrom(event: PiEvent, recordOffset: number, now: Date): CompanionPiEntry[] {
+  if (event.type !== "message_end") return [];
+  const message = objectOf(event.message) as PiMessage;
+  if (message.role !== "assistant") return [];
+  const createdAt = messageTimestamp(message, now);
+  return blocksOf(message)
+    .filter((block) => TOOL_CALL_BLOCK_TYPES.has(blockType(block)))
+    .flatMap((block, index) => {
+      const tool = toolRunFrom(block);
+      if (!tool) return [];
+      return [{
+        eventId: `pi:${recordOffset}:tool:${index}`,
+        role: "tool" as const,
+        // The row's own text stays readable on its own, so a reader that never learned about chips
+        // still sees which run happened where.
+        content: tool.title,
+        createdAt,
+        tool,
+      }];
+    });
+}
+
+/**
  * Project a byte range of the Box `pi.rpc.ndjson` log into transcript entries. Event ids are derived
  * from the record's byte offset, so re-reading the same range yields the same ids and the transcript
  * insert stays idempotent. Pi writes strict LF-delimited JSON, so a chunk that ends mid-record leaves
  * those bytes unconsumed for the next read instead of guessing.
+ *
+ * Tool runs are projected twice over: the call that starts one becomes a running entry, and the
+ * result that ends it comes back as a completion the caller applies to whichever entry is still
+ * running for it — the two halves routinely arrive in different chunks, seconds apart.
  */
 export function projectCompanionPiEvents(input: {
   chunk: string;
@@ -168,6 +444,7 @@ export function projectCompanionPiEvents(input: {
   const records = input.chunk.split("\n");
   const complete = records.slice(0, -1);
   const entries: CompanionPiEntry[] = [];
+  const toolCompletions: CompanionPiToolCompletion[] = [];
   let consumedBytes = 0;
   let settled = false;
 
@@ -185,7 +462,9 @@ export function projectCompanionPiEvents(input: {
     if (event.type === "agent_settled") settled = true;
     const projected = entryFrom(event, now);
     if (projected) entries.push({ eventId: `pi:${recordOffset}`, ...projected });
+    entries.push(...toolEntriesFrom(event, recordOffset, now));
+    toolCompletions.push(...completionsFrom(event, now));
   }
 
-  return { entries, consumedBytes, settled };
+  return { entries, toolCompletions, consumedBytes, settled };
 }

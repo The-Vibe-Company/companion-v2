@@ -333,6 +333,7 @@ describe("CompanionThread composer", () => {
           content: "Draft the launch note",
           author_id: "user-1",
           author_name: null,
+          tool: null,
           created_at: "2026-08-12T12:01:00.000Z",
         }],
       }));
@@ -384,6 +385,7 @@ describe("CompanionThread stream", () => {
     content: "Draft the launch note",
     author_id: "user-1",
     author_name: null,
+    tool: null,
     created_at: "2026-08-12T12:01:00.000Z",
   };
 
@@ -394,6 +396,7 @@ describe("CompanionThread stream", () => {
     content,
     author_id: null,
     author_name: null,
+    tool: null,
     created_at: "2026-08-12T12:01:20.000Z",
   });
 
@@ -429,6 +432,7 @@ describe("CompanionThread stream", () => {
           content: "The migration is idempotent.",
           author_id: null,
           author_name: null,
+          tool: null,
           created_at: "2026-08-12T12:01:24.000Z",
         },
       ],
@@ -466,6 +470,7 @@ describe("CompanionThread stream", () => {
           content: "Pi ended the turn without a visible reply.",
           author_id: null,
           author_name: null,
+          tool: null,
           created_at: "2026-08-12T12:01:20.000Z",
         },
       ],

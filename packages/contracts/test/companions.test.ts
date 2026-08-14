@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   COMPANION_PROVIDER_CATALOG,
+  COMPANION_TOOL_RUN_SCREENSHOT_MAX_CHARACTERS,
   companionProviderOAuthCompleteInputSchema,
   companionProviderOAuthStartInputSchema,
   companionDesktopSchema,
   companionMessageEventId,
   companionThreadSchema,
+  companionToolRunSchema,
+  companionTranscriptEntrySchema,
   companionSharesSchema,
   createCompanionInputSchema,
   saveCompanionProviderInputSchema,
@@ -286,6 +289,76 @@ describe("Companion chat contracts", () => {
     // The reader is not the author, so the surface can attribute the message to the Owner.
     expect(thread.entries[0]?.author_id).not.toBe(thread.viewer_id);
     expect(thread.entries[1]?.author_id).toBeNull();
+    // A message is not a tool run, and the thread says so rather than leaving the field absent.
+    expect(thread.entries[0]?.tool).toBeNull();
+  });
+
+  it("carries a tool run only on a tool entry", () => {
+    const run = {
+      call_id: "call_1",
+      kind: "shell" as const,
+      name: "bash",
+      title: "ls -la",
+      status: "ok" as const,
+      detail: '{"command":"ls -la"}',
+      screenshot: null,
+    };
+
+    expect(companionTranscriptEntrySchema.parse({
+      event_id: "pi:512:tool:0",
+      ordinal: 2,
+      role: "tool",
+      content: "ls -la",
+      author_id: null,
+      author_name: null,
+      tool: run,
+      created_at: "2026-08-12T12:00:02.000Z",
+    }).tool).toMatchObject({ kind: "shell", status: "ok" });
+
+    // A tool entry with nothing to report, and a reply smuggling a chip, are both incoherent.
+    expect(() => companionTranscriptEntrySchema.parse({
+      event_id: "pi:512:tool:0",
+      ordinal: 2,
+      role: "tool",
+      content: "ls -la",
+      author_id: null,
+      author_name: null,
+      created_at: "2026-08-12T12:00:02.000Z",
+    })).toThrow();
+    expect(() => companionTranscriptEntrySchema.parse({
+      event_id: "pi:512",
+      ordinal: 2,
+      role: "assistant",
+      content: "Listing the repository.",
+      author_id: null,
+      author_name: null,
+      tool: run,
+      created_at: "2026-08-12T12:00:02.000Z",
+    })).toThrow();
+  });
+
+  it("accepts a Box frame only as an inline image and never as a URL a browser would fetch", () => {
+    const frame = (screenshot: string) => companionToolRunSchema.parse({
+      call_id: null,
+      kind: "computer",
+      name: "computer",
+      title: "screenshot",
+      status: "ok",
+      detail: null,
+      screenshot,
+    });
+
+    expect(frame("data:image/jpeg;base64,/9j/4AAQSkZJRg==").screenshot).toContain("data:image/jpeg");
+
+    // The transcript hands this straight to an `img`, so anything that could reach out of the page —
+    // or run in it — is refused here rather than trusted because the control plane wrote it.
+    expect(() => frame("https://example.test/frame.jpg")).toThrow();
+    expect(() => frame("javascript:alert(1)")).toThrow();
+    expect(() => frame("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=")).toThrow();
+    // One downscaled still, not a recording: an oversized frame is refused, not truncated.
+    expect(() => frame(`data:image/jpeg;base64,${"A".repeat(
+      COMPANION_TOOL_RUN_SCREENSHOT_MAX_CHARACTERS,
+    )}`)).toThrow();
   });
 });
 

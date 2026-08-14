@@ -57,6 +57,7 @@ const coreMocks = vi.hoisted(() => ({
   sendCompanionMessage: vi.fn(),
   listPendingCompanionMessages: vi.fn(),
   recordCompanionPiProjection: vi.fn(),
+  attachCompanionToolRunScreenshot: vi.fn(),
   listCompanionShares: vi.fn(),
   setCompanionWorkspaceShare: vi.fn(),
   listCompanionRuntimeSkillPackages: vi.fn(),
@@ -153,6 +154,7 @@ const message = {
   content: "Summarize the incident",
   author_id: "user-1",
   author_name: "User",
+  tool: null,
   created_at: companion.created_at,
 };
 
@@ -175,6 +177,7 @@ function boxRuntime(overrides: Record<string, unknown> = {}) {
     prompt: vi.fn(),
     refreshTtl: vi.fn(async () => undefined),
     readEvents: vi.fn(async () => ({ chunk: "", offset: 0 })),
+    captureDesktopFrame: vi.fn(async () => null),
     ...overrides,
   };
 }
@@ -1807,6 +1810,197 @@ describe("Companions API feature gate", () => {
       piLogOffset: 0,
       piLogRewound: true,
     }));
+  });
+
+  /**
+   * Product promise:
+   * A tool run appears in the thread as a chip that spins and then stops, and a run that moved the
+   * Box desktop carries one picture of it. Reading a thread still never wakes a Box, and a Box that
+   * cannot be photographed still gets its transcript.
+   *
+   * Regression caught:
+   * Tool results dropped on the floor so a chip spins forever; a frame taken for a run that did not
+   * touch a screen, or for one photographed already; a failed capture failing the whole sync.
+   *
+   * Why this level:
+   * The decision to photograph is the route's: it knows what the projection just closed, what the
+   * Box observation said, and that the transcript is already durable either way.
+   *
+   * Failure proof:
+   * Photographing every finished run, or letting a capture failure escape, fails a case below.
+   */
+  describe("tool runs in a synced thread", () => {
+    const visualRun = (screenshot: string | null = null) => ({
+      event_id: "pi:512:tool:0",
+      ordinal: 1,
+      role: "tool" as const,
+      content: "screenshot",
+      author_id: null,
+      author_name: null,
+      tool: {
+        call_id: "call_1",
+        kind: "computer" as const,
+        name: "computer",
+        title: "screenshot",
+        status: "ok" as const,
+        detail: null,
+        screenshot,
+      },
+      created_at: companion.created_at,
+    });
+
+    const shellRun = {
+      ...visualRun(),
+      event_id: "pi:512:tool:1",
+      content: "ls",
+      tool: { ...visualRun().tool, call_id: "call_2", kind: "shell" as const, name: "bash", title: "ls" },
+    };
+
+    /** One call and its result, the two halves of a chip, in a single read of the log. */
+    const chunk = [
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "call_1", name: "computer", arguments: { action: "screenshot" } }],
+          stopReason: "toolUse",
+        },
+      },
+      { type: "message_end", message: { role: "toolResult", toolCallId: "call_1", content: [{ type: "text", text: "ok" }] } },
+    ].map((event) => `${JSON.stringify(event)}\n`).join("");
+
+    function syncing(runtime: ReturnType<typeof boxRuntime>) {
+      coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+      coreMocks.listPendingCompanionMessages.mockResolvedValue({ pending: [], piLogOffset: 512 });
+      const app = new Hono<{ Variables: ApiVariables }>();
+      registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+      return app.request(`/v1/companions/${companion.id}/thread/sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+    }
+
+    it("hands Pi's call and its result to the projection as a run and its completion", async () => {
+      coreMocks.recordCompanionPiProjection.mockResolvedValue({
+        ...viewerThread,
+        access: "owner",
+        read_only: false,
+        can_send: true,
+        entries: [visualRun()],
+      });
+      const runtime = boxRuntime({ readEvents: vi.fn(async () => ({ chunk, offset: 512 })) });
+
+      const response = await syncing(runtime);
+
+      expect(response.status).toBe(200);
+      expect(coreMocks.recordCompanionPiProjection).toHaveBeenCalledWith(expect.objectContaining({
+        entries: [expect.objectContaining({
+          role: "tool",
+          tool: expect.objectContaining({ kind: "computer", status: "running" }),
+        })],
+        toolCompletions: [expect.objectContaining({ callId: "call_1", status: "ok" })],
+      }));
+    });
+
+    it("photographs the Box once for the visual run this sync finished", async () => {
+      const frame = "data:image/jpeg;base64,/9j/4AAQSkZJRg==";
+      coreMocks.recordCompanionPiProjection.mockResolvedValue({
+        ...viewerThread,
+        access: "owner",
+        entries: [visualRun()],
+      });
+      coreMocks.attachCompanionToolRunScreenshot.mockResolvedValue({
+        ...viewerThread,
+        access: "owner",
+        entries: [visualRun(frame)],
+      });
+      const runtime = boxRuntime({
+        readEvents: vi.fn(async () => ({ chunk, offset: 512 })),
+        captureDesktopFrame: vi.fn(async () => frame),
+      });
+
+      const response = await syncing(runtime);
+      const body = await response.json() as { thread: { entries: Array<{ tool: { screenshot: string } }> } };
+
+      expect(runtime.captureDesktopFrame).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
+      expect(coreMocks.attachCompanionToolRunScreenshot).toHaveBeenCalledWith(expect.objectContaining({
+        eventId: "pi:512:tool:0",
+        screenshot: frame,
+      }));
+      // The reader gets the framed thread from the sync that took it, not on the next poll.
+      expect(body.thread.entries[0]?.tool.screenshot).toBe(frame);
+    });
+
+    it("leaves a run that touched no screen without a picture", async () => {
+      coreMocks.recordCompanionPiProjection.mockResolvedValue({
+        ...viewerThread,
+        access: "owner",
+        entries: [shellRun],
+      });
+      const runtime = boxRuntime({ readEvents: vi.fn(async () => ({ chunk, offset: 512 })) });
+
+      await syncing(runtime);
+
+      expect(runtime.captureDesktopFrame).not.toHaveBeenCalled();
+    });
+
+    it("leaves a run that already has its picture alone", async () => {
+      // The desktop only tells the truth about the run that just ended, so a second capture would
+      // replace the screen as the run left it with whatever is on it now.
+      coreMocks.recordCompanionPiProjection.mockResolvedValue({
+        ...viewerThread,
+        access: "owner",
+        entries: [visualRun("data:image/jpeg;base64,/9j/4AAQSkZJRg==")],
+      });
+      const runtime = boxRuntime({ readEvents: vi.fn(async () => ({ chunk, offset: 512 })) });
+
+      await syncing(runtime);
+
+      expect(runtime.captureDesktopFrame).not.toHaveBeenCalled();
+    });
+
+    it("does not reach for a frame on a Box with no desktop", async () => {
+      coreMocks.recordCompanionPiProjection.mockResolvedValue({
+        ...viewerThread,
+        access: "owner",
+        entries: [visualRun()],
+      });
+      const runtime = boxRuntime({
+        readEvents: vi.fn(async () => ({ chunk, offset: 512 })),
+        status: vi.fn(async () => ({
+          boxId: companion.runtime.box_id,
+          runtimeState: "running" as const,
+          daemonState: "running" as const,
+          desktopAvailable: false,
+        })),
+      });
+
+      await syncing(runtime);
+
+      expect(runtime.captureDesktopFrame).not.toHaveBeenCalled();
+    });
+
+    it("keeps the projected transcript when the capture fails", async () => {
+      coreMocks.recordCompanionPiProjection.mockResolvedValue({
+        ...viewerThread,
+        access: "owner",
+        entries: [visualRun()],
+      });
+      const runtime = boxRuntime({
+        readEvents: vi.fn(async () => ({ chunk, offset: 512 })),
+        captureDesktopFrame: vi.fn(async () => {
+          throw new Error("box command failed");
+        }),
+      });
+
+      const response = await syncing(runtime);
+      const body = await response.json() as { thread: { entries: unknown[] } };
+
+      expect(response.status).toBe(200);
+      expect(body.thread.entries).toHaveLength(1);
+      expect(coreMocks.attachCompanionToolRunScreenshot).not.toHaveBeenCalled();
+    });
   });
 
   it("syncs a sleeping thread from the control plane without contacting Box", async () => {
