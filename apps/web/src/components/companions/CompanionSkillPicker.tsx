@@ -13,10 +13,10 @@ export type CompanionSkillOption = {
   scope: "personal" | "org";
 };
 
-async function loadPickerSkills(orgId: string): Promise<CompanionSkillOption[]> {
+async function fetchPickerSkills(orgId: string): Promise<CompanionSkillOption[]> {
   const rows = await apiFetch<SkillListRow[]>("/v1/skills?lib=accessible", {
     headers: { "x-companion-org": orgId },
-  }).catch(() => [] as SkillListRow[]);
+  });
   return rows
     .filter((skill) => !skill.archived && skill.validation === "valid" && skill.current_version)
     .map((skill): CompanionSkillOption => ({
@@ -53,14 +53,18 @@ export function CompanionSkillPicker({
 
   useEffect(() => {
     let cancelled = false;
-    void loadPickerSkills(orgId).then((rows) => {
-      if (cancelled) return;
-      setSkills(rows);
-    }).catch((cause) => {
-      if (cancelled) return;
-      setError(cause instanceof Error ? cause.message : "Skills could not be loaded.");
-      setSkills([]);
-    });
+    setError(null);
+    setSkills(null);
+    void fetchPickerSkills(orgId)
+      .then((rows) => {
+        if (cancelled) return;
+        setSkills(rows);
+      })
+      .catch((cause) => {
+        if (cancelled) return;
+        setError(cause instanceof Error ? cause.message : "Skills could not be loaded.");
+        setSkills([]);
+      });
     return () => {
       cancelled = true;
     };
@@ -85,9 +89,9 @@ export function CompanionSkillPicker({
         {error ? <div className="companions-error" role="alert">{error}</div> : null}
         {skills === null ? (
           <p className="companions-skills-picker__empty">Loading skills…</p>
-        ) : skills.length === 0 ? (
+        ) : skills.length === 0 && !error ? (
           <p className="companions-skills-picker__empty">No skills in your library yet.</p>
-        ) : (
+        ) : skills.length === 0 ? null : (
           <div className="companions-skills-picker__list" role="group" aria-label="Skills this Companion may use">
             {skills.map((skill) => {
               const checked = selectedSkillIds.includes(skill.id);

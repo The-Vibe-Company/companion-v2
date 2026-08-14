@@ -1,48 +1,81 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { Hono } from "hono";
-import {
-  CompanionWriteSkillsForbiddenError,
-} from "@companion/core";
+import { CompanionWriteSkillsForbiddenError } from "@companion/core";
 
-const contextMocks = vi.hoisted(() => ({
-  actorFromContext: vi.fn(() => ({ id: "user-1", email: "owner@example.test", name: "Owner" })),
-  orgIdFromContext: vi.fn(async () => "00000000-0000-4000-8000-000000000001"),
-  requireScope: vi.fn(async () => undefined),
-  requireCompanionWriteSkillsIfNeeded: vi.fn(async () => undefined),
+const dbMocks = vi.hoisted(() => ({
+  withTenantContext: vi.fn(async (
+    _ctx: { orgId: string; userId: string },
+    fn: (database: unknown) => Promise<unknown>,
+  ) => fn({ tenant: true })),
 }));
 
-vi.mock("./context", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./context")>()),
-  ...contextMocks,
+const coreMocks = vi.hoisted(() => ({
+  assertCompanionCanWriteSkills: vi.fn(async () => undefined),
 }));
+
+vi.mock("@companion/db", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@companion/db")>()),
+  withTenantContext: dbMocks.withTenantContext,
+}));
+
+vi.mock("@companion/core", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@companion/core")>()),
+  assertCompanionCanWriteSkills: coreMocks.assertCompanionCanWriteSkills,
+}));
+
+function companionContext(overrides: Record<string, unknown> = {}) {
+  const values: Record<string, unknown> = {
+    tokenSourceType: "companion",
+    tokenCompanionId: "11111111-1111-4111-8111-111111111111",
+    tokenOrgId: "00000000-0000-4000-8000-000000000001",
+    tokenActor: { id: "user-1", email: "owner@example.test", name: "Owner" },
+    ...overrides,
+  };
+  return {
+    get: (key: string) => (key in values ? values[key] : null),
+  } as never;
+}
 
 describe("Companion write-on-behalf gate", () => {
   beforeEach(() => {
-    contextMocks.requireCompanionWriteSkillsIfNeeded.mockReset();
-    contextMocks.requireCompanionWriteSkillsIfNeeded.mockResolvedValue(undefined);
+    dbMocks.withTenantContext.mockClear();
+    coreMocks.assertCompanionCanWriteSkills.mockReset();
+    coreMocks.assertCompanionCanWriteSkills.mockResolvedValue(undefined);
+  });
+
+  it("skips the gate for non-companion tokens", async () => {
+    const { requireCompanionWriteSkillsIfNeeded } = await import("./context");
+    await requireCompanionWriteSkillsIfNeeded(companionContext({ tokenSourceType: "pat" }));
+    expect(dbMocks.withTenantContext).not.toHaveBeenCalled();
+  });
+
+  it("re-checks can_write_skills inside the token owner's tenant context", async () => {
+    const { requireCompanionWriteSkillsIfNeeded } = await import("./context");
+    await requireCompanionWriteSkillsIfNeeded(companionContext());
+    expect(dbMocks.withTenantContext).toHaveBeenCalledWith(
+      { orgId: "00000000-0000-4000-8000-000000000001", userId: "user-1" },
+      expect.any(Function),
+    );
+    expect(coreMocks.assertCompanionCanWriteSkills).toHaveBeenCalledWith({
+      orgId: "00000000-0000-4000-8000-000000000001",
+      companionId: "11111111-1111-4111-8111-111111111111",
+      database: { tenant: true },
+    });
   });
 
   it("rejects skills:write when the Companion toggle is off", async () => {
-    const { requireScope, requireCompanionWriteSkillsIfNeeded } = await import("./context");
-    contextMocks.requireCompanionWriteSkillsIfNeeded.mockRejectedValue(
+    const { requireCompanionWriteSkillsIfNeeded } = await import("./context");
+    coreMocks.assertCompanionCanWriteSkills.mockRejectedValue(
       new CompanionWriteSkillsForbiddenError(),
     );
-    // Simulate the async requireScope path used by publish routes.
-    const scopes = ["skills:write"] as const;
-    await expect((async () => {
-      // Cookie session path: null scopes skip the token check, then still run the companion gate
-      // only when tokenSourceType is companion — covered by requireCompanionWriteSkillsIfNeeded.
-      await requireCompanionWriteSkillsIfNeeded({
-        get: (key: string) => {
-          if (key === "tokenSourceType") return "companion";
-          if (key === "tokenCompanionId") return "11111111-1111-4111-8111-111111111111";
-          if (key === "tokenOrgId") return "00000000-0000-4000-8000-000000000001";
-          if (key === "tokenScopes") return [...scopes];
-          return null;
-        },
-      } as never);
-    })()).rejects.toBeInstanceOf(CompanionWriteSkillsForbiddenError);
-    expect(requireScope).toBeTypeOf("function");
+    await expect(requireCompanionWriteSkillsIfNeeded(companionContext()))
+      .rejects.toBeInstanceOf(CompanionWriteSkillsForbiddenError);
+  });
+
+  it("fails closed when companion provenance is missing an actor for the RLS re-check", async () => {
+    const { requireCompanionWriteSkillsIfNeeded } = await import("./context");
+    await expect(requireCompanionWriteSkillsIfNeeded(companionContext({ tokenActor: null })))
+      .rejects.toBeInstanceOf(CompanionWriteSkillsForbiddenError);
+    expect(dbMocks.withTenantContext).not.toHaveBeenCalled();
   });
 });
 

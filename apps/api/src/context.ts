@@ -13,6 +13,7 @@ import {
   CompanionWriteSkillsForbiddenError,
   EntitlementDeniedError,
 } from "@companion/core";
+import { withTenantContext } from "@companion/db";
 
 export interface ApiVariables {
   user: typeof auth.$Infer.Session.user | null;
@@ -198,7 +199,8 @@ export async function requireScope(c: Context<{ Variables: ApiVariables }>, scop
 
 /**
  * Companion write-on-behalf PATs must still have can_write_skills true at use time. Cookie sessions
- * and ordinary PATs are unaffected.
+ * and ordinary PATs are unaffected. The companions row is FORCE RLS, so the re-check runs in the
+ * token owner's tenant context.
  */
 export async function requireCompanionWriteSkillsIfNeeded(
   c: Context<{ Variables: ApiVariables }>,
@@ -206,8 +208,11 @@ export async function requireCompanionWriteSkillsIfNeeded(
   if (c.get("tokenSourceType") !== "companion") return;
   const companionId = c.get("tokenCompanionId");
   const orgId = c.get("tokenOrgId");
-  if (!companionId || !orgId) throw new CompanionWriteSkillsForbiddenError();
-  await assertCompanionCanWriteSkills({ orgId, companionId });
+  const actor = c.get("tokenActor");
+  if (!companionId || !orgId || !actor) throw new CompanionWriteSkillsForbiddenError();
+  await withTenantContext({ orgId, userId: actor.id }, (database) =>
+    assertCompanionCanWriteSkills({ orgId, companionId, database }),
+  );
 }
 
 export async function orgIdFromContext(c: Context<{ Variables: ApiVariables }>): Promise<string> {

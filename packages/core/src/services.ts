@@ -1232,11 +1232,13 @@ export async function listCompanionRuntimeSkillPackages(input: {
       isNull(schema.skills.archivedAt),
       eq(schema.skills.validation, "valid"),
       eq(schema.skillVersions.validation, "valid"),
-      // Personal skills stay creator-private even when selected: only the creator's Companion wake
-      // (or an actor who is that creator) may stage them.
+      // Org skills are member-wide. Personal skills stay creator-private, but a Companion that
+      // already selected the owner's personal skill must keep staging it for any authorized wake
+      // (Owner or Editor) and for Skills Hub → Box sync.
       or(
         eq(schema.skills.scope, "org"),
         eq(schema.skills.creatorId, input.actor.id),
+        eq(schema.skills.creatorId, companion.ownerId),
       ),
     ));
   const order = new Map(selected.map((id, index) => [id, index]));

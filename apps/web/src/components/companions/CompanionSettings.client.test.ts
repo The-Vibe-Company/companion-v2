@@ -184,6 +184,10 @@ describe("CompanionSettings", () => {
       input.matches(":disabled")))
       .toBe(true);
     expect(container.textContent).toContain("Claude Opus 4.8");
+    expect(container.textContent).toContain("Skills");
+    expect(container.textContent).toContain("May create and update skills on my behalf");
+    expect(container.querySelector(".companions-skills-picker fieldset")).toHaveProperty("disabled", true);
+    expect(container.querySelector(".companions-skills-picker__write input")).toHaveProperty("disabled", true);
     expect(container.textContent).not.toContain("Save changes");
     expect(container.textContent).not.toContain("Delete Companion");
     expect(updateCompanion).not.toHaveBeenCalled();

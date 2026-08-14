@@ -282,12 +282,15 @@ export async function getCompanion(input: {
 
 /**
  * Resolve and validate skill ids the actor may attach to a Companion: organization skills plus the
- * actor's own personal skills. Unknown, archived, or invisible ids fail closed.
+ * actor's own personal skills. Unknown, archived, or invisible ids fail closed. Ids already on the
+ * Companion may be kept even when the current editor cannot see them, so an Owner's personal skills
+ * survive an Editor saving other settings.
  */
 export async function resolveCompanionSelectedSkillIds(input: {
   actor: ActorContext;
   orgId: string;
   selectedSkillIds: string[];
+  previouslySelectedSkillIds?: string[];
   database?: Db;
 }): Promise<string[]> {
   const database = input.database ?? db;
@@ -304,6 +307,9 @@ export async function resolveCompanionSelectedSkillIds(input: {
       .filter((skill) => !skill.archived && skill.validation === "valid" && skill.current_version)
       .map((skill) => skill.id),
   );
+  for (const id of input.previouslySelectedSkillIds ?? []) {
+    if (unique.includes(id)) allowed.add(id);
+  }
   const rejected = unique.filter((id) => !allowed.has(id));
   if (rejected.length) {
     throw new CompanionSkillSelectionError(
@@ -473,6 +479,7 @@ export async function updateCompanion(input: {
         actor: input.actor,
         orgId: input.orgId,
         selectedSkillIds: input.selectedSkillIds,
+        previouslySelectedSkillIds: companion.selected_skill_ids,
         database,
       })
     : undefined;
