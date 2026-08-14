@@ -793,13 +793,6 @@ export function registerCompanionRoutes(
       });
       return c.json({ connection });
     } catch (error) {
-      setCookie(c, COMPANION_PROVIDER_OAUTH_COOKIE, "", {
-        path: "/v1/companion-providers/oauth",
-        maxAge: 0,
-        httpOnly: true,
-        sameSite: "Lax",
-        secure: env.NODE_ENV === "production",
-      });
       return routeError(c, error);
     }
   });

@@ -28,11 +28,14 @@ describe("Companion provider OAuth", () => {
     expect(authorization.origin).toBe("https://claude.ai");
     expect(authorization.searchParams.get("code_challenge")).toBeTruthy();
     expect(authorization.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(authorization.searchParams.get("state")).toBe(started.flow.state);
+    expect(started.flow.state).not.toBe(started.flow.verifier);
 
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as Record<string, string>;
       expect(body.code).toBe("one-time-code");
       expect(body.code_verifier).toBe(started.flow.verifier);
+      expect(body.state).toBe(started.flow.state);
       return jsonResponse({
         access_token: "claude-access",
         refresh_token: "claude-refresh",
@@ -50,6 +53,23 @@ describe("Companion provider OAuth", () => {
       access: "claude-access",
       refresh: "claude-refresh",
     });
+  });
+
+  it("requires Claude's returned state before exchanging the authorization code", async () => {
+    const started = beginAnthropicProviderOAuth();
+    const fetchImpl = vi.fn() as unknown as typeof fetch;
+
+    await expect(completeAnthropicProviderOAuth({
+      flow: started.flow,
+      authorizationInput: "one-time-code",
+      fetchImpl,
+    })).rejects.toMatchObject({ code: "oauth_invalid" });
+    await expect(completeAnthropicProviderOAuth({
+      flow: started.flow,
+      authorizationInput: "one-time-code#wrong-state",
+      fetchImpl,
+    })).rejects.toMatchObject({ code: "oauth_invalid" });
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("uses Codex device login and returns the Pi account-bound OAuth entry only after approval", async () => {

@@ -3,6 +3,7 @@ import {
   CompanionDeleteForbiddenError,
   CompanionPluginConflictError,
   CompanionProviderError,
+  CompanionProviderOAuthError,
   CompanionRegistryUnavailableError,
   CompanionRuntimeTransitionError,
   CompanionSettingsForbiddenError,
@@ -1936,6 +1937,45 @@ describe("Companions API feature gate", () => {
     expect(completedBody).not.toContain("claude-refresh-secret");
   });
 
+  it("keeps the Claude flow cookie after a recoverable completion error", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, {
+      COMPANION_COMPANIONS_ENABLED: "true",
+      COMPANION_SECRETS_MASTER_KEY: Buffer.alloc(32, 29).toString("base64"),
+    });
+    const started = await app.request("/v1/companion-providers/oauth/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: "anthropic" }),
+    });
+    const cookie = started.headers.get("set-cookie")!.split(";")[0]!;
+    coreMocks.completeAnthropicProviderOAuth.mockRejectedValueOnce(
+      new CompanionProviderOAuthError("oauth_invalid", "Try the complete code."),
+    );
+
+    const failed = await app.request("/v1/companion-providers/oauth/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", cookie },
+      body: JSON.stringify({ authorization_code: "incomplete-code" }),
+    });
+
+    expect(failed.status).toBe(400);
+    expect(failed.headers.get("set-cookie")).toBeNull();
+    coreMocks.saveCompanionProvider.mockResolvedValueOnce({
+      provider_id: "anthropic",
+      auth_method: "subscription",
+      connected_by: "user-1",
+      created_at: companion.created_at,
+      updated_at: companion.updated_at,
+    });
+    const retried = await app.request("/v1/companion-providers/oauth/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", cookie },
+      body: JSON.stringify({ authorization_code: "complete-code#provider-state" }),
+    });
+    expect(retried.status).toBe(200);
+  });
+
   it("connects Codex with a device code while keeping device and OAuth secrets off the browser", async () => {
     const app = new Hono<{ Variables: ApiVariables }>();
     registerCompanionRoutes(app, {
@@ -1975,6 +2015,30 @@ describe("Companions API feature gate", () => {
     }));
     expect(responseText).not.toContain("codex-access-secret");
     expect(responseText).not.toContain("codex-refresh-secret");
+  });
+
+  it("keeps Codex device authorization pending without clearing its cookie", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, {
+      COMPANION_COMPANIONS_ENABLED: "true",
+      COMPANION_SECRETS_MASTER_KEY: Buffer.alloc(32, 31).toString("base64"),
+    });
+    const started = await app.request("/v1/companion-providers/oauth/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: "openai-codex" }),
+    });
+    const cookie = started.headers.get("set-cookie")!.split(";")[0]!;
+    coreMocks.pollOpenAICodexProviderOAuth.mockResolvedValueOnce({ status: "pending" });
+
+    const polled = await app.request("/v1/companion-providers/oauth/poll", {
+      method: "POST",
+      headers: { cookie },
+    });
+
+    expect(polled.status).toBe(202);
+    await expect(polled.json()).resolves.toEqual({ status: "pending" });
+    expect(polled.headers.get("set-cookie")).toBeNull();
   });
 
   it("keeps provider OAuth unavailable to workspace members without admin rights", async () => {

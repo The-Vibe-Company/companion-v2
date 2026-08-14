@@ -93,6 +93,7 @@ export function beginAnthropicProviderOAuth(): {
   flow: Extract<CompanionProviderOAuthPendingFlow, { providerId: "anthropic" }>;
 } {
   const { verifier, challenge } = generatePkce();
+  const state = base64url(randomBytes(32));
   const params = new URLSearchParams({
     code: "true",
     client_id: ANTHROPIC_CLIENT_ID,
@@ -101,14 +102,14 @@ export function beginAnthropicProviderOAuth(): {
     scope: ANTHROPIC_SCOPES,
     code_challenge: challenge,
     code_challenge_method: "S256",
-    state: verifier,
+    state,
   });
   return {
     authorizationUrl: `${ANTHROPIC_AUTHORIZE_URL}?${params.toString()}`,
     flow: {
       providerId: "anthropic",
       verifier,
-      state: verifier,
+      state,
       expiresAt: Date.now() + COMPANION_PROVIDER_OAUTH_TTL_MS,
     },
   };
@@ -144,8 +145,11 @@ export async function completeAnthropicProviderOAuth(input: {
     throw new CompanionProviderOAuthError("oauth_expired", "Claude sign-in expired. Start again.");
   }
   const parsed = parseAnthropicAuthorizationInput(input.authorizationInput);
-  if (!parsed.code || (parsed.state && parsed.state !== input.flow.state)) {
-    throw new CompanionProviderOAuthError("oauth_invalid", "Claude returned an invalid authorization code.");
+  if (!parsed.code || parsed.state !== input.flow.state) {
+    throw new CompanionProviderOAuthError(
+      "oauth_invalid",
+      "Claude returned an invalid authorization code. Paste the complete code or redirect URL.",
+    );
   }
   const response = await request(ANTHROPIC_TOKEN_URL, {
     method: "POST",
@@ -154,7 +158,7 @@ export async function completeAnthropicProviderOAuth(input: {
       grant_type: "authorization_code",
       client_id: ANTHROPIC_CLIENT_ID,
       code: parsed.code,
-      state: input.flow.state,
+      state: parsed.state,
       redirect_uri: ANTHROPIC_REDIRECT_URI,
       code_verifier: input.flow.verifier,
     }),

@@ -93,6 +93,9 @@ an empty skill set. This is enforced by the API and again by the Box adapter bef
 | `PUT` | `/v1/companion-providers/:provider` | Never; Owner/Admin only |
 | `DELETE` | `/v1/companion-providers/:provider` | Never; Owner/Admin only |
 | `PUT` | `/v1/companion-providers/default` | Never; Owner/Admin only |
+| `POST` | `/v1/companion-providers/oauth/start` | Never; Owner/Admin only |
+| `POST` | `/v1/companion-providers/oauth/complete` | Never; Owner/Admin only |
+| `POST` | `/v1/companion-providers/oauth/poll` | Never; Owner/Admin only |
 | `GET/POST/DELETE` | `/v1/companion-plugins` | Never; current member's private MCP accounts only |
 | `POST/GET` | `/v1/companion-plugins/oauth/start`, `/oauth/callback` | Never; curated MCP pins only, signed PKCE callback |
 

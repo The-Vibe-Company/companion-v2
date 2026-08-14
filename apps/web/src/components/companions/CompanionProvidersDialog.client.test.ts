@@ -46,7 +46,10 @@ function connection(
   };
 }
 
-async function mount(onProviders = vi.fn()) {
+async function mount(
+  onProviders = vi.fn(),
+  providerResponse: CompanionProvidersResponse = providers,
+) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -54,7 +57,7 @@ async function mount(onProviders = vi.fn()) {
   await act(async () => {
     root.render(React.createElement(CompanionProvidersDialog, {
       orgId: "org-1",
-      providers,
+      providers: providerResponse,
       onProviders,
       onClose: () => {},
     }));
@@ -138,12 +141,15 @@ describe("CompanionProvidersDialog", () => {
     const code = container.querySelector<HTMLInputElement>(
       ".companions-provider-oauth input",
     )!;
+    expect(document.activeElement).toBe(code);
+    expect(Array.from(container.querySelectorAll("select")).every((select) => select.disabled)).toBe(
+      true,
+    );
     await act(async () => setControlled(code, "one-time-code", "input"));
-    const finish = Array.from(container.querySelectorAll("button"))
-      .find((button) => button.textContent === "Finish connection")!;
-    await act(async () => finish.click());
+    await submit(container);
 
     expect(api.completeCompanionProviderOAuth).toHaveBeenCalledWith("org-1", "one-time-code");
+    expect(api.startCompanionProviderOAuth).toHaveBeenCalledTimes(1);
   });
 
   it("connects Codex through device login without browser-submitted tokens", async () => {
@@ -170,5 +176,52 @@ describe("CompanionProvidersDialog", () => {
     await act(async () => check.click());
 
     expect(api.pollCompanionProviderOAuth).toHaveBeenCalledWith("org-1");
+  });
+
+  it("keeps a recoverable subscription flow open for retry", async () => {
+    api.startCompanionProviderOAuth.mockResolvedValue({
+      flow: "device_code",
+      provider_id: "openai-codex",
+      verification_url: "https://auth.openai.com/codex/device",
+      user_code: "ABCD-EFGH",
+      poll_interval_seconds: 2,
+      expires_at: "2026-08-14T12:15:00.000Z",
+    });
+    api.pollCompanionProviderOAuth.mockResolvedValue({ status: "pending" });
+    const { container } = await mount();
+    await chooseProvider(container, "openai-codex");
+    await submit(container);
+    await submit(container);
+
+    expect(container.textContent).toContain("Authorization is still waiting");
+    expect(container.textContent).toContain("ABCD-EFGH");
+    expect(container.textContent).toContain("Start over");
+  });
+
+  it("shows a saved connection even when setting the first default fails", async () => {
+    api.saveCompanionProvider.mockResolvedValue(connection("kimi-coding", "api_key"));
+    api.setDefaultCompanionProvider.mockRejectedValue(new Error("default unavailable"));
+    const onProviders = vi.fn();
+    const { container } = await mount(onProviders);
+    await chooseProvider(container, "kimi-coding");
+    const key = container.querySelector<HTMLInputElement>('input[type="password"]')!;
+    await act(async () => setControlled(key, "kimi-secret", "input"));
+    await submit(container);
+
+    expect(onProviders).toHaveBeenCalledWith(expect.objectContaining({
+      connections: [expect.objectContaining({ provider_id: "kimi-coding" })],
+      default_provider_id: null,
+    }));
+    expect(container.textContent).toContain("Provider connected, but the workspace default");
+  });
+
+  it("keeps provider management read-only for non-admin members", async () => {
+    const { container } = await mount(vi.fn(), {
+      ...providers,
+      can_manage: false,
+    });
+
+    expect(container.querySelector("form")).toBeNull();
+    expect(container.textContent).toContain("Ask a workspace admin");
   });
 });

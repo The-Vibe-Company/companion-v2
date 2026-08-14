@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import type {
   CompanionProviderAuthMethod,
   CompanionProviderConnection,
@@ -46,19 +46,17 @@ export function CompanionProvidersDialog({
   const [authorizationCode, setAuthorizationCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const authorizationInputRef = useRef<HTMLInputElement>(null);
+  const deviceLinkRef = useRef<HTMLAnchorElement>(null);
 
   const providerName = (id: string) =>
     providers.catalog.find((provider) => provider.id === id)?.name ?? id;
   const selectedDefinition = providers.catalog.find((provider) => provider.id === providerToAdd);
 
   const acceptConnection = async (connection: CompanionProviderConnection) => {
-    let defaultProviderId = providers.default_provider_id;
-    if (!defaultProviderId) {
-      await setDefaultCompanionProvider(orgId, connection.provider_id);
-      defaultProviderId = connection.provider_id;
-    }
     const connections = [...providers.connections, connection];
-    onProviders({ ...providers, connections, default_provider_id: defaultProviderId });
+    const connectedProviders = { ...providers, connections };
+    onProviders(connectedProviders);
     setCredential("");
     setAuthorizationCode("");
     setOauthFlow(null);
@@ -66,10 +64,53 @@ export function CompanionProvidersDialog({
       !connections.some((candidate) => candidate.provider_id === provider.id));
     setProviderToAdd(next?.id ?? "");
     setAuthMethod(next?.auth_methods[0] ?? "api_key");
+    if (!providers.default_provider_id) {
+      try {
+        await setDefaultCompanionProvider(orgId, connection.provider_id);
+        onProviders({
+          ...connectedProviders,
+          default_provider_id: connection.provider_id,
+        });
+      } catch (cause) {
+        setError(
+          cause instanceof Error
+            ? `Provider connected, but the workspace default was not saved: ${cause.message}`
+            : "Provider connected, but the workspace default was not saved.",
+        );
+      }
+    }
+  };
+
+  const completeSubscription = async () => {
+    if (!oauthFlow) return;
+    setBusy(true);
+    setError(null);
+    try {
+      let connection: CompanionProviderConnection | null;
+      if (oauthFlow.flow === "authorization_code") {
+        connection = await completeCompanionProviderOAuth(orgId, authorizationCode);
+      } else {
+        const result = await pollCompanionProviderOAuth(orgId);
+        connection = result.status === "connected" ? result.connection : null;
+      }
+      if (!connection) {
+        setError("Authorization is still waiting. Finish sign-in, then check again.");
+        return;
+      }
+      await acceptConnection(connection);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Provider sign-in could not be completed.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const connect = async (event: FormEvent) => {
     event.preventDefault();
+    if (oauthFlow) {
+      await completeSubscription();
+      return;
+    }
     if (!providerToAdd) return;
     setBusy(true);
     setError(null);
@@ -95,31 +136,13 @@ export function CompanionProvidersDialog({
     }
   };
 
-  const completeSubscription = async () => {
-    if (!oauthFlow) return;
-    setBusy(true);
-    setError(null);
-    try {
-      let connection: CompanionProviderConnection | null;
-      if (oauthFlow.flow === "authorization_code") {
-        connection = await completeCompanionProviderOAuth(orgId, authorizationCode);
-      } else {
-        const result = await pollCompanionProviderOAuth(orgId);
-        connection = result.status === "connected" ? result.connection : null;
-      }
-      if (!connection) {
-        setError("Authorization is still waiting. Finish sign-in, then check again.");
-        return;
-      }
-      await acceptConnection(connection);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Provider sign-in could not be completed.");
-      setOauthFlow(null);
-      setAuthorizationCode("");
-    } finally {
-      setBusy(false);
+  useEffect(() => {
+    if (oauthFlow?.flow === "authorization_code") {
+      authorizationInputRef.current?.focus();
+    } else if (oauthFlow?.flow === "device_code") {
+      deviceLinkRef.current?.focus();
     }
-  };
+  }, [oauthFlow]);
 
   const makeDefault = async (providerId: string) => {
     setBusy(true);
@@ -233,6 +256,7 @@ export function CompanionProvidersDialog({
           <label>
             Provider
             <select
+              disabled={busy || oauthFlow !== null}
               value={providerToAdd}
               onChange={(event) => {
                 const id = event.target.value;
@@ -254,6 +278,7 @@ export function CompanionProvidersDialog({
           <label>
             Authentication
             <select
+              disabled={busy || oauthFlow !== null}
               value={authMethod}
               onChange={(event) => {
                 setAuthMethod(event.target.value as CompanionProviderAuthMethod);
@@ -299,6 +324,8 @@ export function CompanionProvidersDialog({
                   <label>
                     Authorization code
                     <input
+                      ref={authorizationInputRef}
+                      required
                       autoComplete="off"
                       value={authorizationCode}
                       onChange={(event) => setAuthorizationCode(event.target.value)}
@@ -310,6 +337,7 @@ export function CompanionProvidersDialog({
                   <p>Open ChatGPT device sign-in and enter this one-time code:</p>
                   <code className="companions-provider-oauth__code">{oauthFlow.user_code}</code>
                   <a
+                    ref={deviceLinkRef}
                     className="cds-btn cds-btn--secondary cds-btn--md"
                     href={oauthFlow.verification_url}
                     target="_blank"
@@ -331,6 +359,18 @@ export function CompanionProvidersDialog({
                 {busy
                   ? "Connecting..."
                   : oauthFlow.flow === "device_code" ? "Check connection" : "Finish connection"}
+              </button>
+              <button
+                type="button"
+                className="cds-btn cds-btn--ghost cds-btn--sm"
+                disabled={busy}
+                onClick={() => {
+                  setOauthFlow(null);
+                  setAuthorizationCode("");
+                  setError(null);
+                }}
+              >
+                Start over
               </button>
             </div>
           ) : (
