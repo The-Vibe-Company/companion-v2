@@ -12,6 +12,7 @@ import type {
   CompanionThread,
   SaveCompanionProviderInput,
   SaveCompanionPluginInput,
+  UpdateCompanionInput,
 } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
 
@@ -29,6 +30,29 @@ export async function createCompanion(
     body: JSON.stringify(input),
   });
   return result.companion;
+}
+
+export async function updateCompanion(
+  orgId: string,
+  companionId: string,
+  input: UpdateCompanionInput,
+): Promise<Companion> {
+  const result = await apiFetch<{ companion: Companion }>(
+    `/v1/companions/${encodeURIComponent(companionId)}`,
+    {
+      method: "PATCH",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify(input),
+    },
+  );
+  return result.companion;
+}
+
+export async function deleteCompanion(orgId: string, companionId: string): Promise<void> {
+  await apiFetch(`/v1/companions/${encodeURIComponent(companionId)}`, {
+    method: "DELETE",
+    headers: orgHeaders(orgId),
+  });
 }
 
 export async function saveCompanionPlugin(

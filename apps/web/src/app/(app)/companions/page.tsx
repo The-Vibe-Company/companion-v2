@@ -28,6 +28,9 @@ export default async function CompanionsPage({
   const resolvedSearchParams = await searchParams;
   const openedCompanion = resolvedSearchParams.companion;
   const initialCompanionId = typeof openedCompanion === "string" ? openedCompanion : null;
+  const settingsCompanion = resolvedSearchParams.settings;
+  const initialSettingsCompanionId =
+    typeof settingsCompanion === "string" ? settingsCompanion : null;
   const initialPluginsOpen = resolvedSearchParams.view === "plugins";
 
   const authState = await loadServerAuth<{
@@ -73,6 +76,15 @@ export default async function CompanionsPage({
   if (!mineRows || !orgRows || !companionsResponse || !providers || !plugins) {
     return <WorkspaceLoadError />;
   }
+  if (
+    initialSettingsCompanionId
+    && !companionsResponse.companions.some(
+      (companion) =>
+        companion.id === initialSettingsCompanionId && companion.access !== "viewer",
+    )
+  ) {
+    notFound();
+  }
 
   const mineSkills = mineRows.map(mapSkill);
   const orgSkills = orgRows.map(mapSkill);
@@ -85,6 +97,7 @@ export default async function CompanionsPage({
       initialProviders={providers}
       initialPlugins={plugins.accounts}
       initialCompanionId={initialCompanionId}
+      initialSettingsCompanionId={initialSettingsCompanionId}
       initialPluginsOpen={initialPluginsOpen}
       navigation={{
         mineTreeRows: deriveTreeRows(

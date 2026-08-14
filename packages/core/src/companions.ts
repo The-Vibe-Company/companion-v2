@@ -135,6 +135,20 @@ export class CompanionShareForbiddenError extends Error {
   }
 }
 
+export class CompanionSettingsForbiddenError extends Error {
+  constructor() {
+    super("Companion settings require owner or editor access");
+    this.name = "CompanionSettingsForbiddenError";
+  }
+}
+
+export class CompanionDeleteForbiddenError extends Error {
+  constructor() {
+    super("only the Companion owner can delete it");
+    this.name = "CompanionDeleteForbiddenError";
+  }
+}
+
 /**
  * Access is the owner, otherwise the workspace-wide grant. Per-member grants were cut in THE-329, so
  * authorization ignores any that a not-yet-run migration left behind: a stale row can never open a
@@ -280,6 +294,138 @@ export async function createCompanion(input: {
     .returning();
   if (!row) throw new Error("failed to create companion");
   return toCompanion(row, "owner");
+}
+
+export async function updateCompanion(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  name?: string;
+  persona?: string | null;
+  providerId?: string;
+  database?: Db;
+}): Promise<Companion> {
+  const database = input.database ?? db;
+  const companion = await getCompanion(input);
+  if (companion.access === "viewer") throw new CompanionSettingsForbiddenError();
+
+  if (input.providerId !== undefined) {
+    const connection = await database.query.companionProviderConnections.findFirst({
+      where: and(
+        eq(schema.companionProviderConnections.orgId, input.orgId),
+        eq(schema.companionProviderConnections.providerId, input.providerId),
+      ),
+      columns: { providerId: true },
+    });
+    if (!connection) {
+      throw new CompanionProviderError(
+        "provider_not_configured",
+        `The ${providerName(input.providerId)} provider is not connected in this workspace.`,
+        input.providerId,
+      );
+    }
+  }
+
+  const providerChanged = input.providerId !== undefined
+    && companion.runtime.provider_ids[0] !== input.providerId;
+  const [row] = await database
+    .update(schema.companions)
+    .set({
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.persona !== undefined ? { persona: input.persona?.trim() || null } : {}),
+      ...(input.providerId !== undefined ? { providerIds: [input.providerId] } : {}),
+      ...(providerChanged ? { providerCredentialGeneration: null } : {}),
+      updatedAt: new Date(),
+    })
+    .where(and(
+      eq(schema.companions.orgId, input.orgId),
+      eq(schema.companions.id, input.companionId),
+    ))
+    .returning();
+  if (!row) throw new CompanionNotFoundError();
+  await database.insert(schema.auditLog).values({
+    orgId: input.orgId,
+    actorId: input.actor.id,
+    action: "companion.settings.updated",
+    targetType: "companion",
+    targetId: input.companionId,
+    metadata: {
+      name: input.name !== undefined,
+      persona: input.persona !== undefined,
+      provider: input.providerId !== undefined,
+    },
+  });
+  return toCompanion(row, companion.access);
+}
+
+/**
+ * Lock the Companion against every wake before its Box is archived. Retrying a failed delete may
+ * reclaim `stopping`; no other lifecycle transition can start while the external archive is pending.
+ */
+export async function claimCompanionDeletion(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  database?: Db;
+}): Promise<Companion> {
+  const database = input.database ?? db;
+  const companion = await getCompanion(input);
+  if (companion.access !== "owner") throw new CompanionDeleteForbiddenError();
+  if (companion.runtime.state === "provisioning") {
+    throw new CompanionRuntimeTransitionError("Companion cannot be deleted while it is starting");
+  }
+  const [row] = await database
+    .update(schema.companions)
+    .set({
+      runtimeState: "stopping",
+      daemonState: companion.runtime.box_id ? companion.runtime.daemon_state : "stopped",
+      lastError: null,
+      // This timestamp is also the lifecycle compare-and-set token. `clock_timestamp()` alone can
+      // equal a stop claim created in the same millisecond after the driver rounds it to a Date.
+      updatedAt: sql<Date>`greatest(
+        clock_timestamp(),
+        ${schema.companions.updatedAt} + interval '1 millisecond'
+      )`,
+    })
+    .where(and(
+      eq(schema.companions.orgId, input.orgId),
+      eq(schema.companions.id, input.companionId),
+      eq(schema.companions.ownerId, input.actor.id),
+    ))
+    .returning();
+  if (!row) throw new CompanionNotFoundError();
+  return toCompanion(row, "owner");
+}
+
+export async function deleteCompanion(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  database?: Db;
+}): Promise<void> {
+  const database = input.database ?? db;
+  const companion = await getCompanion(input);
+  if (companion.access !== "owner") throw new CompanionDeleteForbiddenError();
+  const [deleted] = await database
+    .delete(schema.companions)
+    .where(and(
+      eq(schema.companions.orgId, input.orgId),
+      eq(schema.companions.id, input.companionId),
+      eq(schema.companions.ownerId, input.actor.id),
+      eq(schema.companions.runtimeState, "stopping"),
+    ))
+    .returning({ id: schema.companions.id });
+  if (!deleted) {
+    throw new CompanionRuntimeTransitionError("Companion deletion was not claimed");
+  }
+  await database.insert(schema.auditLog).values({
+    orgId: input.orgId,
+    actorId: input.actor.id,
+    action: "companion.deleted",
+    targetType: "companion",
+    targetId: input.companionId,
+    metadata: {},
+  });
 }
 
 async function assertCompanionOwner(input: {
@@ -1248,6 +1394,8 @@ export async function updateCompanionRuntime(input: {
   actor: ActorContext;
   orgId: string;
   companionId: string;
+  /** Compare-and-set guard for a lifecycle finalizer that must not overwrite a newer claim. */
+  expectedUpdatedAt?: Date;
   patch: {
     boxId?: string | null;
     runtimeState?: CompanionRuntimeState;
@@ -1289,8 +1437,17 @@ export async function updateCompanionRuntime(input: {
       ...(input.patch.stoppedAt ? { lastStoppedAt: input.patch.stoppedAt } : {}),
       updatedAt: now,
     })
-    .where(and(eq(schema.companions.orgId, input.orgId), eq(schema.companions.id, input.companionId)))
+    .where(and(
+      eq(schema.companions.orgId, input.orgId),
+      eq(schema.companions.id, input.companionId),
+      input.expectedUpdatedAt
+        ? eq(schema.companions.updatedAt, input.expectedUpdatedAt)
+        : undefined,
+    ))
     .returning();
+  if (!row && input.expectedUpdatedAt) {
+    throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
+  }
   if (!row) throw new CompanionNotFoundError();
   return toCompanion(row, current.access);
 }

@@ -1,9 +1,11 @@
 import {
   COMPANION_RUNTIME_START_BUDGET_MS,
+  CompanionDeleteForbiddenError,
   CompanionPluginConflictError,
   CompanionProviderError,
   CompanionRegistryUnavailableError,
   CompanionRuntimeTransitionError,
+  CompanionSettingsForbiddenError,
 } from "@companion/core";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -29,6 +31,9 @@ const coreMocks = vi.hoisted(() => ({
   listCompanionRegistry: vi.fn(),
   getCompanionRegistryServer: vi.fn(),
   createCompanion: vi.fn(),
+  updateCompanion: vi.fn(),
+  claimCompanionDeletion: vi.fn(),
+  deleteCompanion: vi.fn(),
   saveCompanionPlugin: vi.fn(),
   deleteCompanionPlugin: vi.fn(),
   saveCompanionProvider: vi.fn(),
@@ -221,6 +226,9 @@ describe("Companions API feature gate", () => {
     });
     coreMocks.deleteCompanionPlugin.mockResolvedValue(undefined);
     coreMocks.createCompanion.mockResolvedValue(companion);
+    coreMocks.updateCompanion.mockResolvedValue(companion);
+    coreMocks.claimCompanionDeletion.mockResolvedValue(companion);
+    coreMocks.deleteCompanion.mockResolvedValue(undefined);
     coreMocks.saveCompanionProvider.mockResolvedValue({
       provider_id: "anthropic",
       auth_method: "api_key",
@@ -308,6 +316,89 @@ describe("Companions API feature gate", () => {
     expect(contextMocks.actorFromContext).toHaveBeenCalledOnce();
     expect(contextMocks.orgIdFromContext).toHaveBeenCalledOnce();
     expect(coreMocks.listCompanions).toHaveBeenCalledOnce();
+  });
+
+  it("updates name, instructions, and provider without contacting the Box", async () => {
+    const runtimeFactory = vi.fn(() => {
+      throw new Error("Box client must not be created");
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Research desk",
+        persona: "Challenge every source.",
+        provider_id: "openai-codex",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(coreMocks.updateCompanion).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: companion.id,
+      name: "Research desk",
+      persona: "Challenge every source.",
+      providerId: "openai-codex",
+    }));
+    expect(runtimeFactory).not.toHaveBeenCalled();
+  });
+
+  it("refuses Viewer settings writes before any Box contact", async () => {
+    coreMocks.updateCompanion.mockRejectedValueOnce(new CompanionSettingsForbiddenError());
+    const runtimeFactory = vi.fn(() => {
+      throw new Error("Box client must not be created");
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Forbidden" }),
+    });
+
+    expect(response.status).toBe(403);
+    expect(runtimeFactory).not.toHaveBeenCalled();
+  });
+
+  it("locks deletion, archives the Companion Box, then removes the row", async () => {
+    const stop = vi.fn(async () => ({
+      boxId: companion.runtime.box_id,
+      runtimeState: "stopped" as const,
+      daemonState: "stopped" as const,
+      desktopAvailable: false,
+    }));
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () =>
+      boxRuntime({ stop }));
+
+    const response = await app.request(`/v1/companions/${companion.id}`, { method: "DELETE" });
+
+    expect(response.status).toBe(204);
+    expect(coreMocks.claimCompanionDeletion).toHaveBeenCalledOnce();
+    expect(stop).toHaveBeenCalledWith({ boxId: "bx_23456789" });
+    expect(coreMocks.deleteCompanion).toHaveBeenCalledOnce();
+    expect(coreMocks.claimCompanionDeletion.mock.invocationCallOrder[0])
+      .toBeLessThan(stop.mock.invocationCallOrder[0]!);
+    expect(stop.mock.invocationCallOrder[0])
+      .toBeLessThan(coreMocks.deleteCompanion.mock.invocationCallOrder[0]!);
+  });
+
+  it("refuses non-owner deletion before creating a Box client", async () => {
+    coreMocks.claimCompanionDeletion.mockRejectedValueOnce(new CompanionDeleteForbiddenError());
+    const runtimeFactory = vi.fn(() => {
+      throw new Error("Box client must not be created");
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}`, { method: "DELETE" });
+
+    expect(response.status).toBe(403);
+    expect(runtimeFactory).not.toHaveBeenCalled();
+    expect(coreMocks.deleteCompanion).not.toHaveBeenCalled();
   });
 
   it("allows an authenticated user whose email domain is allowlisted", async () => {

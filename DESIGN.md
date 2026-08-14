@@ -358,6 +358,13 @@ relative time. Rows are separated by inset hairlines, never boxed or carded, and
 Share rest at zero opacity in a reserved column and appear on hover or keyboard focus, so revealing them never moves
 the row; a coarse pointer keeps them visible. The empty state is plain text and one action in open space.
 
+**Companion settings** is a separate Air page reached only from an Owner or Editor row action in the
+Companions list. It has one direct form for name, instructions, and the same connected-provider picker
+used during creation. Controls use the scoped glass wash without stacking cards or adding navigation.
+The Owner alone sees a hairline-separated delete action and an explicit irreversible confirmation;
+Editor can save but cannot delete, and Viewer has no route or writes. The thread, Box chip, Plugins,
+Lux, and top-level navigation remain unchanged.
+
 **Companion thread** is one transcript in one reading column, not a two-sided bubble chat. Turns are
 left-aligned in a column narrower than the page; a writer keeps the floor across consecutive turns, so
 the writer and the time appear once per passage and the turns under it are only the words. A member's

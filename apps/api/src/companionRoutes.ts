@@ -2,6 +2,7 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 import {
   CompanionNotFoundError,
+  CompanionDeleteForbiddenError,
   CompanionPluginConflictError,
   CompanionRegistryUnavailableError,
   CompanionProviderError,
@@ -9,12 +10,15 @@ import {
   CompanionRuntimeForbiddenError,
   CompanionRuntimeTransitionError,
   CompanionShareForbiddenError,
+  CompanionSettingsForbiddenError,
   COMPANION_RUNTIME_START_BUDGET_MS,
   claimCompanionRuntimeStart,
   claimCompanionRuntimeStop,
+  claimCompanionDeletion,
   companionsAvailableToUser,
   companionsEnabled,
   createCompanion,
+  deleteCompanion,
   deleteCompanionPlugin,
   deleteCompanionProvider,
   getCompanion,
@@ -39,6 +43,7 @@ import {
   setCompanionWorkspaceShare,
   setDefaultCompanionProvider,
   updateCompanionObservation,
+  updateCompanion,
   updateCompanionRuntime,
 } from "@companion/core";
 import type { CompanionPiEntry } from "@companion/core";
@@ -54,6 +59,7 @@ import {
   setDefaultCompanionProviderInputSchema,
   startCompanionRuntimeInputSchema,
   saveCompanionPluginInputSchema,
+  updateCompanionInputSchema,
 } from "@companion/contracts";
 import type {
   Companion,
@@ -101,6 +107,8 @@ function errorStatus(error: unknown): number {
   if (error instanceof CompanionAccessForbiddenError) return 403;
   if (error instanceof CompanionNotFoundError) return 404;
   if (error instanceof CompanionRuntimeForbiddenError) return 403;
+  if (error instanceof CompanionSettingsForbiddenError) return 403;
+  if (error instanceof CompanionDeleteForbiddenError) return 403;
   if (error instanceof CompanionProviderForbiddenError) return 403;
   if (error instanceof CompanionShareForbiddenError) return 403;
   if (error instanceof CompanionProviderError) return 422;
@@ -356,6 +364,7 @@ export function registerCompanionRoutes(
         providerAuth: {
           [mutation.provider.providerId]: mutation.provider.authEntry,
         },
+        instructions: mutation.companion.persona,
         // Skipping the write preserves a subscription token Pi refreshed on disk, so it is safe
         // only for a Box this Companion already provisioned at the current layout, where the
         // recorded generation proves the expected file is already in Pi's agent directory.
@@ -630,6 +639,52 @@ export function registerCompanionRoutes(
       return c.json({ companion });
     } catch (error) {
       return jsonError(c, error, errorStatus(error));
+    }
+  });
+
+  app.patch("/v1/companions/:id", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const body = updateCompanionInputSchema.parse(await c.req.json());
+      const companion = await tenant(c, ({ actor, orgId, database }) =>
+        updateCompanion({
+          actor,
+          orgId,
+          companionId,
+          name: body.name,
+          persona: body.persona,
+          providerId: body.provider_id,
+          database,
+        }));
+      return c.json({ companion });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.delete("/v1/companions/:id", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const claimed = await tenant(c, async ({ actor, orgId, database }) => ({
+        actor,
+        orgId,
+        companion: await claimCompanionDeletion({ actor, orgId, companionId, database }),
+      }));
+      if (claimed.companion.runtime.box_id) {
+        await runtimeFactory().stop({ boxId: claimed.companion.runtime.box_id });
+      }
+      await withTenantContext(
+        { orgId: claimed.orgId, userId: claimed.actor.id },
+        (database) => deleteCompanion({
+          actor: claimed.actor,
+          orgId: claimed.orgId,
+          companionId,
+          database,
+        }),
+      );
+      return c.body(null, 204);
+    } catch (error) {
+      return routeError(c, error);
     }
   });
 
@@ -913,6 +968,9 @@ export function registerCompanionRoutes(
           actor: claimed.actor,
           orgId: claimed.orgId,
           companionId,
+          // A delete may claim this Companion while the Box archive is in flight. Do not let this
+          // older stop completion clear the deletion lock after the archive succeeds.
+          expectedUpdatedAt: new Date(claimed.companion.updated_at),
           patch: {
             runtimeState: observed.runtimeState,
             daemonState: observed.daemonState,
@@ -932,6 +990,7 @@ export function registerCompanionRoutes(
             actor: mutation!.actor,
             orgId: mutation!.orgId,
             companionId,
+            expectedUpdatedAt: new Date(mutation!.companion.updated_at),
             patch: {
               runtimeState: "error",
               daemonState: "error",
