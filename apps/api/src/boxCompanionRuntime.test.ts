@@ -995,6 +995,102 @@ describe("AsciiBoxCompanionRuntime", () => {
     );
   });
 
+  /**
+   * THE-340: production recorded this failure as the bare sentence `Pi resources failed to prepare`.
+   * It names the step and nothing else, so the same stored line covered a corrupt archive, a full
+   * disk, and a tree that would not swap, and the wake that hit it could not be told apart from a
+   * wake that hit any other. The script's own last word is what separates them.
+   */
+  it("names the archive a failed skill preparation could not extract", async () => {
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        if (String(body.command).includes("skills.next")) {
+          return json({
+            success: false,
+            exitCode: 1,
+            stdout: "",
+            // tar reports a bad member over three lines and ends on the one that says nothing, so the
+            // script appends the slug after it. The stored reason keeps the last line only.
+            stderr: "gzip: stdin: not in gzip format\ntar: Child returned status 1\n"
+              + "tar: Error is not recoverable: exiting now\n"
+              + "skill package relecture-catalogue did not extract\n",
+          });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    await expect(runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    })).rejects.toThrow(
+      "Pi resources failed to prepare (exit 1): skill package relecture-catalogue did not extract",
+    );
+  });
+
+  it("names the shell's own complaint when clearing the staging directory fails", async () => {
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        // Only the staging command creates that directory; the extract command removes it.
+        if (String(body.command).includes('mkdir -p "$root/state/skill-archives"')) {
+          return json({
+            success: false,
+            exitCode: 1,
+            stdout: "",
+            stderr: "mkdir: cannot create directory '/home/user/.companion': No space left on device\n",
+          });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    await expect(runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    })).rejects.toThrow(
+      "Pi resource staging failed (exit 1): "
+      + "mkdir: cannot create directory '/home/user/.companion': No space left on device",
+    );
+  });
+
   it("stages the layout script as a file and never sends the script body as a command", async () => {
     const commands: string[] = [];
     const files = new Map<string, string>();

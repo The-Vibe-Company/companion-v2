@@ -1067,7 +1067,12 @@ exit 0`,
       input.boxId,
       `set -e; root="$HOME/.companion/runtime"; rm -rf "$root/state/skill-archives"; mkdir -p "$root/state/skill-archives"; if [ -f "$HOME/.companion/pi/auth.json" ]; then printf '%s\\n' ${shellQuote(PROVIDER_AUTH_PRESENT_MARKER)}; fi`,
     );
-    if (!cleared.success) throw new BoxRuntimeProviderError("Pi resource staging failed", 502);
+    if (!cleared.success) {
+      throw new BoxRuntimeProviderError(
+        `Pi resource staging failed${commandFailureDetail(cleared)}`,
+        502,
+      );
+    }
     // Pi keeps refreshed subscription tokens in its own agent directory, so the auth file is
     // replaced only when the encrypted workspace connection generation changes. The disk itself is
     // the authority on whether the file exists: a Box the control plane recorded at the current
@@ -1113,10 +1118,23 @@ exit 0`,
       );
       const prepared = await this.#command(
         input.boxId,
-        "set -euo pipefail; root=\"$HOME/.companion/runtime\"; rm -rf \"$root/skills.next\"; mkdir -p \"$root/skills.next\"; shopt -s nullglob; for archive in \"$root/state/skill-archives\"/*.tar.gz.b64; do slug=\"$(basename \"$archive\" .tar.gz.b64)\"; mkdir -p \"$root/skills.next/$slug\"; base64 --decode \"$archive\" | tar --extract --gzip --file=- --directory=\"$root/skills.next/$slug\" --no-same-owner --no-same-permissions; done; rm -rf \"$root/skills.prev\"; if [ -d \"$root/skills\" ]; then mv \"$root/skills\" \"$root/skills.prev\"; fi; mv \"$root/skills.next\" \"$root/skills\"; rm -rf \"$root/skills.prev\" \"$root/state/skill-archives\"",
+        // One archive that will not decode or extract has to name itself. `tar` reports a failed
+        // member over three lines and ends on `Error is not recoverable`, which is the one line a
+        // stored reason has room for and the only one that says nothing, so the loop appends the slug
+        // it was working on after tar has finished complaining.
+        "set -euo pipefail; root=\"$HOME/.companion/runtime\"; rm -rf \"$root/skills.next\"; mkdir -p \"$root/skills.next\"; shopt -s nullglob; for archive in \"$root/state/skill-archives\"/*.tar.gz.b64; do slug=\"$(basename \"$archive\" .tar.gz.b64)\"; mkdir -p \"$root/skills.next/$slug\"; if ! base64 --decode \"$archive\" | tar --extract --gzip --file=- --directory=\"$root/skills.next/$slug\" --no-same-owner --no-same-permissions; then echo \"skill package $slug did not extract\" >&2; exit 1; fi; done; rm -rf \"$root/skills.prev\"; if [ -d \"$root/skills\" ]; then mv \"$root/skills\" \"$root/skills.prev\"; fi; mv \"$root/skills.next\" \"$root/skills\"; rm -rf \"$root/skills.prev\" \"$root/state/skill-archives\"",
         180,
       );
-      if (!prepared.success) throw new BoxRuntimeProviderError("Pi resources failed to prepare", 502);
+      // Production read this failure as the bare sentence, which named the step and nothing else: the
+      // same wake could have died decoding a staged archive, extracting one, or swapping the tree in,
+      // and every one of those is a different fault. The failing line travels with it for the same
+      // reason it travels with a failed layout install.
+      if (!prepared.success) {
+        throw new BoxRuntimeProviderError(
+          `Pi resources failed to prepare${commandFailureDetail(prepared)}`,
+          502,
+        );
+      }
     } catch (error) {
       await this.#removeProviderFile(input.boxId).catch(() => undefined);
       throw error;

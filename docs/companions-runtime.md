@@ -374,6 +374,13 @@ the extract loop still reads exactly `~/.companion/runtime/state/skill-archives/
 no part file matches. A rejected write now names the file it was writing, because the provider's
 message carries the limit it enforced but not the path.
 
+Staging and extraction each name what went wrong. Both steps used to record only which step it was,
+so one stored `Pi resources failed to prepare` covered a corrupt archive, a disk with no room, and a
+tree that would not swap, and the wake that hit it could not be told from a wake that hit any other.
+They now carry the exit code and the shell's last word, and because `tar` reports a bad member over
+three lines and ends on the one that says nothing, the extract loop appends the slug it was working on
+after `tar` has finished complaining — that slug is the line a stored reason has room for.
+
 The replacement is prepared before the old tree is swapped, and invalid, archived, unpublished,
 or inaccessible packages are excluded. The browser chat consumes Pi's normal Skills capability;
 Companion does not add Pi tool/skill chrome inside the thread. Native mobile receives no skill
