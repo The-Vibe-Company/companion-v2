@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.53.0");
+    expect(pkg.version).toBe("1.54.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -126,11 +126,16 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("the stream a freshly minted Box desktop arrives over");
-    expect(changelog).toContain("the in-thread Box desktop");
+    expect(changelog).toContain("provider catalog added pinned Pi models");
+    expect(changelog).toContain("provider/model settings and Pi recycling");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
+    const desktopStreamChanges = manifest.metadata?.changelog
+      ?.find((entry) => entry.version === "1.53.0")
+      ?.changes?.join("\n") ?? "";
+    expect(desktopStreamChanges).toContain("the stream a freshly minted Box desktop arrives over");
+    expect(desktopStreamChanges).toContain("the in-thread Box desktop");
     const registryBrowseChanges = manifest.metadata?.changelog
       ?.find((entry) => entry.version === "1.47.0")
       ?.changes?.join("\n") ?? "";
