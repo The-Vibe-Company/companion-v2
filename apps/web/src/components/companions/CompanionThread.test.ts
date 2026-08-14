@@ -433,4 +433,118 @@ describe("CompanionThread", () => {
     // A reply that already landed ends the wait.
     expect(render({})).not.toContain("is replying...");
   });
+
+  it("renders a pending shell permission card with Allow / Deny for Owner/Editor", () => {
+    const markup = render({
+      thread: thread({
+        entries: [
+          ...thread().entries,
+          {
+            event_id: "decision:ui-shell",
+            ordinal: 2,
+            role: "decision",
+            content: "Allow shell: bash",
+            author_id: null,
+            author_name: null,
+            tool: null,
+            decision: {
+              request_id: "ui-shell",
+              kind: "shell",
+              name: "bash",
+              title: "ls -la",
+              detail: null,
+              status: "pending",
+              answer: null,
+              decided_by_id: null,
+              decided_by_name: null,
+              decided_at: null,
+              expires_at: "2026-08-12T12:10:00.000Z",
+            },
+            created_at: "2026-08-12T12:05:00.000Z",
+          },
+        ],
+      }),
+    });
+
+    expect(markup).toContain("chat-decision--pending");
+    expect(markup).toContain("Allow run a command");
+    expect(markup).toContain("ls -la");
+    expect(markup).toContain(">Allow<");
+    expect(markup).toContain(">Deny<");
+  });
+
+  it("shows a resolved permission card without controls, and keeps Viewers from acting on pending ones", () => {
+    const resolved = render({
+      thread: thread({
+        entries: [
+          {
+            event_id: "decision:ui-file",
+            ordinal: 0,
+            role: "decision",
+            content: "Allow file: write",
+            author_id: null,
+            author_name: null,
+            tool: null,
+            decision: {
+              request_id: "ui-file",
+              kind: "file",
+              name: "write",
+              title: "notes.md",
+              detail: null,
+              status: "allowed",
+              answer: null,
+              decided_by_id: "user-1",
+              decided_by_name: "Ada",
+              decided_at: "2026-08-12T12:05:30.000Z",
+              expires_at: "2026-08-12T12:10:00.000Z",
+            },
+            created_at: "2026-08-12T12:05:00.000Z",
+          },
+        ],
+      }),
+    });
+    expect(resolved).toContain("chat-decision--allowed");
+    expect(resolved).toContain("allowed by Ada");
+    expect(resolved).not.toContain(">Allow<");
+    expect(resolved).not.toContain(">Deny<");
+
+    const viewerPending = render({
+      companion: companion({ access: "viewer" }),
+      thread: thread({
+        access: "viewer",
+        read_only: true,
+        can_send: false,
+        entries: [
+          {
+            event_id: "decision:ui-q",
+            ordinal: 0,
+            role: "decision",
+            content: "Question: ask_user",
+            author_id: null,
+            author_name: null,
+            tool: null,
+            decision: {
+              request_id: "ui-q",
+              kind: "question",
+              name: "ask_user",
+              title: "Ship tonight?",
+              detail: null,
+              status: "pending",
+              answer: null,
+              decided_by_id: null,
+              decided_by_name: null,
+              decided_at: null,
+              expires_at: "2026-08-12T12:10:00.000Z",
+            },
+            created_at: "2026-08-12T12:05:00.000Z",
+          },
+        ],
+      }),
+    });
+    expect(viewerPending).toContain("Ship tonight?");
+    expect(viewerPending).toContain("Waiting for an Owner or Editor");
+    expect(viewerPending).not.toContain(">Allow<");
+    expect(viewerPending).not.toContain(">Answer<");
+    expect(viewerPending).not.toContain(">Deny<");
+  });
 });
