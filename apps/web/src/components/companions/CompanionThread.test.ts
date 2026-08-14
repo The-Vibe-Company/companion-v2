@@ -87,6 +87,15 @@ function render(props: {
   }));
 }
 
+/**
+ * What the header reads once the markup is taken out. The Box chip is two elements — `Box ·` and the
+ * state word — so a phone can drop the first half and keep the second, which means its label only
+ * exists as rendered text.
+ */
+function text(markup: string): string {
+  return markup.replace(/<[^>]*>/g, "");
+}
+
 const asleep = companion({
   runtime: { ...companion().runtime, state: "stopped", daemon_state: "stopped", box_id: null },
 });
@@ -106,7 +115,7 @@ describe("CompanionThread", () => {
     expect(markup).toContain("Draft the launch note");
     expect(markup).toContain("Here is a first pass at the launch note.");
     expect(markup).toContain("Message Luna");
-    expect(markup).toContain("Box · online");
+    expect(text(markup)).toContain("Box · online");
   });
 
   it("keeps Pi tools and Skills out of the thread surface", () => {
@@ -151,7 +160,7 @@ describe("CompanionThread", () => {
       thread: viewerThread,
     });
 
-    expect(markup).toContain("Box · online");
+    expect(text(markup)).toContain("Box · online");
     expect(markup).not.toContain("open the Box desktop");
     expect(markup).not.toContain(">Wake<");
   });
@@ -159,17 +168,17 @@ describe("CompanionThread", () => {
   it("offers the Box desktop from the chip only while a runner's Box is already running", () => {
     const running = render({});
 
-    expect(running).toContain("Box · online");
+    expect(text(running)).toContain("Box · online");
     expect(running).toContain("open the Box desktop");
     // An asleep Box has no desktop, so the chip stays a status read instead of becoming a start.
-    expect(render({ companion: asleep })).toContain("Box · asleep");
+    expect(text(render({ companion: asleep }))).toContain("Box · asleep");
     expect(render({ companion: asleep })).not.toContain("open the Box desktop");
   });
 
   it("reports an in-flight desktop handoff on the chip that started it", () => {
     const markup = render({ openingDesktop: true });
 
-    expect(markup).toContain("Box · opening desktop");
+    expect(text(markup)).toContain("Box · opening desktop");
     expect(markup).toContain("disabled");
   });
 
@@ -209,7 +218,7 @@ describe("CompanionThread", () => {
       thread: waiting,
     });
 
-    expect(starting).toContain("Box · starting");
+    expect(text(starting)).toContain("Box · starting");
     expect(starting).toContain("1 message saved. Luna is waking to deliver.");
     expect(starting).not.toContain("Wake Luna to deliver.");
   });
@@ -243,7 +252,7 @@ describe("CompanionThread", () => {
       }),
     });
 
-    expect(markup).toContain("Box · error");
+    expect(text(markup)).toContain("Box · error");
     expect(markup).toContain("Box runtime is not configured; set COMPANION_BOX_API_KEY");
   });
 

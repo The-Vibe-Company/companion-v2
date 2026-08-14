@@ -1,12 +1,24 @@
+/* One viewport, one scroll owner. The shared shell sizes itself in `vh`, which on a phone is the
+   large viewport and so taller than what is on screen: the page could then be panned vertically
+   under a finger even though nothing was scrollable. `dvh` is the box the browser actually shows,
+   and clipping the inline axis means a sideways pan has nowhere to go. */
 .companions-app {
+  height: 100dvh;
   min-height: 100dvh;
+  overflow-x: clip;
+  overscroll-behavior: none;
 }
 
+/* The list and every settings surface scroll here and nowhere else; the thread hands that job to the
+   log below and turns this box into a fixed frame. `overscroll-behavior` keeps a flick that reaches
+   either end from bouncing the page underneath it. */
 .companions-main {
   flex: 1;
   min-width: 0;
-  height: 100dvh;
+  height: 100%;
   overflow-y: auto;
+  overflow-x: clip;
+  overscroll-behavior: none;
   padding: 38px 44px 64px;
   background: var(--color-canvas);
 }
@@ -53,10 +65,14 @@
   gap: 6px;
 }
 
+/* One column that is allowed to be narrower than its contents' minimum. Without the explicit
+   `minmax(0, …)` the track takes the widest row's min-content width, which on a 320px phone pushed
+   the list a few pixels past the page and gave the main box something to pan across. */
 .companions-content {
   max-width: var(--content-max);
   margin: 0 auto;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -150,16 +166,19 @@
   font-size: var(--text-sm);
 }
 
+/* Dialog widths resolve against the scrim, which already insets itself from the edges. `100vw`
+   counted the scrollbar and the overscroll gutter, so a dialog came out wider than the visual
+   viewport and the whole page could be dragged sideways behind it. */
 .companions-new-dialog {
-  width: min(520px, calc(100vw - 28px));
+  width: min(520px, 100%);
 }
 
 .companions-providers-dialog {
-  width: min(660px, calc(100vw - 28px));
+  width: min(660px, 100%);
 }
 
 .companions-plugin-dialog {
-  width: min(600px, calc(100vw - 28px));
+  width: min(600px, 100%);
 }
 
 .companions-plugins__head {
@@ -324,9 +343,11 @@
   font-weight: 600;
 }
 
+/* A card is 280px wide until the column itself is narrower than that, at which point the track
+   follows the column instead of pushing past its edge. */
 .companions-registry-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
   gap: 12px;
 }
 
@@ -473,7 +494,10 @@
   font-weight: 500;
 }
 
-.companions-chip input {
+/* The chip is the control; its radio is only there for the keyboard. Scoped to the picker so the
+   settings form's field sizing cannot stretch it back into a full-width invisible box sitting on top
+   of the form — at 320px that box reached 91px past the page edge. */
+.companions-picker .companions-chip input {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -656,7 +680,7 @@
 }
 
 .companions-delete-dialog {
-  width: min(500px, calc(100vw - 28px));
+  width: min(500px, 100%);
 }
 
 .companions-new-form input:focus-visible,
@@ -874,7 +898,7 @@
 }
 
 .companions-share-dialog {
-  width: min(620px, calc(100vw - 28px));
+  width: min(620px, 100%);
 }
 
 .companions-share-dialog .og-dialog__body {
@@ -950,6 +974,13 @@
   background: var(--color-surface);
 }
 
+/* The head is one row and stays one row. Everything beside the identity keeps the width it asks for,
+   and the identity is the only thing that gives, so a long name shortens instead of pushing the Box
+   chip and Wake off the right edge. */
+.chat-head > * {
+  flex: none;
+}
+
 .chat-identity {
   flex: 1;
   min-width: 0;
@@ -991,6 +1022,7 @@
   background: var(--color-surface-raised);
   font-weight: 500;
   text-transform: none;
+  white-space: nowrap;
 }
 
 .chat-box.companions-state--ok {
@@ -1043,11 +1075,14 @@ button.chat-box:focus-visible {
   flex-direction: column;
 }
 
+/* The conversation is the only thing that scrolls on a thread. A flick that reaches either end stops
+   there rather than handing the gesture to the page, which is what let the whole thread bounce. */
 .chat-log {
   flex: 1;
   min-height: 0;
   padding: 18px var(--chat-gutter) 6px;
   overflow-y: auto;
+  overscroll-behavior: none;
   display: flex;
   flex-direction: column;
 }
@@ -1231,6 +1266,7 @@ button.chat-box:focus-visible {
   line-height: var(--leading-normal);
   resize: none;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .chat-composer__input::placeholder {
@@ -1322,9 +1358,30 @@ button.chat-box:focus-visible {
     padding: 22px 14px 32px;
   }
 
-  /* Phones keep the chat full-bleed; the composer stays reachable above the log. */
-  .companions-main--chat {
+  /* A phone thread is the whole phone. The rail is an overlay here, not a column, so it no longer
+     takes 60px out of a 320px header; it steps aside while a thread is open and comes back with the
+     list, which the Back control in the head returns to. */
+  .companions-app .companions-main--chat {
+    margin-left: 0;
     padding: 0;
+  }
+
+  .companions-app:has(.companions-main--chat) .side:not(.side--mobile-open) {
+    transform: translateX(-100%);
+  }
+
+  /* iOS shrinks the visual viewport for the keyboard and leaves the layout viewport alone, so a
+     `dvh` box keeps its full height: the composer ends up under the keyboard and the browser pans
+     the thread to chase the focused field. `--chat-viewport-h` and `--chat-viewport-top` carry the
+     visual viewport the browser reports, so the shell sits exactly on what is visible and the
+     composer lands on the keyboard's top edge. Without a report this is an ordinary `dvh` page. */
+  .companions-app:has(.companions-main--chat) {
+    position: fixed;
+    right: 0;
+    bottom: auto;
+    left: 0;
+    top: var(--chat-viewport-top, 0px);
+    height: var(--chat-viewport-h, 100dvh);
   }
 
   .chat {
@@ -1335,12 +1392,24 @@ button.chat-box:focus-visible {
     padding: 10px 14px;
   }
 
+  /* The chip names the compute on a screen with room to say so; on a phone the dot and the state
+     word are the whole message, and `Box ·` is what gives way. */
+  .chat-box__prefix {
+    display: none;
+  }
+
+  /* The name is the point of the header, so the avatar beside it yields its width first. */
+  .chat-head .companions-avatar {
+    display: none;
+  }
+
   .chat-log {
     padding: 14px var(--chat-gutter) 4px;
   }
 
+  /* The keyboard covers the home indicator, so the inset is only claimed when there is no keyboard. */
   .chat-composer {
-    padding: 8px var(--chat-gutter) 12px;
+    padding: 8px var(--chat-gutter) max(12px, env(safe-area-inset-bottom, 0px));
   }
 
   .chat-turn--lead {
@@ -1350,6 +1419,10 @@ button.chat-box:focus-visible {
   .companions-head {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .companions-head-actions {
+    flex-wrap: wrap;
   }
 
   .companions-plugins__head {
@@ -1418,6 +1491,7 @@ button.chat-box:focus-visible {
 
   .companions-row-actions {
     grid-area: actions;
+    flex-wrap: wrap;
     justify-content: flex-start;
     padding-left: 16px;
   }
@@ -1436,22 +1510,14 @@ button.chat-box:focus-visible {
   .companions-plugin-label {
     min-height: 44px;
   }
-}
 
-@media (prefers-reduced-motion: no-preference) {
-  .companions-thread-scrim {
-    animation: companions-scrim-in var(--duration-base) var(--ease-out-quint);
+  /* Back and Wake are thumb targets; the head grows a little rather than the controls shrinking. */
+  .chat-head .chat-back {
+    width: 44px;
+    min-height: 44px;
   }
 
-  .companions-thread {
-    animation: companions-thread-in var(--duration-base) var(--ease-out-quint);
+  .chat-head .cds-btn {
+    min-height: 44px;
   }
-}
-
-@keyframes companions-scrim-in {
-  from { opacity: 0; }
-}
-
-@keyframes companions-thread-in {
-  from { transform: translateX(16px); }
 }
