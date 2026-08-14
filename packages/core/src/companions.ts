@@ -380,7 +380,12 @@ export async function claimCompanionDeletion(input: {
       runtimeState: "stopping",
       daemonState: companion.runtime.box_id ? companion.runtime.daemon_state : "stopped",
       lastError: null,
-      updatedAt: new Date(),
+      // This timestamp is also the lifecycle compare-and-set token. `clock_timestamp()` alone can
+      // equal a stop claim created in the same millisecond after the driver rounds it to a Date.
+      updatedAt: sql<Date>`greatest(
+        clock_timestamp(),
+        ${schema.companions.updatedAt} + interval '1 millisecond'
+      )`,
     })
     .where(and(
       eq(schema.companions.orgId, input.orgId),

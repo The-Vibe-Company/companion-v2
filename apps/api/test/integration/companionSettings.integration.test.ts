@@ -190,19 +190,14 @@ describe("Companion settings persistence and roles", () => {
       companionId,
       database: integrationDb,
     });
-    await claimCompanionDeletion({
+    const deletionClaim = await claimCompanionDeletion({
       actor: fixture.developer,
       orgId: fixture.orgA,
       companionId,
       database: integrationDb,
     });
-    await integrationDb
-      .update(schema.companions)
-      .set({ updatedAt: new Date(new Date(stopClaim.updated_at).getTime() + 1_000) })
-      .where(and(
-        eq(schema.companions.orgId, fixture.orgA),
-        eq(schema.companions.id, companionId),
-      ));
+    expect(new Date(deletionClaim.updated_at).getTime())
+      .toBeGreaterThan(new Date(stopClaim.updated_at).getTime());
 
     await expect(updateCompanionRuntime({
       actor: fixture.developer,
