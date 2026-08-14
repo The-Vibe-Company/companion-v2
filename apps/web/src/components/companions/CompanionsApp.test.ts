@@ -117,7 +117,7 @@ describe("CompanionsApp", () => {
     expect(markup).toContain("Search companions");
     // The Companion Owner keeps sharing; a Viewer row must not offer it.
     expect(markup.match(/>Share</g)).toHaveLength(1);
-    expect(markup.match(/>Settings</g)).toHaveLength(1);
+    expect(markup.match(/aria-label="Settings for/g)).toHaveLength(1);
   });
 
   it("carries the recorded reason next to an Error status in the list", () => {

@@ -684,6 +684,7 @@ export function CompanionsApp({
                               <button
                                 type="button"
                                 className="cds-btn cds-btn--ghost cds-btn--sm"
+                                aria-label={`Settings for ${companion.name}`}
                                 onClick={() => router.push(`/companions/${companion.id}/settings`)}
                               >
                                 Settings
