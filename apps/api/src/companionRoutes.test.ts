@@ -410,14 +410,17 @@ describe("Companions API feature gate", () => {
       read_only: false,
       can_send: true,
     });
-    coreMocks.expireCompanionDecisions.mockResolvedValue({
-      thread: {
-        ...viewerThread,
-        access: "owner",
-        read_only: false,
-        can_send: true,
-      },
-      responses: [],
+    coreMocks.expireCompanionDecisions.mockImplementation(async () => {
+      const last = coreMocks.recordCompanionPiProjection.mock.results.at(-1);
+      const thread = last?.type === "return"
+        ? await last.value
+        : {
+          ...viewerThread,
+          access: "owner",
+          read_only: false,
+          can_send: true,
+        };
+      return { thread, responses: [] };
     });
     coreMocks.decideCompanionDecision.mockResolvedValue({
       thread: {

@@ -1756,7 +1756,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     // Layout 8 replaces wrappers from layout 7 so existing Boxes gain the selected Pi model.
     expect(COMPANION_PI_DISK_LAYOUT_VERSION).toBe(9);
     expect(createdSetupScript)
-      .toContain("expected_layout='8:npm:pi-mcp-adapter@2.12.1'");
+      .toContain("expected_layout='9:npm:pi-mcp-adapter@2.12.1'");
     expect(createdSetupScript).toContain("--append-system-prompt");
     // The supervised daemon gets a minimal PATH from the systemd user manager, so Pi is resolved at
     // layout time and pinned both in the wrapper and on the unit.
