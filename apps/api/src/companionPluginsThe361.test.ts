@@ -1,8 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
+import { CompanionPluginSelectionError } from "@companion/core";
 
 /**
  * THE-361: per-Companion MCP attach allow-list contracts and route recycle signal.
- * Injection filtering lives in resolveCompanionPluginInjection (empty = no extra pins).
+ * Selection + injection filtering are covered by companionPlugins.integration.test.ts
+ * and the Online plugin-selection recycle cases in companionRoutes.test.ts.
  */
 describe("Companion MCP attach contracts (THE-361)", () => {
   it("defaults to an empty plugin allow-list on create and companion rows", async () => {
@@ -25,6 +27,10 @@ describe("Companion MCP attach contracts (THE-361)", () => {
         "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
       ],
     }).selected_mcp_account_ids).toHaveLength(2);
+
+    expect(updateCompanionInputSchema.parse({
+      selected_mcp_account_ids: [],
+    }).selected_mcp_account_ids).toEqual([]);
 
     expect(companionSchema.parse({
       id: "11111111-1111-4111-8111-111111111111",
@@ -54,8 +60,7 @@ describe("Companion MCP attach contracts (THE-361)", () => {
     }).selected_mcp_account_ids).toEqual([]);
   });
 
-  it("rejects unknown plugin ids through CompanionPluginSelectionError", async () => {
-    const { CompanionPluginSelectionError } = await import("@companion/core");
+  it("rejects unknown plugin ids through CompanionPluginSelectionError", () => {
     const error = new CompanionPluginSelectionError(
       "One selected plugin is not connected in this workspace.",
     );
@@ -65,8 +70,7 @@ describe("Companion MCP attach contracts (THE-361)", () => {
 });
 
 describe("Companion MCP attach online recycle (THE-361)", () => {
-  it("treats plugin-list diffs as a Pi recycle reason alongside skills", async () => {
-    // Mirror the PATCH settingsApplyNeeded boolean used in companionRoutes.
+  it("treats plugin-list diffs as a Pi recycle reason", () => {
     const previous = ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"];
     const next = [
       "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -76,7 +80,9 @@ describe("Companion MCP attach online recycle (THE-361)", () => {
       || previous.some((id, index) => id !== next[index]);
     expect(pluginsChanged).toBe(true);
 
-    const emptied = previous.length !== 0 || previous.some((id, index) => id !== [][index]);
-    expect(emptied).toBe(true);
+    const emptied: string[] = [];
+    const detachChanged = previous.length !== emptied.length
+      || previous.some((id, index) => id !== emptied[index]);
+    expect(detachChanged).toBe(true);
   });
 });

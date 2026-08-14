@@ -194,7 +194,9 @@ describe("CompanionSettings", () => {
     expect(container.textContent).toContain("Skills");
     expect(container.textContent).toContain("May create and update skills on my behalf");
     expect(container.textContent).toContain("Plugins");
-    expect(container.querySelector(".companions-skills-picker fieldset")).toHaveProperty("disabled", true);
+    const pickers = Array.from(container.querySelectorAll(".companions-skills-picker fieldset"));
+    expect(pickers.length).toBeGreaterThanOrEqual(2);
+    expect(pickers.every((fieldset) => fieldset.matches(":disabled"))).toBe(true);
     expect(container.querySelector(".companions-skills-picker__write input")).toHaveProperty("disabled", true);
     expect(container.textContent).not.toContain("Save changes");
     expect(container.textContent).not.toContain("Delete Companion");

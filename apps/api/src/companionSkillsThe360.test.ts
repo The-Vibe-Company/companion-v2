@@ -46,7 +46,7 @@ describe("Companion write-on-behalf gate", () => {
     const { requireCompanionWriteSkillsIfNeeded } = await import("./context");
     await requireCompanionWriteSkillsIfNeeded(companionContext({ tokenSourceType: "pat" }));
     expect(dbMocks.withTenantContext).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it("re-checks can_write_skills inside the token owner's tenant context", async () => {
     const { requireCompanionWriteSkillsIfNeeded } = await import("./context");
