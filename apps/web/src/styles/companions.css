@@ -1,5 +1,39 @@
+/* ==========================================================================
+   Companions — "Air". The Companions surface is the one place in the product
+   that trades the dense operator table for whitespace, large type, and light
+   glass: a translucent wash over a blurred backdrop rather than an opaque
+   panel. The tokens below are the whole vocabulary, they stay scoped to this
+   surface, and the rest of the app keeps the flat hairline treatment.
+   ========================================================================== */
 .companions-app {
   min-height: 100dvh;
+
+  /* Glass is a neutral ink wash, so it reads as glass over any ground and
+     never becomes a white card floating on white. */
+  --air-glass: oklch(0.27 0.021 265 / 0.045);
+  --air-glass-strong: oklch(0.27 0.021 265 / 0.07);
+  --air-panel: oklch(1 0 0 / 0.82);
+  --air-scrim: oklch(0.27 0.02 265 / 0.16);
+  --air-line: oklch(0.27 0.021 265 / 0.09);
+  --air-line-soft: oklch(0.27 0.021 265 / 0.055);
+  --air-blur: saturate(1.6) blur(16px);
+  --air-blur-panel: saturate(1.7) blur(26px);
+  --air-radius: 12px;
+  --air-radius-lg: 18px;
+}
+
+:root[data-theme="dark"] .companions-app {
+  --air-glass: oklch(1 0 0 / 0.06);
+  --air-glass-strong: oklch(1 0 0 / 0.1);
+  --air-panel: oklch(0.24 0.014 265 / 0.86);
+  --air-scrim: oklch(0.12 0.02 265 / 0.42);
+  --air-line: oklch(1 0 0 / 0.12);
+  --air-line-soft: oklch(1 0 0 / 0.075);
+}
+
+/* The list reads on the light ground and the navigation settles behind it. */
+.companions-app .side {
+  background: var(--color-canvas);
 }
 
 .companions-main {
@@ -7,13 +41,19 @@
   min-width: 0;
   height: 100dvh;
   overflow-y: auto;
-  padding: 38px 44px 64px;
+  padding: 52px 48px 88px;
   background: var(--color-canvas);
+}
+
+/* Air gives the list its own light page; the THE-333 thread keeps the ground
+   it already had. */
+.companions-main:not(.companions-main--chat) {
+  background: var(--color-surface);
 }
 
 .companions-head {
   max-width: var(--content-max);
-  margin: 0 auto 20px;
+  margin: 0 auto 30px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -24,27 +64,29 @@
   margin: 0;
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 12px;
   color: var(--color-fg);
-  font-size: var(--text-xl);
+  font-size: 1.75rem;
+  font-weight: var(--weight-semibold);
   line-height: var(--leading-tight);
-  letter-spacing: var(--tracking-tight);
+  letter-spacing: -0.022em;
 }
 
 .companions-count {
-  padding: 1px 8px;
-  border: 1px solid var(--color-line);
+  padding: 3px 10px;
   border-radius: var(--radius-full);
-  background: var(--color-surface-raised);
+  background: var(--air-glass);
+  backdrop-filter: var(--air-blur);
+  -webkit-backdrop-filter: var(--air-blur);
   color: var(--color-muted);
-  font-size: var(--text-xs);
-  font-weight: 500;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
 }
 
 .companions-head-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 
 .companions-head-actions .cds-btn {
@@ -53,22 +95,39 @@
   gap: 6px;
 }
 
+.companions-head-actions .cds-btn--ghost:hover {
+  background: var(--air-glass);
+}
+
+.companions-head-actions .cds-btn--primary,
+.companions-empty .cds-btn--primary {
+  height: 38px;
+  padding: 0 15px;
+  border-radius: var(--radius-lg);
+}
+
+.companions-head-actions .cds-btn--primary {
+  margin-left: 8px;
+}
+
 .companions-content {
   max-width: var(--content-max);
   margin: 0 auto;
   display: grid;
-  gap: 12px;
+  gap: 26px;
 }
 
 .companions-search {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 36px;
-  padding: 0 11px;
-  border: 1px solid var(--color-line-strong);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  gap: 11px;
+  min-height: 46px;
+  padding: 0 15px;
+  border: 1px solid var(--air-line-soft);
+  border-radius: var(--air-radius);
+  background: var(--air-glass);
+  backdrop-filter: var(--air-blur);
+  -webkit-backdrop-filter: var(--air-blur);
   color: var(--color-faint);
 }
 
@@ -85,37 +144,39 @@
   background: transparent;
   color: var(--color-fg);
   font: inherit;
+  font-size: var(--text-md);
   outline: none;
 }
 
+.companions-search input::placeholder {
+  color: var(--color-faint);
+}
+
+/* Air keeps the list open: hairlines between rows, never a box around them. */
 .companions-list {
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  display: grid;
 }
 
 .companions-empty {
   display: grid;
   justify-items: center;
-  gap: 8px;
-  padding: 56px 20px;
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  gap: 10px;
+  padding: 104px 20px;
   color: var(--color-faint);
   text-align: center;
 }
 
 .companions-empty strong {
   color: var(--color-fg);
-  font-size: var(--text-md);
+  font-size: var(--text-lg);
+  letter-spacing: var(--tracking-tight);
 }
 
 .companions-empty p {
   max-width: 46ch;
-  margin: 0 0 6px;
+  margin: 0 0 10px;
   color: var(--color-muted);
-  font-size: var(--text-sm);
+  font-size: var(--text-base);
 }
 
 .companions-section {
@@ -150,6 +211,50 @@
   font-size: var(--text-sm);
 }
 
+/* Dialogs on this surface are the same glass as the list: a translucent panel
+   over a lightly blurred scrim, with air instead of dense form chrome. */
+.companions-app .og-scrim {
+  background: var(--air-scrim);
+  backdrop-filter: saturate(1.2) blur(6px);
+  -webkit-backdrop-filter: saturate(1.2) blur(6px);
+}
+
+.companions-app .og-dialog {
+  border-color: var(--air-line);
+  border-radius: var(--air-radius-lg);
+  background: var(--air-panel);
+  backdrop-filter: var(--air-blur-panel);
+  -webkit-backdrop-filter: var(--air-blur-panel);
+}
+
+.companions-app .og-dialog__head {
+  padding: 26px 26px 0;
+}
+
+.companions-app .og-dialog__ic {
+  background: var(--air-glass);
+  color: var(--color-muted);
+}
+
+.companions-app .og-dialog__t {
+  font-size: var(--text-lg);
+}
+
+.companions-app .og-dialog__d {
+  margin-top: 6px;
+  font-size: var(--text-base);
+}
+
+.companions-app .og-dialog__body {
+  gap: 18px;
+  padding: 22px 26px 6px;
+}
+
+.companions-app .og-dialog__foot {
+  padding: 18px 26px 22px;
+  border-top: 0;
+}
+
 .companions-new-dialog {
   width: min(520px, calc(100vw - 28px));
 }
@@ -162,8 +267,19 @@
   width: min(600px, calc(100vw - 28px));
 }
 
+/* Plugins reuses the Companions head and content shell but is not part of the
+   Air list, so it keeps its own denser rhythm. */
 .companions-plugins__head {
   align-items: flex-start;
+}
+
+.companions-plugins__head h1 {
+  font-size: var(--text-xl);
+  letter-spacing: var(--tracking-tight);
+}
+
+.companions-plugins .companions-content {
+  gap: 12px;
 }
 
 .companions-plugins__title {
@@ -456,27 +572,37 @@
   align-items: center;
   gap: 6px;
   white-space: nowrap;
-  min-height: 32px;
-  padding: 0 11px;
-  border: 1px solid var(--color-line-strong);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--air-line-soft);
+  border-radius: var(--radius-full);
+  background: var(--air-glass);
+  backdrop-filter: var(--air-blur);
+  -webkit-backdrop-filter: var(--air-blur);
   color: var(--color-muted);
-  font-size: var(--text-sm);
+  font-size: var(--text-base);
   cursor: pointer;
+  transition: background-color var(--duration-fast) var(--ease-out-quint),
+    border-color var(--duration-fast) var(--ease-out-quint);
 }
 
-.companions-chip--active {
-  border-color: var(--color-accent-edge);
+.companions-chip:hover {
+  background: var(--air-glass-strong);
+}
+
+.companions-chip--active,
+.companions-chip--active:hover {
+  border-color: var(--color-accent-line);
   background: var(--color-accent-tint);
   color: var(--color-fg);
-  font-weight: 500;
+  font-weight: var(--weight-medium);
 }
 
 .companions-chip input {
   position: absolute;
   width: 1px;
   height: 1px;
+  min-height: 0;
   opacity: 0;
 }
 
@@ -513,6 +639,29 @@
   color: var(--color-fg);
   font-size: var(--text-sm);
   font-weight: 500;
+}
+
+.companions-new-form > label,
+.companions-picker legend {
+  gap: 7px;
+  color: var(--color-muted);
+  font-weight: var(--weight-medium);
+}
+
+/* The create fields keep the wizard contract and take the surface's glass. */
+.companions-new-form > label input {
+  min-height: 42px;
+  padding: 0 14px;
+  border-color: var(--air-line-soft);
+  border-radius: var(--air-radius);
+  background: var(--air-glass);
+  backdrop-filter: var(--air-blur);
+  -webkit-backdrop-filter: var(--air-blur);
+  font-size: var(--text-md);
+}
+
+.companions-new-form > label input::placeholder {
+  color: var(--color-faint);
 }
 
 .companions-new-form input,
@@ -559,41 +708,44 @@
   border-bottom: 1px solid var(--color-line);
 }
 
-.companions-row {
-  min-height: 60px;
-  padding: 0 16px 0 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 110px 96px auto;
-  align-items: center;
-  gap: 12px;
-  border-bottom: 1px solid var(--color-line);
-}
-
-.companions-provider-row:last-child,
-.companions-row:last-child {
+.companions-provider-row:last-child {
   border-bottom: 0;
 }
 
-.companions-row--head {
-  min-height: 34px;
-  background: var(--color-surface-sunken);
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
-  color: var(--color-faint);
-  font-size: 10px;
-  letter-spacing: var(--tracking-wide);
-  text-transform: uppercase;
+/* One Companion per row, carried by air and one hairline. The hairline is a
+   pseudo-element inset from the edges so the hover wash can round its corners
+   without a box appearing around the list. */
+.companions-row {
+  position: relative;
+  min-height: 76px;
+  padding: 0 12px 0 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(64px, auto) auto;
+  align-items: center;
+  gap: 14px;
+  border-radius: var(--air-radius);
+  transition: background-color var(--duration-fast) var(--ease-out-quint);
 }
 
-.companions-row--head > span:first-child {
-  padding-left: 16px;
+.companions-row + .companions-row::before {
+  content: "";
+  position: absolute;
+  inset-inline: 12px;
+  top: 0;
+  height: 1px;
+  background: var(--air-line-soft);
+}
+
+.companions-row:hover {
+  background: var(--air-glass);
 }
 
 .companions-row__main {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 0 10px 16px;
+  gap: 14px;
+  padding: 14px 0 14px 12px;
   border: 0;
   background: transparent;
   font: inherit;
@@ -604,9 +756,11 @@
 .companions-row__main:focus-visible {
   outline: 2px solid var(--color-accent-ring);
   outline-offset: -2px;
-  border-radius: var(--radius-md);
+  border-radius: var(--air-radius);
 }
 
+/* The thread header shares this avatar, so only the list row takes the Air size
+   and glass fill. */
 .companions-avatar {
   flex: none;
   display: grid;
@@ -621,11 +775,22 @@
   font-weight: 600;
 }
 
+.companions-row .companions-avatar {
+  width: 38px;
+  height: 38px;
+  border: 0;
+  background: var(--air-glass-strong);
+  backdrop-filter: var(--air-blur);
+  -webkit-backdrop-filter: var(--air-blur);
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+
 .companions-row__text,
 .companions-provider-row > div:first-child {
   min-width: 0;
   display: grid;
-  gap: 1px;
+  gap: 2px;
 }
 
 .companions-row__text strong,
@@ -635,14 +800,28 @@
   white-space: nowrap;
 }
 
-.companions-row__time {
+/* Big type is the whole point: the name leads, the persona follows it quietly. */
+.companions-row__text strong {
+  color: var(--color-fg);
+  font-size: 0.9375rem;
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
+}
+
+.companions-row__text span {
   color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+
+.companions-row__time {
+  justify-self: end;
+  color: var(--color-faint);
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .companions-provider-row strong,
-.companions-row strong,
 .companions-provider-empty strong {
   color: var(--color-fg);
   font-size: var(--text-sm);
@@ -650,7 +829,6 @@
 }
 
 .companions-provider-row span,
-.companions-row span,
 .companions-provider-empty span {
   color: var(--color-muted);
   font-size: var(--text-xs);
@@ -663,11 +841,28 @@
   gap: 8px;
 }
 
+/* Access and sharing are owner chores, not part of reading the list, so they
+   rest until the row is pointed at or focused. The column stays reserved so
+   revealing them never moves the name, the status, or the time. Coarse
+   pointers, which have no hover, keep them on screen. */
 .companions-row-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-out-quint);
+}
+
+.companions-row:hover .companions-row-actions,
+.companions-row:focus-within .companions-row-actions {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .companions-row-actions {
+    opacity: 1;
+  }
 }
 
 .companions-provider-empty,
@@ -681,6 +876,13 @@
   gap: 10px;
   color: var(--color-faint);
   font-size: var(--text-sm);
+}
+
+.companions-list-empty {
+  justify-content: flex-start;
+  min-height: 0;
+  padding: 34px 12px;
+  font-size: var(--text-base);
 }
 
 .companions-provider-add {
@@ -729,6 +931,36 @@
 .companions-state--warn i { background: var(--color-warn); }
 .companions-state--danger i { background: var(--color-danger); }
 
+/* Status is a glass chip: the dot still carries the tone and the word still
+   carries the meaning, so colour is never alone. */
+.companions-row .companions-state {
+  justify-self: end;
+  padding: 5px 12px 5px 10px;
+  border-radius: var(--radius-full);
+  background: var(--air-glass);
+  backdrop-filter: var(--air-blur);
+  -webkit-backdrop-filter: var(--air-blur);
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+
+.companions-row .companions-state--ok {
+  background: var(--color-ok-tint);
+  color: var(--color-ok);
+}
+
+.companions-row .companions-state--warn {
+  background: var(--color-warn-tint);
+  color: var(--color-warn);
+}
+
+.companions-row .companions-state--danger {
+  background: var(--color-danger-tint);
+  color: var(--color-danger);
+}
+
 .companions-thread-notice {
   display: flex;
   align-items: center;
@@ -742,14 +974,19 @@
 }
 
 .companions-role {
-  padding: 2px 7px;
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-raised);
-  color: var(--color-muted);
+  padding: 3px 9px;
+  border-radius: var(--radius-full);
+  background: var(--air-glass);
+  backdrop-filter: var(--air-blur);
+  -webkit-backdrop-filter: var(--air-blur);
+  color: var(--color-faint);
   font-size: var(--text-xs);
-  font-weight: 500;
+  font-weight: var(--weight-medium);
   text-transform: capitalize;
+}
+
+.companions-row-actions .cds-btn--ghost:hover {
+  background: var(--air-glass-strong);
 }
 
 .companions-share-dialog {
@@ -765,35 +1002,42 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 20px;
+  padding: 4px 0 2px;
 }
 
 .companions-share-workspace > div {
   min-width: 0;
   display: grid;
-  gap: 2px;
+  gap: 4px;
 }
 
 .companions-share-workspace strong {
   color: var(--color-fg);
-  font-size: var(--text-sm);
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
 }
 
 .companions-share-workspace span {
   margin: 0;
   color: var(--color-muted);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
 
 .companions-share-dialog select {
-  min-height: 36px;
-  padding: 0 10px;
-  border: 1px solid var(--color-line-strong);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--air-line-soft);
+  border-radius: var(--radius-full);
+  background: var(--air-glass);
+  backdrop-filter: var(--air-blur);
+  -webkit-backdrop-filter: var(--air-blur);
   color: var(--color-fg);
   font: inherit;
+  font-size: var(--text-base);
+  cursor: pointer;
 }
 
 .companions-share-dialog select:focus-visible {
@@ -864,10 +1108,12 @@
 /* The chat chip names the compute it reports. Asleep stays neutral; a live Box carries the low tint
    of its status tone, and for a runner the same chip is the only way into the Box desktop. */
 .chat-box {
-  padding: 4px 10px;
-  border: 1px solid var(--color-line);
+  padding: 5px 12px;
+  border: 1px solid var(--air-line-soft);
   border-radius: var(--radius-full);
-  background: var(--color-surface-raised);
+  background: var(--air-glass);
+  backdrop-filter: var(--air-blur);
+  -webkit-backdrop-filter: var(--air-blur);
   font-weight: 500;
   text-transform: none;
 }
@@ -1172,7 +1418,7 @@ button.chat-box:focus-visible {
 
 @media (max-width: 860px) {
   .companions-main {
-    padding: 28px 20px 40px;
+    padding: 36px 24px 56px;
   }
 
   .companions-main--chat {
@@ -1181,10 +1427,9 @@ button.chat-box:focus-visible {
 
   /* Status stays next to the name; the timestamp column is the first thing to go. */
   .companions-row {
-    grid-template-columns: minmax(0, 1fr) 104px auto;
+    grid-template-columns: minmax(0, 1fr) auto auto;
   }
 
-  .companions-row--head > span:nth-child(3),
   .companions-row__time {
     display: none;
   }
@@ -1198,7 +1443,11 @@ button.chat-box:focus-visible {
 
 @media (max-width: 560px) {
   .companions-main {
-    padding: 22px 14px 32px;
+    padding: 28px 16px 40px;
+  }
+
+  .companions-head h1 {
+    font-size: var(--text-xl);
   }
 
   /* Phones keep the chat full-bleed; the composer stays reachable above the log. */
@@ -1229,6 +1478,11 @@ button.chat-box:focus-visible {
   .companions-head {
     align-items: flex-start;
     flex-direction: column;
+    gap: 14px;
+  }
+
+  .companions-head-actions .cds-btn--primary {
+    margin-left: 4px;
   }
 
   .companions-plugins__head {
@@ -1283,17 +1537,13 @@ button.chat-box:focus-visible {
     padding-bottom: 10px;
   }
 
-  .companions-row--head {
-    display: none;
-  }
-
   .companions-row__main { grid-area: main; }
   .companions-row > .companions-state { grid-area: status; }
 
   .companions-row-actions {
     grid-area: actions;
     justify-content: flex-start;
-    padding-left: 16px;
+    padding-left: 12px;
   }
 
   .companions-share-workspace {
