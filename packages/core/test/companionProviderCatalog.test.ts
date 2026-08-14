@@ -99,6 +99,27 @@ describe("Companion pi.dev provider catalog", () => {
     expect(catalog.every((provider) => provider.models.length > 0)).toBe(true);
   });
 
+  it("coalesces concurrent refreshes for the same provider catalog", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      await gate;
+      const providerId = providerIdFromUrl(input);
+      const id = `${providerId}-live`;
+      return jsonResponse({ [id]: { id, name: `${providerId} live` } });
+    }) as typeof fetch;
+    const cache = new CompanionProviderCatalogCache();
+
+    const first = getCompanionProviderCatalog({ fetchImpl, cache });
+    const second = getCompanionProviderCatalog({ fetchImpl, cache });
+    release();
+    await Promise.all([first, second]);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(COMPANION_PROVIDER_CATALOG.length);
+  });
+
   it("keeps the bundled default when live and otherwise defaults to the first live model", async () => {
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       const providerId = providerIdFromUrl(input);

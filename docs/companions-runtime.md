@@ -491,10 +491,10 @@ disabled. Native-mobile starts discard both saved and caller-supplied MCP accoun
 
 Provider management is workspace-scoped and Owner/Admin-only. API keys and one-provider Pi OAuth
 entries are encrypted with `COMPANION_SECRETS_MASTER_KEY`; responses, logs, audit metadata, and
-Companion rows never contain plaintext. Starting a Companion resolves only its selected provider,
-validates its persisted `model_id` against that provider's live, last-known, or bundled fallback
-catalog, decrypts the credential
-after the owner/editor wake guard, and writes a minimal owner-only `~/.companion/pi/auth.json` plus
+Companion rows never contain plaintext. Create and settings validate `model_id` against the selected
+provider's live, last-known, or bundled fallback catalog before persisting it. Starting a Companion
+resolves only that selected provider and persisted model, decrypts the credential after the
+owner/editor wake guard, and writes a minimal owner-only `~/.companion/pi/auth.json` plus
 `.companion/runtime/state/model.txt` inside Pi's isolated runtime. The daemon wrapper passes the
 selected id through `pi --model`. The start endpoint accepts no model-provider credentials; its only
 credential input is the MCP-scoped `mcp_credentials` array.

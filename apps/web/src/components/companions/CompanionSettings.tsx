@@ -7,7 +7,7 @@ import { Icon } from "../Icon";
 import { Dialog } from "../org/primitives";
 import {
   CompanionProviderModelPicker,
-  providerDefaultModel,
+  providerSelectedModel,
 } from "./CompanionProviderModelPicker";
 
 export function CompanionSettings({
@@ -30,7 +30,7 @@ export function CompanionSettings({
   const [instructions, setInstructions] = useState(companion.persona ?? "");
   const [providerId, setProviderId] = useState(initialProviderId);
   const [modelId, setModelId] = useState(
-    companion.model_id ?? providerDefaultModel(providers, initialProviderId),
+    providerSelectedModel(providers, initialProviderId, companion.model_id),
   );
   const [busy, setBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -66,7 +66,7 @@ export function CompanionSettings({
       setInstructions(updated.persona ?? "");
       const updatedProviderId = updated.runtime.provider_ids[0] ?? "";
       setProviderId(updatedProviderId);
-      setModelId(updated.model_id ?? providerDefaultModel(providers, updatedProviderId));
+      setModelId(providerSelectedModel(providers, updatedProviderId, updated.model_id));
       setSaved(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Companion settings could not be saved.");

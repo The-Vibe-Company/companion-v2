@@ -80,6 +80,7 @@ const roots: Root[] = [];
 async function mount(
   access: Companion["access"] = "owner",
   providerResponse: CompanionProvidersResponse = providers,
+  companionResponse: Companion = companion(access),
 ) {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -90,7 +91,7 @@ async function mount(
   await act(async () => {
     root.render(React.createElement(CompanionSettings, {
       orgId: "org-1",
-      companion: companion(access),
+      companion: companionResponse,
       providers: providerResponse,
       onBack: vi.fn(),
       onSaved,
@@ -206,6 +207,25 @@ describe("CompanionSettings", () => {
         provider_id: "anthropic",
         model_id: "claude-sonnet-4-6",
       }),
+    );
+  });
+
+  it("selects the live default when the persisted model has left the catalog", async () => {
+    const staleCompanion = { ...companion("editor"), model_id: "claude-retired" };
+    const { container } = await mount("editor", providers, staleCompanion);
+    const form = container.querySelector("form")!;
+    const defaultModel = form.querySelector<HTMLInputElement>(
+      'input[value="claude-opus-4-8"]',
+    )!;
+
+    expect(defaultModel.checked).toBe(true);
+    await act(async () => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(updateCompanion).toHaveBeenCalledWith(
+      "org-1",
+      staleCompanion.id,
+      expect.objectContaining({ model_id: "claude-opus-4-8" }),
     );
   });
 

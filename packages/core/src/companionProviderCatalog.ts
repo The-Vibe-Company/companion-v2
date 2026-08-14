@@ -38,6 +38,7 @@ interface CacheEntry {
 /** Process-local last-known cache. Stale entries remain available when pi.dev cannot be reached. */
 export class CompanionProviderCatalogCache {
   private readonly entries = new Map<string, CacheEntry>();
+  private readonly refreshes = new Map<string, Promise<CatalogModels>>();
 
   get(providerId: string): CacheEntry | undefined {
     return this.entries.get(providerId);
@@ -47,8 +48,19 @@ export class CompanionProviderCatalogCache {
     this.entries.set(providerId, { models, storedAt });
   }
 
+  refresh(providerId: string, load: () => Promise<CatalogModels>): Promise<CatalogModels> {
+    const active = this.refreshes.get(providerId);
+    if (active) return active;
+    const refresh = load().finally(() => {
+      if (this.refreshes.get(providerId) === refresh) this.refreshes.delete(providerId);
+    });
+    this.refreshes.set(providerId, refresh);
+    return refresh;
+  }
+
   clear(): void {
     this.entries.clear();
+    this.refreshes.clear();
   }
 }
 
@@ -125,7 +137,10 @@ export async function getCompanionProviderCatalog(
     let models = cached?.models;
     if (!cached || currentTime - cached.storedAt >= cacheTtlMs) {
       try {
-        models = await fetchProviderModels(provider.id, fetchOptions);
+        models = await cache.refresh(
+          provider.id,
+          () => fetchProviderModels(provider.id, fetchOptions),
+        );
         cache.set(provider.id, models, currentTime);
       } catch {
         models = cached?.models?.length ? cached.models : bundledModels(provider.id);
