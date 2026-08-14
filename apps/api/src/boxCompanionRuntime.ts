@@ -184,6 +184,8 @@ export interface CompanionBoxRuntime {
     clientSurface: CompanionClientSurface;
     providerAuth: Record<string, Record<string, unknown>>;
     replaceProviderAuth: boolean;
+    /** Force layout/resource injection without implying that a running Pi needs provider recycle. */
+    refreshRuntimeLayout?: boolean;
     /** Operator instructions applied when Pi next starts; changing them never restarts a warm Box. */
     instructions?: string | null;
     mcpCredentials: McpRuntimeCredential[];
@@ -1123,6 +1125,7 @@ exit 0`,
     clientSurface: CompanionClientSurface;
     providerAuth: Record<string, Record<string, unknown>>;
     replaceProviderAuth: boolean;
+    refreshRuntimeLayout?: boolean;
     instructions?: string | null;
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
@@ -1221,6 +1224,7 @@ exit 0`,
     clientSurface: CompanionClientSurface;
     providerAuth: Record<string, Record<string, unknown>>;
     replaceProviderAuth: boolean;
+    refreshRuntimeLayout?: boolean;
     instructions?: string | null;
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
@@ -1301,7 +1305,10 @@ exit 0`,
     // `replaceProviderAuth=false` proves the control-plane row already records this layout and the
     // current provider generation. The runtime-file probe supplies the missing volatile half of the
     // proof: a later systemd auto-restart can still inherit this daemon's MCP credentials.
-    const first = await this.#firstCommand(box, !replaceProviderAuth);
+    const first = await this.#firstCommand(
+      box,
+      !replaceProviderAuth && !input.refreshRuntimeLayout,
+    );
     box = first.box;
     if (first.warm) return observation(await this.#get(box.id), "running");
     await this.#ensurePiLayout(box.id);

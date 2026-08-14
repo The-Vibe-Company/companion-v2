@@ -550,14 +550,15 @@ export function registerCompanionRoutes(
           [mutation.provider.providerId]: mutation.provider.authEntry,
         },
         instructions: mutation.companion.persona,
-        // Skipping the write preserves a subscription token Pi refreshed on disk, so it is safe
-        // only for a Box this Companion already provisioned at the current layout, where the
-        // recorded generation proves the expected file is already in Pi's agent directory.
+        // Skipping the write preserves a subscription token Pi refreshed on disk. A layout refresh
+        // remains a cold resource-injection path, but it does not replace current provider auth or
+        // recycle Pi unless the credential generation itself is stale.
         replaceProviderAuth:
           !mutation.companion.runtime.box_id
-          || mutation.companion.runtime.disk_layout_version !== COMPANION_PI_DISK_LAYOUT_VERSION
           || mutation.companion.runtime.provider_credential_generation
             !== mutation.provider.credentialGeneration,
+        refreshRuntimeLayout:
+          mutation.companion.runtime.disk_layout_version !== COMPANION_PI_DISK_LAYOUT_VERSION,
         mcpCredentials: body.client_surface === "native_mobile"
           ? []
           : [...mutation.plugins.credentials, ...body.mcp_credentials],
@@ -1121,13 +1122,26 @@ export function registerCompanionRoutes(
           providerId: body.provider_id,
           database,
         });
+        const provider = body.provider_id !== undefined
+          ? await getCompanionProviderCredentialGeneration({
+              actor, orgId, companionId, database,
+            })
+          : null;
         return {
           companion,
-          providerChanged: body.provider_id !== undefined
-            && previous.runtime.provider_ids[0] !== body.provider_id,
+          providerApplyNeeded: body.provider_id !== undefined
+            && (
+              previous.runtime.provider_ids[0] !== body.provider_id
+              || !providerAuthIsCurrent(companion, provider)
+            ),
         };
       });
-      if (updated.providerChanged && piIsReachable(updated.companion)) {
+      const canApplyWithoutWaking = updated.companion.runtime.box_id
+        && (
+          piIsReachable(updated.companion)
+          || updated.companion.runtime.state === "error"
+        );
+      if (updated.providerApplyNeeded && canApplyWithoutWaking) {
         // Settings must never wake a sleeping Box. Confirm the projected online state is still live
         // before routing the provider change through startRuntime, which rewrites auth and recycles Pi.
         const observed = await runtimeFactory().status({
@@ -1336,14 +1350,18 @@ export function registerCompanionRoutes(
       const resolved = await tenant(c, async ({ actor, orgId, database }) => {
         const companion = await getCompanionForRuntime({ actor, orgId, companionId, database });
         const state = await listPendingCompanionMessages({ actor, orgId, companionId, database });
-        const provider = piIsReachable(companion)
+        const mayNeedProviderRecovery = piIsReachable(companion)
+          || (Boolean(companion.runtime.box_id) && companion.runtime.state === "error");
+        const provider = mayNeedProviderRecovery
           ? await getCompanionProviderCredentialGeneration({
               actor, orgId, companionId, database,
             })
           : null;
         return { actor, orgId, companion, provider, ...state };
       });
-      if (!piIsReachable(resolved.companion)) {
+      const mayRecoverProvider = resolved.companion.runtime.state === "error"
+        && !providerAuthIsCurrent(resolved.companion, resolved.provider);
+      if (!piIsReachable(resolved.companion) && !mayRecoverProvider) {
         const thread = await withTenantContext(
           { orgId: resolved.orgId, userId: resolved.actor.id },
           (database) => getCompanionThread({

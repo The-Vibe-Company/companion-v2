@@ -459,6 +459,10 @@ describe("Companions API feature gate", () => {
     };
     coreMocks.getCompanion.mockResolvedValueOnce(runningCompanion);
     coreMocks.updateCompanion.mockResolvedValueOnce(changed);
+    coreMocks.getCompanionProviderCredentialGeneration.mockResolvedValueOnce({
+      providerId: "openai-codex",
+      credentialGeneration: "44444444-4444-4444-8444-444444444444",
+    });
     coreMocks.claimCompanionRuntimeStart.mockResolvedValueOnce(changed);
     coreMocks.resolveCompanionProviderAuth.mockResolvedValueOnce({
       providerId: "openai-codex",
@@ -512,6 +516,46 @@ describe("Companions API feature gate", () => {
     expect(response.status).toBe(200);
     expect(runtimeFactory).not.toHaveBeenCalled();
     expect(coreMocks.claimCompanionRuntimeStart).not.toHaveBeenCalled();
+  });
+
+  it("retries an unapplied provider save without requiring another provider change", async () => {
+    const unapplied = {
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        state: "error" as const,
+        daemon_state: "error" as const,
+        provider_ids: ["openai-codex"],
+        provider_credential_generation: null,
+      },
+    };
+    coreMocks.getCompanion.mockResolvedValueOnce(unapplied);
+    coreMocks.updateCompanion.mockResolvedValueOnce(unapplied);
+    coreMocks.getCompanionProviderCredentialGeneration.mockResolvedValueOnce({
+      providerId: "openai-codex",
+      credentialGeneration: "44444444-4444-4444-8444-444444444444",
+    });
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValueOnce(unapplied);
+    coreMocks.resolveCompanionProviderAuth.mockResolvedValueOnce({
+      providerId: "openai-codex",
+      credentialGeneration: "44444444-4444-4444-8444-444444444444",
+      authEntry: { type: "oauth", access: "secret-b" },
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider_id: "openai-codex" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtime.status).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
+      replaceProviderAuth: true,
+    }));
   });
 
   it("refuses Viewer settings writes before any Box contact", async () => {
@@ -1593,6 +1637,41 @@ describe("Companions API feature gate", () => {
       .toBeLessThan(runtime.prompt.mock.invocationCallOrder[0]!);
   });
 
+  it("retries stale provider recovery when a prior sync left the projection in error", async () => {
+    const staleError = {
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        state: "error" as const,
+        daemon_state: "error" as const,
+        provider_credential_generation: null,
+      },
+    };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(staleError);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(staleError);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtime.status).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
+      replaceProviderAuth: true,
+    }));
+    expect(runtime.prompt).toHaveBeenCalledOnce();
+  });
+
   it("records a reply when Pi answered inside a thinking block and settled", async () => {
     coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
     coreMocks.listPendingCompanionMessages.mockResolvedValue({
@@ -1949,6 +2028,7 @@ describe("Companions API feature gate", () => {
         provider_credential_generation: "22222222-2222-4222-8222-222222222222",
       },
       false,
+      false,
     ],
     [
       "rewrites provider auth for a Companion that has no Box yet",
@@ -1958,14 +2038,16 @@ describe("Companions API feature gate", () => {
         provider_credential_generation: "22222222-2222-4222-8222-222222222222",
       },
       true,
+      false,
     ],
     [
-      "rewrites provider auth when the Box still holds an older Pi layout",
+      "refreshes an older Pi layout without replacing current provider auth",
       {
         box_id: "bx_23456789",
         disk_layout_version: 1,
         provider_credential_generation: "22222222-2222-4222-8222-222222222222",
       },
+      false,
       true,
     ],
     [
@@ -1976,8 +2058,9 @@ describe("Companions API feature gate", () => {
         provider_credential_generation: "33333333-3333-4333-8333-333333333333",
       },
       true,
+      false,
     ],
-  ])("%s", async (_name, runtime, expected) => {
+  ])("%s", async (_name, runtime, replaceProviderAuth, refreshRuntimeLayout) => {
     const claimed = { ...companion, runtime: { ...companion.runtime, ...runtime } };
     coreMocks.getCompanionForRuntime.mockResolvedValue(claimed);
     coreMocks.claimCompanionRuntimeStart.mockResolvedValue(claimed);
@@ -2000,7 +2083,10 @@ describe("Companions API feature gate", () => {
     });
 
     expect(response.status).toBe(200);
-    expect(start).toHaveBeenCalledWith(expect.objectContaining({ replaceProviderAuth: expected }));
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      replaceProviderAuth,
+      refreshRuntimeLayout,
+    }));
   });
 
   it("stores provider credentials without returning their value", async () => {

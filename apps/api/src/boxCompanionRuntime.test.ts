@@ -430,6 +430,59 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(writtenPaths).toContain(".companion/runtime/state/providers.env");
   });
 
+  it("refreshes an old layout with idempotent start when provider auth is still current", async () => {
+    const commands: string[] = [];
+    const writtenPaths: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") {
+        writtenPaths.push(String(body.path));
+        return json({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: command.includes("companion-provider-auth-present")
+            ? "companion-provider-auth-present\n"
+            : command.includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: false,
+      refreshRuntimeLayout: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(commands.some((command) =>
+      command.includes("systemctl --user start companion-pi-daemon.service"))).toBe(true);
+    expect(commands.every((command) =>
+      !command.includes("systemctl --user restart companion-pi-daemon.service"))).toBe(true);
+    expect(writtenPaths).not.toContain(".companion/pi/auth.json");
+  });
+
   /**
    * THE-340: production wakes claimed `provisioning` against Boxes that sat at `idle` and never
    * moved. `idle` is a state a Box normally runs commands from, so a start that finds one has to
