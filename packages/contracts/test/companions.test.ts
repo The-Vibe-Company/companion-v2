@@ -276,24 +276,50 @@ describe("Companion desktop contract", () => {
       desktop_url: "https://ascii.dev/desktop/bx_23456789",
       provisioning: false,
       automation: "lux",
+      transport: "vnc",
     })).toMatchObject({ automation: "lux" });
     expect(companionDesktopSchema.parse({
       desktop_url: null,
       provisioning: true,
       automation: "lux",
+      transport: null,
     }).desktop_url).toBeNull();
     // A second computer-use surface cannot be introduced through this payload.
     expect(() => companionDesktopSchema.parse({
       desktop_url: "https://ascii.dev/desktop/bx_23456789",
       provisioning: false,
       automation: "vnc",
+      transport: "vnc",
     })).toThrow();
     // Nothing else travels with a secret-bearing URL.
     expect(() => companionDesktopSchema.parse({
       desktop_url: "https://ascii.dev/desktop/bx_23456789",
       provisioning: false,
       automation: "lux",
+      transport: "vnc",
       box_token: "must-not-enter-the-contract",
+    })).toThrow();
+  });
+
+  it("names the stream this mint got, and only a stream Box actually offers", () => {
+    // The two Box desktop streams: VNC is asked for first, WebRTC is the fallback.
+    expect(companionDesktopSchema.parse({
+      desktop_url: "https://ascii.dev/desktop/bx_23456789",
+      provisioning: false,
+      automation: "lux",
+      transport: "webrtc",
+    }).transport).toBe("webrtc");
+    expect(() => companionDesktopSchema.parse({
+      desktop_url: "https://ascii.dev/desktop/bx_23456789",
+      provisioning: false,
+      automation: "lux",
+      transport: "screenshots",
+    })).toThrow();
+    // A URL always came over one of them, so the surface is never left to infer which.
+    expect(() => companionDesktopSchema.parse({
+      desktop_url: "https://ascii.dev/desktop/bx_23456789",
+      provisioning: false,
+      automation: "lux",
     })).toThrow();
   });
 });

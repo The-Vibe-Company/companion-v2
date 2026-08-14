@@ -1557,11 +1557,14 @@ export function registerCompanionRoutes(
       }
       const desktop = await runtimeFactory().desktop({ boxId: companion.runtime.box_id });
       // Computer use is the Box desktop Lux drives. The URL is secret-bearing, so it reaches this
-      // authorized caller and is never stored, logged, or projected onto the Companion row.
+      // authorized caller and is never stored, logged, or projected onto the Companion row. Every
+      // request mints its own: Box rotates the stream token on each state change, so the in-thread
+      // Computer panel and the desktop tab each ask for a URL rather than sharing a kept one.
       const payload: CompanionDesktop = {
         desktop_url: desktop.url,
         provisioning: desktop.provisioning,
         automation: "lux",
+        transport: desktop.transport,
       };
       return c.json(payload);
     } catch (error) {

@@ -1866,6 +1866,8 @@ describe("Companions API feature gate", () => {
     ["start", `/v1/companions/${companion.id}/runtime/start`],
     ["stop", `/v1/companions/${companion.id}/runtime/stop`],
     ["desktop", `/v1/companions/${companion.id}/runtime/desktop`],
+    // The Computer panel's join is this same route, so a Viewer who reached for one — by any means —
+    // is refused before a Box client exists to wake anything with.
   ])("guards viewer %s before creating or calling the Box client", async (_action, path) => {
     const app = new Hono<{ Variables: ApiVariables }>();
     const runtimeFactory = vi.fn(() => {
@@ -2767,7 +2769,11 @@ describe("Companions API feature gate", () => {
     const app = new Hono<{ Variables: ApiVariables }>();
     coreMocks.getCompanionForRuntime.mockResolvedValueOnce(runningCompanion);
     const runtime = boxRuntime({
-      desktop: vi.fn(async () => ({ url: "https://ascii.dev/desktop/bx_23456789", provisioning: false })),
+      desktop: vi.fn(async () => ({
+        url: "https://ascii.dev/desktop/bx_23456789",
+        provisioning: false,
+        transport: "vnc" as const,
+      })),
     });
     registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
 
@@ -2780,6 +2786,8 @@ describe("Companions API feature gate", () => {
       desktop_url: "https://ascii.dev/desktop/bx_23456789",
       provisioning: false,
       automation: "lux",
+      // The Computer panel is handed the stream this mint got rather than left to infer it.
+      transport: "vnc",
     });
     expect(runtime.desktop).toHaveBeenCalledWith({ boxId: "bx_23456789" });
     // Computer use observes a Box the runner already started; it is never a wake.
@@ -2794,7 +2802,7 @@ describe("Companions API feature gate", () => {
     const app = new Hono<{ Variables: ApiVariables }>();
     coreMocks.getCompanionForRuntime.mockResolvedValueOnce(runningCompanion);
     const runtime = boxRuntime({
-      desktop: vi.fn(async () => ({ url: null, provisioning: true })),
+      desktop: vi.fn(async () => ({ url: null, provisioning: true, transport: null })),
     });
     registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
 
@@ -2807,7 +2815,42 @@ describe("Companions API feature gate", () => {
       desktop_url: null,
       provisioning: true,
       automation: "lux",
+      transport: null,
     });
+  });
+
+  it("mints a Computer panel's desktop again on every join instead of repeating one", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    const minted = [
+      "https://ascii.dev/desktop/bx_23456789?token=first",
+      "https://ascii.dev/desktop/bx_23456789?token=second",
+    ];
+    const runtime = boxRuntime({
+      desktop: vi.fn(async () => ({
+        url: minted.shift() ?? null,
+        provisioning: false,
+        transport: "vnc" as const,
+      })),
+    });
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const join = async () => {
+      const response = await app.request(`/v1/companions/${companion.id}/runtime/desktop`, {
+        method: "POST",
+      });
+      return await response.json() as { desktop_url: string | null };
+    };
+    const first = await join();
+    const second = await join();
+
+    // Box rotates the stream token on every state change, so the panel opening and the desktop tab
+    // each get their own URL and the control plane keeps neither.
+    expect(first.desktop_url).not.toBe(second.desktop_url);
+    expect(runtime.desktop).toHaveBeenCalledTimes(2);
+    expect(coreMocks.updateCompanionRuntime).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionObservation).not.toHaveBeenCalled();
+    expect(runtime.start).not.toHaveBeenCalled();
   });
 
   it("returns a transition conflict when desktop is requested before Box creation", async () => {
