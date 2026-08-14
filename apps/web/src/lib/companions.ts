@@ -299,6 +299,26 @@ export async function syncCompanionThread(
 }
 
 /**
+ * Allow, Deny, or answer a pending permission card. Owner/Editor only; Viewer is refused by the API.
+ */
+export async function decideCompanionDecision(
+  orgId: string,
+  companionId: string,
+  requestId: string,
+  input: { action: "allow" } | { action: "deny" } | { action: "answer"; answer: string },
+): Promise<CompanionThread> {
+  const result = await apiFetch<{ thread: CompanionThread }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/decisions/${encodeURIComponent(requestId)}`,
+    {
+      method: "POST",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify(input),
+    },
+  );
+  return result.thread;
+}
+
+/**
  * Runtime read. The default is the control-plane projection, so it is safe after a failed wake and
  * for a Viewer. `live` observes the Box an Owner or Editor already runs; it never resumes one, so a
  * status read cannot become a wake.

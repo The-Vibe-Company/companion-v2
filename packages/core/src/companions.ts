@@ -4,6 +4,7 @@ import type {
   Companion,
   CompanionAccess,
   CompanionDaemonState,
+  CompanionDecision,
   CompanionMcpAccount,
   CompanionMcpCredential,
   CompanionPluginAccount,
@@ -12,6 +13,7 @@ import type {
   CompanionProviderDefinition,
   CompanionProvidersResponse,
   CompanionRuntimeState,
+  DecideCompanionDecisionInput,
   SaveCompanionPluginInput,
   CompanionShareRole,
   CompanionShares,
@@ -97,6 +99,20 @@ export class CompanionRuntimeForbiddenError extends Error {
   constructor() {
     super("companion runtime access requires owner or editor");
     this.name = "CompanionRuntimeForbiddenError";
+  }
+}
+
+export class CompanionDecisionNotFoundError extends Error {
+  constructor() {
+    super("companion permission request not found");
+    this.name = "CompanionDecisionNotFoundError";
+  }
+}
+
+export class CompanionDecisionConflictError extends Error {
+  constructor(message = "companion permission request is no longer pending") {
+    super(message);
+    this.name = "CompanionDecisionConflictError";
   }
 }
 
@@ -799,6 +815,7 @@ async function readCompanionTranscript(
       role: schema.companionTranscriptEntries.role,
       content: schema.companionTranscriptEntries.content,
       tool: schema.companionTranscriptEntries.tool,
+      decision: schema.companionTranscriptEntries.decision,
       authorId: schema.companionTranscriptEntries.authorId,
       authorName: schema.profiles.name,
       createdAt: schema.companionTranscriptEntries.createdAt,
@@ -818,6 +835,7 @@ async function readCompanionTranscript(
     author_id: row.authorId,
     author_name: row.authorName,
     tool: row.tool ?? null,
+    decision: row.decision ?? null,
     created_at: row.createdAt.toISOString(),
   }));
 }
@@ -1140,6 +1158,7 @@ export async function recordCompanionPiProjection(input: {
         role: entry.role,
         content: entry.content,
         tool: entry.tool ?? null,
+        decision: entry.decision ?? null,
         createdAt: entry.createdAt,
       })))
       .onConflictDoNothing();
@@ -1184,6 +1203,197 @@ export async function recordCompanionPiProjection(input: {
     readCompanionTranscript(database, input.orgId, input.companionId),
   ]);
   return toThread({ actor: input.actor, companion, row, entries });
+}
+
+/** What the Box FIFO must receive so Pi unblocks a pending extension UI dialog. */
+export type CompanionExtensionUiResponse =
+  | { type: "extension_ui_response"; id: string; confirmed: boolean }
+  | { type: "extension_ui_response"; id: string; value: string }
+  | { type: "extension_ui_response"; id: string; cancelled: true };
+
+function extensionUiResponseFor(
+  decision: CompanionDecision,
+  action: DecideCompanionDecisionInput["action"] | "expire",
+  answer?: string,
+): CompanionExtensionUiResponse {
+  if (decision.kind === "question") {
+    if (action === "answer" && answer) {
+      return { type: "extension_ui_response", id: decision.request_id, value: answer };
+    }
+    return { type: "extension_ui_response", id: decision.request_id, cancelled: true };
+  }
+  if (action === "allow") {
+    return { type: "extension_ui_response", id: decision.request_id, confirmed: true };
+  }
+  return { type: "extension_ui_response", id: decision.request_id, confirmed: false };
+}
+
+function settleDecision(
+  current: CompanionDecision,
+  next: Pick<CompanionDecision, "status" | "answer"> & {
+    decided_by_id: string | null;
+    decided_by_name: string | null;
+    decided_at: string;
+  },
+): CompanionDecision {
+  return {
+    ...current,
+    status: next.status,
+    answer: next.answer,
+    decided_by_id: next.decided_by_id,
+    decided_by_name: next.decided_by_name,
+    decided_at: next.decided_at,
+  };
+}
+
+/**
+ * Expire pending permission cards whose timeout has passed. Fail-closed: each expired card becomes
+ * a Deny (or a cancelled question), and the caller writes the matching FIFO response so Pi unblocks.
+ */
+export async function expireCompanionDecisions(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  now?: Date;
+  database?: Db;
+}): Promise<{
+  thread: CompanionThread;
+  responses: CompanionExtensionUiResponse[];
+}> {
+  const database = input.database ?? db;
+  const companion = await getCompanionForRuntime({ ...input, database });
+  const now = input.now ?? new Date();
+  const pending = await database
+    .select({
+      eventId: schema.companionTranscriptEntries.eventId,
+      decision: schema.companionTranscriptEntries.decision,
+    })
+    .from(schema.companionTranscriptEntries)
+    .where(and(
+      eq(schema.companionTranscriptEntries.orgId, input.orgId),
+      eq(schema.companionTranscriptEntries.companionId, input.companionId),
+      eq(schema.companionTranscriptEntries.role, "decision"),
+      sql`${schema.companionTranscriptEntries.decision}->>'status' = 'pending'`,
+      sql`(${schema.companionTranscriptEntries.decision}->>'expires_at')::timestamptz <= ${now.toISOString()}::timestamptz`,
+    ));
+  const responses: CompanionExtensionUiResponse[] = [];
+  for (const row of pending) {
+    if (!row.decision) continue;
+    const settled = settleDecision(row.decision, {
+      status: "expired",
+      answer: null,
+      decided_by_id: null,
+      decided_by_name: null,
+      decided_at: now.toISOString(),
+    });
+    await database
+      .update(schema.companionTranscriptEntries)
+      .set({
+        decision: settled,
+        content: settled.title,
+      })
+      .where(and(
+        eq(schema.companionTranscriptEntries.orgId, input.orgId),
+        eq(schema.companionTranscriptEntries.companionId, input.companionId),
+        eq(schema.companionTranscriptEntries.eventId, row.eventId),
+        sql`${schema.companionTranscriptEntries.decision}->>'status' = 'pending'`,
+      ));
+    responses.push(extensionUiResponseFor(row.decision, "expire"));
+  }
+  const [threadRow, entries] = await Promise.all([
+    readCompanionThreadRow(database, input.orgId, input.companionId),
+    readCompanionTranscript(database, input.orgId, input.companionId),
+  ]);
+  return {
+    thread: toThread({ actor: input.actor, companion, row: threadRow, entries }),
+    responses,
+  };
+}
+
+/**
+ * Allow, Deny, or answer a pending permission card. Owner/Editor only; Viewers are refused by
+ * `getCompanionForRuntime` before any row is touched. The returned FIFO payload is what unblocks Pi.
+ */
+export async function decideCompanionDecision(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  requestId: string;
+  decision: DecideCompanionDecisionInput;
+  now?: Date;
+  database?: Db;
+}): Promise<{
+  thread: CompanionThread;
+  response: CompanionExtensionUiResponse;
+}> {
+  const database = input.database ?? db;
+  const companion = await getCompanionForRuntime({ ...input, database });
+  const now = input.now ?? new Date();
+  const eventId = `decision:${input.requestId}`.slice(0, 200);
+  const [row] = await database
+    .select({
+      eventId: schema.companionTranscriptEntries.eventId,
+      decision: schema.companionTranscriptEntries.decision,
+    })
+    .from(schema.companionTranscriptEntries)
+    .where(and(
+      eq(schema.companionTranscriptEntries.orgId, input.orgId),
+      eq(schema.companionTranscriptEntries.companionId, input.companionId),
+      eq(schema.companionTranscriptEntries.eventId, eventId),
+      eq(schema.companionTranscriptEntries.role, "decision"),
+    ))
+    .limit(1);
+  if (!row?.decision) throw new CompanionDecisionNotFoundError();
+  if (row.decision.status !== "pending") throw new CompanionDecisionConflictError();
+  if (Date.parse(row.decision.expires_at) <= now.getTime()) {
+    throw new CompanionDecisionConflictError("companion permission request expired");
+  }
+
+  const action = input.decision.action;
+  if (row.decision.kind === "question") {
+    if (action === "allow") {
+      throw new CompanionDecisionConflictError("question cards require an answer or deny");
+    }
+  } else if (action === "answer") {
+    throw new CompanionDecisionConflictError("shell and file cards accept allow or deny only");
+  }
+
+  const answer = action === "answer" ? input.decision.answer : null;
+  const status = action === "allow"
+    ? "allowed" as const
+    : action === "answer"
+      ? "answered" as const
+      : "denied" as const;
+  const settled = settleDecision(row.decision, {
+    status,
+    answer,
+    decided_by_id: input.actor.id,
+    decided_by_name: input.actor.name || input.actor.email,
+    decided_at: now.toISOString(),
+  });
+  const updated = await database
+    .update(schema.companionTranscriptEntries)
+    .set({
+      decision: settled,
+      content: settled.title,
+    })
+    .where(and(
+      eq(schema.companionTranscriptEntries.orgId, input.orgId),
+      eq(schema.companionTranscriptEntries.companionId, input.companionId),
+      eq(schema.companionTranscriptEntries.eventId, eventId),
+      sql`${schema.companionTranscriptEntries.decision}->>'status' = 'pending'`,
+    ))
+    .returning({ eventId: schema.companionTranscriptEntries.eventId });
+  if (!updated.length) throw new CompanionDecisionConflictError();
+
+  const [threadRow, entries] = await Promise.all([
+    readCompanionThreadRow(database, input.orgId, input.companionId),
+    readCompanionTranscript(database, input.orgId, input.companionId),
+  ]);
+  return {
+    thread: toThread({ actor: input.actor, companion, row: threadRow, entries }),
+    response: extensionUiResponseFor(row.decision, action, answer ?? undefined),
+  };
 }
 
 function providerName(providerId: string): string {

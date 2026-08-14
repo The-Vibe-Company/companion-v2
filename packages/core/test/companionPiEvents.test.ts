@@ -341,3 +341,96 @@ describe("Pi tool result matching", () => {
     expect(settled?.tool).toMatchObject({ kind: "shell", name: "bash", title: "ls" });
   });
 });
+
+describe("permission broker projection", () => {
+  it("projects shell and file confirm requests as pending decision cards", () => {
+    const chunk = [
+      line({
+        type: "extension_ui_request",
+        id: "ui-shell-1",
+        method: "confirm",
+        title: "companion:shell:bash",
+        message: "rm -rf /tmp/scratch",
+        timeout: 300_000,
+      }),
+      line({
+        type: "extension_ui_request",
+        id: "ui-file-1",
+        method: "confirm",
+        title: "companion:file:write",
+        message: "src/index.ts",
+        timeout: 300_000,
+      }),
+    ].join("");
+
+    const projection = projectCompanionPiEvents({ chunk, offset: 0, now });
+
+    expect(projection.entries).toHaveLength(2);
+    expect(projection.entries[0]).toMatchObject({
+      eventId: "decision:ui-shell-1",
+      role: "decision",
+      content: "rm -rf /tmp/scratch",
+      decision: {
+        request_id: "ui-shell-1",
+        kind: "shell",
+        name: "bash",
+        title: "rm -rf /tmp/scratch",
+        status: "pending",
+        answer: null,
+        expires_at: "2026-08-12T12:05:00.000Z",
+      },
+    });
+    expect(projection.entries[1]?.decision).toMatchObject({
+      request_id: "ui-file-1",
+      kind: "file",
+      name: "write",
+      title: "src/index.ts",
+      status: "pending",
+    });
+  });
+
+  it("projects ask_user input requests as question cards", () => {
+    const chunk = line({
+      type: "extension_ui_request",
+      id: "ui-q-1",
+      method: "input",
+      title: "companion:question:ask_user",
+      placeholder: "Ship the release notes now?",
+      timeout: 300_000,
+    });
+
+    const projection = projectCompanionPiEvents({ chunk, offset: 10, now });
+
+    expect(projection.entries).toEqual([expect.objectContaining({
+      eventId: "decision:ui-q-1",
+      role: "decision",
+      decision: expect.objectContaining({
+        kind: "question",
+        name: "ask_user",
+        title: "Ship the release notes now?",
+        status: "pending",
+      }),
+    })]);
+  });
+
+  it("ignores fire-and-forget extension UI and titles the Companion broker did not mint", () => {
+    const chunk = [
+      line({ type: "extension_ui_request", id: "1", method: "setStatus", statusKey: "mcp" }),
+      line({
+        type: "extension_ui_request",
+        id: "2",
+        method: "confirm",
+        title: "Clear session?",
+        message: "All messages will be lost.",
+      }),
+      line({
+        type: "extension_ui_request",
+        id: "3",
+        method: "notify",
+        message: "Blocked",
+      }),
+    ].join("");
+
+    expect(projectCompanionPiEvents({ chunk, offset: 0, now }).entries).toEqual([]);
+  });
+});

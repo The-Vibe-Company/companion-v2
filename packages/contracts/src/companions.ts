@@ -277,10 +277,63 @@ export const companionToolRunSchema = z.object({
 }).strict();
 export type CompanionToolRun = z.infer<typeof companionToolRunSchema>;
 
+/**
+ * What a permission card is asking about. Shell and file edits need Allow / Deny; a question needs
+ * an answer. Browse and computer stay ungated — they already surface through THE-352 chips and the
+ * Computer panel rather than a broker card.
+ */
+export const companionDecisionKindSchema = z.enum(["shell", "file", "question"]);
+export type CompanionDecisionKind = z.infer<typeof companionDecisionKindSchema>;
+
+/** A card is `pending` until Allow / Deny / answer, or until the fail-closed timeout expires. */
+export const companionDecisionStatusSchema = z.enum([
+  "pending",
+  "allowed",
+  "denied",
+  "answered",
+  "expired",
+]);
+export type CompanionDecisionStatus = z.infer<typeof companionDecisionStatusSchema>;
+
+/**
+ * One permission request Pi blocked on, projected from an `extension_ui_request` in the RPC log.
+ * The transcript keeps the decision after refresh and for Viewers; only Owner/Editor may act while
+ * the card is still pending.
+ */
+export const companionDecisionSchema = z.object({
+  /** Pi's extension UI request id — also the key the FIFO response must echo. */
+  request_id: z.string().min(1).max(200),
+  kind: companionDecisionKindSchema,
+  /** Tool name Pi was about to run, or `ask_user` for a question. */
+  name: z.string().min(1).max(120),
+  /** One line naming what was requested: the command, the path, or the question. */
+  title: z.string().max(300),
+  detail: z.string().max(16_000).nullable(),
+  status: companionDecisionStatusSchema,
+  /** Free-form answer when `kind` is `question` and the card was answered. */
+  answer: z.string().max(8_000).nullable(),
+  decided_by_id: z.string().nullable(),
+  decided_by_name: z.string().nullable(),
+  decided_at: z.string().datetime().nullable(),
+  expires_at: z.string().datetime(),
+}).strict();
+export type CompanionDecision = z.infer<typeof companionDecisionSchema>;
+
+/** Owner/Editor answer to a pending permission card. Viewers are refused before this is parsed. */
+export const decideCompanionDecisionInputSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("allow") }).strict(),
+  z.object({ action: z.literal("deny") }).strict(),
+  z.object({
+    action: z.literal("answer"),
+    answer: z.string().trim().min(1).max(8_000),
+  }).strict(),
+]);
+export type DecideCompanionDecisionInput = z.infer<typeof decideCompanionDecisionInputSchema>;
+
 export const companionTranscriptEntrySchema = z.object({
   event_id: z.string().min(1).max(200),
   ordinal: z.number().int().nonnegative(),
-  role: z.enum(["user", "assistant", "system", "tool"]),
+  role: z.enum(["user", "assistant", "system", "tool", "decision"]),
   content: z.string(),
   /**
    * Member who sent a user message. A shared thread has several writers, so the reader compares
@@ -290,14 +343,24 @@ export const companionTranscriptEntrySchema = z.object({
   author_name: z.string().nullable(),
   /** Set on exactly the `tool` entries; every other role carries null. */
   tool: companionToolRunSchema.nullable().default(null),
+  /** Set on exactly the `decision` entries; every other role carries null. */
+  decision: companionDecisionSchema.nullable().default(null),
   created_at: z.string().datetime(),
 }).superRefine((entry, ctx) => {
-  if ((entry.role === "tool") === (entry.tool !== null)) return;
-  ctx.addIssue({
-    code: z.ZodIssueCode.custom,
-    path: ["tool"],
-    message: "a tool entry carries a tool run and no other role may",
-  });
+  if ((entry.role === "tool") !== (entry.tool !== null)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["tool"],
+      message: "a tool entry carries a tool run and no other role may",
+    });
+  }
+  if ((entry.role === "decision") !== (entry.decision !== null)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["decision"],
+      message: "a decision entry carries a permission card and no other role may",
+    });
+  }
 });
 export type CompanionTranscriptEntry = z.infer<typeof companionTranscriptEntrySchema>;
 export type CompanionTranscriptRole = CompanionTranscriptEntry["role"];

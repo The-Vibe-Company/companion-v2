@@ -33,7 +33,7 @@ export function transcriptAuthor(
   companionName: string,
 ): string | null {
   if (entry.role === "assistant") return companionName;
-  if (entry.role === "system" || entry.role === "tool") return null;
+  if (entry.role === "system" || entry.role === "tool" || entry.role === "decision") return null;
   if (entry.author_id === viewerId) return "You";
   return entry.author_name ?? "Member";
 }
@@ -91,7 +91,7 @@ export function replyExpected(input: {
 }): boolean {
   if (!input.awake) return false;
   const role = input.entries[input.entries.length - 1]?.role;
-  return role === "user" || role === "tool";
+  return role === "user" || role === "tool" || role === "decision";
 }
 
 /**

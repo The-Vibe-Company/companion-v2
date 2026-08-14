@@ -637,6 +637,7 @@ export function CompanionsApp({
             <CompanionThread
               companion={opened}
               thread={thread}
+              orgId={currentOrg.id}
               error={desktopError ?? threadError}
               busy={sending}
               waking={waking}
@@ -651,6 +652,7 @@ export function CompanionsApp({
               }}
               onBack={closeThread}
               onSend={onSend}
+              onThread={setThread}
               onWake={() => void onWake()}
               onDesktop={() => void onDesktop()}
             />

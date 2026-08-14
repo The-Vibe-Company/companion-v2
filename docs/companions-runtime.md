@@ -85,6 +85,7 @@ an empty skill set. This is enforced by the API and again by the Box adapter bef
 | `GET` | `/v1/companions/:id/thread` | Never; authorized read-only control-plane projection |
 | `POST` | `/v1/companions/:id/messages` | Owner/editor only; persists first, starts when not already running, then delivers |
 | `POST` | `/v1/companions/:id/thread/sync` | Owner/editor only; delivers and projects without resuming Box |
+| `POST` | `/v1/companions/:id/decisions/:requestId` | Owner/editor only; Allow / Deny / answer a pending permission card |
 | `GET` | `/v1/companions/:id/runtime` | Never |
 | `GET` | `/v1/companions/:id/runtime?live=true` | Owner/editor only; observes without resuming |
 | `POST` | `/v1/companions/:id/runtime/start` | Creates or resumes Box, then starts Pi |
@@ -291,6 +292,19 @@ Frames are never uploaded to object storage and never minted as a desktop URL, s
 thread is not a second way to reach a live stream. Because capture happens on the Owner/Editor sync
 path, a Viewer reads chips and whatever frames were already stored without any of it touching a Box.
 
+Before a risky tool runs, the Companion permission-broker Pi extension emits an
+`extension_ui_request` (confirm for bash / write / edit, input for `ask_user`) and blocks until the
+control plane answers. Sync projects those requests as `decision` transcript entries carrying the
+request in `companion_transcript_entries.decision`, coupled to the `decision` role by a check
+constraint. Owner and Editor Allow / Deny / answer through
+`POST /v1/companions/:id/decisions/:requestId`, which persists who decided and writes an
+`extension_ui_response` to the same FIFO Pi reads for prompts — Allow resumes the tool, Deny and
+timeout never execute it. Timeout is fail-closed at five minutes on both sides: the extension passes
+that window to Pi's dialog, and sync expires any card still pending past `expires_at`. Viewers read
+resolved cards on the control-plane thread and cannot act. Fire-and-forget extension UI and prompts
+minted outside the Companion title grammar (`companion:<kind>:<name>`) are ignored so third-party
+extension chrome does not become Allow / Deny cards.
+
 Delivery reads the pending list before it claims the watermark, so two requests that overlap inside
 that window can hand Pi the same prompt twice. One client cannot do this: the web surface runs its
 sends and syncs one at a time, skipping a poll that an in-flight request already covers. Two clients
@@ -306,7 +320,8 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
 ├── bin/pi-daemon
 ├── pi/                    # isolated PI_CODING_AGENT_DIR
 │   ├── auth.json          # owner-only Pi API key or refreshable OAuth entry
-│   └── mcp.json           # pi-mcp-adapter config; environment references only
+│   ├── mcp.json           # pi-mcp-adapter config; environment references only
+│   └── extensions/        # Companion permission-broker (Allow / Deny / ask_user)
 └── runtime/
     ├── skills/            # exact current packages exposed through Pi native Skills
     ├── sessions/          # Pi session tree files (`pi --session-dir`)
@@ -321,10 +336,12 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
         └── pi.stderr.log  # Pi's stderr and the daemon wrapper's own account of a failed start
 ```
 
-Layout version `8` is written to the control-plane row after a successful Skills/MCP-aware start and
+Layout version `9` is written to the control-plane row after a successful Skills/MCP-aware start and
 to an on-disk marker keyed by the adapter package. Starts repair older Box snapshots before resource
 injection. Runtime transcripts and files do not enter PostgreSQL. A systemd user unit supervises Pi
-while Box is active; the lifecycle API starts it after a Box resume.
+while Box is active; the lifecycle API starts it after a Box resume. Each start also stages the
+permission-broker extension under `~/.companion/pi/extensions/` so Pi pauses shell, file edits, and
+`ask_user` behind control-plane Allow / Deny cards.
 
 MCP credential values are not part of that snapshotted tree. A start stages them through the
 owner-only Box file channel, moves the file into `%t/companion/providers.env` in the systemd user

@@ -58,6 +58,8 @@ const coreMocks = vi.hoisted(() => ({
   listPendingCompanionMessages: vi.fn(),
   recordCompanionPiProjection: vi.fn(),
   attachCompanionToolRunScreenshot: vi.fn(),
+  decideCompanionDecision: vi.fn(),
+  expireCompanionDecisions: vi.fn(),
   listCompanionShares: vi.fn(),
   setCompanionWorkspaceShare: vi.fn(),
   listCompanionRuntimeSkillPackages: vi.fn(),
@@ -190,6 +192,7 @@ const message = {
   author_id: "user-1",
   author_name: "User",
   tool: null,
+    decision: null,
   created_at: companion.created_at,
 };
 
@@ -210,6 +213,7 @@ function boxRuntime(overrides: Record<string, unknown> = {}) {
     })),
     desktop: vi.fn(),
     prompt: vi.fn(),
+    respondExtensionUi: vi.fn(async () => undefined),
     refreshTtl: vi.fn(async () => undefined),
     readEvents: vi.fn(async () => ({ chunk: "", offset: 0 })),
     captureDesktopFrame: vi.fn(async () => null),
@@ -405,6 +409,24 @@ describe("Companions API feature gate", () => {
       access: "owner",
       read_only: false,
       can_send: true,
+    });
+    coreMocks.expireCompanionDecisions.mockResolvedValue({
+      thread: {
+        ...viewerThread,
+        access: "owner",
+        read_only: false,
+        can_send: true,
+      },
+      responses: [],
+    });
+    coreMocks.decideCompanionDecision.mockResolvedValue({
+      thread: {
+        ...viewerThread,
+        access: "owner",
+        read_only: false,
+        can_send: true,
+      },
+      response: { type: "extension_ui_response", id: "req-1", confirmed: true },
     });
     const shares = {
       companion_id: companion.id,
@@ -2114,6 +2136,142 @@ describe("Companions API feature gate", () => {
       expect(response.status).toBe(200);
       expect(body.thread.entries).toHaveLength(1);
       expect(coreMocks.attachCompanionToolRunScreenshot).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * Product promise:
+   * Shell / file / question pause behind an inline Allow / Deny / answer card. Allow unblocks Pi,
+   * Deny / timeout never execute the action, and the decision stays on the transcript for Viewers.
+   */
+  describe("permission broker decisions", () => {
+    const pendingDecision = {
+      event_id: "decision:ui-1",
+      ordinal: 2,
+      role: "decision" as const,
+      content: "ls -la",
+      author_id: null,
+      author_name: null,
+      tool: null,
+      decision: {
+        request_id: "ui-1",
+        kind: "shell" as const,
+        name: "bash",
+        title: "ls -la",
+        detail: "ls -la",
+        status: "pending" as const,
+        answer: null,
+        decided_by_id: null,
+        decided_by_name: null,
+        decided_at: null,
+        expires_at: "2026-08-12T12:05:00.000Z",
+      },
+      created_at: companion.created_at,
+    };
+
+    it("allows a pending card and writes the FIFO response that unblocks Pi", async () => {
+      coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+      coreMocks.decideCompanionDecision.mockResolvedValue({
+        thread: {
+          ...viewerThread,
+          access: "owner",
+          can_send: true,
+          read_only: false,
+          entries: [{
+            ...pendingDecision,
+            decision: {
+              ...pendingDecision.decision,
+              status: "allowed",
+              decided_by_id: "user-1",
+              decided_by_name: "Ada",
+              decided_at: "2026-08-12T12:01:00.000Z",
+            },
+          }],
+        },
+        response: { type: "extension_ui_response", id: "ui-1", confirmed: true },
+      });
+      const runtime = boxRuntime();
+      const app = new Hono<{ Variables: ApiVariables }>();
+      registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+      const response = await app.request(`/v1/companions/${companion.id}/decisions/ui-1`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "allow" }),
+      });
+      const body = await response.json() as { thread: { entries: Array<{ decision: { status: string } }> } };
+
+      expect(response.status).toBe(200);
+      expect(body.thread.entries[0]?.decision.status).toBe("allowed");
+      expect(runtime.respondExtensionUi).toHaveBeenCalledWith({
+        boxId: companion.runtime.box_id,
+        response: { type: "extension_ui_response", id: "ui-1", confirmed: true },
+      });
+    });
+
+    it("refuses Viewer allow/deny before any Box contact", async () => {
+      coreMocks.getCompanionForRuntime.mockRejectedValue(
+        new (await import("@companion/core")).CompanionRuntimeForbiddenError(),
+      );
+      const runtimeFactory = vi.fn(() => {
+        throw new Error("Box client must not be created");
+      });
+      const app = new Hono<{ Variables: ApiVariables }>();
+      registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+      const response = await app.request(`/v1/companions/${companion.id}/decisions/ui-1`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "deny" }),
+      });
+
+      expect(response.status).toBe(403);
+      expect(runtimeFactory).not.toHaveBeenCalled();
+      expect(coreMocks.decideCompanionDecision).not.toHaveBeenCalled();
+    });
+
+    it("expires pending cards on sync and sends cancel to Pi", async () => {
+      coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+      coreMocks.listPendingCompanionMessages.mockResolvedValue({ pending: [], piLogOffset: 0 });
+      coreMocks.recordCompanionPiProjection.mockResolvedValue({
+        ...viewerThread,
+        access: "owner",
+        can_send: true,
+        read_only: false,
+        entries: [pendingDecision],
+      });
+      coreMocks.expireCompanionDecisions.mockResolvedValue({
+        thread: {
+          ...viewerThread,
+          access: "owner",
+          can_send: true,
+          read_only: false,
+          entries: [{
+            ...pendingDecision,
+            decision: { ...pendingDecision.decision, status: "expired", decided_at: companion.created_at },
+          }],
+        },
+        responses: [{ type: "extension_ui_response", id: "ui-1", confirmed: false }],
+      });
+      const runtime = boxRuntime({
+        readEvents: vi.fn(async () => ({ chunk: "", offset: 0 })),
+      });
+      const app = new Hono<{ Variables: ApiVariables }>();
+      registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+      const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const body = await response.json() as { thread: { entries: Array<{ decision: { status: string } }> } };
+
+      expect(response.status).toBe(200);
+      expect(body.thread.entries[0]?.decision.status).toBe("expired");
+      expect(runtime.respondExtensionUi).toHaveBeenCalledWith({
+        boxId: companion.runtime.box_id,
+        response: { type: "extension_ui_response", id: "ui-1", confirmed: false },
+      });
     });
   });
 

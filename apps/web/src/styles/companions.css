@@ -1560,6 +1560,133 @@ button.chat-box:focus-visible {
   background: var(--color-surface-sunken);
 }
 
+/* Permission broker cards (THE-349). Same quiet chrome as tool chips — not a composer toolbox. */
+.chat-decision {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
+  gap: 8px;
+  max-width: min(100%, 520px);
+  padding: 10px 12px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.chat-decision--pending {
+  border-color: var(--color-line-strong);
+}
+
+.chat-decision--allowed,
+.chat-decision--answered {
+  opacity: 0.88;
+}
+
+.chat-decision--denied,
+.chat-decision--expired {
+  border-color: var(--color-danger-line);
+  background: var(--color-danger-tint);
+}
+
+.chat-decision__head {
+  max-width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+}
+
+.chat-decision__kind {
+  flex: none;
+  color: var(--color-faint);
+}
+
+.chat-decision__label {
+  flex: none;
+  color: var(--color-fg);
+  font-weight: 600;
+  font-size: var(--text-sm);
+}
+
+.chat-decision__name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--color-faint);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.chat-decision__state {
+  flex: none;
+  margin-left: auto;
+}
+
+.chat-decision--allowed .chat-decision__state,
+.chat-decision--answered .chat-decision__state {
+  color: var(--color-ok);
+}
+
+.chat-decision--denied .chat-decision__state,
+.chat-decision--expired .chat-decision__state {
+  color: var(--color-danger);
+}
+
+.chat-decision__detail {
+  max-width: 100%;
+  max-height: 10rem;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  color: var(--color-fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-decision__answer,
+.chat-decision__meta {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+}
+
+.chat-decision__answer {
+  color: var(--color-fg);
+}
+
+.chat-decision__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.chat-decision__input {
+  flex: 1 1 12rem;
+  min-width: 0;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-fg);
+  font-size: var(--text-sm);
+}
+
+.chat-decision__input:focus-visible {
+  outline: 2px solid var(--color-accent-ring);
+  outline-offset: 1px;
+}
+
 /* A running Box that owes a reply says so; there is nothing to animate, the line is the state. */
 .chat-replying {
   margin: 20px 0 0;

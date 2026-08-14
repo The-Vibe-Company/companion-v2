@@ -88,7 +88,9 @@ async function mount(
       openingDesktop: false,
       computer: computerPanel(overrides.computer),
       onBack: () => {},
+      orgId: "org-1",
       onSend,
+      onThread: () => {},
       onWake: overrides.onWake ?? (() => {}),
       onDesktop: overrides.onDesktop ?? (() => {}),
     }));
@@ -113,7 +115,9 @@ async function mountPolling(initial: Thread) {
         openingDesktop: false,
         computer: computerPanel(),
         onBack: () => {},
+        orgId: "org-1",
         onSend: async () => true,
+        onThread: () => {},
         onWake: () => {},
         onDesktop: () => {},
       }));
@@ -313,10 +317,12 @@ describe("CompanionThread composer", () => {
       openingDesktop: false,
       computer: computerPanel(),
       onBack: () => {},
+      orgId: "org-1",
       onSend: (_content: string, clientMessageId: string) => {
         sentId = clientMessageId;
         return new Promise<boolean>((resolve) => { settle = resolve; });
       },
+      onThread: () => {},
       onWake: () => {},
       onDesktop: () => {},
     });
@@ -337,6 +343,7 @@ describe("CompanionThread composer", () => {
           author_id: "user-1",
           author_name: null,
           tool: null,
+    decision: null,
           created_at: "2026-08-12T12:01:00.000Z",
         }],
       }));
@@ -389,6 +396,7 @@ describe("CompanionThread stream", () => {
     author_id: "user-1",
     author_name: null,
     tool: null,
+    decision: null,
     created_at: "2026-08-12T12:01:00.000Z",
   };
 
@@ -400,6 +408,7 @@ describe("CompanionThread stream", () => {
     author_id: null,
     author_name: null,
     tool: null,
+    decision: null,
     created_at: "2026-08-12T12:01:20.000Z",
   });
 
@@ -436,6 +445,7 @@ describe("CompanionThread stream", () => {
           author_id: null,
           author_name: null,
           tool: null,
+    decision: null,
           created_at: "2026-08-12T12:01:24.000Z",
         },
       ],
@@ -474,6 +484,7 @@ describe("CompanionThread stream", () => {
           author_id: null,
           author_name: null,
           tool: null,
+    decision: null,
           created_at: "2026-08-12T12:01:20.000Z",
         },
       ],

@@ -561,6 +561,13 @@
       "when": 1786986400000,
       "tag": "0079_companion_mcp_attach",
       "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1787072800000,
+      "tag": "0080_companion_decisions",
+      "breakpoints": true
     }
   ]
 }

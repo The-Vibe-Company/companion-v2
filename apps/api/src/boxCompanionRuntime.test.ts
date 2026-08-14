@@ -1754,7 +1754,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(piResolveIndex).toBeGreaterThan(-1);
     expect(markerIndex).toBeLessThan(piResolveIndex);
     // Layout 8 replaces wrappers from layout 7 so existing Boxes gain the selected Pi model.
-    expect(COMPANION_PI_DISK_LAYOUT_VERSION).toBe(8);
+    expect(COMPANION_PI_DISK_LAYOUT_VERSION).toBe(9);
     expect(createdSetupScript)
       .toContain("expected_layout='8:npm:pi-mcp-adapter@2.12.1'");
     expect(createdSetupScript).toContain("--append-system-prompt");
