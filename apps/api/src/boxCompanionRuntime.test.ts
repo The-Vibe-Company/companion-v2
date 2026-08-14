@@ -2799,7 +2799,12 @@ describe("AsciiBoxCompanionRuntime", () => {
       await mkdir(join(disk.home, ".companion", "runtime", "state", "pi.rpc.in", "held"), {
         recursive: true,
       });
-      const attemptedAt = Date.now();
+      // The freshness window compares one file's timestamp against another clock reading, so the
+      // reference is taken from this disk rather than from `Date.now()`: a filesystem whose timestamps
+      // trail the process clock would otherwise make a log written after this point look older.
+      const clock = join(disk.home, "attempted-at");
+      await writeFile(clock, "");
+      const attemptedAt = (await stat(clock)).mtimeMs;
 
       const started = await runOnBoxDisk(`bash ${JSON.stringify(disk.daemon)}`, disk.home);
 
