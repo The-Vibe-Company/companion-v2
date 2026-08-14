@@ -3,16 +3,10 @@ ALTER TABLE "companions"
   ADD COLUMN "selected_skill_ids" jsonb DEFAULT '[]'::jsonb NOT NULL,
   ADD COLUMN "can_write_skills" boolean DEFAULT false NOT NULL;
 --> statement-breakpoint
+-- Postgres CHECK cannot use subqueries; UUID element shape is enforced in contracts/core.
 ALTER TABLE "companions"
   ADD CONSTRAINT "companions_selected_skill_ids_check"
-  CHECK (
-    jsonb_typeof("selected_skill_ids") = 'array'
-    AND NOT EXISTS (
-      SELECT 1
-      FROM jsonb_array_elements_text("selected_skill_ids") AS skill_id(value)
-      WHERE skill_id.value !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
-    )
-  );
+  CHECK (jsonb_typeof("selected_skill_ids") = 'array');
 --> statement-breakpoint
 
 -- Companion write-on-behalf PATs reuse source_agent_id as the Companion id.
