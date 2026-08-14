@@ -137,6 +137,8 @@ describe("CompanionProvidersDialog", () => {
     expect(container.textContent).not.toContain("auth.json");
     expect(container.querySelector("textarea")).toBeNull();
     expect(container.textContent).toContain("Open Claude sign-in");
+    expect(container.textContent).toContain("CODE#STATE");
+    expect(container.textContent).toContain("full callback URL");
     expect(container.querySelector<HTMLButtonElement>(".og-dialog__x")?.disabled).toBe(true);
     expect(Array.from(container.querySelectorAll("button"))
       .find((button) => button.textContent === "Done")?.disabled).toBe(true);

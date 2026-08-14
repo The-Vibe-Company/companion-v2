@@ -494,7 +494,8 @@ credential tags a start request carried, including MCP account tags, so no legac
 workspace connection. Owners attach a real provider afterwards through the one-time route below.
 
 Subscription setup uses Pi's native public-client OAuth protocols without asking an administrator
-to copy `auth.json`. Claude opens the PKCE browser flow and accepts the one-time authorization code;
+to copy `auth.json`. Claude uses Anthropic's hosted code callback, not the CLI loopback, and accepts
+the one-time PKCE authorization code;
 Codex opens ChatGPT's device page and polls the device grant. The API exchanges those short-lived
 values and writes the resulting Pi `{ "type": "oauth", ... }` entry directly through the same
 envelope-encrypted provider store. Access and refresh tokens are never returned to the browser.

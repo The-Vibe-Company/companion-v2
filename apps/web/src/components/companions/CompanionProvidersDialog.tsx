@@ -328,8 +328,8 @@ export function CompanionProvidersDialog({
               {oauthFlow.flow === "authorization_code" ? (
                 <>
                   <p>
-                    Open Claude sign-in and approve Companion. Then enter the one-time code or final
-                    redirect URL shown by Claude.
+                    Open Claude sign-in and approve Companion. Anthropic will show a one-time
+                    CODE#STATE. Paste that code or the full callback URL here.
                   </p>
                   <a
                     className="cds-btn cds-btn--secondary cds-btn--md"
@@ -340,7 +340,7 @@ export function CompanionProvidersDialog({
                     Open Claude sign-in
                   </a>
                   <label>
-                    Authorization code
+                    One-time code or callback URL
                     <input
                       ref={authorizationInputRef}
                       required
