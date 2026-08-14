@@ -26,6 +26,8 @@ import {
 } from "@assistant-ui/react";
 import type {
   Companion,
+  CompanionDecision,
+  CompanionDecisionKind,
   CompanionThread as Thread,
   CompanionToolRun,
   CompanionToolRunKind,
@@ -33,6 +35,7 @@ import type {
 } from "@companion/contracts";
 import { companionMessageEventId } from "@companion/contracts";
 import { Icon } from "../Icon";
+import { decideCompanionDecision } from "../../lib/companions";
 import {
   composerHint,
   replyExpected,
@@ -60,6 +63,19 @@ const PRESS_CLICK_MS = 700;
 /** Turn metadata by message id. The primitives render one component per message; this is its row. */
 const TurnsContext = createContext<ReadonlyMap<string, TranscriptTurn>>(new Map());
 
+type DecisionAction =
+  | { action: "allow" }
+  | { action: "deny" }
+  | { action: "answer"; answer: string };
+
+const DecisionActionsContext = createContext<{
+  canAct: boolean;
+  onDecide: (requestId: string, input: DecisionAction) => Promise<void>;
+}>({
+  canAct: false,
+  onDecide: async () => undefined,
+});
+
 function useTurn(): TranscriptTurn | undefined {
   const turns = useContext(TurnsContext);
   const id = useAuiState((state) => state.message.id);
@@ -73,7 +89,7 @@ function useTurn(): TranscriptTurn | undefined {
  */
 const convertEntry = (entry: CompanionTranscriptEntry): ThreadMessageLike => ({
   id: entry.event_id,
-  role: entry.role === "tool" ? "system" : entry.role,
+  role: entry.role === "tool" || entry.role === "decision" ? "system" : entry.role,
   content: [{ type: "text", text: entry.content }],
   createdAt: new Date(entry.created_at),
 });
@@ -207,10 +223,164 @@ function ToolChip({ run }: { run: CompanionToolRun }) {
   );
 }
 
-/** A tool run arrives as a system message; everything else with that role is a note. */
+const DECISION_ICONS: Record<CompanionDecisionKind, string> = {
+  shell: "terminal",
+  file: "file-pen-line",
+  question: "message-square",
+};
+
+const DECISION_KIND_LABELS: Record<CompanionDecisionKind, string> = {
+  shell: "run a command",
+  file: "edit a file",
+  question: "asks",
+};
+
+const DECISION_STATUS_LABELS = {
+  pending: "waiting",
+  allowed: "allowed",
+  denied: "denied",
+  answered: "answered",
+  expired: "timed out",
+} as const;
+
+/**
+ * One permission card in the thread. It sits beside THE-352 tool chips with the same quiet chrome:
+ * pending cards offer Allow / Deny (or an answer field) to Owner/Editor only; Viewers see the
+ * resolved state and never get the controls.
+ */
+function DecisionCard({
+  decision,
+  canAct,
+  onDecide,
+}: {
+  decision: CompanionDecision;
+  canAct: boolean;
+  onDecide: (
+    requestId: string,
+    input: { action: "allow" } | { action: "deny" } | { action: "answer"; answer: string },
+  ) => Promise<void>;
+}) {
+  const [answer, setAnswer] = useState("");
+  const [busy, setBusy] = useState(false);
+  const pending = decision.status === "pending";
+  const interactive = pending && canAct && !busy;
+  const status = DECISION_STATUS_LABELS[decision.status];
+
+  async function act(
+    input: { action: "allow" } | { action: "deny" } | { action: "answer"; answer: string },
+  ) {
+    if (!interactive) return;
+    setBusy(true);
+    try {
+      await onDecide(decision.request_id, input);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <MessagePrimitive.Root
+      className={"chat-decision chat-decision--" + decision.status}
+      aria-busy={pending || undefined}
+    >
+      <div className="chat-decision__head">
+        <Icon name={DECISION_ICONS[decision.kind]} size={13} className="chat-decision__kind" />
+        <span className="chat-decision__label">
+          {decision.kind === "question" ? "Question" : `Allow ${DECISION_KIND_LABELS[decision.kind]}`}
+        </span>
+        <span className="chat-decision__name">{decision.name}</span>
+        {pending
+          ? <span className="chat-tool__spinner" aria-hidden="true" />
+          : (
+            <Icon
+              name={decision.status === "allowed" || decision.status === "answered"
+                ? "check"
+                : "alert-triangle"}
+              size={13}
+              className="chat-decision__state"
+            />
+          )}
+        <span className="sr-only">{status}</span>
+      </div>
+      <pre className="chat-decision__detail">{decision.title}</pre>
+      {decision.kind === "question" && decision.answer && (
+        <p className="chat-decision__answer">{decision.answer}</p>
+      )}
+      {!pending && decision.decided_by_name && (
+        <p className="chat-decision__meta">
+          {status} by {decision.decided_by_name}
+        </p>
+      )}
+      {decision.status === "expired" && !decision.decided_by_name && (
+        <p className="chat-decision__meta">Timed out — denied</p>
+      )}
+      {interactive && decision.kind === "question" && (
+        <form
+          className="chat-decision__actions"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const value = answer.trim();
+            if (!value) return;
+            void act({ action: "answer", answer: value });
+          }}
+        >
+          <input
+            className="chat-decision__input"
+            value={answer}
+            onChange={(event) => setAnswer(event.target.value)}
+            placeholder="Your answer"
+            aria-label="Answer"
+            disabled={busy}
+          />
+          <button type="submit" className="cds-btn cds-btn--primary" disabled={busy || !answer.trim()}>
+            Answer
+          </button>
+          <button
+            type="button"
+            className="cds-btn cds-btn--secondary"
+            disabled={busy}
+            onClick={() => void act({ action: "deny" })}
+          >
+            Deny
+          </button>
+        </form>
+      )}
+      {interactive && decision.kind !== "question" && (
+        <div className="chat-decision__actions">
+          <button
+            type="button"
+            className="cds-btn cds-btn--primary"
+            disabled={busy}
+            onClick={() => void act({ action: "allow" })}
+          >
+            Allow
+          </button>
+          <button
+            type="button"
+            className="cds-btn cds-btn--secondary"
+            disabled={busy}
+            onClick={() => void act({ action: "deny" })}
+          >
+            Deny
+          </button>
+        </div>
+      )}
+      {pending && !canAct && (
+        <p className="chat-decision__meta">Waiting for an Owner or Editor</p>
+      )}
+    </MessagePrimitive.Root>
+  );
+}
+
+/** A tool run or permission card arrives as a system message; everything else with that role is a note. */
 function SystemTurn() {
-  const run = useTurn()?.entry.tool;
-  return run ? <ToolChip run={run} /> : <Note />;
+  const entry = useTurn()?.entry;
+  const { canAct, onDecide } = useContext(DecisionActionsContext);
+  if (entry?.tool) return <ToolChip run={entry.tool} />;
+  if (entry?.decision) {
+    return <DecisionCard decision={entry.decision} canAct={canAct} onDecide={onDecide} />;
+  }
+  return <Note />;
 }
 
 const TURN_COMPONENTS = {
@@ -242,6 +412,9 @@ function useStableEntries(entries: CompanionTranscriptEntry[]): CompanionTranscr
         && kept.tool?.status === entry.tool?.status
         && kept.tool?.detail === entry.tool?.detail
         && kept.tool?.screenshot === entry.tool?.screenshot
+        && kept.decision?.status === entry.decision?.status
+        && kept.decision?.answer === entry.decision?.answer
+        && kept.decision?.decided_by_id === entry.decision?.decided_by_id
         && kept.created_at === entry.created_at;
       const value = unchanged ? kept : entry;
       next.set(entry.event_id, value);
@@ -273,13 +446,18 @@ function restoreDraft(runtime: AssistantRuntime | null, content: string): void {
 export function CompanionTranscript({
   companion,
   thread,
+  orgId,
   busy,
   onSend,
+  onThread,
 }: {
   companion: Companion;
   thread: Thread | null;
+  orgId: string;
   busy: boolean;
   onSend: (content: string, clientMessageId: string) => Promise<boolean>;
+  /** Replace the thread after a permission card is decided, without a full poll cycle. */
+  onThread: (thread: Thread) => void;
 }) {
   const canSend = thread ? thread.can_send : companion.access !== "viewer";
   const awake = companion.runtime.state === "running";
@@ -310,6 +488,11 @@ export function CompanionTranscript({
     return [...saved, outgoing];
   }, [outgoing, thread]);
   const messages = useStableEntries(entries);
+
+  const onDecide = useCallback(async (requestId: string, input: DecisionAction) => {
+    const next = await decideCompanionDecision(orgId, companion.id, requestId, input);
+    onThread(next);
+  }, [companion.id, onThread, orgId]);
 
   const turns = useMemo(
     () => transcriptTurns(messages, {
@@ -347,6 +530,7 @@ export function CompanionTranscript({
       author_id: viewerId,
       author_name: null,
       tool: null,
+    decision: null,
       created_at: new Date().toISOString(),
     });
     try {
@@ -409,6 +593,7 @@ export function CompanionTranscript({
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
+      <DecisionActionsContext.Provider value={{ canAct: canSend, onDecide }}>
       <TurnsContext.Provider value={turnsById}>
         <ThreadPrimitive.Root className="chat-thread">
           <ThreadPrimitive.Viewport
@@ -489,6 +674,7 @@ export function CompanionTranscript({
           )}
         </ThreadPrimitive.Root>
       </TurnsContext.Provider>
+      </DecisionActionsContext.Provider>
     </AssistantRuntimeProvider>
   );
 }

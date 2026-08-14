@@ -157,6 +157,7 @@ function controlPlane(options: { piAcceptsOnWake: boolean }) {
           author_id: "user-1",
           author_name: null,
           tool: null,
+    decision: null,
           created_at: new Date().toISOString(),
         });
       }
@@ -179,6 +180,7 @@ function controlPlane(options: { piAcceptsOnWake: boolean }) {
           author_id: null,
           author_name: null,
           tool: null,
+    decision: null,
           created_at: new Date().toISOString(),
         });
       }

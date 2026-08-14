@@ -41,6 +41,7 @@ export interface CompanionComputerPanel {
 export function CompanionThread({
   companion,
   thread,
+  orgId,
   error,
   busy,
   waking,
@@ -48,11 +49,13 @@ export function CompanionThread({
   computer,
   onBack,
   onSend,
+  onThread,
   onWake,
   onDesktop,
 }: {
   companion: Companion;
   thread: Thread | null;
+  orgId: string;
   error: string | null;
   busy: boolean;
   waking: boolean;
@@ -60,6 +63,7 @@ export function CompanionThread({
   computer: CompanionComputerPanel;
   onBack: () => void;
   onSend: (content: string, clientMessageId: string) => Promise<boolean>;
+  onThread: (thread: Thread) => void;
   onWake: () => void;
   onDesktop: () => void;
 }) {
@@ -168,8 +172,10 @@ export function CompanionThread({
           key={companion.id}
           companion={companion}
           thread={thread}
+          orgId={orgId}
           busy={busy}
           onSend={onSend}
+          onThread={onThread}
         />
         {showComputer && (
           <CompanionComputer

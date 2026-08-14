@@ -375,6 +375,53 @@ describe("Companion chat contracts", () => {
     })).toThrow();
   });
 
+  it("keeps a permission card coupled to the decision role", () => {
+    const decision = {
+      request_id: "ui-1",
+      kind: "shell" as const,
+      name: "bash",
+      title: "ls -la",
+      detail: "ls -la",
+      status: "pending" as const,
+      answer: null,
+      decided_by_id: null,
+      decided_by_name: null,
+      decided_at: null,
+      expires_at: "2026-08-12T12:05:00.000Z",
+    };
+
+    expect(companionTranscriptEntrySchema.parse({
+      event_id: "decision:ui-1",
+      ordinal: 3,
+      role: "decision",
+      content: "ls -la",
+      author_id: null,
+      author_name: null,
+      decision,
+      created_at: "2026-08-12T12:00:03.000Z",
+    }).decision).toMatchObject({ kind: "shell", status: "pending" });
+
+    expect(() => companionTranscriptEntrySchema.parse({
+      event_id: "decision:ui-1",
+      ordinal: 3,
+      role: "decision",
+      content: "ls -la",
+      author_id: null,
+      author_name: null,
+      created_at: "2026-08-12T12:00:03.000Z",
+    })).toThrow();
+    expect(() => companionTranscriptEntrySchema.parse({
+      event_id: "pi:512",
+      ordinal: 3,
+      role: "assistant",
+      content: "Listing.",
+      author_id: null,
+      author_name: null,
+      decision,
+      created_at: "2026-08-12T12:00:03.000Z",
+    })).toThrow();
+  });
+
   it("accepts a Box frame only as an inline image and never as a URL a browser would fetch", () => {
     const frame = (screenshot: string) => companionToolRunSchema.parse({
       call_id: null,

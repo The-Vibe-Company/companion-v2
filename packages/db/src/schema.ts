@@ -56,6 +56,7 @@ export const companionTranscriptRoleEnum = pgEnum("companion_transcript_role", [
   "assistant",
   "system",
   "tool",
+  "decision",
 ]);
 export const billingSeatSyncStatusEnum = pgEnum("billing_seat_sync_status", ["synced", "pending", "error"]);
 export const invitationStatusEnum = pgEnum("invitation_status", [
@@ -588,6 +589,25 @@ export interface CompanionStoredToolRun {
 }
 
 /**
+ * One permission card as stored, field for field the `companion_decision` contract. Wire shape is
+ * kept verbatim so projection and readers share it with no translation, and restated here so the
+ * schema keeps no dependency on contracts.
+ */
+export interface CompanionStoredDecision {
+  request_id: string;
+  kind: "shell" | "file" | "question";
+  name: string;
+  title: string;
+  detail: string | null;
+  status: "pending" | "allowed" | "denied" | "answered" | "expired";
+  answer: string | null;
+  decided_by_id: string | null;
+  decided_by_name: string | null;
+  decided_at: string | null;
+  expires_at: string;
+}
+
+/**
  * Durable, append-oriented transcript projection. Pi remains authoritative while active; browser
  * reads, especially Viewer reads, use this table and therefore never contact or wake Box.
  */
@@ -611,6 +631,11 @@ export const companionTranscriptEntries = pgTable(
      * removed with the Companion the row already cascades from. Null for every other role.
      */
     tool: jsonb("tool").$type<CompanionStoredToolRun>(),
+    /**
+     * The permission card a `decision` entry reports: what Pi asked to do, whether it was allowed,
+     * denied, answered, or expired, and who decided. Null for every other role.
+     */
+    decision: jsonb("decision").$type<CompanionStoredDecision>(),
     /** Member who sent a user message; null for Pi output and for entries written before sharing. */
     authorId: text("author_id").references(() => user.id, { onDelete: "set null" }),
     createdAt: now(),
@@ -644,9 +669,16 @@ export const companionTranscriptEntries = pgTable(
       "companion_transcript_entries_tool_size_check",
       sql`${t.tool} is null or octet_length(${t.tool}::text) <= 262144`,
     ),
+    decisionRoleOnly: check(
+      "companion_transcript_entries_decision_role_check",
+      sql`(${t.role}::text = 'decision') = (${t.decision} is not null)`,
+    ),
+    boundedDecision: check(
+      "companion_transcript_entries_decision_size_check",
+      sql`${t.decision} is null or octet_length(${t.decision}::text) <= 262144`,
+    ),
   }),
 );
-
 /**
  * Workspace-level Pi provider credentials. Ciphertext is envelope-encrypted and only decrypted
  * immediately before it is delivered to the selected Companion's Box.

@@ -24,6 +24,8 @@ import {
   CompanionProviderForbiddenError,
   CompanionRuntimeForbiddenError,
   CompanionRuntimeTransitionError,
+  CompanionDecisionConflictError,
+  CompanionDecisionNotFoundError,
   CompanionShareForbiddenError,
   CompanionSettingsForbiddenError,
   CompanionSkillSelectionError,
@@ -38,9 +40,11 @@ import {
   companionsEnabled,
   companionToolRunIsVisual,
   createCompanion,
+  decideCompanionDecision,
   deleteCompanion,
   deleteCompanionPlugin,
   deleteCompanionProvider,
+  expireCompanionDecisions,
   getCompanion,
   getCompanionProviderCredentialGeneration,
   getCompanionRegistryServer,
@@ -80,6 +84,7 @@ import {
   companionPluginOAuthStartInputSchema,
   companionRegistryQuerySchema,
   companionRegistryServerNameSchema,
+  decideCompanionDecisionInputSchema,
   saveCompanionProviderInputSchema,
   sendCompanionMessageInputSchema,
   setCompanionProviderInputSchema,
@@ -283,6 +288,8 @@ function errorStatus(error: unknown): number {
   if (error instanceof AuthenticationRequiredError) return 401;
   if (error instanceof CompanionAccessForbiddenError) return 403;
   if (error instanceof CompanionNotFoundError) return 404;
+  if (error instanceof CompanionDecisionNotFoundError) return 404;
+  if (error instanceof CompanionDecisionConflictError) return 409;
   if (error instanceof CompanionRuntimeForbiddenError) return 403;
   if (error instanceof CompanionSettingsForbiddenError) return 403;
   if (error instanceof CompanionSkillSelectionError) return 400;
@@ -1585,7 +1592,7 @@ export function registerCompanionRoutes(
       }
       const events = await runtime.readEvents({ boxId, offset: resolved.piLogOffset });
       const projection = projectCompanionPiEvents({ chunk: events.chunk, offset: events.offset });
-      const thread = await recordProjection({
+      let thread = await recordProjection({
         actor: resolved.actor,
         orgId: resolved.orgId,
         companionId,
@@ -1596,6 +1603,20 @@ export function registerCompanionRoutes(
         // outright; otherwise the offset only moves forward.
         piLogRewound: events.offset < resolved.piLogOffset,
       });
+      // Fail-closed: pending cards past their timeout become Deny before the client sees them spin.
+      const expired = await withTenantContext(
+        { orgId: resolved.orgId, userId: resolved.actor.id },
+        (database) => expireCompanionDecisions({
+          actor: resolved.actor,
+          orgId: resolved.orgId,
+          companionId,
+          database,
+        }),
+      );
+      thread = expired.thread;
+      for (const response of expired.responses) {
+        await runtime.respondExtensionUi({ boxId, response }).catch(() => undefined);
+      }
       const framed = projection.toolCompletions.length
         ? await attachDesktopFrame({
             actor: resolved.actor,
@@ -1608,6 +1629,43 @@ export function registerCompanionRoutes(
           })
         : null;
       return c.json({ thread: framed ?? thread, source: "box" as const });
+    } catch (error) {
+      return runtimeRouteError(c, error);
+    }
+  });
+
+  /**
+   * Allow / Deny / answer a pending permission card. Owner/Editor only; Viewer is refused before any
+   * Box contact. The decision is persisted on the transcript, then the matching FIFO response
+   * unblocks Pi so Allow proceeds and Deny / timeout never executes the tool.
+   */
+  app.post("/v1/companions/:id/decisions/:requestId", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const requestId = z.string().min(1).max(200).parse(c.req.param("requestId"));
+      const body = decideCompanionDecisionInputSchema.parse(await c.req.json());
+      const decided = await tenant(c, async ({ actor, orgId, database }) => {
+        const companion = await getCompanionForRuntime({ actor, orgId, companionId, database });
+        const result = await decideCompanionDecision({
+          actor,
+          orgId,
+          companionId,
+          requestId,
+          decision: body,
+          database,
+        });
+        return { actor, orgId, companion, ...result };
+      });
+      const boxId = decided.companion.runtime.box_id;
+      if (boxId && piIsReachable(decided.companion)) {
+        const runtime = runtimeFactory();
+        const observed = await runtime.status({ boxId }).catch(() => null);
+        if (observed?.runtimeState === "running" && observed.daemonState === "running") {
+          await runtime.respondExtensionUi({ boxId, response: decided.response });
+          await runtime.refreshTtl({ boxId }).catch(() => undefined);
+        }
+      }
+      return c.json({ thread: decided.thread });
     } catch (error) {
       return runtimeRouteError(c, error);
     }

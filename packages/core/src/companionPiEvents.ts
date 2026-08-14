@@ -1,4 +1,10 @@
-import type { CompanionToolRun, CompanionToolRunKind, CompanionTranscriptRole } from "@companion/contracts";
+import type {
+  CompanionDecision,
+  CompanionDecisionKind,
+  CompanionToolRun,
+  CompanionToolRunKind,
+  CompanionTranscriptRole,
+} from "@companion/contracts";
 
 /** One control-plane transcript entry projected from the Pi RPC log; ordinals are assigned later. */
 export interface CompanionPiEntry {
@@ -8,6 +14,8 @@ export interface CompanionPiEntry {
   createdAt: Date;
   /** Set on exactly the `tool` entries, as the run looked when Pi started it. */
   tool?: CompanionToolRun;
+  /** Set on exactly the `decision` entries, as the permission card looked when Pi asked. */
+  decision?: CompanionDecision;
 }
 
 /** The result Pi reported for a tool run, matched back to the chip that is still spinning for it. */
@@ -36,6 +44,10 @@ const TRUNCATION_SUFFIX = "\n[truncated]";
 const MAX_TOOL_ARGUMENT_CHARACTERS = 4_000;
 const MAX_TOOL_RESULT_CHARACTERS = 8_000;
 const MAX_TOOL_TITLE_CHARACTERS = 300;
+/** Same window the Box permission-broker extension passes to Pi's UI dialogs. */
+export const COMPANION_DECISION_TIMEOUT_MS = 5 * 60 * 1000;
+const COMPANION_DECISION_TITLE_PATTERN =
+  /^companion:(shell|file|question):([A-Za-z0-9._-]{1,120})$/;
 
 interface PiContentBlock {
   type?: unknown;
@@ -56,6 +68,12 @@ interface PiEvent {
   success?: unknown;
   error?: unknown;
   message?: unknown;
+  id?: unknown;
+  method?: unknown;
+  title?: unknown;
+  options?: unknown;
+  placeholder?: unknown;
+  timeout?: unknown;
 }
 
 const THINKING_BLOCK_TYPES = new Set(["thinking", "reasoning", "redacted_thinking"]);
@@ -425,6 +443,64 @@ function toolEntriesFrom(event: PiEvent, recordOffset: number, now: Date): Compa
     });
 }
 
+function parseDecisionTitle(title: string): { kind: CompanionDecisionKind; name: string } | null {
+  const match = COMPANION_DECISION_TITLE_PATTERN.exec(title.trim());
+  if (!match) return null;
+  return { kind: match[1] as CompanionDecisionKind, name: match[2]! };
+}
+
+/**
+ * One permission card from an `extension_ui_request`. Fire-and-forget methods (notify, setStatus,
+ * …) are ignored; only dialog methods that block Pi become transcript cards. Titles the Companion
+ * broker did not mint are ignored so third-party extension prompts do not become Allow/Deny chrome.
+ */
+function decisionEntryFrom(event: PiEvent, now: Date): CompanionPiEntry | null {
+  if (event.type !== "extension_ui_request") return null;
+  const method = typeof event.method === "string" ? event.method : "";
+  if (method !== "confirm" && method !== "select" && method !== "input" && method !== "editor") {
+    return null;
+  }
+  const requestId = typeof event.id === "string" ? event.id.trim() : "";
+  if (!requestId) return null;
+  const title = typeof event.title === "string" ? event.title : "";
+  const parsed = parseDecisionTitle(title);
+  if (!parsed) return null;
+  if (parsed.kind === "question" && method !== "input" && method !== "editor") return null;
+  if (parsed.kind !== "question" && method !== "confirm" && method !== "select") return null;
+
+  const detailRaw = method === "input" || method === "editor"
+    ? (typeof event.placeholder === "string" ? event.placeholder : "")
+    : (typeof event.message === "string" ? event.message : "");
+  const detail = detailRaw.trim() ? truncate(detailRaw.trim(), MAX_TOOL_RESULT_CHARACTERS) : null;
+  const cardTitle = (detail ?? parsed.name).split("\n").map((part) => part.trim()).find(Boolean)
+    ?? parsed.name;
+  const timeoutMs = typeof event.timeout === "number" && Number.isFinite(event.timeout) && event.timeout > 0
+    ? event.timeout
+    : COMPANION_DECISION_TIMEOUT_MS;
+  const decision: CompanionDecision = {
+    request_id: requestId.slice(0, 200),
+    kind: parsed.kind,
+    name: parsed.name.slice(0, 120),
+    title: cardTitle.length <= MAX_TOOL_TITLE_CHARACTERS
+      ? cardTitle
+      : `${cardTitle.slice(0, MAX_TOOL_TITLE_CHARACTERS - 1)}…`,
+    detail,
+    status: "pending",
+    answer: null,
+    decided_by_id: null,
+    decided_by_name: null,
+    decided_at: null,
+    expires_at: new Date(now.getTime() + timeoutMs).toISOString(),
+  };
+  return {
+    eventId: `decision:${requestId}`.slice(0, 200),
+    role: "decision",
+    content: decision.title,
+    createdAt: now,
+    decision,
+  };
+}
+
 /**
  * Project a byte range of the Box `pi.rpc.ndjson` log into transcript entries. Event ids are derived
  * from the record's byte offset, so re-reading the same range yields the same ids and the transcript
@@ -434,6 +510,9 @@ function toolEntriesFrom(event: PiEvent, recordOffset: number, now: Date): Compa
  * Tool runs are projected twice over: the call that starts one becomes a running entry, and the
  * result that ends it comes back as a completion the caller applies to whichever entry is still
  * running for it — the two halves routinely arrive in different chunks, seconds apart.
+ *
+ * Permission requests from the Companion broker become `decision` entries keyed by Pi's request id,
+ * so a human Allow / Deny / answer can find the same row the log first projected.
  */
 export function projectCompanionPiEvents(input: {
   chunk: string;
@@ -463,6 +542,8 @@ export function projectCompanionPiEvents(input: {
     const projected = entryFrom(event, now);
     if (projected) entries.push({ eventId: `pi:${recordOffset}`, ...projected });
     entries.push(...toolEntriesFrom(event, recordOffset, now));
+    const decision = decisionEntryFrom(event, now);
+    if (decision) entries.push(decision);
     toolCompletions.push(...completionsFrom(event, now));
   }
 

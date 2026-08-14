@@ -11,6 +11,7 @@ function entry(overrides: Partial<CompanionTranscriptEntry> = {}): CompanionTran
     author_id: "user-1",
     author_name: "Ada",
     tool: null,
+    decision: null,
     created_at: "2026-08-12T12:00:00.000Z",
     ...overrides,
   };
@@ -43,6 +44,7 @@ describe("transcriptAuthor", () => {
   it("credits a reply to the Companion and leaves a run note unattributed", () => {
     expect(transcriptAuthor(entry({ role: "assistant" }), "user-1", "Luna")).toBe("Luna");
     expect(transcriptAuthor(entry({ role: "system" }), "user-1", "Luna")).toBeNull();
+    expect(transcriptAuthor(entry({ role: "decision" }), "user-1", "Luna")).toBeNull();
   });
 });
 
@@ -128,6 +130,13 @@ describe("replyExpected", () => {
       entries: [entry(), entry({ event_id: "pi:1", role: "system" })],
       awake: true,
     })).toBe(false);
+  });
+
+  it("keeps waiting while a permission card is still open mid-turn", () => {
+    expect(replyExpected({
+      entries: [entry(), entry({ event_id: "decision:ui-1", role: "decision" })],
+      awake: true,
+    })).toBe(true);
   });
 
   it("never waits on a Box that is not running, because nothing has been delivered", () => {

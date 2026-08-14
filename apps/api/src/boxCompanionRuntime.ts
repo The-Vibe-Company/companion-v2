@@ -10,6 +10,10 @@ import type {
 import { COMPANION_TOOL_RUN_SCREENSHOT_MAX_CHARACTERS } from "@companion/contracts";
 import { COMPANION_RUNTIME_ERROR_MAX_LENGTH } from "@companion/core";
 import {
+  COMPANION_PERMISSION_BROKER_EXTENSION_FILE,
+  COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE,
+} from "./companionPermissionBroker";
+import {
   buildMcpAdapterInjection,
   runtimeSkillArchivePath,
   type CompanionRuntimeSkill,
@@ -20,7 +24,9 @@ const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
 // Layout 5 made the daemon wrapper report its own failures. Layout 6 moves MCP credentials off the
 // snapshotted Box disk and into the user runtime directory. Layout 7 teaches the daemon wrapper to
 // append staged Companion instructions. Layout 8 passes the persisted model through `pi --model`.
-export const COMPANION_PI_DISK_LAYOUT_VERSION = 8;
+// Layout 9 stages the permission-broker extension that pauses shell / file / questions for Allow /
+// Deny cards in the control-plane thread.
+export const COMPANION_PI_DISK_LAYOUT_VERSION = 9;
 /** Content bytes the provider's file API refuses in one `PUT /boxes/:id/files` body. */
 const BOX_FILE_WRITE_LIMIT_BYTES = 5 * 1024 * 1024;
 /**
@@ -259,6 +265,14 @@ export interface CompanionBoxRuntime {
   desktop(input: { boxId: string }): Promise<CompanionDesktopMint>;
   /** Hand one chat message to the already running Pi daemon; never creates or resumes a Box. */
   prompt(input: { boxId: string; message: string; requestId: string }): Promise<void>;
+  /**
+   * Unblock a Pi extension UI dialog (Allow / Deny / answer). Writes one `extension_ui_response`
+   * line to the same FIFO the prompt path uses; never creates or resumes a Box.
+   */
+  respondExtensionUi(input: {
+    boxId: string;
+    response: Record<string, unknown>;
+  }): Promise<void>;
   /** Reset the provider's idle clock after Pi accepts a durable message. */
   refreshTtl(input: { boxId: string }): Promise<void>;
   /** Read Pi RPC output from `offset` so the control plane can project new events. */
@@ -432,7 +446,7 @@ if ! command -v pi >/dev/null 2>&1; then
   ${install}
 fi
 command -v pi >/dev/null 2>&1
-mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.config/systemd/user"
+mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/pi/extensions" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.config/systemd/user"
 # Resolve Pi's absolute path now so the daemon does not depend on a login-shell PATH it will never
 # have under the minimal systemd user manager environment.
 pi_bin="$(command -v pi)"
@@ -1358,6 +1372,19 @@ exit 0`,
       ".companion/runtime/state/model.txt",
       `${input.modelId}\n`,
     );
+    // Permission broker: always rewrite so a Box that woke on an older layout still pauses shell /
+    // file / questions behind the control-plane Allow / Deny cards.
+    await this.#command(
+      input.boxId,
+      'mkdir -p "$HOME/.companion/pi/extensions"',
+    );
+    await this.#writeFile(
+      input.boxId,
+      `.companion/pi/extensions/${COMPANION_PERMISSION_BROKER_EXTENSION_FILE}`,
+      COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE.endsWith("\n")
+        ? COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE
+        : `${COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE}\n`,
+    );
     const staged = new Map<string, string>();
     for (const skill of injectedSkills) {
       const path = runtimeSkillArchivePath(skill);
@@ -1635,6 +1662,29 @@ printf '%s\\n' ${shellQuote(command)} > "$fifo"`,
     );
     if (!result.success) {
       throw new BoxRuntimeProviderError("Pi did not accept the message; wake the Companion and retry", 409);
+    }
+  }
+
+  async respondExtensionUi(input: {
+    boxId: string;
+    response: Record<string, unknown>;
+  }): Promise<void> {
+    const command = JSON.stringify(input.response);
+    const result = await this.#command(
+      input.boxId,
+      `set -euo pipefail
+${USER_BUS_ENVIRONMENT}
+fifo="$HOME/.companion/runtime/state/pi.rpc.in"
+systemctl --user is-active --quiet companion-pi-daemon.service
+test -p "$fifo"
+printf '%s\\n' ${shellQuote(command)} > "$fifo"`,
+      20,
+    );
+    if (!result.success) {
+      throw new BoxRuntimeProviderError(
+        "Pi did not accept the permission response; wake the Companion and retry",
+        409,
+      );
     }
   }
 
