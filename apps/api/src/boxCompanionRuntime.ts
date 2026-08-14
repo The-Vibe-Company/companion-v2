@@ -1248,6 +1248,7 @@ exit 0`,
     clientSurface: CompanionClientSurface;
     providerAuth: Record<string, Record<string, unknown>>;
     replaceProviderAuth: boolean;
+    refreshRuntimeLayout?: boolean;
     instructions?: string | null;
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
