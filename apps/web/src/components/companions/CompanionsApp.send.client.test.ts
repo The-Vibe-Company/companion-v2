@@ -148,6 +148,7 @@ function controlPlane(
           author_name: null,
           tool: null,
     decision: null,
+          reasoning: null,
           created_at: new Date().toISOString(),
         });
         delivered = ordinal - 1;
@@ -178,6 +179,7 @@ function controlPlane(
           author_name: null,
           tool: null,
     decision: null,
+          reasoning: null,
           created_at: new Date().toISOString(),
         });
       }

@@ -531,6 +531,7 @@ export function CompanionTranscript({
       author_name: null,
       tool: null,
     decision: null,
+      reasoning: null,
       created_at: new Date().toISOString(),
     });
     try {

@@ -12,6 +12,7 @@ function entry(overrides: Partial<CompanionTranscriptEntry> = {}): CompanionTran
     author_name: "Ada",
     tool: null,
     decision: null,
+    reasoning: null,
     created_at: "2026-08-12T12:00:00.000Z",
     ...overrides,
   };
@@ -88,6 +89,7 @@ describe("transcriptTurns", () => {
         content: "Pi did not accept the message.",
         author_id: null,
         author_name: null,
+        reasoning: null,
         created_at: "2026-08-12T12:00:10.000Z",
       }),
       entry({ event_id: "msg:2", created_at: "2026-08-12T12:00:20.000Z" }),

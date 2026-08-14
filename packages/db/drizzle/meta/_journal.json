@@ -568,6 +568,13 @@
       "when": 1787072800000,
       "tag": "0080_companion_decisions",
       "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1787159200000,
+      "tag": "0081_companion_transcript_reasoning",
+      "breakpoints": true
     }
   ]
 }

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { CompanionToolRun } from "@companion/contracts";
+import {
+  COMPANION_REASONING_MAX_CHARACTERS,
+  companionTranscriptEntrySchema,
+  type CompanionToolRun,
+} from "@companion/contracts";
 import {
   matchCompanionToolCompletions,
   projectCompanionPiEvents,
@@ -12,7 +16,7 @@ function line(event: unknown): string {
 const now = new Date("2026-08-12T12:00:00.000Z");
 
 describe("Pi RPC log projection", () => {
-  it("projects assistant text, drops thinking, and gives each tool call its own entry", () => {
+  it("projects assistant text, keeps thinking beside it, and gives each tool call its own entry", () => {
     const chunk = [
       line({ type: "agent_start" }),
       line({ type: "message_end", message: { role: "user", content: "Summarize the incident" } }),
@@ -39,7 +43,8 @@ describe("Pi RPC log projection", () => {
       ["assistant", "Two services timed out."],
       ["tool", "ls"],
     ]);
-    // The reply stays the reply: the thinking is gone and the call is beside it, not inside it.
+    // The reply stays the reply: the thinking rides beside it, and so does the call.
+    expect(projection.entries[0]?.reasoning).toBe("internal reasoning");
     expect(projection.entries[0]?.tool).toBeUndefined();
     expect(projection.entries[1]?.tool).toMatchObject({
       call_id: "call_1",
@@ -194,7 +199,65 @@ describe("Pi RPC log projection", () => {
       content: "2025",
       createdAt: new Date("2026-08-12T11:59:30.000Z"),
     }]);
+    // The thinking already is the reply here, so it must not also be attached as reasoning: a reader
+    // would be shown the same passage twice, once behind a disclosure.
+    expect(projection.entries[0]?.reasoning).toBeUndefined();
     expect(projection.settled).toBe(true);
+  });
+
+  it("truncates reasoning to the contract cap", () => {
+    const chunk = line({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "t".repeat(COMPANION_REASONING_MAX_CHARACTERS + 5_000) },
+          { type: "text", text: "Done." },
+        ],
+        stopReason: "stop",
+      },
+    });
+
+    const projection = projectCompanionPiEvents({ chunk, offset: 0, now });
+
+    const reasoning = projection.entries[0]?.reasoning ?? "";
+    expect(projection.entries[0]?.content).toBe("Done.");
+    expect(reasoning.length).toBeLessThanOrEqual(COMPANION_REASONING_MAX_CHARACTERS);
+    expect(reasoning.endsWith("[truncated]")).toBe(true);
+    // A stored entry has to survive the contract it is read back through, cap and all.
+    expect(companionTranscriptEntrySchema.parse({
+      event_id: projection.entries[0]?.eventId,
+      ordinal: 0,
+      role: "assistant",
+      content: "Done.",
+      reasoning,
+      author_id: null,
+      author_name: null,
+      tool: null,
+      decision: null,
+      created_at: now.toISOString(),
+    }).reasoning).toBe(reasoning);
+  });
+
+  it("carries no reasoning on a turn that only ran tools", () => {
+    const chunk = line({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "I should list the directory" },
+          { type: "toolCall", id: "call_9", name: "bash", arguments: { command: "ls" } },
+        ],
+        stopReason: "toolUse",
+      },
+    });
+
+    const projection = projectCompanionPiEvents({ chunk, offset: 0, now });
+
+    // The turn spoke only through its chip, and the thinking rides on a reply or not at all.
+    expect(projection.entries.map((entry) => entry.role)).toEqual(["assistant", "tool"]);
+    expect(projection.entries[0]?.content).toBe("I should list the directory");
+    expect(projection.entries[0]?.reasoning).toBeUndefined();
   });
 
   it("keeps a settled turn with no content at all visible as a system line", () => {

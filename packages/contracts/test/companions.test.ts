@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   COMPANION_PROVIDER_CATALOG,
+  COMPANION_REASONING_MAX_CHARACTERS,
   COMPANION_TOOL_RUN_SCREENSHOT_MAX_CHARACTERS,
   companionProviderOAuthCompleteInputSchema,
   companionProviderOAuthStartInputSchema,
@@ -329,6 +330,35 @@ describe("Companion chat contracts", () => {
     expect(thread.entries[1]?.author_id).toBeNull();
     // A message is not a tool run, and the thread says so rather than leaving the field absent.
     expect(thread.entries[0]?.tool).toBeNull();
+  });
+
+  it("carries reasoning only on a reply, and absent means none", () => {
+    const reply = {
+      event_id: "pi:512",
+      ordinal: 4,
+      role: "assistant" as const,
+      content: "Two services timed out.",
+      author_id: null,
+      author_name: null,
+      created_at: "2026-08-12T12:00:03.000Z",
+    };
+
+    expect(companionTranscriptEntrySchema.parse({ ...reply, reasoning: "checked the logs" }).reasoning)
+      .toBe("checked the logs");
+    // An entry stored before this column existed reads back as a reply with nothing to disclose,
+    // not as one whose disclosure is missing.
+    expect(companionTranscriptEntrySchema.parse(reply).reasoning).toBeNull();
+    // Thinking belongs to the turn that produced it; nothing else in the thread may claim any.
+    expect(() => companionTranscriptEntrySchema.parse({
+      ...reply,
+      role: "user",
+      author_id: "user-1",
+      reasoning: "checked the logs",
+    })).toThrow();
+    expect(() => companionTranscriptEntrySchema.parse({
+      ...reply,
+      reasoning: "t".repeat(COMPANION_REASONING_MAX_CHARACTERS + 1),
+    })).toThrow();
   });
 
   it("carries a tool run only on a tool entry", () => {

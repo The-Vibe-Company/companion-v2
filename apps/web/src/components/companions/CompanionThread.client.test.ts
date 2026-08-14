@@ -344,6 +344,7 @@ describe("CompanionThread composer", () => {
           author_name: null,
           tool: null,
     decision: null,
+          reasoning: null,
           created_at: "2026-08-12T12:01:00.000Z",
         }],
       }));
@@ -397,6 +398,7 @@ describe("CompanionThread stream", () => {
     author_name: null,
     tool: null,
     decision: null,
+    reasoning: null,
     created_at: "2026-08-12T12:01:00.000Z",
   };
 
@@ -409,6 +411,7 @@ describe("CompanionThread stream", () => {
     author_name: null,
     tool: null,
     decision: null,
+    reasoning: null,
     created_at: "2026-08-12T12:01:20.000Z",
   });
 
@@ -446,6 +449,7 @@ describe("CompanionThread stream", () => {
           author_name: null,
           tool: null,
     decision: null,
+          reasoning: null,
           created_at: "2026-08-12T12:01:24.000Z",
         },
       ],
@@ -485,6 +489,7 @@ describe("CompanionThread stream", () => {
           author_name: null,
           tool: null,
     decision: null,
+          reasoning: null,
           created_at: "2026-08-12T12:01:20.000Z",
         },
       ],
