@@ -519,7 +519,7 @@ export function CompanionsApp({
                 {providers.can_manage && (
                   <button
                     type="button"
-                    className="cds-btn cds-btn--secondary cds-btn--md"
+                    className="cds-btn cds-btn--ghost cds-btn--md"
                     onClick={() => setManagingProviders(true)}
                   >
                     Providers
@@ -527,10 +527,10 @@ export function CompanionsApp({
                 )}
                 <button
                   type="button"
-                  className="cds-btn cds-btn--secondary cds-btn--md"
+                  className="cds-btn cds-btn--ghost cds-btn--md"
                   onClick={openPlugins}
                 >
-                  <Icon name="plug-zap" size={15} /> Plugins
+                  Plugins
                 </button>
                 <button
                   type="button"
@@ -572,12 +572,6 @@ export function CompanionsApp({
                   </label>
 
                   <div className="companions-list">
-                    <div className="companions-row companions-row--head">
-                      <span>Companion</span>
-                      <span>Status</span>
-                      <span>Updated</span>
-                      <span>Access</span>
-                    </div>
                     {visible.map((companion) => {
                       const status = companionStatus(companion.runtime.state);
                       return (
