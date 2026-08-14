@@ -19,7 +19,7 @@ async function loadPickerSkills(orgId: string): Promise<CompanionSkillOption[]> 
   }).catch(() => [] as SkillListRow[]);
   return rows
     .filter((skill) => !skill.archived && skill.validation === "valid" && skill.current_version)
-    .map((skill) => ({
+    .map((skill): CompanionSkillOption => ({
       id: skill.id,
       slug: skill.slug,
       name: skill.display?.name ?? skill.slug,

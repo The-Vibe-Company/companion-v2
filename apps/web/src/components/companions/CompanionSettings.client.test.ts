@@ -12,6 +12,9 @@ const { updateCompanion, deleteCompanion } = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/companions", () => ({ updateCompanion, deleteCompanion }));
+vi.mock("@/lib/apiClient", () => ({
+  apiFetch: vi.fn(async () => []),
+}));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -163,6 +166,8 @@ describe("CompanionSettings", () => {
         persona: "Challenge every source.",
         provider_id: "openai-codex",
         model_id: "gpt-5.5",
+        selected_skill_ids: [],
+        can_write_skills: false,
       },
     );
     expect(onSaved).toHaveBeenCalledOnce();

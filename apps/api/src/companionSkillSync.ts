@@ -5,8 +5,8 @@ import {
   resolveCompanionPluginInjection,
   resolveCompanionProviderAuth,
   updateCompanionRuntime,
-  type ActorContext,
 } from "@companion/core";
+import type { ActorContext } from "@companion/core/services";
 import { COMPANION_SKILL_KEY, companionSkillDir } from "@companion/companion-skill";
 import { withTenantContext } from "@companion/db";
 import { packDir, skillChecksum, toTar } from "@companion/skills";
