@@ -271,6 +271,19 @@ export async function pollOpenAICodexProviderOAuth(input: {
   }, fetchImpl);
   if (response.status === 403 || response.status === 404) return { status: "pending" };
   if (!response.ok) {
+    const responseBody = await response.text().catch(() => "");
+    let errorCode: unknown;
+    try {
+      const data = JSON.parse(responseBody) as {
+        error?: string | { code?: unknown };
+      } | null;
+      errorCode = typeof data?.error === "object" ? data.error?.code : data?.error;
+    } catch {
+      // A non-JSON provider error is terminal and handled below.
+    }
+    if (errorCode === "deviceauth_authorization_pending" || errorCode === "slow_down") {
+      return { status: "pending" };
+    }
     throw new CompanionProviderOAuthError("oauth_invalid", "Codex device sign-in failed. Start again.");
   }
   const device = await response.json() as {

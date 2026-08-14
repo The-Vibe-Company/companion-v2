@@ -35,7 +35,7 @@ describe("Companion provider contracts", () => {
   it("pins Pi's Kimi, Moonshot, OpenAI, and Google API-key providers", () => {
     expect(COMPANION_PROVIDER_CATALOG).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "kimi-coding", auth_methods: ["api_key"] }),
-      expect.objectContaining({ id: "moonshot", auth_methods: ["api_key"] }),
+      expect.objectContaining({ id: "moonshotai", auth_methods: ["api_key"] }),
       expect.objectContaining({ id: "openai", auth_methods: ["api_key"] }),
       expect.objectContaining({ id: "google", auth_methods: ["api_key"] }),
     ]));

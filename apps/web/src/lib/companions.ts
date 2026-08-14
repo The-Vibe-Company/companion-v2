@@ -152,6 +152,7 @@ export async function startCompanionProviderOAuth(
     method: "POST",
     headers: orgHeaders(orgId),
     body: JSON.stringify({ provider_id: providerId }),
+    signal: AbortSignal.timeout(35_000),
   });
 }
 
@@ -165,6 +166,7 @@ export async function completeCompanionProviderOAuth(
       method: "POST",
       headers: orgHeaders(orgId),
       body: JSON.stringify({ authorization_code: authorizationCode }),
+      signal: AbortSignal.timeout(35_000),
     },
   );
   return result.connection;
@@ -179,6 +181,7 @@ export async function pollCompanionProviderOAuth(
   return apiFetch("/v1/companion-providers/oauth/poll", {
     method: "POST",
     headers: orgHeaders(orgId),
+    signal: AbortSignal.timeout(65_000),
   });
 }
 

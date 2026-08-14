@@ -112,4 +112,22 @@ describe("Companion provider OAuth", () => {
       },
     });
   });
+
+  it.each([
+    { error: { code: "deviceauth_authorization_pending" } },
+    { error: "slow_down" },
+  ])("keeps Codex device login pending for Pi retry responses", async (body) => {
+    const fetchImpl = vi.fn(async () => jsonResponse(body, 429)) as unknown as typeof fetch;
+
+    await expect(pollOpenAICodexProviderOAuth({
+      flow: {
+        providerId: "openai-codex",
+        deviceAuthId: "device-secret",
+        userCode: "ABCD-EFGH",
+        pollIntervalSeconds: 2,
+        expiresAt: Date.now() + 60_000,
+      },
+      fetchImpl,
+    })).resolves.toEqual({ status: "pending" });
+  });
 });

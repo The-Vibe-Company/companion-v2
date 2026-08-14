@@ -137,6 +137,9 @@ describe("CompanionProvidersDialog", () => {
     expect(container.textContent).not.toContain("auth.json");
     expect(container.querySelector("textarea")).toBeNull();
     expect(container.textContent).toContain("Open Claude sign-in");
+    expect(container.querySelector<HTMLButtonElement>(".og-dialog__x")?.disabled).toBe(true);
+    expect(Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent === "Done")?.disabled).toBe(true);
 
     const code = container.querySelector<HTMLInputElement>(
       ".companions-provider-oauth input",
@@ -149,6 +152,24 @@ describe("CompanionProvidersDialog", () => {
     await submit(container);
 
     expect(api.completeCompanionProviderOAuth).toHaveBeenCalledWith("org-1", "one-time-code");
+    expect(api.startCompanionProviderOAuth).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts only one subscription flow for overlapping form submissions", async () => {
+    api.startCompanionProviderOAuth.mockResolvedValue({
+      flow: "authorization_code",
+      provider_id: "anthropic",
+      authorization_url: "https://claude.ai/oauth/authorize?state=test",
+    });
+    const { container } = await mount();
+    await chooseAuthentication(container, "subscription");
+    const form = container.querySelector("form")!;
+    await act(async () => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+
     expect(api.startCompanionProviderOAuth).toHaveBeenCalledTimes(1);
   });
 

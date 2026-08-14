@@ -812,12 +812,14 @@ export function registerCompanionRoutes(
   });
 
   app.post("/v1/companion-providers/oauth/poll", async (c) => {
+    let clearCookieOnFailure = false;
     try {
       const context = await tenant(c, async ({ actor, orgId, database }) => {
         const providers = await listCompanionProviders({ actor, orgId, database });
         if (!providers.can_manage) throw new CompanionProviderForbiddenError();
         return { actor, orgId };
       });
+      clearCookieOnFailure = true;
       const masterKey = loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY);
       const cookie = getCookie(c, COMPANION_PROVIDER_OAUTH_COOKIE);
       if (!cookie) {
@@ -854,7 +856,10 @@ export function registerCompanionRoutes(
       });
       return c.json({ status: "connected", connection });
     } catch (error) {
-      if (!(error instanceof CompanionProviderOAuthError) || error.code !== "oauth_unavailable") {
+      if (
+        clearCookieOnFailure
+        && (!(error instanceof CompanionProviderOAuthError) || error.code !== "oauth_unavailable")
+      ) {
         setCookie(c, COMPANION_PROVIDER_OAUTH_COOKIE, "", {
           path: "/v1/companion-providers/oauth",
           maxAge: 0,

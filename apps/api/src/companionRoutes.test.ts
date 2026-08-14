@@ -2294,6 +2294,47 @@ describe("Companions API feature gate", () => {
 
     expect(response.status).toBe(403);
     expect(coreMocks.beginAnthropicProviderOAuth).not.toHaveBeenCalled();
+
+    coreMocks.listCompanionProviders.mockResolvedValueOnce({
+      catalog: [],
+      connections: [],
+      default_provider_id: null,
+      can_manage: false,
+    });
+    const polled = await app.request("/v1/companion-providers/oauth/poll", {
+      method: "POST",
+      headers: { cookie: "companion_provider_oauth=owner-flow" },
+    });
+    expect(polled.status).toBe(403);
+    expect(polled.headers.get("set-cookie")).toBeNull();
+    expect(coreMocks.pollOpenAICodexProviderOAuth).not.toHaveBeenCalled();
+  });
+
+  it("rejects a provider OAuth cookie bound to another user", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, {
+      COMPANION_COMPANIONS_ENABLED: "true",
+      COMPANION_SECRETS_MASTER_KEY: Buffer.alloc(32, 37).toString("base64"),
+    });
+    const started = await app.request("/v1/companion-providers/oauth/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: "openai-codex" }),
+    });
+    const cookie = started.headers.get("set-cookie")!.split(";")[0]!;
+    contextMocks.actorFromContext.mockReturnValue({
+      id: "user-2",
+      email: "other@example.test",
+      name: "Other",
+    });
+
+    const polled = await app.request("/v1/companion-providers/oauth/poll", {
+      method: "POST",
+      headers: { cookie },
+    });
+
+    expect(polled.status).toBe(400);
+    expect(coreMocks.pollOpenAICodexProviderOAuth).not.toHaveBeenCalled();
   });
 
   it("manages labeled MCP accounts outside the Companion thread", async () => {
