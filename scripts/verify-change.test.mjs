@@ -178,6 +178,14 @@ test("a core change selects its workspace and requires database integration", ()
   assert.deepEqual(quality.args.slice(-2), ["--filter", "...@companion/core"]);
 });
 
+test("a bundled-skill input change verifies the committed agent-client bundle", () => {
+  const plan = createVerificationPlan(["packages/contracts/src/companions.ts"], { workspaces });
+  assert.equal(plan.scope.skill, true);
+  const ids = plan.fastSteps.map(({ id }) => id);
+  assert.ok(ids.includes("skill-agent-client"));
+  assert.ok(ids.indexOf("skill-agent-client") < ids.indexOf("skill-version"));
+});
+
 test("root configuration changes force the full monorepo and every CI lane", () => {
   const plan = createVerificationPlan(["package.json"], { workspaces });
   assert.equal(plan.scope.full, true);

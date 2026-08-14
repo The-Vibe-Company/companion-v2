@@ -159,6 +159,7 @@ export function createVerificationPlan(files, { workspaces = [], env = process.e
   }
   if (scope.skill) {
     fastSteps.push(
+      step("skill-agent-client", "pnpm", ["--filter", "@companion/companion-skill", "check:agent-client"]),
       step("skill-version", "pnpm", ["--filter", "@companion/companion-skill", "check:version-bump"]),
       step("skill-guards", "python", [
         "-m",

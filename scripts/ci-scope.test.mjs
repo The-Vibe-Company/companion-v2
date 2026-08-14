@@ -92,6 +92,23 @@ test("the bundled Companion runtime triggers its direct browser smoke", () => {
   assert.equal(result.containers, true);
 });
 
+test("bundled skill files always request the skill checks, documentation included", () => {
+  assert.equal(classifyFiles(["packages/companion-skill/skill/SKILL.md"]).skill, true);
+  assert.equal(classifyFiles(["packages/companion-skill/skill/scripts/bootstrap.py"]).skill, true);
+});
+
+test("sources inlined into the committed agent-client bundle request the skill checks", () => {
+  assert.equal(classifyFiles(["packages/contracts/src/companions.ts"]).skill, true);
+  assert.equal(classifyFiles(["packages/companion-skill/client/operations.ts"]).skill, true);
+  assert.equal(classifyFiles(["packages/companion-skill/tsup.config.ts"]).skill, true);
+});
+
+test("changes that cannot alter the bundled skill stay out of the skill lane", () => {
+  assert.equal(classifyFiles(["packages/contracts/test/companions.test.ts"]).skill, false);
+  assert.equal(classifyFiles(["packages/contracts/README.md"]).skill, false);
+  assert.equal(classifyFiles(["packages/core/src/companions.ts"]).skill, false);
+});
+
 test("agent-browser smoke runtime changes trigger the browser lane", () => {
   for (const file of ["scripts/agent-browser-smoke.sh", "scripts/agent-browser-box-center.mjs"]) {
     const result = classifyFiles([file]);

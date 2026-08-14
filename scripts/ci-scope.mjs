@@ -68,7 +68,19 @@ export function classifyFiles(files, { forceFull = false } = {}) {
   const docs = forceFull || (uniqueFiles.length > 0 && uniqueFiles.every(isDocumentation));
   const design = full || uniqueFiles.includes("DESIGN.md") || uniqueFiles.includes(".github/workflows/design-md.yml");
   const dependencies = full || uniqueFiles.some((file) => file === "pnpm-lock.yaml" || /(^|\/)package\.json$/.test(file));
-  const skill = full || uniqueFiles.some((file) => file.startsWith("packages/companion-skill/skill/"));
+  // Any change under `skill/` counts, including SKILL.md, because the whole dir is integrity-tracked.
+  // The committed `skill/scripts/companion-agent-client.mjs` bundle also inlines the companion-skill
+  // client and `packages/contracts`, so editing those sources can invalidate the artifact and its
+  // integrity baseline without touching `skill/` at all.
+  const skill =
+    full ||
+    uniqueFiles.some(
+      (file) =>
+        file.startsWith("packages/companion-skill/skill/") ||
+        (!isTestFile(file) &&
+          !isDocumentation(file) &&
+          matchesAny(file, ["packages/companion-skill/", "packages/contracts/"])),
+    );
   const quality = full || uniqueFiles.some((file) => !isDocumentation(file));
   const build =
     full ||
