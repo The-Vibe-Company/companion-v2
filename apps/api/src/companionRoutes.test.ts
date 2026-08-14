@@ -688,6 +688,58 @@ describe("Companions API feature gate", () => {
   });
 
   /**
+   * The reported stall left its Box untouched: idle, setup done, no error, not even a changed
+   * timestamp. Reading the skill archives is the step that explains that, because it sits between the
+   * claim and the first Box call, and the storage client is built with no request timeout of its own.
+   */
+  it("records last_error when reading a skill archive never answers, without contacting the Box", async () => {
+    vi.useFakeTimers();
+    try {
+      coreMocks.listPendingCompanionMessages.mockResolvedValue({
+        pending: [message],
+        piLogOffset: 0,
+        deliveredOrdinal: null,
+      });
+      coreMocks.listCompanionRuntimeSkillPackages.mockResolvedValue([{
+        slug: "incident-summary",
+        version: "1.2.3",
+        checksum: `sha256:${"a".repeat(64)}`,
+        storagePath: "org-1/incident-summary/1.2.3.tar.gz",
+      }]);
+      let read: AbortSignal | undefined;
+      storageMocks.getSkillArchive.mockImplementation((input: { signal?: AbortSignal }) => {
+        read = input.signal;
+        return new Promise(() => undefined);
+      });
+      const runtime = boxRuntime();
+      const app = new Hono<{ Variables: ApiVariables }>();
+      registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+      const pending = app.request(`/v1/companions/${companion.id}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: "Summarize the incident" }),
+      });
+      await vi.advanceTimersByTimeAsync(COMPANION_RUNTIME_START_BUDGET_MS);
+      const response = await pending;
+
+      expect(response.status).toBe(200);
+      expect(runtime.start).not.toHaveBeenCalled();
+      expect(read?.aborted).toBe(true);
+      expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+        companionId: companion.id,
+        patch: expect.objectContaining({
+          runtimeState: "error",
+          daemonState: "error",
+          lastError: expect.stringContaining("did not finish within 180s"),
+        }),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
    * The deadline does not wait for the call it interrupts, so a Box assignment already in flight can
    * still commit `provisioning` after the failure was recorded. The Companion would be reading as
    * Starting again, with the reason it failed erased and its claim renewed for another stale window.

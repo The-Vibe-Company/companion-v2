@@ -18,7 +18,10 @@ Pi, and the final lifecycle write. At the deadline the wake stops working — th
 whatever call is in flight and the adapter's poll intervals — and records why, so the Companion leaves
 `provisioning` for a retryable `error` carrying that reason. Per-step timeouts alone did not bound a
 wake: each call answered inside its own limit while their sum ran for minutes, which is how a send
-could leave a Companion reporting Starting against a Box that was doing nothing. A start that returns
+could leave a Companion reporting Starting against a Box that was doing nothing. Nor was every step
+timed at all — a Box whose own record is untouched during the stall places the wake before the first
+Box call, where the reads of the skill archives are, and the storage client carries no request
+timeout, so a bucket that accepted the connection and then said nothing waited without end. A start that returns
 without a running Box and a running Pi is a failure with an observation attached, not a wake still in
 flight, so that observation is never written back as `provisioning`.
 
