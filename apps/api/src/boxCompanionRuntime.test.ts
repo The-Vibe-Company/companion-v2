@@ -11,6 +11,7 @@ import {
   COMPANION_PI_DISK_LAYOUT_VERSION,
   COMPANION_PI_EVENT_READ_LIMIT,
   composeDaemonFailureDetail,
+  mintBoxDesktopUrl,
   PI_DAEMON_FAILURE_MESSAGE,
 } from "./boxCompanionRuntime";
 import { companionRuntimeErrorMessage } from "./companionRuntimeError";
@@ -204,6 +205,150 @@ async function binWithCappedCommand(name: string, exitCode: number): Promise<str
   await chmod(script, 0o755);
   return bin;
 }
+
+/**
+ * Product promise:
+ * Every join of a Box desktop — the Computer panel opening, a reconnect, an `Open desktop` tab — gets
+ * a URL minted for that join alone, over the stream that actually works.
+ *
+ * Regression guarded:
+ * Box rotates the stream token on every state change, so a URL kept from an earlier join is a URL
+ * that has already stopped working. The VNC stream is also the one that survives a network blocking
+ * peer-to-peer traffic, and it answers `provisioning` before it answers with a URL — reading that
+ * first answer as "no desktop" is what would turn a working Box into an empty panel.
+ *
+ * Why this test is at the helper:
+ * The mint is a decision about two answers and a clock. Every case below — a stream that arrives at
+ * once, one that arrives late, one that never arrives, and a provider that refuses the flag — is
+ * arithmetic over those answers rather than anything about a Box.
+ */
+describe("Box desktop mint", () => {
+  /** A clock the cases move themselves, so a budget can expire without a test waiting for it. */
+  function fakeClock(step = 3_000) {
+    let value = 0;
+    return {
+      now: () => value,
+      pause: async () => {
+        value += step;
+      },
+    };
+  }
+
+  it("mints a fresh VNC URL for every join", async () => {
+    const clock = fakeClock();
+    const minted = ["https://box.test/vnc/one?token=first", "https://box.test/vnc/two?token=second"];
+    const vnc = vi.fn(async () => ({ desktopUrl: minted.shift() ?? null }));
+    const webrtc = vi.fn(async () => ({ desktopUrl: "https://box.test/webrtc" }));
+
+    const first = await mintBoxDesktopUrl({ vnc, webrtc, budgetMs: 15_000, ...clock });
+    const second = await mintBoxDesktopUrl({ vnc, webrtc, budgetMs: 15_000, ...clock });
+
+    // Two joins, two mints: nothing is remembered between them, so neither can be handed a token Box
+    // has already rotated away.
+    expect(first).toEqual({
+      url: "https://box.test/vnc/one?token=first",
+      provisioning: false,
+      transport: "vnc",
+    });
+    expect(second).toEqual({
+      url: "https://box.test/vnc/two?token=second",
+      provisioning: false,
+      transport: "vnc",
+    });
+    expect(vnc).toHaveBeenCalledTimes(2);
+    // VNC answered, so the WebRTC fallback is never asked.
+    expect(webrtc).not.toHaveBeenCalled();
+  });
+
+  it("waits out a VNC stream Box is still bringing up", async () => {
+    const clock = fakeClock();
+    const answers = [
+      { provisioning: true },
+      { provisioning: true },
+      { desktopUrl: "https://box.test/vnc/late?token=third" },
+    ];
+    const vnc = vi.fn(async () => answers.shift() ?? { provisioning: false });
+    const webrtc = vi.fn(async () => ({ desktopUrl: "https://box.test/webrtc" }));
+
+    const minted = await mintBoxDesktopUrl({ vnc, webrtc, budgetMs: 15_000, ...clock });
+
+    expect(minted).toEqual({
+      url: "https://box.test/vnc/late?token=third",
+      provisioning: false,
+      transport: "vnc",
+    });
+    expect(vnc).toHaveBeenCalledTimes(3);
+    expect(webrtc).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the WebRTC stream when Box has no VNC one to give", async () => {
+    const clock = fakeClock();
+    const vnc = vi.fn(async () => ({ desktopUrl: null, provisioning: false }));
+    // Older Box builds name the field `url`; a mint reads whichever one carries the stream.
+    const webrtc = vi.fn(async () => ({ url: "https://box.test/stream?token=fourth" }));
+
+    const minted = await mintBoxDesktopUrl({ vnc, webrtc, budgetMs: 15_000, ...clock });
+
+    expect(minted).toEqual({
+      url: "https://box.test/stream?token=fourth",
+      provisioning: false,
+      transport: "webrtc",
+    });
+    // The fallback is reached without waiting: this Box said it is not provisioning one.
+    expect(vnc).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops polling at the budget and still tries the fallback", async () => {
+    const clock = fakeClock(6_000);
+    const vnc = vi.fn(async () => ({ provisioning: true }));
+    const webrtc = vi.fn(async () => ({ desktopUrl: "https://box.test/stream?token=fifth" }));
+
+    const minted = await mintBoxDesktopUrl({ vnc, webrtc, budgetMs: 15_000, ...clock });
+
+    expect(minted.transport).toBe("webrtc");
+    // Somebody is watching a panel for the screen to appear, so the wait is bounded rather than held
+    // open for as long as Box keeps saying `provisioning`.
+    expect(vnc).toHaveBeenCalledTimes(3);
+    expect(webrtc).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a desktop still being provisioned instead of inventing a URL", async () => {
+    const clock = fakeClock(20_000);
+    const vnc = vi.fn(async () => ({ provisioning: true }));
+    const webrtc = vi.fn(async () => ({ desktopUrl: null, provisioning: true }));
+
+    const minted = await mintBoxDesktopUrl({ vnc, webrtc, budgetMs: 15_000, ...clock });
+
+    expect(minted).toEqual({ url: null, provisioning: true, transport: null });
+  });
+
+  it("survives a provider build that refuses the VNC flag", async () => {
+    const clock = fakeClock();
+    const vnc = vi.fn(async () => {
+      throw new BoxRuntimeProviderError("Box request failed: unknown query parameter vnc", 400);
+    });
+    const webrtc = vi.fn(async () => ({ desktopUrl: "https://box.test/stream?token=sixth" }));
+
+    const minted = await mintBoxDesktopUrl({ vnc, webrtc, budgetMs: 15_000, ...clock });
+
+    // A refused query parameter must not take computer use down with it.
+    expect(minted.transport).toBe("webrtc");
+    expect(vnc).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports the VNC refusal when the fallback has nothing either", async () => {
+    const clock = fakeClock();
+    const vnc = vi.fn(async () => {
+      throw new BoxRuntimeProviderError("Box rejected the service key", 401);
+    });
+    const webrtc = vi.fn(async () => ({ desktopUrl: null, provisioning: false }));
+
+    // The refusal is the reason this mint went looking for a fallback, so it is what an operator is
+    // told rather than a Box that merely has no desktop.
+    await expect(mintBoxDesktopUrl({ vnc, webrtc, budgetMs: 15_000, ...clock }))
+      .rejects.toThrow("Box rejected the service key");
+  });
+});
 
 describe("AsciiBoxCompanionRuntime", () => {
   afterEach(() => {
@@ -2246,7 +2391,11 @@ describe("AsciiBoxCompanionRuntime", () => {
     const desktop = await runtime.desktop({ boxId: "bx_23456789" });
 
     expect(status).toMatchObject({ runtimeState: "stopped", daemonState: "stopped" });
-    expect(desktop).toEqual({ url: "https://desktop.example.test/session", provisioning: false });
+    expect(desktop).toEqual({
+      url: "https://desktop.example.test/session",
+      provisioning: false,
+      transport: "vnc",
+    });
     // The wake poll belongs to start alone: status reads the daemon once and neither path restarts
     // the unit, creates a Box, or resumes one.
     expect(commands).toHaveLength(1);
@@ -2254,6 +2403,63 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(commands[0]).not.toContain("restart companion-pi-daemon.service");
     expect(fetchMock.mock.calls.some(([url, init]) =>
       String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
+    // The VNC stream is the one asked for, because it is the one that reaches a Box from a network
+    // that blocks peer-to-peer traffic.
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/desktop?vnc=1"))).toBe(true);
+  });
+
+  it("asks Box for the VNC desktop first and the WebRTC stream only as the fallback", async () => {
+    const desktopCalls: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.includes("/desktop") && method === "POST") {
+        desktopCalls.push(url.slice(url.indexOf("/boxes")));
+        return url.endsWith("?vnc=1")
+          ? json({ desktopUrl: null, provisioning: false })
+          : json({ desktopUrl: "https://desktop.example.test/stream?token=opaque" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const desktop = await runtime.desktop({ boxId: "bx_23456789" });
+
+    expect(desktop).toEqual({
+      url: "https://desktop.example.test/stream?token=opaque",
+      provisioning: false,
+      transport: "webrtc",
+    });
+    expect(desktopCalls).toEqual([
+      "/boxes/bx_23456789/desktop?vnc=1",
+      "/boxes/bx_23456789/desktop",
+    ]);
+    // Reaching a desktop over either stream still observes a Box and never resumes one.
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
+  });
+
+  it("refuses a desktop for a Box that is not running rather than resuming it", async () => {
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request) => {
+      const url = String(rawUrl);
+      if (url.endsWith("/boxes/bx_23456789")) {
+        return json({ box: { ...box, state: "archived", desktopAvailable: false } });
+      }
+      throw new Error(`unexpected Box request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    // Opening the Computer panel is a desktop request, so this is what keeps a panel from being a
+    // wake: an archived Box is refused before any stream is minted for it.
+    await expect(runtime.desktop({ boxId: "bx_23456789" }))
+      .rejects.toThrow("Box must already be running before requesting desktop access");
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/desktop"))).toBe(false);
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
   });
 

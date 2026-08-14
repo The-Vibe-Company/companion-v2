@@ -2,6 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type {
   CompanionClientSurface,
   CompanionDaemonState,
+  CompanionDesktopTransport,
   CompanionMcpAccount,
   CompanionMcpCredential,
   CompanionRuntimeState,
@@ -114,6 +115,13 @@ const STAGED_ARCHIVE_DIRECTORY = ".companion/runtime/state/skill-archives";
 const STAGED_ARCHIVE_SIZE_LABEL = "companion-archive-bytes";
 /** How long a start will wait to be told what the Box kept before it gives up asking. */
 const STAGED_ARCHIVE_MEASURE_TIMEOUT_SECONDS = 10;
+/**
+ * How long one desktop mint may spend waiting for Box to finish bringing up the VNC stream of a Box
+ * that is already running. A person is watching a panel for the screen to appear, so the budget is
+ * short enough that a stream which is not coming is reported instead of held: the surface says the
+ * desktop is still starting and the next join tries again.
+ */
+const BOX_DESKTOP_MINT_BUDGET_MS = 15_000;
 
 export type BoxState =
   | "init"
@@ -157,7 +165,19 @@ interface CommandEnvelope {
 
 interface DesktopEnvelope {
   desktopUrl?: string | null;
+  /** Older Box builds name the same field `url`; a mint reads whichever one carries the stream. */
+  url?: string | null;
   provisioning?: boolean;
+}
+
+/**
+ * One freshly minted Box desktop, and which stream carried it. `url` is null only when Box has no
+ * stream to give yet, and `provisioning` then says whether it is still bringing one up.
+ */
+export interface CompanionDesktopMint {
+  url: string | null;
+  provisioning: boolean;
+  transport: CompanionDesktopTransport | null;
 }
 
 /** Transient environment value inherited by Pi for one labeled MCP account. */
@@ -203,7 +223,8 @@ export interface CompanionBoxRuntime {
   }): Promise<CompanionRuntimeObservation>;
   stop(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
   status(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
-  desktop(input: { boxId: string }): Promise<{ url: string | null; provisioning: boolean }>;
+  /** Mint one fresh desktop URL for a Box that is already running; never creates or resumes one. */
+  desktop(input: { boxId: string }): Promise<CompanionDesktopMint>;
   /** Hand one chat message to the already running Pi daemon; never creates or resumes a Box. */
   prompt(input: { boxId: string; message: string; requestId: string }): Promise<void>;
   /** Reset the provider's idle clock after Pi accepts a durable message. */
@@ -586,6 +607,70 @@ function observation(box: BoxInfo, daemonState: CompanionDaemonState): Companion
   };
 }
 
+/** The stream URL one desktop answer carries, whichever of the two names Box gave it. */
+function desktopEnvelopeUrl(envelope: DesktopEnvelope): string | null {
+  const url = (envelope.desktopUrl ?? envelope.url ?? "").trim();
+  return url || null;
+}
+
+/**
+ * Mint one fresh desktop URL for a Box that is already running.
+ *
+ * The stream token rotates on every Box state change, so there is no such thing as a desktop URL
+ * worth keeping: each join mints its own, and none of them is ever stored. VNC is asked for first
+ * because it is a plain WebSocket stream that still reaches a Box from a network which blocks
+ * peer-to-peer traffic, and it answers `provisioning` before it answers with a URL, so a first read
+ * without one is polled rather than reported as a Box with no desktop. WebRTC is the fallback: it is
+ * what Box offers when a Box has no VNC stream to give, and it is also the whole answer for a
+ * provider build that does not know the `vnc` flag at all — that refusal must not take computer use
+ * down with it, so it is only reported when the fallback has nothing either.
+ *
+ * This is a decision about two answers and a clock rather than about Box itself, so the calls, the
+ * poll interval, and the budget are all handed in: the arithmetic has to hold for a stream that
+ * arrives at once, one that arrives late, one that never arrives, and a flag the provider refuses.
+ */
+export async function mintBoxDesktopUrl(input: {
+  vnc: () => Promise<DesktopEnvelope>;
+  webrtc: () => Promise<DesktopEnvelope>;
+  budgetMs: number;
+  pause: () => Promise<void>;
+  now?: () => number;
+}): Promise<CompanionDesktopMint> {
+  const now = input.now ?? Date.now;
+  const deadline = now() + input.budgetMs;
+  let provisioning = false;
+  let vncRefusal: unknown;
+  for (;;) {
+    let read: DesktopEnvelope;
+    try {
+      read = await input.vnc();
+    } catch (error) {
+      vncRefusal = error;
+      break;
+    }
+    const url = desktopEnvelopeUrl(read);
+    if (url) return { url, provisioning: false, transport: "vnc" };
+    provisioning = read.provisioning === true;
+    if (!provisioning) break;
+    await input.pause();
+    // The budget is spent by waiting, so it is checked after the wait: a poll is never made past a
+    // deadline the previous interval already crossed.
+    if (now() >= deadline) break;
+  }
+  const fallback = await input.webrtc().catch((error: unknown) => {
+    // Two refusals, one report: the VNC one is the reason this mint went looking for a fallback.
+    throw vncRefusal ?? error;
+  });
+  const url = desktopEnvelopeUrl(fallback);
+  if (url) return { url, provisioning: false, transport: "webrtc" };
+  if (vncRefusal) throw vncRefusal;
+  return {
+    url: null,
+    provisioning: provisioning || fallback.provisioning === true,
+    transport: null,
+  };
+}
+
 export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
   readonly #apiKey: string;
   readonly #baseUrl: string;
@@ -593,6 +678,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
   readonly #ttlSeconds: number;
   readonly #pollIntervalMs: number;
   readonly #readyTimeoutMs: number;
+  readonly #desktopMintBudgetMs: number;
   readonly #daemonActiveTimeoutMs: number;
   readonly #installCommand: string | undefined;
   readonly #mcpAdapterPackage: string;
@@ -617,6 +703,10 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     this.#ttlSeconds = positiveInteger(env.COMPANION_BOX_TTL_SECONDS, 21_600);
     this.#pollIntervalMs = positiveInteger(env.COMPANION_BOX_POLL_INTERVAL_MS, 1000);
     this.#readyTimeoutMs = positiveInteger(env.COMPANION_BOX_READY_TIMEOUT_MS, 120_000);
+    this.#desktopMintBudgetMs = positiveInteger(
+      env.COMPANION_BOX_DESKTOP_MINT_BUDGET_MS,
+      BOX_DESKTOP_MINT_BUDGET_MS,
+    );
     this.#daemonActiveTimeoutMs = positiveInteger(
       env.COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS,
       PI_DAEMON_ACTIVE_TIMEOUT_MS,
@@ -1521,16 +1611,23 @@ exit 0`,
     return { chunk: "", offset: input.offset };
   }
 
-  async desktop(input: { boxId: string }): Promise<{ url: string | null; provisioning: boolean }> {
+  /**
+   * A fresh desktop URL for a Box that is already running. Reaching a desktop observes a Box; it
+   * never creates or resumes one, which is what keeps a panel that opens on a sleeping Box — or a
+   * join a Viewer could reach — from being a wake.
+   */
+  async desktop(input: { boxId: string }): Promise<CompanionDesktopMint> {
     const box = await this.#get(input.boxId);
     if (!READY_STATES.has(box.state)) {
       throw new BoxRuntimeProviderError("Box must already be running before requesting desktop access", 409);
     }
-    const result = await this.#request<DesktopEnvelope>(
-      `/boxes/${encodeURIComponent(input.boxId)}/desktop?vnc=1`,
-      { method: "POST", body: "{}" },
-    );
-    return { url: result.desktopUrl ?? null, provisioning: result.provisioning === true };
+    const desktopPath = `/boxes/${encodeURIComponent(input.boxId)}/desktop`;
+    return mintBoxDesktopUrl({
+      vnc: () => this.#request<DesktopEnvelope>(`${desktopPath}?vnc=1`, { method: "POST", body: "{}" }),
+      webrtc: () => this.#request<DesktopEnvelope>(desktopPath, { method: "POST", body: "{}" }),
+      budgetMs: this.#desktopMintBudgetMs,
+      pause: () => this.#pause(),
+    });
   }
 }
 

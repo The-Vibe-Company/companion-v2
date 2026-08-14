@@ -136,6 +136,31 @@ async function clickBoxChip(container: HTMLElement) {
   return chip;
 }
 
+/** Open or close the Computer panel the way a runner does: the toggle in the thread header. */
+async function clickComputerToggle(container: HTMLElement) {
+  const toggle = container.querySelector(".chat-computer-toggle") as HTMLButtonElement | null;
+  if (toggle) {
+    await act(async () => {
+      toggle.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+  }
+  return toggle;
+}
+
+function panelFrame(container: HTMLElement) {
+  return container.querySelector(".chat-computer__frame") as HTMLIFrameElement | null;
+}
+
+function desktopPayload(url: string | null, overrides: Record<string, unknown> = {}) {
+  return {
+    desktop_url: url,
+    provisioning: url === null,
+    automation: "lux",
+    transport: url === null ? null : "vnc",
+    ...overrides,
+  };
+}
+
 /**
  * Stands in for the tab a click claims: it records where it was sent, whether it still had a handle
  * on this window at that moment, and whether it was closed.
@@ -382,5 +407,170 @@ describe("CompanionsApp Box desktop", () => {
     });
     expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Box · asleep");
+  });
+});
+
+/**
+ * Product promise:
+ * A runner opens the Computer panel and watches the Box desktop in the thread. Every join mints its
+ * own URL, the desktop tab is still one click away, and no part of this can start a Box.
+ *
+ * Regression guarded:
+ * Box rotates the stream token on every state change, so a URL held from an earlier join is one that
+ * has already stopped working. A panel that replayed a stored URL would show a dead stream, and a
+ * panel that kept one across a Box that stopped would show a screen belonging to nothing.
+ */
+describe("CompanionsApp Computer panel", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    companionsApi.getCompanionThread.mockResolvedValue(thread());
+    companionsApi.syncCompanionThread.mockResolvedValue(thread());
+    companionsApi.getCompanionRuntime.mockResolvedValue(companion());
+    window.open = vi.fn();
+  });
+
+  afterEach(() => {
+    act(() => roots.splice(0).forEach((root) => root.unmount()));
+    document.body.innerHTML = "";
+    vi.useRealTimers();
+  });
+
+  it("mints a desktop when a runner opens the panel and shows it in the thread", async () => {
+    companionsApi.openCompanionDesktop.mockResolvedValue(
+      desktopPayload("https://box.ascii.dev/vnc/bx_23456789?token=first"),
+    );
+    const container = await open(companion());
+
+    // Opening the thread alone contacts no desktop: the panel is what a runner asks for.
+    expect(companionsApi.openCompanionDesktop).not.toHaveBeenCalled();
+    expect(panelFrame(container)).toBeNull();
+
+    await clickComputerToggle(container);
+
+    expect(companionsApi.openCompanionDesktop).toHaveBeenCalledWith("org-1", companionId);
+    expect(panelFrame(container)?.getAttribute("src"))
+      .toBe("https://box.ascii.dev/vnc/bx_23456789?token=first");
+    // A live desktop is a read of a Box that is already running, never a start.
+    expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
+    // The tab handoff is untouched by the panel being open.
+    expect(window.open).not.toHaveBeenCalled();
+  });
+
+  it("mints another desktop each time the panel is joined", async () => {
+    companionsApi.openCompanionDesktop
+      .mockResolvedValueOnce(desktopPayload("https://box.ascii.dev/vnc/bx_23456789?token=first"))
+      .mockResolvedValueOnce(desktopPayload("https://box.ascii.dev/vnc/bx_23456789?token=second"));
+    const container = await open(companion());
+
+    await clickComputerToggle(container);
+
+    expect(panelFrame(container)?.getAttribute("src")).toContain("token=first");
+
+    // Closing the panel drops the stream, and opening it again is a new join rather than a replay.
+    await clickComputerToggle(container);
+
+    expect(panelFrame(container)).toBeNull();
+
+    await clickComputerToggle(container);
+
+    expect(companionsApi.openCompanionDesktop).toHaveBeenCalledTimes(2);
+    expect(panelFrame(container)?.getAttribute("src")).toContain("token=second");
+  });
+
+  it("keeps a desktop the panel could not mint off screen and says why", async () => {
+    companionsApi.openCompanionDesktop.mockResolvedValue(desktopPayload(null));
+    const container = await open(companion());
+
+    await clickComputerToggle(container);
+
+    expect(panelFrame(container)).toBeNull();
+    expect(container.textContent).toContain("The Box desktop is still starting");
+  });
+
+  it("reports a refused join on the panel without the token the URL carries", async () => {
+    companionsApi.openCompanionDesktop.mockRejectedValue(new Error("Box is unreachable."));
+    const container = await open(companion());
+
+    await clickComputerToggle(container);
+
+    expect(container.textContent).toContain("Box is unreachable.");
+    expect(container.textContent).not.toContain("token=");
+    expect(panelFrame(container)).toBeNull();
+  });
+
+  it("drops the stream when the Box stops under an open panel", async () => {
+    vi.useFakeTimers();
+    companionsApi.openCompanionDesktop.mockResolvedValue(
+      desktopPayload("https://box.ascii.dev/vnc/bx_23456789?token=first"),
+    );
+    // The runner's slow re-observation finds the Box has stopped underneath the stream.
+    companionsApi.getCompanionRuntime.mockResolvedValue(companion({
+      runtime: { ...companion().runtime, state: "stopped", daemon_state: "stopped" },
+    }));
+    const container = await open(companion());
+
+    await clickComputerToggle(container);
+
+    expect(panelFrame(container)?.getAttribute("src")).toContain("token=first");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+
+    // A stopped Box has no screen, and its last URL must not be left on one.
+    expect(panelFrame(container)).toBeNull();
+    expect(container.innerHTML).not.toContain("token=first");
+    expect(container.textContent).toContain("this Box is not running");
+    expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
+  });
+
+  it("wakes an asleep Box from the panel only when a runner asks", async () => {
+    companionsApi.startCompanionRuntime.mockResolvedValue(companion());
+    companionsApi.openCompanionDesktop.mockResolvedValue(
+      desktopPayload("https://box.ascii.dev/vnc/bx_23456789?token=first"),
+    );
+    const asleep = companion({
+      runtime: { ...companion().runtime, state: "stopped", daemon_state: "stopped" },
+    });
+    const container = await open(asleep);
+
+    await clickComputerToggle(container);
+
+    // Opening the panel on a sleeping Box mints nothing and starts nothing.
+    expect(companionsApi.openCompanionDesktop).not.toHaveBeenCalled();
+    expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("this Box is not running");
+
+    const wake = [...container.querySelectorAll(".chat-computer__actions button")]
+      .find((button) => (button.textContent ?? "").includes("Wake")) as HTMLButtonElement;
+    await act(async () => {
+      wake.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    // The wake is the existing one, and the Box it brings up is then joined for its screen.
+    expect(companionsApi.startCompanionRuntime).toHaveBeenCalledWith("org-1", companionId);
+    expect(companionsApi.openCompanionDesktop).toHaveBeenCalledTimes(1);
+    expect(panelFrame(container)?.getAttribute("src")).toContain("token=first");
+  });
+
+  it("never gives a Viewer a panel to open, so it cannot become their wake", async () => {
+    vi.useFakeTimers();
+    companionsApi.getCompanionThread.mockResolvedValue(
+      thread({ viewer_id: "user-9", access: "viewer", read_only: true, can_send: false }),
+    );
+    const container = await open(companion({
+      access: "viewer",
+      runtime: { ...companion().runtime, box_id: null, desktop_available: false },
+    }));
+
+    const toggle = await clickComputerToggle(container);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    expect(toggle).toBeNull();
+    expect(panelFrame(container)).toBeNull();
+    expect(companionsApi.openCompanionDesktop).not.toHaveBeenCalled();
+    expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
   });
 });

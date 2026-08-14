@@ -488,15 +488,28 @@ export const companionRuntimeStatusSchema = z.object({
 export type CompanionRuntimeStatus = z.infer<typeof companionRuntimeStatusSchema>;
 
 /**
+ * How the minted desktop URL carries the screen. VNC is a plain WebSocket stream that survives
+ * networks which block peer-to-peer traffic, so it is asked for first; `webrtc` is the fallback Box
+ * offers when a Box has no VNC stream to give.
+ */
+export const companionDesktopTransportSchema = z.enum(["vnc", "webrtc"]);
+export type CompanionDesktopTransport = z.infer<typeof companionDesktopTransportSchema>;
+
+/**
  * Owner/Editor handoff to the Box desktop. Computer use is that desktop driven by Lux and nothing
  * else, so the payload names the automation instead of leaving the surface to pick one. The URL is
  * secret-bearing and belongs to the authorized caller alone: it is never stored or logged, and it
  * is null while Box is still provisioning the desktop of a Box that is already running.
+ *
+ * Every request mints a fresh URL. Box rotates the stream token on each state change, so a stored
+ * one is a URL that has already stopped working, and `transport` names which stream this mint got
+ * rather than leaving the surface to guess at the one it was handed.
  */
 export const companionDesktopSchema = z.object({
   desktop_url: z.string().url().nullable(),
   provisioning: z.boolean(),
   automation: z.literal("lux"),
+  transport: companionDesktopTransportSchema.nullable(),
 }).strict();
 export type CompanionDesktop = z.infer<typeof companionDesktopSchema>;
 

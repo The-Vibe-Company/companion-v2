@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type {
   Companion,
+  CompanionDesktop,
   CompanionPluginAccount,
   CompanionProvidersResponse,
   CompanionThread as Thread,
@@ -138,7 +139,23 @@ export function CompanionsApp({
   const [sending, setSending] = useState(false);
   const [waking, setWaking] = useState(false);
   const [openingDesktop, setOpeningDesktop] = useState(false);
+  /**
+   * Whether a runner asked for the Computer panel. It is a preference rather than a property of one
+   * Companion, so it survives moving between threads: an operator who wants to watch the screen wants
+   * to watch the next Companion's too.
+   */
+  const [computerOpen, setComputerOpen] = useState(false);
+  /**
+   * The desktop the open panel is showing. Box rotates the stream token on every state change, so
+   * this is held for exactly as long as the join that minted it is on screen and is never stored:
+   * closing the panel, moving to another Companion, and a Box that stops all drop it.
+   */
+  const [computerDesktop, setComputerDesktop] = useState<CompanionDesktop | null>(null);
+  const [joiningComputer, setJoiningComputer] = useState(false);
+  const [computerError, setComputerError] = useState<string | null>(null);
   const threadRequestRef = useRef(0);
+  /** Newest panel join, so a slower mint cannot put its stream on screen after a newer one. */
+  const computerJoinRef = useRef(0);
   /** Newest runtime read per Companion, so a slower one cannot answer over it. */
   const companionReadRef = useRef(new Map<string, number>());
   const threadQueueRef = useRef(createThreadQueue());
@@ -400,6 +417,62 @@ export function CompanionsApp({
     }
   };
 
+  /**
+   * One join of the Computer panel: mint this Companion's desktop and show it in the panel. It is the
+   * same authorized handoff the desktop tab uses, so it observes a Box that is already running and
+   * can never create or resume one — opening the panel is not a wake, and a Viewer never reaches it.
+   *
+   * The URL is minted for this join alone. It is held in state only while the panel shows it, so
+   * nothing here can hand a later join a stream token Box has already rotated away.
+   */
+  const joinComputer = useCallback(async () => {
+    if (!openedId || !canRunOpened || !openedAwake) return;
+    const joinId = ++computerJoinRef.current;
+    setJoiningComputer(true);
+    setComputerError(null);
+    setComputerDesktop(null);
+    try {
+      const minted = await openCompanionDesktop(currentOrg.id, openedId);
+      if (computerJoinRef.current !== joinId) return;
+      setComputerDesktop(minted);
+      if (!minted.desktop_url) {
+        setComputerError(minted.provisioning
+          ? "The Box desktop is still starting. Reconnect in a moment."
+          : "This Box has no desktop to show yet.");
+      }
+    } catch (cause) {
+      if (computerJoinRef.current !== joinId) return;
+      // The reason is kept on the panel rather than the thread: the live thread poll clears its own
+      // notice every couple of seconds, which would erase this one before it could be read.
+      setComputerError(cause instanceof Error
+        ? cause.message
+        : "The Box desktop could not be reached.");
+    } finally {
+      if (computerJoinRef.current === joinId) setJoiningComputer(false);
+    }
+  }, [canRunOpened, currentOrg.id, openedAwake, openedId]);
+
+  /** Whether the panel has a running Box of a runner's to show, which is the only thing it streams. */
+  const computerLive = computerOpen && canRunOpened && openedAwake;
+
+  // Every join mints its own URL: opening the panel, moving to another Companion, and a Box that came
+  // back up are each a fresh mint, because Box rotates the stream token on every state change and a
+  // kept URL is one that has already stopped working.
+  useEffect(() => {
+    if (!openedId || !computerLive) return;
+    void joinComputer();
+  }, [computerLive, joinComputer, openedId]);
+
+  // A closed panel, a Companion left behind, and a Box that stopped under the stream all leave no
+  // desktop: the URL goes with the join it belonged to, and an in-flight mint is disowned.
+  useEffect(() => {
+    if (computerLive) return;
+    computerJoinRef.current += 1;
+    setComputerDesktop(null);
+    setJoiningComputer(false);
+    setComputerError(null);
+  }, [computerLive]);
+
   const onCreated = (companion: Companion) => {
     setCompanions((current) => [companion, ...current]);
     setCreating(false);
@@ -554,6 +627,14 @@ export function CompanionsApp({
               busy={sending}
               waking={waking}
               openingDesktop={openingDesktop}
+              computer={{
+                open: computerOpen,
+                desktop: computerDesktop,
+                joining: joiningComputer,
+                error: computerError,
+                onToggle: () => setComputerOpen((open) => !open),
+                onJoin: () => void joinComputer(),
+              }}
               onBack={closeThread}
               onSend={onSend}
               onWake={() => void onWake()}

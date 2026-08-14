@@ -1093,16 +1093,153 @@ button.chat-box:focus-visible {
   outline-offset: 2px;
 }
 
+/* The Computer toggle lives with the chip, in the same header row. Its pressed state is what says the
+   panel is open, so the control still reads correctly when the panel itself is off screen. */
+.chat-computer-toggle {
+  border-color: var(--color-line);
+}
+
+.chat-computer-toggle--on {
+  border-color: var(--color-accent-line);
+  background: var(--color-accent-tint);
+  color: var(--color-accent-edge);
+}
+
+.chat-computer-toggle:focus-visible {
+  outline: 2px solid var(--color-accent-ring);
+  outline-offset: 1px;
+}
+
 .chat .companions-error {
   flex: none;
   margin: 12px var(--chat-gutter) 0;
 }
 
-.chat-thread {
+/* The room below the header, shared by the conversation and the Computer panel. The conversation is
+   the part that gives, so the panel keeps the width it asks for and the reading column narrows around
+   it; the gutter is a percentage resolved where it is used, so the turns stay centred either way. */
+.chat-stage {
   flex: 1;
   min-height: 0;
   display: flex;
+  align-items: stretch;
+}
+
+.chat-thread {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
   flex-direction: column;
+}
+
+/* The Companion's screen, beside its conversation. */
+.chat-computer {
+  flex: none;
+  width: min(440px, 40%);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--color-line);
+  background: var(--color-surface);
+}
+
+.chat-computer__head {
+  flex: none;
+  min-height: 46px;
+  padding: 8px 10px 8px 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--color-line);
+  color: var(--color-muted);
+}
+
+.chat-computer__head h2 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--color-fg);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  letter-spacing: var(--tracking-tight);
+}
+
+/* Which of the two Box streams this join got. It is the difference between a desktop that will hold
+   on a network that blocks peer-to-peer traffic and one that may not, so it is said rather than
+   inferred from a picture that either appears or does not. */
+.chat-computer__transport {
+  flex: none;
+  padding: 2px 7px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-full);
+  background: var(--color-surface-raised);
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+}
+
+.chat-computer__screen {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  background: var(--color-surface-raised);
+}
+
+/* The desktop arrives at the Box's own aspect ratio, so the frame takes the pane and the stream
+   letterboxes itself inside it rather than being stretched to fit. */
+.chat-computer__frame {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  background: var(--color-surface-sunken);
+}
+
+.chat-computer__empty {
+  flex: 1;
+  min-width: 0;
+  padding: 24px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--color-muted);
+  text-align: center;
+}
+
+.chat-computer__empty strong {
+  color: var(--color-fg);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.chat-computer__empty p {
+  margin: 0;
+  max-width: 34ch;
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+.chat-computer__error {
+  flex: none;
+  margin: 0;
+  padding: 10px 14px;
+  border-top: 1px solid var(--color-danger-line);
+  background: var(--color-danger-tint);
+  color: var(--color-fg);
+  font-size: var(--text-xs);
+}
+
+.chat-computer__actions {
+  flex: none;
+  padding: 10px 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  border-top: 1px solid var(--color-line);
 }
 
 /* The conversation is the only thing that scrolls on a thread. A flick that reaches either end stops
@@ -1374,6 +1511,19 @@ button.chat-box:focus-visible {
   .companions-row--head > span:nth-child(3),
   .companions-row__time {
     display: none;
+  }
+
+  /* Below this width there is no room for a desktop beside a conversation without squeezing both into
+     uselessness, so the two share the stage instead: the Computer panel takes it, and the toggle in
+     the header is how an operator goes back to the conversation. */
+  .chat-stage--computer .chat-thread {
+    display: none;
+  }
+
+  .chat-stage--computer .chat-computer {
+    width: auto;
+    flex: 1;
+    border-left: 0;
   }
 }
 

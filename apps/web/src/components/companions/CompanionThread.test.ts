@@ -2,7 +2,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Companion, CompanionThread as Thread } from "@companion/contracts";
 import { describe, expect, it } from "vitest";
-import { CompanionThread } from "./CompanionThread";
+import { CompanionThread, type CompanionComputerPanel } from "./CompanionThread";
 
 const companionId = "11111111-1111-4111-8111-111111111111";
 
@@ -65,6 +65,19 @@ function thread(overrides: Partial<Thread> = {}): Thread {
   };
 }
 
+/** A closed Computer panel: what a thread opens with, and what most of these cases render. */
+function computerPanel(overrides: Partial<CompanionComputerPanel> = {}): CompanionComputerPanel {
+  return {
+    open: false,
+    desktop: null,
+    joining: false,
+    error: null,
+    onToggle: () => {},
+    onJoin: () => {},
+    ...overrides,
+  };
+}
+
 function render(props: {
   companion?: Companion;
   thread?: Thread | null;
@@ -72,6 +85,7 @@ function render(props: {
   busy?: boolean;
   waking?: boolean;
   openingDesktop?: boolean;
+  computer?: Partial<CompanionComputerPanel>;
 }) {
   return renderToStaticMarkup(React.createElement(CompanionThread, {
     companion: props.companion ?? companion(),
@@ -80,6 +94,7 @@ function render(props: {
     busy: props.busy ?? false,
     waking: props.waking ?? false,
     openingDesktop: props.openingDesktop ?? false,
+    computer: computerPanel(props.computer),
     onBack: () => {},
     onSend: async () => true,
     onWake: () => {},

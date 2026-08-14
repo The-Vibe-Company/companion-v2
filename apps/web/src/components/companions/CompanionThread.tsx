@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import type { Companion, CompanionThread as Thread } from "@companion/contracts";
+import type { Companion, CompanionDesktop, CompanionThread as Thread } from "@companion/contracts";
 import { Icon } from "../Icon";
+import { CompanionComputer } from "./CompanionComputer";
 import { CompanionTranscript } from "./CompanionTranscript";
 import {
   COMPANION_BOX_CHIP_PREFIX,
@@ -13,10 +14,29 @@ import {
 import { useVisualViewportPin } from "./useVisualViewportPin";
 
 /**
- * One Companion, one thread. The header carries the identity, the Box status chip, and at most one
- * lifecycle control; the conversation and the composer below it are the assistant-ui primitives. The
- * transcript is the control-plane read model, so a Viewer sees the conversation without any Box
- * contact and gets no composer. Pi's tools and skills stay out of this surface by design.
+ * What the Computer panel beside the conversation is showing, and how a runner drives it. The mint
+ * itself belongs to the surface that owns the org and the open Companion, so this is the state it
+ * hands down: a desktop is only ever the one minted for the join now on screen.
+ */
+export interface CompanionComputerPanel {
+  open: boolean;
+  desktop: CompanionDesktop | null;
+  joining: boolean;
+  error: string | null;
+  onToggle: () => void;
+  onJoin: () => void;
+}
+
+/**
+ * One Companion, one thread. The header carries the identity, the Box status chip, the Computer
+ * toggle, and at most one lifecycle control; the conversation and the composer below it are the
+ * assistant-ui primitives. The transcript is the control-plane read model, so a Viewer sees the
+ * conversation without any Box contact and gets no composer. Pi's tools and skills stay out of this
+ * surface by design.
+ *
+ * A runner can open the Computer panel beside the conversation to watch the Box desktop itself. It is
+ * a second pane rather than a change to the transcript: the primitives keep the conversation, the
+ * composer, and their own mechanics untouched whether the panel is open or not.
  */
 export function CompanionThread({
   companion,
@@ -25,6 +45,7 @@ export function CompanionThread({
   busy,
   waking,
   openingDesktop,
+  computer,
   onBack,
   onSend,
   onWake,
@@ -36,6 +57,7 @@ export function CompanionThread({
   busy: boolean;
   waking: boolean;
   openingDesktop: boolean;
+  computer: CompanionComputerPanel;
   onBack: () => void;
   onSend: (content: string, clientMessageId: string) => Promise<boolean>;
   onWake: () => void;
@@ -51,6 +73,9 @@ export function CompanionThread({
   // keeps one control. A Viewer reads the same chip without the action: a sleeping Box has no
   // desktop, and a Viewer must never be handed anything that could start one.
   const canOpenDesktop = canSend && awake;
+  // Computer use in the thread is the same runner surface, and a Viewer never gets it: the panel
+  // cannot start a Box, but it must not offer a Viewer a control that looks as if it could.
+  const showComputer = canSend && computer.open;
   // A red status without a reason tells an operator nothing. The failure this request saw wins;
   // otherwise the reason recorded on the Companion explains an Error state across reloads.
   const notice = error ?? companion.runtime.last_error;
@@ -101,6 +126,18 @@ export function CompanionThread({
             <span className="chat-box__state">{boxWord}</span>
           </span>
         )}
+        {canSend && (
+          <button
+            type="button"
+            className={"iconbtn chat-computer-toggle"
+              + (computer.open ? " chat-computer-toggle--on" : "")}
+            aria-label={computer.open ? "Hide the Computer panel" : "Show the Computer panel"}
+            aria-pressed={computer.open}
+            onClick={computer.onToggle}
+          >
+            <Icon name="monitor" size={16} />
+          </button>
+        )}
         {canSend && !awake && (
           <button
             type="button"
@@ -116,18 +153,39 @@ export function CompanionThread({
       {notice && <div className="companions-error" role="alert">{notice}</div>}
 
       {/*
-        Keyed by Companion: the transcript owns the runtime and the composer, and a half-typed message
-        belongs to the conversation it was meant for. Opening another Companion must hand over an empty
-        composer rather than the previous draft, which would otherwise be one Enter away from the wrong
-        thread.
+        The conversation and, for a runner who asked for it, the Computer panel share the room below
+        the header. A narrow screen has room for one of them, so there the panel takes the stage and
+        the toggle in the header is how an operator moves between the two.
       */}
-      <CompanionTranscript
-        key={companion.id}
-        companion={companion}
-        thread={thread}
-        busy={busy}
-        onSend={onSend}
-      />
+      <div className={"chat-stage" + (showComputer ? " chat-stage--computer" : "")}>
+        {/*
+          Keyed by Companion: the transcript owns the runtime and the composer, and a half-typed
+          message belongs to the conversation it was meant for. Opening another Companion must hand
+          over an empty composer rather than the previous draft, which would otherwise be one Enter
+          away from the wrong thread.
+        */}
+        <CompanionTranscript
+          key={companion.id}
+          companion={companion}
+          thread={thread}
+          busy={busy}
+          onSend={onSend}
+        />
+        {showComputer && (
+          <CompanionComputer
+            companion={companion}
+            desktop={computer.desktop}
+            joining={computer.joining}
+            error={computer.error}
+            openingDesktop={openingDesktop}
+            waking={waking}
+            onJoin={computer.onJoin}
+            onDesktop={onDesktop}
+            onWake={onWake}
+            onClose={computer.onToggle}
+          />
+        )}
+      </div>
     </section>
   );
 }
