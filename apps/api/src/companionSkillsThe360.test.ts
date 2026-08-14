@@ -22,6 +22,20 @@ vi.mock("@companion/core", async (importOriginal) => ({
   assertCompanionCanWriteSkills: coreMocks.assertCompanionCanWriteSkills,
 }));
 
+// The gate never touches Better Auth, so replace `@companion/auth` outright instead of spreading the
+// original: importing it would pull better-auth and its Drizzle adapter into this file for nothing.
+vi.mock("@companion/auth", () => ({
+  auth: { api: { getSession: vi.fn() }, $Infer: {} },
+  authenticateAgentRequest: vi.fn(),
+}));
+
+// Load the module graph under test at collection time. `./context` reaches @companion/core and
+// @companion/db, and a cold `await import("./context")` inside a test body spent more than the 5s
+// default timeout on Node 20 CI runners (THE-363). Static imports run after the hoisted vi.mock
+// calls above, so the mocks still apply — keep these imports static.
+import { requireCompanionWriteSkillsIfNeeded } from "./context";
+import { companionSchema, createCompanionInputSchema } from "@companion/contracts";
+
 function companionContext(overrides: Record<string, unknown> = {}) {
   const values: Record<string, unknown> = {
     tokenSourceType: "companion",
@@ -43,13 +57,11 @@ describe("Companion write-on-behalf gate", () => {
   });
 
   it("skips the gate for non-companion tokens", async () => {
-    const { requireCompanionWriteSkillsIfNeeded } = await import("./context");
     await requireCompanionWriteSkillsIfNeeded(companionContext({ tokenSourceType: "pat" }));
     expect(dbMocks.withTenantContext).not.toHaveBeenCalled();
   }, 15_000);
 
   it("re-checks can_write_skills inside the token owner's tenant context", async () => {
-    const { requireCompanionWriteSkillsIfNeeded } = await import("./context");
     await requireCompanionWriteSkillsIfNeeded(companionContext());
     expect(dbMocks.withTenantContext).toHaveBeenCalledWith(
       { orgId: "00000000-0000-4000-8000-000000000001", userId: "user-1" },
@@ -63,7 +75,6 @@ describe("Companion write-on-behalf gate", () => {
   });
 
   it("rejects skills:write when the Companion toggle is off", async () => {
-    const { requireCompanionWriteSkillsIfNeeded } = await import("./context");
     coreMocks.assertCompanionCanWriteSkills.mockRejectedValue(
       new CompanionWriteSkillsForbiddenError(),
     );
@@ -72,7 +83,6 @@ describe("Companion write-on-behalf gate", () => {
   });
 
   it("fails closed when companion provenance is missing an actor for the RLS re-check", async () => {
-    const { requireCompanionWriteSkillsIfNeeded } = await import("./context");
     await expect(requireCompanionWriteSkillsIfNeeded(companionContext({ tokenActor: null })))
       .rejects.toBeInstanceOf(CompanionWriteSkillsForbiddenError);
     expect(dbMocks.withTenantContext).not.toHaveBeenCalled();
@@ -80,11 +90,7 @@ describe("Companion write-on-behalf gate", () => {
 });
 
 describe("Companion skill allow-list contracts", () => {
-  it("defaults write-on-behalf off and accepts an empty selection", async () => {
-    const {
-      createCompanionInputSchema,
-      companionSchema,
-    } = await import("@companion/contracts");
+  it("defaults write-on-behalf off and accepts an empty selection", () => {
     expect(createCompanionInputSchema.parse({
       name: "Luna",
       provider_id: "anthropic",
