@@ -263,13 +263,33 @@ so neither the Box script nor the adapter treats it as a failed read. Only outpu
 in it means the Box never ran the read, and only that fails, carrying the exit status and the last
 line the Box printed.
 
-The projection deliberately keeps only conversation: Pi assistant text, plus a system note when a
-turn errors or is aborted. Tool calls and tool results are dropped, so no Pi tool or Skills chrome
-reaches the thread UI. Thinking is dropped the same way whenever the turn produced text; a turn that
-ended with thinking and no text part at all shows that reasoning as the reply, because some models
-answer a short question inside the thinking block. A turn that ends with nothing visible records a
-system note instead, so a settled turn is never silence the reader has to interpret as a hang. A
-mid-turn tool step carries no visible content either and stays out of the thread.
+The projection keeps conversation plus the work behind it: Pi assistant text, a system note when a
+turn errors or is aborted, and one entry per tool call. Thinking is dropped whenever the turn produced
+text; a turn that ended with thinking and no text part at all shows that reasoning as the reply,
+because some models answer a short question inside the thinking block. A turn that ends with nothing
+visible records a system note instead, so a settled turn is never silence the reader has to interpret
+as a hang.
+
+A tool call becomes its own transcript entry rather than being folded into the assistant turn that
+made it, so the chip keeps an ordinal and sits between the turns in the order Pi worked. The entry
+carries the run in `companion_transcript_entries.tool`, and the `tool` role and that column are
+coupled by a check constraint, so no other role can carry a run and a run cannot exist without one.
+The run names the call, a kind read from the tool's name (`shell`, `file`, `browse`, `computer`, or a
+plain `tool`), a short title, the arguments as truncated detail, and a status that starts `running`.
+Pi's tool result then settles it: a result naming its call closes exactly that chip, a harness that
+reports no call id closes the oldest chip still running, and a result matching nothing is dropped
+rather than guessed at, so a chunk read twice cannot close a run some later call started. A run whose
+result never arrives stays `running`, which is what the reader is owed — the chip spins because the
+tool has not answered.
+
+A visual run — `browse` or `computer` — is worth a picture, so when one settles the sync captures a
+single frame of the Box desktop and stores it on that run as a `data:` URL, bounded to the same size
+limit the contract enforces. It is one frame per sync and only for the most recent settled visual run
+that has none, taken with the screenshot tool the Box already has; a Box with no desktop, no capture
+tool, or a capture that fails simply leaves the chip without a picture rather than failing the sync.
+Frames are never uploaded to object storage and never minted as a desktop URL, so a screenshot in the
+thread is not a second way to reach a live stream. Because capture happens on the Owner/Editor sync
+path, a Viewer reads chips and whatever frames were already stored without any of it touching a Box.
 
 Delivery reads the pending list before it claims the watermark, so two requests that overlap inside
 that window can hand Pi the same prompt twice. One client cannot do this: the web surface runs its
