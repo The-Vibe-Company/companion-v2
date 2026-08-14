@@ -146,13 +146,21 @@ export function CompanionsApp({
    */
   const [computerOpen, setComputerOpen] = useState(false);
   /**
-   * The desktop the open panel is showing. Box rotates the stream token on every state change, so
-   * this is held for exactly as long as the join that minted it is on screen and is never stored:
-   * closing the panel, moving to another Companion, and a Box that stops all drop it.
+   * The one join the open panel is showing, and the Companion it was minted for. Box rotates the
+   * stream token on every state change, so a desktop is held for exactly as long as the join that
+   * minted it is on screen and is never stored: closing the panel, moving to another Companion, and a
+   * Box that stops all drop it.
+   *
+   * The Companion is part of the state rather than assumed, because the panel preference outlives one
+   * thread. Without it, opening another Companion would frame the previous one's screen — and its
+   * secret-bearing URL — under the new Companion's name until the next mint answered.
    */
-  const [computerDesktop, setComputerDesktop] = useState<CompanionDesktop | null>(null);
-  const [joiningComputer, setJoiningComputer] = useState(false);
-  const [computerError, setComputerError] = useState<string | null>(null);
+  const [computerJoin, setComputerJoin] = useState<{
+    companionId: string;
+    desktop: CompanionDesktop | null;
+    error: string | null;
+    joining: boolean;
+  } | null>(null);
   const threadRequestRef = useRef(0);
   /** Newest panel join, so a slower mint cannot put its stream on screen after a newer one. */
   const computerJoinRef = useRef(0);
@@ -427,33 +435,43 @@ export function CompanionsApp({
    */
   const joinComputer = useCallback(async () => {
     if (!openedId || !canRunOpened || !openedAwake) return;
+    const companionId = openedId;
     const joinId = ++computerJoinRef.current;
-    setJoiningComputer(true);
-    setComputerError(null);
-    setComputerDesktop(null);
+    setComputerJoin({ companionId, desktop: null, error: null, joining: true });
     try {
-      const minted = await openCompanionDesktop(currentOrg.id, openedId);
+      const minted = await openCompanionDesktop(currentOrg.id, companionId);
       if (computerJoinRef.current !== joinId) return;
-      setComputerDesktop(minted);
-      if (!minted.desktop_url) {
-        setComputerError(minted.provisioning
-          ? "The Box desktop is still starting. Reconnect in a moment."
-          : "This Box has no desktop to show yet.");
-      }
+      setComputerJoin({
+        companionId,
+        desktop: minted,
+        error: minted.desktop_url
+          ? null
+          : minted.provisioning
+            ? "The Box desktop is still starting. Reconnect in a moment."
+            : "This Box has no desktop to show yet.",
+        joining: false,
+      });
     } catch (cause) {
       if (computerJoinRef.current !== joinId) return;
       // The reason is kept on the panel rather than the thread: the live thread poll clears its own
       // notice every couple of seconds, which would erase this one before it could be read.
-      setComputerError(cause instanceof Error
-        ? cause.message
-        : "The Box desktop could not be reached.");
-    } finally {
-      if (computerJoinRef.current === joinId) setJoiningComputer(false);
+      setComputerJoin({
+        companionId,
+        desktop: null,
+        error: cause instanceof Error ? cause.message : "The Box desktop could not be reached.",
+        joining: false,
+      });
     }
   }, [canRunOpened, currentOrg.id, openedAwake, openedId]);
 
   /** Whether the panel has a running Box of a runner's to show, which is the only thing it streams. */
   const computerLive = computerOpen && canRunOpened && openedAwake;
+  /**
+   * The join the panel may show right now, which is only ever the open Companion's. A join belonging
+   * to the Companion an operator just left is not shown for the paint before its replacement is
+   * minted: a panel that is live with nothing of this Companion's yet is a panel that is connecting.
+   */
+  const openedComputer = computerJoin?.companionId === openedId ? computerJoin : null;
 
   // Every join mints its own URL: opening the panel, moving to another Companion, and a Box that came
   // back up are each a fresh mint, because Box rotates the stream token on every state change and a
@@ -468,9 +486,7 @@ export function CompanionsApp({
   useEffect(() => {
     if (computerLive) return;
     computerJoinRef.current += 1;
-    setComputerDesktop(null);
-    setJoiningComputer(false);
-    setComputerError(null);
+    setComputerJoin(null);
   }, [computerLive]);
 
   const onCreated = (companion: Companion) => {
@@ -629,9 +645,9 @@ export function CompanionsApp({
               openingDesktop={openingDesktop}
               computer={{
                 open: computerOpen,
-                desktop: computerDesktop,
-                joining: joiningComputer,
-                error: computerError,
+                desktop: openedComputer?.desktop ?? null,
+                joining: openedComputer?.joining ?? computerLive,
+                error: openedComputer?.error ?? null,
                 onToggle: () => setComputerOpen((open) => !open),
                 onJoin: () => void joinComputer(),
               }}

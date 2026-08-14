@@ -59,12 +59,13 @@ COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=thevibecompany.co
 ```
 
 With the flag unset or `false`, `/companions`, `/v1/companions`, and `/v1/companion-providers`
-return not found and no Companions navigation is rendered. The Pi/Box harness itself stays out of the
-web shell: it has a compact provider picker, one Box status chip, and one Computer panel showing that
-Box's desktop, but no Pi, runtime, or harness controls of its own.
-The same fail-closed behavior applies when the flag is `true` but the allowlist is unset or empty.
-With both values configured, users need an exact matching email domain. Missing or malformed emails
-are always denied.
+return not found and no Companions navigation is rendered. The same fail-closed behavior applies when
+the flag is `true` but the allowlist is unset or empty. With both values configured, users need an
+exact matching email domain. Missing or malformed emails are always denied.
+
+Once Companions is enabled, the Pi/Box harness itself still stays out of the web shell: a thread has
+a compact provider picker, one Box status chip, and one Computer panel showing that Box's desktop,
+but no Pi, runtime, or harness controls of its own.
 
 Configured Owner/Editor lifecycle calls use Pi inside a no-env [Box](https://box.ascii.dev). Set:
 

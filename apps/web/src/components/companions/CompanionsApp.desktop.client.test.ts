@@ -109,7 +109,7 @@ function thread(overrides: Partial<Thread> = {}): Thread {
 
 const roots: Root[] = [];
 
-async function open(initial: Companion) {
+async function open(initial: Companion, others: Companion[] = []) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -119,7 +119,7 @@ async function open(initial: Companion) {
       orgs: [org],
       currentOrg: org,
       navigation,
-      initialCompanions: [initial],
+      initialCompanions: [initial, ...others],
       initialProviders: providers,
       initialPlugins: [],
       initialCompanionId: companionId,
@@ -551,6 +551,38 @@ describe("CompanionsApp Computer panel", () => {
     expect(companionsApi.startCompanionRuntime).toHaveBeenCalledWith("org-1", companionId);
     expect(companionsApi.openCompanionDesktop).toHaveBeenCalledTimes(1);
     expect(panelFrame(container)?.getAttribute("src")).toContain("token=first");
+  });
+
+  it("hands the panel the open Companion's own join when a runner switches threads", async () => {
+    const otherId = "22222222-2222-4222-8222-222222222222";
+    const other = companion({ id: otherId, name: "Nova" });
+    companionsApi.getCompanionThread.mockImplementation(async (_org: string, id: string) =>
+      thread({ companion_id: id }));
+    companionsApi.getCompanionRuntime.mockImplementation(async (_org: string, id: string) =>
+      (id === otherId ? other : companion()));
+    companionsApi.openCompanionDesktop
+      .mockResolvedValueOnce(desktopPayload("https://box.ascii.dev/vnc/bx_23456789?token=luna"))
+      .mockResolvedValueOnce(desktopPayload("https://box.ascii.dev/vnc/bx_34567890?token=nova"));
+    const container = await open(companion(), [other]);
+
+    await clickComputerToggle(container);
+
+    expect(panelFrame(container)?.getAttribute("src")).toContain("token=luna");
+
+    // The sidebar moves between threads without closing the panel, so the panel has to follow the
+    // Companion rather than keep the screen it was already showing.
+    const row = [...container.querySelectorAll(".cmprow")]
+      .find((button) => (button.getAttribute("aria-label") ?? "").startsWith("Nova")) as HTMLButtonElement;
+    await act(async () => {
+      row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    // One Companion's stream is never another's: the previous token is gone from the document, and
+    // this Companion's screen is one this join minted for it.
+    expect(container.innerHTML).not.toContain("token=luna");
+    expect(panelFrame(container)?.getAttribute("src")).toContain("token=nova");
+    expect(companionsApi.openCompanionDesktop).toHaveBeenNthCalledWith(2, "org-1", otherId);
+    expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
   });
 
   it("never gives a Viewer a panel to open, so it cannot become their wake", async () => {
