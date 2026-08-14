@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   COMPANION_RUNTIME_ERROR_VIEWER_MESSAGE,
+  COMPANION_RUNTIME_START_BUDGET_MS,
+  CompanionRuntimeTransitionError,
   claimCompanionRuntimeStart,
   getCompanion,
   updateCompanionObservation,
@@ -116,6 +118,41 @@ describe("Companion runtime error reporting", () => {
     expect(claimed.runtime.state).toBe("provisioning");
     expect(claimed.runtime.last_error).toBeNull();
     expect(await storedError()).toBeNull();
+  });
+
+  /**
+   * THE-340: a wake that dies without writing anything leaves its `provisioning` claim behind, and
+   * the Companion reads as Starting until that claim may be taken. The window is the wake's own start
+   * budget plus the room a live wake needs to record its failure on the way out, so a claim younger
+   * than the budget still belongs to whoever holds it and an older one belongs to nobody.
+   */
+  it.each([
+    ["refuses a claim a live wake could still be inside", COMPANION_RUNTIME_START_BUDGET_MS - 30_000],
+    ["takes over a claim no live wake can still be holding", COMPANION_RUNTIME_START_BUDGET_MS + 60_000],
+  ])("%s", async (_case, age) => {
+    await integrationSql`
+      update companions
+      set runtime_state = 'provisioning',
+          daemon_state = 'starting',
+          last_error = null,
+          updated_at = ${new Date(Date.now() - age).toISOString()}
+      where id = ${companionId}
+    `;
+
+    const claim = asOwner((database) => claimCompanionRuntimeStart({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      companionId,
+      database,
+    }));
+
+    if (age < COMPANION_RUNTIME_START_BUDGET_MS) {
+      await expect(claim).rejects.toBeInstanceOf(CompanionRuntimeTransitionError);
+      return;
+    }
+    await expect(claim).resolves.toMatchObject({
+      runtime: expect.objectContaining({ state: "provisioning", daemon_state: "starting" }),
+    });
   });
 
   it("clears the reason when a live observation finds the Box healthy", async () => {
