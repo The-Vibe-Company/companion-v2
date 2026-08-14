@@ -547,7 +547,7 @@ credential material must remain behind the adapter boundary.
 | Codex | `openai-codex` | `gpt-5.5` | ChatGPT Plus/Pro device OAuth |
 | Kimi | `kimi-coding` | `kimi-for-coding` | Kimi For Coding API key |
 | Moonshot | `moonshotai` | `kimi-k2.6` | Moonshot AI API key |
-| z.ai | `zai` | `glm-4.7` | z.ai API key, including Coding Plan keys |
+| z.ai | `zai` | `glm-5.3` | z.ai API key, including Coding Plan keys |
 | OpenAI API | `openai` | `gpt-5.5` | OpenAI API key |
 | Google Gemini | `google` | `gemini-3.1-pro-preview` | Google Gemini API key |
 
