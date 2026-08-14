@@ -8,11 +8,13 @@ import type {
   CompanionRegistrySource,
   SaveCompanionPluginInput,
 } from "@companion/contracts";
+import { companionPluginOAuthServerNameSchema } from "@companion/contracts";
 import {
   deleteCompanionPlugin,
   getCompanionRegistryServer,
   listCompanionRegistry,
   saveCompanionPlugin,
+  startCompanionPluginOAuth,
 } from "@/lib/companions";
 import { Icon } from "../Icon";
 import { Dialog } from "../org/primitives";
@@ -297,6 +299,8 @@ function RegistryConnectDialog({
   const [credentialValue, setCredentialValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const busyRef = useRef(false);
+  const oauth = companionPluginOAuthServerNameSchema.safeParse(server.name).success;
 
   useEffect(() => {
     if (server.pinned) return;
@@ -319,6 +323,7 @@ function RegistryConnectDialog({
 
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (busyRef.current) return;
     const trimmed = label.trim();
     if (!trimmed) {
       setError("An account label is required.");
@@ -328,13 +333,24 @@ function RegistryConnectDialog({
       setError("This server has no connectable endpoint yet. Use Add custom MCP instead.");
       return;
     }
-    if (connect.credential?.required && !credentialValue.trim()) {
+    if (!oauth && connect.credential?.required && !credentialValue.trim()) {
       setError(`${connect.credential.name} is required for this server.`);
       return;
     }
+    busyRef.current = true;
     setBusy(true);
     setError(null);
+    let redirecting = false;
     try {
+      if (oauth) {
+        const authorizationUrl = await startCompanionPluginOAuth(orgId, {
+          server_name: companionPluginOAuthServerNameSchema.parse(server.name),
+          label: trimmed,
+        });
+        window.location.assign(authorizationUrl);
+        redirecting = true;
+        return;
+      }
       const account = await saveCompanionPlugin(
         orgId,
         toSaveInput(server, connect, trimmed, credentialValue),
@@ -343,7 +359,10 @@ function RegistryConnectDialog({
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "This MCP account could not be connected.");
     } finally {
-      setBusy(false);
+      if (!redirecting) {
+        busyRef.current = false;
+        setBusy(false);
+      }
     }
   };
 
@@ -372,7 +391,7 @@ function RegistryConnectDialog({
             disabled={busy || loadingDetail || !connect}
             aria-busy={busy}
           >
-            {busy ? "Connecting..." : "Connect"}
+            {busy ? "Connecting..." : oauth ? "Continue with OAuth" : "Connect"}
           </button>
         </>
       )}
@@ -413,7 +432,7 @@ function RegistryConnectDialog({
             onChange={(event) => setLabel(event.target.value)}
           />
         </label>
-        {connect?.credential && (
+        {!oauth && connect?.credential && (
           <label>
             {connect.credential.name}
             {connect.credential.required ? "" : " (optional)"}
@@ -430,7 +449,9 @@ function RegistryConnectDialog({
           </label>
         )}
         <p className="companions-new-form__hint">
-          Credentials are write-only and encrypted. Reconnect the account to replace one.
+          {oauth
+            ? "You will authorize this account on the provider's website. Tokens remain write-only and encrypted."
+            : "Credentials are write-only and encrypted. Reconnect the account to replace one."}
         </p>
       </form>
     </Dialog>
@@ -483,6 +504,10 @@ export function CompanionPlugins({
   const [connecting, setConnecting] = useState<CompanionRegistryServer | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [oauthNotice, setOauthNotice] = useState<{
+    tone: "success" | "error";
+    message: string;
+  } | null>(null);
 
   const [searchInput, setSearchInput] = useState("");
   const [pins, setPins] = useState<CompanionRegistryServer[]>([]);
@@ -493,6 +518,28 @@ export function CompanionPlugins({
   const [loadingMore, setLoadingMore] = useState(false);
   const [registryError, setRegistryError] = useState<string | null>(null);
   const requestRef = useRef(0);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("oauth") === "connected") {
+      setOauthNotice({ tone: "success", message: "MCP account connected." });
+    } else {
+      const oauthError = url.searchParams.get("oauth_error");
+      if (oauthError) {
+        setOauthNotice({
+          tone: "error",
+          message: oauthError === "duplicate_label"
+            ? "That provider already has an account with this label."
+            : "OAuth authorization did not complete. Try connecting again.",
+        });
+      }
+    }
+    if (url.searchParams.has("oauth") || url.searchParams.has("oauth_error")) {
+      url.searchParams.delete("oauth");
+      url.searchParams.delete("oauth_error");
+      window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+    }
+  }, []);
 
   const groups = useMemo(() => {
     const grouped = new Map<string, CompanionPluginAccount[]>();
@@ -582,6 +629,12 @@ export function CompanionPlugins({
       </header>
 
       <div className="companions-content">
+        {oauthNotice?.tone === "success" && (
+          <p className="companions-registry-note" role="status">{oauthNotice.message}</p>
+        )}
+        {oauthNotice?.tone === "error" && (
+          <div className="companions-error" role="alert">{oauthNotice.message}</div>
+        )}
         {error && <div className="companions-error" role="alert">{error}</div>}
 
         {groups.length > 0 && (

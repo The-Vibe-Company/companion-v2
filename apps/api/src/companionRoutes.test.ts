@@ -35,6 +35,9 @@ const coreMocks = vi.hoisted(() => ({
   claimCompanionDeletion: vi.fn(),
   deleteCompanion: vi.fn(),
   saveCompanionPlugin: vi.fn(),
+  beginCompanionPluginOAuth: vi.fn(),
+  completeCompanionPluginOAuth: vi.fn(),
+  saveCompanionOAuthPlugin: vi.fn(),
   deleteCompanionPlugin: vi.fn(),
   saveCompanionProvider: vi.fn(),
   setCompanionProvider: vi.fn(),
@@ -224,6 +227,51 @@ describe("Companions API feature gate", () => {
       created_at: companion.created_at,
       updated_at: companion.updated_at,
     });
+    coreMocks.beginCompanionPluginOAuth.mockImplementation(async (input) => ({
+      authorizationUrl: `https://mcp.linear.app/authorize?state=${encodeURIComponent(input.state)}`,
+      flow: {
+        serverName: "app.linear/linear",
+        provider: "linear",
+        remoteUrl: "https://mcp.linear.app/mcp",
+        authorizationEndpoint: "https://mcp.linear.app/authorize",
+        tokenEndpoint: "https://mcp.linear.app/token",
+        resource: "https://mcp.linear.app/mcp",
+        scope: "read write",
+        codeVerifier: "pkce-verifier",
+        client: {
+          clientId: "dynamic-client",
+          clientSecret: null,
+          tokenEndpointAuthMethod: "none",
+        },
+      },
+    }));
+    coreMocks.completeCompanionPluginOAuth.mockResolvedValue({
+      kind: "oauth",
+      version: 1,
+      serverName: "app.linear/linear",
+      accessToken: "provider-access-token",
+      refreshToken: "provider-refresh-token",
+      accessExpiresAt: "2026-08-14T12:00:00.000Z",
+      scope: "read write",
+      tokenType: "Bearer",
+      tokenEndpoint: "https://mcp.linear.app/token",
+      resource: "https://mcp.linear.app/mcp",
+      client: {
+        clientId: "dynamic-client",
+        clientSecret: null,
+        tokenEndpointAuthMethod: "none",
+      },
+    });
+    coreMocks.saveCompanionOAuthPlugin.mockResolvedValue({
+      id: "55555555-5555-4555-8555-555555555555",
+      provider: "linear",
+      label: "work",
+      transport: "http",
+      endpoint: "https://mcp.linear.app/mcp",
+      connected: true,
+      created_at: companion.created_at,
+      updated_at: companion.updated_at,
+    });
     coreMocks.deleteCompanionPlugin.mockResolvedValue(undefined);
     coreMocks.createCompanion.mockResolvedValue(companion);
     coreMocks.updateCompanion.mockResolvedValue(companion);
@@ -288,6 +336,8 @@ describe("Companions API feature gate", () => {
     expect((await app.request("/v1/companions")).status).toBe(404);
     expect((await app.request("/v1/companion-providers")).status).toBe(404);
     expect((await app.request("/v1/companion-plugins")).status).toBe(404);
+    expect((await app.request("/v1/companion-plugins/oauth/start", { method: "POST" })).status)
+      .toBe(404);
     expect((await app.request("/v1/companion-registry/servers")).status).toBe(404);
     expect((await app.request("/v1/companion-registry/server?name=app.linear/linear")).status)
       .toBe(404);
@@ -452,6 +502,10 @@ describe("Companions API feature gate", () => {
       args: [],
     })],
     ["DELETE", "/v1/companion-plugins/44444444-4444-4444-8444-444444444444", undefined],
+    ["POST", "/v1/companion-plugins/oauth/start", JSON.stringify({
+      server_name: "app.linear/linear",
+      label: "work",
+    })],
   ])("returns 403 before tenant resolution for %s %s outside the allowlist", async (
     method,
     path,
@@ -1845,6 +1899,141 @@ describe("Companions API feature gate", () => {
     expect(coreMocks.deleteCompanionPlugin).toHaveBeenCalledWith(expect.objectContaining({
       accountId: "44444444-4444-4444-8444-444444444444",
     }));
+  });
+
+  it("brokers a signed OAuth callback and stores the grant through the encrypted plugin path", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const masterKey = Buffer.alloc(32, 29).toString("base64");
+    const web = "https://companion.example";
+    registerCompanionRoutes(app, {
+      COMPANION_COMPANIONS_ENABLED: "true",
+      COMPANION_SECRETS_MASTER_KEY: masterKey,
+      COMPANION_WEB_URL: web,
+    });
+
+    const started = await app.request("/v1/companion-plugins/oauth/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ server_name: "app.linear/linear", label: "work" }),
+    });
+    expect(started.status).toBe(200);
+    const payload = await started.json() as { authorization_url: string };
+    const state = new URL(payload.authorization_url).searchParams.get("state");
+    const cookie = started.headers.get("set-cookie")?.split(";")[0];
+    expect(state).toBeTruthy();
+    expect(cookie).toMatch(/^companion_mcp_oauth_[a-f0-9]+=.+/);
+    expect(cookie).not.toContain("pkce-verifier");
+
+    const callback = await app.request(
+      `/v1/companion-plugins/oauth/callback?code=provider-code&state=${encodeURIComponent(state!)}`,
+      { headers: { cookie: cookie! } },
+    );
+    expect(callback.status).toBe(303);
+    expect(callback.headers.get("location"))
+      .toBe("https://companion.example/companions?view=plugins&oauth=connected");
+    expect(coreMocks.completeCompanionPluginOAuth).toHaveBeenCalledWith(expect.objectContaining({
+      code: "provider-code",
+      redirectUri: "https://companion.example/v1/companion-plugins/oauth/callback",
+      flow: expect.objectContaining({ codeVerifier: "pkce-verifier" }),
+    }));
+    expect(coreMocks.saveCompanionOAuthPlugin).toHaveBeenCalledWith(expect.objectContaining({
+      provider: "linear",
+      label: "work",
+      remoteUrl: "https://mcp.linear.app/mcp",
+      credential: expect.objectContaining({ accessToken: "provider-access-token" }),
+    }));
+    expect(callback.headers.get("set-cookie")).not.toContain("provider-access-token");
+  });
+
+  it("rejects a duplicate OAuth label before discovery or registration", async () => {
+    coreMocks.listCompanionPlugins.mockResolvedValueOnce([{
+      id: "44444444-4444-4444-8444-444444444444",
+      provider: "linear",
+      label: "Work",
+      transport: "http",
+      endpoint: "https://mcp.linear.app/mcp",
+      connected: true,
+      created_at: companion.created_at,
+      updated_at: companion.updated_at,
+    }]);
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, {
+      COMPANION_COMPANIONS_ENABLED: "true",
+      COMPANION_SECRETS_MASTER_KEY: Buffer.alloc(32, 29).toString("base64"),
+    });
+
+    const response = await app.request("/v1/companion-plugins/oauth/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ server_name: "app.linear/linear", label: "work" }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(coreMocks.beginCompanionPluginOAuth).not.toHaveBeenCalled();
+  });
+
+  it("clears the pending OAuth cookie when the provider denies authorization", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, {
+      COMPANION_COMPANIONS_ENABLED: "true",
+      COMPANION_SECRETS_MASTER_KEY: Buffer.alloc(32, 29).toString("base64"),
+      COMPANION_WEB_URL: "https://companion.example",
+    });
+    const started = await app.request("/v1/companion-plugins/oauth/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ server_name: "app.linear/linear", label: "work" }),
+    });
+    const payload = await started.json() as { authorization_url: string };
+    const state = new URL(payload.authorization_url).searchParams.get("state")!;
+    const cookie = started.headers.get("set-cookie")!.split(";")[0]!;
+    const cookieName = cookie.split("=")[0]!;
+
+    const denied = await app.request(
+      `/v1/companion-plugins/oauth/callback?error=access_denied&state=${encodeURIComponent(state)}`,
+      { headers: { cookie } },
+    );
+
+    expect(denied.status).toBe(303);
+    expect(denied.headers.get("location"))
+      .toBe("https://companion.example/companions?view=plugins&oauth_error=authorization_failed");
+    expect(denied.headers.get("set-cookie")).toContain(`${cookieName}=`);
+    expect(denied.headers.get("set-cookie")).toContain("Max-Age=0");
+    expect(coreMocks.completeCompanionPluginOAuth).not.toHaveBeenCalled();
+    expect(coreMocks.saveCompanionOAuthPlugin).not.toHaveBeenCalled();
+  });
+
+  it("rejects an OAuth callback completed under another user session", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, {
+      COMPANION_COMPANIONS_ENABLED: "true",
+      COMPANION_SECRETS_MASTER_KEY: Buffer.alloc(32, 29).toString("base64"),
+      COMPANION_WEB_URL: "https://companion.example",
+    });
+    const started = await app.request("/v1/companion-plugins/oauth/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ server_name: "app.linear/linear", label: "work" }),
+    });
+    const payload = await started.json() as { authorization_url: string };
+    const state = new URL(payload.authorization_url).searchParams.get("state")!;
+    const cookie = started.headers.get("set-cookie")!.split(";")[0]!;
+    contextMocks.actorFromContext.mockReturnValue({
+      id: "user-2",
+      email: "other@example.test",
+      name: "Other user",
+    });
+
+    const mismatched = await app.request(
+      `/v1/companion-plugins/oauth/callback?code=provider-code&state=${encodeURIComponent(state)}`,
+      { headers: { cookie } },
+    );
+
+    expect(mismatched.status).toBe(303);
+    expect(mismatched.headers.get("location")).toContain("oauth_error=authorization_failed");
+    expect(mismatched.headers.get("set-cookie")).toContain("Max-Age=0");
+    expect(coreMocks.completeCompanionPluginOAuth).not.toHaveBeenCalled();
+    expect(coreMocks.saveCompanionOAuthPlugin).not.toHaveBeenCalled();
   });
 
   it("injects saved member plugins through THE-325 without exposing their credential", async () => {

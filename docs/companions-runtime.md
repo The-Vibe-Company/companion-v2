@@ -94,6 +94,7 @@ an empty skill set. This is enforced by the API and again by the Box adapter bef
 | `DELETE` | `/v1/companion-providers/:provider` | Never; Owner/Admin only |
 | `PUT` | `/v1/companion-providers/default` | Never; Owner/Admin only |
 | `GET/POST/DELETE` | `/v1/companion-plugins` | Never; current member's private MCP accounts only |
+| `POST/GET` | `/v1/companion-plugins/oauth/start`, `/oauth/callback` | Never; curated MCP pins only, signed PKCE callback |
 
 Desktop responses are secret-bearing and are returned only to the authorized caller. They are never
 stored. The response advertises `automation: "lux"`, so computer use is the Box desktop Lux drives

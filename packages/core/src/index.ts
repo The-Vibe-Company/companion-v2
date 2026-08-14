@@ -10,6 +10,7 @@ export * from "./billingService";
 export * from "./featureFlags";
 export * from "./companions";
 export * from "./companionRegistry";
+export * from "./companionPluginOAuth";
 export * from "./companionPiEvents";
 export * from "./companionRuntimeErrors";
 export { listCompanionRuntimeSkillPackages } from "./services";

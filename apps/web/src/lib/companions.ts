@@ -2,6 +2,8 @@ import type {
   Companion,
   CompanionDesktop,
   CompanionPluginAccount,
+  CompanionPluginOAuthStartInput,
+  CompanionPluginOAuthStartResponse,
   CompanionPluginsResponse,
   CompanionProviderConnection,
   CompanionProvidersResponse,
@@ -67,6 +69,23 @@ export async function saveCompanionPlugin(
     signal: AbortSignal.timeout(10_000),
   });
   return result.account;
+}
+
+/** Begin a curated MCP OAuth flow; the caller navigates to the returned provider URL. */
+export async function startCompanionPluginOAuth(
+  orgId: string,
+  input: CompanionPluginOAuthStartInput,
+): Promise<string> {
+  const result = await apiFetch<CompanionPluginOAuthStartResponse>(
+    "/v1/companion-plugins/oauth/start",
+    {
+      method: "POST",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify(input),
+      signal: AbortSignal.timeout(12_000),
+    },
+  );
+  return result.authorization_url;
 }
 
 /**

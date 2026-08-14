@@ -1,10 +1,20 @@
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Context, Hono } from "hono";
+import { getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
 import {
+  COMPANION_PLUGIN_OAUTH_SERVERS,
   CompanionNotFoundError,
   CompanionDeleteForbiddenError,
   CompanionPluginConflictError,
+  CompanionPluginOAuthError,
   CompanionRegistryUnavailableError,
+  beginCompanionPluginOAuth,
+  completeCompanionPluginOAuth,
+  decryptOpaqueValue,
+  encryptOpaqueValue,
+  loadSecretsMasterKey,
+  type OpaqueCiphertext,
   CompanionProviderError,
   CompanionProviderForbiddenError,
   CompanionRuntimeForbiddenError,
@@ -38,6 +48,7 @@ import {
   resolveCompanionPluginInjection,
   saveCompanionProvider,
   saveCompanionPlugin,
+  saveCompanionOAuthPlugin,
   sendCompanionMessage,
   setCompanionProvider,
   setCompanionWorkspaceShare,
@@ -50,6 +61,7 @@ import type { CompanionPiEntry } from "@companion/core";
 import {
   createCompanionInputSchema,
   companionProviderIdSchema,
+  companionPluginOAuthStartInputSchema,
   companionRegistryQuerySchema,
   companionRegistryServerNameSchema,
   saveCompanionProviderInputSchema,
@@ -92,6 +104,94 @@ import {
 } from "./companionRuntimeError";
 
 const companionIdSchema = z.string().uuid();
+const COMPANION_PLUGIN_OAUTH_FLOW_PURPOSE = "companion-mcp-oauth-flow";
+const COMPANION_PLUGIN_OAUTH_TTL_MS = 10 * 60_000;
+
+type CompanionPluginOAuthState = {
+  orgId: string;
+  userId: string;
+  nonce: string;
+  expiresAt: number;
+};
+
+function companionPluginOAuthRedirectUri(env: NodeJS.ProcessEnv): string {
+  const base = env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000";
+  return new URL("/v1/companion-plugins/oauth/callback", base).toString();
+}
+
+function companionPluginOAuthCookieName(nonce: string): string {
+  return `companion_mcp_oauth_${nonce.replaceAll("-", "")}`;
+}
+
+function signCompanionPluginOAuthState(
+  payload: CompanionPluginOAuthState,
+  masterKey: Buffer,
+): string {
+  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  const signature = createHmac("sha256", masterKey).update(encoded).digest("base64url");
+  return `${encoded}.${signature}`;
+}
+
+function verifyCompanionPluginOAuthState(
+  value: string,
+  masterKey: Buffer,
+): CompanionPluginOAuthState {
+  const [encoded, signature] = value.split(".");
+  if (!encoded || !signature) throw new Error("invalid OAuth state");
+  const expected = createHmac("sha256", masterKey).update(encoded).digest();
+  const actual = Buffer.from(signature, "base64url");
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+    throw new Error("invalid OAuth state");
+  }
+  const parsed = JSON.parse(
+    Buffer.from(encoded, "base64url").toString("utf8"),
+  ) as CompanionPluginOAuthState;
+  if (
+    !parsed.orgId
+    || !parsed.userId
+    || !parsed.nonce
+    || parsed.expiresAt < Date.now()
+  ) {
+    throw new Error("expired OAuth state");
+  }
+  return parsed;
+}
+
+function encodeCompanionPluginOAuthFlow(input: {
+  orgId: string;
+  nonce: string;
+  value: unknown;
+  masterKey: Buffer;
+}): string {
+  const encrypted = encryptOpaqueValue({
+    orgId: input.orgId,
+    purpose: COMPANION_PLUGIN_OAUTH_FLOW_PURPOSE,
+    subjectId: input.nonce,
+    value: JSON.stringify(input.value),
+  }, input.masterKey);
+  return Buffer.from(JSON.stringify(encrypted), "utf8").toString("base64url");
+}
+
+function decodeCompanionPluginOAuthFlow(input: {
+  orgId: string;
+  nonce: string;
+  value: string;
+  masterKey: Buffer;
+}): { label: string; flow: Awaited<ReturnType<typeof beginCompanionPluginOAuth>>["flow"] } {
+  const encrypted = JSON.parse(
+    Buffer.from(input.value, "base64url").toString("utf8"),
+  ) as OpaqueCiphertext;
+  const plaintext = decryptOpaqueValue({
+    orgId: input.orgId,
+    purpose: COMPANION_PLUGIN_OAUTH_FLOW_PURPOSE,
+    subjectId: input.nonce,
+    ...encrypted,
+  }, input.masterKey);
+  return JSON.parse(plaintext) as {
+    label: string;
+    flow: Awaited<ReturnType<typeof beginCompanionPluginOAuth>>["flow"];
+  };
+}
 
 type RuntimeFactory = () => CompanionBoxRuntime;
 
@@ -114,6 +214,11 @@ function errorStatus(error: unknown): number {
   if (error instanceof CompanionProviderError) return 422;
   if (error instanceof CompanionRuntimeTransitionError) return 409;
   if (error instanceof CompanionPluginConflictError) return 409;
+  if (error instanceof CompanionPluginOAuthError) {
+    if (error.code === "oauth_not_supported") return 400;
+    if (error.code === "oauth_not_configured") return 503;
+    return 502;
+  }
   if (error instanceof CompanionRegistryUnavailableError) return 503;
   if (error instanceof CompanionRuntimeStartBudgetError) return 504;
   if (error instanceof BoxRuntimeConfigurationError) return 503;
@@ -542,6 +647,130 @@ export function registerCompanionRoutes(
       return c.json({ account }, 201);
     } catch (error) {
       return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companion-plugins/oauth/start", async (c) => {
+    try {
+      const body = companionPluginOAuthStartInputSchema.parse(await c.req.json());
+      const context = await tenant(c, async ({ actor, orgId, database }) => ({
+        actor,
+        orgId,
+        accounts: await listCompanionPlugins({ actor, orgId, database }),
+      }));
+      const catalog = COMPANION_PLUGIN_OAUTH_SERVERS[body.server_name];
+      if (context.accounts.some((account) =>
+        account.provider === catalog.provider
+        && account.label.toLocaleLowerCase("en-US") === body.label.toLocaleLowerCase("en-US"))) {
+        throw new CompanionPluginConflictError();
+      }
+      const masterKey = loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY);
+      const nonce = randomUUID();
+      const state = signCompanionPluginOAuthState({
+        orgId: context.orgId,
+        userId: context.actor.id,
+        nonce,
+        expiresAt: Date.now() + COMPANION_PLUGIN_OAUTH_TTL_MS,
+      }, masterKey);
+      const redirectUri = companionPluginOAuthRedirectUri(env);
+      const started = await beginCompanionPluginOAuth({
+        serverName: body.server_name,
+        redirectUri,
+        state,
+        env,
+      });
+      setCookie(c, companionPluginOAuthCookieName(nonce), encodeCompanionPluginOAuthFlow({
+        orgId: context.orgId,
+        nonce,
+        value: { label: body.label, flow: started.flow },
+        masterKey,
+      }), {
+        path: "/v1/companion-plugins/oauth/callback",
+        httpOnly: true,
+        sameSite: "Lax",
+        secure: env.NODE_ENV === "production",
+        maxAge: COMPANION_PLUGIN_OAUTH_TTL_MS / 1000,
+      });
+      return c.json({ authorization_url: started.authorizationUrl });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.get("/v1/companion-plugins/oauth/callback", async (c) => {
+    const web = env.COMPANION_WEB_URL ?? "http://127.0.0.1:3000";
+    let cookieName: string | null = null;
+    try {
+      const actor = actorFromContext(c);
+      if (!companionsAvailableToUser(actor.email, env)) {
+        throw new CompanionAccessForbiddenError();
+      }
+      const masterKey = loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY);
+      const state = verifyCompanionPluginOAuthState(c.req.query("state") ?? "", masterKey);
+      cookieName = companionPluginOAuthCookieName(state.nonce);
+      if (actor.id !== state.userId) throw new Error("OAuth authorization session does not match");
+      const cookie = getCookie(c, cookieName);
+      if (!cookie) throw new Error("OAuth authorization session expired");
+      if (c.req.query("error")) throw new Error("OAuth authorization was denied");
+      const pending = decodeCompanionPluginOAuthFlow({
+        orgId: state.orgId,
+        nonce: state.nonce,
+        value: cookie,
+        masterKey,
+      });
+      const code = c.req.query("code");
+      if (!code) throw new Error("OAuth provider did not return an authorization code");
+      const credential = await completeCompanionPluginOAuth({
+        flow: pending.flow,
+        code,
+        redirectUri: companionPluginOAuthRedirectUri(env),
+      });
+      await withTenantContext(
+        { orgId: state.orgId, userId: actor.id },
+        (database) => saveCompanionOAuthPlugin({
+          actor,
+          orgId: state.orgId,
+          provider: pending.flow.provider,
+          label: pending.label,
+          remoteUrl: pending.flow.remoteUrl,
+          credential,
+          masterKey,
+          database,
+        }),
+      );
+      setCookie(c, "companion_org", state.orgId, {
+        path: "/",
+        sameSite: "Lax",
+        secure: env.NODE_ENV === "production",
+      });
+      const target = new URL("/companions", web);
+      target.searchParams.set("view", "plugins");
+      target.searchParams.set("oauth", "connected");
+      setCookie(c, cookieName, "", {
+        path: "/v1/companion-plugins/oauth/callback",
+        maxAge: 0,
+        httpOnly: true,
+        sameSite: "Lax",
+        secure: env.NODE_ENV === "production",
+      });
+      return c.redirect(target.toString(), 303);
+    } catch (error) {
+      if (cookieName) {
+        setCookie(c, cookieName, "", {
+          path: "/v1/companion-plugins/oauth/callback",
+          maxAge: 0,
+          httpOnly: true,
+          sameSite: "Lax",
+          secure: env.NODE_ENV === "production",
+        });
+      }
+      const target = new URL("/companions", web);
+      target.searchParams.set("view", "plugins");
+      target.searchParams.set(
+        "oauth_error",
+        error instanceof CompanionPluginConflictError ? "duplicate_label" : "authorization_failed",
+      );
+      return c.redirect(target.toString(), 303);
     }
   });
 

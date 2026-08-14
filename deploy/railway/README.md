@@ -190,7 +190,12 @@ provide the runtime secrets it needs:
   stays disabled and the API registers no Companion routes even if the master flag is `true`.
 - `COMPANION_BOX_API_KEY` — required for Box lifecycle calls (start/stop/status).
 - `COMPANION_SECRETS_MASTER_KEY` — the base64 32-byte Skills master key also envelope-encrypts
-  companion provider subscription credentials; it is already required by Secrets in production.
+  companion provider subscriptions, MCP OAuth grants, and pending OAuth callbacks; it is already
+  required by Secrets in production.
+- `COMPANION_MCP_GITHUB_CLIENT_ID` and `COMPANION_MCP_GITHUB_CLIENT_SECRET` — set on `api` only from
+  the deployment's GitHub OAuth App. Register
+  `${COMPANION_WEB_URL}/v1/companion-plugins/oauth/callback` as its callback URL. Linear and Notion
+  MCP OAuth use dynamic client registration and do not need deployment-owned client credentials.
 - `COMPANION_PI_INSTALL_COMMAND` — set an operator-pinned Pi install command unless the Box template
   preinstalls Pi.
 

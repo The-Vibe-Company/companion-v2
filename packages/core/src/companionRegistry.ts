@@ -30,8 +30,9 @@ export function companionRegistryBaseUrl(env: NodeJS.ProcessEnv = process.env): 
 /**
  * Curated, verified overrides pinned to the top of the browse surface (verified 2026-08-13). GitHub
  * is pinned to the hosted Copilot remote because its registry entry is stdio/OCI only; Linear and
- * Notion pin their official `streamable-http` remotes. Auth V1 is a token/header the user pastes;
- * OAuth is THE-328. Pins never require the registry to be reachable.
+ * Notion pin their official `streamable-http` remotes. These three pins connect through THE-328's
+ * brokered OAuth flow; custom and unpinned entries keep THE-321's token/header path. Pins never
+ * require the registry to be reachable.
  */
 export const COMPANION_MCP_REGISTRY_PINS: readonly CompanionRegistryServer[] = [
   {
@@ -46,12 +47,7 @@ export const COMPANION_MCP_REGISTRY_PINS: readonly CompanionRegistryServer[] = [
     connect: {
       transport: "http",
       url: "https://mcp.linear.app/mcp",
-      credential: {
-        name: "Authorization",
-        description: "Optional bearer token. Leave blank until OAuth ships (THE-328).",
-        is_secret: true,
-        required: false,
-      },
+      credential: null,
     },
   },
   {
@@ -66,12 +62,7 @@ export const COMPANION_MCP_REGISTRY_PINS: readonly CompanionRegistryServer[] = [
     connect: {
       transport: "http",
       url: "https://api.githubcopilot.com/mcp/",
-      credential: {
-        name: "Authorization",
-        description: "Authorization header, e.g. a GitHub token as `Bearer <token>`.",
-        is_secret: true,
-        required: false,
-      },
+      credential: null,
     },
   },
   {
@@ -86,12 +77,7 @@ export const COMPANION_MCP_REGISTRY_PINS: readonly CompanionRegistryServer[] = [
     connect: {
       transport: "http",
       url: "https://mcp.notion.com/mcp",
-      credential: {
-        name: "Authorization",
-        description: "Optional bearer token. Leave blank until OAuth ships (THE-328).",
-        is_secret: true,
-        required: false,
-      },
+      credential: null,
     },
   },
 ];
