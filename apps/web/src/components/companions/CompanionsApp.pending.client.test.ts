@@ -76,6 +76,7 @@ function companionIn(state: "provisioning" | "running" | "error"): Companion {
     selected_mcp_account_ids: [],
     owner_id: "user-1",
     access: "owner",
+    last_message: null,
     runtime: {
       state,
       daemon_state: state === "running" ? "running" : state === "error" ? "error" : "starting",

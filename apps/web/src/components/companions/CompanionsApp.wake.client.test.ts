@@ -72,6 +72,7 @@ const asleep: Companion = {
   selected_mcp_account_ids: [],
   owner_id: "user-1",
   access: "owner",
+  last_message: null,
   runtime: {
     state: "stopped",
     daemon_state: "stopped",

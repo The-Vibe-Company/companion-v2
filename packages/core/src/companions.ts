@@ -5,6 +5,7 @@ import type {
   CompanionAccess,
   CompanionDaemonState,
   CompanionDecision,
+  CompanionLastMessage,
   CompanionMcpAccount,
   CompanionMcpCredential,
   CompanionPluginAccount,
@@ -21,6 +22,7 @@ import type {
   CompanionTranscriptEntry,
 } from "@companion/contracts";
 import {
+  COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS,
   COMPANION_PROVIDER_CATALOG,
   companionProviderDefaultModel,
   companionMcpAccountSchema,
@@ -218,7 +220,72 @@ export function canWakeCompanion(access: CompanionAccess): boolean {
   return access === "owner" || access === "editor";
 }
 
-function toCompanion(row: CompanionRow, access: CompanionAccess): Companion {
+/**
+ * One line of a message, fit for a list row: the first line, whitespace collapsed, cut to the
+ * contract's width. The cut is on characters rather than words because the alternative is a preview
+ * that silently drops the end of a short message to keep a word whole.
+ */
+export function companionLastMessagePreview(content: string): string {
+  const firstLine = content.split("\n").find((line) => line.trim().length > 0) ?? "";
+  const collapsed = firstLine.replace(/\s+/g, " ").trim();
+  return collapsed.length > COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS
+    ? collapsed.slice(0, COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS)
+    : collapsed;
+}
+
+/**
+ * Newest chat line per Companion, for the conversation list. `tool` and `decision` entries are
+ * excluded in the query rather than filtered afterwards, so a Companion whose last activity was a
+ * tool run still previews the last thing a person or Pi actually said — and no tool title or pending
+ * permission question can reach a surface outside the thread.
+ *
+ * Callers pass only Companion ids the actor may already read, so this adds no visibility of its own.
+ */
+export async function loadCompanionLastMessages(
+  database: Db,
+  orgId: string,
+  companionIds: string[],
+): Promise<Map<string, CompanionLastMessage>> {
+  if (companionIds.length === 0) return new Map();
+  const rows = await database
+    .selectDistinctOn([schema.companionTranscriptEntries.companionId], {
+      companionId: schema.companionTranscriptEntries.companionId,
+      role: schema.companionTranscriptEntries.role,
+      content: schema.companionTranscriptEntries.content,
+      authorId: schema.companionTranscriptEntries.authorId,
+      authorName: schema.profiles.name,
+      createdAt: schema.companionTranscriptEntries.createdAt,
+    })
+    .from(schema.companionTranscriptEntries)
+    .leftJoin(schema.profiles, eq(schema.profiles.id, schema.companionTranscriptEntries.authorId))
+    .where(and(
+      eq(schema.companionTranscriptEntries.orgId, orgId),
+      inArray(schema.companionTranscriptEntries.companionId, companionIds),
+      inArray(schema.companionTranscriptEntries.role, ["user", "assistant"]),
+    ))
+    .orderBy(
+      asc(schema.companionTranscriptEntries.companionId),
+      desc(schema.companionTranscriptEntries.ordinal),
+    );
+  const previews = new Map<string, CompanionLastMessage>();
+  for (const row of rows) {
+    if (row.role !== "user" && row.role !== "assistant") continue;
+    previews.set(row.companionId, {
+      preview: companionLastMessagePreview(row.content),
+      role: row.role,
+      author_id: row.authorId,
+      author_name: row.authorName,
+      created_at: row.createdAt.toISOString(),
+    });
+  }
+  return previews;
+}
+
+function toCompanion(
+  row: CompanionRow,
+  access: CompanionAccess,
+  lastMessage: CompanionLastMessage | null = null,
+): Companion {
   const providerId = row.providerIds[0];
   const modelId = row.modelId ?? (providerId ? companionProviderDefaultModel(providerId) : undefined);
   return {
@@ -233,6 +300,7 @@ function toCompanion(row: CompanionRow, access: CompanionAccess): Companion {
       : [],
     owner_id: row.ownerId,
     access,
+    last_message: lastMessage,
     runtime: {
       state: row.runtimeState,
       daemon_state: row.daemonState,
@@ -280,11 +348,19 @@ export async function listCompanions(input: {
     .from(schema.companions)
     .where(eq(schema.companions.orgId, input.orgId))
     .orderBy(desc(schema.companions.updatedAt));
-  const visible = await Promise.all(rows.map(async (row) => {
+  const accessible = (await Promise.all(rows.map(async (row) => {
     const access = await loadCompanionAccess(database, row, input.actor.id);
-    return access ? toCompanion(row, access) : null;
-  }));
-  return visible.filter((item): item is Companion => item !== null);
+    return access ? { row, access } : null;
+  }))).filter((item): item is { row: CompanionRow; access: CompanionAccess } => item !== null);
+  // Only the Companions this actor may already read are previewed, and in one query rather than one
+  // per row: the list is the surface that shows every thread's last word at once.
+  const previews = await loadCompanionLastMessages(
+    database,
+    input.orgId,
+    accessible.map((item) => item.row.id),
+  );
+  return accessible.map((item) =>
+    toCompanion(item.row, item.access, previews.get(item.row.id) ?? null));
 }
 
 export async function getCompanion(input: {
@@ -303,7 +379,8 @@ export async function getCompanion(input: {
   if (!row) throw new CompanionNotFoundError();
   const access = await loadCompanionAccess(database, row, input.actor.id);
   if (!access) throw new CompanionNotFoundError();
-  return toCompanion(row, access);
+  const previews = await loadCompanionLastMessages(database, input.orgId, [row.id]);
+  return toCompanion(row, access, previews.get(row.id) ?? null);
 }
 
 /**
@@ -606,7 +683,9 @@ export async function updateCompanion(input: {
       selected_mcp_accounts: selectedMcpAccountIds !== undefined,
     },
   });
-  return toCompanion(row, companion.access);
+  // Settings writes leave the thread alone, so the preview this update read is still the current
+  // one: carrying it keeps a saved Companion from blanking its own row in an open conversation list.
+  return toCompanion(row, companion.access, companion.last_message);
 }
 
 /**
@@ -1843,7 +1922,7 @@ export async function setCompanionProvider(input: {
       "this Companion provider was already configured",
     );
   }
-  return toCompanion(row, "owner");
+  return toCompanion(row, "owner", companion.last_message);
 }
 
 export async function saveCompanionProvider(input: {
@@ -2165,7 +2244,8 @@ export async function updateCompanionRuntime(input: {
     throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
   }
   if (!row) throw new CompanionNotFoundError();
-  return toCompanion(row, current.access);
+  // A lifecycle write never touches the thread, so the preview this read carries is still current.
+  return toCompanion(row, current.access, current.last_message);
 }
 
 /**
@@ -2202,7 +2282,7 @@ export async function updateCompanionObservation(input: {
       notInArray(schema.companions.runtimeState, ["provisioning", "stopping"]),
     ))
     .returning();
-  if (row) return toCompanion(row, current.access);
+  if (row) return toCompanion(row, current.access, current.last_message);
   return getCompanionForRuntime({ ...input, database });
 }
 
@@ -2228,7 +2308,7 @@ export async function claimCompanionRuntimeStart(input: {
       eq(schema.companions.runtimeState, "not_created"),
     ))
     .returning();
-  if (row) return toCompanion(row, currentAccess.access);
+  if (row) return toCompanion(row, currentAccess.access, currentAccess.last_message);
 
   const current = await getCompanionForRuntime({ ...input, database });
   const transitional =
@@ -2255,7 +2335,7 @@ export async function claimCompanionRuntimeStart(input: {
     ))
     .returning();
   if (!claimed) throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
-  return toCompanion(claimed, current.access);
+  return toCompanion(claimed, current.access, current.last_message);
 }
 
 export async function claimCompanionRuntimeStop(input: {
@@ -2286,6 +2366,6 @@ export async function claimCompanionRuntimeStop(input: {
     ))
     .returning();
   if (!claimed) throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
-  return toCompanion(claimed, current.access);
+  return toCompanion(claimed, current.access, current.last_message);
 }
 

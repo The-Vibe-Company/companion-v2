@@ -156,6 +156,7 @@ const companion = {
   selected_mcp_account_ids: [],
   owner_id: "user-1",
   access: "owner" as const,
+  last_message: null,
   runtime: {
     state: "stopped" as const,
     daemon_state: "stopped" as const,
@@ -483,6 +484,35 @@ describe("Companions API feature gate", () => {
     expect(contextMocks.actorFromContext).toHaveBeenCalledOnce();
     expect(contextMocks.orgIdFromContext).toHaveBeenCalledOnce();
     expect(coreMocks.listCompanions).toHaveBeenCalledOnce();
+  });
+
+  it("carries each thread's last line on the list a conversation sidebar reads", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    coreMocks.listCompanions.mockResolvedValue([{
+      ...companion,
+      last_message: {
+        preview: "Drafted the launch note.",
+        role: "assistant",
+        author_id: null,
+        author_name: null,
+        created_at: "2026-08-14T09:05:00.000Z",
+      },
+    }]);
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => {
+      throw new Error("Box client must not be created");
+    });
+
+    const response = await app.request("/v1/companions");
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as { companions: Array<{ last_message: unknown }> };
+    expect(body.companions[0]?.last_message).toEqual({
+      preview: "Drafted the launch note.",
+      role: "assistant",
+      author_id: null,
+      author_name: null,
+      created_at: "2026-08-14T09:05:00.000Z",
+    });
   });
 
   it("saves a provider change without waking an asleep Box", async () => {
