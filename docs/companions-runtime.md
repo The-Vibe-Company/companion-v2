@@ -12,8 +12,20 @@ provider id, authentication method, and timestamps. `GET /v1/companions`,
 `GET /v1/companions/:id`, and the default
 `GET /v1/companions/:id/runtime` read only this projection and never call Box.
 
+One wake is bounded. The claim is written before any Box work, so every step after it runs under one
+three-minute start budget: object storage reads, Box calls, the waits for a ready Box and an active
+Pi, and the final lifecycle write. At the deadline the wake stops working — the same signal cancels
+whatever call is in flight and the adapter's poll intervals — and records why, so the Companion leaves
+`provisioning` for a retryable `error` carrying that reason. Per-step timeouts alone did not bound a
+wake: each call answered inside its own limit while their sum ran for minutes, which is how a send
+could leave a Companion reporting Starting against a Box that was doing nothing. A start that returns
+without a running Box and a running Pi is a failure with an observation attached, not a wake still in
+flight, so that observation is never written back as `provisioning`.
+
 Lifecycle claims are conditional updates. A claim abandoned by a crashed API process becomes
-retryable after five minutes; starts recover a Box by its deterministic `Companion <uuid>` name
+retryable half a minute past that budget — long enough for a live wake to record its own failure
+first, and short enough that a process that died writing nothing does not hold the Companion.
+Starts recover a Box by its deterministic `Companion <uuid>` name
 before creating another one, following every Box-list page. A new Box initially gets a maximum
 five-minute TTL; only after its id is durable does the adapter apply the configured TTL and name.
 If the id cannot be persisted, the adapter best-effort archives the Box immediately.
@@ -101,7 +113,7 @@ responses carry that same line as `error`, so the operator who pressed Wake and 
 reloads later read the same reason.
 
 Only recognized failures explain themselves: Box configuration (`COMPANION_BOX_API_KEY` unset), Box
-and Pi provider failures, provider resolution, and lifecycle conflicts. Every other failure — object
+and Pi provider failures, provider resolution, an exhausted start budget, and lifecycle conflicts. Every other failure — object
 storage, PostgreSQL, an unexpected adapter fault — records a generic line, so internal text cannot
 reach a stored row or a response. Sanitizing keeps the first line only, redacts credential-shaped
 text and the query string of any URL, and truncates to one status line.
@@ -305,10 +317,20 @@ instead of a real start attempt, for as long as the Box lived. Neither the poll 
 archives, or retires the Box: only a Box already beyond recovery — terminal `error` state or failed
 Pi setup — is replaced, and that decision is made before the daemon is ever started.
 
+A ready state is not a machine that answers. `idle` is a resting state the provider's own idle
+handling can leave a Box in, and such a Box normally still runs commands, so a start treats it as
+ready — but production found Boxes at `idle` that ran nothing while the wake against them reported
+`provisioning`. Every step of a start after the Box is ready is a command, so the first of those
+commands is also the proof that the machine is listening. A Box that refuses it, by envelope or by
+refusing the command endpoint at all, is resumed and asked once more; one that still says nothing
+fails the wake with what it said. A Box in a state no resume applies to fails immediately.
+
 A start first checks the warm path when the control-plane row already records the current layout and
 provider generation. If the unit is `active` and its tmpfs MCP credential file is present, start
 returns that observation without repairing layout, injecting resources, or calling systemd start at
-all. This keeps an in-flight turn alive. The first start after a layout or credential change still
+all. This keeps an in-flight turn alive. That warm probe is the start's first command whenever the
+start is warm-eligible, so its answer carries the reachability proof too and a warm Box is still
+touched exactly once. The first start after a layout or credential change still
 refreshes the files, but uses idempotent `systemctl start`, never `restart`, so an active unit is not
 killed during the upgrade. An already-running process keeps the environment it inherited; refreshed
 layout and MCP environment take effect on its next automatic start or after an explicit stop/wake.

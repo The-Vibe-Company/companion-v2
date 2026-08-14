@@ -425,6 +425,153 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(writtenPaths).toContain(".companion/runtime/state/providers.env");
   });
 
+  /**
+   * THE-340: production wakes claimed `provisioning` against Boxes that sat at `idle` and never
+   * moved. `idle` is a state a Box normally runs commands from, so a start that finds one has to
+   * discover from the Box itself whether this one does, and resume it when it does not.
+   */
+  describe("a Box whose state reads ready but will not run commands", () => {
+    /**
+     * One idle Box that refuses every command until it is resumed, and — when `resumable` is false —
+     * refuses them afterwards too. The refusal is either the provider's own envelope saying the
+     * command did not run or an error from the command endpoint itself; a parked machine can produce
+     * either, and neither may be read as a wake in progress.
+     */
+    function idleBoxRefusingCommands(input: {
+      resumable: boolean;
+      refusal: "envelope" | "transport";
+    }) {
+      const commands: string[] = [];
+      let resumed = false;
+      const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const url = String(rawUrl);
+        const method = init?.method ?? "GET";
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+        if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+          return json({ box: { ...box, state: resumed ? "ready" : "idle" } });
+        }
+        if (url.endsWith("/resume") && method === "POST") {
+          resumed = input.resumable;
+          return json({ box: { ...box, state: resumed ? "ready" : "idle" } }, 202);
+        }
+        if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+        if (url.endsWith("/commands") && method === "POST") {
+          const command = String(body.command);
+          commands.push(command);
+          if (!resumed) {
+            // What a parked Box answers with: either an envelope reporting the command never ran, or
+            // no answer at all from the provider's own command endpoint.
+            return input.refusal === "envelope"
+              ? json({
+                success: false,
+                exitCode: 255,
+                stdout: "",
+                stderr: "box is not running",
+              })
+              : json({ code: "box_not_running", message: "Box is not running" }, 409);
+          }
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: command.includes("is-active") ? "active\n" : "",
+            stderr: "",
+          });
+        }
+        throw new Error(`unexpected Box request: ${method} ${url}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      return { commands, fetchMock };
+    }
+
+    const startInput = {
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web" as const,
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    };
+
+    it.each([
+      ["reports the command never ran", "envelope" as const],
+      ["will not answer the command endpoint", "transport" as const],
+    ])("resumes an idle Box that %s and starts Pi on it", async (_case, refusal) => {
+      const { commands, fetchMock } = idleBoxRefusingCommands({ resumable: true, refusal });
+      const runtime = new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      });
+
+      const result = await runtime.start(startInput);
+
+      expect(result).toMatchObject({ runtimeState: "running", daemonState: "running" });
+      expect(fetchMock.mock.calls.some(([url, init]) =>
+        String(url).endsWith("/boxes/bx_23456789/resume") && init?.method === "POST")).toBe(true);
+      // The wake it was resumed for then ran, rather than the resume being its own reported outcome.
+      expect(commands.some((command) =>
+        command.includes("systemctl --user start companion-pi-daemon.service"))).toBe(true);
+    });
+
+    it("fails the start with what an unresumable idle Box said instead of reporting provisioning", async () => {
+      idleBoxRefusingCommands({ resumable: false, refusal: "envelope" });
+      const runtime = new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      });
+
+      // A Box that will not run this start's first command even after a resume is a failed wake with
+      // a reason on it, which is what the Companion row records and what the sender is shown.
+      await expect(runtime.start(startInput)).rejects.toMatchObject({
+        status: 502,
+        message: expect.stringContaining("did not run this start's first command"),
+      });
+      await expect(runtime.start(startInput)).rejects.toMatchObject({
+        message: expect.stringContaining("box is not running"),
+      });
+    });
+
+    it("returns a warm idle Box without resuming the machine its Pi is already running on", async () => {
+      const commands: string[] = [];
+      const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const url = String(rawUrl);
+        const method = init?.method ?? "GET";
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+        if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+          return json({ box: { ...box, state: "idle" } });
+        }
+        if (url.endsWith("/commands") && method === "POST") {
+          const command = String(body.command);
+          commands.push(command);
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: command.includes("companion-pi-warm-ready") ? "companion-pi-warm-ready\n" : "",
+            stderr: "",
+          });
+        }
+        throw new Error(`unexpected Box request: ${method} ${url}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const runtime = new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      });
+
+      const result = await runtime.start({ ...startInput, replaceProviderAuth: false });
+
+      expect(result).toMatchObject({ runtimeState: "running", daemonState: "running" });
+      // The warm answer is the reachability proof, so the fast path still costs exactly one command
+      // and never restarts the turn that daemon may be in the middle of.
+      expect(commands).toHaveLength(1);
+      expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
+      expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/files"))).toBe(false);
+    });
+  });
+
   it("stages a skill archive too large for one file write as parts a short command joins", async () => {
     // Production wake died writing a single ~12.7 MiB base64 body; this archive base64s to ~6.7 MiB,
     // which the file API refuses the same way.

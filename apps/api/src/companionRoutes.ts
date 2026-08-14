@@ -9,6 +9,7 @@ import {
   CompanionRuntimeForbiddenError,
   CompanionRuntimeTransitionError,
   CompanionShareForbiddenError,
+  COMPANION_RUNTIME_START_BUDGET_MS,
   claimCompanionRuntimeStart,
   claimCompanionRuntimeStop,
   companionsAvailableToUser,
@@ -78,7 +79,11 @@ import {
   COMPANION_PI_DISK_LAYOUT_VERSION,
   type CompanionBoxRuntime,
 } from "./boxCompanionRuntime";
-import { companionRuntimeErrorMessage, isBoxRuntimeFailure } from "./companionRuntimeError";
+import {
+  CompanionRuntimeStartBudgetError,
+  companionRuntimeErrorMessage,
+  isBoxRuntimeFailure,
+} from "./companionRuntimeError";
 
 const companionIdSchema = z.string().uuid();
 
@@ -102,6 +107,7 @@ function errorStatus(error: unknown): number {
   if (error instanceof CompanionRuntimeTransitionError) return 409;
   if (error instanceof CompanionPluginConflictError) return 409;
   if (error instanceof CompanionRegistryUnavailableError) return 503;
+  if (error instanceof CompanionRuntimeStartBudgetError) return 504;
   if (error instanceof BoxRuntimeConfigurationError) return 503;
   if (error instanceof BoxRuntimeProviderError) {
     if (error.status === 409) return 409;
@@ -110,6 +116,40 @@ function errorStatus(error: unknown): number {
   }
   if (error instanceof z.ZodError) return 400;
   return 400;
+}
+
+/**
+ * One wake's deadline. Each step of a start bounds itself, but their sum did not, so a step that
+ * hung — an object-storage read with no timeout of its own, a Box call that never answered — kept the
+ * `provisioning` claim it had already written and recorded no reason for it. This is the clock that
+ * ends such a wake: the signal cancels whatever it is waiting on, and `aborted` is how a callback
+ * that outlived it knows it no longer owns the lifecycle.
+ *
+ * The timer is an ordinary cleared one rather than `AbortSignal.timeout`, so a wake that finished in
+ * a second does not leave a three-minute timer holding the process awake behind it.
+ */
+function startBudget(): { signal: AbortSignal; release: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(new CompanionRuntimeStartBudgetError(COMPANION_RUNTIME_START_BUDGET_MS)),
+    COMPANION_RUNTIME_START_BUDGET_MS,
+  );
+  timer.unref?.();
+  return { signal: controller.signal, release: () => clearTimeout(timer) };
+}
+
+/**
+ * Fail this step as soon as the wake's budget does, whatever the step is waiting on. `Promise.race`
+ * subscribes to both sides, so an abort that arrives after the wake already settled rejects a
+ * promise that is still handled rather than surfacing as an unhandled rejection.
+ */
+function withinBudget<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  const expiry = new Promise<never>((_resolve, reject) => {
+    const fail = () => reject(signal.reason);
+    if (signal.aborted) fail();
+    else signal.addEventListener("abort", fail, { once: true });
+  });
+  return Promise.race([work, expiry]);
 }
 
 /** Thread sync observes the control-plane projection and never wakes an unreachable Pi. */
@@ -229,6 +269,11 @@ export function registerCompanionRoutes(
    * Claim and start one Companion through the same lifecycle path for an explicit Wake or a
    * persisted message. The Box adapter owns the warm decision, so an already-active layout-6 Pi
    * returns before resource injection or any systemd start.
+   *
+   * The claim is written before any of that work, so every step after it runs under one budget: a
+   * wake that hangs or that answers with something other than a running Pi records why and leaves a
+   * retryable `error`, because the alternative — the bug this bounds — is a Companion that reports
+   * Starting until somebody reads the Box's own state to find out nothing is happening.
    */
   async function startRuntime(
     c: Context<{ Variables: ApiVariables }>,
@@ -251,8 +296,9 @@ export function registerCompanionRoutes(
           skillPackages: Awaited<ReturnType<typeof listCompanionRuntimeSkillPackages>>;
         }
       | undefined;
+    const budget = startBudget();
     try {
-      mutation = await tenant(c, async ({ actor, orgId, database }) => {
+      mutation = await withinBudget(tenant(c, async ({ actor, orgId, database }) => {
         failureContext = { actor, orgId };
         const provider = await resolveCompanionProviderAuth({
           actor, orgId, companionId, database,
@@ -269,24 +315,34 @@ export function registerCompanionRoutes(
           ? []
           : await listCompanionRuntimeSkillPackages({ actor, orgId, database });
         return { actor, orgId, companion, provider, plugins, skillPackages };
-      });
-      const skills = await Promise.all(mutation.skillPackages.map(async (skill) => {
-        const archive = await getSkillArchive({ key: skill.storagePath });
-        if (skillChecksum(toTar(archive)) !== skill.checksum) {
-          throw new BoxRuntimeProviderError(
-            `stored skill package no longer matches ${skill.slug}@${skill.version}`,
-            502,
-          );
-        }
-        return {
-          slug: skill.slug,
-          version: skill.version,
-          checksum: skill.checksum,
-          archive,
-        };
-      }));
+      }), budget.signal);
+      const skills = await withinBudget(
+        // Object storage has no timeout of its own, so these reads are held to the wake's deadline
+        // like every other step: a bucket that stops answering must not become a Companion that
+        // reports Starting with a Box nobody has contacted yet.
+        Promise.all(mutation.skillPackages.map(async (skill) => {
+          const archive = await getSkillArchive({
+            key: skill.storagePath,
+            signal: budget.signal,
+          });
+          if (skillChecksum(toTar(archive)) !== skill.checksum) {
+            throw new BoxRuntimeProviderError(
+              `stored skill package no longer matches ${skill.slug}@${skill.version}`,
+              502,
+            );
+          }
+          return {
+            slug: skill.slug,
+            version: skill.version,
+            checksum: skill.checksum,
+            archive,
+          };
+        })),
+        budget.signal,
+      );
       const runtime = runtimeFactory();
-      const observed = await runtime.start({
+      const observed = await withinBudget(runtime.start({
+        signal: budget.signal,
         companionId,
         orgId: mutation.orgId,
         boxId: mutation.companion.runtime.box_id,
@@ -312,6 +368,10 @@ export function registerCompanionRoutes(
         // `null` clears the recorded Box: the adapter found that the id this row carried names a
         // machine this Companion does not own, so no other path may reach it either.
         onBoxAssigned: async (boxId) => {
+          // A start abandoned at the deadline may still be mid-call when its cancellation lands, and
+          // the reason for that failure is already on the row. Re-claiming `provisioning` here would
+          // erase it and put the Companion back into the state this budget exists to end.
+          if (budget.signal.aborted) return;
           await withTenantContext(
             { orgId: mutation!.orgId, userId: mutation!.actor.id },
             (database) => updateCompanionRuntime({
@@ -323,29 +383,46 @@ export function registerCompanionRoutes(
             }),
           );
         },
-      });
-      const companion = await withTenantContext(
-        { orgId: mutation.orgId, userId: mutation.actor.id },
-        (database) => updateCompanionRuntime({
-          actor: mutation!.actor,
-          orgId: mutation!.orgId,
-          companionId,
-          patch: {
-            boxId: observed.boxId,
-            runtimeState: observed.runtimeState,
-            daemonState: observed.daemonState,
-            providerIds: [mutation!.provider.providerId],
-            providerCredentialGeneration: mutation!.provider.credentialGeneration,
-            diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
-            desktopAvailable: observed.desktopAvailable,
-            observedAt: new Date(),
-            startedAt: new Date(),
-          },
-          database,
-        }),
+      }), budget.signal);
+      // A start that returns is a start that finished, so anything other than a running Pi is a
+      // failure with an observation attached rather than a wake still in progress. Writing this
+      // observation back verbatim is what turned such an answer into a Companion stuck on Starting:
+      // `provisioning` reads as a wake in flight, and no later step was ever going to correct it.
+      if (observed.runtimeState !== "running" || observed.daemonState !== "running") {
+        throw new BoxRuntimeProviderError(
+          `Box ${observed.boxId} answered this wake as ${observed.runtimeState}`
+          + ` with Pi ${observed.daemonState} instead of running`,
+          502,
+        );
+      }
+      const companion = await withinBudget(
+        withTenantContext(
+          { orgId: mutation.orgId, userId: mutation.actor.id },
+          (database) => updateCompanionRuntime({
+            actor: mutation!.actor,
+            orgId: mutation!.orgId,
+            companionId,
+            patch: {
+              boxId: observed.boxId,
+              runtimeState: observed.runtimeState,
+              daemonState: observed.daemonState,
+              providerIds: [mutation!.provider.providerId],
+              providerCredentialGeneration: mutation!.provider.credentialGeneration,
+              diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
+              desktopAvailable: observed.desktopAvailable,
+              observedAt: new Date(),
+              startedAt: new Date(),
+            },
+            database,
+          }),
+        ),
+        budget.signal,
       );
       return { companion, runtime };
-    } catch (error) {
+    } catch (raised) {
+      // Cancellation surfaces as whatever call was in flight when the deadline landed, so the reason
+      // this wake reports is the budget it spent rather than a bare abort from one Box request.
+      const error = budget.signal.aborted ? budget.signal.reason : raised;
       // A pre-claim transition conflict means another request owns the wake. Preserve its
       // provisioning lock; all other authorized failures remain visible through last_error.
       const context = mutation
@@ -370,6 +447,8 @@ export function registerCompanionRoutes(
         ).catch(() => undefined);
       }
       throw error;
+    } finally {
+      budget.release();
     }
   }
 

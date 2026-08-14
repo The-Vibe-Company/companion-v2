@@ -94,6 +94,16 @@ type PiDaemonDiagnosticKey = (typeof PI_DAEMON_DIAGNOSTIC_BUDGETS)[number]["key"
 const READY_STATES = new Set<BoxState>(["ready", "idle", "running"]);
 const STARTING_STATES = new Set<BoxState>(["init", "provisioning", "provisioned", "cloning"]);
 const ARCHIVED_STATES = new Set<BoxState>(["archiving", "archived"]);
+/**
+ * States a Box can be brought back from with `resume`. `archived` is the state an explicit stop
+ * leaves, and `idle` is the resting state the provider's own idle handling can put a Box into: it
+ * normally still runs commands, which is why a start treats it as ready, but a start that finds it
+ * will not answer has to resume it rather than run the wake's commands against a machine that is not
+ * listening.
+ */
+const RESUMABLE_STATES = new Set<BoxState>(["archived", "idle"]);
+/** Printed by the probe that proves this Box is running commands for the start. */
+const BOX_RUNNABLE_MARKER = "companion-box-runnable";
 /** Printed by the staging command when Pi's auth file already exists on the Box disk. */
 const PROVIDER_AUTH_PRESENT_MARKER = "companion-provider-auth-present";
 /** Printed only when a warm Box already has everything an automatic Pi restart needs. */
@@ -173,6 +183,11 @@ export interface CompanionBoxRuntime {
     skills: CompanionRuntimeSkill[];
     /** Record which Box backs this Companion, or `null` when the recorded one is not its own. */
     onBoxAssigned: (boxId: string | null) => Promise<void>;
+    /**
+     * The lifecycle caller's start budget. Every Box call and every wait this start makes ends when
+     * it does, so a wake the control plane stopped waiting for stops working too.
+     */
+    signal?: AbortSignal;
   }): Promise<CompanionRuntimeObservation>;
   stop(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
   status(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
@@ -469,6 +484,27 @@ if ! systemctl --user show-environment >/dev/null 2>&1; then
   exit 1
 fi`;
 
+/**
+ * A cold start's first command. It proves nothing about Pi and is not meant to: its only job is to
+ * establish that this Box runs the commands the rest of the start is made of, so a machine that will
+ * not answer is discovered here rather than reported as a wake in progress.
+ */
+const BOX_RUNNABLE_COMMAND = `printf '%s\\n' ${shellQuote(BOX_RUNNABLE_MARKER)}`;
+
+/**
+ * A warm-eligible start's first command. A current-layout active daemon with its runtime credential
+ * file is already fully started. Returning from that state avoids replacing Skills/MCP files
+ * underneath an in-flight turn and, most importantly, avoids killing that turn with an unnecessary
+ * systemd restart. Printing nothing is the ordinary answer for a Box whose Pi is not warm, so this
+ * exits 0 either way and its exit status carries the same reachability proof as the cold probe.
+ */
+const WARM_DAEMON_READY_COMMAND = `${USER_BUS_ENVIRONMENT}
+if systemctl --user show-environment >/dev/null 2>&1 &&
+  systemctl --user is-active --quiet companion-pi-daemon.service &&
+  [ -f "$XDG_RUNTIME_DIR/companion/providers.env" ]; then
+  printf '%s\\n' ${shellQuote(WARM_DAEMON_READY_MARKER)}
+fi`;
+
 function encodeEnvironmentFile(credentials: McpRuntimeCredential[]): string {
   return credentials
     .map(({ env_key: envKey, value }) => `${envKey}=${JSON.stringify(value)}`)
@@ -545,6 +581,13 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
   readonly #daemonActiveTimeoutMs: number;
   readonly #installCommand: string | undefined;
   readonly #mcpAdapterPackage: string;
+  /**
+   * The current start's budget, held for as long as that start runs. Every Box request and every
+   * poll interval reads it, so one field cancels the whole tree of calls a wake makes without
+   * threading the signal through each private step, and delivery on the same adapter instance is
+   * unaffected because the field is cleared when the start returns.
+   */
+  #startSignal: AbortSignal | undefined;
 
   constructor(env: NodeJS.ProcessEnv = process.env) {
     const apiKey = env.COMPANION_BOX_API_KEY?.trim();
@@ -568,6 +611,18 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
       env.COMPANION_PI_MCP_ADAPTER_PACKAGE?.trim() || DEFAULT_PI_MCP_ADAPTER_PACKAGE;
   }
 
+  /**
+   * What ends one Box request: its own timeout, whatever the caller passed, and the running start's
+   * budget. The per-call timeout alone is what let a wake outlive every deadline it had — each call
+   * answered inside its own limit while their sum ran for minutes.
+   */
+  #requestSignal(timeoutMs: number, callerSignal?: AbortSignal | null): AbortSignal {
+    const signals = [AbortSignal.timeout(timeoutMs)];
+    if (callerSignal) signals.push(callerSignal);
+    if (this.#startSignal) signals.push(this.#startSignal);
+    return signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
+  }
+
   async #request<T>(path: string, init?: RequestInit, timeoutMs = 30_000): Promise<T> {
     const response = await fetch(`${this.#baseUrl}${path}`, {
       ...init,
@@ -576,7 +631,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
         ...(init?.body ? { "Content-Type": "application/json" } : {}),
         ...init?.headers,
       },
-      signal: init?.signal ?? AbortSignal.timeout(timeoutMs),
+      signal: this.#requestSignal(timeoutMs, init?.signal),
     });
     if (!response.ok) {
       const body = await response.json().catch(() => null) as
@@ -689,6 +744,11 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     }
   }
 
+  /** One poll interval, ended early by the running start's budget. */
+  async #pause(): Promise<void> {
+    await sleep(this.#pollIntervalMs, undefined, { signal: this.#startSignal });
+  }
+
   async #waitReady(boxId: string): Promise<BoxInfo> {
     const deadline = Date.now() + this.#readyTimeoutMs;
     while (Date.now() < deadline) {
@@ -700,9 +760,76 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
       if (box.setupStatus === "failed") {
         throw new BoxRuntimeProviderError(`Box Pi setup failed: ${box.setupError || "unknown error"}`, 502);
       }
-      await sleep(this.#pollIntervalMs);
+      await this.#pause();
     }
     throw new BoxRuntimeProviderError("Box did not become ready before the configured timeout", 504);
+  }
+
+  async #resume(boxId: string): Promise<BoxInfo> {
+    const resumed = await this.#request<BoxEnvelope>(
+      `/boxes/${encodeURIComponent(boxId)}/resume`,
+      {
+        method: "POST",
+        body: JSON.stringify({ noEnv: true, ttlSeconds: this.#ttlSeconds }),
+      },
+    );
+    return resumed.box;
+  }
+
+  /**
+   * Run one command and treat a refusal as an answer rather than a failure, because the caller's next
+   * move is to resume the machine. Only cancellation travels on: a wake the control plane stopped
+   * waiting for has nothing left to resume.
+   */
+  async #attemptCommand(
+    boxId: string,
+    command: string,
+  ): Promise<{ ran: boolean; stdout: string; detail: string }> {
+    try {
+      const result = await this.#command(boxId, command);
+      if (result.success) return { ran: true, stdout: result.stdout, detail: "" };
+      return { ran: false, stdout: result.stdout, detail: commandFailureDetail(result) };
+    } catch (error) {
+      if (this.#startSignal?.aborted) throw error;
+      const detail = error instanceof BoxRuntimeProviderError ? error.message : "";
+      return { ran: false, stdout: "", detail: detail ? `: ${detail}` : "" };
+    }
+  }
+
+  /**
+   * Run this start's first command, resuming the Box when it will not run it.
+   *
+   * `idle` is a ready state for a Box that answers, and the start's own commands are what discover
+   * that this one does not. A Box whose compute the provider parked is resumed and asked again, and
+   * one that still says nothing fails the start with what it said: reporting a start as
+   * `provisioning` against a machine that is not listening is what left a Companion waking forever.
+   *
+   * The command is the warm probe whenever this start could still return early, so a warm Box is
+   * touched exactly once — the answer that proves it is listening is the same answer that says its Pi
+   * is already running.
+   */
+  async #firstCommand(box: BoxInfo, warmEligible: boolean): Promise<{ box: BoxInfo; warm: boolean }> {
+    const command = warmEligible ? WARM_DAEMON_READY_COMMAND : BOX_RUNNABLE_COMMAND;
+    let attempt = await this.#attemptCommand(box.id, command);
+    if (!attempt.ran) {
+      if (!RESUMABLE_STATES.has(box.state)) {
+        throw new BoxRuntimeProviderError(
+          `Box in state ${box.state} did not run this start's first command${attempt.detail}`,
+          502,
+        );
+      }
+      box = await this.#waitReady((await this.#resume(box.id)).id);
+      attempt = await this.#attemptCommand(box.id, command);
+      if (!attempt.ran) {
+        throw new BoxRuntimeProviderError(
+          `Box in state ${box.state} did not run this start's first command after a resume`
+          + attempt.detail,
+          502,
+        );
+      }
+    }
+    const warm = warmEligible && attempt.stdout.split(/[\r\n]+/).includes(WARM_DAEMON_READY_MARKER);
+    return { box, warm };
   }
 
   async #command(
@@ -726,24 +853,6 @@ systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true`,
   }
 
   /**
-   * A current-layout active daemon with its runtime credential file is already fully started.
-   * Returning from that state avoids replacing Skills/MCP files underneath an in-flight turn and,
-   * most importantly, avoids killing that turn with an unnecessary systemd restart.
-   */
-  async #warmDaemonReady(boxId: string): Promise<boolean> {
-    const result = await this.#command(
-      boxId,
-      `${USER_BUS_ENVIRONMENT}
-if systemctl --user show-environment >/dev/null 2>&1 &&
-  systemctl --user is-active --quiet companion-pi-daemon.service &&
-  [ -f "$XDG_RUNTIME_DIR/companion/providers.env" ]; then
-  printf '%s\\n' ${shellQuote(WARM_DAEMON_READY_MARKER)}
-fi`,
-    );
-    return result.success && result.stdout.split(/[\r\n]+/).includes(WARM_DAEMON_READY_MARKER);
-  }
-
-  /**
    * Wait for the started unit to actually be running. A successful `start` only means systemd
    * accepted the job, so the daemon is given the whole window to reach `active` and the wait ends
    * on the first probe that says it did.
@@ -752,7 +861,7 @@ fi`,
     const deadline = Date.now() + this.#daemonActiveTimeoutMs;
     let daemonState = await this.#daemonState(boxId);
     while (daemonState !== "running" && Date.now() < deadline) {
-      await sleep(this.#pollIntervalMs);
+      await this.#pause();
       daemonState = await this.#daemonState(boxId);
     }
     return daemonState;
@@ -997,6 +1106,28 @@ exit 0`,
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
     onBoxAssigned: (boxId: string | null) => Promise<void>;
+    signal?: AbortSignal;
+  }): Promise<CompanionRuntimeObservation> {
+    this.#startSignal = input.signal;
+    try {
+      return await this.#startBox(input);
+    } finally {
+      // Delivery runs on this same adapter instance, so the wake's deadline must not outlive it.
+      this.#startSignal = undefined;
+    }
+  }
+
+  async #startBox(input: {
+    companionId: string;
+    orgId: string;
+    boxId: string | null;
+    clientSurface: CompanionClientSurface;
+    providerAuth: Record<string, Record<string, unknown>>;
+    replaceProviderAuth: boolean;
+    mcpCredentials: McpRuntimeCredential[];
+    mcpAccounts: CompanionMcpAccount[];
+    skills: CompanionRuntimeSkill[];
+    onBoxAssigned: (boxId: string | null) => Promise<void>;
   }): Promise<CompanionRuntimeObservation> {
     const assigned = input.boxId ? await this.#getAssignedBox(input.boxId) : null;
     // A recorded id that names a machine this Companion does not own is treated as no assignment at
@@ -1023,14 +1154,7 @@ exit 0`,
       replaceProviderAuth = true;
     }
     if (box.state === "archived") {
-      const resumed = await this.#request<BoxEnvelope>(
-        `/boxes/${encodeURIComponent(box.id)}/resume`,
-        {
-          method: "POST",
-          body: JSON.stringify({ noEnv: true, ttlSeconds: this.#ttlSeconds }),
-        },
-      );
-      box = resumed.box;
+      box = await this.#resume(box.id);
     } else if (box.state === "archiving") {
       throw new BoxRuntimeProviderError("Box is still archiving; retry start after it is archived", 409);
     } else if (!READY_STATES.has(box.state) && !STARTING_STATES.has(box.state)) {
@@ -1056,12 +1180,15 @@ exit 0`,
       }
     }
     box = await this.#waitReady(box.id);
+    // Everything from here on is a command, so this is where a Box that is not listening has to be
+    // found: a state that reads as ready is not the same as a machine that answers.
+    //
     // `replaceProviderAuth=false` proves the control-plane row already records this layout and the
     // current provider generation. The runtime-file probe supplies the missing volatile half of the
     // proof: a later systemd auto-restart can still inherit this daemon's MCP credentials.
-    if (!replaceProviderAuth && await this.#warmDaemonReady(box.id)) {
-      return observation(await this.#get(box.id), "running");
-    }
+    const first = await this.#firstCommand(box, !replaceProviderAuth);
+    box = first.box;
+    if (first.warm) return observation(await this.#get(box.id), "running");
     await this.#ensurePiLayout(box.id);
     await this.#injectPiResources({
       boxId: box.id,

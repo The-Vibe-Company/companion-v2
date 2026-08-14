@@ -1,4 +1,5 @@
 import {
+  COMPANION_RUNTIME_START_BUDGET_MS,
   CompanionPluginConflictError,
   CompanionProviderError,
   CompanionRegistryUnavailableError,
@@ -632,6 +633,119 @@ describe("Companions API feature gate", () => {
         runtimeState: "error",
         daemonState: "error",
         lastError: "The provider connection is unavailable.",
+      }),
+    }));
+  });
+
+  /**
+   * THE-340: a send claimed `provisioning` and then waited on a start that never came back, so the
+   * Companion reported Starting for as long as nobody looked at its Box. The claim now has a deadline
+   * and the failure it records is what releases it.
+   */
+  it("records last_error and leaves a retryable error when automatic wake outlives its budget", async () => {
+    vi.useFakeTimers();
+    try {
+      coreMocks.listPendingCompanionMessages.mockResolvedValue({
+        pending: [message],
+        piLogOffset: 0,
+        deliveredOrdinal: null,
+      });
+      const runtime = boxRuntime({
+        // The production signature: a start that neither resolves nor rejects.
+        start: vi.fn(() => new Promise(() => undefined)),
+      });
+      const app = new Hono<{ Variables: ApiVariables }>();
+      registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+      const pending = app.request(`/v1/companions/${companion.id}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: "Summarize the incident" }),
+      });
+      await vi.advanceTimersByTimeAsync(COMPANION_RUNTIME_START_BUDGET_MS);
+      const response = await pending;
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
+      expect(runtime.prompt).not.toHaveBeenCalled();
+      expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+        companionId: companion.id,
+        patch: expect.objectContaining({
+          runtimeState: "error",
+          daemonState: "error",
+          lastError: expect.stringContaining("did not finish within 180s"),
+        }),
+      }));
+      // The start is told the wake is over, so it stops working against a Box nobody is waiting on.
+      expect(runtime.start.mock.calls[0]![0].signal.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("answers an explicit wake that outlived its budget with a retryable failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const app = new Hono<{ Variables: ApiVariables }>();
+      registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => boxRuntime({
+        start: vi.fn(() => new Promise(() => undefined)),
+      }));
+
+      const pending = app.request(`/v1/companions/${companion.id}/runtime/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      await vi.advanceTimersByTimeAsync(COMPANION_RUNTIME_START_BUDGET_MS);
+      const response = await pending;
+
+      expect(response.status).toBe(504);
+      await expect(response.json()).resolves.toMatchObject({
+        ok: false,
+        error: expect.stringContaining("Try again."),
+      });
+      expect(coreMocks.updateCompanionRuntime).toHaveBeenLastCalledWith(expect.objectContaining({
+        patch: expect.objectContaining({ runtimeState: "error", daemonState: "error" }),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("records an error when a wake returns something other than a running Pi", async () => {
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    const runtime = boxRuntime({
+      // A start that finished without a running daemon is a failed wake with an observation attached.
+      // Storing this observation verbatim is what made a Companion read as Starting forever.
+      start: vi.fn(async () => ({
+        boxId: companion.runtime.box_id,
+        runtimeState: "provisioning" as const,
+        daemonState: "starting" as const,
+        desktopAvailable: true,
+      })),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
+    expect(runtime.prompt).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledOnce();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({
+        runtimeState: "error",
+        daemonState: "error",
+        lastError: expect.stringContaining("as provisioning with Pi starting instead of running"),
       }),
     }));
   });
