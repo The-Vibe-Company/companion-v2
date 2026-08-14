@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { projectCompanionPiEvents } from "../src/companionPiEvents";
+import type { CompanionToolRun } from "@companion/contracts";
+import {
+  matchCompanionToolCompletions,
+  projectCompanionPiEvents,
+} from "../src/companionPiEvents";
 
 function line(event: unknown): string {
   return `${JSON.stringify(event)}\n`;
@@ -259,5 +263,81 @@ describe("Pi RPC log projection", () => {
     expect(projection.entries).toHaveLength(1);
     expect(projection.entries[0]?.content).toBe("Recovered");
     expect(projection.consumedBytes).toBe(Buffer.byteLength(chunk, "utf8"));
+  });
+});
+
+/**
+ * Product promise:
+ * A chip that starts spinning stops on the run it belongs to. A tool call and its result routinely
+ * arrive in different syncs, so the match is what keeps a finished run from spinning forever and a
+ * stray result from closing somebody else's run.
+ *
+ * Regression caught:
+ * Closing whichever chip is convenient — the newest, or any open one — which shows a shell run's
+ * output under a file run, and re-closing an already-settled run when a shrunken log is reread.
+ *
+ * Why this level:
+ * The rule is pure. It reads the open runs and the results and says which chips settle; the database
+ * around it only supplies the one list and writes the other.
+ *
+ * Failure proof:
+ * Dropping the call-id branch, or letting a result with no id close the newest run, fails a case.
+ */
+describe("Pi tool result matching", () => {
+  const run = (
+    eventId: string,
+    overrides: Partial<CompanionToolRun> = {},
+  ): { eventId: string; tool: CompanionToolRun } => ({
+    eventId,
+    tool: {
+      call_id: null,
+      kind: "shell",
+      name: "bash",
+      title: "ls",
+      status: "running",
+      detail: '{ "command": "ls" }',
+      screenshot: null,
+      ...overrides,
+    },
+  });
+
+  const result = (
+    callId: string | null,
+    overrides: Partial<{ status: "ok" | "error"; result: string | null }> = {},
+  ) => ({ callId, status: "ok" as const, result: "done", completedAt: now, ...overrides });
+
+  it("closes the run its result names, whatever order the results arrive in", () => {
+    const settled = matchCompanionToolCompletions(
+      [run("a", { call_id: "call_1" }), run("b", { call_id: "call_2" })],
+      [result("call_2"), result("call_1", { status: "error", result: "exit 1" })],
+    );
+
+    expect(settled.map((entry) => [entry.eventId, entry.tool.status])).toEqual([
+      ["b", "ok"],
+      ["a", "error"],
+    ]);
+  });
+
+  it("closes the oldest open run when the harness reports no call id", () => {
+    const settled = matchCompanionToolCompletions(
+      [run("a"), run("b")],
+      [result(null), result(null)],
+    );
+
+    expect(settled.map((entry) => entry.eventId)).toEqual(["a", "b"]);
+  });
+
+  it("drops a result that matches no open run instead of closing one at random", () => {
+    expect(matchCompanionToolCompletions([run("a", { call_id: "call_1" })], [result("call_9")]))
+      .toEqual([]);
+    expect(matchCompanionToolCompletions([], [result(null)])).toEqual([]);
+  });
+
+  it("keeps the arguments and adds what the tool answered", () => {
+    const [settled] = matchCompanionToolCompletions([run("a")], [result(null, { result: "logs" })]);
+
+    expect(settled?.tool.detail).toBe('{ "command": "ls" }\n\nlogs');
+    // Everything the call itself said about the run is untouched by its result.
+    expect(settled?.tool).toMatchObject({ kind: "shell", name: "bash", title: "ls" });
   });
 });

@@ -92,6 +92,40 @@ async function readEventsOnBoxDisk(input: {
 }
 
 /**
+ * A PATH holding one screenshot tool that writes `contents` wherever it was told to. ImageMagick's
+ * `import` takes its destination as the last argument, prefixed with the format it should write.
+ */
+async function binWithCaptureTool(name: string, contents: string): Promise<string> {
+  const bin = await mkdtemp(join(tmpdir(), "companion-frame-bin-"));
+  const script = join(bin, name);
+  await writeFile(
+    script,
+    "#!/bin/sh\nfor arg in \"$@\"; do last=\"$arg\"; done\n"
+    + `printf '%s' ${JSON.stringify(contents)} > "\${last#jpeg:}"\n`,
+  );
+  await chmod(script, 0o755);
+  return bin;
+}
+
+/** A PATH on which every screenshot tool the capture knows about is missing. */
+async function binWithMissingCaptureTools(): Promise<string> {
+  return mkdtemp(join(tmpdir(), "companion-frame-bin-"));
+}
+
+/** Photograph a Box whose shell is this process's, so the script runs against a real PATH. */
+async function captureFrameOnBoxDisk(input: {
+  home: string;
+  pathPrefix: string;
+}): Promise<string | null> {
+  vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    return json(await runOnBoxDisk(String(body.command), input.home, input.pathPrefix));
+  }));
+  const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+  return runtime.captureDesktopFrame({ boxId: "bx_23456789" });
+}
+
+/**
  * The layout script the adapter stages on a Box, captured from one wake. It is the same text the
  * create `setupScript` carries, and running it is the only way to get the daemon wrapper it writes.
  */
@@ -3815,6 +3849,54 @@ describe("AsciiBoxCompanionRuntime", () => {
       await expect(readEventsOnBoxDisk({ home, offset: 0, pathPrefix: bin }))
         .resolves.toEqual({ chunk: "", offset: 0, exitCode: 0 });
     });
+  });
+
+  /**
+   * The frame a visual tool run carries is produced by a shell script on a machine the control plane
+   * does not control the contents of, so what it does when the tools it hopes for are absent — or
+   * when the picture is too big to keep — is behavior, not intention. These run the script the
+   * adapter sends against a real shell with a real PATH.
+   */
+  describe("photographing the Box desktop against a real shell", () => {
+    it("returns the frame a capture tool wrote, encoded for the transcript", async () => {
+      const home = await mkdtemp(join(tmpdir(), "companion-frame-home-"));
+      const bin = await binWithCaptureTool("import", "FAKEJPEG");
+
+      await expect(captureFrameOnBoxDisk({ home, pathPrefix: bin }))
+        .resolves.toBe(`data:image/jpeg;base64,${Buffer.from("FAKEJPEG").toString("base64")}`);
+    });
+
+    it("keeps a run without a picture when the machine has nothing that can take one", async () => {
+      // A Box with no desktop, or a desktop image with no screenshot tool on it, is the ordinary
+      // case for a Companion that never opens one. The sync that projected the run must not fail.
+      const home = await mkdtemp(join(tmpdir(), "companion-frame-home-"));
+      const bin = await binWithMissingCaptureTools();
+
+      await expect(captureFrameOnBoxDisk({ home, pathPrefix: bin })).resolves.toBeNull();
+    });
+
+    it("drops a frame too large for the transcript instead of sending it", async () => {
+      const home = await mkdtemp(join(tmpdir(), "companion-frame-home-"));
+      const bin = await binWithCaptureTool("import", "F".repeat(200_000));
+
+      await expect(captureFrameOnBoxDisk({ home, pathPrefix: bin })).resolves.toBeNull();
+    });
+  });
+
+  it("refuses whatever a Box printed that is not an inline image", async () => {
+    // The frame is handed to an `img` in the transcript, so a Box that answered with a diagnostic,
+    // a remote URL, or a truncated line leaves the run without a picture rather than with that.
+    for (const stdout of [
+      "Xlib: cannot connect to X server :0\n",
+      "https://example.test/frame.jpg",
+      "data:image/jpeg;base64,",
+      "data:text/html;base64,PGgxPmhpPC9oMT4=",
+    ]) {
+      vi.stubGlobal("fetch", vi.fn(async () => json({ success: true, exitCode: 0, stdout, stderr: "" })));
+      const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+      await expect(runtime.captureDesktopFrame({ boxId: "bx_23456789" })).resolves.toBeNull();
+    }
   });
 
   it("projects a capped read the Box called unsuccessful rather than failing the sync", async () => {

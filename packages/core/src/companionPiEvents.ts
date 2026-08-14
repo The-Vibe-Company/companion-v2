@@ -367,6 +367,38 @@ function entryFrom(event: PiEvent, now: Date): Omit<CompanionPiEntry, "eventId">
 }
 
 /**
+ * Settle the runs Pi reported results for.
+ *
+ * A result naming its call closes exactly that chip. A harness that reports no call id closes the
+ * oldest chip still running, because Pi works through a turn's tools one at a time and the oldest
+ * open run is the only one such a result can belong to. A result matching nothing is dropped rather
+ * than guessed at, so a chunk read twice cannot close a run some later call started.
+ */
+export function matchCompanionToolCompletions(
+  open: ReadonlyArray<{ eventId: string; tool: CompanionToolRun }>,
+  completions: readonly CompanionPiToolCompletion[],
+): Array<{ eventId: string; tool: CompanionToolRun }> {
+  const remaining = [...open];
+  const settled: Array<{ eventId: string; tool: CompanionToolRun }> = [];
+  for (const completion of completions) {
+    const index = completion.callId
+      ? remaining.findIndex((run) => run.tool.call_id === completion.callId)
+      : (remaining.length ? 0 : -1);
+    const match = index < 0 ? undefined : remaining.splice(index, 1)[0];
+    if (!match) continue;
+    settled.push({
+      eventId: match.eventId,
+      tool: {
+        ...match.tool,
+        status: completion.status,
+        detail: [match.tool.detail, completion.result].filter(Boolean).join("\n\n") || null,
+      },
+    });
+  }
+  return settled;
+}
+
+/**
  * The runs one record announced, as their own transcript entries. A run is not folded into the
  * assistant turn that called it: it keeps an ordinal of its own, so the chip sits between the turns
  * it happened between and stays there once the turn around it has been written.

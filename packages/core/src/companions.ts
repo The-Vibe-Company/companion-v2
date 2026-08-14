@@ -28,6 +28,7 @@ import {
 import { db, schema, type Db } from "@companion/db";
 import { canManageOrg } from "./authz";
 import type { CompanionPiEntry, CompanionPiToolCompletion } from "./companionPiEvents";
+import { matchCompanionToolCompletions } from "./companionPiEvents";
 import {
   companionRuntimeErrorForAccess,
   sanitizeCompanionRuntimeError,
@@ -837,13 +838,7 @@ async function readRunningCompanionToolRuns(
   return rows.flatMap((row) => (row.tool ? [{ eventId: row.eventId, tool: row.tool }] : []));
 }
 
-/**
- * Settle the runs Pi reported results for. A result naming its call closes exactly that chip; a
- * harness that reports no call id closes the oldest chip still running, because Pi runs a turn's
- * tools one at a time and the oldest open one is the only run its result can belong to. A result
- * that matches nothing is dropped rather than guessed at, so a replayed chunk cannot close a run
- * that a later call started.
- */
+/** Write the results Pi reported onto the chips still running for them. */
 async function completeCompanionToolRuns(input: {
   database: Db;
   orgId: string;
@@ -856,22 +851,7 @@ async function completeCompanionToolRuns(input: {
     input.orgId,
     input.companionId,
   );
-  const settled: Array<{ eventId: string; tool: CompanionStoredToolRun }> = [];
-  for (const completion of input.completions) {
-    const index = completion.callId
-      ? open.findIndex((run) => run.tool.call_id === completion.callId)
-      : (open.length ? 0 : -1);
-    const match = index < 0 ? undefined : open.splice(index, 1)[0];
-    if (!match) continue;
-    settled.push({
-      eventId: match.eventId,
-      tool: {
-        ...match.tool,
-        status: completion.status,
-        detail: [match.tool.detail, completion.result].filter(Boolean).join("\n\n") || null,
-      },
-    });
-  }
+  const settled = matchCompanionToolCompletions(open, input.completions);
   for (const run of settled) {
     await input.database
       .update(schema.companionTranscriptEntries)

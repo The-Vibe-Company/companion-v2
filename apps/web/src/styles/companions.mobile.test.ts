@@ -117,7 +117,15 @@ describe("Companions mobile viewport", () => {
     expect(css).not.toContain("companions-thread-in");
     expect(css).not.toContain("companions-scrim-in");
     expect(css).not.toContain("companions-thread-scrim");
-    expect(rules.some((rule) => rule.at.some((entry) => entry.startsWith("@keyframes")))).toBe(false);
+    // Nothing in this stylesheet may animate a surface across the screen. A keyframe that only
+    // rotates in place — the tool-run spinner — is not that, so the assertion is on what the
+    // keyframes do rather than on there being none.
+    const keyframes = rules.filter((rule) =>
+      rule.at.some((entry) => entry.startsWith("@keyframes")));
+    expect(keyframes.length).toBeGreaterThan(0);
+    for (const frame of keyframes) {
+      expect(frame.declarations).not.toMatch(/translate|left|right|inset|margin/);
+    }
     expect(css).not.toContain("translateX(16px)");
   });
 
