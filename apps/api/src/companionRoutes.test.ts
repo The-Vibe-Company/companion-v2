@@ -650,9 +650,13 @@ describe("Companions API feature gate", () => {
         piLogOffset: 0,
         deliveredOrdinal: null,
       });
+      let wake: AbortSignal | undefined;
       const runtime = boxRuntime({
         // The production signature: a start that neither resolves nor rejects.
-        start: vi.fn(() => new Promise(() => undefined)),
+        start: vi.fn((input: { signal?: AbortSignal }) => {
+          wake = input.signal;
+          return new Promise(() => undefined);
+        }),
       });
       const app = new Hono<{ Variables: ApiVariables }>();
       registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
@@ -677,7 +681,7 @@ describe("Companions API feature gate", () => {
         }),
       }));
       // The start is told the wake is over, so it stops working against a Box nobody is waiting on.
-      expect(runtime.start.mock.calls[0]![0].signal.aborted).toBe(true);
+      expect(wake?.aborted).toBe(true);
     } finally {
       vi.useRealTimers();
     }
