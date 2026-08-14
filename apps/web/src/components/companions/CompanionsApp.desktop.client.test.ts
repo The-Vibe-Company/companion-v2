@@ -457,6 +457,21 @@ describe("CompanionsApp Computer panel", () => {
     expect(window.open).not.toHaveBeenCalled();
   });
 
+  it("shows the stream the first join minted without joining a second time", async () => {
+    companionsApi.openCompanionDesktop.mockResolvedValue(
+      desktopPayload("https://box.ascii.dev/vnc/bx_23456789?token=first"),
+    );
+    const container = await open(companion());
+
+    await clickComputerToggle(container);
+
+    // The panel never picks a transport; it names the one the mint got. Opening it is one join, so
+    // a first stream that works is on screen without anybody pressing Reconnect.
+    expect(companionsApi.openCompanionDesktop).toHaveBeenCalledTimes(1);
+    expect(container.querySelector(".chat-computer__transport")?.textContent).toBe("vnc");
+    expect(panelFrame(container)?.getAttribute("src")).toContain("token=first");
+  });
+
   it("mints another desktop each time the panel is joined", async () => {
     companionsApi.openCompanionDesktop
       .mockResolvedValueOnce(desktopPayload("https://box.ascii.dev/vnc/bx_23456789?token=first"))
