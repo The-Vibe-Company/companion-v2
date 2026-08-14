@@ -55,6 +55,15 @@ describe("Companion settings persistence and roles", () => {
       masterKey,
       database: integrationDb,
     });
+    await saveCompanionProvider({
+      actor: fixture.owner,
+      orgId: fixture.orgA,
+      providerId: "zai",
+      authMethod: "api_key",
+      credential: "integration-zai-secret",
+      masterKey,
+      database: integrationDb,
+    });
     await integrationDb.insert(schema.companions).values({
       id: companionId,
       orgId: fixture.orgA,
@@ -154,20 +163,22 @@ describe("Companion settings persistence and roles", () => {
       actor: fixture.developer,
       orgId: fixture.orgA,
       companionId,
-      modelId: "claude-sonnet-4-6",
+      providerId: "zai",
+      modelId: "glm-5.3",
       database: integrationDb,
     });
-    expect(updated.model_id).toBe("claude-sonnet-4-6");
+    expect(updated.runtime.provider_ids).toEqual(["zai"]);
+    expect(updated.model_id).toBe("glm-5.3");
 
     await expect(updateCompanion({
       actor: fixture.developer,
       orgId: fixture.orgA,
       companionId,
-      modelId: "glm-4.7",
+      modelId: "claude-sonnet-4-6",
       database: integrationDb,
     })).rejects.toMatchObject({
       code: "provider_model_invalid",
-      providerId: "anthropic",
+      providerId: "zai",
     });
   });
 

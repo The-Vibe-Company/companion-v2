@@ -500,10 +500,20 @@ describe("Companions API feature gate", () => {
   });
 
   it("recycles Pi for an online model-only change without replacing provider auth", async () => {
-    const changed = { ...runningCompanion, model_id: "claude-sonnet-4-6" };
-    coreMocks.getCompanion.mockResolvedValueOnce(runningCompanion);
+    const runningZaiCompanion = {
+      ...runningCompanion,
+      model_id: "glm-4.7",
+      runtime: { ...runningCompanion.runtime, provider_ids: ["zai"] },
+    };
+    const changed = { ...runningZaiCompanion, model_id: "glm-5.3" };
+    coreMocks.getCompanion.mockResolvedValueOnce(runningZaiCompanion);
     coreMocks.updateCompanion.mockResolvedValueOnce(changed);
     coreMocks.claimCompanionRuntimeStart.mockResolvedValueOnce(changed);
+    coreMocks.resolveCompanionProviderAuth.mockResolvedValueOnce({
+      providerId: "zai",
+      credentialGeneration: "22222222-2222-4222-8222-222222222222",
+      authEntry: { type: "api_key", key: "secret-zai" },
+    });
     const runtime = boxRuntime();
     const app = new Hono<{ Variables: ApiVariables }>();
     registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
@@ -511,14 +521,14 @@ describe("Companions API feature gate", () => {
     const response = await app.request(`/v1/companions/${companion.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model_id: "claude-sonnet-4-6" }),
+      body: JSON.stringify({ model_id: "glm-5.3" }),
     });
 
     expect(response.status).toBe(200);
     expect(runtime.status).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
     expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
       boxId: companion.runtime.box_id,
-      modelId: "claude-sonnet-4-6",
+      modelId: "glm-5.3",
       replaceProviderAuth: false,
       restartPi: true,
       allowBoxWake: false,

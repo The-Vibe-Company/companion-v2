@@ -48,6 +48,15 @@ describe("Companion provider contracts", () => {
     }
   });
 
+  it("pins z.ai's supported models and follows Pi's GLM-5.3 default", () => {
+    expect(COMPANION_PROVIDER_CATALOG.find((provider) => provider.id === "zai")?.models).toEqual([
+      { id: "glm-4.7", name: "GLM-4.7" },
+      { id: "glm-5-turbo", name: "GLM-5-Turbo" },
+      { id: "glm-5.2", name: "GLM-5.2" },
+      { id: "glm-5.3", name: "GLM-5.3", default: true },
+    ]);
+  });
+
   it("starts only native Claude/Codex subscription login and accepts one-time codes only", () => {
     expect(companionProviderOAuthStartInputSchema.parse({
       provider_id: "anthropic",

@@ -80,8 +80,10 @@ export const COMPANION_PROVIDER_CATALOG = [
     auth_methods: ["api_key"],
     description: "z.ai API key, including Coding Plan keys.",
     models: [
-      { id: "glm-4.7", name: "GLM-4.7", default: true },
+      { id: "glm-4.7", name: "GLM-4.7" },
       { id: "glm-5-turbo", name: "GLM-5-Turbo" },
+      { id: "glm-5.2", name: "GLM-5.2" },
+      { id: "glm-5.3", name: "GLM-5.3", default: true },
     ],
   },
   {

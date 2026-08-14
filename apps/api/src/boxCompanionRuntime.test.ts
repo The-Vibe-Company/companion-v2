@@ -463,10 +463,10 @@ describe("AsciiBoxCompanionRuntime", () => {
       boxId: null,
       clientSurface: "web",
       providerAuth: {
-        anthropic: { type: "api_key", key: "provider-secret" },
+        zai: { type: "api_key", key: "provider-secret" },
       },
       replaceProviderAuth: true,
-      modelId: "claude-opus-4-8",
+      modelId: "glm-5.3",
       instructions: "Challenge every source before answering.",
       mcpCredentials: [
         { env_key: "GITHUB_TOKEN_WORK", value: "mcp-secret" },
@@ -510,7 +510,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       content: "GITHUB_TOKEN_WORK=\"mcp-secret\"\n",
     });
     expect(files.get(".companion/pi/auth.json"))
-      .toBe("{\"anthropic\":{\"type\":\"api_key\",\"key\":\"provider-secret\"}}\n");
+      .toBe("{\"zai\":{\"type\":\"api_key\",\"key\":\"provider-secret\"}}\n");
     expect(files.get(".companion/runtime/state/skill-archives/incident-summary.tar.gz.b64"))
       .toBe(Buffer.from("archive").toString("base64"));
     // A payload the file API accepts whole is written whole; only an oversized one is split.
@@ -521,7 +521,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(files.get(".companion/runtime/state/mcp-accounts.json")).toContain("GitHub work");
     expect(files.get(".companion/runtime/state/instructions.txt"))
       .toBe("Challenge every source before answering.\n");
-    expect(files.get(".companion/runtime/state/model.txt")).toBe("claude-opus-4-8\n");
+    expect(files.get(".companion/runtime/state/model.txt")).toBe("glm-5.3\n");
     expect(assigned).toHaveBeenCalledWith("bx_23456789");
     expect(result).toEqual({
       boxId: "bx_23456789",
