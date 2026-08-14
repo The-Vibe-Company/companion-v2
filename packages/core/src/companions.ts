@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, lt, notInArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lt, notInArray, or, sql } from "drizzle-orm";
 import type {
   Companion,
   CompanionAccess,
@@ -170,6 +170,13 @@ export class CompanionSkillSelectionError extends Error {
   }
 }
 
+export class CompanionPluginSelectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CompanionPluginSelectionError";
+  }
+}
+
 export class CompanionWriteSkillsForbiddenError extends Error {
   constructor() {
     super("this Companion is not allowed to create or update skills on your behalf");
@@ -205,6 +212,9 @@ function toCompanion(row: CompanionRow, access: CompanionAccess): Companion {
     model_id: modelId ?? null,
     selected_skill_ids: Array.isArray(row.selectedSkillIds) ? row.selectedSkillIds : [],
     can_write_skills: row.canWriteSkills === true,
+    selected_mcp_account_ids: Array.isArray(row.selectedMcpAccountIds)
+      ? row.selectedMcpAccountIds
+      : [],
     owner_id: row.ownerId,
     access,
     runtime: {
@@ -322,6 +332,42 @@ export async function resolveCompanionSelectedSkillIds(input: {
 }
 
 /**
+ * Resolve and validate MCP account ids the actor may attach to a Companion: the member's already
+ * connected Plugins accounts. Unknown or foreign ids fail closed. Ids already on the Companion may
+ * be kept even when the current editor does not own them, so an Owner's connections survive an
+ * Editor saving other settings.
+ */
+export async function resolveCompanionSelectedMcpAccountIds(input: {
+  actor: ActorContext;
+  orgId: string;
+  selectedMcpAccountIds: string[];
+  previouslySelectedMcpAccountIds?: string[];
+  database?: Db;
+}): Promise<string[]> {
+  const database = input.database ?? db;
+  const unique = [...new Set(input.selectedMcpAccountIds)];
+  if (!unique.length) return [];
+  const connected = await listCompanionPlugins({
+    actor: input.actor,
+    orgId: input.orgId,
+    database,
+  });
+  const allowed = new Set(connected.map((account) => account.id));
+  for (const id of input.previouslySelectedMcpAccountIds ?? []) {
+    if (unique.includes(id)) allowed.add(id);
+  }
+  const rejected = unique.filter((id) => !allowed.has(id));
+  if (rejected.length) {
+    throw new CompanionPluginSelectionError(
+      rejected.length === 1
+        ? "One selected plugin is not connected in this workspace."
+        : `${rejected.length} selected plugins are not connected in this workspace.`,
+    );
+  }
+  return unique;
+}
+
+/**
  * Fail closed when a Companion-sourced PAT attempts skills:write after write-on-behalf was turned off.
  */
 export async function assertCompanionCanWriteSkills(input: {
@@ -350,6 +396,7 @@ export async function createCompanion(input: {
   modelId?: string;
   selectedSkillIds?: string[];
   canWriteSkills?: boolean;
+  selectedMcpAccountIds?: string[];
   providerCatalog?: CompanionProviderDefinition[];
   database?: Db;
 }): Promise<Companion> {
@@ -397,6 +444,14 @@ export async function createCompanion(input: {
         database,
       })
     : [];
+  const selectedMcpAccountIds = input.selectedMcpAccountIds !== undefined
+    ? await resolveCompanionSelectedMcpAccountIds({
+        actor: input.actor,
+        orgId: input.orgId,
+        selectedMcpAccountIds: input.selectedMcpAccountIds,
+        database,
+      })
+    : [];
   const [row] = await database
     .insert(schema.companions)
     .values({
@@ -408,6 +463,7 @@ export async function createCompanion(input: {
       modelId,
       selectedSkillIds,
       canWriteSkills: input.canWriteSkills === true,
+      selectedMcpAccountIds,
     })
     .returning();
   if (!row) throw new Error("failed to create companion");
@@ -424,6 +480,7 @@ export async function updateCompanion(input: {
   modelId?: string;
   selectedSkillIds?: string[];
   canWriteSkills?: boolean;
+  selectedMcpAccountIds?: string[];
   providerCatalog?: CompanionProviderDefinition[];
   database?: Db;
 }): Promise<Companion> {
@@ -483,6 +540,15 @@ export async function updateCompanion(input: {
         database,
       })
     : undefined;
+  const selectedMcpAccountIds = input.selectedMcpAccountIds !== undefined
+    ? await resolveCompanionSelectedMcpAccountIds({
+        actor: input.actor,
+        orgId: input.orgId,
+        selectedMcpAccountIds: input.selectedMcpAccountIds,
+        previouslySelectedMcpAccountIds: companion.selected_mcp_account_ids,
+        database,
+      })
+    : undefined;
   const [row] = await database
     .update(schema.companions)
     .set({
@@ -498,6 +564,7 @@ export async function updateCompanion(input: {
       ),
       ...(selectedSkillIds !== undefined ? { selectedSkillIds } : {}),
       ...(input.canWriteSkills !== undefined ? { canWriteSkills: input.canWriteSkills } : {}),
+      ...(selectedMcpAccountIds !== undefined ? { selectedMcpAccountIds } : {}),
       ...(providerChanged ? { providerCredentialGeneration: null } : {}),
       updatedAt: new Date(),
     })
@@ -520,6 +587,7 @@ export async function updateCompanion(input: {
       model: input.modelId !== undefined || providerChanged,
       selected_skills: selectedSkillIds !== undefined,
       can_write_skills: input.canWriteSkills !== undefined,
+      selected_mcp_accounts: selectedMcpAccountIds !== undefined,
     },
   });
   return toCompanion(row, companion.access);
@@ -1334,8 +1402,11 @@ export async function deleteCompanionPlugin(input: {
 }
 
 /**
- * Resolve the current member's saved accounts only after Owner/Editor runtime authorization. The
- * caller passes the resulting values straight to THE-325's transient environment channel.
+ * Resolve the Companion's attached MCP accounts after Owner/Editor runtime authorization.
+ * Only `selected_mcp_account_ids` are staged; empty means no member MCP pins (adapter binary only).
+ * Accounts owned by the waking member or the Companion owner may be included so an Editor wake
+ * still receives the Owner's attached connectors. Detach never deletes the member connection.
+ * The caller passes the resulting values straight to THE-325's transient environment channel.
  */
 export async function resolveCompanionPluginInjection(input: {
   actor: ActorContext;
@@ -1346,15 +1417,25 @@ export async function resolveCompanionPluginInjection(input: {
   fetchImpl?: typeof fetch;
 }): Promise<{ accounts: CompanionMcpAccount[]; credentials: CompanionMcpCredential[] }> {
   const database = input.database ?? db;
-  await getCompanionForRuntime({ ...input, database });
+  const companion = await getCompanionForRuntime({ ...input, database });
+  const selected = companion.selected_mcp_account_ids;
+  if (!selected.length) return { accounts: [], credentials: [] };
+
   const rows = await database
     .select()
     .from(schema.companionMcpAccounts)
     .where(and(
       eq(schema.companionMcpAccounts.orgId, input.orgId),
-      eq(schema.companionMcpAccounts.ownerId, input.actor.id),
-    ))
-    .orderBy(asc(schema.companionMcpAccounts.provider), asc(schema.companionMcpAccounts.label));
+      inArray(schema.companionMcpAccounts.id, selected),
+      // Member-private accounts: waking actor's own connections, or the Companion owner's
+      // attached set so an Editor wake keeps Owner-selected pins (mirrors personal skills).
+      or(
+        eq(schema.companionMcpAccounts.ownerId, input.actor.id),
+        eq(schema.companionMcpAccounts.ownerId, companion.owner_id),
+      ),
+    ));
+  const order = new Map(selected.map((id, index) => [id, index]));
+  rows.sort((left, right) => (order.get(left.id) ?? 0) - (order.get(right.id) ?? 0));
   const accounts: CompanionMcpAccount[] = [];
   const credentials: CompanionMcpCredential[] = [];
   for (const row of rows) {
@@ -1404,7 +1485,7 @@ export async function resolveCompanionPluginInjection(input: {
           .set({ credentialGeneration: generation, ...encrypted, updatedAt: new Date() })
           .where(and(
             eq(schema.companionMcpAccounts.orgId, input.orgId),
-            eq(schema.companionMcpAccounts.ownerId, input.actor.id),
+            eq(schema.companionMcpAccounts.ownerId, row.ownerId),
             eq(schema.companionMcpAccounts.id, row.id),
             eq(schema.companionMcpAccounts.credentialGeneration, row.credentialGeneration),
           ))

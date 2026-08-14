@@ -69,6 +69,7 @@ const asleep: Companion = {
   model_id: "claude-opus-4-8",
   selected_skill_ids: [],
   can_write_skills: false,
+  selected_mcp_account_ids: [],
   owner_id: "user-1",
   access: "owner",
   runtime: {

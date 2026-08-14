@@ -554,6 +554,13 @@
       "when": 1786900000000,
       "tag": "0078_companion_skills",
       "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1786986400000,
+      "tag": "0079_companion_mcp_attach",
+      "breakpoints": true
     }
   ]
 }

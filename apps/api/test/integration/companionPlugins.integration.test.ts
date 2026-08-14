@@ -86,7 +86,23 @@ describe("member-private Companion Plugins", () => {
       orgId: fixture.orgA,
       ownerId: fixture.developer.id,
       name: "Developer Companion",
+      selectedMcpAccountIds: [account.id],
     });
+    const emptyCompanionId = randomUUID();
+    await integrationDb.insert(schema.companions).values({
+      id: emptyCompanionId,
+      orgId: fixture.orgA,
+      ownerId: fixture.developer.id,
+      name: "Empty Plugins Companion",
+      selectedMcpAccountIds: [],
+    });
+    await expect(resolveCompanionPluginInjection({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId: emptyCompanionId,
+      masterKey,
+      database: integrationDb,
+    })).resolves.toEqual({ accounts: [], credentials: [] });
     const injection = await resolveCompanionPluginInjection({
       actor: fixture.developer,
       orgId: fixture.orgA,
@@ -99,6 +115,24 @@ describe("member-private Companion Plugins", () => {
     expect(injection.credentials).toEqual([
       expect.objectContaining({ value: "Bearer plugin-secret-value" }),
     ]);
+
+    // Detach from the Companion without disconnecting the member Plugins connection.
+    await integrationDb
+      .update(schema.companions)
+      .set({ selectedMcpAccountIds: [] })
+      .where(eq(schema.companions.id, companionId));
+    await expect(resolveCompanionPluginInjection({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      masterKey,
+      database: integrationDb,
+    })).resolves.toEqual({ accounts: [], credentials: [] });
+    await expect(listCompanionPlugins({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      database: integrationDb,
+    })).resolves.toEqual([expect.objectContaining({ id: account.id })]);
 
     await deleteCompanionPlugin({
       actor: fixture.developer,
@@ -202,6 +236,7 @@ describe("member-private Companion Plugins", () => {
       orgId: fixture.orgA,
       ownerId: fixture.developer.id,
       name: "OAuth Companion",
+      selectedMcpAccountIds: [account.id],
     });
     await integrationDb.insert(schema.companionWorkspaceAccess).values({
       orgId: fixture.orgA,

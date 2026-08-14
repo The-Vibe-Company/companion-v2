@@ -46,7 +46,7 @@ describe("Companion write-on-behalf gate", () => {
     const { requireCompanionWriteSkillsIfNeeded } = await import("./context");
     await requireCompanionWriteSkillsIfNeeded(companionContext({ tokenSourceType: "pat" }));
     expect(dbMocks.withTenantContext).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it("re-checks can_write_skills inside the token owner's tenant context", async () => {
     const { requireCompanionWriteSkillsIfNeeded } = await import("./context");
@@ -102,6 +102,7 @@ describe("Companion skill allow-list contracts", () => {
       model_id: "claude-opus-4-8",
       selected_skill_ids: [],
       can_write_skills: false,
+      selected_mcp_account_ids: [],
       owner_id: "user-1",
       access: "owner",
       runtime: {

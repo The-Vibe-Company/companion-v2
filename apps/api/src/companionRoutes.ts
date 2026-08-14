@@ -27,6 +27,7 @@ import {
   CompanionShareForbiddenError,
   CompanionSettingsForbiddenError,
   CompanionSkillSelectionError,
+  CompanionPluginSelectionError,
   CompanionWriteSkillsForbiddenError,
   COMPANION_RUNTIME_START_BUDGET_MS,
   attachCompanionToolRunScreenshot,
@@ -285,6 +286,7 @@ function errorStatus(error: unknown): number {
   if (error instanceof CompanionRuntimeForbiddenError) return 403;
   if (error instanceof CompanionSettingsForbiddenError) return 403;
   if (error instanceof CompanionSkillSelectionError) return 400;
+  if (error instanceof CompanionPluginSelectionError) return 400;
   if (error instanceof CompanionWriteSkillsForbiddenError) return 403;
   if (error instanceof CompanionDeleteForbiddenError) return 403;
   if (error instanceof CompanionProviderForbiddenError) return 403;
@@ -821,6 +823,7 @@ export function registerCompanionRoutes(
           modelId: body.model_id,
           selectedSkillIds: body.selected_skill_ids,
           canWriteSkills: body.can_write_skills,
+          selectedMcpAccountIds: body.selected_mcp_account_ids,
           database,
         }));
       return c.json({ companion }, 201);
@@ -1257,6 +1260,7 @@ export function registerCompanionRoutes(
           modelId: body.model_id,
           selectedSkillIds: body.selected_skill_ids,
           canWriteSkills: body.can_write_skills,
+          selectedMcpAccountIds: body.selected_mcp_account_ids,
           database,
         });
         const provider = body.provider_id !== undefined
@@ -1271,14 +1275,23 @@ export function registerCompanionRoutes(
           );
         const writeChanged = body.can_write_skills !== undefined
           && previous.can_write_skills !== companion.can_write_skills;
+        const pluginsChanged = body.selected_mcp_account_ids !== undefined
+          && (
+            previous.selected_mcp_account_ids.length !== companion.selected_mcp_account_ids.length
+            || previous.selected_mcp_account_ids.some(
+              (id, index) => id !== companion.selected_mcp_account_ids[index],
+            )
+          );
         return {
           companion,
           modelChanged: previous.model_id !== companion.model_id,
           skillsChanged,
           writeChanged,
+          pluginsChanged,
           settingsApplyNeeded: previous.model_id !== companion.model_id
             || skillsChanged
             || writeChanged
+            || pluginsChanged
             || body.provider_id !== undefined
             && (
               previous.runtime.provider_ids[0] !== companion.runtime.provider_ids[0]
@@ -1293,8 +1306,8 @@ export function registerCompanionRoutes(
         );
       if (updated.settingsApplyNeeded && canApplyWithoutWaking) {
         // Settings must never wake a sleeping Box. Confirm the projected online state is still live
-        // before routing the provider/skill change through startRuntime, which rewrites auth and
-        // recycles Pi when needed.
+        // before routing the provider/skill/plugin change through startRuntime, which rewrites auth
+        // and recycles Pi when needed.
         const observed = await runtimeFactory().status({
           boxId: updated.companion.runtime.box_id!,
         }).catch(() => null);
@@ -1305,7 +1318,10 @@ export function registerCompanionRoutes(
             startCompanionRuntimeInputSchema.parse({ client_surface: "web" }),
             {
               allowBoxWake: false,
-              restartPi: updated.modelChanged || updated.skillsChanged || updated.writeChanged,
+              restartPi: updated.modelChanged
+                || updated.skillsChanged
+                || updated.writeChanged
+                || updated.pluginsChanged,
             },
           );
           return c.json({ companion: started.companion });

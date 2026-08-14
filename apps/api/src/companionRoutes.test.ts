@@ -151,6 +151,7 @@ const companion = {
   model_id: "claude-opus-4-8",
   selected_skill_ids: [],
   can_write_skills: false,
+  selected_mcp_account_ids: [],
   owner_id: "user-1",
   access: "owner" as const,
   runtime: {
@@ -534,6 +535,85 @@ describe("Companions API feature gate", () => {
       modelId: "gpt-5.5",
       allowBoxWake: false,
     }));
+  });
+
+  it("recycles Pi for an online plugin-selection change without waking or recreating the Box", async () => {
+    const changed = {
+      ...runningCompanion,
+      selected_mcp_account_ids: [
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      ],
+    };
+    coreMocks.getCompanion.mockResolvedValueOnce(runningCompanion);
+    coreMocks.updateCompanion.mockResolvedValueOnce(changed);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValueOnce(changed);
+    coreMocks.resolveCompanionPluginInjection.mockResolvedValueOnce({
+      accounts: [
+        {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          label: "work",
+          lifecycle: "lazy",
+          direct_tools: false,
+          transport: "http",
+          url: "https://mcp.linear.app/mcp",
+          headers: { Authorization: "COMPANION_MCP_LINEAR" },
+        },
+      ],
+      credentials: [{ env_key: "COMPANION_MCP_LINEAR", value: "Bearer secret-linear" }],
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        selected_mcp_account_ids: [
+          "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        ],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtime.status).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
+      boxId: companion.runtime.box_id,
+      restartPi: true,
+      allowBoxWake: false,
+      mcpAccounts: [
+        expect.objectContaining({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }),
+      ],
+    }));
+    expect(JSON.stringify(await response.json())).not.toContain("secret-linear");
+  });
+
+  it("saves a plugin-selection change without waking an asleep Box", async () => {
+    const changed = {
+      ...companion,
+      selected_mcp_account_ids: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+    };
+    coreMocks.getCompanion.mockResolvedValueOnce(companion);
+    coreMocks.updateCompanion.mockResolvedValueOnce(changed);
+    const runtimeFactory = vi.fn(() => {
+      throw new Error("Box client must not be created");
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        selected_mcp_account_ids: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtimeFactory).not.toHaveBeenCalled();
+    expect(coreMocks.claimCompanionRuntimeStart).not.toHaveBeenCalled();
   });
 
   it("recycles Pi for an online model-only change without replacing provider auth", async () => {

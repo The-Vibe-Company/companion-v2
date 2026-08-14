@@ -108,7 +108,32 @@ describe("Companion provider contracts", () => {
       selected_skill_ids: [],
       can_write_skills: false,
     })).toEqual({ selected_skill_ids: [], can_write_skills: false });
+    expect(updateCompanionInputSchema.parse({
+      selected_mcp_account_ids: ["22222222-2222-4222-8222-222222222222"],
+    })).toEqual({
+      selected_mcp_account_ids: ["22222222-2222-4222-8222-222222222222"],
+    });
+    expect(updateCompanionInputSchema.parse({
+      selected_mcp_account_ids: [],
+    })).toEqual({ selected_mcp_account_ids: [] });
     expect(() => updateCompanionInputSchema.parse({})).toThrow();
+  });
+
+  it("accepts MCP plugin selection on create", () => {
+    expect(createCompanionInputSchema.parse({
+      name: "Research",
+      provider_id: "anthropic",
+      model_id: "claude-opus-4-8",
+      selected_mcp_account_ids: [
+        "22222222-2222-4222-8222-222222222222",
+        "33333333-3333-4333-8333-333333333333",
+      ],
+    })).toMatchObject({
+      selected_mcp_account_ids: [
+        "22222222-2222-4222-8222-222222222222",
+        "33333333-3333-4333-8333-333333333333",
+      ],
+    });
   });
 
   it("accepts only the editable Companion settings and supports clearing instructions", () => {

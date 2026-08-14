@@ -505,19 +505,27 @@ archives or `--skill` source even if a caller supplies stale client state.
 The Box setup installs the pinned `pi-mcp-adapter` package into the isolated
 `PI_CODING_AGENT_DIR`. The web and mobile-web Plugins surface stores multiple member-private
 accounts per MCP provider, each with a short label such as `work` or `personal` and either an HTTP
-or stdio transport. The API also retains THE-325's bounded transient start-request contract.
-Companion maps the label plus a stable id digest to a unique adapter server name, so multiple
-accounts for one MCP provider cannot collide.
+or stdio transport. Each Companion then stores an exact `selected_mcp_account_ids` allow-list of
+those already-connected accounts. Create and settings multi-select only connected Plugins; empty
+means no member MCP pins are staged (the adapter binary remains installed, but `mcp.json` gets no
+extra servers). Detach removes an account from that Companion only and never disconnects or revokes
+the member's workspace Plugins connection or OAuth grant. The API also retains THE-325's bounded
+transient start-request contract. Companion maps the label plus a stable id digest to a unique
+adapter server name, so multiple accounts for one MCP provider cannot collide.
 
 Adapter JSON contains only transport metadata and `${ENV_KEY}` references. Plugin credentials are
 write-only and envelope-encrypted per member in `companion_mcp_accounts`; ordinary reads expose only
 provider, label, transport, endpoint, and timestamps. After Owner/Editor runtime authorization, the
-API decrypts the current member's accounts into THE-325's `mcp_credentials` channel. Values cross
+API decrypts only the Companion's attached accounts (owned by the waking member or the Companion
+owner) into THE-325's `mcp_credentials` channel. Values cross
 the snapshotted disk only as a staged owner-only file, then live in the Box's user runtime tmpfs for
 as long as Pi may auto-restart. The systemd unit rereads that file on every start; stop removes it,
 and Box stop/reboot destroys the tmpfs. Every referenced env key must have a matching credential. Model-provider
 authentication never uses this channel. Host-config discovery, MCP sampling, and MCP elicitation are
 disabled. Native-mobile starts discard both saved and caller-supplied MCP accounts.
+
+When an Online Companion's attached plugin list changes in settings, the control plane re-injects MCP
+pins and recycles Pi without recreating the Box. Asleep Companions apply the new set on the next wake.
 
 ## Provider credentials
 
