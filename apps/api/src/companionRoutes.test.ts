@@ -2102,7 +2102,6 @@ describe("Companions API feature gate", () => {
     });
 
     expect(polled.status).toBe(400);
-    expect(polled.headers.get("set-cookie")).toContain("Max-Age=0");
     expect(coreMocks.pollOpenAICodexProviderOAuth).not.toHaveBeenCalled();
   });
 

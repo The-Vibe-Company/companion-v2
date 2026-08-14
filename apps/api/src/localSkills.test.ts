@@ -127,7 +127,7 @@ describe("companion skill package + row", () => {
     });
     const changelog = row.changes.join("\n");
     expect(changelog).toContain("Moonshot provider key");
-    expect(changelog).toContain("Claude and Codex subscription login");
+    expect(changelog).toContain("Codex device authorization");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
