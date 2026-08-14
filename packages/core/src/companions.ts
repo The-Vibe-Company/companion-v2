@@ -349,20 +349,25 @@ export async function updateCompanion(input: {
     }
   }
 
-  const providerId = input.providerId ?? companion.runtime.provider_ids[0];
+  const currentProviderId = companion.runtime.provider_ids[0];
+  const providerChanged = input.providerId !== undefined
+    && currentProviderId !== input.providerId;
+  const providerId = input.providerId ?? currentProviderId;
   const modelId = input.modelId
-    ?? (input.providerId !== undefined && input.providerId !== companion.runtime.provider_ids[0]
+    ?? (input.providerId !== undefined && (providerChanged || !companion.model_id)
       ? companionProviderDefaultModel(input.providerId)
       : companion.model_id);
-  if (!providerId || !modelId || !companionProviderHasModel(providerId, modelId)) {
+  const providerOrModelChanged = input.providerId !== undefined || input.modelId !== undefined;
+  if (
+    providerOrModelChanged
+    && (!providerId || !modelId || !companionProviderHasModel(providerId, modelId))
+  ) {
     throw new CompanionProviderError(
       "provider_model_invalid",
       `The model ${modelId ?? "(default)"} is not available for ${providerName(providerId ?? "unknown")}.`,
       providerId ?? null,
     );
   }
-  const providerChanged = input.providerId !== undefined
-    && companion.runtime.provider_ids[0] !== input.providerId;
   const [row] = await database
     .update(schema.companions)
     .set({
@@ -370,7 +375,9 @@ export async function updateCompanion(input: {
       ...(input.persona !== undefined ? { persona: input.persona?.trim() || null } : {}),
       ...(input.providerId !== undefined ? { providerIds: [input.providerId] } : {}),
       ...(
-        input.modelId !== undefined || providerChanged
+        input.modelId !== undefined
+        || providerChanged
+        || (input.providerId !== undefined && !companion.model_id)
           ? { modelId }
           : {}
       ),

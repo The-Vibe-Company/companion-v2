@@ -171,6 +171,32 @@ describe("Companion settings persistence and roles", () => {
     });
   });
 
+  it("keeps legacy provider-less Companions editable until a provider is selected", async () => {
+    const legacyCompanionId = randomUUID();
+    await integrationDb.insert(schema.companions).values({
+      id: legacyCompanionId,
+      orgId: fixture.orgA,
+      ownerId: fixture.developer.id,
+      name: "Legacy Companion",
+    });
+
+    const updated = await updateCompanion({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId: legacyCompanionId,
+      name: "Renamed legacy Companion",
+      persona: "Keep existing setup readable.",
+      database: integrationDb,
+    });
+
+    expect(updated).toMatchObject({
+      name: "Renamed legacy Companion",
+      persona: "Keep existing setup readable.",
+      model_id: null,
+    });
+    expect(updated.runtime.provider_ids).toEqual([]);
+  });
+
   it("allows only the Companion Owner to claim and finish permanent deletion", async () => {
     await integrationDb.insert(schema.companionWorkspaceAccess).values({
       orgId: fixture.orgA,
