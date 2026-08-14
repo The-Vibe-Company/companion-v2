@@ -174,7 +174,7 @@ describe("CompanionsApp", () => {
 
   it("renders Plugins as a separate web surface and keeps it out of chat", () => {
     const plugins = render([companion()], null, true);
-    expect(plugins).toContain("Browse the MCP registry and connect servers with labels.");
+    expect(plugins).toContain("Connect approved plugins or add a custom MCP server.");
     expect(plugins).toContain("Linear");
     expect(plugins).toContain("work");
     expect(plugins).not.toContain("Chat with Luna");

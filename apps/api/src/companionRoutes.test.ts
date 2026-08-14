@@ -4,7 +4,6 @@ import {
   CompanionPluginConflictError,
   CompanionProviderError,
   CompanionProviderOAuthError,
-  CompanionRegistryUnavailableError,
   CompanionRuntimeTransitionError,
   CompanionSettingsForbiddenError,
 } from "@companion/core";
@@ -29,8 +28,6 @@ const coreMocks = vi.hoisted(() => ({
   listCompanions: vi.fn(),
   listCompanionProviders: vi.fn(),
   listCompanionPlugins: vi.fn(),
-  listCompanionRegistry: vi.fn(),
-  getCompanionRegistryServer: vi.fn(),
   createCompanion: vi.fn(),
   updateCompanion: vi.fn(),
   claimCompanionDeletion: vi.fn(),
@@ -252,26 +249,6 @@ describe("Companions API feature gate", () => {
       can_manage: true,
     });
     coreMocks.listCompanionPlugins.mockResolvedValue([]);
-    coreMocks.listCompanionRegistry.mockResolvedValue({
-      pins: [],
-      servers: [],
-      next_cursor: null,
-      source: "live",
-    });
-    coreMocks.getCompanionRegistryServer.mockResolvedValue({
-      server: {
-        name: "app.linear/linear",
-        provider: "linear",
-        title: "Linear",
-        description: "Linear.",
-        version: "latest",
-        website_url: null,
-        repository_url: null,
-        pinned: true,
-        connect: { transport: "http", url: "https://mcp.linear.app/mcp", credential: null },
-      },
-      source: "live",
-    });
     coreMocks.saveCompanionPlugin.mockResolvedValue({
       id: "44444444-4444-4444-8444-444444444444",
       provider: "github",
@@ -3451,80 +3428,13 @@ describe("Companions API feature gate", () => {
     expect(runtimeFactory).not.toHaveBeenCalled();
   });
 
-  it("proxies a registry search through the cache-backed core helper", async () => {
-    const app = new Hono<{ Variables: ApiVariables }>();
-    coreMocks.listCompanionRegistry.mockResolvedValueOnce({
-      pins: [{ name: "app.linear/linear", provider: "linear" }],
-      servers: [{ name: "io.example.acme/search", provider: "acme" }],
-      next_cursor: "next123",
-      source: "live",
-    });
-    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
-
-    const response = await app.request("/v1/companion-registry/servers?search=acme&cursor=abc");
-
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ source: "live", next_cursor: "next123" });
-    expect(coreMocks.listCompanionRegistry).toHaveBeenCalledWith(
-      expect.objectContaining({ search: "acme", cursor: "abc" }),
-    );
-    // Browse is a stateless proxy: it never opens a tenant row.
-    expect(contextMocks.orgIdFromContext).not.toHaveBeenCalled();
-  });
-
-  it("returns 403 for registry browse outside the allowlist", async () => {
-    const app = new Hono<{ Variables: ApiVariables }>();
-    contextMocks.actorFromContext.mockReturnValueOnce({
-      id: "user-1",
-      email: "user@example.test",
-      name: "User",
-    });
-    registerCompanionRoutes(app, {
-      COMPANION_COMPANIONS_ENABLED: "true",
-      COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "thevibecompany.co",
-    });
-
-    const response = await app.request("/v1/companion-registry/servers");
-
-    expect(response.status).toBe(403);
-    expect(coreMocks.listCompanionRegistry).not.toHaveBeenCalled();
-  });
-
-  it("validates the registry detail server name", async () => {
+  it("does not register the removed MCP registry routes", async () => {
     const app = new Hono<{ Variables: ApiVariables }>();
     registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
 
-    const response = await app.request("/v1/companion-registry/server?name=not-a-registry-name");
-
-    expect(response.status).toBe(400);
-    expect(coreMocks.getCompanionRegistryServer).not.toHaveBeenCalled();
-  });
-
-  it("proxies a registry detail read", async () => {
-    const app = new Hono<{ Variables: ApiVariables }>();
-    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
-
-    const response = await app.request(
+    expect((await app.request("/v1/companion-registry/servers")).status).toBe(404);
+    expect((await app.request(
       "/v1/companion-registry/server?name=app.linear%2Flinear",
-    );
-
-    expect(response.status).toBe(200);
-    expect(coreMocks.getCompanionRegistryServer).toHaveBeenCalledWith(
-      expect.objectContaining({ name: "app.linear/linear" }),
-    );
-  });
-
-  it("answers 503 when the registry is unavailable with no cache", async () => {
-    const app = new Hono<{ Variables: ApiVariables }>();
-    coreMocks.getCompanionRegistryServer.mockRejectedValueOnce(
-      new CompanionRegistryUnavailableError(),
-    );
-    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
-
-    const response = await app.request(
-      "/v1/companion-registry/server?name=io.example.acme%2Fsearch",
-    );
-
-    expect(response.status).toBe(503);
+    )).status).toBe(404);
   });
 });
