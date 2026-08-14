@@ -74,6 +74,9 @@ const companion: Companion = {
   selected_mcp_account_ids: [],
   owner_id: "user-1",
   access: "owner",
+  pinned: false,
+  hidden: false,
+  unread: false,
   runtime: {
     state: "running",
     daemon_state: "running",

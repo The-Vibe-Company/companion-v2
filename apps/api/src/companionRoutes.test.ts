@@ -156,6 +156,9 @@ const companion = {
   selected_mcp_account_ids: [],
   owner_id: "user-1",
   access: "owner" as const,
+  pinned: false,
+  hidden: false,
+  unread: false,
   runtime: {
     state: "stopped" as const,
     daemon_state: "stopped" as const,

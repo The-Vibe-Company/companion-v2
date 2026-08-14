@@ -11,6 +11,7 @@ import type {
 } from "@companion/contracts";
 import type { OrgVM } from "@/lib/types";
 import {
+  duplicateCompanion,
   getCompanionRuntime,
   getCompanionThread,
   openCompanionDesktop,
@@ -18,6 +19,7 @@ import {
   setCompanionProvider,
   startCompanionRuntime,
   syncCompanionThread,
+  updateCompanionMemberState,
 } from "@/lib/companions";
 import { Icon } from "../Icon";
 import { CompanionProvidersDialog } from "./CompanionProvidersDialog";
@@ -198,11 +200,56 @@ export function CompanionsApp({
 
   const visible = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase("en-US");
-    if (!needle) return companions;
-    return companions.filter((companion) =>
+    const active = companions.filter((companion) => !companion.hidden);
+    if (!needle) return active;
+    return active.filter((companion) =>
       companion.name.toLocaleLowerCase("en-US").includes(needle)
       || (companion.persona ?? "").toLocaleLowerCase("en-US").includes(needle));
   }, [companions, query]);
+
+  const hiddenCompanions = useMemo(
+    () => companions.filter((companion) => companion.hidden),
+    [companions],
+  );
+
+  const replaceCompanion = (next: Companion) => {
+    setCompanions((current) => {
+      const without = current.filter((item) => item.id !== next.id);
+      return [next, ...without].sort((left, right) => {
+        if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+        return Date.parse(right.updated_at) - Date.parse(left.updated_at);
+      });
+    });
+  };
+
+  const applyMemberState = async (
+    companion: Companion,
+    patch: { pinned?: boolean; hidden?: boolean; unread?: boolean },
+  ) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await updateCompanionMemberState(currentOrg.id, companion.id, patch);
+      replaceCompanion(next);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not update this Companion.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onDuplicate = async (companion: Companion) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const cloned = await duplicateCompanion(currentOrg.id, companion.id);
+      setCompanions((current) => [cloned, ...current]);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not duplicate this Companion.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const openCompanion = (companion: Companion) => {
     threadRequestRef.current += 1;
@@ -213,6 +260,10 @@ export function CompanionsApp({
     setPluginsOpen(false);
     setSettingsId(null);
     threadUrl(companion.id);
+    if (companion.unread) {
+      setCompanions((current) => current.map((item) =>
+        item.id === companion.id ? { ...item, unread: false } : item));
+    }
   };
 
   const closeThread = () => {
@@ -752,7 +803,10 @@ export function CompanionsApp({
                     {visible.map((companion) => {
                       const status = companionStatus(companion.runtime.state);
                       return (
-                        <div className="companions-row" key={companion.id}>
+                        <div
+                          className={`companions-row${companion.pinned ? " companions-row--pinned" : ""}`}
+                          key={companion.id}
+                        >
                           <button
                             type="button"
                             className="companions-row__main"
@@ -764,9 +818,17 @@ export function CompanionsApp({
                           >
                             <span className="companions-avatar" aria-hidden="true">
                               {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
+                              {companion.unread && (
+                                <i className="companions-unread" title="Unread" />
+                              )}
                             </span>
                             <span className="companions-row__text">
-                              <strong>{companion.name}</strong>
+                              <strong>
+                                {companion.pinned && (
+                                  <Icon name="pin" size={12} aria-hidden="true" />
+                                )}
+                                {companion.name}
+                              </strong>
                               <span>
                                 {companion.persona
                                   ?? providerName(companion.runtime.provider_ids[0] ?? "No provider")}
@@ -783,6 +845,62 @@ export function CompanionsApp({
                           <UpdatedAt iso={companion.updated_at} />
                           <span className="companions-row-actions">
                             <span className="companions-role">{companion.access}</span>
+                            <details className="companions-row-menu">
+                              <summary
+                                className="cds-btn cds-btn--ghost cds-btn--sm"
+                                aria-label={`Actions for ${companion.name}`}
+                              >
+                                <Icon name="more-horizontal" size={15} />
+                              </summary>
+                              <div className="companions-row-menu__panel" role="menu">
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  disabled={busy}
+                                  onClick={(event) => {
+                                    event.currentTarget.closest("details")?.removeAttribute("open");
+                                    void applyMemberState(companion, { pinned: !companion.pinned });
+                                  }}
+                                >
+                                  {companion.pinned ? "Unpin" : "Pin"}
+                                </button>
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  disabled={busy || companion.unread}
+                                  onClick={(event) => {
+                                    event.currentTarget.closest("details")?.removeAttribute("open");
+                                    void applyMemberState(companion, { unread: true });
+                                  }}
+                                >
+                                  Mark as unread
+                                </button>
+                                {companion.access === "owner" && (
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    disabled={busy}
+                                    onClick={(event) => {
+                                      event.currentTarget.closest("details")?.removeAttribute("open");
+                                      void onDuplicate(companion);
+                                    }}
+                                  >
+                                    Duplicate
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  disabled={busy}
+                                  onClick={(event) => {
+                                    event.currentTarget.closest("details")?.removeAttribute("open");
+                                    void applyMemberState(companion, { hidden: true });
+                                  }}
+                                >
+                                  Hide
+                                </button>
+                              </div>
+                            </details>
                             <button
                               type="button"
                               className="cds-btn cds-btn--ghost cds-btn--sm"
@@ -808,6 +926,45 @@ export function CompanionsApp({
                       <p className="companions-list-empty">No Companion matches this search.</p>
                     )}
                   </div>
+
+                  {hiddenCompanions.length > 0 && !query.trim() && (
+                    <section className="companions-hidden" aria-labelledby="companions-hidden-title">
+                      <h2 id="companions-hidden-title">Hidden</h2>
+                      <div className="companions-list">
+                        {hiddenCompanions.map((companion) => (
+                          <div className="companions-row" key={companion.id}>
+                            <div className="companions-row__main companions-row__main--static">
+                              <span className="companions-avatar" aria-hidden="true">
+                                {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
+                              </span>
+                              <span className="companions-row__text">
+                                <strong>{companion.name}</strong>
+                                <span>Hidden from your list</span>
+                              </span>
+                            </div>
+                            <span className="companions-row-actions">
+                              <button
+                                type="button"
+                                className="cds-btn cds-btn--ghost cds-btn--sm"
+                                disabled={busy}
+                                onClick={() => void applyMemberState(companion, { hidden: false })}
+                              >
+                                Unhide
+                              </button>
+                              <button
+                                type="button"
+                                className="cds-btn cds-btn--ghost cds-btn--sm"
+                                aria-label={`Settings for ${companion.name}`}
+                                onClick={() => router.push(`/companions/${companion.id}/settings`)}
+                              >
+                                Settings
+                              </button>
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  )}
                 </>
               )}
             </div>

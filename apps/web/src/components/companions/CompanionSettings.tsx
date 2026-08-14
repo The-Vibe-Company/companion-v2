@@ -2,7 +2,7 @@
 
 import { type FormEvent, useMemo, useState } from "react";
 import type { Companion, CompanionProvidersResponse } from "@companion/contracts";
-import { deleteCompanion, updateCompanion } from "@/lib/companions";
+import { deleteCompanion, updateCompanion, updateCompanionMemberState } from "@/lib/companions";
 import { Icon } from "../Icon";
 import { Dialog } from "../org/primitives";
 import {
@@ -43,6 +43,7 @@ export function CompanionSettings({
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [hidden, setHidden] = useState(companion.hidden);
   const canEdit = companion.access === "owner" || companion.access === "editor";
   const canDelete = companion.access === "owner";
 
@@ -223,6 +224,37 @@ export function CompanionSettings({
             </div>
           )}
         </form>
+
+        {hidden && (
+          <section className="companions-settings__danger" aria-labelledby="unhide-companion-title">
+            <div>
+              <h2 id="unhide-companion-title">Hidden from your list</h2>
+              <p>This Companion stays available. Unhide it to put it back in your Companions list.</p>
+            </div>
+            <button
+              type="button"
+              className="cds-btn cds-btn--secondary cds-btn--md"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                setError(null);
+                try {
+                  const next = await updateCompanionMemberState(orgId, companion.id, {
+                    hidden: false,
+                  });
+                  setHidden(false);
+                  onSaved(next);
+                } catch (cause) {
+                  setError(cause instanceof Error ? cause.message : "Could not unhide this Companion.");
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              Unhide
+            </button>
+          </section>
+        )}
 
         {canDelete && (
           <section className="companions-settings__danger" aria-labelledby="delete-companion-title">

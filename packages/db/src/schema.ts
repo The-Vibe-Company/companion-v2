@@ -533,6 +533,55 @@ export const companionWorkspaceAccess = pgTable(
 );
 
 /**
+ * Per-member Companions list preferences (THE-351). Pin, hide, and unread watermarks are private to
+ * the member who set them: Viewer and Owner each keep their own roster order and badges. Hide never
+ * archives the Companion or its Box; delete remains Owner-only on the Companion row itself.
+ */
+export const companionMemberState = pgTable(
+  "companion_member_state",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    companionId: uuid("companion_id")
+      .notNull()
+      .references(() => companions.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    /** When set, the Companion is pinned for this member; earlier pins sort above later ones. */
+    pinnedAt: timestamp("pinned_at", { withTimezone: true }),
+    /** When true, the Companion is removed from the member's main list without deleting it. */
+    hidden: boolean("hidden").notNull().default(false),
+    /**
+     * Highest transcript ordinal this member has read. Null means never opened; unread when the
+     * thread's highest ordinal is greater than this watermark (treating null as -1).
+     */
+    lastReadOrdinal: integer("last_read_ordinal"),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.companionId, t.userId] }),
+    companionOrgFk: foreignKey({
+      columns: [t.orgId, t.companionId],
+      foreignColumns: [companions.orgId, companions.id],
+      name: "companion_member_state_companion_fk",
+    }),
+    membershipFk: foreignKey({
+      columns: [t.orgId, t.userId],
+      foreignColumns: [memberships.orgId, memberships.userId],
+      name: "companion_member_state_membership_fk",
+    }).onDelete("cascade"),
+    byMember: index("companion_member_state_member_idx").on(t.orgId, t.userId),
+    nonnegativeLastRead: check(
+      "companion_member_state_last_read_ordinal_check",
+      sql`${t.lastReadOrdinal} is null or ${t.lastReadOrdinal} >= 0`,
+    ),
+  }),
+);
+
+/**
  * One chat thread per Companion. The primary key is the Companion id, so a Companion can never own
  * a second thread and a thread can never span Companions. The row also carries the two watermarks
  * that make Pi exchange idempotent: the highest message ordinal Pi has received and the byte offset
