@@ -175,6 +175,20 @@ idempotency key; if automatic wake fails, the lifecycle records `last_error` and
 the already-durable turn pending instead of turning the accepted composer action into a second
 message. Viewers fail authorization before persistence or Box construction.
 
+Because persistence comes first and the wake it then waits on runs under the three-minute start
+budget, this request can legitimately stay open for tens of seconds — ~45–65s for a cold wake, and up
+to that budget. Next defaults a rewrite's proxy timeout to 30s in both dev and production, so the
+send from the browser was aborted mid-wake and surfaced as a `500` over a turn that was already
+durable, and the composer neither cleared nor stopped offering to resend it. `experimental.proxyTimeout`
+is raised to sit just past the start budget (three minutes plus the half-minute the failure path
+spends recording its reason) so the send outlives a normal wake and returns the API's own answer —
+`delivered`, or the durable-but-pending turn — rather than a proxy timeout. It is a bounded ceiling,
+not an unbounded wait: every step of a wake already bounds itself against the budget, so a stalled
+upstream still returns well inside it. The send route itself never answers a wake with `500`/`504`
+within budget — it swallows a failed automatic start and returns the pending turn — so the proxy was
+the only 30s cliff on this path; explicit Wake (`/runtime/start`) still returns `504` on an exhausted
+budget, comfortably inside the raised proxy window.
+
 One send is one turn. The sender names the message it is creating with `client_message_id`, a UUID,
 and the control plane stores it as that entry's event id (`msg:<client_message_id>`), so the
 transcript's `(companion_id, event_id)` primary key is what decides how many turns a send produces.
@@ -187,6 +201,13 @@ attempt never made. Sent messages and projected Pi events keep separate id names
 still accepted and gets a server-generated one, which is the pre-THE-337 behavior and carries no
 protection; the web composer always sends one, and it is the same id the message carries on screen
 before the control plane answers, so an optimistic message and its saved entry are one message.
+
+The composer holds that id beside the draft until the send confirms. A request that never confirmed —
+one a proxy gave up on mid-wake, say — left its turn durable under that id, so restoring the draft and
+minting a fresh id on the retry would ask the control plane to store the same message under a second
+name. Reusing the id keeps the retry idempotent: it resolves to the entry already stored rather than a
+second turn. The id is cleared the moment a send confirms and reused only for the identical draft, so
+two different messages are still two turns.
 
 `POST /v1/companions/:id/thread/sync` is the single Owner/Editor step that reconciles a live thread.
 It hands pending messages to the running Pi daemon in ordinal order through the owner-only

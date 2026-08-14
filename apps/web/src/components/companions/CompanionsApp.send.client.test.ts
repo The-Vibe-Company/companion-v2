@@ -93,13 +93,17 @@ const companion: Companion = {
  * transcript's primary key does, so a duplicated request shows up as a duplicated request rather than
  * as a second turn.
  */
-function controlPlane(options: { holdSend?: boolean } = {}) {
+function controlPlane(
+  options: { holdSend?: boolean; dropFirstSend?: boolean; companion?: Companion } = {},
+) {
+  const runtime = options.companion ?? companion;
   const entries: CompanionTranscriptEntry[] = [];
   const sends: { content: string; clientMessageId: string | undefined }[] = [];
   const requests: string[] = [];
   let ordinal = 0;
   let delivered = -1;
   let owed = 0;
+  let dropped = 0;
   let release = () => {};
   const held = new Promise<void>((resolve) => { release = resolve; });
 
@@ -143,6 +147,16 @@ function controlPlane(options: { holdSend?: boolean } = {}) {
         delivered = ordinal - 1;
         owed += 1;
       }
+      // THE-341: the turn is durable the moment it is stored, before the wake the request then waits
+      // on. A proxy that gives up mid-wake returns 500 over an already-persisted turn; model that by
+      // answering the first send with 500 after it has stored the message.
+      if (options.dropFirstSend && dropped < 1) {
+        dropped += 1;
+        return new Response(JSON.stringify({ error: "Request failed" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
       if (options.holdSend) await held;
       return json({ thread: thread(), delivery: "delivered" });
     }
@@ -162,7 +176,7 @@ function controlPlane(options: { holdSend?: boolean } = {}) {
       return json({ thread: thread(), source: "box" });
     }
     if (url.includes("/thread")) return json({ thread: thread() });
-    if (url.includes("/runtime")) return json({ companion, source: "control_plane" });
+    if (url.includes("/runtime")) return json({ companion: runtime, source: "control_plane" });
     return json({});
   });
 
@@ -178,7 +192,7 @@ function controlPlane(options: { holdSend?: boolean } = {}) {
 
 const roots: Root[] = [];
 
-async function openThread() {
+async function openThread(who: Companion = companion) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -188,7 +202,7 @@ async function openThread() {
       orgs: [org],
       currentOrg: org,
       navigation,
-      initialCompanions: [companion],
+      initialCompanions: [who],
       initialProviders: providers,
       initialPlugins: [],
       initialCompanionId: companionId,
@@ -311,6 +325,45 @@ describe("CompanionsApp send", () => {
       expect(api.posts()).toBe(1);
       expect(api.entries.filter((entry) => entry.role === "user")).toHaveLength(1);
       expect(composer.value).toBe("");
+    });
+  });
+
+  describe("when a send that woke an asleep Companion loses its request after persisting", () => {
+    const asleep: Companion = {
+      ...companion,
+      runtime: {
+        ...companion.runtime,
+        state: "stopped",
+        daemon_state: "stopped",
+        box_id: null,
+        desktop_available: false,
+      },
+    };
+
+    beforeEach(() => {
+      api = controlPlane({ dropFirstSend: true, companion: asleep });
+      vi.stubGlobal("fetch", api.fetchMock);
+    });
+
+    it("resends the same turn, so the composer clears with no toast and one message is stored", async () => {
+      const container = await openThread(asleep);
+      const composer = type(container, "What year is it?");
+
+      // The wake outlives the proxy and the request comes back 500 over an already-durable turn. The
+      // composer keeps the draft so nothing typed is lost.
+      await pressEnter(container);
+      expect(composer.value).toBe("What year is it?");
+
+      // Pressing Enter on the restored draft must name the turn already stored, not a second one.
+      await pressEnter(container);
+      await poll(1);
+
+      expect(api.entries.filter((entry) => entry.role === "user")).toHaveLength(1);
+      expect(api.sends).toHaveLength(2);
+      expect(api.sends[0]?.clientMessageId).toBe(api.sends[1]?.clientMessageId);
+      expect(composer.value).toBe("");
+      // The transient 500 cleared itself, and the successful resend leaves no error behind.
+      expect(container.querySelector(".companions-error")).toBeNull();
     });
   });
 });

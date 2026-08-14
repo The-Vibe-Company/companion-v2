@@ -146,6 +146,46 @@ describe("CompanionThread composer", () => {
     expect(composer.value).toBe("");
   });
 
+  it("reuses the message id when a restored draft is sent again", async () => {
+    // THE-341: a send that wakes an asleep Companion persists the turn before the wake it waits on, so
+    // a request that dies mid-wake still left it durable. Pressing Enter on the restored draft must
+    // name that same turn rather than mint a second one, or the durable message is stored twice.
+    const ids: string[] = [];
+    let answer = false;
+    const container = await mount(async (_content, clientMessageId) => {
+      ids.push(clientMessageId);
+      return answer;
+    });
+    const composer = type(container, "Draft the launch note");
+
+    await send(container);
+    expect(composer.value).toBe("Draft the launch note");
+
+    answer = true;
+    await send(container);
+
+    expect(composer.value).toBe("");
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(1);
+  });
+
+  it("mints a fresh id once a restored draft is edited before resending", async () => {
+    // Reuse is only for the identical draft: a message the sender changed before retrying is a
+    // different message, so it must name a different turn.
+    const ids: string[] = [];
+    const container = await mount(async (_content, clientMessageId) => {
+      ids.push(clientMessageId);
+      return false;
+    });
+    type(container, "Draft the launch note");
+    await send(container);
+    type(container, "Draft the changelog entry");
+    await send(container);
+
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
+  });
+
   it("moves focus into the thread that just opened", async () => {
     const container = await mount(async () => true);
 
