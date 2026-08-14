@@ -1582,7 +1582,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     // that recovered daemon dead.
     const journal = ["activating", "failed", "activating", "active"];
     const probes: string[] = [];
-    const starts: string[] = [];
+    const launches: string[] = [];
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const method = init?.method ?? "GET";
@@ -1591,7 +1591,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
       if (url.endsWith("/commands") && method === "POST") {
         const command = String(body.command);
-        if (command.includes("systemctl --user start")) starts.push(command);
+        if (command.includes("systemctl --user restart")) launches.push(command);
         if (command.includes("is-active") && !command.includes("companion_label")) {
           probes.push(command);
           return json({
@@ -1628,9 +1628,9 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(result).toMatchObject({ runtimeState: "running", daemonState: "running" });
     // The wait has to outlast the `failed` answer rather than stop on it.
     expect(probes.length).toBe(journal.length);
-    // Only the wake's own start is issued: another start on a later probe would add needless work
+    // Only the wake's own restart is issued: another launch on a later probe would add needless work
     // while systemd is already recovering the daemon.
-    expect(starts).toHaveLength(1);
+    expect(launches).toHaveLength(1);
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/stop"))).toBe(false);
   });
 
