@@ -1381,7 +1381,10 @@ button.chat-box:focus-visible {
     bottom: auto;
     left: 0;
     top: var(--chat-viewport-top, 0px);
+    /* `min-height` has to come down with `height`: the shell's own floor is the full `dvh`, and a
+       floor taller than the keyboard leaves the box at its old size with the composer under it. */
     height: var(--chat-viewport-h, 100dvh);
+    min-height: var(--chat-viewport-h, 100dvh);
   }
 
   .chat {
@@ -1446,12 +1449,41 @@ button.chat-box:focus-visible {
     gap: 9px 10px;
   }
 
-  .companions-plugin-icon { grid-area: icon; }
+  /* Scoped to the row that declares these areas. The registry card reuses the same icon class in a
+     grid that has no named areas, where `grid-area: icon` placed the icon in an implicit track of
+     its own: the card grew two empty columns, the description was squeezed to about 32px, and the
+     icon dropped to the bottom-right corner. */
+  .companions-plugin-row > .companions-plugin-icon { grid-area: icon; }
   .companions-plugin-row > strong { grid-area: name; }
   .companions-plugin-row > .companions-state { grid-area: status; }
   .companions-plugin-labels {
     grid-area: labels;
     padding-top: 3px;
+  }
+
+  /* A registry card on a phone has about 230px of inside to work with. Sharing that row with the
+     Connect button left the name and description a sliver each, so the action moves under them and
+     takes the width instead of taking it from the text. */
+  .companions-registry-card {
+    grid-template-columns: 32px minmax(0, 1fr);
+    grid-template-areas:
+      "icon body"
+      "action action";
+    gap: 10px 12px;
+  }
+
+  .companions-registry-card > .companions-plugin-icon {
+    grid-area: icon;
+  }
+
+  .companions-registry-card__body {
+    grid-area: body;
+  }
+
+  .companions-registry-card > .cds-btn {
+    grid-area: action;
+    justify-content: center;
+    min-height: 40px;
   }
 
   .companions-plugin-form__pair {

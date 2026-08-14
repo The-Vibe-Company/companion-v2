@@ -147,6 +147,10 @@ describe("Companions mobile viewport", () => {
     const pinned = declarationsFor(".companions-app:has(.companions-main--chat)", PHONE);
     expect(pinned.join(" ")).toContain("height: var(--chat-viewport-h, 100dvh);");
     expect(pinned.join(" ")).toContain("top: var(--chat-viewport-top, 0px);");
+    // The shell's own floor is a full `dvh`. Left standing, it holds the box at its pre-keyboard
+    // height however short the reported viewport gets, which puts the composer back under the
+    // keyboard — the exact failure this rule exists to prevent.
+    expect(pinned.join(" ")).toContain("min-height: var(--chat-viewport-h, 100dvh);");
   });
 
   it("keeps the composer clear of the home indicator", () => {
@@ -161,6 +165,24 @@ describe("Companions mobile viewport", () => {
     // The state word stays: status is never left to the colour of the dot alone.
     expect(declarationsFor(".chat-box__state", PHONE)).toHaveLength(0);
     expect(declarationsFor(".chat-head > *")[0]).toContain("flex: none;");
+  });
+
+  it("keeps the plugin row's named areas off the registry card", () => {
+    // Both surfaces use `.companions-plugin-icon`. Unscoped, `grid-area: icon` placed the card's icon
+    // in an implicit track of its own: the card grew two empty columns, the description was squeezed
+    // to 32px, and the icon dropped to the bottom-right corner.
+    expect(declarationsFor(".companions-plugin-icon", PHONE)).toHaveLength(0);
+    expect(declarationsFor(".companions-plugin-row > .companions-plugin-icon", PHONE)[0])
+      .toContain("grid-area: icon;");
+  });
+
+  it("puts the registry card's action under its text on a phone", () => {
+    const card = declarationsFor(".companions-registry-card", PHONE)[0];
+
+    expect(card).toContain("grid-template-columns: 32px minmax(0, 1fr);");
+    expect(card).toContain('"action action"');
+    expect(declarationsFor(".companions-registry-card > .cds-btn", PHONE)[0])
+      .toContain("min-height: 40px;");
   });
 
   it("keeps Back and Wake at a 44px thumb target", () => {
