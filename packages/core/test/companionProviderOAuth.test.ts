@@ -30,12 +30,16 @@ describe("Companion provider OAuth", () => {
     expect(authorization.searchParams.get("code_challenge_method")).toBe("S256");
     expect(authorization.searchParams.get("state")).toBe(started.flow.state);
     expect(started.flow.state).not.toBe(started.flow.verifier);
+    expect(authorization.searchParams.get("redirect_uri"))
+      .toBe("https://platform.claude.com/oauth/code/callback");
+    expect(started.authorizationUrl).not.toMatch(/localhost|53692/);
 
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as Record<string, string>;
       expect(body.code).toBe("one-time-code");
       expect(body.code_verifier).toBe(started.flow.verifier);
       expect(body.state).toBe(started.flow.state);
+      expect(body.redirect_uri).toBe("https://platform.claude.com/oauth/code/callback");
       return jsonResponse({
         access_token: "claude-access",
         refresh_token: "claude-refresh",
@@ -53,6 +57,29 @@ describe("Companion provider OAuth", () => {
       access: "claude-access",
       refresh: "claude-refresh",
     });
+  });
+
+  it("accepts Claude's full hosted callback URL", async () => {
+    const started = beginAnthropicProviderOAuth();
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, string>;
+      expect(body.code).toBe("callback-code");
+      expect(body.state).toBe(started.flow.state);
+      return jsonResponse({
+        access_token: "claude-access",
+        refresh_token: "claude-refresh",
+        expires_in: 3600,
+      });
+    }) as unknown as typeof fetch;
+    const callback = new URL("https://platform.claude.com/oauth/code/callback");
+    callback.searchParams.set("code", "callback-code");
+    callback.searchParams.set("state", started.flow.state);
+
+    await expect(completeAnthropicProviderOAuth({
+      flow: started.flow,
+      authorizationInput: callback.toString(),
+      fetchImpl,
+    })).resolves.toMatchObject({ type: "oauth", access: "claude-access" });
   });
 
   it("requires Claude's returned state before exchanging the authorization code", async () => {
@@ -73,7 +100,7 @@ describe("Companion provider OAuth", () => {
   });
 
   it("uses Codex device login and returns the Pi account-bound OAuth entry only after approval", async () => {
-    const fetchImpl = vi.fn()
+    const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({
         device_auth_id: "device-secret",
         user_code: "ABCD-EFGH",
@@ -88,7 +115,8 @@ describe("Companion provider OAuth", () => {
         access_token: accessToken("acct-123"),
         refresh_token: "codex-refresh",
         expires_in: 3600,
-      })) as unknown as typeof fetch;
+      }));
+    const fetchImpl = fetchMock as unknown as typeof fetch;
 
     const started = await beginOpenAICodexProviderOAuth({ fetchImpl });
     expect(started).toMatchObject({
@@ -111,6 +139,18 @@ describe("Companion provider OAuth", () => {
         accountId: "acct-123",
       },
     });
+    expect(fetchMock.mock.calls.map(([url]) => new URL(String(url)).origin))
+      .toEqual([
+        "https://auth.openai.com",
+        "https://auth.openai.com",
+        "https://auth.openai.com",
+        "https://auth.openai.com",
+      ]);
+    const tokenBody = fetchMock.mock.calls[3]?.[1]?.body;
+    expect(String(tokenBody)).toContain(
+      "redirect_uri=https%3A%2F%2Fauth.openai.com%2Fdeviceauth%2Fcallback",
+    );
+    expect(String(tokenBody)).not.toMatch(/localhost|127\.0\.0\.1/);
   });
 
   it.each([

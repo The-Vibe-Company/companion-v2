@@ -11,7 +11,7 @@ const ANTHROPIC_CLIENT_ID = Buffer.from(
 ).toString("utf8");
 const ANTHROPIC_AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
 const ANTHROPIC_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
-const ANTHROPIC_REDIRECT_URI = "http://localhost:53692/callback";
+const ANTHROPIC_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
 const ANTHROPIC_SCOPES =
   "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
