@@ -108,6 +108,10 @@ const BOX_RUNNABLE_MARKER = "companion-box-runnable";
 const PROVIDER_AUTH_PRESENT_MARKER = "companion-provider-auth-present";
 /** Printed only when a warm Box already has everything an automatic Pi restart needs. */
 const WARM_DAEMON_READY_MARKER = "companion-pi-warm-ready";
+/** Where staged skill archives wait on the Box disk between the file writes and the extract. */
+const STAGED_ARCHIVE_DIRECTORY = ".companion/runtime/state/skill-archives";
+/** Labels each staged archive's size so one stdout can be read back as a measurement. */
+const STAGED_ARCHIVE_SIZE_LABEL = "companion-archive-bytes";
 
 export type BoxState =
   | "init"
@@ -1052,6 +1056,55 @@ exit 0`,
     }
   }
 
+  /**
+   * Rewrite any staged archive the Box is holding short of what was sent.
+   *
+   * A write the file API accepted is not the same as a file that landed whole. The reported wake died
+   * extracting an archive on a Box the provider had just brought back from `idle`, and the identical
+   * payload extracted on the next attempt against that same Box — which is a transfer that did not
+   * land, not a package that cannot be read. The control plane knows exactly how many bytes it sent,
+   * so it can notice that and send them again, which is all the second attempt was doing by hand.
+   *
+   * This is advisory on purpose. A measurement is only ever used to repair, never to fail: a Box that
+   * will not report sizes, or does not report one for some archive, is left to the extract step
+   * exactly as before, because a new command that can refuse is not allowed to break a wake that
+   * works today. An archive that is still wrong after the rewrite fails extraction, naming itself.
+   */
+  async #repairShortStagedArchives(boxId: string, staged: Map<string, string>): Promise<void> {
+    if (staged.size === 0) return;
+    const measured = await this.#stagedArchiveSizes(boxId);
+    if (!measured) return;
+    for (const [path, content] of staged) {
+      const bytes = measured.get(path);
+      // An archive the Box did not report is not an archive known to be short.
+      if (bytes === undefined || bytes === Buffer.byteLength(content, "utf8")) continue;
+      await this.#writeFile(boxId, path, content);
+    }
+  }
+
+  /**
+   * Bytes the Box holds for each staged archive, keyed by the path it was written to, or `null` when
+   * the Box would not say. Nothing here is load-bearing enough to fail a start over.
+   */
+  async #stagedArchiveSizes(boxId: string): Promise<Map<string, number> | null> {
+    const listed = await this.#command(
+      boxId,
+      `set -e; cd "$HOME/${STAGED_ARCHIVE_DIRECTORY}" 2>/dev/null || exit 0;`
+      + ` for archive in *.tar.gz.b64; do [ -e "$archive" ] || continue;`
+      + ` printf '${STAGED_ARCHIVE_SIZE_LABEL} %s %s\\n' "$archive" "$(wc -c < "$archive")"; done`,
+    ).catch(() => null);
+    if (!listed?.success) return null;
+    const sizes = new Map<string, number>();
+    for (const line of labeledDiagnosticLines(listed.stdout, STAGED_ARCHIVE_SIZE_LABEL)) {
+      // The name cannot carry a space: it is `<slug>.tar.gz.b64`, and a slug is slug-shaped.
+      const [name, bytes] = line.split(/\s+/);
+      if (name && bytes && /^\d+$/.test(bytes)) {
+        sizes.set(`${STAGED_ARCHIVE_DIRECTORY}/${name}`, Number(bytes));
+      }
+    }
+    return sizes;
+  }
+
   async #injectPiResources(input: {
     boxId: string;
     clientSurface: CompanionClientSurface;
@@ -1103,13 +1156,14 @@ exit 0`,
         skills: injectedSkills.map(({ slug, version, checksum }) => ({ slug, version, checksum })),
       }, null, 2)}\n`,
     );
+    const staged = new Map<string, string>();
     for (const skill of injectedSkills) {
-      await this.#writeFile(
-        input.boxId,
-        runtimeSkillArchivePath(skill),
-        skill.archive.toString("base64"),
-      );
+      const path = runtimeSkillArchivePath(skill);
+      const content = skill.archive.toString("base64");
+      staged.set(path, content);
+      await this.#writeFile(input.boxId, path, content);
     }
+    await this.#repairShortStagedArchives(input.boxId, staged);
     try {
       await this.#writeFile(
         input.boxId,

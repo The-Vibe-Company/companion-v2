@@ -116,6 +116,18 @@ Viewer reads the chip as text: their thread polls only the control-plane project
 open thread refreshes `GET /v1/companions/:id/runtime?live=true` on a slow interval, so a stale chip
 is corrected by an observation rather than by a wake.
 
+A Companion the control plane is still resolving is watched more closely, and on the plain projection
+read: every few seconds while its state is `provisioning` or `stopping`. That window used to be the
+one nothing watched at all. The observation above begins only once the state is already `running`, and
+the request that starts a lifecycle reports it once — before it finishes, if the wake outlives the
+proxy in front of the API, and not at all if the browser has gone. Production spent about a minute
+reading `Box · starting`, still offering Wake, beside a reply Pi had already sent: the row had said
+`running` within a second of the Box coming up, and nothing had read it since. The chip, the wake
+control, and the composer footer all derive from that row, so they leave Starting together, and
+because this read is the projection it never resumes a Box and is as safe for a Viewer as their own.
+Watching stops as soon as the state settles, `error` included: that is where a failed lifecycle
+finishes, and its reason is already on screen.
+
 ## Lifecycle failure reporting
 
 A failure is diagnosable without server logs. A failed start or stop records `runtime_state: error`
@@ -380,6 +392,17 @@ tree that would not swap, and the wake that hit it could not be told from a wake
 They now carry the exit code and the shell's last word, and because `tar` reports a bad member over
 three lines and ends on the one that says nothing, the extract loop appends the slug it was working on
 after `tar` has finished complaining — that slug is the line a stored reason has room for.
+
+A write the file API accepted is also checked against what the Box kept. Once the archives are staged,
+one command reports the byte count of each, and any that is short of what was sent is written again.
+This is why: the wake reported in production died extracting a package on a Box the provider had just
+brought back from `idle`, and the identical payload extracted on the very next attempt against that
+same Box — a transfer that had not landed rather than a package that could not be read, and repeating
+the write is what that second attempt was doing by hand. The measurement is only ever used to repair,
+never to refuse. A Box that will not report sizes, or does not report one for some archive, is left to
+the extract step exactly as it was before, because a probe added to save a wake must not be able to
+cost one that would have worked; an archive that is still wrong after being sent again fails
+extraction, naming itself.
 
 The replacement is prepared before the old tree is swapped, and invalid, archived, unpublished,
 or inaccessible packages are excluded. The browser chat consumes Pi's normal Skills capability;

@@ -900,6 +900,124 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(result.runtimeState).toBe("running");
   });
 
+  /**
+   * A Box that accepted a write is not a Box that kept it. The reported wake died extracting a skill
+   * package on a Box the provider had just brought back from `idle`, and the identical payload
+   * extracted on the very next attempt against that same Box — a transfer that did not land, not a
+   * package that cannot be read. The control plane knows what it sent, so these cover it noticing.
+   */
+  describe("an archive the Box did not keep whole", () => {
+    /**
+     * A Box with a disk that answers for itself. Whatever is written is what the size probe reports,
+     * so a truncated write is visible to the control plane exactly as it would be on a real Box.
+     */
+    function boxWithDisk(options: { truncateFirstWriteOf?: string; measures?: boolean }) {
+      const disk = new Map<string, string>();
+      const writes: string[] = [];
+      const commands: string[] = [];
+      const truncated = new Set<string>();
+      const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const url = String(rawUrl);
+        const method = init?.method ?? "GET";
+        const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+        if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+        if (url.endsWith("/files") && method === "PUT") {
+          const path = String(body.path);
+          const content = String(body.content);
+          writes.push(path);
+          const short = path === options.truncateFirstWriteOf && !truncated.has(path);
+          if (short) truncated.add(path);
+          disk.set(path, short ? content.slice(0, content.length - 40) : content);
+          return json({ ok: true });
+        }
+        if (url.endsWith("/commands") && method === "POST") {
+          const command = String(body.command);
+          commands.push(command);
+          if (command.includes("companion-archive-bytes")) {
+            if (!options.measures) return json({ success: false, exitCode: 127, stdout: "", stderr: "wc: not found" });
+            const lines = [...disk]
+              .filter(([path]) => path.endsWith(".tar.gz.b64"))
+              .map(([path, content]) =>
+                `companion-archive-bytes ${path.split("/").at(-1)} ${Buffer.byteLength(content, "utf8")}`);
+            return json({ success: true, exitCode: 0, stdout: `${lines.join("\n")}\n`, stderr: "" });
+          }
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: command.includes("is-active") ? "active\n" : "",
+            stderr: "",
+          });
+        }
+        throw new Error(`unexpected Box request: ${method} ${url}`);
+      });
+      return { fetchMock, disk, writes, commands };
+    }
+
+    const archive = Buffer.from("relecture-catalogue-payload");
+    const archivePath = ".companion/runtime/state/skill-archives/relecture-catalogue.tar.gz.b64";
+
+    const wake = (fetchMock: ReturnType<typeof vi.fn>) => {
+      vi.stubGlobal("fetch", fetchMock);
+      return new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      }).start({
+        companionId: "11111111-1111-4111-8111-111111111111",
+        orgId: "22222222-2222-4222-8222-222222222222",
+        boxId: "bx_23456789",
+        clientSurface: "web",
+        providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+        replaceProviderAuth: true,
+        mcpCredentials: [],
+        mcpAccounts: [],
+        skills: [{
+          slug: "relecture-catalogue",
+          version: "4.5.6",
+          checksum: `sha256:${"b".repeat(64)}`,
+          archive,
+        }],
+        onBoxAssigned: async () => undefined,
+      });
+    };
+
+    it("sends it again rather than failing the wake over it", async () => {
+      const stub = boxWithDisk({ truncateFirstWriteOf: archivePath, measures: true });
+
+      const result = await wake(stub.fetchMock);
+
+      // The short write is repaired before anything tries to read it, so the archive the extract
+      // decodes is the one the control plane meant to stage.
+      expect(stub.writes.filter((path) => path === archivePath)).toHaveLength(2);
+      expect(stub.disk.get(archivePath)).toBe(archive.toString("base64"));
+      const measured = stub.commands.findIndex((command) => command.includes("companion-archive-bytes"));
+      const extract = stub.commands.findIndex((command) => command.includes("skills.next"));
+      expect(measured).toBeGreaterThanOrEqual(0);
+      expect(measured).toBeLessThan(extract);
+      expect(result.runtimeState).toBe("running");
+    });
+
+    it("leaves an archive it landed whole alone", async () => {
+      const stub = boxWithDisk({ measures: true });
+
+      const result = await wake(stub.fetchMock);
+
+      expect(stub.writes.filter((path) => path === archivePath)).toHaveLength(1);
+      expect(result.runtimeState).toBe("running");
+    });
+
+    it("starts anyway on a Box that will not measure what it holds", async () => {
+      // The measurement is only ever used to repair. A Box that cannot answer it is left to the
+      // extract step exactly as before, because this probe may not cost a wake that would have worked.
+      const stub = boxWithDisk({ measures: false });
+
+      const result = await wake(stub.fetchMock);
+
+      expect(stub.writes.filter((path) => path === archivePath)).toHaveLength(1);
+      expect(stub.commands.some((command) => command.includes("skills.next"))).toBe(true);
+      expect(result.runtimeState).toBe("running");
+    });
+  });
+
   it("names the file the Box refused when a write exceeds the provider's cap", async () => {
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
