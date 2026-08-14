@@ -27,11 +27,13 @@ import {
   CompanionShareForbiddenError,
   CompanionSettingsForbiddenError,
   COMPANION_RUNTIME_START_BUDGET_MS,
+  attachCompanionToolRunScreenshot,
   claimCompanionRuntimeStart,
   claimCompanionRuntimeStop,
   claimCompanionDeletion,
   companionsAvailableToUser,
   companionsEnabled,
+  companionToolRunIsVisual,
   createCompanion,
   deleteCompanion,
   deleteCompanionPlugin,
@@ -64,7 +66,7 @@ import {
   updateCompanion,
   updateCompanionRuntime,
 } from "@companion/core";
-import type { CompanionPiEntry } from "@companion/core";
+import type { CompanionPiEntry, CompanionPiToolCompletion } from "@companion/core";
 import {
   createCompanionInputSchema,
   companionProviderIdSchema,
@@ -357,6 +359,7 @@ function recordProjection(input: {
   orgId: string;
   companionId: string;
   entries: CompanionPiEntry[];
+  toolCompletions?: CompanionPiToolCompletion[];
   piLogOffset?: number;
   piLogRewound?: boolean;
   deliveredOrdinal?: number;
@@ -365,6 +368,46 @@ function recordProjection(input: {
     { orgId: input.orgId, userId: input.actor.id },
     (database) => recordCompanionPiProjection({ ...input, database }),
   );
+}
+
+/**
+ * Give the visual run this sync just finished one picture of the Box desktop.
+ *
+ * Only the newest unphotographed run is offered a frame, and only in the sync that closed it: the
+ * live desktop can only tell the truth about the run that just ended, so an older run keeps no
+ * picture rather than being given a misleading one. Everything here is best-effort — no desktop, no
+ * capture tool, a Box that stopped answering, a frame too large — because the transcript this sync
+ * already stored is the thing that mattered, and a run without a picture is still a run.
+ */
+async function attachDesktopFrame(input: {
+  actor: ReturnType<typeof actorFromContext>;
+  orgId: string;
+  companionId: string;
+  boxId: string;
+  runtime: CompanionBoxRuntime;
+  thread: CompanionThread;
+  desktopAvailable: boolean;
+}): Promise<CompanionThread | null> {
+  if (!input.desktopAvailable) return null;
+  const target = [...input.thread.entries].reverse().find((entry) =>
+    entry.tool !== null
+    && entry.tool.status !== "running"
+    && entry.tool.screenshot === null
+    && companionToolRunIsVisual(entry.tool.kind));
+  if (!target) return null;
+  const frame = await input.runtime.captureDesktopFrame({ boxId: input.boxId }).catch(() => null);
+  if (!frame) return null;
+  return withTenantContext(
+    { orgId: input.orgId, userId: input.actor.id },
+    (database) => attachCompanionToolRunScreenshot({
+      actor: input.actor,
+      orgId: input.orgId,
+      companionId: input.companionId,
+      eventId: target.event_id,
+      screenshot: frame,
+      database,
+    }),
+  ).catch(() => null);
 }
 
 /**
@@ -1441,12 +1484,24 @@ export function registerCompanionRoutes(
         orgId: resolved.orgId,
         companionId,
         entries: projection.entries,
+        toolCompletions: projection.toolCompletions,
         piLogOffset: events.offset + projection.consumedBytes,
         // Pi rereads its log from the start when it shrank, so that projection owns the offset
         // outright; otherwise the offset only moves forward.
         piLogRewound: events.offset < resolved.piLogOffset,
       });
-      return c.json({ thread, source: "box" as const });
+      const framed = projection.toolCompletions.length
+        ? await attachDesktopFrame({
+            actor: resolved.actor,
+            orgId: resolved.orgId,
+            companionId,
+            boxId,
+            runtime,
+            thread,
+            desktopAvailable: observed.desktopAvailable,
+          })
+        : null;
+      return c.json({ thread: framed ?? thread, source: "box" as const });
     } catch (error) {
       return runtimeRouteError(c, error);
     }

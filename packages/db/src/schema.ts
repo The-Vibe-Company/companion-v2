@@ -55,6 +55,7 @@ export const companionTranscriptRoleEnum = pgEnum("companion_transcript_role", [
   "user",
   "assistant",
   "system",
+  "tool",
 ]);
 export const billingSeatSyncStatusEnum = pgEnum("billing_seat_sync_status", ["synced", "pending", "error"]);
 export const invitationStatusEnum = pgEnum("invitation_status", [
@@ -556,6 +557,22 @@ export const companionThreads = pgTable(
 );
 
 /**
+ * One tool run as it is stored, field for field the `companion_tool_run` contract the thread read
+ * model returns. Storing the wire shape verbatim means the projection and the reader share it with
+ * no translation, and the shape is restated here so the schema keeps no dependency on contracts.
+ */
+export interface CompanionStoredToolRun {
+  call_id: string | null;
+  kind: "shell" | "file" | "browse" | "computer" | "tool";
+  name: string;
+  title: string;
+  status: "running" | "ok" | "error";
+  detail: string | null;
+  /** One downscaled Box desktop frame as a `data:` image URL, or null when none was captured. */
+  screenshot: string | null;
+}
+
+/**
  * Durable, append-oriented transcript projection. Pi remains authoritative while active; browser
  * reads, especially Viewer reads, use this table and therefore never contact or wake Box.
  */
@@ -572,6 +589,13 @@ export const companionTranscriptEntries = pgTable(
     ordinal: integer("ordinal").notNull(),
     role: companionTranscriptRoleEnum("role").notNull(),
     content: text("content").notNull(),
+    /**
+     * The tool run a `tool` entry reports: what Pi ran, how it ended, and — for a run that moved the
+     * Box desktop — one frame of that desktop. It lives on the entry rather than in its own table so
+     * a run keeps the transcript ordinal that places it between the turns it happened between, and is
+     * removed with the Companion the row already cascades from. Null for every other role.
+     */
+    tool: jsonb("tool").$type<CompanionStoredToolRun>(),
     /** Member who sent a user message; null for Pi output and for entries written before sharing. */
     authorId: text("author_id").references(() => user.id, { onDelete: "set null" }),
     createdAt: now(),
@@ -591,6 +615,19 @@ export const companionTranscriptEntries = pgTable(
     boundedContent: check(
       "companion_transcript_entries_content_check",
       sql`octet_length(${t.content}) <= 1048576`,
+    ),
+    // A tool run is a tool entry and nothing else, so no reader has to decide what a `system` row
+    // carrying a tool payload — or a `tool` row carrying none — was supposed to mean. The role is
+    // compared as text because the migration that adds this check also adds the label it names.
+    toolRoleOnly: check(
+      "companion_transcript_entries_tool_role_check",
+      sql`(${t.role}::text = 'tool') = (${t.tool} is not null)`,
+    ),
+    // One downscaled frame plus its run detail. The cap is the transcript's, not the capture's: a
+    // payload larger than this never reached a row, so a stored one is a bug, not a big screenshot.
+    boundedTool: check(
+      "companion_transcript_entries_tool_size_check",
+      sql`${t.tool} is null or octet_length(${t.tool}::text) <= 262144`,
     ),
   }),
 );

@@ -8,7 +8,7 @@ function line(event: unknown): string {
 const now = new Date("2026-08-12T12:00:00.000Z");
 
 describe("Pi RPC log projection", () => {
-  it("projects assistant text and drops thinking, tool calls, and tool results", () => {
+  it("projects assistant text, drops thinking, and gives each tool call its own entry", () => {
     const chunk = [
       line({ type: "agent_start" }),
       line({ type: "message_end", message: { role: "user", content: "Summarize the incident" } }),
@@ -31,14 +31,100 @@ describe("Pi RPC log projection", () => {
 
     const projection = projectCompanionPiEvents({ chunk, offset: 0, now });
 
-    expect(projection.entries).toEqual([{
-      eventId: expect.stringMatching(/^pi:\d+$/),
-      role: "assistant",
-      content: "Two services timed out.",
-      createdAt: new Date("2026-08-12T11:59:00.000Z"),
-    }]);
+    expect(projection.entries.map((entry) => [entry.role, entry.content])).toEqual([
+      ["assistant", "Two services timed out."],
+      ["tool", "ls"],
+    ]);
+    // The reply stays the reply: the thinking is gone and the call is beside it, not inside it.
+    expect(projection.entries[0]?.tool).toBeUndefined();
+    expect(projection.entries[1]?.tool).toMatchObject({
+      call_id: "call_1",
+      kind: "shell",
+      name: "bash",
+      title: "ls",
+      status: "running",
+      screenshot: null,
+    });
     expect(projection.settled).toBe(true);
     expect(projection.consumedBytes).toBe(Buffer.byteLength(chunk, "utf8"));
+  });
+
+  it("reads a tool result as the completion of the call it names", () => {
+    const chunk = [
+      line({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "call_7", name: "bash", arguments: { command: "ls" } }],
+          stopReason: "toolUse",
+        },
+      }),
+      line({
+        type: "message_end",
+        message: {
+          role: "toolResult",
+          toolCallId: "call_7",
+          content: [{ type: "text", text: "README.md\npackage.json" }],
+        },
+      }),
+    ].join("");
+
+    const projection = projectCompanionPiEvents({ chunk, offset: 0, now });
+
+    expect(projection.toolCompletions).toEqual([{
+      callId: "call_7",
+      status: "ok",
+      result: "README.md\npackage.json",
+      completedAt: now,
+    }]);
+  });
+
+  it("reports a failed tool result as a failed run", () => {
+    const chunk = line({
+      type: "message_end",
+      message: {
+        role: "toolResult",
+        toolCallId: "call_8",
+        isError: true,
+        content: [{ type: "text", text: "bash: nope: command not found" }],
+      },
+    });
+
+    const projection = projectCompanionPiEvents({ chunk, offset: 0, now });
+
+    expect(projection.toolCompletions[0]).toMatchObject({
+      callId: "call_8",
+      status: "error",
+      result: "bash: nope: command not found",
+    });
+  });
+
+  it("names a run by what it touched rather than by the tool that touched it", () => {
+    const chunk = [
+      line({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "a", name: "str_replace_editor", input: { path: "src/app.ts" } },
+            { type: "tool_use", id: "b", name: "web_search", input: { query: "oklch support" } },
+            { type: "tool_use", id: "c", name: "computer", input: { action: "screenshot" } },
+            { type: "tool_use", id: "d", name: "summon_kraken", input: {} },
+          ],
+          stopReason: "toolUse",
+        },
+      }),
+    ].join("");
+
+    const projection = projectCompanionPiEvents({ chunk, offset: 0, now });
+
+    expect(projection.entries.map((entry) => [entry.tool?.kind, entry.tool?.title])).toEqual([
+      ["file", "src/app.ts"],
+      ["browse", "oklch support"],
+      ["computer", "screenshot"],
+      // An unrecognized tool reports itself rather than being filed under a guess.
+      ["tool", "summon_kraken"],
+    ]);
   });
 
   it("derives event ids from byte offsets so a repeated read stays idempotent", () => {
@@ -120,7 +206,7 @@ describe("Pi RPC log projection", () => {
     expect(projection.settled).toBe(true);
   });
 
-  it("leaves a mid-turn tool step invisible", () => {
+  it("leaves a mid-turn tool step as its chip and not as a reply", () => {
     const chunk = line({
       type: "message_end",
       message: {
@@ -132,7 +218,34 @@ describe("Pi RPC log projection", () => {
 
     const projection = projectCompanionPiEvents({ chunk, offset: 0, now });
 
-    expect(projection.entries).toEqual([]);
+    // A tool step is not a turn, so it must never close one with "Pi ended the turn without a
+    // visible reply" — the chip is the whole of what happened here.
+    expect(projection.entries.map((entry) => entry.role)).toEqual(["tool"]);
+  });
+
+  it("gives a call and the reply beside it ids that survive a repeated read", () => {
+    const chunk = line({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Listing the repository." },
+          { type: "toolCall", id: "call_1", name: "bash", arguments: { command: "ls" } },
+          { type: "toolCall", id: "call_2", name: "bash", arguments: { command: "pwd" } },
+        ],
+        stopReason: "toolUse",
+      },
+    });
+
+    const projection = projectCompanionPiEvents({ chunk, offset: 4_096, now });
+    const replayed = projectCompanionPiEvents({ chunk, offset: 4_096, now });
+
+    expect(projection.entries.map((entry) => entry.eventId)).toEqual([
+      "pi:4096",
+      "pi:4096:tool:0",
+      "pi:4096:tool:1",
+    ]);
+    expect(replayed.entries).toEqual(projection.entries);
   });
 
   it("skips malformed records instead of failing the whole sync", () => {

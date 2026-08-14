@@ -153,6 +153,7 @@ const message = {
   content: "Summarize the incident",
   author_id: "user-1",
   author_name: "User",
+  tool: null,
   created_at: companion.created_at,
 };
 
@@ -175,6 +176,7 @@ function boxRuntime(overrides: Record<string, unknown> = {}) {
     prompt: vi.fn(),
     refreshTtl: vi.fn(async () => undefined),
     readEvents: vi.fn(async () => ({ chunk: "", offset: 0 })),
+    captureDesktopFrame: vi.fn(async () => null),
     ...overrides,
   };
 }

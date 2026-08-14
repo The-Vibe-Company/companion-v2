@@ -27,7 +27,7 @@ import {
 } from "@companion/contracts";
 import { db, schema, type Db } from "@companion/db";
 import { canManageOrg } from "./authz";
-import type { CompanionPiEntry } from "./companionPiEvents";
+import type { CompanionPiEntry, CompanionPiToolCompletion } from "./companionPiEvents";
 import {
   companionRuntimeErrorForAccess,
   sanitizeCompanionRuntimeError,
@@ -592,6 +592,7 @@ async function readCompanionTranscript(
       ordinal: schema.companionTranscriptEntries.ordinal,
       role: schema.companionTranscriptEntries.role,
       content: schema.companionTranscriptEntries.content,
+      tool: schema.companionTranscriptEntries.tool,
       authorId: schema.companionTranscriptEntries.authorId,
       authorName: schema.profiles.name,
       createdAt: schema.companionTranscriptEntries.createdAt,
@@ -610,6 +611,7 @@ async function readCompanionTranscript(
     content: row.content,
     author_id: row.authorId,
     author_name: row.authorName,
+    tool: row.tool ?? null,
     created_at: row.createdAt.toISOString(),
   }));
 }
@@ -809,6 +811,113 @@ export async function listPendingCompanionMessages(input: {
   };
 }
 
+type CompanionStoredToolRun = NonNullable<
+  typeof schema.companionTranscriptEntries.$inferSelect["tool"]
+>;
+
+/** Tool entries whose chip is still spinning, oldest first: the queue a result is matched against. */
+async function readRunningCompanionToolRuns(
+  database: Db,
+  orgId: string,
+  companionId: string,
+): Promise<Array<{ eventId: string; tool: CompanionStoredToolRun }>> {
+  const rows = await database
+    .select({
+      eventId: schema.companionTranscriptEntries.eventId,
+      tool: schema.companionTranscriptEntries.tool,
+    })
+    .from(schema.companionTranscriptEntries)
+    .where(and(
+      eq(schema.companionTranscriptEntries.orgId, orgId),
+      eq(schema.companionTranscriptEntries.companionId, companionId),
+      eq(schema.companionTranscriptEntries.role, "tool"),
+      sql`${schema.companionTranscriptEntries.tool}->>'status' = 'running'`,
+    ))
+    .orderBy(asc(schema.companionTranscriptEntries.ordinal));
+  return rows.flatMap((row) => (row.tool ? [{ eventId: row.eventId, tool: row.tool }] : []));
+}
+
+/**
+ * Settle the runs Pi reported results for. A result naming its call closes exactly that chip; a
+ * harness that reports no call id closes the oldest chip still running, because Pi runs a turn's
+ * tools one at a time and the oldest open one is the only run its result can belong to. A result
+ * that matches nothing is dropped rather than guessed at, so a replayed chunk cannot close a run
+ * that a later call started.
+ */
+async function completeCompanionToolRuns(input: {
+  database: Db;
+  orgId: string;
+  companionId: string;
+  completions: CompanionPiToolCompletion[];
+}): Promise<void> {
+  if (!input.completions.length) return;
+  const open = await readRunningCompanionToolRuns(
+    input.database,
+    input.orgId,
+    input.companionId,
+  );
+  const settled: Array<{ eventId: string; tool: CompanionStoredToolRun }> = [];
+  for (const completion of input.completions) {
+    const index = completion.callId
+      ? open.findIndex((run) => run.tool.call_id === completion.callId)
+      : (open.length ? 0 : -1);
+    const match = index < 0 ? undefined : open.splice(index, 1)[0];
+    if (!match) continue;
+    settled.push({
+      eventId: match.eventId,
+      tool: {
+        ...match.tool,
+        status: completion.status,
+        detail: [match.tool.detail, completion.result].filter(Boolean).join("\n\n") || null,
+      },
+    });
+  }
+  for (const run of settled) {
+    await input.database
+      .update(schema.companionTranscriptEntries)
+      .set({ tool: run.tool })
+      .where(and(
+        eq(schema.companionTranscriptEntries.orgId, input.orgId),
+        eq(schema.companionTranscriptEntries.companionId, input.companionId),
+        eq(schema.companionTranscriptEntries.eventId, run.eventId),
+      ));
+  }
+}
+
+/**
+ * Attach one Box desktop frame to a finished run. It is written only while the run still has no
+ * frame, so a retried sync cannot replace the picture of the desktop as the run left it with a
+ * picture of whatever is on screen now.
+ */
+export async function attachCompanionToolRunScreenshot(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  eventId: string;
+  screenshot: string;
+  database?: Db;
+}): Promise<CompanionThread> {
+  const database = input.database ?? db;
+  const companion = await getCompanionForRuntime({ ...input, database });
+  await database
+    .update(schema.companionTranscriptEntries)
+    .set({
+      tool: sql`jsonb_set(${schema.companionTranscriptEntries.tool}, '{screenshot}', to_jsonb(${input.screenshot}::text))`,
+    })
+    .where(and(
+      eq(schema.companionTranscriptEntries.orgId, input.orgId),
+      eq(schema.companionTranscriptEntries.companionId, input.companionId),
+      eq(schema.companionTranscriptEntries.eventId, input.eventId),
+      eq(schema.companionTranscriptEntries.role, "tool"),
+      sql`${schema.companionTranscriptEntries.tool}->>'screenshot' is null`,
+    ));
+  const [row, entries] = await Promise.all([
+    readCompanionThreadRow(database, input.orgId, input.companionId),
+    readCompanionTranscript(database, input.orgId, input.companionId),
+  ]);
+  return toThread({ actor: input.actor, companion, row, entries });
+}
+
 /**
  * Append entries projected from the Pi RPC log and advance both watermarks. Pi is authoritative
  * while it runs; this idempotent sink only mirrors what it already produced and never wakes Box.
@@ -818,6 +927,8 @@ export async function recordCompanionPiProjection(input: {
   orgId: string;
   companionId: string;
   entries: CompanionPiEntry[];
+  /** Results for runs this projection — or an earlier one — already stored as running chips. */
+  toolCompletions?: CompanionPiToolCompletion[];
   piLogOffset?: number;
   /** Set when the caller reread a shrunken log from its start, so the offset may move backwards. */
   piLogRewound?: boolean;
@@ -843,10 +954,19 @@ export async function recordCompanionPiProjection(input: {
         ordinal: ordinal + index,
         role: entry.role,
         content: entry.content,
+        tool: entry.tool ?? null,
         createdAt: entry.createdAt,
       })))
       .onConflictDoNothing();
   }
+  // Results are applied after the inserts above, so a call and its result arriving in one chunk
+  // settle in that one sync instead of leaving a chip spinning until the next one.
+  await completeCompanionToolRuns({
+    database,
+    orgId: input.orgId,
+    companionId: input.companionId,
+    completions: input.toolCompletions ?? [],
+  });
   if (input.piLogOffset !== undefined || input.deliveredOrdinal !== undefined) {
     await database
       .insert(schema.companionThreads)

@@ -205,10 +205,59 @@ export const setCompanionWorkspaceShareInputSchema = z.object({
   role: companionShareRoleSchema.nullable(),
 }).strict();
 
+/**
+ * What one tool run touched, so a chip can name it in a word and pick its icon. `computer` is the
+ * Box desktop Lux drives; `tool` is the honest fallback for a name this catalog does not recognize,
+ * because a chip that guesses wrong is worse than one that only says a run happened.
+ */
+export const companionToolRunKindSchema = z.enum(["shell", "file", "browse", "computer", "tool"]);
+export type CompanionToolRunKind = z.infer<typeof companionToolRunKindSchema>;
+
+/** A run is `running` until Pi reports its result; the chip spins until then. */
+export const companionToolRunStatusSchema = z.enum(["running", "ok", "error"]);
+export type CompanionToolRunStatus = z.infer<typeof companionToolRunStatusSchema>;
+
+/**
+ * How much of a Box frame a transcript will carry. One downscaled JPEG per visual run stays inside
+ * the row it belongs to, so it is read by exactly the readers who may read the thread and is removed
+ * with the Companion; anything larger is dropped rather than stored.
+ */
+export const COMPANION_TOOL_RUN_SCREENSHOT_MAX_CHARACTERS = 196_608;
+
+/**
+ * A `data:` image URL and nothing else. The transcript hands this string straight to an `img`, so
+ * the shape is enforced here rather than trusted: no remote origin, no `javascript:`, no SVG.
+ */
+const COMPANION_TOOL_RUN_SCREENSHOT_PATTERN = /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
+
+/**
+ * One tool run Pi performed inside a turn, projected from its RPC log. The chip reports the run; the
+ * detail carries the arguments and the result excerpt behind a disclosure, and a visual run also
+ * carries one frame of the Box desktop as it stood when the run ended.
+ */
+export const companionToolRunSchema = z.object({
+  /** Pi's own id for the call, so the result that closes it finds the chip it belongs to. */
+  call_id: z.string().min(1).max(200).nullable(),
+  kind: companionToolRunKindSchema,
+  /** Pi's tool name, verbatim, so an unrecognized tool still reports what actually ran. */
+  name: z.string().min(1).max(120),
+  /** One line naming what the run did: the command, the path, the URL. */
+  title: z.string().max(300),
+  status: companionToolRunStatusSchema,
+  /** The disclosed body: arguments and the result excerpt, already truncated. */
+  detail: z.string().max(16_000).nullable(),
+  screenshot: z
+    .string()
+    .max(COMPANION_TOOL_RUN_SCREENSHOT_MAX_CHARACTERS)
+    .regex(COMPANION_TOOL_RUN_SCREENSHOT_PATTERN)
+    .nullable(),
+}).strict();
+export type CompanionToolRun = z.infer<typeof companionToolRunSchema>;
+
 export const companionTranscriptEntrySchema = z.object({
   event_id: z.string().min(1).max(200),
   ordinal: z.number().int().nonnegative(),
-  role: z.enum(["user", "assistant", "system"]),
+  role: z.enum(["user", "assistant", "system", "tool"]),
   content: z.string(),
   /**
    * Member who sent a user message. A shared thread has several writers, so the reader compares
@@ -216,7 +265,16 @@ export const companionTranscriptEntrySchema = z.object({
    */
   author_id: z.string().nullable(),
   author_name: z.string().nullable(),
+  /** Set on exactly the `tool` entries; every other role carries null. */
+  tool: companionToolRunSchema.nullable().default(null),
   created_at: z.string().datetime(),
+}).superRefine((entry, ctx) => {
+  if ((entry.role === "tool") === (entry.tool !== null)) return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    path: ["tool"],
+    message: "a tool entry carries a tool run and no other role may",
+  });
 });
 export type CompanionTranscriptEntry = z.infer<typeof companionTranscriptEntrySchema>;
 export type CompanionTranscriptRole = CompanionTranscriptEntry["role"];
