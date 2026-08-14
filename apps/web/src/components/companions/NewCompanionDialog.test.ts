@@ -11,7 +11,17 @@ function providers(overrides: Partial<CompanionProvidersResponse> = {}): Compani
     catalog: [
       { id: "anthropic", name: "Claude", auth_methods: ["api_key", "subscription"], description: "", models: [{ id: "claude-opus-4-8", name: "Claude Opus 4.8", default: true }] },
       { id: "kimi-coding", name: "Kimi", auth_methods: ["api_key"], description: "", models: [{ id: "kimi-for-coding", name: "Kimi K2.7 Code", default: true }] },
-      { id: "zai", name: "z.ai", auth_methods: ["api_key"], description: "", models: [{ id: "glm-4.7", name: "GLM-4.7", default: true }] },
+      {
+        id: "zai",
+        name: "z.ai",
+        auth_methods: ["api_key"],
+        description: "",
+        models: [
+          { id: "glm-4.7", name: "GLM-4.7", default: true },
+          { id: "glm-5.2", name: "GLM-5.2" },
+          { id: "glm-5.3", name: "GLM-5.3" },
+        ],
+      },
     ],
     connections: [{
       provider_id: "anthropic",
@@ -72,6 +82,22 @@ describe("NewCompanionDialog", () => {
     expect(markup).toContain("Kimi K2.7 Code");
     expect(markup).not.toContain("Claude");
     expect(markup).not.toContain("Claude Opus 4.8");
+  });
+
+  it("keeps the two-step picker and renders live z.ai models from the API payload", () => {
+    const zai = {
+      ...providers().connections[0]!,
+      provider_id: "zai",
+    };
+    const markup = render(providers({
+      connections: [zai],
+      default_provider_id: "zai",
+    }));
+
+    expect(markup).toContain("1. Provider");
+    expect(markup).toContain("2. Model");
+    expect(markup).toContain("GLM-5.2");
+    expect(markup).toContain("GLM-5.3");
   });
 
   it("tells a member without provider rights who can connect one", () => {

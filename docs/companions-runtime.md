@@ -293,7 +293,7 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
     ├── state/
     │   ├── instructions.txt # optional appended Pi system prompt
     │   ├── mcp-accounts.json # account ids, labels, adapter names, and transports
-    │   ├── model.txt       # pinned model id passed through `pi --model`
+    │   ├── model.txt       # selected model id passed through `pi --model`
     │   ├── skills.json    # injected surface/version/checksum projection
     │   └── pi.rpc.in      # owner-only FIFO for the Pi JSON RPC stream
     └── logs/
@@ -492,7 +492,8 @@ disabled. Native-mobile starts discard both saved and caller-supplied MCP accoun
 Provider management is workspace-scoped and Owner/Admin-only. API keys and one-provider Pi OAuth
 entries are encrypted with `COMPANION_SECRETS_MASTER_KEY`; responses, logs, audit metadata, and
 Companion rows never contain plaintext. Starting a Companion resolves only its selected provider,
-validates its persisted `model_id` against that provider's pinned catalog, decrypts the credential
+validates its persisted `model_id` against that provider's live, last-known, or bundled fallback
+catalog, decrypts the credential
 after the owner/editor wake guard, and writes a minimal owner-only `~/.companion/pi/auth.json` plus
 `.companion/runtime/state/model.txt` inside Pi's isolated runtime. The daemon wrapper passes the
 selected id through `pi --model`. The start endpoint accepts no model-provider credentials; its only
@@ -516,7 +517,8 @@ runtime `mcp_credentials` files. A later active-wait timeout keeps the runtime f
 may still recover Pi through `Restart=on-failure`; explicit stop and Box stop/reboot remain its
 cleanup boundary.
 
-Changing a Companion's provider in settings selects that provider's default model, rewrites
+Changing a Companion's provider in settings keeps its bundled default model when pi.dev still lists
+it, otherwise selects the first live model, rewrites
 `auth.json`, and recycles Pi, not the Box. Changing only the model rewrites `model.txt` and recycles
 Pi without replacing provider auth. Both apply immediately when Box and Pi are online, or on the
 next start/send when the Box is asleep; PATCH never wakes Box.
@@ -552,12 +554,16 @@ credential material must remain behind the adapter boundary.
 | Google Gemini | `google` | `gemini-3.1-pro-preview` | Google Gemini API key |
 
 The web picker intentionally shows only this short list. The API and storage key use Pi provider
-ids and accept any valid lowercase Pi provider id, so another built-in provider can be connected
-without a schema change. To add one to the picker:
+ids. The provider catalog endpoint fetches `https://pi.dev/api/models/providers/{id}` for these
+seven mapped ids concurrently with a 15-second bound, keeps a five-minute process-local last-known
+cache, and falls back to the bundled model rows below on a cold failure. The bundled default remains
+the default while Pi still lists it; otherwise Pi's first returned model becomes the default. Create
+and settings validate the submitted model against that same resolved catalog. To add a provider:
 
-1. verify its auth-file key and supported auth methods against the pinned Pi `providers.md`;
-2. add one entry and its Pi-accepted pinned models to `COMPANION_PROVIDER_CATALOG` in
-   `packages/contracts/src/companions.ts`;
+1. verify its auth-file key and supported auth methods against Pi;
+2. add one entry with a non-empty fallback model list to `COMPANION_PROVIDER_CATALOG` in
+   `packages/contracts/src/companions.ts` and map its pi.dev id in
+   `packages/core/src/companionProviderCatalog.ts`;
 3. add contract and Box adapter coverage for its auth entry;
 4. update this table.
 

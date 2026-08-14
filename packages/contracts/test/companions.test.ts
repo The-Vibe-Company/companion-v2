@@ -72,11 +72,11 @@ describe("Companion provider contracts", () => {
       provider_id: "anthropic",
       model_id: "claude-opus-4-8",
     })).toMatchObject({ provider_id: "anthropic", model_id: "claude-opus-4-8" });
-    expect(() => createCompanionInputSchema.parse({
+    expect(createCompanionInputSchema.parse({
       name: "Research",
       provider_id: "anthropic",
-      model_id: "glm-4.7",
-    })).toThrow();
+      model_id: "claude-sonnet-5",
+    })).toMatchObject({ model_id: "claude-sonnet-5" });
     expect(createCompanionInputSchema.parse({
       name: "Luna",
       persona: "  Content marketing assistant  ",
@@ -107,10 +107,10 @@ describe("Companion provider contracts", () => {
       provider_id: "openai-codex",
       model_id: "gpt-5.5",
     });
-    expect(() => updateCompanionInputSchema.parse({
+    expect(updateCompanionInputSchema.parse({
       provider_id: "openai-codex",
-      model_id: "claude-opus-4-8",
-    })).toThrow();
+      model_id: "gpt-5.6-sol",
+    })).toMatchObject({ model_id: "gpt-5.6-sol" });
     expect(() => updateCompanionInputSchema.parse({})).toThrow();
     expect(() => updateCompanionInputSchema.parse({ owner_id: "user-2" })).toThrow();
   });

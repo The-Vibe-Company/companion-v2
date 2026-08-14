@@ -270,15 +270,7 @@ export const createCompanionInputSchema = z.object({
   persona: companionPersonaSchema.optional(),
   provider_id: companionProviderIdSchema.optional(),
   model_id: companionModelIdSchema.optional(),
-}).strict().superRefine((input, context) => {
-  if (input.provider_id && input.model_id && !companionProviderHasModel(input.provider_id, input.model_id)) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["model_id"],
-      message: `Model ${input.model_id} is not available for provider ${input.provider_id}`,
-    });
-  }
-});
+}).strict();
 export type CreateCompanionInput = z.infer<typeof createCompanionInputSchema>;
 
 export const updateCompanionInputSchema = z.object({
@@ -293,15 +285,7 @@ export const updateCompanionInputSchema = z.object({
     || input.provider_id !== undefined
     || input.model_id !== undefined,
   "At least one Companion setting is required",
-).superRefine((input, context) => {
-  if (input.provider_id && input.model_id && !companionProviderHasModel(input.provider_id, input.model_id)) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["model_id"],
-      message: `Model ${input.model_id} is not available for provider ${input.provider_id}`,
-    });
-  }
-});
+);
 export type UpdateCompanionInput = z.infer<typeof updateCompanionInputSchema>;
 
 export const setCompanionProviderInputSchema = z.object({

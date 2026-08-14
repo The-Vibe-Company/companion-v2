@@ -209,11 +209,21 @@ describe("CompanionSettings", () => {
     );
   });
 
-  it("shows both Kimi and z.ai when both workspace connections exist", async () => {
+  it("shows live z.ai models from the API payload in the two-step settings picker", async () => {
     const apiConnections: CompanionProvidersResponse = {
       catalog: [
         { id: "kimi-coding", name: "Kimi", auth_methods: ["api_key"], description: "", models: [{ id: "kimi-for-coding", name: "Kimi K2.7 Code", default: true }] },
-        { id: "zai", name: "z.ai", auth_methods: ["api_key"], description: "", models: [{ id: "glm-4.7", name: "GLM-4.7", default: true }] },
+        {
+          id: "zai",
+          name: "z.ai",
+          auth_methods: ["api_key"],
+          description: "",
+          models: [
+            { id: "glm-4.7", name: "GLM-4.7", default: true },
+            { id: "glm-5.2", name: "GLM-5.2" },
+            { id: "glm-5.3", name: "GLM-5.3" },
+          ],
+        },
       ],
       connections: [
         { ...providers.connections[0]!, provider_id: "kimi-coding" },
@@ -227,6 +237,13 @@ describe("CompanionSettings", () => {
     expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(2);
     expect(container.textContent).toContain("Kimi");
     expect(container.textContent).toContain("z.ai");
+    await act(async () => {
+      container.querySelector<HTMLInputElement>('input[value="zai"]')!.click();
+    });
+    expect(container.textContent).toContain("1. Provider");
+    expect(container.textContent).toContain("2. Model");
+    expect(container.textContent).toContain("GLM-5.2");
+    expect(container.textContent).toContain("GLM-5.3");
   });
 
   it("requires Owner confirmation before deletion", async () => {
