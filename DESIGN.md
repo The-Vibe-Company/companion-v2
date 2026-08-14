@@ -279,13 +279,6 @@ Use shadows only for floating layers such as drawers, dropdowns, and dialogs. Sh
 
 No glassmorphism. No backdrop blur. No translucent panels pretending to be glass. No gradient depth. No bokeh, grain, decorative textures, or atmospheric image backgrounds in product UI.
 
-The Companions list surface is the one scoped exception, named Air. Air is a light glass treatment: a translucent
-neutral wash over a short backdrop blur on the count, the search field, status and role chips, the Box chip, the
-Companions dialogs, and the scrim behind them, carried by hairlines and whitespace instead of framed panels. Air is
-transparency, not depth. It has no 3D material, no gradient wallpaper, no glow, no floating cards, and no stacked
-settings lists. Its tokens are declared on the Companions root and never globally, so the Companion thread, Skills,
-Settings, and every other surface keep the flat hairline treatment.
-
 Motion is sparse and functional. Use `duration-fast` (120ms), `duration-base` (180ms), or `duration-slow` (240ms) with
 `ease-out-quint` transitions. Allowed motion: drawer slide-in/out, scrim fade, hover color changes, selection color
 changes, and short copy confirmation. Do not animate layout properties such as width, height, margin, or top. Respect
@@ -350,20 +343,12 @@ rows; empty, revoked, conflicted, failed, and archived-read-only states explain 
 offer Retry where useful. On narrow screens preserve every capability through progressive
 table → rows → full-screen panel navigation rather than shrinking the grid or removing actions.
 
-**Companions list** is the Air surface. There is no table and no header row: a large page title carries a glass count
-chip, Providers and Plugins are quiet ghost actions beside the one accent New companion action, and a single
-full-width glass search field sits above the list. Each row is one initial avatar, the Companion name in large type,
-the persona as one quiet line under it, a glass status chip pairing the tone dot with its status word, and the
-relative time. Rows are separated by inset hairlines, never boxed or carded, and hover tints the whole row. Access and
-Share rest at zero opacity in a reserved column and appear on hover or keyboard focus, so revealing them never moves
-the row; a coarse pointer keeps them visible. The empty state is plain text and one action in open space.
-
-**Companion settings** is a separate Air page reached only from an Owner or Editor row action in the
+**Companion settings** is a separate page reached only from an Owner or Editor row action in the
 Companions list. It has one direct form for name, instructions, and the same connected-provider picker
-used during creation. Controls use the scoped glass wash without stacking cards or adding navigation.
-The Owner alone sees a hairline-separated delete action and an explicit irreversible confirmation;
-Editor can save but cannot delete, and Viewer has no route or writes. The thread, Box chip, Plugins,
-Lux, and top-level navigation remain unchanged.
+used during creation, on the same flat hairline surface as the list without stacking cards or adding
+navigation. The Owner alone sees a hairline-separated delete action and an explicit irreversible
+confirmation; Editor can save but cannot delete, and Viewer has no route or writes. The thread, Box
+chip, Plugins, Lux, and top-level navigation remain unchanged.
 
 **Companion thread** is one transcript in one reading column, not a two-sided bubble chat. Turns are
 left-aligned in a column narrower than the page; a writer keeps the floor across consecutive turns, so
@@ -419,7 +404,7 @@ Don't:
 
 - Do not create marketing hero dashboards.
 - Do not use big-number vanity metric cards.
-- Do not use gradients, gradient text, glow, bokeh, or decorative texture, and keep glass and backdrop blur inside the scoped Companions Air surface.
+- Do not use gradients, gradient text, glassmorphism, backdrop blur, glow, bokeh, or decorative texture.
 - Do not use emoji in product UI.
 - Do not use em dashes in UI copy.
 - Do not use web fonts.
