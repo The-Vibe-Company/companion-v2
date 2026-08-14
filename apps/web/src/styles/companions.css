@@ -638,6 +638,103 @@
   font-size: var(--text-xs);
 }
 
+.companions-skills-picker {
+  display: grid;
+  gap: 18px;
+  margin-top: 8px;
+}
+
+.companions-skills-picker__skills {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.companions-skills-picker__skills legend {
+  padding: 0;
+  color: var(--color-fg);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.companions-skills-picker__hint,
+.companions-skills-picker__empty,
+.companions-skills-picker__foot {
+  margin: 8px 0 0;
+  color: var(--color-faint);
+  font-size: var(--text-xs);
+}
+
+.companions-skills-picker__list {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.companions-skills-picker__list label {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: start;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--color-line);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.companions-skills-picker__list label.is-selected {
+  border-color: color-mix(in srgb, var(--color-accent) 45%, var(--color-line));
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+
+.companions-skills-picker__list label span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.companions-skills-picker__list strong {
+  color: var(--color-fg);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.companions-skills-picker__list code,
+.companions-skills-picker__list small {
+  color: var(--color-faint);
+  font-size: var(--text-xs);
+}
+
+.companions-skills-picker__write {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--color-line);
+  border-radius: 10px;
+}
+
+.companions-skills-picker__write span {
+  display: grid;
+  gap: 4px;
+}
+
+.companions-skills-picker__write strong {
+  color: var(--color-fg);
+  font-size: var(--text-sm);
+}
+
+.companions-skills-picker__write small {
+  color: var(--color-faint);
+  font-size: var(--text-xs);
+}
+
 .companions-settings__actions {
   display: flex;
   justify-content: flex-start;

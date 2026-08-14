@@ -378,6 +378,16 @@ export const companions = pgTable(
     persona: text("persona"),
     /** Pi model id selected from the provider's pinned Companion catalog. */
     modelId: text("model_id"),
+    /**
+     * Exact Skills Hub skill ids this Companion may stage onto its Box. Empty means no library
+     * skills; the bundled Companion agent skill may still be injected separately for hub access.
+     */
+    selectedSkillIds: jsonb("selected_skill_ids").$type<string[]>().notNull().default([]),
+    /**
+     * When true, the Box may publish and update Skills Hub packages on the Companion owner's
+     * behalf. Off by default; Viewer never writes this flag.
+     */
+    canWriteSkills: boolean("can_write_skills").notNull().default(false),
     boxId: text("box_id"),
     runtimeState: companionRuntimeStateEnum("runtime_state").notNull().default("not_created"),
     daemonState: companionDaemonStateEnum("daemon_state").notNull().default("unknown"),

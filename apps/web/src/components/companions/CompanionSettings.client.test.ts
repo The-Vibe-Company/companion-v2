@@ -55,6 +55,8 @@ function companion(access: Companion["access"] = "owner"): Companion {
     name: "Luna",
     persona: "Check every source.",
     model_id: "claude-opus-4-8",
+    selected_skill_ids: [],
+    can_write_skills: false,
     owner_id: "user-1",
     access,
     runtime: {

@@ -9,6 +9,7 @@ import {
   CompanionProviderModelPicker,
   providerSelectedModel,
 } from "./CompanionProviderModelPicker";
+import { CompanionSkillPicker } from "./CompanionSkillPicker";
 
 export function CompanionSettings({
   orgId,
@@ -32,6 +33,8 @@ export function CompanionSettings({
   const [modelId, setModelId] = useState(
     providerSelectedModel(providers, initialProviderId, companion.model_id),
   );
+  const [selectedSkillIds, setSelectedSkillIds] = useState(companion.selected_skill_ids);
+  const [canWriteSkills, setCanWriteSkills] = useState(companion.can_write_skills);
   const [busy, setBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -44,8 +47,11 @@ export function CompanionSettings({
       name.trim() !== companion.name
       || instructions.trim() !== (companion.persona ?? "")
       || providerId !== (companion.runtime.provider_ids[0] ?? "")
-      || modelId !== companion.model_id,
-    [companion, instructions, modelId, name, providerId],
+      || modelId !== companion.model_id
+      || canWriteSkills !== companion.can_write_skills
+      || selectedSkillIds.length !== companion.selected_skill_ids.length
+      || selectedSkillIds.some((id, index) => id !== companion.selected_skill_ids[index]),
+    [canWriteSkills, companion, instructions, modelId, name, providerId, selectedSkillIds],
   );
 
   const submit = async (event: FormEvent) => {
@@ -60,6 +66,8 @@ export function CompanionSettings({
         persona: instructions.trim() || null,
         provider_id: providerId,
         model_id: modelId,
+        selected_skill_ids: selectedSkillIds,
+        can_write_skills: canWriteSkills,
       });
       onSaved(updated);
       setName(updated.name);
@@ -67,6 +75,8 @@ export function CompanionSettings({
       const updatedProviderId = updated.runtime.provider_ids[0] ?? "";
       setProviderId(updatedProviderId);
       setModelId(providerSelectedModel(providers, updatedProviderId, updated.model_id));
+      setSelectedSkillIds(updated.selected_skill_ids);
+      setCanWriteSkills(updated.can_write_skills);
       setSaved(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Companion settings could not be saved.");
@@ -156,8 +166,23 @@ export function CompanionSettings({
             }}
           />
           <p className="companions-settings__hint" id="companion-provider-hint">
-            If Online, changing provider or model recycles Pi. The Box stays online.
+            If Online, changing provider, model, or skills recycles Pi. The Box stays online.
           </p>
+
+          <CompanionSkillPicker
+            orgId={orgId}
+            selectedSkillIds={selectedSkillIds}
+            canWriteSkills={canWriteSkills}
+            disabled={!canEdit || busy}
+            onSelectedSkillIdsChange={(ids) => {
+              setSelectedSkillIds(ids);
+              setSaved(false);
+            }}
+            onCanWriteSkillsChange={(value) => {
+              setCanWriteSkills(value);
+              setSaved(false);
+            }}
+          />
 
           {canEdit && (
             <div className="companions-settings__actions">

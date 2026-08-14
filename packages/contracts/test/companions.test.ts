@@ -79,7 +79,12 @@ describe("Companion provider contracts", () => {
       name: "Research",
       provider_id: "anthropic",
       model_id: "claude-sonnet-5",
-    })).toMatchObject({ model_id: "claude-sonnet-5" });
+      selected_skill_ids: ["11111111-1111-4111-8111-111111111111"],
+      can_write_skills: true,
+    })).toMatchObject({
+      selected_skill_ids: ["11111111-1111-4111-8111-111111111111"],
+      can_write_skills: true,
+    });
     expect(createCompanionInputSchema.parse({
       name: "Luna",
       persona: "  Content marketing assistant  ",
@@ -96,6 +101,14 @@ describe("Companion provider contracts", () => {
     expect(() => startCompanionRuntimeInputSchema.parse({
       credentials: [{ provider: "anthropic", env_key: "ANTHROPIC_API_KEY", value: "must-not-enter-start" }],
     })).toThrow();
+  });
+
+  it("persists skill selection and write-on-behalf on update", () => {
+    expect(updateCompanionInputSchema.parse({
+      selected_skill_ids: [],
+      can_write_skills: false,
+    })).toEqual({ selected_skill_ids: [], can_write_skills: false });
+    expect(() => updateCompanionInputSchema.parse({})).toThrow();
   });
 
   it("accepts only the editable Companion settings and supports clearing instructions", () => {

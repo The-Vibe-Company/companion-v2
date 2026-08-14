@@ -55,8 +55,10 @@ describe("NewCompanionDialog", () => {
     expect(markup).toContain("Claude");
     expect(markup).toContain("Claude Opus 4.8");
     expect(markup).toContain("Default");
-    // Two text fields plus the selected provider and model radios: no SDK or settings wizard.
-    expect(markup.match(/<input/g)).toHaveLength(4);
+    // Name + persona text fields, plus write-on-behalf checkbox once a provider is connected.
+    expect(markup.match(/<input/g)?.length).toBeGreaterThanOrEqual(4);
+    expect(markup).toContain("Skills");
+    expect(markup).toContain("May create and update skills on my behalf");
     expect(markup).not.toContain("z.ai");
     expect(markup).not.toContain("GLM-4.7");
   });

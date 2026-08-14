@@ -443,11 +443,23 @@ PATCH failure does not turn a durably delivered message into a failed send.
 Pi starts with `--no-skills` so ambient Box or package skills cannot leak into a Companion. For a
 web or mobile-web start, the API:
 
-1. resolves the authorized actor's Installed library in the tenant transaction;
+1. resolves the Companion's `selected_skill_ids` allow-list (empty means no library skills);
 2. reads each exact current archive from object storage;
-3. stages the archives through the Box file API and extracts them into a replacement
+3. always stages the bundled Companion agent skill (`companion`) so Pi can talk to the Skills Hub;
+4. stages the selected library archives through the Box file API and extracts them into a replacement
    `~/.companion/runtime/skills` tree;
-4. starts Pi with that tree as an explicit repeatable native `--skill` source.
+5. starts Pi with that tree as an explicit repeatable native `--skill` source.
+
+Write-on-behalf is a separate Companion setting (`can_write_skills`, default off). When enabled, the
+wake mints a short-lived Companion-sourced PAT for the Companion owner with `skills:write` and injects
+it as `COMPANION_DELEGATION_TOKEN` (plus `COMPANION_API_URL` / `COMPANION_WORKSPACE_ID`) into the
+volatile providers env. When disabled, the PAT carries only `skills:read`; every `skills:write` use
+re-checks `can_write_skills` and fails closed if the toggle was turned off. Skills published through
+that path are owned by the Companion owner and appear in their Skills Hub library.
+
+When a selected skill is published or updated in Companion, Online Boxes that have it selected are
+re-injected and Pi is recycled without recreating the Box. Asleep Boxes apply the new package on the
+next wake.
 
 The file API takes one whole body per JSON request, refuses content over 5 MiB, and offers no
 append, multipart, or streaming write, so a base64 archive of a few megabytes cannot be written in a

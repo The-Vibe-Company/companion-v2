@@ -67,6 +67,8 @@ const asleep: Companion = {
   name: "Luna",
   persona: "Content marketing assistant",
   model_id: "claude-opus-4-8",
+  selected_skill_ids: [],
+  can_write_skills: false,
   owner_id: "user-1",
   access: "owner",
   runtime: {

@@ -158,6 +158,9 @@ export type CompanionProvidersResponse = z.infer<typeof companionProvidersRespon
 
 export const companionPersonaSchema = z.string().trim().max(280);
 
+/** Exact Skills Hub skill ids a Companion may stage onto its Box. Empty = no library skills. */
+export const companionSelectedSkillIdsSchema = z.array(z.string().uuid()).max(100);
+
 export const companionSchema = z.object({
   id: z.string().uuid(),
   name: z.string(),
@@ -165,6 +168,15 @@ export const companionSchema = z.object({
   persona: z.string().nullable(),
   /** Null only for legacy rows created before a provider was selected. */
   model_id: companionModelIdSchema.nullable(),
+  /**
+   * Skills Hub packages this Companion is allowed to receive on its Box. The bundled Companion
+   * agent skill is staged separately when the Box needs Skills Hub access and is not listed here.
+   */
+  selected_skill_ids: companionSelectedSkillIdsSchema,
+  /**
+   * When true, the Companion may publish and update skills on the owner's behalf. Off by default.
+   */
+  can_write_skills: z.boolean(),
   owner_id: z.string(),
   access: companionAccessSchema,
   runtime: z.object({
@@ -328,6 +340,8 @@ export const createCompanionInputSchema = z.object({
   persona: companionPersonaSchema.optional(),
   provider_id: companionProviderIdSchema.optional(),
   model_id: companionModelIdSchema.optional(),
+  selected_skill_ids: companionSelectedSkillIdsSchema.optional(),
+  can_write_skills: z.boolean().optional(),
 }).strict();
 export type CreateCompanionInput = z.infer<typeof createCompanionInputSchema>;
 
@@ -336,12 +350,16 @@ export const updateCompanionInputSchema = z.object({
   persona: companionPersonaSchema.nullable().optional(),
   provider_id: companionProviderIdSchema.optional(),
   model_id: companionModelIdSchema.optional(),
+  selected_skill_ids: companionSelectedSkillIdsSchema.optional(),
+  can_write_skills: z.boolean().optional(),
 }).strict().refine(
   (input) =>
     input.name !== undefined
     || input.persona !== undefined
     || input.provider_id !== undefined
-    || input.model_id !== undefined,
+    || input.model_id !== undefined
+    || input.selected_skill_ids !== undefined
+    || input.can_write_skills !== undefined,
   "At least one Companion setting is required",
 );
 export type UpdateCompanionInput = z.infer<typeof updateCompanionInputSchema>;
