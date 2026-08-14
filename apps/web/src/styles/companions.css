@@ -541,8 +541,7 @@
 
 .companions-new-form input,
 .companions-provider-add input,
-.companions-provider-add select,
-.companions-provider-add textarea {
+.companions-provider-add select {
   width: 100%;
   min-height: 36px;
   padding: 0 11px;
@@ -552,14 +551,6 @@
   color: var(--color-fg);
   font: inherit;
   font-weight: 400;
-}
-
-.companions-provider-add textarea {
-  min-height: 86px;
-  padding-block: 8px;
-  resize: vertical;
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
 }
 
 .companions-settings__head {

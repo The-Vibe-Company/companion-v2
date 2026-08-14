@@ -46,12 +46,26 @@ export function CompanionProvidersDialog({
   const [authorizationCode, setAuthorizationCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const busyRef = useRef(false);
   const authorizationInputRef = useRef<HTMLInputElement>(null);
   const deviceLinkRef = useRef<HTMLAnchorElement>(null);
 
   const providerName = (id: string) =>
     providers.catalog.find((provider) => provider.id === id)?.name ?? id;
   const selectedDefinition = providers.catalog.find((provider) => provider.id === providerToAdd);
+  const closeBlocked = busy || oauthFlow !== null;
+
+  const beginBusy = () => {
+    if (busyRef.current) return false;
+    busyRef.current = true;
+    setBusy(true);
+    return true;
+  };
+
+  const endBusy = () => {
+    busyRef.current = false;
+    setBusy(false);
+  };
 
   const acceptConnection = async (connection: CompanionProviderConnection) => {
     const connections = [...providers.connections, connection];
@@ -82,8 +96,7 @@ export function CompanionProvidersDialog({
   };
 
   const completeSubscription = async () => {
-    if (!oauthFlow) return;
-    setBusy(true);
+    if (!oauthFlow || !beginBusy()) return;
     setError(null);
     try {
       let connection: CompanionProviderConnection | null;
@@ -101,7 +114,7 @@ export function CompanionProvidersDialog({
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Provider sign-in could not be completed.");
     } finally {
-      setBusy(false);
+      endBusy();
     }
   };
 
@@ -112,7 +125,7 @@ export function CompanionProvidersDialog({
       return;
     }
     if (!providerToAdd) return;
-    setBusy(true);
+    if (!beginBusy()) return;
     setError(null);
     try {
       if (authMethod === "subscription") {
@@ -132,7 +145,7 @@ export function CompanionProvidersDialog({
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Provider could not be connected.");
     } finally {
-      setBusy(false);
+      endBusy();
     }
   };
 
@@ -145,7 +158,7 @@ export function CompanionProvidersDialog({
   }, [oauthFlow]);
 
   const makeDefault = async (providerId: string) => {
-    setBusy(true);
+    if (!beginBusy()) return;
     setError(null);
     try {
       await setDefaultCompanionProvider(orgId, providerId);
@@ -153,7 +166,7 @@ export function CompanionProvidersDialog({
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Default provider could not be saved.");
     } finally {
-      setBusy(false);
+      endBusy();
     }
   };
 
@@ -161,7 +174,7 @@ export function CompanionProvidersDialog({
     if (!window.confirm(
       `Disconnect ${providerName(providerId)}? Companions using it cannot start until it is reconnected.`,
     )) return;
-    setBusy(true);
+    if (!beginBusy()) return;
     setError(null);
     try {
       await deleteCompanionProvider(orgId, providerId);
@@ -185,7 +198,7 @@ export function CompanionProvidersDialog({
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Provider could not be disconnected.");
     } finally {
-      setBusy(false);
+      endBusy();
     }
   };
 
@@ -195,10 +208,15 @@ export function CompanionProvidersDialog({
       title="Model providers"
       desc="Credentials are encrypted, write-only, and shared by every Companion in this workspace."
       onClose={onClose}
-      closeDisabled={busy}
+      closeDisabled={closeBlocked}
       className="og-dialog companions-providers-dialog"
       foot={(
-        <button type="button" className="cds-btn cds-btn--secondary cds-btn--md" onClick={onClose}>
+        <button
+          type="button"
+          className="cds-btn cds-btn--secondary cds-btn--md"
+          disabled={closeBlocked}
+          onClick={onClose}
+        >
           Done
         </button>
       )}
