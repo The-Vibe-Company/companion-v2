@@ -185,10 +185,16 @@ describe("Companions mobile viewport", () => {
       .toContain("min-height: 40px;");
   });
 
-  it("keeps Back and Wake at a 44px thumb target", () => {
+  it("keeps Back, Wake, and Send at a 44px thumb target", () => {
     const coarse = ["@media (pointer: coarse)"];
 
     expect(declarationsFor(".chat-head .chat-back", coarse)[0]).toContain("min-height: 44px;");
     expect(declarationsFor(".chat-head .cds-btn", coarse)[0]).toContain("min-height: 44px;");
+    // THE-346: Send is the control the composer exists for, and 30px is not a thumb target.
+    const send = declarationsFor(".chat-send", coarse)[0];
+    expect(send).toContain("width: 44px;");
+    expect(send).toContain("height: 44px;");
+    // A mouse still points at the compact square.
+    expect(declarationsFor(".chat-send")[0]).toContain("width: 30px;");
   });
 });

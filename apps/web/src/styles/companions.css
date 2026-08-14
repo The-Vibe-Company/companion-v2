@@ -1582,4 +1582,12 @@ button.chat-box:focus-visible {
   .chat-head .cds-btn {
     min-height: 44px;
   }
+
+  /* Send is what the composer is for, and a 30px square is not a thumb target: THE-346 was a tap
+     that missed. The field grows around it rather than the control shrinking, and a mouse keeps the
+     30px square it points at precisely. */
+  .chat-send {
+    width: 44px;
+    height: 44px;
+  }
 }
