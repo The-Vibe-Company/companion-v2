@@ -8,7 +8,20 @@ export function providerDefaultModel(
 ): string {
   return providers.catalog
     .find((provider) => provider.id === providerId)
-    ?.models.find((model) => model.default)?.id ?? "";
+    ?.models.find((model) => model.default)?.id
+    ?? providers.catalog.find((provider) => provider.id === providerId)?.models[0]?.id
+    ?? "";
+}
+
+export function providerSelectedModel(
+  providers: CompanionProvidersResponse,
+  providerId: string,
+  modelId: string | null,
+): string {
+  const provider = providers.catalog.find((candidate) => candidate.id === providerId);
+  return modelId && provider?.models.some((model) => model.id === modelId)
+    ? modelId
+    : providerDefaultModel(providers, providerId);
 }
 
 export function CompanionProviderModelPicker({

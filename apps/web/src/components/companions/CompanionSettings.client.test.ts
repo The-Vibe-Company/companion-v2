@@ -80,6 +80,7 @@ const roots: Root[] = [];
 async function mount(
   access: Companion["access"] = "owner",
   providerResponse: CompanionProvidersResponse = providers,
+  companionResponse: Companion = companion(access),
 ) {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -90,7 +91,7 @@ async function mount(
   await act(async () => {
     root.render(React.createElement(CompanionSettings, {
       orgId: "org-1",
-      companion: companion(access),
+      companion: companionResponse,
       providers: providerResponse,
       onBack: vi.fn(),
       onSaved,
@@ -209,11 +210,40 @@ describe("CompanionSettings", () => {
     );
   });
 
-  it("shows both Kimi and z.ai when both workspace connections exist", async () => {
+  it("selects the live default when the persisted model has left the catalog", async () => {
+    const staleCompanion = { ...companion("editor"), model_id: "claude-retired" };
+    const { container } = await mount("editor", providers, staleCompanion);
+    const form = container.querySelector("form")!;
+    const defaultModel = form.querySelector<HTMLInputElement>(
+      'input[value="claude-opus-4-8"]',
+    )!;
+
+    expect(defaultModel.checked).toBe(true);
+    await act(async () => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(updateCompanion).toHaveBeenCalledWith(
+      "org-1",
+      staleCompanion.id,
+      expect.objectContaining({ model_id: "claude-opus-4-8" }),
+    );
+  });
+
+  it("shows live z.ai models from the API payload in the two-step settings picker", async () => {
     const apiConnections: CompanionProvidersResponse = {
       catalog: [
         { id: "kimi-coding", name: "Kimi", auth_methods: ["api_key"], description: "", models: [{ id: "kimi-for-coding", name: "Kimi K2.7 Code", default: true }] },
-        { id: "zai", name: "z.ai", auth_methods: ["api_key"], description: "", models: [{ id: "glm-4.7", name: "GLM-4.7", default: true }] },
+        {
+          id: "zai",
+          name: "z.ai",
+          auth_methods: ["api_key"],
+          description: "",
+          models: [
+            { id: "glm-4.7", name: "GLM-4.7", default: true },
+            { id: "glm-5.2", name: "GLM-5.2" },
+            { id: "glm-5.3", name: "GLM-5.3" },
+          ],
+        },
       ],
       connections: [
         { ...providers.connections[0]!, provider_id: "kimi-coding" },
@@ -227,6 +257,13 @@ describe("CompanionSettings", () => {
     expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(2);
     expect(container.textContent).toContain("Kimi");
     expect(container.textContent).toContain("z.ai");
+    await act(async () => {
+      container.querySelector<HTMLInputElement>('input[value="zai"]')!.click();
+    });
+    expect(container.textContent).toContain("1. Provider");
+    expect(container.textContent).toContain("2. Model");
+    expect(container.textContent).toContain("GLM-5.2");
+    expect(container.textContent).toContain("GLM-5.3");
   });
 
   it("requires Owner confirmation before deletion", async () => {

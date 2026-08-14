@@ -9,6 +9,7 @@ import type {
   CompanionPluginAccount,
   CompanionProviderAuthMethod,
   CompanionProviderConnection,
+  CompanionProviderDefinition,
   CompanionProvidersResponse,
   CompanionRuntimeState,
   SaveCompanionPluginInput,
@@ -20,7 +21,6 @@ import type {
 import {
   COMPANION_PROVIDER_CATALOG,
   companionProviderDefaultModel,
-  companionProviderHasModel,
   companionMcpAccountSchema,
   companionMcpCredentialSchema,
   companionMessageEventId,
@@ -39,6 +39,10 @@ import {
   refreshCompanionPluginOAuth,
   type CompanionPluginStoredOAuthCredential,
 } from "./companionPluginOAuth";
+import {
+  companionCatalogModel,
+  getCompanionProviderCatalog,
+} from "./companionProviderCatalog";
 
 type CompanionRow = typeof schema.companions.$inferSelect;
 /**
@@ -266,6 +270,7 @@ export async function createCompanion(input: {
   persona?: string;
   providerId?: string;
   modelId?: string;
+  providerCatalog?: CompanionProviderDefinition[];
   database?: Db;
 }): Promise<Companion> {
   const database = input.database ?? db;
@@ -295,8 +300,9 @@ export async function createCompanion(input: {
       providerId,
     );
   }
-  const modelId = input.modelId ?? companionProviderDefaultModel(providerId);
-  if (!modelId || !companionProviderHasModel(providerId, modelId)) {
+  const catalog = input.providerCatalog ?? await getCompanionProviderCatalog();
+  const modelId = companionCatalogModel(catalog, providerId, input.modelId);
+  if (!modelId) {
     throw new CompanionProviderError(
       "provider_model_invalid",
       `The model ${input.modelId ?? "(default)"} is not available for ${providerName(providerId)}.`,
@@ -326,6 +332,7 @@ export async function updateCompanion(input: {
   persona?: string | null;
   providerId?: string;
   modelId?: string;
+  providerCatalog?: CompanionProviderDefinition[];
   database?: Db;
 }): Promise<Companion> {
   const database = input.database ?? db;
@@ -353,18 +360,25 @@ export async function updateCompanion(input: {
   const providerChanged = input.providerId !== undefined
     && currentProviderId !== input.providerId;
   const providerId = input.providerId ?? currentProviderId;
-  const modelId = input.modelId
-    ?? (input.providerId !== undefined && (providerChanged || !companion.model_id)
-      ? companionProviderDefaultModel(input.providerId)
-      : companion.model_id);
   const providerOrModelChanged = input.providerId !== undefined || input.modelId !== undefined;
+  const requestedModelId = input.modelId
+    ?? (input.providerId !== undefined && (providerChanged || !companion.model_id)
+      ? undefined
+      : companion.model_id ?? undefined);
+  const modelId = providerOrModelChanged && providerId
+    ? companionCatalogModel(
+        input.providerCatalog ?? await getCompanionProviderCatalog(),
+        providerId,
+        requestedModelId,
+      )
+    : companion.model_id;
   if (
     providerOrModelChanged
-    && (!providerId || !modelId || !companionProviderHasModel(providerId, modelId))
+    && (!providerId || !modelId)
   ) {
     throw new CompanionProviderError(
       "provider_model_invalid",
-      `The model ${modelId ?? "(default)"} is not available for ${providerName(providerId ?? "unknown")}.`,
+      `The model ${requestedModelId ?? "(default)"} is not available for ${providerName(providerId ?? "unknown")}.`,
       providerId ?? null,
     );
   }
@@ -1209,12 +1223,13 @@ function toProviderConnection(
 export async function listCompanionProviders(input: {
   actor: ActorContext;
   orgId: string;
+  providerCatalog?: CompanionProviderDefinition[];
   database?: Db;
 }): Promise<CompanionProvidersResponse> {
   const database = input.database ?? db;
   const role = await getOrgRole(input.orgId, input.actor.id, database);
   if (!role) throw new Error("not a member of this organization");
-  const [org, connections] = await Promise.all([
+  const [org, connections, catalog] = await Promise.all([
     database.query.organizations.findFirst({
       where: eq(schema.organizations.id, input.orgId),
       columns: { defaultCompanionProviderId: true },
@@ -1230,13 +1245,10 @@ export async function listCompanionProviders(input: {
       .from(schema.companionProviderConnections)
       .where(eq(schema.companionProviderConnections.orgId, input.orgId))
       .orderBy(asc(schema.companionProviderConnections.providerId)),
+    input.providerCatalog ?? getCompanionProviderCatalog(),
   ]);
   return {
-    catalog: COMPANION_PROVIDER_CATALOG.map((provider) => ({
-      ...provider,
-      auth_methods: [...provider.auth_methods],
-      models: provider.models.map((model) => ({ ...model })),
-    })),
+    catalog,
     connections: connections.map(toProviderConnection),
     default_provider_id: org?.defaultCompanionProviderId ?? null,
     can_manage: canManageOrg(role),
@@ -1248,6 +1260,7 @@ export async function setCompanionProvider(input: {
   orgId: string;
   companionId: string;
   providerId: string;
+  providerCatalog?: CompanionProviderDefinition[];
   database?: Db;
 }): Promise<Companion> {
   const database = input.database ?? db;
@@ -1271,11 +1284,22 @@ export async function setCompanionProvider(input: {
       input.providerId,
     );
   }
+  const modelId = companionCatalogModel(
+    input.providerCatalog ?? await getCompanionProviderCatalog(),
+    input.providerId,
+  );
+  if (!modelId) {
+    throw new CompanionProviderError(
+      "provider_model_invalid",
+      `No model is available for ${providerName(input.providerId)}.`,
+      input.providerId,
+    );
+  }
   const [row] = await database
     .update(schema.companions)
     .set({
       providerIds: [input.providerId],
-      modelId: companionProviderDefaultModel(input.providerId) ?? null,
+      modelId,
       providerCredentialGeneration: null,
       updatedAt: new Date(),
     })

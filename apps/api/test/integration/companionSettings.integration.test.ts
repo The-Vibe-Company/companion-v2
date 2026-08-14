@@ -14,6 +14,10 @@ import {
   updateCompanion,
   updateCompanionRuntime,
 } from "@companion/core";
+import {
+  COMPANION_PROVIDER_CATALOG,
+  type CompanionProviderDefinition,
+} from "@companion/contracts";
 import { schema } from "@companion/db";
 import {
   createIntegrationFixture,
@@ -33,6 +37,13 @@ describe("Companion settings persistence and roles", () => {
   let fixture: IntegrationFixture;
   let companionId: string;
   const masterKey = Buffer.alloc(32, 38);
+  const providerCatalog: CompanionProviderDefinition[] = COMPANION_PROVIDER_CATALOG.map(
+    (provider) => ({
+      ...provider,
+      auth_methods: [...provider.auth_methods],
+      models: provider.models.map((model) => ({ ...model })),
+    }),
+  );
 
   beforeEach(async () => {
     fixture = await createIntegrationFixture();
@@ -86,6 +97,7 @@ describe("Companion settings persistence and roles", () => {
       name: "Evidence desk",
       persona: "Challenge every source.",
       providerId: "openai-codex",
+      providerCatalog,
       database: integrationDb,
     });
     expect(ownerEdit).toMatchObject({
@@ -149,12 +161,13 @@ describe("Companion settings persistence and roles", () => {
     expect(reloaded.model_id).toBe("gpt-5.5");
   });
 
-  it("persists only a model pinned to the selected provider", async () => {
+  it("persists only a catalog model for the selected provider", async () => {
     const updated = await updateCompanion({
       actor: fixture.developer,
       orgId: fixture.orgA,
       companionId,
       modelId: "claude-sonnet-4-6",
+      providerCatalog,
       database: integrationDb,
     });
     expect(updated.model_id).toBe("claude-sonnet-4-6");
@@ -164,10 +177,12 @@ describe("Companion settings persistence and roles", () => {
       orgId: fixture.orgA,
       companionId,
       modelId: "glm-4.7",
+      providerCatalog,
       database: integrationDb,
     })).rejects.toMatchObject({
       code: "provider_model_invalid",
       providerId: "anthropic",
+      message: "The model glm-4.7 is not available for Claude.",
     });
   });
 
