@@ -296,6 +296,12 @@ export function registerCompanionRoutes(
           skillPackages: Awaited<ReturnType<typeof listCompanionRuntimeSkillPackages>>;
         }
       | undefined;
+    /**
+     * The Box-assignment write, while it is in flight. A start abandoned at its deadline can already
+     * be inside this write, and what it writes is `provisioning`, so the failure path waits for it
+     * before recording its own state: the reason a wake failed has to be the last word on the row.
+     */
+    let boxAssignment: Promise<unknown> | undefined;
     const budget = startBudget();
     try {
       mutation = await withinBudget(tenant(c, async ({ actor, orgId, database }) => {
@@ -368,11 +374,13 @@ export function registerCompanionRoutes(
         // `null` clears the recorded Box: the adapter found that the id this row carried names a
         // machine this Companion does not own, so no other path may reach it either.
         onBoxAssigned: async (boxId) => {
-          // A start abandoned at the deadline may still be mid-call when its cancellation lands, and
-          // the reason for that failure is already on the row. Re-claiming `provisioning` here would
-          // erase it and put the Companion back into the state this budget exists to end.
-          if (budget.signal.aborted) return;
-          await withTenantContext(
+          // A start abandoned at the deadline may still reach this point, and the reason for that
+          // failure is already on the row. Re-claiming `provisioning` here would erase it and put the
+          // Companion back into the state this budget exists to end. Refusing rather than returning is
+          // what says so: the adapter reads a rejected assignment as a Box no row points at and puts
+          // that Box back to sleep, which returning as if the id were recorded would skip.
+          if (budget.signal.aborted) throw budget.signal.reason;
+          const write = withTenantContext(
             { orgId: mutation!.orgId, userId: mutation!.actor.id },
             (database) => updateCompanionRuntime({
               actor: mutation!.actor,
@@ -382,6 +390,8 @@ export function registerCompanionRoutes(
               database,
             }),
           );
+          boxAssignment = write.catch(() => undefined);
+          await write;
         },
       }), budget.signal);
       // A start that returns is a start that finished, so anything other than a running Pi is a
@@ -423,6 +433,9 @@ export function registerCompanionRoutes(
       // Cancellation surfaces as whatever call was in flight when the deadline landed, so the reason
       // this wake reports is the budget it spent rather than a bare abort from one Box request.
       const error = budget.signal.aborted ? budget.signal.reason : raised;
+      // Cancellation does not wait for the call it interrupted, so a Box assignment still in flight
+      // would otherwise write `provisioning` over the failure recorded here.
+      await boxAssignment;
       // A pre-claim transition conflict means another request owns the wake. Preserve its
       // provisioning lock; all other authorized failures remain visible through last_error.
       const context = mutation

@@ -616,14 +616,26 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
    * budget. The per-call timeout alone is what let a wake outlive every deadline it had — each call
    * answered inside its own limit while their sum ran for minutes.
    */
-  #requestSignal(timeoutMs: number, callerSignal?: AbortSignal | null): AbortSignal {
+  #requestSignal(
+    timeoutMs: number,
+    callerSignal?: AbortSignal | null,
+    budget?: AbortSignal | null,
+  ): AbortSignal {
     const signals = [AbortSignal.timeout(timeoutMs)];
     if (callerSignal) signals.push(callerSignal);
-    if (this.#startSignal) signals.push(this.#startSignal);
+    if (budget) signals.push(budget);
     return signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
   }
 
-  async #request<T>(path: string, init?: RequestInit, timeoutMs = 30_000): Promise<T> {
+  async #request<T>(
+    path: string,
+    init?: RequestInit,
+    timeoutMs = 30_000,
+    // The running start's budget, unless a caller passes `null` to leave it out. Only a call that
+    // undoes what a cancelled start left behind does that: the cancellation is the reason it has work
+    // to do, so inheriting it would cancel the repair along with the wake.
+    budget: AbortSignal | null = this.#startSignal ?? null,
+  ): Promise<T> {
     const response = await fetch(`${this.#baseUrl}${path}`, {
       ...init,
       headers: {
@@ -631,7 +643,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
         ...(init?.body ? { "Content-Type": "application/json" } : {}),
         ...init?.headers,
       },
-      signal: this.#requestSignal(timeoutMs, init?.signal),
+      signal: this.#requestSignal(timeoutMs, init?.signal, budget),
     });
     if (!response.ok) {
       const body = await response.json().catch(() => null) as
@@ -717,12 +729,28 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
         },
       )).box;
     } catch (error) {
-      await this.#request(`/boxes/${encodeURIComponent(created.box.id)}/stop`, {
-        method: "POST",
-        body: JSON.stringify({ force: false }),
-      }).catch(() => undefined);
+      await this.#sleepUnrecordedBox(created.box.id);
       throw error;
     }
+  }
+
+  /**
+   * Put a Box back to sleep after this start failed to record which Companion it belongs to. Stopping
+   * it the ordinary way snapshots the disk and keeps the deterministic name, so the next start finds
+   * the same Box and resumes it rather than building another one.
+   *
+   * The call is deliberately off the start's budget. A wake cancelled at its deadline is the main way
+   * a Box ends up awake with nothing pointing at it, and a stop that inherited that cancellation would
+   * put nothing to sleep. It stays best-effort: a Box the provider will not stop must not replace the
+   * failure the caller is already reporting.
+   */
+  async #sleepUnrecordedBox(boxId: string): Promise<void> {
+    await this.#request(
+      `/boxes/${encodeURIComponent(boxId)}/stop`,
+      { method: "POST", body: JSON.stringify({ force: false }) },
+      undefined,
+      null,
+    ).catch(() => undefined);
   }
 
   /**
@@ -1165,17 +1193,11 @@ exit 0`,
       try {
         await input.onBoxAssigned(box.id);
       } catch (error) {
-        // A Box recovered by name is recorded nowhere until this write lands, so a write that fails
-        // would leave it awake with nothing pointing at it. It is put to sleep the ordinary way, which
-        // snapshots the disk rather than discarding it, and it still carries the deterministic name, so
-        // the next start finds the same disk and resumes it. The Box the control plane already had
-        // recorded stays awake and stays recorded.
-        if (!keptAssignment) {
-          await this.#request(`/boxes/${encodeURIComponent(box.id)}/stop`, {
-            method: "POST",
-            body: JSON.stringify({ force: false }),
-          }).catch(() => undefined);
-        }
+        // A Box recovered by name is recorded nowhere until this write lands, so a refused write —
+        // whether the control plane could not store the id or a cancelled wake no longer owns the
+        // lifecycle — would leave it awake with nothing pointing at it. The Box the control plane
+        // already had recorded stays awake and stays recorded.
+        if (!keptAssignment) await this.#sleepUnrecordedBox(box.id);
         throw error;
       }
     }

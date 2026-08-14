@@ -572,6 +572,107 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
   });
 
+  /**
+   * THE-340: the lifecycle caller gives one wake a deadline, and the adapter is what has to end when
+   * it does. Every Box call and every poll interval runs on that signal, because a start that keeps
+   * working against a Box nobody is waiting on is what held the `provisioning` claim open.
+   */
+  describe("a start the caller's budget cancels", () => {
+    const startInput = {
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web" as const,
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    };
+
+    it("stops waiting for a Box to become ready as soon as the budget ends", async () => {
+      // A Box that never leaves setup: without the budget the start owns this wait for the adapter's
+      // whole ready timeout, which is the two minutes a stalled wake spent doing nothing.
+      const fetchMock = vi.fn(async (rawUrl: string | URL | Request) => {
+        if (String(rawUrl).endsWith("/boxes/bx_23456789")) {
+          return json({ box: { ...box, state: "provisioning", setupStatus: "running" } });
+        }
+        throw new Error(`unexpected Box request: ${String(rawUrl)}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      const runtime = new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_BOX_POLL_INTERVAL_MS: "50",
+        COMPANION_BOX_READY_TIMEOUT_MS: "600000",
+      });
+      const budget = new AbortController();
+      const deadline = new Error("wake budget spent");
+
+      const started = runtime.start({ ...startInput, signal: budget.signal });
+      await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+      budget.abort(deadline);
+
+      // Which cancellation surfaces depends on what the start was waiting on; the lifecycle caller
+      // reports the budget it spent rather than this, and what matters here is that the wait ended.
+      await expect(started).rejects.toThrow(/abort/i);
+      // The wait ended on the abort rather than on the poll interval that came after it.
+      const answered = fetchMock.mock.calls.length;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(fetchMock.mock.calls).toHaveLength(answered);
+    });
+
+    /**
+     * The one call a cancelled wake still has to make. A Box recovered by name is recorded nowhere
+     * until the control plane accepts its id, so a deadline that lands on that write leaves a Box
+     * awake with nothing pointing at it — and a stop that inherited the deadline would put nothing to
+     * sleep.
+     */
+    it("puts a Box it could not record to sleep even though the budget already ended", async () => {
+      const answered: string[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const url = String(rawUrl);
+        const method = init?.method ?? "GET";
+        // The provider is reached through `fetch`, so a request carrying a spent signal never runs.
+        if (init?.signal?.aborted) throw init.signal.reason;
+        answered.push(`${method} ${new URL(url).pathname}`);
+        if (url.includes("/boxes?") && method === "GET") {
+          return json({
+            boxes: [{
+              ...box,
+              name: `Companion ${startInput.companionId}`,
+              state: "idle",
+            }],
+          });
+        }
+        if (url.endsWith("/stop") && method === "POST") return json({ ok: true });
+        throw new Error(`unexpected Box request: ${method} ${url}`);
+      }));
+      const runtime = new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      });
+      const budget = new AbortController();
+      const deadline = new Error("wake budget spent");
+
+      // What the lifecycle caller does at its deadline: the assignment is refused, because the reason
+      // this wake failed is already on the Companion row and must stay there.
+      const started = runtime.start({
+        ...startInput,
+        boxId: null,
+        signal: budget.signal,
+        onBoxAssigned: async () => {
+          budget.abort(deadline);
+          throw deadline;
+        },
+      });
+
+      await expect(started).rejects.toBe(deadline);
+      expect(answered.some((request) =>
+        request.startsWith("POST") && request.endsWith("/boxes/bx_23456789/stop"))).toBe(true);
+    });
+  });
+
   it("stages a skill archive too large for one file write as parts a short command joins", async () => {
     // Production wake died writing a single ~12.7 MiB base64 body; this archive base64s to ~6.7 MiB,
     // which the file API refuses the same way.

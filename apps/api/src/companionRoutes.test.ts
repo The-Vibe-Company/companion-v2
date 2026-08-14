@@ -687,6 +687,89 @@ describe("Companions API feature gate", () => {
     }
   });
 
+  /**
+   * The deadline does not wait for the call it interrupts, so a Box assignment already in flight can
+   * still commit `provisioning` after the failure was recorded. The Companion would be reading as
+   * Starting again, with the reason it failed erased and its claim renewed for another stale window.
+   */
+  it("keeps the wake failure the last state written when the deadline lands mid-assignment", async () => {
+    vi.useFakeTimers();
+    try {
+      coreMocks.listPendingCompanionMessages.mockResolvedValue({
+        pending: [message],
+        piLogOffset: 0,
+        deliveredOrdinal: null,
+      });
+      let releaseAssignment: (() => void) | undefined;
+      const assignmentReached = new Promise<void>((resolve) => { releaseAssignment = resolve; });
+      const committed: (string | undefined)[] = [];
+      coreMocks.updateCompanionRuntime.mockImplementation(
+        async (input: { patch: { runtimeState?: string } }) => {
+          // Hold the assignment write open so the budget expires while it is still in flight.
+          if (input.patch.runtimeState === "provisioning") await assignmentReached;
+          committed.push(input.patch.runtimeState);
+          return companion;
+        },
+      );
+      const app = new Hono<{ Variables: ApiVariables }>();
+      registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => boxRuntime({
+        start: vi.fn(async (input: { onBoxAssigned: (boxId: string) => Promise<void> }) => {
+          await input.onBoxAssigned("bx_abcdefgh");
+          return new Promise(() => undefined);
+        }),
+      }));
+
+      const pending = app.request(`/v1/companions/${companion.id}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: "Summarize the incident" }),
+      });
+      await vi.advanceTimersByTimeAsync(COMPANION_RUNTIME_START_BUDGET_MS);
+      releaseAssignment?.();
+      const response = await pending;
+
+      expect(response.status).toBe(200);
+      expect(committed).toEqual(["provisioning", "error"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * The same deadline, reached before the adapter offers the Box. Refusing the assignment is what
+   * tells the adapter no row points at that Box, which is how it knows to put it back to sleep.
+   */
+  it("refuses a Box assignment offered after the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      let assign: ((boxId: string | null) => Promise<void>) | undefined;
+      const app = new Hono<{ Variables: ApiVariables }>();
+      registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => boxRuntime({
+        start: vi.fn((input: { onBoxAssigned: (boxId: string | null) => Promise<void> }) => {
+          assign = input.onBoxAssigned;
+          return new Promise(() => undefined);
+        }),
+      }));
+
+      const pending = app.request(`/v1/companions/${companion.id}/runtime/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      await vi.advanceTimersByTimeAsync(COMPANION_RUNTIME_START_BUDGET_MS);
+      const response = await pending;
+
+      expect(response.status).toBe(504);
+      await expect(assign?.("bx_abcdefgh")).rejects.toThrow(/did not finish within 180s/);
+      // The recorded failure survives the assignment the abandoned start still tried to make.
+      expect(coreMocks.updateCompanionRuntime).toHaveBeenLastCalledWith(expect.objectContaining({
+        patch: expect.objectContaining({ runtimeState: "error", daemonState: "error" }),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("answers an explicit wake that outlived its budget with a retryable failure", async () => {
     vi.useFakeTimers();
     try {

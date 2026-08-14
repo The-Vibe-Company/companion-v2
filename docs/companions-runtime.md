@@ -22,13 +22,21 @@ could leave a Companion reporting Starting against a Box that was doing nothing.
 without a running Box and a running Pi is a failure with an observation attached, not a wake still in
 flight, so that observation is never written back as `provisioning`.
 
+That recorded failure is the last state the wake writes. Cancellation does not wait for the call it
+interrupts, so an abandoned start can still be inside a Box-assignment write, and what that callback
+writes is `provisioning`: the failure therefore waits for an assignment already in flight, and refuses
+one offered after the deadline. Refusing it is also how the adapter learns no row points at that Box,
+which is what puts a Box the wake had just woken back to sleep.
+
 Lifecycle claims are conditional updates. A claim abandoned by a crashed API process becomes
 retryable half a minute past that budget — long enough for a live wake to record its own failure
 first, and short enough that a process that died writing nothing does not hold the Companion.
 Starts recover a Box by its deterministic `Companion <uuid>` name
 before creating another one, following every Box-list page. A new Box initially gets a maximum
 five-minute TTL; only after its id is durable does the adapter apply the configured TTL and name.
-If the id cannot be persisted, the adapter best-effort archives the Box immediately.
+If the id cannot be persisted, the adapter best-effort archives the Box immediately, on a request that
+carries no start budget of its own: a spent deadline is the common reason the id was refused, and a
+stop that inherited it would put nothing to sleep.
 
 One Companion is one Box is one Pi, and that deterministic name is the only evidence of it. A start
 adopts a recorded Box id only while the Box carries this Companion's own name, or no name yet — the
