@@ -41,6 +41,14 @@ const READ_MODEL_POLL_MS = 8_000;
  * without anyone's Companion being woken to find out.
  */
 const BOX_STATUS_POLL_MS = 15_000;
+/**
+ * How often a Companion mid-transition re-reads the lifecycle it is waiting on. Nothing else does:
+ * the Box-status poll below starts only once the state is already `running`, and the request that
+ * began the transition answers once, before the lifecycle finishes when it outlives a proxy. That
+ * left the chip reporting Starting against a Box that was already up, beside a reply Pi had already
+ * sent. This is the control-plane projection, so it never resumes a Box and is safe for a Viewer.
+ */
+const PENDING_POLL_MS = 3_000;
 
 export interface CompanionNavigation {
   mineTreeRows: TreeRow[];
@@ -130,6 +138,9 @@ export function CompanionsApp({
   );
   const canRunOpened = opened !== null && opened.access !== "viewer";
   const openedAwake = opened?.runtime.state === "running";
+  // A lifecycle the control plane is still resolving. `error` is not one of these: it is where a
+  // failed transition settles, and its reason is already on screen.
+  const openedPending = opened?.runtime.state === "provisioning" || opened?.runtime.state === "stopping";
 
   const providerName = (providerId: string) =>
     providers.catalog.find((provider) => provider.id === providerId)?.name ?? providerId;
@@ -252,6 +263,15 @@ export function CompanionsApp({
     const timer = setInterval(() => void refreshCompanion(openedId, true), BOX_STATUS_POLL_MS);
     return () => clearInterval(timer);
   }, [canRunOpened, openedAwake, openedId, refreshCompanion]);
+
+  // A pending lifecycle is the one window where the projection is expected to change on its own, so
+  // it is the one window that has to be watched. The chip, the wake control, and the composer footer
+  // all read this row, so they leave Starting together as soon as the wake records that it finished.
+  useEffect(() => {
+    if (!openedId || !openedPending) return;
+    const timer = setInterval(() => void refreshCompanion(openedId), PENDING_POLL_MS);
+    return () => clearInterval(timer);
+  }, [openedId, openedPending, refreshCompanion]);
 
   /** Resolves false when the message never reached the control plane, so the composer keeps its text. */
   const onSend = async (content: string, clientMessageId: string): Promise<boolean> => {
