@@ -13,9 +13,9 @@ workspace: validate a skill, publish it, push an update, manage its pinned publi
 whether everything is current. Agent Auth is the default programmatic identity.
 Run the mandatory Companion self-update check once at the first Companion invocation in a
 conversation, and always confirm a change with the user before anything is published.
-Companion runtime provider credentials and Companion Owner/Editor/Viewer sharing are browser-session
-workspace administration. This delegated skill never requests, reads, stores, forwards, or manages
-those credentials or runtime ACLs.
+Companion runtime provider/model settings, provider credentials, and Companion Owner/Editor/Viewer
+sharing are browser-session workspace administration. This delegated skill never requests, reads,
+stores, forwards, or manages those settings, credentials, or runtime ACLs.
 
 ## Configuration
 

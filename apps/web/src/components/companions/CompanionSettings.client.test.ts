@@ -17,8 +17,8 @@ vi.mock("@/lib/companions", () => ({ updateCompanion, deleteCompanion }));
 
 const providers: CompanionProvidersResponse = {
   catalog: [
-    { id: "anthropic", name: "Claude", auth_methods: ["api_key"], description: "" },
-    { id: "openai-codex", name: "Codex", auth_methods: ["subscription"], description: "" },
+    { id: "anthropic", name: "Claude", auth_methods: ["api_key"], description: "", models: [{ id: "claude-opus-4-8", name: "Claude Opus 4.8", default: true }] },
+    { id: "openai-codex", name: "Codex", auth_methods: ["subscription"], description: "", models: [{ id: "gpt-5.5", name: "GPT-5.5", default: true }] },
   ],
   connections: [
     {
@@ -45,6 +45,7 @@ function companion(access: Companion["access"] = "owner"): Companion {
     id: "11111111-1111-4111-8111-111111111111",
     name: "Luna",
     persona: "Check every source.",
+    model_id: "claude-opus-4-8",
     owner_id: "user-1",
     access,
     runtime: {
@@ -104,11 +105,12 @@ describe("CompanionSettings", () => {
     updateCompanion.mockImplementation(async (
       _orgId: string,
       _companionId: string,
-      input: { name: string; persona: string | null; provider_id: string },
+      input: { name: string; persona: string | null; provider_id: string; model_id: string },
     ) => ({
       ...companion(),
       name: input.name,
       persona: input.persona,
+      model_id: input.model_id,
       runtime: { ...companion().runtime, provider_ids: [input.provider_id] },
     }));
     deleteCompanion.mockResolvedValue(undefined);
@@ -133,6 +135,11 @@ describe("CompanionSettings", () => {
       setControlled(name, "Luna research");
       setControlled(instructions, "Challenge every source.");
       codex.click();
+    });
+    expect(container.textContent).toContain("GPT-5.5");
+    expect(container.textContent).not.toContain("Claude Opus 4.8");
+
+    await act(async () => {
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
 
@@ -143,6 +150,7 @@ describe("CompanionSettings", () => {
         name: "Luna research",
         persona: "Challenge every source.",
         provider_id: "openai-codex",
+        model_id: "gpt-5.5",
       },
     );
     expect(onSaved).toHaveBeenCalledOnce();
@@ -155,16 +163,27 @@ describe("CompanionSettings", () => {
 
     expect(container.querySelector("input:not([type=radio])")).toHaveProperty("disabled", true);
     expect(container.querySelector("textarea")).toHaveProperty("disabled", true);
+    expect(Array.from(container.querySelectorAll('input[type="radio"]')).every((input) =>
+      input.matches(":disabled")))
+      .toBe(true);
+    expect(container.textContent).toContain("Claude Opus 4.8");
     expect(container.textContent).not.toContain("Save changes");
     expect(container.textContent).not.toContain("Delete Companion");
     expect(updateCompanion).not.toHaveBeenCalled();
   });
 
+  it("shows models only for the selected provider", async () => {
+    const { container } = await mount("owner");
+
+    expect(container.textContent).toContain("Claude Opus 4.8");
+    expect(container.textContent).not.toContain("GPT-5.5");
+  });
+
   it("shows both Kimi and z.ai when both workspace connections exist", async () => {
     const apiConnections: CompanionProvidersResponse = {
       catalog: [
-        { id: "kimi-coding", name: "Kimi", auth_methods: ["api_key"], description: "" },
-        { id: "zai", name: "z.ai", auth_methods: ["api_key"], description: "" },
+        { id: "kimi-coding", name: "Kimi", auth_methods: ["api_key"], description: "", models: [{ id: "kimi-for-coding", name: "Kimi K2.7 Code", default: true }] },
+        { id: "zai", name: "z.ai", auth_methods: ["api_key"], description: "", models: [{ id: "glm-4.7", name: "GLM-4.7", default: true }] },
       ],
       connections: [
         { ...providers.connections[0]!, provider_id: "kimi-coding" },

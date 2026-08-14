@@ -9,9 +9,9 @@ const noop = () => {};
 function providers(overrides: Partial<CompanionProvidersResponse> = {}): CompanionProvidersResponse {
   return {
     catalog: [
-      { id: "anthropic", name: "Claude", auth_methods: ["api_key", "subscription"], description: "" },
-      { id: "kimi-coding", name: "Kimi", auth_methods: ["api_key"], description: "" },
-      { id: "zai", name: "z.ai", auth_methods: ["api_key"], description: "" },
+      { id: "anthropic", name: "Claude", auth_methods: ["api_key", "subscription"], description: "", models: [{ id: "claude-opus-4-8", name: "Claude Opus 4.8", default: true }] },
+      { id: "kimi-coding", name: "Kimi", auth_methods: ["api_key"], description: "", models: [{ id: "kimi-for-coding", name: "Kimi K2.7 Code", default: true }] },
+      { id: "zai", name: "z.ai", auth_methods: ["api_key"], description: "", models: [{ id: "glm-4.7", name: "GLM-4.7", default: true }] },
     ],
     connections: [{
       provider_id: "anthropic",
@@ -37,16 +37,18 @@ function render(response: CompanionProvidersResponse) {
 }
 
 describe("NewCompanionDialog", () => {
-  it("asks for a name, a persona, and one connected provider and nothing else", () => {
+  it("shows only the selected connected provider's models", () => {
     const markup = render(providers());
 
     expect(markup).toContain("Name");
     expect(markup).toContain("Persona");
     expect(markup).toContain("Claude");
+    expect(markup).toContain("Claude Opus 4.8");
     expect(markup).toContain("Default");
-    // Two text fields plus one radio per connected provider: no SDK, model, or settings wizard.
-    expect(markup.match(/<input/g)).toHaveLength(3);
+    // Two text fields plus the selected provider and model radios: no SDK or settings wizard.
+    expect(markup.match(/<input/g)).toHaveLength(4);
     expect(markup).not.toContain("z.ai");
+    expect(markup).not.toContain("GLM-4.7");
   });
 
   it("points an admin at provider setup when the workspace has no provider", () => {
@@ -67,7 +69,9 @@ describe("NewCompanionDialog", () => {
     }));
 
     expect(markup).toContain("Kimi");
+    expect(markup).toContain("Kimi K2.7 Code");
     expect(markup).not.toContain("Claude");
+    expect(markup).not.toContain("Claude Opus 4.8");
   });
 
   it("tells a member without provider rights who can connect one", () => {

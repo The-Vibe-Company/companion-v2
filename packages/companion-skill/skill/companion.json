@@ -1,7 +1,7 @@
 {
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.53.0",
+  "version": "1.54.0",
   "icon": "boxes",
   "title": "Companion",
   "description": "Manage and safely install SKILL.md packages through delegated Agent Auth, including pinned public releases, publishing, updates, dependencies, secrets, hosted Skill Databases, local install tracking, and Companion self-update.",
@@ -28,6 +28,15 @@
       "evals/evals.json"
     ],
     "changelog": [
+      {
+        "version": "1.54.0",
+        "date": "2026-08-14",
+        "changes": [
+          "Refreshes the bundled Agent Auth client after the Companion provider catalog added pinned Pi models and persisted model selection.",
+          "Keeps Companion provider/model settings and Pi recycling outside delegated Skills Hub Agent Auth.",
+          "No change to Companion skill commands, permissions, or installation behavior."
+        ]
+      },
       {
         "version": "1.53.0",
         "date": "2026-08-14",
@@ -613,30 +622,102 @@
   },
   "dependencies": {},
   "commands": [
-    { "name": "Guided onboarding", "desc": "Resume the getting-started checklist, review untracked local skills, and explore the complete organization library in English or French." },
-    { "name": "Connect an agent", "desc": "Discover the instance and approve delegated, progressively requested Agent Auth capabilities for one workspace." },
-    { "name": "Delegate to a Cloud workspace", "desc": "Snapshot existing Agent Auth grants into a short-lived child PAT delivered only through an owner-only FIFO, without new approval." },
-    { "name": "Use explicit legacy credentials", "desc": "Use or refresh a preserved PAT only after the user explicitly selects legacy-pat mode." },
-    { "name": "Bootstrap health check", "desc": "Gather workspace, self-update, local integrity, and installed-skill context in one fast pass." },
-    { "name": "List skills", "desc": "List org, My Skills, reported installed skills, and local lockfile inventory." },
-    { "name": "Publish a skill", "desc": "Validate a skill, ask Personal vs Org and folder placement, then publish it safely." },
-    { "name": "Update a skill", "desc": "Push a new version with targeted identity checks." },
-    { "name": "Manage a public release", "desc": "Make the current version of an organization skill public, promote it explicitly, or remove package access while preserving the share link." },
-    { "name": "Install a public release", "desc": "Authenticate once, verify the exact pinned ZIP, inspect prerequisites, and atomically install only the safe root package." },
-    { "name": "Rename a skill", "desc": "Change a skill slug through the explicit rename API while preserving its stable id." },
-    { "name": "Organize with labels", "desc": "Create, assign, rename, recolor, or delete org and personal folder labels." },
-    { "name": "Resolve dependencies", "desc": "Analyze packages and sync companion.json before upload." },
-    { "name": "Sync companion.json", "desc": "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog." },
-    { "name": "Manage skill API calls", "desc": "Use the supported skills API surface without crossing into workspace admin." },
-    { "name": "Manage and retrieve secrets", "desc": "Create and bind write-only personal or shared secrets without a browser, manage their lifecycle, then retrieve authorized values through one-time grants." },
-    { "name": "Use hosted Skill Databases", "desc": "Declare hosted SQLite tables, query an organization or personal realm, and explicitly share a personal realm with current members." },
-    { "name": "Update Companion skill", "desc": "Check and synchronize the latest bundled Companion skill across every existing registered tool installation." },
-    { "name": "Guard against duplicates", "desc": "Preflight the local inventory and workspace catalog before create/update/install to block duplicate slugs and skill-id retargets." },
-    { "name": "Check for updates", "desc": "Compare installed skills and dependencies against the workspace registry." },
-    { "name": "Install into your tools", "desc": "Fan out a skill install into every configured tool (Claude Code, Codex, OpenCode, Grok Bot (Cursor), OpenClaw, Hermes) at each supported scope." },
-    { "name": "Install updates", "desc": "Bring outdated skills up to the latest published version." },
-    { "name": "Validate a skill", "desc": "Check a skill is well formed before you share it." },
-    { "name": "Manage your skills", "desc": "List and organize the skills on this machine." }
+    {
+      "name": "Guided onboarding",
+      "desc": "Resume the getting-started checklist, review untracked local skills, and explore the complete organization library in English or French."
+    },
+    {
+      "name": "Connect an agent",
+      "desc": "Discover the instance and approve delegated, progressively requested Agent Auth capabilities for one workspace."
+    },
+    {
+      "name": "Delegate to a Cloud workspace",
+      "desc": "Snapshot existing Agent Auth grants into a short-lived child PAT delivered only through an owner-only FIFO, without new approval."
+    },
+    {
+      "name": "Use explicit legacy credentials",
+      "desc": "Use or refresh a preserved PAT only after the user explicitly selects legacy-pat mode."
+    },
+    {
+      "name": "Bootstrap health check",
+      "desc": "Gather workspace, self-update, local integrity, and installed-skill context in one fast pass."
+    },
+    {
+      "name": "List skills",
+      "desc": "List org, My Skills, reported installed skills, and local lockfile inventory."
+    },
+    {
+      "name": "Publish a skill",
+      "desc": "Validate a skill, ask Personal vs Org and folder placement, then publish it safely."
+    },
+    {
+      "name": "Update a skill",
+      "desc": "Push a new version with targeted identity checks."
+    },
+    {
+      "name": "Manage a public release",
+      "desc": "Make the current version of an organization skill public, promote it explicitly, or remove package access while preserving the share link."
+    },
+    {
+      "name": "Install a public release",
+      "desc": "Authenticate once, verify the exact pinned ZIP, inspect prerequisites, and atomically install only the safe root package."
+    },
+    {
+      "name": "Rename a skill",
+      "desc": "Change a skill slug through the explicit rename API while preserving its stable id."
+    },
+    {
+      "name": "Organize with labels",
+      "desc": "Create, assign, rename, recolor, or delete org and personal folder labels."
+    },
+    {
+      "name": "Resolve dependencies",
+      "desc": "Analyze packages and sync companion.json before upload."
+    },
+    {
+      "name": "Sync companion.json",
+      "desc": "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog."
+    },
+    {
+      "name": "Manage skill API calls",
+      "desc": "Use the supported skills API surface without crossing into workspace admin."
+    },
+    {
+      "name": "Manage and retrieve secrets",
+      "desc": "Create and bind write-only personal or shared secrets without a browser, manage their lifecycle, then retrieve authorized values through one-time grants."
+    },
+    {
+      "name": "Use hosted Skill Databases",
+      "desc": "Declare hosted SQLite tables, query an organization or personal realm, and explicitly share a personal realm with current members."
+    },
+    {
+      "name": "Update Companion skill",
+      "desc": "Check and synchronize the latest bundled Companion skill across every existing registered tool installation."
+    },
+    {
+      "name": "Guard against duplicates",
+      "desc": "Preflight the local inventory and workspace catalog before create/update/install to block duplicate slugs and skill-id retargets."
+    },
+    {
+      "name": "Check for updates",
+      "desc": "Compare installed skills and dependencies against the workspace registry."
+    },
+    {
+      "name": "Install into your tools",
+      "desc": "Fan out a skill install into every configured tool (Claude Code, Codex, OpenCode, Grok Bot (Cursor), OpenClaw, Hermes) at each supported scope."
+    },
+    {
+      "name": "Install updates",
+      "desc": "Bring outdated skills up to the latest published version."
+    },
+    {
+      "name": "Validate a skill",
+      "desc": "Check a skill is well formed before you share it."
+    },
+    {
+      "name": "Manage your skills",
+      "desc": "List and organize the skills on this machine."
+    }
   ],
   "checks": {
     "updates": {

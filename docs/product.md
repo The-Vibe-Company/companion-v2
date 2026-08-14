@@ -37,8 +37,9 @@ Historical Projects, skill runs, attachments/artifacts, generic model-provider s
 deployment surfaces remain removed and fail closed. Behind the `companions` flag, the control plane
 stores Companion list/open metadata, encrypted workspace Pi provider connections, and controls Pi
 in box.ascii.dev. The creation surface has one short provider picker and no harness settings screen.
-Owner and Editor can edit a Companion's name, instructions, and connected provider from a separate
-web or mobile-web page entered from the list; only Owner can permanently delete it and archive its Box.
+Owner and Editor can edit a Companion's name, instructions, connected provider, and pinned model from
+a separate web or mobile-web page entered from the list; Viewer sees those fields read-only, and only
+Owner can permanently delete it and archive its Box.
 Sessions remain on Box disk, and viewer reads never wake or contact Box. Pi receives the caller's
 Installed skills only for web and mobile web; native mobile receives no Skills source. Each member
 manages labeled MCP accounts on the web Plugins surface. Their write-only credentials are

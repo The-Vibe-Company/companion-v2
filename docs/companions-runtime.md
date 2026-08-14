@@ -79,7 +79,7 @@ an empty skill set. This is enforced by the API and again by the Box adapter bef
 | `POST` | `/v1/companions` | Never |
 | `GET` | `/v1/companions` | Never |
 | `GET` | `/v1/companions/:id` | Never |
-| `PATCH` | `/v1/companions/:id` | Recycles Pi for an online provider change; never wakes Box |
+| `PATCH` | `/v1/companions/:id` | Recycles Pi for an online provider or model change; never wakes Box |
 | `PUT` | `/v1/companions/:id/provider` | Never; owner-only, unconfigured Companions only |
 | `GET/PUT/PATCH/DELETE` | `/v1/companions/:id/shares/...` | Never; owner-only |
 | `GET` | `/v1/companions/:id/thread` | Never; authorized read-only control-plane projection |
@@ -288,7 +288,9 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
     ├── skills/            # exact current packages exposed through Pi native Skills
     ├── sessions/          # Pi session tree files (`pi --session-dir`)
     ├── state/
+    │   ├── instructions.txt # optional appended Pi system prompt
     │   ├── mcp-accounts.json # account ids, labels, adapter names, and transports
+    │   ├── model.txt       # pinned model id passed through `pi --model`
     │   ├── skills.json    # injected surface/version/checksum projection
     │   └── pi.rpc.in      # owner-only FIFO for the Pi JSON RPC stream
     └── logs/
@@ -296,7 +298,7 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
         └── pi.stderr.log  # Pi's stderr and the daemon wrapper's own account of a failed start
 ```
 
-Layout version `6` is written to the control-plane row after a successful Skills/MCP-aware start and
+Layout version `8` is written to the control-plane row after a successful Skills/MCP-aware start and
 to an on-disk marker keyed by the adapter package. Starts repair older Box snapshots before resource
 injection. Runtime transcripts and files do not enter PostgreSQL. A systemd user unit supervises Pi
 while Box is active; the lifecycle API starts it after a Box resume.
@@ -487,10 +489,11 @@ disabled. Native-mobile starts discard both saved and caller-supplied MCP accoun
 Provider management is workspace-scoped and Owner/Admin-only. API keys and one-provider Pi OAuth
 entries are encrypted with `COMPANION_SECRETS_MASTER_KEY`; responses, logs, audit metadata, and
 Companion rows never contain plaintext. Starting a Companion resolves only its selected provider,
-decrypts the credential after the owner/editor wake guard, and writes a minimal owner-only
-`~/.companion/pi/auth.json` inside Pi's isolated agent directory before restarting Pi. The start
-endpoint accepts no model-provider credentials; its only credential input is the MCP-scoped
-`mcp_credentials` array.
+validates its persisted `model_id` against that provider's pinned catalog, decrypts the credential
+after the owner/editor wake guard, and writes a minimal owner-only `~/.companion/pi/auth.json` plus
+`.companion/runtime/state/model.txt` inside Pi's isolated runtime. The daemon wrapper passes the
+selected id through `pi --model`. The start endpoint accepts no model-provider credentials; its only
+credential input is the MCP-scoped `mcp_credentials` array.
 
 Companions created before provider support may have no provider id. Their owner can attach one
 connected provider once through `PUT /v1/companions/:id/provider`; this does not contact or wake Box.
@@ -510,8 +513,10 @@ runtime `mcp_credentials` files. A later active-wait timeout keeps the runtime f
 may still recover Pi through `Restart=on-failure`; explicit stop and Box stop/reboot remain its
 cleanup boundary.
 
-Changing a Companion's provider in settings rewrites `auth.json` and recycles Pi, not the Box:
-immediately when Box and Pi are online, or on the next start/send when the Box is asleep.
+Changing a Companion's provider in settings selects that provider's default model, rewrites
+`auth.json`, and recycles Pi, not the Box. Changing only the model rewrites `model.txt` and recycles
+Pi without replacing provider auth. Both apply immediately when Box and Pi are online, or on the
+next start/send when the Box is asleep; PATCH never wakes Box.
 
 Migration `0065` clears `provider_ids` for existing rows. Before it, that column recorded whichever
 credential tags a start request carried, including MCP account tags, so no legacy value can name a
@@ -527,28 +532,29 @@ API keys are stored as literal Pi `api_key` entries, so shell-command and enviro
 are not accepted.
 
 Provider failures use stable codes suitable for the chat surface:
-`provider_not_configured`, `provider_auth_invalid`, `provider_auth_expired`, and
+`provider_not_configured`, `provider_model_invalid`, `provider_auth_invalid`, `provider_auth_expired`, and
 `provider_unavailable`. Messages name the provider and the corrective action; raw Pi output and
 credential material must remain behind the adapter boundary.
 
 ## V1 providers
 
-| Picker label | Pi auth key | Authentication |
-|---|---|---|
-| Claude | `anthropic` | Anthropic API key or Claude Pro/Max browser OAuth |
-| Codex | `openai-codex` | ChatGPT Plus/Pro device OAuth |
-| Kimi | `kimi-coding` | Kimi For Coding API key |
-| Moonshot | `moonshotai` | Moonshot AI API key |
-| z.ai | `zai` | z.ai API key, including Coding Plan keys |
-| OpenAI API | `openai` | OpenAI API key |
-| Google Gemini | `google` | Google Gemini API key |
+| Picker label | Pi auth key | Default model | Authentication |
+|---|---|---|---|
+| Claude | `anthropic` | `claude-opus-4-8` | Anthropic API key or Claude Pro/Max browser OAuth |
+| Codex | `openai-codex` | `gpt-5.5` | ChatGPT Plus/Pro device OAuth |
+| Kimi | `kimi-coding` | `kimi-for-coding` | Kimi For Coding API key |
+| Moonshot | `moonshotai` | `kimi-k2.6` | Moonshot AI API key |
+| z.ai | `zai` | `glm-4.7` | z.ai API key, including Coding Plan keys |
+| OpenAI API | `openai` | `gpt-5.5` | OpenAI API key |
+| Google Gemini | `google` | `gemini-3.1-pro-preview` | Google Gemini API key |
 
 The web picker intentionally shows only this short list. The API and storage key use Pi provider
 ids and accept any valid lowercase Pi provider id, so another built-in provider can be connected
 without a schema change. To add one to the picker:
 
 1. verify its auth-file key and supported auth methods against the pinned Pi `providers.md`;
-2. add one entry to `COMPANION_PROVIDER_CATALOG` in `packages/contracts/src/companions.ts`;
+2. add one entry and its Pi-accepted pinned models to `COMPANION_PROVIDER_CATALOG` in
+   `packages/contracts/src/companions.ts`;
 3. add contract and Box adapter coverage for its auth entry;
 4. update this table.
 

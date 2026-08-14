@@ -533,6 +533,13 @@
       "when": 1786598400000,
       "tag": "0075_companion_box_unshare",
       "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1786726800000,
+      "tag": "0076_companion_model",
+      "breakpoints": true
     }
   ]
 }

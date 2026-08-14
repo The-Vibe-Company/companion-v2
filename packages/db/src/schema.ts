@@ -375,6 +375,8 @@ export const companions = pgTable(
     name: text("name").notNull(),
     /** One short operator-authored line describing the Companion; never a system prompt. */
     persona: text("persona"),
+    /** Pi model id selected from the provider's pinned Companion catalog. */
+    modelId: text("model_id"),
     boxId: text("box_id"),
     runtimeState: companionRuntimeStateEnum("runtime_state").notNull().default("not_created"),
     daemonState: companionDaemonStateEnum("daemon_state").notNull().default("unknown"),

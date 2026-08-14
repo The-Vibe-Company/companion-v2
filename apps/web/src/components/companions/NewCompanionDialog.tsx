@@ -4,6 +4,10 @@ import { type FormEvent, useState } from "react";
 import type { Companion, CompanionProvidersResponse } from "@companion/contracts";
 import { createCompanion } from "@/lib/companions";
 import { Dialog } from "../org/primitives";
+import {
+  CompanionProviderModelPicker,
+  providerDefaultModel,
+} from "./CompanionProviderModelPicker";
 
 /**
  * Creation is deliberately two fields plus one provider choice. Everything else about a Companion
@@ -24,19 +28,21 @@ export function NewCompanionDialog({
 }) {
   const [name, setName] = useState("");
   const [persona, setPersona] = useState("");
-  const [providerId, setProviderId] = useState(
-    providers.default_provider_id ?? providers.connections[0]?.provider_id ?? "",
-  );
+  const initialProviderId = providers.connections.some(
+    (connection) => connection.provider_id === providers.default_provider_id,
+  )
+    ? providers.default_provider_id ?? ""
+    : providers.connections[0]?.provider_id ?? "";
+  const [providerId, setProviderId] = useState(initialProviderId);
+  const [modelId, setModelId] = useState(providerDefaultModel(providers, initialProviderId));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const providerName = (id: string) =>
-    providers.catalog.find((provider) => provider.id === id)?.name ?? id;
   const connected = providers.connections.length > 0;
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!name.trim() || !providerId) return;
+    if (!name.trim() || !providerId || !modelId) return;
     setBusy(true);
     setError(null);
     try {
@@ -44,6 +50,7 @@ export function NewCompanionDialog({
         name: name.trim(),
         persona: persona.trim() || undefined,
         provider_id: providerId,
+        model_id: modelId,
       }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Companion could not be created.");
@@ -73,7 +80,7 @@ export function NewCompanionDialog({
             type="submit"
             form="companion-create"
             className="cds-btn cds-btn--primary cds-btn--md"
-            disabled={busy || !connected || !name.trim() || !providerId}
+            disabled={busy || !connected || !name.trim() || !providerId || !modelId}
           >
             {busy ? "Creating..." : "Create companion"}
           </button>
@@ -106,44 +113,33 @@ export function NewCompanionDialog({
         <p className="companions-new-form__hint" id="companion-persona-hint">
           One line, shown under the name in the list.
         </p>
-        <fieldset className="companions-picker">
-          <legend>Provider</legend>
-          {connected ? (
-            providers.connections.map((connection) => (
-              <label
-                key={connection.provider_id}
-                className={
-                  "companions-chip"
-                  + (providerId === connection.provider_id ? " companions-chip--active" : "")
-                }
-              >
-                <input
-                  type="radio"
-                  name="companion-provider"
-                  value={connection.provider_id}
-                  checked={providerId === connection.provider_id}
-                  onChange={() => setProviderId(connection.provider_id)}
-                />
-                <span>{providerName(connection.provider_id)}</span>
-                {providers.default_provider_id === connection.provider_id && <em>Default</em>}
-              </label>
-            ))
-          ) : (
-            <p className="companions-picker__empty">
-              {providers.can_manage ? (
-                <>
-                  No provider is connected yet.{" "}
-                  <button type="button" className="cds-link" onClick={onConnectProvider}>
-                    Connect one
-                  </button>{" "}
-                  to create a Companion.
-                </>
-              ) : (
-                "No provider is connected yet. Ask a workspace admin to connect one."
-              )}
-            </p>
-          )}
-        </fieldset>
+        {connected ? (
+          <CompanionProviderModelPicker
+            providers={providers}
+            providerId={providerId}
+            modelId={modelId}
+            namePrefix="companion-create"
+            disabled={busy}
+            onChange={(selection) => {
+              setProviderId(selection.providerId);
+              setModelId(selection.modelId);
+            }}
+          />
+        ) : (
+          <p className="companions-picker__empty">
+            {providers.can_manage ? (
+              <>
+                No provider is connected yet.{" "}
+                <button type="button" className="cds-link" onClick={onConnectProvider}>
+                  Connect one
+                </button>{" "}
+                to create a Companion.
+              </>
+            ) : (
+              "No provider is connected yet. Ask a workspace admin to connect one."
+            )}
+          </p>
+        )}
       </form>
     </Dialog>
   );

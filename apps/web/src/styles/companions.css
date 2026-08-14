@@ -464,6 +464,11 @@
   gap: 8px;
 }
 
+.companions-provider-model-picker {
+  display: grid;
+  gap: 14px;
+}
+
 .companions-picker legend {
   padding: 0 0 5px;
   color: var(--color-fg);

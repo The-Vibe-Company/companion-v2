@@ -18,8 +18,8 @@ const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
 const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
 // Layout 5 made the daemon wrapper report its own failures. Layout 6 moves MCP credentials off the
 // snapshotted Box disk and into the user runtime directory. Layout 7 teaches the daemon wrapper to
-// append the staged Companion instructions, so existing Boxes must reinstall the wrapper once.
-export const COMPANION_PI_DISK_LAYOUT_VERSION = 7;
+// append staged Companion instructions. Layout 8 passes the persisted model through `pi --model`.
+export const COMPANION_PI_DISK_LAYOUT_VERSION = 8;
 /** Content bytes the provider's file API refuses in one `PUT /boxes/:id/files` body. */
 const BOX_FILE_WRITE_LIMIT_BYTES = 5 * 1024 * 1024;
 /**
@@ -204,12 +204,16 @@ export interface CompanionBoxRuntime {
     clientSurface: CompanionClientSurface;
     providerAuth: Record<string, Record<string, unknown>>;
     replaceProviderAuth: boolean;
+    /** Recycle Pi after a process-level model selection changed, without rewriting provider auth. */
+    restartPi?: boolean;
     /** Force layout/resource injection without implying that a running Pi needs provider recycle. */
     refreshRuntimeLayout?: boolean;
     /** Refuse creation or resume when a caller may touch only an already-runnable Box. */
     allowBoxWake?: boolean;
     /** Operator instructions applied when Pi next starts; changing them never restarts a warm Box. */
     instructions?: string | null;
+    /** Pi model id selected from the provider's pinned catalog. */
+    modelId: string;
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
@@ -427,16 +431,21 @@ rm -f "$fifo"
 mkfifo -m 600 "$fifo"
 exec 3<>"$fifo"
 skill_args=(--no-skills)
+model_args=()
+if [ -s "$root/state/model.txt" ]; then
+  model_args+=(--model "$(cat "$root/state/model.txt")")
+fi
 if find "$root/skills" -type f -name SKILL.md -print -quit 2>/dev/null | grep -q .; then
   skill_args+=(--skill "$root/skills")
 fi
 if [ -s "$root/state/instructions.txt" ]; then
   skill_args+=(--append-system-prompt "$(cat "$root/state/instructions.txt")")
 fi
+pi_args=("\${model_args[@]}" "\${skill_args[@]}")
 # One line per start, so the log always carries this start's timestamp and the invocation it made:
 # a Pi that dies without complaining is then reported as the command it was, not as silence.
-printf 'pi-daemon: starting %s %s\\n' "$PI_BIN" "\${skill_args[*]}" >&2
-exec "$PI_BIN" --mode rpc --session-dir "$root/sessions" "\${skill_args[@]}" <&3 >>"$root/logs/pi.rpc.ndjson" 2>>"$stderr_log"
+printf 'pi-daemon: starting %s %s\\n' "$PI_BIN" "\${pi_args[*]}" >&2
+exec "$PI_BIN" --mode rpc --session-dir "$root/sessions" "\${pi_args[@]}" <&3 >>"$root/logs/pi.rpc.ndjson" 2>>"$stderr_log"
 COMPANION_PI_DAEMON
 } > "$HOME/.companion/bin/pi-daemon"
 chmod 700 "$HOME/.companion/bin/pi-daemon"
@@ -1227,6 +1236,7 @@ exit 0`,
     clientSurface: CompanionClientSurface;
     providerAuth: Record<string, Record<string, unknown>>;
     replaceProviderAuth: boolean;
+    modelId: string;
     instructions?: string | null;
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
@@ -1279,6 +1289,11 @@ exit 0`,
       ".companion/runtime/state/instructions.txt",
       input.instructions?.trim() ? `${input.instructions.trim()}\n` : "",
     );
+    await this.#writeFile(
+      input.boxId,
+      ".companion/runtime/state/model.txt",
+      `${input.modelId}\n`,
+    );
     const staged = new Map<string, string>();
     for (const skill of injectedSkills) {
       const path = runtimeSkillArchivePath(skill);
@@ -1325,9 +1340,11 @@ exit 0`,
     clientSurface: CompanionClientSurface;
     providerAuth: Record<string, Record<string, unknown>>;
     replaceProviderAuth: boolean;
+    restartPi?: boolean;
     refreshRuntimeLayout?: boolean;
     allowBoxWake?: boolean;
     instructions?: string | null;
+    modelId: string;
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
@@ -1350,9 +1367,11 @@ exit 0`,
     clientSurface: CompanionClientSurface;
     providerAuth: Record<string, Record<string, unknown>>;
     replaceProviderAuth: boolean;
+    restartPi?: boolean;
     refreshRuntimeLayout?: boolean;
     allowBoxWake?: boolean;
     instructions?: string | null;
+    modelId: string;
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
@@ -1421,7 +1440,7 @@ exit 0`,
     // proof: a later systemd auto-restart can still inherit this daemon's MCP credentials.
     const first = await this.#firstCommand(
       box,
-      !replaceProviderAuth && !input.refreshRuntimeLayout,
+      !replaceProviderAuth && !input.restartPi && !input.refreshRuntimeLayout,
       allowBoxWake,
     );
     box = first.box;
@@ -1432,6 +1451,7 @@ exit 0`,
       clientSurface: input.clientSurface,
       providerAuth: input.providerAuth,
       replaceProviderAuth,
+      modelId: input.modelId,
       instructions: input.instructions,
       mcpCredentials: input.mcpCredentials,
       mcpAccounts: input.mcpAccounts,
@@ -1467,7 +1487,7 @@ systemctl --user daemon-reload
 systemctl --user reset-failed companion-pi-daemon.service >/dev/null 2>&1 || true
 # Keep an unchanged-provider start idempotent so it cannot kill a turn already in flight. Replacing
 # auth.json is different: Pi loaded the old provider into memory, so only its daemon is recycled.
-systemctl --user ${replaceProviderAuth ? "restart" : "start"} companion-pi-daemon.service
+systemctl --user ${replaceProviderAuth || input.restartPi ? "restart" : "start"} companion-pi-daemon.service
 # Keep the tmpfs file while the Box is awake so Restart=on-failure can reread the same credentials.
 # Box stop/reboot destroys /run, and the explicit stop path removes it as soon as Pi is down.
 trap - EXIT`,

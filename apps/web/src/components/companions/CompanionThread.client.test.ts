@@ -15,6 +15,7 @@ const companion: Companion = {
   id: companionId,
   name: "Luna",
   persona: "Content marketing assistant",
+  model_id: "claude-opus-4-8",
   owner_id: "user-1",
   access: "owner",
   runtime: {

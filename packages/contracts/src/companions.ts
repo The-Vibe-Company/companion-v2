@@ -24,61 +24,118 @@ export type CompanionProviderId = z.infer<typeof companionProviderIdSchema>;
 export const companionProviderAuthMethodSchema = z.enum(["api_key", "subscription"]);
 export type CompanionProviderAuthMethod = z.infer<typeof companionProviderAuthMethodSchema>;
 
+export const companionModelIdSchema = z.string().trim().min(1).max(200).refine(
+  (value) => !/[\r\n\0]/.test(value),
+  "Model id must be a single line",
+);
+export type CompanionModelId = z.infer<typeof companionModelIdSchema>;
+
 export const COMPANION_PROVIDER_CATALOG = [
   {
     id: "anthropic",
     name: "Claude",
     auth_methods: ["api_key", "subscription"],
     description: "Anthropic API key or Claude Pro/Max browser authentication.",
+    models: [
+      { id: "claude-opus-4-8", name: "Claude Opus 4.8", default: true },
+      { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+      { id: "claude-haiku-4-5", name: "Claude Haiku 4.5" },
+    ],
   },
   {
     id: "openai-codex",
     name: "Codex",
     auth_methods: ["subscription"],
     description: "ChatGPT Plus/Pro device authentication.",
+    models: [
+      { id: "gpt-5.5", name: "GPT-5.5", default: true },
+      { id: "gpt-5.4", name: "GPT-5.4" },
+      { id: "gpt-5.4-mini", name: "GPT-5.4 mini" },
+    ],
   },
   {
     id: "kimi-coding",
     name: "Kimi",
     auth_methods: ["api_key"],
     description: "Kimi For Coding API key.",
+    models: [
+      { id: "kimi-for-coding", name: "Kimi K2.7 Code", default: true },
+      { id: "kimi-for-coding-highspeed", name: "Kimi For Coding HighSpeed" },
+    ],
   },
   {
     id: "moonshotai",
     name: "Moonshot",
     auth_methods: ["api_key"],
     description: "Moonshot AI API key.",
+    models: [
+      { id: "kimi-k2.6", name: "Kimi K2.6", default: true },
+      { id: "kimi-k2.7-code", name: "Kimi K2.7 Code" },
+      { id: "kimi-k2.7-code-highspeed", name: "Kimi K2.7 Code HighSpeed" },
+    ],
   },
   {
     id: "zai",
     name: "z.ai",
     auth_methods: ["api_key"],
     description: "z.ai API key, including Coding Plan keys.",
+    models: [
+      { id: "glm-4.7", name: "GLM-4.7", default: true },
+      { id: "glm-5-turbo", name: "GLM-5-Turbo" },
+    ],
   },
   {
     id: "openai",
     name: "OpenAI API",
     auth_methods: ["api_key"],
     description: "OpenAI API key.",
+    models: [
+      { id: "gpt-5.5", name: "GPT-5.5", default: true },
+      { id: "gpt-5.4", name: "GPT-5.4" },
+      { id: "gpt-5.4-mini", name: "GPT-5.4 mini" },
+    ],
   },
   {
     id: "google",
     name: "Google Gemini",
     auth_methods: ["api_key"],
     description: "Google Gemini API key.",
+    models: [
+      { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview", default: true },
+      { id: "gemini-3.1-flash-lite", name: "Gemini 3.1 Flash Lite" },
+      { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro" },
+    ],
   },
 ] as const satisfies ReadonlyArray<{
   id: string;
   name: string;
   auth_methods: readonly CompanionProviderAuthMethod[];
   description: string;
+  models: ReadonlyArray<{ id: string; name: string; default?: true }>;
 }>;
+
+export function companionProviderDefaultModel(providerId: string): string | undefined {
+  return COMPANION_PROVIDER_CATALOG
+    .find((provider) => provider.id === providerId)
+    ?.models.find((model) => "default" in model && model.default)?.id;
+}
+
+export function companionProviderHasModel(providerId: string, modelId: string): boolean {
+  return COMPANION_PROVIDER_CATALOG
+    .find((provider) => provider.id === providerId)
+    ?.models.some((model) => model.id === modelId) ?? false;
+}
 
 export const companionProviderDefinitionSchema = z.object({
   id: companionProviderIdSchema,
   name: z.string(),
   auth_methods: z.array(companionProviderAuthMethodSchema),
   description: z.string(),
+  models: z.array(z.object({
+    id: companionModelIdSchema,
+    name: z.string(),
+    default: z.literal(true).optional(),
+  }).strict()).min(1),
 });
 export type CompanionProviderDefinition = z.infer<typeof companionProviderDefinitionSchema>;
 
@@ -106,6 +163,7 @@ export const companionSchema = z.object({
   name: z.string(),
   /** One short line describing what this Companion is for; shown under the name in the list. */
   persona: z.string().nullable(),
+  model_id: companionModelIdSchema,
   owner_id: z.string(),
   access: companionAccessSchema,
   runtime: z.object({
@@ -210,17 +268,39 @@ export const createCompanionInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
   persona: companionPersonaSchema.optional(),
   provider_id: companionProviderIdSchema.optional(),
-}).strict();
+  model_id: companionModelIdSchema.optional(),
+}).strict().superRefine((input, context) => {
+  if (input.provider_id && input.model_id && !companionProviderHasModel(input.provider_id, input.model_id)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["model_id"],
+      message: `Model ${input.model_id} is not available for provider ${input.provider_id}`,
+    });
+  }
+});
 export type CreateCompanionInput = z.infer<typeof createCompanionInputSchema>;
 
 export const updateCompanionInputSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   persona: companionPersonaSchema.nullable().optional(),
   provider_id: companionProviderIdSchema.optional(),
+  model_id: companionModelIdSchema.optional(),
 }).strict().refine(
-  (input) => input.name !== undefined || input.persona !== undefined || input.provider_id !== undefined,
+  (input) =>
+    input.name !== undefined
+    || input.persona !== undefined
+    || input.provider_id !== undefined
+    || input.model_id !== undefined,
   "At least one Companion setting is required",
-);
+).superRefine((input, context) => {
+  if (input.provider_id && input.model_id && !companionProviderHasModel(input.provider_id, input.model_id)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["model_id"],
+      message: `Model ${input.model_id} is not available for provider ${input.provider_id}`,
+    });
+  }
+});
 export type UpdateCompanionInput = z.infer<typeof updateCompanionInputSchema>;
 
 export const setCompanionProviderInputSchema = z.object({
@@ -472,6 +552,7 @@ export type StartCompanionRuntimeInput = z.infer<typeof startCompanionRuntimeInp
 export const companionProviderErrorSchema = z.object({
   code: z.enum([
     "provider_not_configured",
+    "provider_model_invalid",
     "provider_auth_invalid",
     "provider_auth_expired",
     "provider_unavailable",

@@ -472,7 +472,7 @@ export function registerCompanionRoutes(
     c: Context<{ Variables: ApiVariables }>,
     companionId: string,
     body: StartCompanionRuntimeInput,
-    options: { allowBoxWake?: boolean } = {},
+    options: { allowBoxWake?: boolean; restartPi?: boolean } = {},
   ): Promise<{ companion: Companion; runtime: CompanionBoxRuntime }> {
     let failureContext:
       | {
@@ -550,6 +550,7 @@ export function registerCompanionRoutes(
         providerAuth: {
           [mutation.provider.providerId]: mutation.provider.authEntry,
         },
+        modelId: mutation.companion.model_id,
         instructions: mutation.companion.persona,
         // Skipping the write preserves a subscription token Pi refreshed on disk. A layout refresh
         // remains a cold resource-injection path, but it does not replace current provider auth or
@@ -558,6 +559,7 @@ export function registerCompanionRoutes(
           !mutation.companion.runtime.box_id
           || mutation.companion.runtime.provider_credential_generation
             !== mutation.provider.credentialGeneration,
+        restartPi: options.restartPi,
         refreshRuntimeLayout:
           mutation.companion.runtime.disk_layout_version !== COMPANION_PI_DISK_LAYOUT_VERSION,
         allowBoxWake: options.allowBoxWake,
@@ -694,6 +696,7 @@ export function registerCompanionRoutes(
           name: body.name,
           persona: body.persona,
           providerId: body.provider_id,
+          modelId: body.model_id,
           database,
         }));
       return c.json({ companion }, 201);
@@ -1127,6 +1130,7 @@ export function registerCompanionRoutes(
           name: body.name,
           persona: body.persona,
           providerId: body.provider_id,
+          modelId: body.model_id,
           database,
         });
         const provider = body.provider_id !== undefined
@@ -1136,9 +1140,11 @@ export function registerCompanionRoutes(
           : null;
         return {
           companion,
-          providerApplyNeeded: body.provider_id !== undefined
+          modelChanged: previous.model_id !== companion.model_id,
+          settingsApplyNeeded: previous.model_id !== companion.model_id
+            || body.provider_id !== undefined
             && (
-              previous.runtime.provider_ids[0] !== body.provider_id
+              previous.runtime.provider_ids[0] !== companion.runtime.provider_ids[0]
               || !providerAuthIsCurrent(companion, provider)
             ),
         };
@@ -1148,7 +1154,7 @@ export function registerCompanionRoutes(
           piIsReachable(updated.companion)
           || updated.companion.runtime.state === "error"
         );
-      if (updated.providerApplyNeeded && canApplyWithoutWaking) {
+      if (updated.settingsApplyNeeded && canApplyWithoutWaking) {
         // Settings must never wake a sleeping Box. Confirm the projected online state is still live
         // before routing the provider change through startRuntime, which rewrites auth and recycles Pi.
         const observed = await runtimeFactory().status({
@@ -1159,7 +1165,7 @@ export function registerCompanionRoutes(
             c,
             companionId,
             startCompanionRuntimeInputSchema.parse({ client_surface: "web" }),
-            { allowBoxWake: false },
+            { allowBoxWake: false, restartPi: updated.modelChanged },
           );
           return c.json({ companion: started.companion });
         }

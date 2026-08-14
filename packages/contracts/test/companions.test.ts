@@ -41,6 +41,13 @@ describe("Companion provider contracts", () => {
     ]));
   });
 
+  it("pins at least one Pi model and exactly one default for every provider", () => {
+    for (const provider of COMPANION_PROVIDER_CATALOG) {
+      expect(provider.models.length).toBeGreaterThanOrEqual(1);
+      expect(provider.models.filter((model) => model.default)).toHaveLength(1);
+    }
+  });
+
   it("starts only native Claude/Codex subscription login and accepts one-time codes only", () => {
     expect(companionProviderOAuthStartInputSchema.parse({
       provider_id: "anthropic",
@@ -63,7 +70,13 @@ describe("Companion provider contracts", () => {
     expect(createCompanionInputSchema.parse({
       name: "Research",
       provider_id: "anthropic",
-    })).toMatchObject({ provider_id: "anthropic" });
+      model_id: "claude-opus-4-8",
+    })).toMatchObject({ provider_id: "anthropic", model_id: "claude-opus-4-8" });
+    expect(() => createCompanionInputSchema.parse({
+      name: "Research",
+      provider_id: "anthropic",
+      model_id: "glm-4.7",
+    })).toThrow();
     expect(createCompanionInputSchema.parse({
       name: "Luna",
       persona: "  Content marketing assistant  ",
@@ -87,11 +100,17 @@ describe("Companion provider contracts", () => {
       name: "Luna research",
       persona: null,
       provider_id: "openai-codex",
+      model_id: "gpt-5.5",
     })).toEqual({
       name: "Luna research",
       persona: null,
       provider_id: "openai-codex",
+      model_id: "gpt-5.5",
     });
+    expect(() => updateCompanionInputSchema.parse({
+      provider_id: "openai-codex",
+      model_id: "claude-opus-4-8",
+    })).toThrow();
     expect(() => updateCompanionInputSchema.parse({})).toThrow();
     expect(() => updateCompanionInputSchema.parse({ owner_id: "user-2" })).toThrow();
   });

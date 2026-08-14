@@ -128,6 +128,7 @@ async function stagedPiLayoutScript(): Promise<string> {
     clientSurface: "web",
     providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
     replaceProviderAuth: true,
+    modelId: "claude-opus-4-8",
     mcpCredentials: [],
     mcpAccounts: [],
     skills: [],
@@ -409,6 +410,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         anthropic: { type: "api_key", key: "provider-secret" },
       },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       instructions: "Challenge every source before answering.",
       mcpCredentials: [
         { env_key: "GITHUB_TOKEN_WORK", value: "mcp-secret" },
@@ -444,6 +446,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(String(createBody?.setupScript)).toContain("ExecStart=%h/.companion/bin/pi-daemon");
     expect(String(createBody?.setupScript)).toContain("npm:pi-mcp-adapter@2.12.1");
     expect(String(createBody?.setupScript)).toContain("--no-skills");
+    expect(String(createBody?.setupScript)).toContain('model_args+=(--model "$(cat "$root/state/model.txt")")');
     expect(String(createBody?.setupScript)).toContain("--append-system-prompt");
     expect(String(createBody?.setupScript)).not.toContain("OpenCode");
     expect(fileBody).toEqual({
@@ -462,6 +465,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(files.get(".companion/runtime/state/mcp-accounts.json")).toContain("GitHub work");
     expect(files.get(".companion/runtime/state/instructions.txt"))
       .toBe("Challenge every source before answering.\n");
+    expect(files.get(".companion/runtime/state/model.txt")).toBe("claude-opus-4-8\n");
     expect(assigned).toHaveBeenCalledWith("bx_23456789");
     expect(result).toEqual({
       boxId: "bx_23456789",
@@ -506,6 +510,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       // The route sends false only when this Box records the current layout and provider generation.
       replaceProviderAuth: false,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [{ env_key: "GITHUB_TOKEN_WORK", value: "new-secret-not-injected" }],
       mcpAccounts: [],
       skills: [],
@@ -560,6 +565,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "rotated-provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -573,6 +579,59 @@ describe("AsciiBoxCompanionRuntime", () => {
       !command.includes("systemctl --user start companion-pi-daemon.service"))).toBe(true);
     expect(writtenPaths).toContain(".companion/pi/auth.json");
     expect(writtenPaths).toContain(".companion/runtime/state/providers.env");
+  });
+
+  it("writes a changed model and restarts Pi without replacing current provider auth", async () => {
+    const commands: string[] = [];
+    const writtenPaths: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
+      if (url.endsWith("/files") && method === "PUT") {
+        writtenPaths.push(String(body.path));
+        return json({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: command.includes("companion-provider-auth-present")
+            ? "companion-provider-auth-present\n"
+            : command.includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: false,
+      restartPi: true,
+      modelId: "claude-sonnet-4-6",
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(commands.some((command) =>
+      command.includes("systemctl --user restart companion-pi-daemon.service"))).toBe(true);
+    expect(writtenPaths).toContain(".companion/runtime/state/model.txt");
+    expect(writtenPaths).not.toContain(".companion/pi/auth.json");
   });
 
   it("refreshes an old layout with idempotent start when provider auth is still current", async () => {
@@ -614,6 +673,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: false,
+      modelId: "claude-opus-4-8",
       refreshRuntimeLayout: true,
       mcpCredentials: [],
       mcpAccounts: [],
@@ -693,6 +753,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web" as const,
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -802,6 +863,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web" as const,
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -944,6 +1006,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [{
@@ -1042,6 +1105,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [
         { env_key: "LINEAR_TOKEN_WORK", value: "linear-work-secret" },
         { env_key: "LINEAR_TOKEN_PERSONAL", value: "linear-personal-secret" },
@@ -1185,6 +1249,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         clientSurface: "web",
         providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
         replaceProviderAuth: true,
+        modelId: "claude-opus-4-8",
         mcpCredentials: [],
         mcpAccounts: [],
         skills: [{
@@ -1309,6 +1374,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [{
@@ -1359,6 +1425,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -1412,6 +1479,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -1455,6 +1523,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -1511,6 +1580,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -1580,6 +1650,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -1592,10 +1663,10 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(markerIndex).toBeGreaterThan(-1);
     expect(piResolveIndex).toBeGreaterThan(-1);
     expect(markerIndex).toBeLessThan(piResolveIndex);
-    // Layout 7 replaces wrappers from layout 6 so existing Boxes gain staged instructions.
+    // Layout 8 replaces wrappers from layout 7 so existing Boxes gain the selected Pi model.
     expect(COMPANION_PI_DISK_LAYOUT_VERSION).toBe(7);
     expect(createdSetupScript)
-      .toContain("expected_layout='7:npm:pi-mcp-adapter@2.12.1'");
+      .toContain("expected_layout='8:npm:pi-mcp-adapter@2.12.1'");
     expect(createdSetupScript).toContain("--append-system-prompt");
     // The supervised daemon gets a minimal PATH from the systemd user manager, so Pi is resolved at
     // layout time and pinned both in the wrapper and on the unit.
@@ -1645,6 +1716,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -1726,6 +1798,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -1772,6 +1845,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -1831,6 +1905,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -1896,6 +1971,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [{ env_key: "GITHUB_TOKEN_WORK", value: "mcp-secret" }],
       mcpAccounts: [],
       skills: [],
@@ -1984,6 +2060,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -2059,6 +2136,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [{ env_key: "GITHUB_TOKEN_WORK", value: "mcp-secret" }],
       mcpAccounts: [],
       skills: [],
@@ -2137,6 +2215,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -2195,6 +2274,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -2265,6 +2345,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -2356,6 +2437,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -2489,6 +2571,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       allowBoxWake: false,
       mcpCredentials: [],
       mcpAccounts: [],
@@ -2561,6 +2644,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "mobile_web",
       providerAuth: {},
       replaceProviderAuth: false,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -2643,6 +2727,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       // The control plane recorded the failed Box at the current layout and generation, so the
       // replacement disk still has to receive Pi's auth file.
       replaceProviderAuth: false,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -2711,6 +2796,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       // The control plane recorded this Box at the current layout and generation.
       replaceProviderAuth: false,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -2778,6 +2864,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -2839,6 +2926,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -2900,6 +2988,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -2958,6 +3047,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -3053,6 +3143,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: false,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -3140,6 +3231,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: false,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -3193,6 +3285,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -3306,6 +3399,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         anthropic: { type: "api_key", key: "provider-secret" },
       },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [
         { env_key: "GITHUB_TOKEN_WORK", value: "mcp-secret" },
       ],
@@ -3350,6 +3444,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         anthropic: { type: "api_key", key: "provider-secret" },
       },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [
         { env_key: "GITHUB_TOKEN_WORK", value: "mcp-secret" },
       ],
@@ -3693,6 +3788,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: {},
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
@@ -3742,6 +3838,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: {},
       replaceProviderAuth: false,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
