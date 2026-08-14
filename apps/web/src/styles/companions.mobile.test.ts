@@ -193,6 +193,16 @@ describe("Companions mobile viewport", () => {
       .toContain("min-height: 40px;");
   });
 
+  it("holds a tool run's chip and its Box frame inside the thread's width", () => {
+    // A grid column left to size itself takes the longest command or the frame's own pixels, so a
+    // `max-width: 100%` underneath it resolves against that content rather than the thread and both
+    // parts run off a phone. Bounding the column is what makes those percentages mean the thread.
+    expect(declarationsFor(".chat-tool")[0]).toContain("grid-template-columns: minmax(0, 1fr);");
+    expect(declarationsFor(".chat-tool__head")[0]).toContain("max-width: 100%;");
+    expect(declarationsFor(".chat-tool__detail")[0]).toContain("max-width: 100%;");
+    expect(declarationsFor(".chat-tool__frame")[0]).toContain("max-width: min(100%, 460px);");
+  });
+
   it("keeps Back, Wake, and Send at a 44px thumb target", () => {
     const coarse = ["@media (pointer: coarse)"];
 

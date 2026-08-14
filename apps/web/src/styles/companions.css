@@ -1333,9 +1333,13 @@ button.chat-box:focus-visible {
 
 /* One tool run. It sits between two turns as a quiet line of chrome, indented nowhere and tinted
    nothing, so the conversation above and below it still reads as the conversation. */
+/* The single column is bounded rather than content-sized, so the `max-width: 100%` each part below
+   carries resolves against the thread's width. Left to size itself, the column grows to the longest
+   command or the frame's own pixels and pushes both past a narrow screen. */
 .chat-tool {
   margin-top: 12px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   justify-items: start;
   gap: 6px;
 }
