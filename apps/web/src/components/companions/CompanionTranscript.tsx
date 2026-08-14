@@ -47,6 +47,13 @@ import {
  * reading a thread still cannot reach Box.
  */
 
+/**
+ * How long after a press its own `click` can still arrive. A browser resolving a tap takes a moment
+ * to deliver it, and on a phone it may never come at all; anything later than this is somebody
+ * activating the button again.
+ */
+const PRESS_CLICK_MS = 700;
+
 /** Turn metadata by message id. The primitives render one component per message; this is its row. */
 const TurnsContext = createContext<ReadonlyMap<string, TranscriptTurn>>(new Map());
 
@@ -263,35 +270,35 @@ export function CompanionTranscript({
     runtimeRef.current = runtime;
   }, [runtime]);
 
-  /**
-   * A press that already sent, so the `click` the browser sends afterwards is not a second message.
-   */
-  const sentOnPress = useRef(false);
+  /** When a press last sent, so the click that press produces can be told apart from a new one. */
+  const pressSentAt = useRef(0);
 
   /**
    * iOS settles a tap on the composer's own button by blurring the field first: the keyboard starts
    * closing, the visual viewport grows, the thread pinned to it is laid out again, and the `click`
    * meant for this button lands wherever the button used to be — THE-346, a Send that never fired.
-   * The press is the whole gesture here, so it is where the message goes: preventing the default
-   * keeps focus, and the draft, in the field, which is also what keeps the keyboard from closing
-   * under the finger in the first place.
+   * The press is the whole gesture on a button that neither drags nor holds, so it is where the
+   * message goes. Refusing the default keeps focus, and the draft, in the field, which is what keeps
+   * the keyboard from closing under the finger to begin with.
    */
   const sendOnPress = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
     const composer = runtime.thread.composer;
     if (!composer.getState().canSend) return;
     event.preventDefault();
-    sentOnPress.current = true;
+    pressSentAt.current = Date.now();
     composer.send();
   }, [runtime]);
 
   /**
-   * The primitive sends from `click`, which the browser still delivers after the press. Refusing the
-   * default is how `ComposerPrimitive.Send` is told the message is already gone: it composes its own
-   * handler after this one and skips it on a prevented event.
+   * The primitive sends from `click`, and the browser still delivers one after the press. Refusing
+   * the default is how `ComposerPrimitive.Send` is told this one is spoken for: it composes its own
+   * handler behind this one and skips it on a prevented event. Only the click belonging to the press
+   * is refused — a click from a keyboard activating the focused button, or one the browser delivers
+   * long after a press whose own click never arrived, is a fresh Send and goes through.
    */
   const swallowClickAfterPress = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
-    if (!sentOnPress.current) return;
-    sentOnPress.current = false;
+    if (Date.now() - pressSentAt.current > PRESS_CLICK_MS) return;
+    pressSentAt.current = 0;
     event.preventDefault();
   }, []);
 

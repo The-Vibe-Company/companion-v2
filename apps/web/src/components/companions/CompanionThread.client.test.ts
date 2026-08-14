@@ -610,6 +610,59 @@ describe("CompanionThread mobile send", () => {
     expect(sent).toEqual(["Draft the launch note"]);
   });
 
+  it("leaves a refused draft alone when the click lands after the press that failed", async () => {
+    // A refused send hands the text back to the composer. The click belonging to that same press must
+    // not pick the restored draft up and send it again behind the sender's back.
+    const sent: string[] = [];
+    const container = await mount(async (content) => {
+      sent.push(content);
+      return false;
+    });
+    const composer = type(container, "Draft the launch note");
+
+    await act(async () => {
+      pressed(sendButton(container));
+    });
+    expect(composer.value).toBe("Draft the launch note");
+
+    await act(async () => {
+      sendButton(container).dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+
+    expect(sent).toEqual(["Draft the launch note"]);
+    expect(composer.value).toBe("Draft the launch note");
+  });
+
+  it("still sends when a click arrives long after a press whose own click was lost", async () => {
+    // A phone that dropped the click leaves nothing to swallow. The next activation of the button is
+    // a new message and must not be mistaken for the tail of the old one.
+    vi.useFakeTimers();
+    try {
+      const sent: string[] = [];
+      const container = await mount(async (content) => {
+        sent.push(content);
+        return true;
+      });
+      type(container, "Draft the launch note");
+      await act(async () => {
+        tapWithKeyboardClosing(container);
+      });
+      expect(sent).toEqual(["Draft the launch note"]);
+
+      type(container, "And the changelog entry");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(800);
+      });
+      await act(async () => {
+        sendButton(container).dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      });
+
+      expect(sent).toEqual(["Draft the launch note", "And the changelog entry"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("still sends a click no press came before, so the button stays reachable by keyboard", async () => {
     const sent: string[] = [];
     const container = await mount(async (content) => {
