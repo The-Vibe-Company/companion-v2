@@ -186,6 +186,8 @@ export interface CompanionBoxRuntime {
     replaceProviderAuth: boolean;
     /** Force layout/resource injection without implying that a running Pi needs provider recycle. */
     refreshRuntimeLayout?: boolean;
+    /** Refuse creation or resume when a caller may touch only an already-runnable Box. */
+    allowBoxWake?: boolean;
     /** Operator instructions applied when Pi next starts; changing them never restarts a warm Box. */
     instructions?: string | null;
     mcpCredentials: McpRuntimeCredential[];
@@ -849,10 +851,20 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
    * touched exactly once — the answer that proves it is listening is the same answer that says its Pi
    * is already running.
    */
-  async #firstCommand(box: BoxInfo, warmEligible: boolean): Promise<{ box: BoxInfo; warm: boolean }> {
+  async #firstCommand(
+    box: BoxInfo,
+    warmEligible: boolean,
+    allowResume = true,
+  ): Promise<{ box: BoxInfo; warm: boolean }> {
     const command = warmEligible ? WARM_DAEMON_READY_COMMAND : BOX_RUNNABLE_COMMAND;
     let attempt = await this.#attemptCommand(box.id, command);
     if (!attempt.ran) {
+      if (!allowResume) {
+        throw new BoxRuntimeProviderError(
+          `Box in state ${box.state} did not run this apply command${attempt.detail}`,
+          409,
+        );
+      }
       if (!RESUMABLE_STATES.has(box.state)) {
         throw new BoxRuntimeProviderError(
           `Box in state ${box.state} did not run this start's first command${attempt.detail}`,
@@ -1125,7 +1137,6 @@ exit 0`,
     clientSurface: CompanionClientSurface;
     providerAuth: Record<string, Record<string, unknown>>;
     replaceProviderAuth: boolean;
-    refreshRuntimeLayout?: boolean;
     instructions?: string | null;
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
@@ -1225,6 +1236,7 @@ exit 0`,
     providerAuth: Record<string, Record<string, unknown>>;
     replaceProviderAuth: boolean;
     refreshRuntimeLayout?: boolean;
+    allowBoxWake?: boolean;
     instructions?: string | null;
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
@@ -1249,12 +1261,14 @@ exit 0`,
     providerAuth: Record<string, Record<string, unknown>>;
     replaceProviderAuth: boolean;
     refreshRuntimeLayout?: boolean;
+    allowBoxWake?: boolean;
     instructions?: string | null;
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
     onBoxAssigned: (boxId: string | null) => Promise<void>;
   }): Promise<CompanionRuntimeObservation> {
+    const allowBoxWake = input.allowBoxWake !== false;
     const assigned = input.boxId ? await this.#getAssignedBox(input.boxId) : null;
     // A recorded id that names a machine this Companion does not own is treated as no assignment at
     // all, and the row is cleared so nothing else — a stop, a live status, a thread sync — reaches
@@ -1265,6 +1279,9 @@ exit 0`,
     if (assigned && !keptAssignment) await input.onBoxAssigned(null);
     if (!box) box = await this.#findCompanionBox(input.companionId);
     if (box && isBeyondRecovery(box)) {
+      if (!allowBoxWake) {
+        throw new BoxRuntimeProviderError("Box is no longer online; apply on the next wake", 409);
+      }
       // The assigned Box failed setup or died, so the Companion moves onto a new Box instead of
       // failing every future wake against the same broken disk.
       await this.#retireBox(box, input.companionId);
@@ -1273,6 +1290,9 @@ exit 0`,
     let boxIdPersisted = false;
     let replaceProviderAuth = input.replaceProviderAuth;
     if (!box) {
+      if (!allowBoxWake) {
+        throw new BoxRuntimeProviderError("Box is no longer online; apply on the next wake", 409);
+      }
       box = await this.#createCompanionBox(input);
       boxIdPersisted = true;
       // Pi's auth file lives on the Box disk, so a new disk needs it written whatever generation the
@@ -1280,6 +1300,9 @@ exit 0`,
       replaceProviderAuth = true;
     }
     if (box.state === "archived") {
+      if (!allowBoxWake) {
+        throw new BoxRuntimeProviderError("Box is asleep; apply on the next wake", 409);
+      }
       box = await this.#resume(box.id);
     } else if (box.state === "archiving") {
       throw new BoxRuntimeProviderError("Box is still archiving; retry start after it is archived", 409);
@@ -1309,6 +1332,7 @@ exit 0`,
     const first = await this.#firstCommand(
       box,
       !replaceProviderAuth && !input.refreshRuntimeLayout,
+      allowBoxWake,
     );
     box = first.box;
     if (first.warm) return observation(await this.#get(box.id), "running");

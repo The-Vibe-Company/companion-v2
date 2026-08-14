@@ -472,6 +472,7 @@ export function registerCompanionRoutes(
     c: Context<{ Variables: ApiVariables }>,
     companionId: string,
     body: StartCompanionRuntimeInput,
+    options: { allowBoxWake?: boolean } = {},
   ): Promise<{ companion: Companion; runtime: CompanionBoxRuntime }> {
     let failureContext:
       | {
@@ -559,6 +560,7 @@ export function registerCompanionRoutes(
             !== mutation.provider.credentialGeneration,
         refreshRuntimeLayout:
           mutation.companion.runtime.disk_layout_version !== COMPANION_PI_DISK_LAYOUT_VERSION,
+        allowBoxWake: options.allowBoxWake,
         mcpCredentials: body.client_surface === "native_mobile"
           ? []
           : [...mutation.plugins.credentials, ...body.mcp_credentials],
@@ -1152,6 +1154,7 @@ export function registerCompanionRoutes(
             c,
             companionId,
             startCompanionRuntimeInputSchema.parse({ client_surface: "web" }),
+            { allowBoxWake: false },
           );
           return c.json({ companion: started.companion });
         }
@@ -1383,7 +1386,7 @@ export function registerCompanionRoutes(
         return c.json({ thread, source: "control_plane" as const });
       }
       if (!providerAuthIsCurrent(resolved.companion, resolved.provider)) {
-        const started = await startRuntime(c, companionId, body);
+        const started = await startRuntime(c, companionId, body, { allowBoxWake: false });
         if (!started.companion.runtime.box_id) {
           throw new CompanionRuntimeTransitionError("companion start completed without a Box");
         }

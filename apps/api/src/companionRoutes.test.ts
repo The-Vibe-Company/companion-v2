@@ -492,6 +492,7 @@ describe("Companions API feature gate", () => {
       boxId: companion.runtime.box_id,
       providerAuth: { "openai-codex": { type: "oauth", access: "secret-b" } },
       replaceProviderAuth: true,
+      allowBoxWake: false,
     }));
   });
 
@@ -555,6 +556,7 @@ describe("Companions API feature gate", () => {
     expect(runtime.status).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
     expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
       replaceProviderAuth: true,
+      allowBoxWake: false,
     }));
   });
 
@@ -1632,6 +1634,7 @@ describe("Companions API feature gate", () => {
     expect(runtime.status).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
     expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
       replaceProviderAuth: true,
+      allowBoxWake: false,
     }));
     expect(runtime.start.mock.invocationCallOrder[0]!)
       .toBeLessThan(runtime.prompt.mock.invocationCallOrder[0]!);
@@ -1668,6 +1671,7 @@ describe("Companions API feature gate", () => {
     expect(runtime.status).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
     expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
       replaceProviderAuth: true,
+      allowBoxWake: false,
     }));
     expect(runtime.prompt).toHaveBeenCalledOnce();
   });

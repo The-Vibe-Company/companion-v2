@@ -592,6 +592,20 @@ describe("AsciiBoxCompanionRuntime", () => {
       });
     });
 
+    it("does not resume a Box that stops before an apply-only command runs", async () => {
+      const { fetchMock } = idleBoxRefusingCommands({ resumable: true, refusal: "envelope" });
+      const runtime = new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      });
+
+      await expect(runtime.start({ ...startInput, allowBoxWake: false })).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringContaining("did not run this apply command"),
+      });
+      expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
+    });
+
     it("returns a warm idle Box without resuming the machine its Pi is already running on", async () => {
       const commands: string[] = [];
       const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
@@ -2241,6 +2255,41 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(fetchMock.mock.calls.some(([url, init]) =>
       String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
+  });
+
+  it("refuses to resume an archived Box for an apply-only provider recycle", async () => {
+    const archived = {
+      ...box,
+      name: "Companion 11111111-1111-4111-8111-111111111111",
+      state: "archived",
+    };
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (url.endsWith("/boxes/bx_23456789") && (!init?.method || init.method === "GET")) {
+        return json({ box: archived });
+      }
+      throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    await expect(runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      allowBoxWake: false,
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    })).rejects.toMatchObject({ status: 409, message: expect.stringContaining("Box is asleep") });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("recovers a deterministically named archived Box before restarting Pi", async () => {
