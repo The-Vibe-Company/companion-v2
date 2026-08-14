@@ -16,6 +16,7 @@ export function CompanionProviderModelPicker({
   providerId,
   modelId,
   namePrefix,
+  descriptionId,
   disabled = false,
   onChange,
 }: {
@@ -23,6 +24,7 @@ export function CompanionProviderModelPicker({
   providerId: string;
   modelId: string;
   namePrefix: string;
+  descriptionId?: string;
   disabled?: boolean;
   onChange: (selection: { providerId: string; modelId: string }) => void;
 }) {
@@ -32,7 +34,11 @@ export function CompanionProviderModelPicker({
 
   return (
     <div className="companions-provider-model-picker">
-      <fieldset className="companions-picker" disabled={disabled}>
+      <fieldset
+        className="companions-picker"
+        disabled={disabled}
+        aria-describedby={descriptionId}
+      >
         <legend>1. Provider</legend>
         {providers.connections.map((connection) => (
           <label
@@ -59,7 +65,11 @@ export function CompanionProviderModelPicker({
         ))}
       </fieldset>
 
-      <fieldset className="companions-picker" disabled={disabled || !selectedProvider}>
+      <fieldset
+        className="companions-picker"
+        disabled={disabled || !selectedProvider}
+        aria-describedby={descriptionId}
+      >
         <legend>2. Model</legend>
         {selectedProvider?.models.map((model) => (
           <label

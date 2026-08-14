@@ -17,7 +17,16 @@ vi.mock("@/lib/companions", () => ({ updateCompanion, deleteCompanion }));
 
 const providers: CompanionProvidersResponse = {
   catalog: [
-    { id: "anthropic", name: "Claude", auth_methods: ["api_key"], description: "", models: [{ id: "claude-opus-4-8", name: "Claude Opus 4.8", default: true }] },
+    {
+      id: "anthropic",
+      name: "Claude",
+      auth_methods: ["api_key"],
+      description: "",
+      models: [
+        { id: "claude-opus-4-8", name: "Claude Opus 4.8", default: true },
+        { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+      ],
+    },
     { id: "openai-codex", name: "Codex", auth_methods: ["subscription"], description: "", models: [{ id: "gpt-5.5", name: "GPT-5.5", default: true }] },
   ],
   connections: [
@@ -176,7 +185,28 @@ describe("CompanionSettings", () => {
     const { container } = await mount("owner");
 
     expect(container.textContent).toContain("Claude Opus 4.8");
+    expect(container.textContent).toContain("Claude Sonnet 4.6");
     expect(container.textContent).not.toContain("GPT-5.5");
+  });
+
+  it("persists a non-default model without changing provider", async () => {
+    const { container } = await mount("editor");
+    const form = container.querySelector("form")!;
+    const sonnet = form.querySelector<HTMLInputElement>('input[value="claude-sonnet-4-6"]')!;
+
+    await act(async () => sonnet.click());
+    await act(async () => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    expect(updateCompanion).toHaveBeenCalledWith(
+      "org-1",
+      companion().id,
+      expect.objectContaining({
+        provider_id: "anthropic",
+        model_id: "claude-sonnet-4-6",
+      }),
+    );
   });
 
   it("shows both Kimi and z.ai when both workspace connections exist", async () => {

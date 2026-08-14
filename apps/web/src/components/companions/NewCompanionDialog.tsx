@@ -10,8 +10,8 @@ import {
 } from "./CompanionProviderModelPicker";
 
 /**
- * Creation is deliberately two fields plus one provider choice. Everything else about a Companion
- * is decided later, from the Companion itself.
+ * Creation is deliberately two fields plus provider and model choices. Everything else about a
+ * Companion is decided later, from the Companion itself.
  */
 export function NewCompanionDialog({
   orgId,
@@ -62,7 +62,7 @@ export function NewCompanionDialog({
     <Dialog
       icon="bot"
       title="New companion"
-      desc="A name, one line about what it does, and the model provider it runs on."
+      desc="A name, one line about what it does, then the provider and model it runs on."
       onClose={onClose}
       closeDisabled={busy}
       className="og-dialog companions-new-dialog"

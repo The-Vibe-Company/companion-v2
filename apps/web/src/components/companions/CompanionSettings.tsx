@@ -142,20 +142,19 @@ export function CompanionSettings({
             Applied the next time this Companion starts.
           </p>
 
-          <div aria-describedby="companion-provider-hint">
-            <CompanionProviderModelPicker
-              providers={providers}
-              providerId={providerId}
-              modelId={modelId}
-              namePrefix="companion-settings"
-              disabled={!canEdit || busy}
-              onChange={(selection) => {
-                setProviderId(selection.providerId);
-                setModelId(selection.modelId);
-                setSaved(false);
-              }}
-            />
-          </div>
+          <CompanionProviderModelPicker
+            providers={providers}
+            providerId={providerId}
+            modelId={modelId}
+            namePrefix="companion-settings"
+            descriptionId="companion-provider-hint"
+            disabled={!canEdit || busy}
+            onChange={(selection) => {
+              setProviderId(selection.providerId);
+              setModelId(selection.modelId);
+              setSaved(false);
+            }}
+          />
           <p className="companions-settings__hint" id="companion-provider-hint">
             If Online, changing provider or model recycles Pi. The Box stays online.
           </p>
