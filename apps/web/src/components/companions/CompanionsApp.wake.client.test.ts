@@ -215,6 +215,7 @@ async function openThread() {
       currentOrg: org,
       viewer: { id: "user-1", name: "Ada", email: "ada@example.test", initials: "A", avatarUrl: null },
       navigation,
+      skills: [],
       initialCompanions: [asleep],
       initialProviders: providers,
       initialPlugins: [],

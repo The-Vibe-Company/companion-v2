@@ -143,6 +143,7 @@ async function render(companions: Companion[], openedId: string | null = null) {
       currentOrg: org,
       viewer,
       navigation,
+      skills: [],
       initialCompanions: companions,
       initialProviders: providers,
       initialPlugins: [],

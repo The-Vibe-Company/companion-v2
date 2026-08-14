@@ -1,19 +1,19 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Companion, CompanionDesktop, CompanionThread as Thread } from "@companion/contracts";
 import { Icon } from "../Icon";
-import { CompanionComputer } from "./CompanionComputer";
+import { CompanionContext, type CompanionContextSkill } from "./CompanionContext";
 import { CompanionTranscript } from "./CompanionTranscript";
 import { companionBoxStatusLabel, companionStatus } from "./status";
 import { useVisualViewportPin } from "./useVisualViewportPin";
 
 /**
- * What the Computer panel beside the conversation is showing, and how a runner drives it. The mint
+ * What the context panel beside the conversation is showing, and how a runner drives it. The mint
  * itself belongs to the surface that owns the org and the open Companion, so this is the state it
  * hands down: a desktop is only ever the one minted for the join now on screen.
  */
-export interface CompanionComputerPanel {
+export interface CompanionContextPanel {
   open: boolean;
   desktop: CompanionDesktop | null;
   joining: boolean;
@@ -23,15 +23,16 @@ export interface CompanionComputerPanel {
 }
 
 /**
- * One Companion, one thread. The header carries the identity, the Box status chip, the Computer
- * toggle, and at most one lifecycle control; the conversation and the composer below it are the
- * assistant-ui primitives. The transcript is the control-plane read model, so a Viewer sees the
- * conversation without any Box contact and gets no composer. Pi's tools and skills stay out of this
- * surface by design.
+ * One Companion, one thread. The header carries the identity, the Box status chip, settings, the
+ * context toggle, and at most one lifecycle control; the conversation and the composer below it are
+ * the assistant-ui primitives. The transcript is the control-plane read model, so a Viewer sees the
+ * conversation without any Box contact and gets no composer. Pi's tools and skills stay out of the
+ * transcript by design.
  *
- * A runner can open the Computer panel beside the conversation to watch the Box desktop itself. It is
- * a second pane rather than a change to the transcript: the primitives keep the conversation, the
- * composer, and their own mechanics untouched whether the panel is open or not.
+ * A runner can open the context panel beside the conversation: the Box screen as a preview, the
+ * routines this Companion will keep, and the skills it may stage. It is a second pane rather than a
+ * change to the transcript: the primitives keep the conversation, the composer, and their own
+ * mechanics untouched whether the panel is open or not.
  */
 export function CompanionThread({
   companion,
@@ -41,7 +42,8 @@ export function CompanionThread({
   busy,
   waking,
   openingDesktop,
-  computer,
+  context,
+  contextSkills,
   newSince,
   onBack,
   onSend,
@@ -57,7 +59,9 @@ export function CompanionThread({
   busy: boolean;
   waking: boolean;
   openingDesktop: boolean;
-  computer: CompanionComputerPanel;
+  context: CompanionContextPanel;
+  /** Selected skills this surface can name; the panel counts the ones it cannot. */
+  contextSkills: CompanionContextSkill[];
   /** The newest line this reader had already seen when the thread was opened. */
   newSince?: string | null;
   onBack: () => void;
@@ -68,6 +72,7 @@ export function CompanionThread({
   onDesktop: () => void;
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const [overlay, setOverlay] = useState(false);
   const status = companionStatus(companion.runtime.state);
   const canSend = thread ? thread.can_send : companion.access !== "viewer";
   const awake = companion.runtime.state === "running";
@@ -76,9 +81,9 @@ export function CompanionThread({
   // keeps one control. A Viewer reads the same chip without the action: a sleeping Box has no
   // desktop, and a Viewer must never be handed anything that could start one.
   const canOpenDesktop = canSend && awake;
-  // Computer use in the thread is the same runner surface, and a Viewer never gets it: the panel
-  // cannot start a Box, but it must not offer a Viewer a control that looks as if it could.
-  const showComputer = canSend && computer.open;
+  // The context panel is a runner surface, and a Viewer never gets it: the screen preview cannot
+  // start a Box, but it must not offer a Viewer a control that looks as if it could.
+  const showContext = canSend && context.open;
   // A red status without a reason tells an operator nothing. The failure this request saw wins;
   // otherwise the reason recorded on the Companion explains an Error state across reloads.
   const notice = error ?? companion.runtime.last_error;
@@ -87,6 +92,30 @@ export function CompanionThread({
   useEffect(() => {
     headingRef.current?.focus();
   }, [companion.id]);
+
+  /**
+   * Whether the panel comes over the conversation rather than sitting beside it. An overlay is
+   * something to dismiss — Esc and the scrim close it — and a docked panel is not, so the surface has
+   * to know which one is on screen rather than offering a dismissal for a panel nobody is stuck under.
+   */
+  useEffect(() => {
+    const narrow = window.matchMedia("(max-width: 1023px)");
+    const sync = () => setOverlay(narrow.matches);
+    sync();
+    narrow.addEventListener("change", sync);
+    return () => narrow.removeEventListener("change", sync);
+  }, []);
+
+  useEffect(() => {
+    if (!showContext || !overlay) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      context.onToggle();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [context, overlay, showContext]);
 
   // A thread is the only Companions surface a phone keyboard opens over, so it is the only one that
   // has to follow the visual viewport.
@@ -147,13 +176,13 @@ export function CompanionThread({
         {canSend && (
           <button
             type="button"
-            className={"iconbtn chat-computer-toggle"
-              + (computer.open ? " chat-computer-toggle--on" : "")}
-            aria-label={computer.open ? "Hide the Computer panel" : "Show the Computer panel"}
-            aria-pressed={computer.open}
-            onClick={computer.onToggle}
+            className={"iconbtn chat-context-toggle"
+              + (context.open ? " chat-context-toggle--on" : "")}
+            aria-label={context.open ? "Hide the context panel" : "Show the context panel"}
+            aria-pressed={context.open}
+            onClick={context.onToggle}
           >
-            <Icon name="monitor" size={16} />
+            <Icon name="panel-right" size={16} />
           </button>
         )}
         {canSend && !awake && (
@@ -171,11 +200,11 @@ export function CompanionThread({
       {notice && <div className="companions-error" role="alert">{notice}</div>}
 
       {/*
-        The conversation and, for a runner who asked for it, the Computer panel share the room below
-        the header. A narrow screen has room for one of them, so there the panel takes the stage and
+        The conversation and, for a runner, the context panel share the room below the header. A
+        narrow screen has room for one of them, so there the panel comes over the conversation and
         the toggle in the header is how an operator moves between the two.
       */}
-      <div className={"chat-stage" + (showComputer ? " chat-stage--computer" : "")}>
+      <div className={"chat-stage" + (showContext ? " chat-stage--context" : "")}>
         {/*
           Keyed by Companion: the transcript owns the runtime and the composer, and a half-typed
           message belongs to the conversation it was meant for. Opening another Companion must hand
@@ -192,18 +221,28 @@ export function CompanionThread({
           onSend={onSend}
           onThread={onThread}
         />
-        {showComputer && (
-          <CompanionComputer
+        {showContext && overlay && (
+          <button
+            type="button"
+            className="chat-context-scrim"
+            aria-label="Hide the context panel"
+            onClick={context.onToggle}
+          />
+        )}
+        {showContext && (
+          <CompanionContext
             companion={companion}
-            desktop={computer.desktop}
-            joining={computer.joining}
-            error={computer.error}
+            desktop={context.desktop}
+            joining={context.joining}
+            error={context.error}
             openingDesktop={openingDesktop}
             waking={waking}
-            onJoin={computer.onJoin}
+            skills={contextSkills}
+            onJoin={context.onJoin}
             onDesktop={onDesktop}
             onWake={onWake}
-            onClose={computer.onToggle}
+            onSettings={onSettings}
+            onClose={context.onToggle}
           />
         )}
       </div>

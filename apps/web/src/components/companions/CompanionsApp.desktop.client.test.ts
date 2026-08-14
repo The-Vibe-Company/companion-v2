@@ -116,6 +116,9 @@ function thread(overrides: Partial<Thread> = {}): Thread {
 const roots: Root[] = [];
 
 async function open(initial: Companion, others: Companion[] = []) {
+  // The slow list poll re-reads every Companion; left unmocked against a different fixture it would
+  // hand the open thread somebody else's access a minute in.
+  companionsApi.listCompanions.mockResolvedValue([initial, ...others]);
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -126,6 +129,7 @@ async function open(initial: Companion, others: Companion[] = []) {
       currentOrg: org,
       viewer: { id: "user-1", name: "Ada", email: "ada@example.test", initials: "A", avatarUrl: null },
       navigation,
+      skills: [],
       initialCompanions: [initial, ...others],
       initialProviders: providers,
       initialPlugins: [],
@@ -143,9 +147,9 @@ async function clickBoxChip(container: HTMLElement) {
   return chip;
 }
 
-/** Open or close the Computer panel the way a runner does: the toggle in the thread header. */
-async function clickComputerToggle(container: HTMLElement) {
-  const toggle = container.querySelector(".chat-computer-toggle") as HTMLButtonElement | null;
+/** Open or close the context panel the way a runner does: the toggle in the thread header. */
+async function clickContextToggle(container: HTMLElement) {
+  const toggle = container.querySelector(".chat-context-toggle") as HTMLButtonElement | null;
   if (toggle) {
     await act(async () => {
       toggle.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -155,7 +159,7 @@ async function clickComputerToggle(container: HTMLElement) {
 }
 
 function panelFrame(container: HTMLElement) {
-  return container.querySelector(".chat-computer__frame") as HTMLIFrameElement | null;
+  return container.querySelector(".chat-context__frame") as HTMLIFrameElement | null;
 }
 
 function desktopPayload(url: string | null, overrides: Record<string, unknown> = {}) {
@@ -209,6 +213,9 @@ function deferredDesktop() {
 describe("CompanionsApp Box desktop", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // These cases are about what asking for the panel does, so they start from a closed one; the
+    // wide-screen default is covered on its own below.
+    window.localStorage.setItem("companions:context-open", "false");
     companionsApi.listCompanions.mockResolvedValue([companion()]);
     companionsApi.getCompanionThread.mockResolvedValue(thread());
     companionsApi.syncCompanionThread.mockResolvedValue(thread());
@@ -428,9 +435,12 @@ describe("CompanionsApp Box desktop", () => {
  * has already stopped working. A panel that replayed a stored URL would show a dead stream, and a
  * panel that kept one across a Box that stopped would show a screen belonging to nothing.
  */
-describe("CompanionsApp Computer panel", () => {
+describe("CompanionsApp context panel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // These cases are about what asking for the panel does, so they start from a closed one; the
+    // wide-screen default is covered on its own below.
+    window.localStorage.setItem("companions:context-open", "false");
     companionsApi.listCompanions.mockResolvedValue([companion()]);
     companionsApi.getCompanionThread.mockResolvedValue(thread());
     companionsApi.syncCompanionThread.mockResolvedValue(thread());
@@ -454,7 +464,7 @@ describe("CompanionsApp Computer panel", () => {
     expect(companionsApi.openCompanionDesktop).not.toHaveBeenCalled();
     expect(panelFrame(container)).toBeNull();
 
-    await clickComputerToggle(container);
+    await clickContextToggle(container);
 
     expect(companionsApi.openCompanionDesktop).toHaveBeenCalledWith("org-1", companionId);
     expect(panelFrame(container)?.getAttribute("src"))
@@ -471,12 +481,12 @@ describe("CompanionsApp Computer panel", () => {
     );
     const container = await open(companion());
 
-    await clickComputerToggle(container);
+    await clickContextToggle(container);
 
     // The panel never picks a transport; it names the one the mint got. Opening it is one join, so
     // a first stream that works is on screen without anybody pressing Reconnect.
     expect(companionsApi.openCompanionDesktop).toHaveBeenCalledTimes(1);
-    expect(container.querySelector(".chat-computer__transport")?.textContent).toBe("vnc");
+    expect(container.querySelector(".chat-context__transport")?.textContent).toBe("vnc");
     expect(panelFrame(container)?.getAttribute("src")).toContain("token=first");
   });
 
@@ -486,16 +496,16 @@ describe("CompanionsApp Computer panel", () => {
       .mockResolvedValueOnce(desktopPayload("https://box.ascii.dev/vnc/bx_23456789?token=second"));
     const container = await open(companion());
 
-    await clickComputerToggle(container);
+    await clickContextToggle(container);
 
     expect(panelFrame(container)?.getAttribute("src")).toContain("token=first");
 
     // Closing the panel drops the stream, and opening it again is a new join rather than a replay.
-    await clickComputerToggle(container);
+    await clickContextToggle(container);
 
     expect(panelFrame(container)).toBeNull();
 
-    await clickComputerToggle(container);
+    await clickContextToggle(container);
 
     expect(companionsApi.openCompanionDesktop).toHaveBeenCalledTimes(2);
     expect(panelFrame(container)?.getAttribute("src")).toContain("token=second");
@@ -505,7 +515,7 @@ describe("CompanionsApp Computer panel", () => {
     companionsApi.openCompanionDesktop.mockResolvedValue(desktopPayload(null));
     const container = await open(companion());
 
-    await clickComputerToggle(container);
+    await clickContextToggle(container);
 
     expect(panelFrame(container)).toBeNull();
     expect(container.textContent).toContain("The Box desktop is still starting");
@@ -515,7 +525,7 @@ describe("CompanionsApp Computer panel", () => {
     companionsApi.openCompanionDesktop.mockRejectedValue(new Error("Box is unreachable."));
     const container = await open(companion());
 
-    await clickComputerToggle(container);
+    await clickContextToggle(container);
 
     expect(container.textContent).toContain("Box is unreachable.");
     expect(container.textContent).not.toContain("token=");
@@ -533,7 +543,7 @@ describe("CompanionsApp Computer panel", () => {
     }));
     const container = await open(companion());
 
-    await clickComputerToggle(container);
+    await clickContextToggle(container);
 
     expect(panelFrame(container)?.getAttribute("src")).toContain("token=first");
 
@@ -558,14 +568,14 @@ describe("CompanionsApp Computer panel", () => {
     });
     const container = await open(asleep);
 
-    await clickComputerToggle(container);
+    await clickContextToggle(container);
 
     // Opening the panel on a sleeping Box mints nothing and starts nothing.
     expect(companionsApi.openCompanionDesktop).not.toHaveBeenCalled();
     expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
     expect(container.textContent).toContain("this Box is not running");
 
-    const wake = [...container.querySelectorAll(".chat-computer__actions button")]
+    const wake = [...container.querySelectorAll(".chat-context button")]
       .find((button) => (button.textContent ?? "").includes("Wake")) as HTMLButtonElement;
     await act(async () => {
       wake.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -589,7 +599,7 @@ describe("CompanionsApp Computer panel", () => {
       .mockResolvedValueOnce(desktopPayload("https://box.ascii.dev/vnc/bx_34567890?token=nova"));
     const container = await open(companion(), [other]);
 
-    await clickComputerToggle(container);
+    await clickContextToggle(container);
 
     expect(panelFrame(container)?.getAttribute("src")).toContain("token=luna");
 
@@ -619,7 +629,7 @@ describe("CompanionsApp Computer panel", () => {
       runtime: { ...companion().runtime, box_id: null, desktop_available: false },
     }));
 
-    const toggle = await clickComputerToggle(container);
+    const toggle = await clickContextToggle(container);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(60_000);
     });
@@ -628,5 +638,57 @@ describe("CompanionsApp Computer panel", () => {
     expect(panelFrame(container)).toBeNull();
     expect(companionsApi.openCompanionDesktop).not.toHaveBeenCalled();
     expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
+  });
+
+  it("keeps a runner's panel open by default on a screen with room for it", async () => {
+    // The panel is where a Companion's screen, routines, and skills live, so a wide screen shows it
+    // beside the conversation without being asked. What a stored choice says wins over that.
+    window.localStorage.removeItem("companions:context-open");
+    companionsApi.openCompanionDesktop.mockResolvedValue(
+      desktopPayload("https://box.ascii.dev/vnc/bx_23456789?token=first"),
+    );
+
+    const container = await open(companion());
+
+    expect(container.querySelector(".chat-context")).not.toBeNull();
+    expect(panelFrame(container)?.getAttribute("src")).toContain("token=first");
+    // Still only ever a read of a Box that is already running.
+    expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
+
+    // Closing it is remembered, so the next thread opens the way this one was left.
+    await clickContextToggle(container);
+    expect(window.localStorage.getItem("companions:context-open")).toBe("false");
+  });
+
+  it("names the skills a Companion stages and counts the ones this reader cannot see", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+    window.localStorage.removeItem("companions:context-open");
+    const staged = companion({
+      selected_skill_ids: [
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      ],
+    });
+    companionsApi.listCompanions.mockResolvedValue([staged]);
+    await act(async () => {
+      root.render(React.createElement(CompanionsApp, {
+        orgs: [org],
+        currentOrg: org,
+        viewer: { id: "user-1", name: "Ada", email: "ada@example.test", initials: "A", avatarUrl: null },
+        navigation,
+        skills: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", slug: "incident-summary" }],
+        initialCompanions: [staged],
+        initialProviders: providers,
+        initialPlugins: [],
+        initialCompanionId: companionId,
+      }));
+    });
+
+    expect(container.textContent).toContain("incident-summary");
+    // An id in somebody's personal library is counted rather than given a name it cannot prove.
+    expect(container.textContent).toContain("1 not visible to you");
   });
 });

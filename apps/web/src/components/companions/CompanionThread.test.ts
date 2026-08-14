@@ -2,7 +2,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Companion, CompanionThread as Thread } from "@companion/contracts";
 import { describe, expect, it } from "vitest";
-import { CompanionThread, type CompanionComputerPanel } from "./CompanionThread";
+import { CompanionThread, type CompanionContextPanel } from "./CompanionThread";
 
 const companionId = "11111111-1111-4111-8111-111111111111";
 
@@ -74,8 +74,8 @@ function thread(overrides: Partial<Thread> = {}): Thread {
   };
 }
 
-/** A closed Computer panel: what a thread opens with, and what most of these cases render. */
-function computerPanel(overrides: Partial<CompanionComputerPanel> = {}): CompanionComputerPanel {
+/** A closed context panel: what these cases render unless one asks for it open. */
+function contextPanel(overrides: Partial<CompanionContextPanel> = {}): CompanionContextPanel {
   return {
     open: false,
     desktop: null,
@@ -94,7 +94,7 @@ function render(props: {
   busy?: boolean;
   waking?: boolean;
   openingDesktop?: boolean;
-  computer?: Partial<CompanionComputerPanel>;
+  context?: Partial<CompanionContextPanel>;
   newSince?: string | null;
 }) {
   return renderToStaticMarkup(React.createElement(CompanionThread, {
@@ -104,7 +104,8 @@ function render(props: {
     busy: props.busy ?? false,
     waking: props.waking ?? false,
     openingDesktop: props.openingDesktop ?? false,
-    computer: computerPanel(props.computer),
+    context: contextPanel(props.context),
+    contextSkills: [],
     newSince: props.newSince ?? null,
     onBack: () => {},
     orgId: "org-1",

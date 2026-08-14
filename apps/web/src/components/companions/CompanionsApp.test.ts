@@ -84,6 +84,7 @@ function render(
     currentOrg: org,
     viewer: { id: "user-1", name: "Ada", email: "ada@example.test", initials: "A", avatarUrl: null },
     navigation,
+    skills: [],
     initialCompanions: companions,
     initialProviders: providers,
     initialPlugins: [{

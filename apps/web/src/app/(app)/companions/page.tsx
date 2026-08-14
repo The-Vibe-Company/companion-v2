@@ -101,12 +101,18 @@ export default async function CompanionsPage({
 
   const mineSkills = mineRows.map(mapSkill);
   const orgSkills = orgRows.map(mapSkill);
+  // What the context panel can name a Companion's attached skills by. An id not in here belongs to
+  // somebody else's personal library, and the panel counts it rather than guessing at a name.
+  const visibleSkills = [...new Map(
+    [...mineSkills, ...orgSkills].map((skill) => [skill.uuid, { id: skill.uuid, slug: skill.id }]),
+  ).values()];
   return (
     <CompanionsApp
       key={current.id}
       orgs={orgs}
       currentOrg={current}
       viewer={viewer}
+      skills={visibleSkills}
       initialCompanions={companionsResponse.companions}
       initialProviders={providers}
       initialPlugins={plugins.accounts}

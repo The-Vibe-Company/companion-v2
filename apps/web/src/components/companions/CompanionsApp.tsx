@@ -26,6 +26,7 @@ import { isUnread, markViewed, readViewed, type CompanionViewedMap } from "./unr
 import { CompanionProvidersDialog } from "./CompanionProvidersDialog";
 import { CompanionPlugins } from "./CompanionPlugins";
 import { CompanionSettings } from "./CompanionSettings";
+import type { CompanionContextSkill } from "./CompanionContext";
 import { CompanionThread } from "./CompanionThread";
 import { NewCompanionDialog } from "./NewCompanionDialog";
 import { ShareCompanionDialog } from "./ShareCompanionDialog";
@@ -88,6 +89,32 @@ function replaceCompanion(current: Companion[], next: Companion): Companion[] {
   return current.map((item) => item.id === next.id ? mergeCompanion(item, next) : item);
 }
 
+const CONTEXT_OPEN_KEY = "companions:context-open";
+
+/**
+ * Whether the context panel starts open. A wide screen has room for it beside the conversation, so
+ * that is the default there; on a narrow one the panel comes over the thread, so it waits to be asked
+ * for. An explicit choice, once made, wins over both.
+ */
+function readContextOpen(): boolean {
+  try {
+    const stored = window.localStorage.getItem(CONTEXT_OPEN_KEY);
+    if (stored === "true") return true;
+    if (stored === "false") return false;
+    return window.matchMedia("(min-width: 1024px)").matches;
+  } catch {
+    return false;
+  }
+}
+
+function writeContextOpen(open: boolean): void {
+  try {
+    window.localStorage.setItem(CONTEXT_OPEN_KEY, open ? "true" : "false");
+  } catch {
+    // A device that cannot remember the preference simply asks again next time.
+  }
+}
+
 function threadUrl(companionId: string | null): void {
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
@@ -104,6 +131,7 @@ export function CompanionsApp({
   currentOrg,
   viewer,
   navigation,
+  skills,
   initialCompanions,
   initialProviders,
   initialPlugins,
@@ -116,6 +144,8 @@ export function CompanionsApp({
   /** The signed-in reader: whose messages are their own, and whose face the footer row carries. */
   viewer: { id: string; name: string; email: string; initials: string; avatarUrl: string | null };
   navigation: CompanionNavigation;
+  /** Every skill this reader can see, so the context panel can name the ones a Companion stages. */
+  skills: CompanionContextSkill[];
   initialCompanions: Companion[];
   initialProviders: CompanionProvidersResponse;
   initialPlugins: CompanionPluginAccount[];
@@ -167,11 +197,13 @@ export function CompanionsApp({
   const [waking, setWaking] = useState(false);
   const [openingDesktop, setOpeningDesktop] = useState(false);
   /**
-   * Whether a runner asked for the Computer panel. It is a preference rather than a property of one
-   * Companion, so it survives moving between threads: an operator who wants to watch the screen wants
-   * to watch the next Companion's too.
+   * Whether a runner keeps the context panel beside the conversation. It is a preference rather than
+   * a property of one Companion, so it survives moving between threads and reloads: an operator who
+   * wants the screen, the routines, and the skills in view wants them for the next Companion too. It
+   * starts closed so server markup and the first client paint agree, and the stored preference — open
+   * unless it was closed — arrives once the client owns the page.
    */
-  const [computerOpen, setComputerOpen] = useState(false);
+  const [contextOpen, setContextOpen] = useState(false);
   /**
    * The one join the open panel is showing, and the Companion it was minted for. Box rotates the
    * stream token on every state change, so a desktop is held for exactly as long as the join that
@@ -182,7 +214,7 @@ export function CompanionsApp({
    * thread. Without it, opening another Companion would frame the previous one's screen — and its
    * secret-bearing URL — under the new Companion's name until the next mint answered.
    */
-  const [computerJoin, setComputerJoin] = useState<{
+  const [contextJoin, setContextJoin] = useState<{
     companionId: string;
     desktop: CompanionDesktop | null;
     error: string | null;
@@ -190,7 +222,7 @@ export function CompanionsApp({
   } | null>(null);
   const threadRequestRef = useRef(0);
   /** Newest panel join, so a slower mint cannot put its stream on screen after a newer one. */
-  const computerJoinRef = useRef(0);
+  const contextJoinRef = useRef(0);
   /** Newest runtime read per Companion, so a slower one cannot answer over it. */
   const companionReadRef = useRef(new Map<string, number>());
   const threadQueueRef = useRef(createThreadQueue());
@@ -318,6 +350,9 @@ export function CompanionsApp({
       }
     }
   }, [currentOrg.id, openedId]);
+
+  // Both preferences are per device, so they can only be read once the client owns the page.
+  useEffect(() => setContextOpen(readContextOpen()), []);
 
   // Read state is per device, so it can only be read once the client owns the page.
   useEffect(() => setViewed(readViewed(currentOrg.id)), [currentOrg.id]);
@@ -506,22 +541,22 @@ export function CompanionsApp({
   };
 
   /**
-   * One join of the Computer panel: mint this Companion's desktop and show it in the panel. It is the
-   * same authorized handoff the desktop tab uses, so it observes a Box that is already running and
-   * can never create or resume one — opening the panel is not a wake, and a Viewer never reaches it.
+   * One join of the context panel's screen: mint this Companion's desktop and show it in the panel.
+   * It is the same authorized handoff the desktop tab uses, so it observes a Box that is already
+   * running and can never create or resume one — the panel is not a wake, and a Viewer never sees it.
    *
    * The URL is minted for this join alone. It is held in state only while the panel shows it, so
    * nothing here can hand a later join a stream token Box has already rotated away.
    */
-  const joinComputer = useCallback(async () => {
+  const joinContext = useCallback(async () => {
     if (!openedId || !canRunOpened || !openedAwake) return;
     const companionId = openedId;
-    const joinId = ++computerJoinRef.current;
-    setComputerJoin({ companionId, desktop: null, error: null, joining: true });
+    const joinId = ++contextJoinRef.current;
+    setContextJoin({ companionId, desktop: null, error: null, joining: true });
     try {
       const minted = await openCompanionDesktop(currentOrg.id, companionId);
-      if (computerJoinRef.current !== joinId) return;
-      setComputerJoin({
+      if (contextJoinRef.current !== joinId) return;
+      setContextJoin({
         companionId,
         desktop: minted,
         error: minted.desktop_url
@@ -532,10 +567,10 @@ export function CompanionsApp({
         joining: false,
       });
     } catch (cause) {
-      if (computerJoinRef.current !== joinId) return;
+      if (contextJoinRef.current !== joinId) return;
       // The reason is kept on the panel rather than the thread: the live thread poll clears its own
       // notice every couple of seconds, which would erase this one before it could be read.
-      setComputerJoin({
+      setContextJoin({
         companionId,
         desktop: null,
         error: cause instanceof Error ? cause.message : "The Box desktop could not be reached.",
@@ -545,29 +580,29 @@ export function CompanionsApp({
   }, [canRunOpened, currentOrg.id, openedAwake, openedId]);
 
   /** Whether the panel has a running Box of a runner's to show, which is the only thing it streams. */
-  const computerLive = computerOpen && canRunOpened && openedAwake;
+  const contextLive = contextOpen && canRunOpened && openedAwake;
   /**
    * The join the panel may show right now, which is only ever the open Companion's. A join belonging
    * to the Companion an operator just left is not shown for the paint before its replacement is
    * minted: a panel that is live with nothing of this Companion's yet is a panel that is connecting.
    */
-  const openedComputer = computerJoin?.companionId === openedId ? computerJoin : null;
+  const openedContext = contextJoin?.companionId === openedId ? contextJoin : null;
 
   // Every join mints its own URL: opening the panel, moving to another Companion, and a Box that came
   // back up are each a fresh mint, because Box rotates the stream token on every state change and a
   // kept URL is one that has already stopped working.
   useEffect(() => {
-    if (!openedId || !computerLive) return;
-    void joinComputer();
-  }, [computerLive, joinComputer, openedId]);
+    if (!openedId || !contextLive) return;
+    void joinContext();
+  }, [contextLive, joinContext, openedId]);
 
   // A closed panel, a Companion left behind, and a Box that stopped under the stream all leave no
   // desktop: the URL goes with the join it belonged to, and an in-flight mint is disowned.
   useEffect(() => {
-    if (computerLive) return;
-    computerJoinRef.current += 1;
-    setComputerJoin(null);
-  }, [computerLive]);
+    if (contextLive) return;
+    contextJoinRef.current += 1;
+    setContextJoin(null);
+  }, [contextLive]);
 
   const onCreated = (companion: Companion) => {
     setCompanions((current) => [companion, ...current]);
@@ -727,14 +762,18 @@ export function CompanionsApp({
               busy={sending}
               waking={waking}
               openingDesktop={openingDesktop}
-              computer={{
-                open: computerOpen,
-                desktop: openedComputer?.desktop ?? null,
-                joining: openedComputer?.joining ?? computerLive,
-                error: openedComputer?.error ?? null,
-                onToggle: () => setComputerOpen((open) => !open),
-                onJoin: () => void joinComputer(),
+              context={{
+                open: contextOpen,
+                desktop: openedContext?.desktop ?? null,
+                joining: openedContext?.joining ?? contextLive,
+                error: openedContext?.error ?? null,
+                onToggle: () => setContextOpen((open) => {
+                  writeContextOpen(!open);
+                  return !open;
+                }),
+                onJoin: () => void joinContext(),
               }}
+              contextSkills={skills}
               newSince={newSince}
               onBack={closeThread}
               onSend={onSend}
