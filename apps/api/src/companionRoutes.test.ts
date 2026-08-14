@@ -1943,7 +1943,7 @@ describe("Companions API feature gate", () => {
     expect(runtimeFactory).not.toHaveBeenCalled();
   });
 
-  it("creates a Companion from a name, persona, connected provider, and pinned model", async () => {
+  it("creates a Companion from a name, persona, connected provider, and catalog model", async () => {
     const app = new Hono<{ Variables: ApiVariables }>();
     registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
 
@@ -1976,8 +1976,20 @@ describe("Companions API feature gate", () => {
       "PATCH",
       { provider_id: "anthropic", model_id: "glm-4.7" },
     ],
-  ])("rejects a model from another provider on %s", async (_name, path, method, body) => {
+  ])("returns the catalog service rejection for an unknown model on %s", async (
+    name,
+    path,
+    method,
+    body,
+  ) => {
     const app = new Hono<{ Variables: ApiVariables }>();
+    const error = new CompanionProviderError(
+      "provider_model_invalid",
+      "The model glm-4.7 is not available for Claude.",
+      "anthropic",
+    );
+    if (name === "create") coreMocks.createCompanion.mockRejectedValueOnce(error);
+    else coreMocks.updateCompanion.mockRejectedValueOnce(error);
     registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
 
     const response = await app.request(path, {
@@ -1986,9 +1998,9 @@ describe("Companions API feature gate", () => {
       body: JSON.stringify(body),
     });
 
-    expect(response.status).toBe(400);
-    expect(coreMocks.createCompanion).not.toHaveBeenCalled();
-    expect(coreMocks.updateCompanion).not.toHaveBeenCalled();
+    expect(response.status).toBe(422);
+    expect(name === "create" ? coreMocks.createCompanion : coreMocks.updateCompanion)
+      .toHaveBeenCalledOnce();
   });
 
   it("rejects a persona longer than the stored column allows", async () => {

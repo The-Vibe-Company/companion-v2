@@ -149,7 +149,7 @@ describe("Companion settings persistence and roles", () => {
     expect(reloaded.model_id).toBe("gpt-5.5");
   });
 
-  it("persists only a model pinned to the selected provider", async () => {
+  it("persists only a catalog model for the selected provider", async () => {
     const updated = await updateCompanion({
       actor: fixture.developer,
       orgId: fixture.orgA,
