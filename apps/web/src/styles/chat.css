@@ -1,0 +1,151 @@
+/* ============================================================================
+   chat.css — Tailwind, scoped to the Companion thread.
+
+   Every other page in this app is written in the hand-authored stylesheets this
+   file is imported after, and they are unlayered: they win over anything here.
+   That is why Tailwind arrives without its preflight — a global reset would
+   flatten fifteen stylesheets to fix one surface — and why the reset the
+   vendored assistant-ui components do need is re-stated under `.aui-scope`,
+   inside the `base` layer so a utility on the same element still wins.
+
+   The semantic names shadcn components are written against are bridged onto the
+   OKLCH tokens the rest of the app already uses, so dark mode and the four
+   accent presets keep working here with nothing to keep in sync.
+   ============================================================================ */
+
+@layer theme, base, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+@import "tw-animate-css";
+@import "tw-shimmer";
+@import "@assistant-ui/react-markdown/styles/dot.css";
+
+/* Only the chat surface is written in utilities, so only it is scanned. */
+@source "../components/assistant-ui";
+@source "../components/companions";
+@source "../components/ui";
+
+/* The app switches themes with an attribute on the root, not a class. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* The disclosure state Radix writes on a collapsible, as a variant the components can read. */
+@custom-variant data-open (&:where([data-state="open"], [data-open]:not([data-open="false"])));
+@custom-variant data-closed (&:where([data-state="closed"], [data-closed]:not([data-closed="false"])));
+
+/*
+ * The shadcn palette, in terms of the tokens tokens.css already defines. `accent` here is shadcn's
+ * hover surface, not the app's signal colour — the app accent is `primary`, which is what the send
+ * button and the focus ring resolve to.
+ */
+:root {
+  --background: var(--color-surface);
+  --foreground: var(--color-fg);
+  --card: var(--color-surface);
+  --card-foreground: var(--color-fg);
+  --popover: var(--color-surface-raised);
+  --popover-foreground: var(--color-fg);
+  --primary: var(--color-accent);
+  --primary-foreground: var(--color-accent-fg);
+  --secondary: var(--color-surface-raised);
+  --secondary-foreground: var(--color-fg);
+  --muted: var(--color-surface-sunken);
+  --muted-foreground: var(--color-muted);
+  --accent: var(--color-surface-raised);
+  --accent-foreground: var(--color-fg);
+  --destructive: var(--color-danger);
+  --destructive-foreground: var(--color-surface);
+  --border: var(--color-line);
+  --input: var(--color-line);
+  --ring: var(--color-accent-ring);
+}
+
+/*
+ * Inlined on purpose: a utility emits `var(--primary)` rather than a copy of its value, so switching
+ * the theme or the accent preset re-colours this surface with everything else.
+ *
+ * Radius, shadow, mono, and the text scale are deliberately absent: tokens.css already owns those
+ * names unlayered, so `rounded-lg`, `shadow-md`, and `text-sm` here resolve to the app's own scale.
+ */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --font-sans: var(--font-ui);
+}
+
+/*
+ * The parts of Tailwind's preflight the vendored components actually depend on, applied to the chat
+ * subtree only. `border: 0 solid` is load-bearing: every `border`, `border-t`, `border-b` utility in
+ * those components sets a width and nothing else, so without this they draw nothing.
+ */
+@layer base {
+  .aui-scope,
+  .aui-scope :where(*),
+  .aui-scope :where(*)::before,
+  .aui-scope :where(*)::after {
+    border: 0 solid var(--border);
+  }
+
+  .aui-scope :where(h1, h2, h3, h4, h5, h6, p, blockquote, figure, pre, hr, dl, dd) {
+    margin: 0;
+  }
+
+  .aui-scope :where(ol, ul) {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .aui-scope :where(button, input, textarea, select) {
+    font: inherit;
+    letter-spacing: inherit;
+    color: inherit;
+    background-color: transparent;
+    padding: 0;
+  }
+
+  .aui-scope :where(button) {
+    cursor: pointer;
+  }
+
+  .aui-scope :where(button:disabled) {
+    cursor: default;
+  }
+
+  .aui-scope :where(textarea) {
+    resize: vertical;
+  }
+
+  .aui-scope :where(::placeholder) {
+    color: var(--muted-foreground);
+    opacity: 1;
+  }
+
+  .aui-scope :where(img, video, canvas, svg) {
+    display: block;
+    max-width: 100%;
+    height: auto;
+  }
+
+  .aui-scope :where(table) {
+    border-collapse: collapse;
+    text-indent: 0;
+  }
+}

@@ -13,3 +13,5 @@
 @import "../styles/share.css";
 @import "../styles/secrets.css";
 @import "../styles/companions.css";
+/* Last on purpose: Tailwind is scoped to the thread and must layer over the rest. */
+@import "../styles/chat.css";
