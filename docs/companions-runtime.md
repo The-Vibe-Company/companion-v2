@@ -106,14 +106,17 @@ and nothing else; no automation other than Lux may be introduced through it.
 
 Every request mints a fresh URL, because Box rotates the stream token on every Box state change and a
 kept URL is one that has already stopped working. The mint asks `POST /boxes/{id}/desktop?vnc=1`
-first: the VNC stream is a plain WebSocket that still reaches a Box from a network blocking
-peer-to-peer traffic, and it answers `provisioning` before it answers with a URL, so the mint polls
-that answer inside a short budget rather than reporting a Box with no desktop. `POST
-/boxes/{id}/desktop` is the WebRTC fallback, used when Box has no VNC stream to give and when a
-provider build refuses the flag outright, so a refused query parameter cannot take computer use down
-with it. The response names which stream a join got in `transport`. The mint never creates or resumes
-a Box: a Box outside `ready`, `idle`, or `running` is refused before any stream is minted for it,
-which is what keeps opening a desktop surface from being a wake.
+first and prefers that answer for the whole budget: the VNC stream is a plain WebSocket that still
+reaches a Box from a network blocking peer-to-peer traffic, and it is the stream a panel can show. A
+VNC read with no URL in it is a stream Box has not finished bringing up, whether or not the read also
+says `provisioning`, so the mint keeps polling it, and so is a poll that failed on a moment the next
+one can find resolved — a busy, timed-out, rate-limited, or server-side answer. `POST
+/boxes/{id}/desktop` is the WebRTC fallback and is reached only two ways: the provider refuses
+`?vnc=1` outright, so a build that does not know the flag cannot take computer use down with it, or
+the budget runs out with no VNC URL to show for it. A WebRTC URL is never taken because it arrived
+sooner; the two streams are never raced. The response names which stream a join got in `transport`.
+The mint never creates or resumes a Box: a Box outside `ready`, `idle`, or `running` is refused
+before any stream is minted for it, which is what keeps opening a desktop surface from being a wake.
 
 The web chat header carries that boundary as one chip. It reads `Box · online`, `Box · starting`,
 `Box · asleep`, or `Box · error` from the same runtime state the list and sidebar show, and for an
@@ -570,8 +573,8 @@ Optional settings:
 - `COMPANION_BOX_TTL_SECONDS` (default `21600`)
 - `COMPANION_BOX_POLL_INTERVAL_MS` (default `1000`)
 - `COMPANION_BOX_READY_TIMEOUT_MS` (default `120000`)
-- `COMPANION_BOX_DESKTOP_MINT_BUDGET_MS` (default `15000`) — how long one desktop mint waits for a VNC
-  stream Box is still bringing up before it tries the WebRTC fallback
+- `COMPANION_BOX_DESKTOP_MINT_BUDGET_MS` (default `15000`) — how long one desktop mint keeps asking
+  for a VNC stream Box has not produced yet before it settles for the WebRTC fallback
 - `COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS` (default `20000`)
 - `COMPANION_PI_INSTALL_COMMAND`
 - `COMPANION_PI_MCP_ADAPTER_PACKAGE` (default pinned to `npm:pi-mcp-adapter@2.12.1`)

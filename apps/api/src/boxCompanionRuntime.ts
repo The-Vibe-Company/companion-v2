@@ -117,11 +117,21 @@ const STAGED_ARCHIVE_SIZE_LABEL = "companion-archive-bytes";
 const STAGED_ARCHIVE_MEASURE_TIMEOUT_SECONDS = 10;
 /**
  * How long one desktop mint may spend waiting for Box to finish bringing up the VNC stream of a Box
- * that is already running. A person is watching a panel for the screen to appear, so the budget is
- * short enough that a stream which is not coming is reported instead of held: the surface says the
- * desktop is still starting and the next join tries again.
+ * that is already running. The whole budget belongs to VNC: the WebRTC fallback is what a mint
+ * settles for once this has run out, never what it takes because it answered sooner. A person is
+ * watching a panel for the screen to appear, so the budget is short enough that a stream which is
+ * not coming is reported instead of held: the surface says the desktop is still starting and the
+ * next join tries again.
  */
 const BOX_DESKTOP_MINT_BUDGET_MS = 15_000;
+/**
+ * Box answers a mint asks again about, rather than answers that say this build has no VNC to give.
+ * A desktop the provider is busy with, a request it timed out on, and one it rate-limited are all
+ * states the next poll can find resolved; every other refusal of `?vnc=1` is about the flag itself
+ * and is the same on every poll, so it is read as the fallback's cue instead of spending the budget.
+ */
+const VNC_RETRYABLE_STATUSES = new Set([408, 409, 425, 429]);
+
 
 export type BoxState =
   | "init"
@@ -623,16 +633,38 @@ function desktopEnvelopeUrl(envelope: DesktopEnvelope): string | null {
 }
 
 /**
+ * Whether one failed `?vnc=1` call means this Box has no VNC stream to offer at all.
+ *
+ * Only the provider's own refusals are read that way, and only the ones that say something about
+ * the request rather than about the moment it arrived: a build that does not know the flag answers
+ * the same way however long a mint keeps asking, so spending the budget on it only delays the
+ * fallback. Everything else — a transport fault, a timeout, a server error, a retryable status —
+ * is one bad moment inside a budget that still has room to ask again, and reading those as a
+ * refusal is what would hand a panel a WebRTC URL over a VNC stream that was about to work.
+ */
+function isVncRefusal(error: unknown): boolean {
+  if (!(error instanceof BoxRuntimeProviderError)) return false;
+  return error.status < 500 && !VNC_RETRYABLE_STATUSES.has(error.status);
+}
+
+/**
  * Mint one fresh desktop URL for a Box that is already running.
  *
  * The stream token rotates on every Box state change, so there is no such thing as a desktop URL
  * worth keeping: each join mints its own, and none of them is ever stored. VNC is asked for first
  * because it is a plain WebSocket stream that still reaches a Box from a network which blocks
- * peer-to-peer traffic, and it answers `provisioning` before it answers with a URL, so a first read
- * without one is polled rather than reported as a Box with no desktop. WebRTC is the fallback: it is
- * what Box offers when a Box has no VNC stream to give, and it is also the whole answer for a
- * provider build that does not know the `vnc` flag at all — that refusal must not take computer use
- * down with it, so it is only reported when the fallback has nothing either.
+ * peer-to-peer traffic, and it is the stream the panel can actually show.
+ *
+ * VNC is not merely asked first, it is preferred for the whole budget: a read with no URL in it is
+ * a stream Box has not finished bringing up, whether or not that read also says `provisioning`, so
+ * it is polled rather than read as a Box with no VNC. Production proved why the flag alone cannot
+ * decide it — a first join was handed WebRTC, whose URL arrives at once and then never becomes a
+ * picture, while the reconnect a moment later got the VNC stream that had been coming all along.
+ *
+ * WebRTC is what a mint settles for, never what it prefers, so it is asked exactly twice over: once
+ * when the provider refuses `?vnc=1` outright, because a build that does not know the flag must not
+ * take computer use down with it, and once when the budget runs out with no VNC URL to show for it.
+ * A URL it returns before either of those has happened is a URL this mint never asked for.
  *
  * This is a decision about two answers and a clock rather than about Box itself, so the calls, the
  * poll interval, and the budget are all handed in: the arithmetic has to hold for a stream that
@@ -648,19 +680,22 @@ export async function mintBoxDesktopUrl(input: {
   const now = input.now ?? Date.now;
   const deadline = now() + input.budgetMs;
   let provisioning = false;
-  let vncRefusal: unknown;
+  let vncFailure: unknown;
   for (;;) {
-    let read: DesktopEnvelope;
     try {
-      read = await input.vnc();
+      const read = await input.vnc();
+      const url = desktopEnvelopeUrl(read);
+      if (url) return { url, provisioning: false, transport: "vnc" };
+      // A Box that said it is bringing a stream up said so about this join, so the surface is told
+      // the desktop is still starting even if a later read stopped saying it.
+      provisioning ||= read.provisioning === true;
+      // This poll reached Box and was answered, so whatever an earlier poll failed with is no
+      // longer this mint's reason for anything.
+      vncFailure = undefined;
     } catch (error) {
-      vncRefusal = error;
-      break;
+      vncFailure = error;
+      if (isVncRefusal(error)) break;
     }
-    const url = desktopEnvelopeUrl(read);
-    if (url) return { url, provisioning: false, transport: "vnc" };
-    provisioning = read.provisioning === true;
-    if (!provisioning) break;
     await input.pause();
     // The budget is spent by waiting, so it is checked after the wait: a poll is never made past a
     // deadline the previous interval already crossed.
@@ -668,11 +703,11 @@ export async function mintBoxDesktopUrl(input: {
   }
   const fallback = await input.webrtc().catch((error: unknown) => {
     // Two refusals, one report: the VNC one is the reason this mint went looking for a fallback.
-    throw vncRefusal ?? error;
+    throw vncFailure ?? error;
   });
   const url = desktopEnvelopeUrl(fallback);
   if (url) return { url, provisioning: false, transport: "webrtc" };
-  if (vncRefusal) throw vncRefusal;
+  if (vncFailure) throw vncFailure;
   return {
     url: null,
     provisioning: provisioning || fallback.provisioning === true,
