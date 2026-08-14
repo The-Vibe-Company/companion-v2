@@ -210,6 +210,7 @@ async function openThread(who: Companion = companion) {
     root.render(React.createElement(CompanionsApp, {
       orgs: [org],
       currentOrg: org,
+      viewer: { id: "user-1", name: "Ada", email: "ada@example.test", initials: "A", avatarUrl: null },
       navigation,
       initialCompanions: [who],
       initialProviders: providers,

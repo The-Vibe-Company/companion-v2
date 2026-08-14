@@ -4,6 +4,8 @@ import { useEffect, useRef, useState, type CSSProperties, type PointerEvent, typ
 import type { LabelColor, LabelIcon } from "@companion/contracts";
 import { LABEL_COLORS, LABEL_ICONS, labelDisplayNameToPath } from "@companion/contracts";
 import { Icon } from "../Icon";
+import { UserAvatar } from "../UserAvatar";
+import { RelativeTime } from "../companions/RelativeTime";
 import { OrgSwitcher } from "../org/OrgSwitcher";
 import type { OrgVM } from "@/lib/types";
 import type { SkillsLibrary } from "./route";
@@ -23,6 +25,20 @@ export type SidebarCompanion = {
   /** Short status word already paired with the dot colour, never colour alone. */
   status: string;
   tone: "ok" | "warn" | "danger" | "unknown";
+  /** One line of the newest thing said on this thread; null when nobody has written in it. */
+  preview: string | null;
+  /** When that line was written, so the row can say how long ago. */
+  previewAt: string | null;
+  /** Someone else has written since this reader last opened the thread. */
+  unread: boolean;
+};
+
+/** The signed-in reader, for the footer row that names whose workspace this is. */
+export type SidebarViewer = {
+  name: string;
+  email: string;
+  initials: string;
+  avatarUrl: string | null;
 };
 
 function labelParent(path: string): string | null {
@@ -496,6 +512,9 @@ export function Sidebar({
   companions = [],
   activeCompanionId = null,
   onSelectCompanion = () => {},
+  onOpenPlugins,
+  pluginsActive = false,
+  viewer = null,
   navigationOnly = false,
   localActive,
   localUpdateCount,
@@ -552,6 +571,11 @@ export function Sidebar({
   companions?: SidebarCompanion[];
   activeCompanionId?: string | null;
   onSelectCompanion?: (companionId: string) => void;
+  /** Companions mode only: the Plugins surface, reachable without leaving an open thread. */
+  onOpenPlugins?: () => void;
+  pluginsActive?: boolean;
+  /** Companions mode only: the signed-in reader, shown in the footer beside the settings action. */
+  viewer?: SidebarViewer | null;
   /** Render the complete shared navigation without exposing label mutation affordances. */
   navigationOnly?: boolean;
   localActive: boolean;
@@ -730,13 +754,27 @@ export function Sidebar({
                   >
                     <span className="cmprow__avatar" aria-hidden="true">
                       {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
-                    </span>
-                    <span className="cmprow__name">{companion.name}</span>
-                    {/* The dot never stands alone: the word rides with it, and the collapsed rail
-                        keeps it in the button's accessible name. */}
-                    <span className="cmprow__status" aria-hidden="true">
+                      {/* Presence sits on the face it belongs to, the way a conversation list reads.
+                          It is never the only carrier: the word rides in the row's accessible name
+                          and, below, as text a screen reader reaches. */}
                       <i className={`cmprow__dot cmprow__dot--${companion.tone}`} />
-                      <span className="cmprow__statusword">{companion.status}</span>
+                    </span>
+                    <span className="cmprow__body">
+                      <span className="cmprow__line">
+                        <span className="cmprow__name">{companion.name}</span>
+                        {companion.previewAt && (
+                          <RelativeTime className="cmprow__time" iso={companion.previewAt} />
+                        )}
+                      </span>
+                      <span className="cmprow__preview">
+                        {companion.preview ?? "No messages yet"}
+                      </span>
+                    </span>
+                    {/* Outside the body so the collapsed rail, which drops the text, still shows
+                        that something is waiting. */}
+                    {companion.unread && <i className="cmprow__unread" aria-hidden="true" />}
+                    <span className="cmprow__statusword sr-only">
+                      {companion.unread ? `${companion.status}, Unread` : companion.status}
                     </span>
                   </button>
                 );
@@ -942,16 +980,52 @@ export function Sidebar({
           <span className="navitem__count tnum">{archivedCount}</span>
         </button>
       </nav>
-      <button
-        className="side__foot side__foot--btn"
-        onFocus={warmSettings}
-        onMouseDown={warmSettings}
-        onClick={() => runAndClose(() => onOpenSettings())}
-        onPointerEnter={warmSettings}
-        title="Settings"
-      >
-        <Icon name="settings" size={14} /> <span className="side__foot__label">Settings</span>
-      </button>
+      {companionsMode && onOpenPlugins && (
+        <button
+          className={"navitem side__plugins" + (pluginsActive ? " navitem--active" : "")}
+          aria-current={pluginsActive ? "page" : undefined}
+          onClick={() => runAndClose(() => onOpenPlugins())}
+          title="Plugins"
+        >
+          <span className="navitem__ico">
+            <Icon name="plug-zap" />
+          </span>
+          <span className="navitem__label">Plugins</span>
+        </button>
+      )}
+      {companionsMode && viewer ? (
+        // The reader's own row is the settings entry in Companions mode: one control, named for the
+        // person it belongs to, rather than a face that does nothing beside a word that does.
+        <button
+          className="side__foot side__foot--btn side__me"
+          onFocus={warmSettings}
+          onMouseDown={warmSettings}
+          onClick={() => runAndClose(() => onOpenSettings())}
+          onPointerEnter={warmSettings}
+          aria-label="Settings"
+          title="Settings"
+        >
+          <UserAvatar
+            className="avatar side__me__av"
+            avatarUrl={viewer.avatarUrl}
+            initials={viewer.initials}
+            size={24}
+          />
+          <span className="side__foot__label side__me__name">{viewer.name}</span>
+          <Icon name="settings" size={14} />
+        </button>
+      ) : (
+        <button
+          className="side__foot side__foot--btn"
+          onFocus={warmSettings}
+          onMouseDown={warmSettings}
+          onClick={() => runAndClose(() => onOpenSettings())}
+          onPointerEnter={warmSettings}
+          title="Settings"
+        >
+          <Icon name="settings" size={14} /> <span className="side__foot__label">Settings</span>
+        </button>
+      )}
       {!navigationOnly && menu && (
         <LabelMenu
           row={menu.row}

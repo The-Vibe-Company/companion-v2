@@ -14,6 +14,7 @@ import { deriveTreeRows } from "@/components/skills/sidebarTree";
 import { serverApiFetch } from "@/lib/apiServer";
 import { loadOrgContext } from "@/lib/currentOrg";
 import { loadServerAuth } from "@/lib/serverAuth";
+import { initialsOf } from "@/lib/settingsViewModel";
 import { mapSkill } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -34,7 +35,10 @@ export default async function CompanionsPage({
   const initialPluginsOpen = resolvedSearchParams.view === "plugins";
 
   const authState = await loadServerAuth<{
-    email?: string | null;
+    userId: string;
+    email: string;
+    name?: string | null;
+    avatarUrl?: string | null;
     needsOnboarding?: boolean;
   }>();
   if (authState.status === "unauthenticated") redirect("/login");
@@ -86,6 +90,15 @@ export default async function CompanionsPage({
     notFound();
   }
 
+  const viewerName = authState.user.name || authState.user.email || "You";
+  const viewer = {
+    id: authState.user.userId,
+    name: viewerName,
+    email: authState.user.email,
+    initials: initialsOf(viewerName),
+    avatarUrl: authState.user.avatarUrl ?? null,
+  };
+
   const mineSkills = mineRows.map(mapSkill);
   const orgSkills = orgRows.map(mapSkill);
   return (
@@ -93,6 +106,7 @@ export default async function CompanionsPage({
       key={current.id}
       orgs={orgs}
       currentOrg={current}
+      viewer={viewer}
       initialCompanions={companionsResponse.companions}
       initialProviders={providers}
       initialPlugins={plugins.accounts}

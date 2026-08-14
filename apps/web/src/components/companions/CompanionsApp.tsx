@@ -13,6 +13,7 @@ import type { OrgVM } from "@/lib/types";
 import {
   getCompanionRuntime,
   getCompanionThread,
+  listCompanions,
   openCompanionDesktop,
   sendCompanionMessage,
   setCompanionProvider,
@@ -20,13 +21,15 @@ import {
   syncCompanionThread,
 } from "@/lib/companions";
 import { Icon } from "../Icon";
+import { RelativeTime } from "./RelativeTime";
+import { isUnread, markViewed, readViewed, type CompanionViewedMap } from "./unread";
 import { CompanionProvidersDialog } from "./CompanionProvidersDialog";
 import { CompanionPlugins } from "./CompanionPlugins";
 import { CompanionSettings } from "./CompanionSettings";
 import { CompanionThread } from "./CompanionThread";
 import { NewCompanionDialog } from "./NewCompanionDialog";
 import { ShareCompanionDialog } from "./ShareCompanionDialog";
-import { companionStatus, relativeTime } from "./status";
+import { companionStatus } from "./status";
 import { createThreadQueue } from "./threadQueue";
 import { Onboarding } from "../org/Onboarding";
 import { useOrgActions } from "../org/useOrgActions";
@@ -51,6 +54,12 @@ const BOX_STATUS_POLL_MS = 15_000;
  * sent. This is the control-plane projection, so it never resumes a Box and is safe for a Viewer.
  */
 const PENDING_POLL_MS = 3_000;
+/**
+ * How often the conversation list re-reads every thread's last line. It is slow on purpose: this is
+ * the sidebar, not the open thread, and it is the control-plane read model, so it never contacts or
+ * wakes a Box for any Companion — including the ones nobody has opened.
+ */
+const LIST_POLL_MS = 45_000;
 
 export interface CompanionNavigation {
   mineTreeRows: TreeRow[];
@@ -63,11 +72,20 @@ export interface CompanionNavigation {
   archivedCount: number;
 }
 
-/** Server markup keeps the stable ISO day; the relative form appears once the client owns the clock. */
-function UpdatedAt({ iso }: { iso: string }) {
-  const [text, setText] = useState(() => iso.slice(0, 10));
-  useEffect(() => setText(relativeTime(iso)), [iso]);
-  return <time className="companions-row__time" dateTime={iso}>{text}</time>;
+/**
+ * Keep a preview a response did not carry. Every mutation answers about the settings it just wrote
+ * and reports `last_message: null`, so replacing a row wholesale would blank the line the sidebar is
+ * showing until the next list poll. The projection only ever arrives from a read, so a null here
+ * means "not answered", never "the thread is empty".
+ */
+function mergeCompanion(previous: Companion, next: Companion): Companion {
+  return next.last_message === null && previous.last_message !== null
+    ? { ...next, last_message: previous.last_message }
+    : next;
+}
+
+function replaceCompanion(current: Companion[], next: Companion): Companion[] {
+  return current.map((item) => item.id === next.id ? mergeCompanion(item, next) : item);
 }
 
 function threadUrl(companionId: string | null): void {
@@ -84,6 +102,7 @@ function threadUrl(companionId: string | null): void {
 export function CompanionsApp({
   orgs,
   currentOrg,
+  viewer,
   navigation,
   initialCompanions,
   initialProviders,
@@ -94,6 +113,8 @@ export function CompanionsApp({
 }: {
   orgs: OrgVM[];
   currentOrg: OrgVM;
+  /** The signed-in reader: whose messages are their own, and whose face the footer row carries. */
+  viewer: { id: string; name: string; email: string; initials: string; avatarUrl: string | null };
   navigation: CompanionNavigation;
   initialCompanions: Companion[];
   initialProviders: CompanionProvidersResponse;
@@ -128,6 +149,12 @@ export function CompanionsApp({
   );
   const [thread, setThread] = useState<Thread | null>(null);
   const [threadError, setThreadError] = useState<string | null>(null);
+  /**
+   * When this reader last had each thread open. Server markup cannot know it — it is per device —
+   * so the map starts empty and the store is read once the client is mounted, which also keeps the
+   * first paint identical on both sides.
+   */
+  const [viewed, setViewed] = useState<CompanionViewedMap>({});
   /**
    * Why the last desktop handoff opened nothing. It is kept apart from `threadError` because the
    * live thread poll clears that one every couple of seconds, which would erase this answer before
@@ -191,9 +218,18 @@ export function CompanionsApp({
   const sidebarCompanions = useMemo(
     () => companions.map((companion) => {
       const status = companionStatus(companion.runtime.state);
-      return { id: companion.id, name: companion.name, status: status.label, tone: status.tone };
+      return {
+        id: companion.id,
+        name: companion.name,
+        status: status.label,
+        tone: status.tone,
+        preview: companion.last_message?.preview ?? null,
+        previewAt: companion.last_message?.created_at ?? null,
+        // The thread on screen is being read right now, so it is never the one with a dot on it.
+        unread: companion.id !== openedId && isUnread(companion, viewer.id, viewed),
+      };
     }),
-    [companions],
+    [companions, openedId, viewed, viewer.id],
   );
 
   const visible = useMemo(() => {
@@ -265,6 +301,14 @@ export function CompanionsApp({
       if (next && requestId === threadRequestRef.current) {
         setThread(next);
         setThreadError(null);
+        // Reading the thread is what marks it read, and it is marked up to the line that was
+        // actually on screen rather than to "now", so a message that lands a moment later still
+        // arrives as unread.
+        setViewed(markViewed(
+          currentOrg.id,
+          openedId,
+          next.entries.at(-1)?.created_at ?? new Date().toISOString(),
+        ));
       }
     } catch (cause) {
       if (requestId === threadRequestRef.current) {
@@ -272,6 +316,33 @@ export function CompanionsApp({
       }
     }
   }, [currentOrg.id, openedId]);
+
+  // Read state is per device, so it can only be read once the client owns the page.
+  useEffect(() => setViewed(readViewed(currentOrg.id)), [currentOrg.id]);
+
+  /**
+   * The conversation list re-reads every thread's last line on a slow cadence. It is the
+   * control-plane read model — the same list the page was rendered from — so it never contacts a Box
+   * and never wakes one, whatever state the Companions in it are in.
+   *
+   * The open thread does not depend on this: sending re-reads its Companion, and a runner watching an
+   * awake Box re-reads it every few seconds, and both of those reads now carry the preview.
+   */
+  useEffect(() => {
+    const timer = setInterval(() => {
+      void listCompanions(currentOrg.id)
+        .then((latest) => setCompanions((current) => {
+          const byId = new Map(current.map((item) => [item.id, item]));
+          return latest.map((item) => {
+            const previous = byId.get(item.id);
+            return previous ? mergeCompanion(previous, item) : item;
+          });
+        }))
+        // A list that could not be re-read keeps the rows it has; nothing on screen is wrong yet.
+        .catch(() => {});
+    }, LIST_POLL_MS);
+    return () => clearInterval(timer);
+  }, [currentOrg.id]);
 
   useEffect(() => {
     if (!openedId) return;
@@ -302,7 +373,7 @@ export function CompanionsApp({
     try {
       const latest = await getCompanionRuntime(currentOrg.id, companionId, { live });
       if (companionReadRef.current.get(companionId) !== readId) return;
-      setCompanions((current) => current.map((item) => item.id === latest.id ? latest : item));
+      setCompanions((current) => replaceCompanion(current, latest));
     } catch {
       // The failure that prompted this read is already on screen; do not replace it with this one.
     }
@@ -363,7 +434,7 @@ export function CompanionsApp({
     setThreadError(null);
     try {
       const updated = await startCompanionRuntime(currentOrg.id, companionId);
-      setCompanions((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setCompanions((current) => replaceCompanion(current, updated));
       await refreshThread(true);
     } catch (cause) {
       setThreadError(cause instanceof Error ? cause.message : "This Companion could not be woken.");
@@ -503,7 +574,7 @@ export function CompanionsApp({
     setError(null);
     try {
       const updated = await setCompanionProvider(currentOrg.id, companion.id, fallbackProvider);
-      setCompanions((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setCompanions((current) => replaceCompanion(current, updated));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Provider could not be set.");
     } finally {
@@ -589,6 +660,9 @@ export function CompanionsApp({
           if (mode === "skills") router.push("/skills");
         }}
         companions={sidebarCompanions}
+        onOpenPlugins={openPlugins}
+        pluginsActive={pluginsOpen}
+        viewer={viewer}
         activeCompanionId={openedId ?? settingsId}
         onSelectCompanion={(companionId) => {
           const companion = companions.find((item) => item.id === companionId);
@@ -664,8 +738,7 @@ export function CompanionsApp({
             providers={providers}
             onBack={closeSettings}
             onSaved={(updated) => {
-              setCompanions((current) =>
-                current.map((item) => item.id === updated.id ? updated : item));
+              setCompanions((current) => replaceCompanion(current, updated));
             }}
             onDeleted={(companionId) => {
               setCompanions((current) => current.filter((item) => item.id !== companionId));
@@ -780,7 +853,7 @@ export function CompanionsApp({
                             <i aria-hidden="true" />
                             {status.label}
                           </span>
-                          <UpdatedAt iso={companion.updated_at} />
+                          <RelativeTime className="companions-row__time" iso={companion.updated_at} />
                           <span className="companions-row-actions">
                             <span className="companions-role">{companion.access}</span>
                             <button

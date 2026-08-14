@@ -16,6 +16,7 @@ vi.mock("next/navigation", () => ({ useRouter: () => ({ push: () => {}, refresh:
 
 const companionsApi = vi.hoisted(() => ({
   getCompanionRuntime: vi.fn(),
+  listCompanions: vi.fn(),
   getCompanionThread: vi.fn(),
   openCompanionDesktop: vi.fn(),
   sendCompanionMessage: vi.fn(),
@@ -123,6 +124,7 @@ async function open(initial: Companion, others: Companion[] = []) {
     root.render(React.createElement(CompanionsApp, {
       orgs: [org],
       currentOrg: org,
+      viewer: { id: "user-1", name: "Ada", email: "ada@example.test", initials: "A", avatarUrl: null },
       navigation,
       initialCompanions: [initial, ...others],
       initialProviders: providers,
@@ -207,6 +209,7 @@ function deferredDesktop() {
 describe("CompanionsApp Box desktop", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    companionsApi.listCompanions.mockResolvedValue([companion()]);
     companionsApi.getCompanionThread.mockResolvedValue(thread());
     companionsApi.syncCompanionThread.mockResolvedValue(thread());
     companionsApi.getCompanionRuntime.mockResolvedValue(companion());
@@ -428,6 +431,7 @@ describe("CompanionsApp Box desktop", () => {
 describe("CompanionsApp Computer panel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    companionsApi.listCompanions.mockResolvedValue([companion()]);
     companionsApi.getCompanionThread.mockResolvedValue(thread());
     companionsApi.syncCompanionThread.mockResolvedValue(thread());
     companionsApi.getCompanionRuntime.mockResolvedValue(companion());
