@@ -91,7 +91,11 @@ anything. One send is one turn: the sender names the message it is creating with
 `(companion_id, event_id)` primary key decides how many turns a send produces and the same send
 arriving twice — retried, replayed by a proxy, submitted twice — resolves to the turn already stored
 rather than persisting a second one. Because that message is then no longer pending it is never handed
-to Pi again either, so a replayed send cannot produce a second reply. Sent messages and projected Pi
+to Pi again either, so a replayed send cannot produce a second reply. Since persistence precedes the
+wake, that request can stay open for the wake (~45–65s, up to the start budget), so the web rewrite's
+proxy timeout is raised past that budget rather than the 30s default that cut the send off mid-wake;
+and the composer holds its `client_message_id` beside a draft until the send confirms, so retrying a
+draft a lost request left behind names the durable turn instead of a second one. Sent messages and projected Pi
 output keep separate event-id namespaces, so a sender can never name an entry the Pi log will claim.
 Send and sync reach Pi through its owner-only FIFO, while sync also projects new Pi output from a
 recorded byte offset. A send that Pi accepts refreshes the Box TTL to six hours, so idle is measured

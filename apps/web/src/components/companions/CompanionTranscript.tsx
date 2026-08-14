@@ -177,6 +177,16 @@ export function CompanionTranscript({
   const runtimeRef = useRef<AssistantRuntime | null>(null);
   const inFlight = useRef(false);
   /**
+   * The id of a send whose request did not confirm, held beside the draft it named. A send that wakes
+   * an asleep Companion persists the turn before the wake it then waits on, so a request that dies
+   * mid-wake still left that turn durable under this id. Restoring the draft and minting a fresh id on
+   * the retry would ask the control plane to store the same message under a second name — the second
+   * turn THE-341 saw. Reusing the id keeps one submission one turn: the retry resolves to the entry
+   * already stored. It is cleared the moment a send confirms and only reused for the identical draft,
+   * so two different messages are still two turns.
+   */
+  const pendingSendRef = useRef<{ content: string; clientMessageId: string } | null>(null);
+  /**
    * The message this composer just sent, shown before the control plane answers. It already carries
    * the event id the control plane will store it under, so the saved entry replaces it rather than
    * joining it: the sent message cannot appear twice even if a thread read lands first. A refused send
@@ -210,9 +220,15 @@ export function CompanionTranscript({
     // programmatic one, so one message is never sent twice.
     if (!content || !canSend || inFlight.current) return;
     inFlight.current = true;
-    // One submission, one id, kept for as long as this send lasts: whatever happens to the request,
-    // the control plane can only ever store the turn it names once.
-    const clientMessageId = crypto.randomUUID();
+    // One submission, one id: whatever happens to the request, the control plane can only ever store
+    // the turn it names once. A draft restored after a send that never confirmed keeps the id its
+    // first attempt named, so retrying the same text resolves to the durable turn rather than a
+    // second copy of it; anything else is a new message and gets a fresh id.
+    const remembered = pendingSendRef.current;
+    const clientMessageId = remembered && remembered.content === content
+      ? remembered.clientMessageId
+      : crypto.randomUUID();
+    pendingSendRef.current = { content, clientMessageId };
     setOutgoing({
       event_id: companionMessageEventId(clientMessageId),
       ordinal: Number.MAX_SAFE_INTEGER,
@@ -224,7 +240,8 @@ export function CompanionTranscript({
     });
     try {
       const saved = await onSend(content, clientMessageId);
-      if (!saved) restoreDraft(runtimeRef.current, content);
+      if (saved) pendingSendRef.current = null;
+      else restoreDraft(runtimeRef.current, content);
     } finally {
       inFlight.current = false;
       setOutgoing(null);
