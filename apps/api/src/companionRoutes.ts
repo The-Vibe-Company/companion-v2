@@ -26,6 +26,8 @@ import {
   CompanionRuntimeTransitionError,
   CompanionShareForbiddenError,
   CompanionSettingsForbiddenError,
+  CompanionSkillSelectionError,
+  CompanionWriteSkillsForbiddenError,
   COMPANION_RUNTIME_START_BUDGET_MS,
   attachCompanionToolRunScreenshot,
   claimCompanionRuntimeStart,
@@ -49,6 +51,7 @@ import {
   listCompanions,
   listCompanionProviders,
   listCompanionPlugins,
+  listOnlineCompanionsForSkillSync,
   listPendingCompanionMessages,
   projectCompanionPiEvents,
   pollOpenAICodexProviderOAuth,
@@ -66,6 +69,7 @@ import {
   updateCompanion,
   updateCompanionRuntime,
 } from "@companion/core";
+import { issueApiToken } from "@companion/core/services";
 import type { CompanionPiEntry, CompanionPiToolCompletion } from "@companion/core";
 import {
   createCompanionInputSchema,
@@ -91,9 +95,12 @@ import type {
   CompanionTranscriptEntry,
   StartCompanionRuntimeInput,
 } from "@companion/contracts";
-import { withTenantContext, type Db } from "@companion/db";
-import { skillChecksum, toTar } from "@companion/skills";
+import { withTenantContext, schema, type Db } from "@companion/db";
+import { packDir, skillChecksum, toTar } from "@companion/skills";
+import { COMPANION_SKILL_KEY, companionSkillDir } from "@companion/companion-skill";
 import { getSkillArchive } from "@companion/storage";
+import { eq } from "drizzle-orm";
+import { getCompanionSkillPackage } from "./companionSkillPackage";
 import {
   actorFromContext,
   AuthenticationRequiredError,
@@ -277,6 +284,8 @@ function errorStatus(error: unknown): number {
   if (error instanceof CompanionNotFoundError) return 404;
   if (error instanceof CompanionRuntimeForbiddenError) return 403;
   if (error instanceof CompanionSettingsForbiddenError) return 403;
+  if (error instanceof CompanionSkillSelectionError) return 400;
+  if (error instanceof CompanionWriteSkillsForbiddenError) return 403;
   if (error instanceof CompanionDeleteForbiddenError) return 403;
   if (error instanceof CompanionProviderForbiddenError) return 403;
   if (error instanceof CompanionShareForbiddenError) return 403;
@@ -531,6 +540,7 @@ export function registerCompanionRoutes(
           provider: Awaited<ReturnType<typeof resolveCompanionProviderAuth>>;
           plugins: Awaited<ReturnType<typeof resolveCompanionPluginInjection>>;
           skillPackages: Awaited<ReturnType<typeof listCompanionRuntimeSkillPackages>>;
+          hubEnv: Record<string, string>;
         }
       | undefined;
     /**
@@ -556,8 +566,50 @@ export function registerCompanionRoutes(
         });
         const skillPackages = body.client_surface === "native_mobile"
           ? []
-          : await listCompanionRuntimeSkillPackages({ actor, orgId, database });
-        return { actor, orgId, companion, provider, plugins, skillPackages };
+          : await listCompanionRuntimeSkillPackages({ actor, orgId, companionId, database });
+        const hubEnv: Record<string, string> = {};
+        if (body.client_surface !== "native_mobile") {
+          const apiUrl = (env.COMPANION_API_URL ?? "http://127.0.0.1:3001").replace(/\/+$/, "");
+          hubEnv.COMPANION_API_URL = apiUrl;
+          hubEnv.COMPANION_WORKSPACE_ID = orgId;
+          let ownerActor = actor.id === companion.owner_id
+            ? actor
+            : null;
+          if (!ownerActor) {
+            const [owner] = await database
+              .select({
+                id: schema.user.id,
+                email: schema.user.email,
+                name: schema.user.name,
+              })
+              .from(schema.user)
+              .where(eq(schema.user.id, companion.owner_id))
+              .limit(1);
+            if (owner) {
+              ownerActor = {
+                id: owner.id,
+                email: owner.email,
+                name: owner.name || owner.email,
+              };
+            }
+          }
+          if (ownerActor) {
+            const scopes = companion.can_write_skills
+              ? (["skills:read", "skills:write"] as const)
+              : (["skills:read"] as const);
+            const issued = await issueApiToken({
+              actor: ownerActor,
+              orgId,
+              scopes: [...scopes],
+              name: `Companion ${companionId} Skills Hub`,
+              ttlMs: 6 * 60 * 60 * 1000,
+              source: { type: "companion", companionId },
+              database,
+            });
+            hubEnv.COMPANION_DELEGATION_TOKEN = issued.token;
+          }
+        }
+        return { actor, orgId, companion, provider, plugins, skillPackages, hubEnv };
       }), budget.signal);
       const modelId = mutation.companion.model_id;
       if (!modelId) {
@@ -567,7 +619,7 @@ export function registerCompanionRoutes(
           mutation.provider.providerId,
         );
       }
-      const skills = await withinBudget(
+      const librarySkills = await withinBudget(
         // Object storage has no timeout of its own, so these reads are held to the wake's deadline
         // like every other step: a bucket that stops answering must not become a Companion that
         // reports Starting with a Box nobody has contacted yet.
@@ -591,6 +643,24 @@ export function registerCompanionRoutes(
         })),
         budget.signal,
       );
+      // Bundled Companion agent skill is always staged on web/mobile-web so Pi can reach the Skills
+      // Hub. selected_skill_ids are additional library packages; empty selection stages only this.
+      const skills = body.client_surface === "native_mobile"
+        ? []
+        : await withinBudget((async () => {
+          const bundled = await getCompanionSkillPackage();
+          const packed = await packDir(companionSkillDir());
+          const agentSkill = {
+            slug: COMPANION_SKILL_KEY,
+            version: bundled.version,
+            checksum: packed.checksum,
+            archive: packed.archive,
+          };
+          return [
+            agentSkill,
+            ...librarySkills.filter((skill) => skill.slug !== COMPANION_SKILL_KEY),
+          ];
+        })(), budget.signal);
       const runtime = runtimeFactory();
       const observed = await withinBudget(runtime.start({
         signal: budget.signal,
@@ -621,6 +691,7 @@ export function registerCompanionRoutes(
           ? []
           : [...mutation.plugins.accounts, ...body.mcp_accounts],
         skills,
+        hubEnv: mutation.hubEnv,
         // `null` clears the recorded Box: the adapter found that the id this row carried names a
         // machine this Companion does not own, so no other path may reach it either.
         onBoxAssigned: async (boxId) => {
@@ -748,6 +819,8 @@ export function registerCompanionRoutes(
           persona: body.persona,
           providerId: body.provider_id,
           modelId: body.model_id,
+          selectedSkillIds: body.selected_skill_ids,
+          canWriteSkills: body.can_write_skills,
           database,
         }));
       return c.json({ companion }, 201);
@@ -1182,6 +1255,8 @@ export function registerCompanionRoutes(
           persona: body.persona,
           providerId: body.provider_id,
           modelId: body.model_id,
+          selectedSkillIds: body.selected_skill_ids,
+          canWriteSkills: body.can_write_skills,
           database,
         });
         const provider = body.provider_id !== undefined
@@ -1189,10 +1264,21 @@ export function registerCompanionRoutes(
               actor, orgId, companionId, database,
             })
           : null;
+        const skillsChanged = body.selected_skill_ids !== undefined
+          && (
+            previous.selected_skill_ids.length !== companion.selected_skill_ids.length
+            || previous.selected_skill_ids.some((id, index) => id !== companion.selected_skill_ids[index])
+          );
+        const writeChanged = body.can_write_skills !== undefined
+          && previous.can_write_skills !== companion.can_write_skills;
         return {
           companion,
           modelChanged: previous.model_id !== companion.model_id,
+          skillsChanged,
+          writeChanged,
           settingsApplyNeeded: previous.model_id !== companion.model_id
+            || skillsChanged
+            || writeChanged
             || body.provider_id !== undefined
             && (
               previous.runtime.provider_ids[0] !== companion.runtime.provider_ids[0]
@@ -1207,7 +1293,8 @@ export function registerCompanionRoutes(
         );
       if (updated.settingsApplyNeeded && canApplyWithoutWaking) {
         // Settings must never wake a sleeping Box. Confirm the projected online state is still live
-        // before routing the provider change through startRuntime, which rewrites auth and recycles Pi.
+        // before routing the provider/skill change through startRuntime, which rewrites auth and
+        // recycles Pi when needed.
         const observed = await runtimeFactory().status({
           boxId: updated.companion.runtime.box_id!,
         }).catch(() => null);
@@ -1216,7 +1303,10 @@ export function registerCompanionRoutes(
             c,
             companionId,
             startCompanionRuntimeInputSchema.parse({ client_surface: "web" }),
-            { allowBoxWake: false, restartPi: updated.modelChanged },
+            {
+              allowBoxWake: false,
+              restartPi: updated.modelChanged || updated.skillsChanged || updated.writeChanged,
+            },
           );
           return c.json({ companion: started.companion });
         }

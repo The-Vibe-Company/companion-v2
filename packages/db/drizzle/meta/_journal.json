@@ -547,6 +547,13 @@
       "when": 1786813200000,
       "tag": "0077_companion_tool_runs",
       "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1786900000000,
+      "tag": "0078_companion_skills",
+      "breakpoints": true
     }
   ]
 }

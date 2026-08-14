@@ -8,7 +8,12 @@ import {
   resolveApiToken,
   type ActorContext,
 } from "@companion/core/services";
-import { EntitlementDeniedError } from "@companion/core";
+import {
+  assertCompanionCanWriteSkills,
+  CompanionWriteSkillsForbiddenError,
+  EntitlementDeniedError,
+} from "@companion/core";
+import { withTenantContext } from "@companion/db";
 
 export interface ApiVariables {
   user: typeof auth.$Infer.Session.user | null;
@@ -17,6 +22,9 @@ export interface ApiVariables {
   tokenActor: ActorContext | null;
   tokenOrgId: string | null;
   tokenScopes: TokenScope[] | null;
+  /** PAT provenance; `companion` means write-on-behalf for `tokenCompanionId`. */
+  tokenSourceType: string | null;
+  tokenCompanionId: string | null;
   programmaticAuthKind: "pat" | "agent" | null;
   agentId: string | null;
   agentCapability: AgentCapabilityName | null;
@@ -66,6 +74,8 @@ export async function attachSession(c: Context<{ Variables: ApiVariables }>, nex
   c.set("tokenActor", null);
   c.set("tokenOrgId", null);
   c.set("tokenScopes", null);
+  c.set("tokenSourceType", null);
+  c.set("tokenCompanionId", null);
   c.set("programmaticAuthKind", null);
   c.set("agentId", null);
   c.set("agentCapability", null);
@@ -89,6 +99,8 @@ export async function attachSession(c: Context<{ Variables: ApiVariables }>, nex
         c.set("tokenActor", resolved.actor);
         c.set("tokenOrgId", resolved.orgId);
         c.set("tokenScopes", resolved.scopes);
+        c.set("tokenSourceType", resolved.sourceType);
+        c.set("tokenCompanionId", resolved.sourceCompanionId);
         c.set("programmaticAuthKind", "pat");
       } else {
         const workspaceId =
@@ -163,13 +175,14 @@ export function isAgentRequest(c: Context<{ Variables: ApiVariables }>): boolean
 
 /**
  * Gate a capability for token-authed requests. Cookie sessions (a signed-in human) implicitly
- * hold every scope; a `cmp_pat_…` token must carry the requested scope. Call after the actor
- * is established.
+ * hold every scope; a `cmp_pat_…` token must carry the requested scope. Companion write-on-behalf
+ * PATs re-check `can_write_skills` on every skills:write use.
  */
-export function requireScope(c: Context<{ Variables: ApiVariables }>, scope: TokenScope): void {
+export async function requireScope(c: Context<{ Variables: ApiVariables }>, scope: TokenScope): Promise<void> {
   const scopes = c.get("tokenScopes");
-  if (scopes === null) return; // cookie session → full access
-  if (!scopes.some((granted) =>
+  if (scopes === null) {
+    // cookie session → full access
+  } else if (!scopes.some((granted) =>
     granted === scope
     || (
       granted !== "public-skills:install"
@@ -179,6 +192,27 @@ export function requireScope(c: Context<{ Variables: ApiVariables }>, scope: Tok
   )) {
     throw new Error(`token is missing the ${scope} scope`);
   }
+  if (scope === "skills:write") {
+    await requireCompanionWriteSkillsIfNeeded(c);
+  }
+}
+
+/**
+ * Companion write-on-behalf PATs must still have can_write_skills true at use time. Cookie sessions
+ * and ordinary PATs are unaffected. The companions row is FORCE RLS, so the re-check runs in the
+ * token owner's tenant context.
+ */
+export async function requireCompanionWriteSkillsIfNeeded(
+  c: Context<{ Variables: ApiVariables }>,
+): Promise<void> {
+  if (c.get("tokenSourceType") !== "companion") return;
+  const companionId = c.get("tokenCompanionId");
+  const orgId = c.get("tokenOrgId");
+  const actor = c.get("tokenActor");
+  if (!companionId || !orgId || !actor) throw new CompanionWriteSkillsForbiddenError();
+  await withTenantContext({ orgId, userId: actor.id }, (database) =>
+    assertCompanionCanWriteSkills({ orgId, companionId, database }),
+  );
 }
 
 export async function orgIdFromContext(c: Context<{ Variables: ApiVariables }>): Promise<string> {
@@ -201,6 +235,9 @@ export async function orgIdFromContext(c: Context<{ Variables: ApiVariables }>):
 export function jsonError(c: Context, error: unknown, status = 400): Response {
   if (error instanceof EntitlementDeniedError) {
     return c.json(error.body, 403);
+  }
+  if (error instanceof CompanionWriteSkillsForbiddenError) {
+    return c.json({ ok: false, error: error.message }, 403);
   }
   const message = error instanceof Error ? error.message : String(error);
   const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"

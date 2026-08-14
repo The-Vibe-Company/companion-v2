@@ -43,15 +43,15 @@ describe("jsonError", () => {
 describe("requireScope", () => {
   it("accepts database write for reads but never read for writes", async () => {
     const app = new Hono<{ Variables: ApiVariables }>();
-    app.get("/read-with-write", (c) => {
+    app.get("/read-with-write", async (c) => {
       c.set("tokenScopes", ["database:write"]);
-      requireScope(c, "database:read");
+      await requireScope(c, "database:read");
       return c.json({ ok: true });
     });
-    app.get("/write-with-read", (c) => {
+    app.get("/write-with-read", async (c) => {
       c.set("tokenScopes", ["database:read"]);
       try {
-        requireScope(c, "database:write");
+        await requireScope(c, "database:write");
         return c.json({ ok: true });
       } catch (error) {
         return jsonError(c, error, 403);
@@ -205,6 +205,8 @@ describe("attachSession", () => {
       actor: { id: "user-1", email: "user@example.test", name: "User" },
       orgId: "169b768e-b1d0-4dde-a62e-575022debe88",
       scopes: ["skills:read"],
+      sourceType: "human",
+      sourceCompanionId: null,
     });
     const app = new Hono<{ Variables: ApiVariables }>();
     app.use("*", attachSession);

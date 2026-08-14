@@ -1182,26 +1182,32 @@ export interface CompanionRuntimeSkillPackage {
 }
 
 /**
- * Resolve the exact current packages exposed to Pi for this actor. "My Skills" is the execution
- * library: creator-owned personal skills plus organization skills the actor explicitly installed.
- * Invalid, archived, and unpublished entries never cross the Box boundary.
+ * Resolve the exact current packages exposed to Pi for this Companion. Only skills in the
+ * Companion's selected allow-list are staged. Empty selection means no library skills. Invalid,
+ * archived, and unpublished entries never cross the Box boundary. The bundled Companion agent skill
+ * is injected separately by the Box adapter when Skills Hub access is needed and is not listed here.
  */
 export async function listCompanionRuntimeSkillPackages(input: {
   actor: ActorContext;
   orgId: string;
+  companionId: string;
   database?: Db;
 }): Promise<CompanionRuntimeSkillPackage[]> {
   const database = input.database ?? db;
-  const visible = await listSkills({
-    actor: input.actor,
-    orgId: input.orgId,
-    library: "mine",
-    database,
-  });
-  const skillIds = visible
-    .filter((skill) => skill.validation === "valid" && skill.current_version)
-    .map((skill) => skill.id);
-  if (!skillIds.length) return [];
+  const [companion] = await database
+    .select({
+      selectedSkillIds: schema.companions.selectedSkillIds,
+      ownerId: schema.companions.ownerId,
+    })
+    .from(schema.companions)
+    .where(and(
+      eq(schema.companions.orgId, input.orgId),
+      eq(schema.companions.id, input.companionId),
+    ))
+    .limit(1);
+  if (!companion) return [];
+  const selected = Array.isArray(companion.selectedSkillIds) ? companion.selectedSkillIds : [];
+  if (!selected.length) return [];
 
   const rows = await database
     .select({
@@ -1222,12 +1228,20 @@ export async function listCompanionRuntimeSkillPackages(input: {
     )
     .where(and(
       eq(schema.skills.orgId, input.orgId),
-      inArray(schema.skills.id, skillIds),
+      inArray(schema.skills.id, selected),
       isNull(schema.skills.archivedAt),
       eq(schema.skills.validation, "valid"),
       eq(schema.skillVersions.validation, "valid"),
+      // Org skills are member-wide. Personal skills stay creator-private, but a Companion that
+      // already selected the owner's personal skill must keep staging it for any authorized wake
+      // (Owner or Editor) and for Skills Hub → Box sync.
+      or(
+        eq(schema.skills.scope, "org"),
+        eq(schema.skills.creatorId, input.actor.id),
+        eq(schema.skills.creatorId, companion.ownerId),
+      ),
     ));
-  const order = new Map(skillIds.map((id, index) => [id, index]));
+  const order = new Map(selected.map((id, index) => [id, index]));
   return rows
     .sort((left, right) => (order.get(left.skillId) ?? 0) - (order.get(right.skillId) ?? 0))
     .map(({ slug, version, checksum, storagePath }) => ({ slug, version, checksum, storagePath }));
@@ -4331,6 +4345,9 @@ export async function issueApiToken(input: {
     type: "agent_auth";
     agentId: string;
     targetWorkspaceId?: string;
+  } | {
+    type: "companion";
+    companionId: string;
   };
   database?: Db;
 }): Promise<{
@@ -4364,6 +4381,12 @@ export async function issueApiToken(input: {
   ) {
     throw new Error("token expiration is outside the allowed range");
   }
+  const sourceAgentId = input.source
+    ? (input.source.type === "agent_auth" ? input.source.agentId : input.source.companionId)
+    : undefined;
+  const targetWorkspaceId = input.source?.type === "agent_auth"
+    ? input.source.targetWorkspaceId ?? null
+    : null;
   const [row] = await database
     .insert(schema.apiTokens)
     .values({
@@ -4375,8 +4398,8 @@ export async function issueApiToken(input: {
       scopes,
       ...(input.source ? {
         sourceType: input.source.type,
-        sourceAgentId: input.source.agentId,
-        targetWorkspaceId: input.source.targetWorkspaceId ?? null,
+        sourceAgentId,
+        targetWorkspaceId,
       } : {}),
       expiresAt,
     })
@@ -4386,15 +4409,17 @@ export async function issueApiToken(input: {
     await database.insert(schema.auditLog).values({
       orgId: input.orgId,
       actorId: input.actor.id,
-      action: "api_token.issue_agent_delegation",
+      action: input.source.type === "companion"
+        ? "api_token.issue_companion_write"
+        : "api_token.issue_agent_delegation",
       targetType: "api_token",
       targetId: row.id,
       metadata: {
         sourceType: input.source.type,
-        sourceAgentId: input.source.agentId,
+        sourceAgentId: sourceAgentId ?? null,
         scopes,
         expiresAt: expiresAt.toISOString(),
-        targetWorkspaceId: input.source.targetWorkspaceId ?? null,
+        targetWorkspaceId,
       },
     });
   }
@@ -4404,7 +4429,7 @@ export async function issueApiToken(input: {
     prefix,
     scopes,
     expiresAt,
-    targetWorkspaceId: input.source?.targetWorkspaceId ?? null,
+    targetWorkspaceId,
   };
 }
 
@@ -4543,7 +4568,13 @@ export async function resolveApiToken(
   rawToken: string,
   database: Db = db,
   targetWorkspaceId: string | null = null,
-): Promise<{ actor: ActorContext; orgId: string; scopes: TokenScope[] } | null> {
+): Promise<{
+  actor: ActorContext;
+  orgId: string;
+  scopes: TokenScope[];
+  sourceType: string;
+  sourceCompanionId: string | null;
+} | null> {
   if (!rawToken.startsWith(API_TOKEN_PREFIX)) return null;
   const row = await resolvePreTenantApiToken(database, hashApiToken(rawToken), targetWorkspaceId);
   if (!row) return null;
@@ -4555,6 +4586,8 @@ export async function resolveApiToken(
     },
     orgId: row.org_id,
     scopes: expandTokenScopes((row.scopes ?? []) as TokenScope[]),
+    sourceType: row.source_type ?? "human",
+    sourceCompanionId: row.source_type === "companion" ? row.source_agent_id : null,
   };
 }
 

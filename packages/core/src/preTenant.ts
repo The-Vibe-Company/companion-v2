@@ -86,6 +86,8 @@ export interface PreTenantApiTokenRow {
   scopes: unknown;
   email: string;
   name: string;
+  source_type: string;
+  source_agent_id: string | null;
 }
 
 export async function resolvePreTenantApiToken(

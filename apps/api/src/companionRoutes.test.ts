@@ -74,6 +74,33 @@ const storageMocks = vi.hoisted(() => ({
 const skillsMocks = vi.hoisted(() => ({
   skillChecksum: vi.fn(),
   toTar: vi.fn((archive) => archive),
+  packDir: vi.fn(async () => ({
+    archive: Buffer.from("companion-agent-skill"),
+    checksum: "sha256:companion-agent",
+    sizeBytes: 22,
+  })),
+}));
+
+const companionSkillPackageMocks = vi.hoisted(() => ({
+  getCompanionSkillPackage: vi.fn(async () => ({
+    key: "companion",
+    zip: Buffer.from("zip"),
+    checksum: "sha256:companion-agent",
+    sizeBytes: 3,
+    version: "1.0.0",
+    integrity: { packageChecksum: "sha256:companion-agent", files: { "SKILL.md": "sha256:a" } },
+  })),
+}));
+
+const servicesMocks = vi.hoisted(() => ({
+  issueApiToken: vi.fn(async () => ({
+    id: "token-1",
+    token: "cmp_pat_testtoken",
+    prefix: "cmp_pat_test",
+    scopes: ["skills:read"],
+    expiresAt: new Date("2026-08-15T00:00:00.000Z"),
+    targetWorkspaceId: null,
+  })),
 }));
 
 function registerCompanionRoutes(
@@ -111,12 +138,19 @@ vi.mock("@companion/db", async (importOriginal) => ({
 
 vi.mock("@companion/storage", () => storageMocks);
 vi.mock("@companion/skills", () => skillsMocks);
+vi.mock("./companionSkillPackage", () => companionSkillPackageMocks);
+vi.mock("@companion/core/services", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@companion/core/services")>()),
+  ...servicesMocks,
+}));
 
 const companion = {
   id: "11111111-1111-4111-8111-111111111111",
   name: "Research",
   persona: "Incident research assistant",
   model_id: "claude-opus-4-8",
+  selected_skill_ids: [],
+  can_write_skills: false,
   owner_id: "user-1",
   access: "owner" as const,
   runtime: {
@@ -2275,7 +2309,9 @@ describe("Companions API feature gate", () => {
       mcpAccounts: [
         expect.objectContaining({ id: "github-work", label: "GitHub work", transport: "stdio" }),
       ],
-      skills: [],
+      skills: [
+        expect.objectContaining({ slug: "companion", version: "1.0.0" }),
+      ],
     }));
     expect(coreMocks.resolveCompanionProviderAuth).toHaveBeenCalledOnce();
     expect(coreMocks.claimCompanionRuntimeStart).toHaveBeenCalledOnce();
@@ -2876,7 +2912,7 @@ describe("Companions API feature gate", () => {
     }));
   });
 
-  it("injects Installed skills for mobile web but never for native mobile", async () => {
+  it("injects selected library skills plus the bundled Companion agent skill for mobile web but never for native mobile", async () => {
     const skillPackage = {
       slug: "incident-summary",
       version: "1.2.3",
@@ -2906,12 +2942,27 @@ describe("Companions API feature gate", () => {
       body: JSON.stringify({ client_surface: "mobile_web" }),
     });
     expect(mobileWeb.status).toBe(200);
-    expect(starts[0]?.skills).toEqual([{
-      slug: "incident-summary",
-      version: "1.2.3",
-      checksum: skillPackage.checksum,
-      archive: Buffer.from("skill-archive"),
-    }]);
+    expect(starts[0]?.skills).toEqual([
+      {
+        slug: "companion",
+        version: "1.0.0",
+        checksum: "sha256:companion-agent",
+        archive: Buffer.from("companion-agent-skill"),
+      },
+      {
+        slug: "incident-summary",
+        version: "1.2.3",
+        checksum: skillPackage.checksum,
+        archive: Buffer.from("skill-archive"),
+      },
+    ]);
+    expect(starts[0]?.hubEnv).toEqual(expect.objectContaining({
+      COMPANION_WORKSPACE_ID: "org-1",
+      COMPANION_DELEGATION_TOKEN: "cmp_pat_testtoken",
+    }));
+    expect(coreMocks.listCompanionRuntimeSkillPackages).toHaveBeenCalledWith(
+      expect.objectContaining({ companionId: companion.id }),
+    );
 
     const nativeMobile = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
       method: "POST",
@@ -2920,6 +2971,7 @@ describe("Companions API feature gate", () => {
     });
     expect(nativeMobile.status).toBe(200);
     expect(starts[1]?.skills).toEqual([]);
+    expect(starts[1]?.hubEnv).toEqual({});
     expect(coreMocks.listCompanionRuntimeSkillPackages).toHaveBeenCalledOnce();
   });
 

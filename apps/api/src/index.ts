@@ -266,6 +266,7 @@ import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSki
 import { parseSkillListQuery } from "./skillListQuery";
 import { registerAgentAuthRoutes } from "./agentAuthRoutes";
 import { registerCompanionRoutes } from "./companionRoutes";
+import { syncPublishedSkillToOnlineCompanions } from "./companionSkillSync";
 import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
 import { StripeBillingGateway } from "@companion/billing";
 import {
@@ -1523,7 +1524,7 @@ app.put("/v1/orgs/current", async (c) => {
 app.get("/v1/orgs/current/skill-naming-policy", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:read");
+    await requireScope(c, "skills:read");
     const policy = await withTenant(
       c,
       ({ actor, orgId, database }) => getSkillNamingPolicy({ actor, orgId, database }),
@@ -1759,7 +1760,7 @@ app.delete("/v1/orgs/current/members/:userId", async (c) => {
 app.get("/v1/skills", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:read");
+    await requireScope(c, "skills:read");
     // `?lib=mine` returns the caller's "My Skills" (authored personal skills + org skills they have
     // installed); `?lib=org` (default) is the flat org-wide library. `?label=marketing/seo` filters to
     // skills filed under that path OR any descendant (personal folders for `mine`, org folders for
@@ -1803,7 +1804,7 @@ app.get("/v1/skills", async (c) => {
 app.get("/v1/labels", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:read");
+    await requireScope(c, "skills:read");
     return c.json(await withTenant(c, ({ actor, orgId, database }) => listLabels({ actor, orgId, database }), true));
   } catch (error) {
     return jsonError(c, error, 401);
@@ -1813,7 +1814,7 @@ app.get("/v1/labels", async (c) => {
 app.post("/v1/labels", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const input = createLabelInputSchema.parse(await c.req.json());
     await withTenant(
       c,
@@ -1838,7 +1839,7 @@ app.post("/v1/labels", async (c) => {
 app.put("/v1/labels/rename", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const input = renameLabelInputSchema.parse(await c.req.json());
     await withTenant(
       c,
@@ -1862,7 +1863,7 @@ app.put("/v1/labels/rename", async (c) => {
 app.put("/v1/labels/color", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const input = setLabelColorInputSchema.parse(await c.req.json());
     await withTenant(
       c,
@@ -1878,7 +1879,7 @@ app.put("/v1/labels/color", async (c) => {
 app.put("/v1/labels/icon", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const input = setLabelIconInputSchema.parse(await c.req.json());
     await withTenant(
       c,
@@ -1894,7 +1895,7 @@ app.put("/v1/labels/icon", async (c) => {
 app.delete("/v1/labels", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const input = deleteLabelInputSchema.parse(await c.req.json());
     await withTenant(
       c,
@@ -1915,7 +1916,7 @@ app.delete("/v1/labels", async (c) => {
 app.get("/v1/personal-labels", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:read");
+    await requireScope(c, "skills:read");
     return c.json(
       await withTenant(c, ({ actor, orgId, database }) => listPersonalLabels({ actor, orgId, database }), true),
     );
@@ -1927,7 +1928,7 @@ app.get("/v1/personal-labels", async (c) => {
 app.post("/v1/personal-labels", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const input = createLabelInputSchema.parse(await c.req.json());
     await withTenant(
       c,
@@ -1952,7 +1953,7 @@ app.post("/v1/personal-labels", async (c) => {
 app.put("/v1/personal-labels/rename", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const input = renameLabelInputSchema.parse(await c.req.json());
     await withTenant(
       c,
@@ -1969,7 +1970,7 @@ app.put("/v1/personal-labels/rename", async (c) => {
 app.put("/v1/personal-labels/color", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const input = setLabelColorInputSchema.parse(await c.req.json());
     await withTenant(
       c,
@@ -1986,7 +1987,7 @@ app.put("/v1/personal-labels/color", async (c) => {
 app.put("/v1/personal-labels/icon", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const input = setLabelIconInputSchema.parse(await c.req.json());
     await withTenant(
       c,
@@ -2003,7 +2004,7 @@ app.put("/v1/personal-labels/icon", async (c) => {
 app.delete("/v1/personal-labels", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const input = deleteLabelInputSchema.parse(await c.req.json());
     await withTenant(
       c,
@@ -2045,7 +2046,7 @@ app.put("/v1/skill-filter-preferences", async (c) => {
 app.get("/v1/getting-started", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:read");
+    await requireScope(c, "skills:read");
     return c.json(
       await withTenant(
         c,
@@ -2061,7 +2062,7 @@ app.get("/v1/getting-started", async (c) => {
 app.post("/v1/getting-started/steps", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const input = recordGettingStartedStepInputSchema.parse(await c.req.json());
     return c.json(
       await withTenant(
@@ -2110,7 +2111,7 @@ app.post("/v1/getting-started/reopen", async (c) => {
 app.get("/v1/skills/:slug/share-plan", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:read");
+    await requireScope(c, "skills:read");
     const result = await withTenant(
       c,
       ({ actor, orgId, database }) => buildSkillSharePlan({ actor, orgId, slug: c.req.param("slug"), database }),
@@ -2125,7 +2126,7 @@ app.get("/v1/skills/:slug/share-plan", async (c) => {
 app.post("/v1/skills/:slug/share", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const result = await withTenant(
       c,
       ({ actor, orgId, database }) => shareSkill({ actor, orgId, slug: c.req.param("slug"), database }),
@@ -2146,7 +2147,7 @@ app.post("/v1/skills/:slug/share", async (c) => {
 app.post("/v1/skills/:slug/rename", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const body = renameSkillInputSchema.parse(await c.req.json());
     const result = await withTenant(
       c,
@@ -2170,7 +2171,7 @@ app.post("/v1/skills/:slug/rename", async (c) => {
 app.get("/v1/skills/:slug", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:read");
+    await requireScope(c, "skills:read");
     // Resolve archived skills too — they stay viewable, so the canonical detail endpoint must
     // return them (getSkillBySlug includes archived).
     const row = await withTenant(
@@ -2365,7 +2366,7 @@ app.patch("/v1/skills/:slug/comments/:id", async (c) => {
 app.post("/v1/skills/:slug/install", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:read");
+    await requireScope(c, "skills:read");
     let input;
     try {
       // An empty body is a valid bare "mark installed"; malformed JSON is an error, not an empty mark.
@@ -2404,7 +2405,7 @@ app.post("/v1/skills/:slug/install", async (c) => {
 app.delete("/v1/skills/:slug/install", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:read");
+    await requireScope(c, "skills:read");
     await withTenant(
       c,
       ({ actor, orgId, database }) => uninstallSkill({ actor, orgId, slug: c.req.param("slug"), database }),
@@ -2420,7 +2421,7 @@ app.delete("/v1/skills/:slug/install", async (c) => {
 app.post("/v1/skills/:slug/labels", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const { path } = assignLabelInputSchema.parse(await c.req.json());
     await withTenant(
       c,
@@ -2437,7 +2438,7 @@ app.post("/v1/skills/:slug/labels", async (c) => {
 app.delete("/v1/skills/:slug/labels", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const { path } = assignLabelInputSchema.parse(await c.req.json());
     await withTenant(
       c,
@@ -2454,7 +2455,7 @@ app.delete("/v1/skills/:slug/labels", async (c) => {
 app.post("/v1/skills/:slug/personal-labels", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const { path } = assignLabelInputSchema.parse(await c.req.json());
     await withTenant(
       c,
@@ -2472,7 +2473,7 @@ app.post("/v1/skills/:slug/personal-labels", async (c) => {
 app.delete("/v1/skills/:slug/personal-labels", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const { path } = assignLabelInputSchema.parse(await c.req.json());
     await withTenant(
       c,
@@ -2490,7 +2491,7 @@ app.delete("/v1/skills/:slug/personal-labels", async (c) => {
 app.get("/v1/skills/:slug/dependencies", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:read");
+    await requireScope(c, "skills:read");
     const version = c.req.query("version") ?? null;
     return c.json(
       await withTenant(
@@ -2517,7 +2518,7 @@ function publicReleaseRouteError(c: Context, error: unknown): Response {
 app.put("/v1/skills/:slug/public-version", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const body = setSkillPublicVersionInputSchema.parse(await c.req.json());
     const packageVersion = await withTenant(
       c,
@@ -2578,7 +2579,7 @@ app.put("/v1/skills/:slug/public-version", async (c) => {
 app.delete("/v1/skills/:slug/public-version", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     return c.json(
       await withTenant(
         c,
@@ -2596,7 +2597,7 @@ app.delete("/v1/skills/:slug/public-version", async (c) => {
 app.post("/v1/skills/:slug/archive", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const body = archiveSkillInputSchema.parse(await c.req.json().catch(() => ({})));
     await withTenant(
       c,
@@ -2614,7 +2615,7 @@ app.post("/v1/skills/:slug/archive", async (c) => {
 app.post("/v1/skills/:slug/restore", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     await withTenant(
       c,
       ({ actor, orgId, database }) => restoreSkill({ actor, orgId, slug: c.req.param("slug"), database }),
@@ -2680,7 +2681,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       orgId = transferBinding.orgId;
     } else {
       actor = actorFromContext(c, true);
-      requireScope(c, "skills:write");
+      await requireScope(c, "skills:write");
       orgId = await orgIdFromContext(c);
     }
 
@@ -2896,6 +2897,11 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
       }
       throw error;
     }
+    await syncPublishedSkillToOnlineCompanions({
+      orgId,
+      skillId: published.id,
+      actor,
+    }).catch(() => undefined);
     return c.json({ ok: true, ...published, dependency_plan: dependencyPlan, warnings: result.warnings ?? [] });
   } catch (error) {
     return jsonError(c, error);
@@ -2906,7 +2912,7 @@ app.post("/v1/skills", bodyLimit({ maxSize: 32 * 1024 * 1024, onError: (c) => js
 app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c) => jsonError(c, "request exceeds the 2 MB limit", 413) }), async (c) => {
   try {
     const actor = actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const orgId = await orgIdFromContext(c);
     const input = createSkillInputSchema.parse(await c.req.json());
     const target = await resolvePublishTarget({
@@ -2991,6 +2997,11 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
         body: result.body ?? "",
         dependencies: preparedCarriedDependencies,
       });
+      await syncPublishedSkillToOnlineCompanions({
+        orgId,
+        skillId: published.id,
+        actor,
+      }).catch(() => undefined);
       return c.json({ ok: true, ...published, warnings: result.warnings ?? [] });
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -3003,7 +3014,7 @@ app.post("/v1/skills/create", bodyLimit({ maxSize: 2 * 1024 * 1024, onError: (c)
 app.get("/v1/skills/:slug/download", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:read");
+    await requireScope(c, "skills:read");
     const version = c.req.query("version") ?? null;
     const found = await withTenant(
       c,
@@ -3042,7 +3053,7 @@ app.get("/v1/public/skills/:token/versions/:version/package", async (c) => {
       if (!found) return jsonError(c, "public skill release not found", 404);
     } else if (isTokenRequest(c)) {
       const actor = actorFromContext(c, true);
-      requireScope(c, "public-skills:install");
+      await requireScope(c, "public-skills:install");
       found = await authorizePublicSkillPackageForApiToken({ token, version, userId: actor.id });
       if (!found) return jsonError(c, "public skill release not found", 404);
     } else if (transferTicket) {
@@ -3152,7 +3163,7 @@ app.get("/v1/skills/:slug/versions/:version/package", async (c) => {
       tarGz = await getSkillArchive({ key: loaded.storagePath });
     } else {
       actorFromContext(c, true);
-      requireScope(c, "skills:read");
+      await requireScope(c, "skills:read");
       ({ tarGz } = await loadSkillVersionArchive(c, slug, version));
     }
     const zip = await tarGzToZip(tarGz);
@@ -3186,7 +3197,7 @@ app.get("/v1/skills/:slug/versions/:version/package", async (c) => {
 app.get("/v1/skills/:slug/versions/:version/files", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:read");
+    await requireScope(c, "skills:read");
     const slug = c.req.param("slug");
     const { found, tarGz } = await loadSkillVersionArchive(c, slug, c.req.param("version"));
     const tar = toTar(tarGz);
@@ -3257,7 +3268,7 @@ app.get("/v1/skills/:slug/versions/:version/files/content", async (c) => {
       tarGz = await getSkillArchive({ key: loaded.storagePath });
     } else {
       actorFromContext(c, true);
-      requireScope(c, "skills:read");
+      await requireScope(c, "skills:read");
       ({ tarGz } = await loadSkillVersionArchive(c, slug, version));
     }
     const tar = toTar(tarGz);
@@ -3317,7 +3328,7 @@ app.get("/v1/skills/:slug/versions/:version/files/content", async (c) => {
 app.get("/v1/local-skills", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:read");
+    await requireScope(c, "skills:read");
     const row = await withTenant(
       c,
       async ({ actor, orgId, database }) => {
@@ -3335,7 +3346,7 @@ app.get("/v1/local-skills", async (c) => {
 app.get("/v1/local-skills/:key", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:read");
+    await requireScope(c, "skills:read");
     const key = c.req.param("key");
     if (key !== COMPANION_SKILL_KEY) return c.json({ error: `unknown local skill: ${key}` }, 404);
     const row = await withTenant(
@@ -3360,7 +3371,7 @@ app.get("/v1/local-skills/:key/package", async (c) => {
     const transferTicket = c.req.header("x-companion-transfer-ticket")?.trim() || null;
     if (!transferTicket) {
       actorFromContext(c, true);
-      requireScope(c, "skills:read");
+      await requireScope(c, "skills:read");
     }
     const pkg = await getCompanionSkillPackage();
     const transportChecksum = `sha256:${createHash("sha256").update(pkg.zip).digest("hex")}`;
@@ -3408,7 +3419,7 @@ app.get("/v1/local-skills/:key/package", async (c) => {
 app.post("/v1/local-skills/:key/installed", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "skills:write");
+    await requireScope(c, "skills:write");
     const key = c.req.param("key");
     if (key !== COMPANION_SKILL_KEY) return c.json({ error: `unknown local skill: ${key}` }, 404);
     let input;
@@ -3454,7 +3465,7 @@ app.post("/v1/local-skills/:key/installed", async (c) => {
 app.get("/v1/skills/:slug/database", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "database:read");
+    await requireScope(c, "database:read");
     return c.json(await withTenant(
       c,
       ({ actor, orgId, database }) => describeSkillDatabase({
@@ -3473,7 +3484,7 @@ app.get("/v1/skills/:slug/database", async (c) => {
 app.get("/v1/skills/:slug/database/shares", async (c) => {
   try {
     actorFromContext(c, true);
-    requireScope(c, "database:write");
+    await requireScope(c, "database:write");
     return c.json(await withTenant(
       c,
       ({ actor, orgId, database }) => getSkillDatabaseShares({
@@ -3494,7 +3505,7 @@ app.put(
   async (c, next) => {
     try {
       actorFromContext(c, true);
-      requireScope(c, "database:write");
+      await requireScope(c, "database:write");
       await next();
     } catch (error) {
       return skillDatabaseRouteError(c, error);
@@ -3530,7 +3541,7 @@ app.post(
   async (c, next) => {
     try {
       actorFromContext(c, true);
-      requireScope(c, "database:read");
+      await requireScope(c, "database:read");
       await next();
     } catch (error) {
       return skillDatabaseRouteError(c, error);
@@ -3564,7 +3575,7 @@ app.post(
   async (c, next) => {
     try {
       actorFromContext(c, true);
-      requireScope(c, "database:write");
+      await requireScope(c, "database:write");
       await next();
     } catch (error) {
       return skillDatabaseRouteError(c, error);
@@ -3599,7 +3610,7 @@ app.get("/v1/secrets", async (c) => {
   try {
     assertSecretsConfigured();
     actorFromContext(c, true);
-    requireScope(c, "secrets:read");
+    await requireScope(c, "secrets:read");
     return c.json(await withTenant(c, ({ actor, orgId, database }) => listSecrets({ actor, orgId, database }), true));
   } catch (error) {
     return secretRouteError(c, error, 401);
@@ -3615,7 +3626,7 @@ app.post(
     try {
       assertSecretsConfigured();
       actorFromContext(c, true);
-      requireScope(c, "secrets:write");
+      await requireScope(c, "secrets:write");
       const value = createSecretInputSchema.parse(await c.req.json());
       return c.json(await withTenant(c, ({ actor, orgId, database }) => createSecret({ actor, orgId, value, database }), true), 201);
     } catch (error) {
@@ -3628,7 +3639,7 @@ app.get("/v1/secrets/:id", async (c) => {
   try {
     assertSecretsConfigured();
     actorFromContext(c, true);
-    requireScope(c, "secrets:read");
+    await requireScope(c, "secrets:read");
     return c.json(await withTenant(c, ({ actor, orgId, database }) => getSecret({ actor, orgId, secretId: c.req.param("id"), database }), true));
   } catch (error) {
     return secretRouteError(c, error, 404);
@@ -3639,7 +3650,7 @@ app.patch("/v1/secrets/:id", async (c) => {
   try {
     assertSecretsConfigured();
     actorFromContext(c, true);
-    requireScope(c, "secrets:write");
+    await requireScope(c, "secrets:write");
     const value = updateSecretInputSchema.parse(await c.req.json());
     return c.json(await withTenant(c, ({ actor, orgId, database }) => updateSecret({ actor, orgId, secretId: c.req.param("id"), value, database }), true));
   } catch (error) {
@@ -3651,7 +3662,7 @@ app.delete("/v1/secrets/:id", async (c) => {
   try {
     assertSecretsConfigured();
     actorFromContext(c, true);
-    requireScope(c, "secrets:write");
+    await requireScope(c, "secrets:write");
     await withTenant(c, ({ actor, orgId, database }) => deleteSecret({ actor, orgId, secretId: c.req.param("id"), database }), true);
     return c.json({ ok: true as const });
   } catch (error) {
@@ -3663,7 +3674,7 @@ app.post("/v1/secrets/:id/rotate", async (c) => {
   try {
     assertSecretsConfigured();
     actorFromContext(c, true);
-    requireScope(c, "secrets:write");
+    await requireScope(c, "secrets:write");
     const value = rotateSecretInputSchema.parse(await c.req.json());
     return c.json(await withTenant(c, ({ actor, orgId, database }) => rotateSecret({ actor, orgId, secretId: c.req.param("id"), value: value.value, database }), true));
   } catch (error) {
@@ -3675,7 +3686,7 @@ app.get("/v1/skills/:slug/secret-configuration", async (c) => {
   try {
     assertSecretsConfigured();
     actorFromContext(c, true);
-    requireScope(c, "secrets:read");
+    await requireScope(c, "secrets:read");
     return c.json(await withTenant(c, ({ actor, orgId, database }) => getSkillSecretConfiguration({ actor, orgId, slug: c.req.param("slug"), version: c.req.query("version"), database }), true));
   } catch (error) {
     return secretRouteError(c, error, 404);
@@ -3686,7 +3697,7 @@ app.put("/v1/skills/:slug/secret-bindings/:slotId", async (c) => {
   try {
     assertSecretsConfigured();
     actorFromContext(c, true);
-    requireScope(c, "secrets:write");
+    await requireScope(c, "secrets:write");
     const value = setSecretBindingInputSchema.parse(await c.req.json());
     return c.json(await withTenant(c, ({ actor, orgId, database }) => setSkillSecretBinding({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), secretId: value.secret_id, database }), true));
   } catch (error) {
@@ -3698,7 +3709,7 @@ app.delete("/v1/skills/:slug/secret-bindings/:slotId", async (c) => {
   try {
     assertSecretsConfigured();
     actorFromContext(c, true);
-    requireScope(c, "secrets:write");
+    await requireScope(c, "secrets:write");
     return c.json(await withTenant(c, ({ actor, orgId, database }) => removeSkillSecretBinding({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), database }), true));
   } catch (error) {
     return secretRouteError(c, error);
@@ -3709,7 +3720,7 @@ app.put("/v1/skills/:slug/secret-suggestions/:slotId", async (c) => {
   try {
     assertSecretsConfigured();
     actorFromContext(c, true);
-    requireScope(c, "secrets:write");
+    await requireScope(c, "secrets:write");
     const value = setSecretSuggestionInputSchema.parse(await c.req.json());
     return c.json(await withTenant(c, ({ actor, orgId, database }) => setSkillSecretSuggestion({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), secretId: value.secret_id, database }), true));
   } catch (error) {
@@ -3721,7 +3732,7 @@ app.delete("/v1/skills/:slug/secret-suggestions/:slotId", async (c) => {
   try {
     assertSecretsConfigured();
     actorFromContext(c, true);
-    requireScope(c, "secrets:write");
+    await requireScope(c, "secrets:write");
     return c.json(await withTenant(c, ({ actor, orgId, database }) => removeSkillSecretSuggestion({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), database }), true));
   } catch (error) {
     return secretRouteError(c, error);
@@ -3732,7 +3743,7 @@ app.post("/v1/skills/:slug/secret-suggestions/:slotId/accept", async (c) => {
   try {
     assertSecretsConfigured();
     actorFromContext(c, true);
-    requireScope(c, "secrets:write");
+    await requireScope(c, "secrets:write");
     return c.json(await withTenant(c, ({ actor, orgId, database }) => acceptSkillSecretSuggestion({ actor, orgId, slug: c.req.param("slug"), slotId: c.req.param("slotId"), database }), true));
   } catch (error) {
     return secretRouteError(c, error);
@@ -3743,7 +3754,7 @@ app.post("/v1/secret-retrievals/preflight", async (c) => {
   try {
     assertSecretsConfigured();
     actorFromContext(c, true);
-    requireScope(c, "secrets:read");
+    await requireScope(c, "secrets:read");
     const value = secretRetrievalPreflightInputSchema.parse(await c.req.json());
     return c.json(await withTenant(c, ({ actor, orgId, database }) => preflightSecretRetrieval({ actor, orgId, value, database }), true));
   } catch (error) {
@@ -3755,7 +3766,7 @@ app.post("/v1/secret-retrievals/:planId/grant", async (c) => {
   try {
     assertSecretsConfigured();
     actorFromContext(c, true);
-    requireScope(c, "secrets:read");
+    await requireScope(c, "secrets:read");
     return c.json(await withTenant(c, ({ actor, orgId, database }) => createSecretRetrievalGrant({ actor, orgId, planId: c.req.param("planId"), database }), true));
   } catch (error) {
     return secretRouteError(c, error);
@@ -3766,7 +3777,7 @@ app.post("/v1/secret-grants/redeem", async (c) => {
   try {
     assertSecretsConfigured();
     actorFromContext(c, true);
-    requireScope(c, "secrets:read");
+    await requireScope(c, "secrets:read");
     const value = redeemSecretGrantInputSchema.parse(await c.req.json());
     const result = await withTenant(c, ({ actor, orgId, database }) => redeemSecretRetrievalGrant({ actor, orgId, grant: value.grant, database }), true);
     return result.ok ? c.json(result.value) : secretRouteError(c, result.error, 409);

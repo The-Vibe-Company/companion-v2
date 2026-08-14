@@ -34,7 +34,7 @@ import {
   sanitizeCompanionRuntimeError,
 } from "./companionRuntimeErrors";
 import { decryptOpaqueValue, encryptOpaqueValue, type OpaqueCiphertext } from "./secretsCrypto";
-import { assertMember, getOrgRole, type ActorContext } from "./services";
+import { assertMember, getOrgRole, listSkills, type ActorContext } from "./services";
 import {
   COMPANION_PLUGIN_OAUTH_SERVERS,
   refreshCompanionPluginOAuth,
@@ -163,6 +163,20 @@ export class CompanionDeleteForbiddenError extends Error {
   }
 }
 
+export class CompanionSkillSelectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CompanionSkillSelectionError";
+  }
+}
+
+export class CompanionWriteSkillsForbiddenError extends Error {
+  constructor() {
+    super("this Companion is not allowed to create or update skills on your behalf");
+    this.name = "CompanionWriteSkillsForbiddenError";
+  }
+}
+
 /**
  * Access is the owner, otherwise the workspace-wide grant. Per-member grants were cut in THE-329, so
  * authorization ignores any that a not-yet-run migration left behind: a stale row can never open a
@@ -189,6 +203,8 @@ function toCompanion(row: CompanionRow, access: CompanionAccess): Companion {
     name: row.name,
     persona: row.persona,
     model_id: modelId ?? null,
+    selected_skill_ids: Array.isArray(row.selectedSkillIds) ? row.selectedSkillIds : [],
+    can_write_skills: row.canWriteSkills === true,
     owner_id: row.ownerId,
     access,
     runtime: {
@@ -264,6 +280,67 @@ export async function getCompanion(input: {
   return toCompanion(row, access);
 }
 
+/**
+ * Resolve and validate skill ids the actor may attach to a Companion: organization skills plus the
+ * actor's own personal skills. Unknown, archived, or invisible ids fail closed. Ids already on the
+ * Companion may be kept even when the current editor cannot see them, so an Owner's personal skills
+ * survive an Editor saving other settings.
+ */
+export async function resolveCompanionSelectedSkillIds(input: {
+  actor: ActorContext;
+  orgId: string;
+  selectedSkillIds: string[];
+  previouslySelectedSkillIds?: string[];
+  database?: Db;
+}): Promise<string[]> {
+  const database = input.database ?? db;
+  const unique = [...new Set(input.selectedSkillIds)];
+  if (!unique.length) return [];
+  const visible = await listSkills({
+    actor: input.actor,
+    orgId: input.orgId,
+    library: "accessible",
+    database,
+  });
+  const allowed = new Set(
+    visible
+      .filter((skill) => !skill.archived && skill.validation === "valid" && skill.current_version)
+      .map((skill) => skill.id),
+  );
+  for (const id of input.previouslySelectedSkillIds ?? []) {
+    if (unique.includes(id)) allowed.add(id);
+  }
+  const rejected = unique.filter((id) => !allowed.has(id));
+  if (rejected.length) {
+    throw new CompanionSkillSelectionError(
+      rejected.length === 1
+        ? "One selected skill is not available in this workspace library."
+        : `${rejected.length} selected skills are not available in this workspace library.`,
+    );
+  }
+  return unique;
+}
+
+/**
+ * Fail closed when a Companion-sourced PAT attempts skills:write after write-on-behalf was turned off.
+ */
+export async function assertCompanionCanWriteSkills(input: {
+  orgId: string;
+  companionId: string;
+  database?: Db;
+}): Promise<void> {
+  const database = input.database ?? db;
+  const [row] = await database
+    .select({ canWriteSkills: schema.companions.canWriteSkills })
+    .from(schema.companions)
+    .where(and(
+      eq(schema.companions.orgId, input.orgId),
+      eq(schema.companions.id, input.companionId),
+    ))
+    .limit(1);
+  if (!row?.canWriteSkills) throw new CompanionWriteSkillsForbiddenError();
+}
+
 export async function createCompanion(input: {
   actor: ActorContext;
   orgId: string;
@@ -271,6 +348,8 @@ export async function createCompanion(input: {
   persona?: string;
   providerId?: string;
   modelId?: string;
+  selectedSkillIds?: string[];
+  canWriteSkills?: boolean;
   providerCatalog?: CompanionProviderDefinition[];
   database?: Db;
 }): Promise<Companion> {
@@ -310,6 +389,14 @@ export async function createCompanion(input: {
       providerId,
     );
   }
+  const selectedSkillIds = input.selectedSkillIds !== undefined
+    ? await resolveCompanionSelectedSkillIds({
+        actor: input.actor,
+        orgId: input.orgId,
+        selectedSkillIds: input.selectedSkillIds,
+        database,
+      })
+    : [];
   const [row] = await database
     .insert(schema.companions)
     .values({
@@ -319,6 +406,8 @@ export async function createCompanion(input: {
       persona: input.persona?.trim() || null,
       providerIds: [providerId],
       modelId,
+      selectedSkillIds,
+      canWriteSkills: input.canWriteSkills === true,
     })
     .returning();
   if (!row) throw new Error("failed to create companion");
@@ -333,6 +422,8 @@ export async function updateCompanion(input: {
   persona?: string | null;
   providerId?: string;
   modelId?: string;
+  selectedSkillIds?: string[];
+  canWriteSkills?: boolean;
   providerCatalog?: CompanionProviderDefinition[];
   database?: Db;
 }): Promise<Companion> {
@@ -383,6 +474,15 @@ export async function updateCompanion(input: {
       providerId ?? null,
     );
   }
+  const selectedSkillIds = input.selectedSkillIds !== undefined
+    ? await resolveCompanionSelectedSkillIds({
+        actor: input.actor,
+        orgId: input.orgId,
+        selectedSkillIds: input.selectedSkillIds,
+        previouslySelectedSkillIds: companion.selected_skill_ids,
+        database,
+      })
+    : undefined;
   const [row] = await database
     .update(schema.companions)
     .set({
@@ -396,6 +496,8 @@ export async function updateCompanion(input: {
           ? { modelId }
           : {}
       ),
+      ...(selectedSkillIds !== undefined ? { selectedSkillIds } : {}),
+      ...(input.canWriteSkills !== undefined ? { canWriteSkills: input.canWriteSkills } : {}),
       ...(providerChanged ? { providerCredentialGeneration: null } : {}),
       updatedAt: new Date(),
     })
@@ -416,9 +518,44 @@ export async function updateCompanion(input: {
       persona: input.persona !== undefined,
       provider: input.providerId !== undefined,
       model: input.modelId !== undefined || providerChanged,
+      selected_skills: selectedSkillIds !== undefined,
+      can_write_skills: input.canWriteSkills !== undefined,
     },
   });
   return toCompanion(row, companion.access);
+}
+
+/**
+ * Companions that have selected a skill and currently look Online, so a Skills Hub publish can
+ * push the new package onto the Box without recreating it. Asleep Companions pick it up on wake.
+ */
+export async function listOnlineCompanionsForSkillSync(input: {
+  orgId: string;
+  skillId: string;
+  database?: Db;
+}): Promise<Array<{ id: string; ownerId: string; boxId: string }>> {
+  const database = input.database ?? db;
+  const rows = await database
+    .select({
+      id: schema.companions.id,
+      ownerId: schema.companions.ownerId,
+      boxId: schema.companions.boxId,
+      selectedSkillIds: schema.companions.selectedSkillIds,
+      runtimeState: schema.companions.runtimeState,
+      daemonState: schema.companions.daemonState,
+    })
+    .from(schema.companions)
+    .where(and(
+      eq(schema.companions.orgId, input.orgId),
+      eq(schema.companions.runtimeState, "running"),
+      eq(schema.companions.daemonState, "running"),
+    ));
+  return rows
+    .filter((row) =>
+      !!row.boxId
+      && Array.isArray(row.selectedSkillIds)
+      && row.selectedSkillIds.includes(input.skillId))
+    .map((row) => ({ id: row.id, ownerId: row.ownerId, boxId: row.boxId! }));
 }
 
 /**

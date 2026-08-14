@@ -8,10 +8,11 @@ import {
   CompanionProviderModelPicker,
   providerDefaultModel,
 } from "./CompanionProviderModelPicker";
+import { CompanionSkillPicker } from "./CompanionSkillPicker";
 
 /**
- * Creation is deliberately two fields plus provider and model choices. Everything else about a
- * Companion is decided later, from the Companion itself.
+ * Creation asks for name, persona, provider/model, which Skills Hub packages this Companion may
+ * use, and whether it may publish skills on the owner's behalf.
  */
 export function NewCompanionDialog({
   orgId,
@@ -35,6 +36,8 @@ export function NewCompanionDialog({
     : providers.connections[0]?.provider_id ?? "";
   const [providerId, setProviderId] = useState(initialProviderId);
   const [modelId, setModelId] = useState(providerDefaultModel(providers, initialProviderId));
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
+  const [canWriteSkills, setCanWriteSkills] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -51,6 +54,8 @@ export function NewCompanionDialog({
         persona: persona.trim() || undefined,
         provider_id: providerId,
         model_id: modelId,
+        selected_skill_ids: selectedSkillIds,
+        can_write_skills: canWriteSkills,
       }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Companion could not be created.");
@@ -62,7 +67,7 @@ export function NewCompanionDialog({
     <Dialog
       icon="bot"
       title="New companion"
-      desc="A name, one line about what it does, then the provider and model it runs on."
+      desc="A name, one line about what it does, the provider and model it runs on, then the skills it may use."
       onClose={onClose}
       closeDisabled={busy}
       className="og-dialog companions-new-dialog"
@@ -140,6 +145,16 @@ export function NewCompanionDialog({
             )}
           </p>
         )}
+        {connected ? (
+          <CompanionSkillPicker
+            orgId={orgId}
+            selectedSkillIds={selectedSkillIds}
+            canWriteSkills={canWriteSkills}
+            disabled={busy}
+            onSelectedSkillIdsChange={setSelectedSkillIds}
+            onCanWriteSkillsChange={setCanWriteSkills}
+          />
+        ) : null}
       </form>
     </Dialog>
   );

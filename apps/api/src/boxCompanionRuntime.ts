@@ -240,6 +240,11 @@ export interface CompanionBoxRuntime {
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
+    /**
+     * Skills Hub env for the Box (COMPANION_API_URL / WORKSPACE_ID / optional DELEGATION_TOKEN).
+     * Lives only in the volatile providers.env file alongside MCP credentials.
+     */
+    hubEnv?: Record<string, string>;
     /** Record which Box backs this Companion, or `null` when the recorded one is not its own. */
     onBoxAssigned: (boxId: string | null) => Promise<void>;
     /**
@@ -579,11 +584,15 @@ if systemctl --user show-environment >/dev/null 2>&1 &&
   printf '%s\\n' ${shellQuote(WARM_DAEMON_READY_MARKER)}
 fi`;
 
-function encodeEnvironmentFile(credentials: McpRuntimeCredential[]): string {
-  return credentials
-    .map(({ env_key: envKey, value }) => `${envKey}=${JSON.stringify(value)}`)
-    .join("\n")
-    .concat(credentials.length ? "\n" : "");
+function encodeEnvironmentFile(
+  credentials: McpRuntimeCredential[],
+  extra: Record<string, string> = {},
+): string {
+  const lines = [
+    ...credentials.map(({ env_key: envKey, value }) => `${envKey}=${JSON.stringify(value)}`),
+    ...Object.entries(extra).map(([key, value]) => `${key}=${JSON.stringify(value)}`),
+  ];
+  return lines.join("\n").concat(lines.length ? "\n" : "");
 }
 
 function companionBoxName(companionId: string): string {
@@ -1295,6 +1304,7 @@ exit 0`,
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
+    hubEnv?: Record<string, string>;
   }): Promise<void> {
     const injectedSkills = input.clientSurface === "native_mobile" ? [] : input.skills;
     const mcp = buildMcpAdapterInjection(input.mcpAccounts);
@@ -1360,7 +1370,7 @@ exit 0`,
       await this.#writeFile(
         input.boxId,
         ".companion/runtime/state/providers.env",
-        encodeEnvironmentFile(input.mcpCredentials),
+        encodeEnvironmentFile(input.mcpCredentials, input.hubEnv),
       );
       const prepared = await this.#command(
         input.boxId,
@@ -1402,6 +1412,7 @@ exit 0`,
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
+    hubEnv?: Record<string, string>;
     onBoxAssigned: (boxId: string | null) => Promise<void>;
     signal?: AbortSignal;
   }): Promise<CompanionRuntimeObservation> {
@@ -1429,6 +1440,7 @@ exit 0`,
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
+    hubEnv?: Record<string, string>;
     onBoxAssigned: (boxId: string | null) => Promise<void>;
   }): Promise<CompanionRuntimeObservation> {
     const allowBoxWake = input.allowBoxWake !== false;
@@ -1510,6 +1522,7 @@ exit 0`,
       mcpCredentials: input.mcpCredentials,
       mcpAccounts: input.mcpAccounts,
       skills: input.skills,
+      hubEnv: input.hubEnv,
     });
     let started: CommandEnvelope;
     try {
