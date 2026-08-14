@@ -35,6 +35,10 @@ const coreMocks = vi.hoisted(() => ({
   claimCompanionDeletion: vi.fn(),
   deleteCompanion: vi.fn(),
   saveCompanionPlugin: vi.fn(),
+  beginAnthropicProviderOAuth: vi.fn(),
+  beginOpenAICodexProviderOAuth: vi.fn(),
+  completeAnthropicProviderOAuth: vi.fn(),
+  pollOpenAICodexProviderOAuth: vi.fn(),
   beginCompanionPluginOAuth: vi.fn(),
   completeCompanionPluginOAuth: vi.fn(),
   saveCompanionOAuthPlugin: vi.fn(),
@@ -226,6 +230,43 @@ describe("Companions API feature gate", () => {
       connected: true,
       created_at: companion.created_at,
       updated_at: companion.updated_at,
+    });
+    coreMocks.beginAnthropicProviderOAuth.mockReturnValue({
+      authorizationUrl: "https://claude.ai/oauth/authorize?state=provider-state",
+      flow: {
+        providerId: "anthropic",
+        verifier: "provider-verifier",
+        state: "provider-state",
+        expiresAt: Date.now() + 15 * 60_000,
+      },
+    });
+    coreMocks.beginOpenAICodexProviderOAuth.mockResolvedValue({
+      verificationUrl: "https://auth.openai.com/codex/device",
+      userCode: "ABCD-EFGH",
+      pollIntervalSeconds: 2,
+      flow: {
+        providerId: "openai-codex",
+        deviceAuthId: "device-auth-secret",
+        userCode: "ABCD-EFGH",
+        pollIntervalSeconds: 2,
+        expiresAt: Date.now() + 15 * 60_000,
+      },
+    });
+    coreMocks.completeAnthropicProviderOAuth.mockResolvedValue({
+      type: "oauth",
+      access: "claude-access-secret",
+      refresh: "claude-refresh-secret",
+      expires: Date.now() + 3600_000,
+    });
+    coreMocks.pollOpenAICodexProviderOAuth.mockResolvedValue({
+      status: "complete",
+      credential: {
+        type: "oauth",
+        access: "codex-access-secret",
+        refresh: "codex-refresh-secret",
+        expires: Date.now() + 3600_000,
+        accountId: "acct-123",
+      },
     });
     coreMocks.beginCompanionPluginOAuth.mockImplementation(async (input) => ({
       authorizationUrl: `https://mcp.linear.app/authorize?state=${encodeURIComponent(input.state)}`,
@@ -1836,6 +1877,127 @@ describe("Companions API feature gate", () => {
       credential: "secret-a",
     }));
     expect(JSON.stringify(await response.json())).not.toContain("secret-a");
+  });
+
+  it("rejects pasted subscription JSON and brokers Claude subscription login server-side", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, {
+      COMPANION_COMPANIONS_ENABLED: "true",
+      COMPANION_SECRETS_MASTER_KEY: Buffer.alloc(32, 17).toString("base64"),
+    });
+
+    const pasted = await app.request("/v1/companion-providers/anthropic", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        auth_method: "subscription",
+        credential: { type: "oauth", access: "pasted-secret" },
+      }),
+    });
+    expect(pasted.status).toBe(400);
+    expect(coreMocks.saveCompanionProvider).not.toHaveBeenCalled();
+
+    const started = await app.request("/v1/companion-providers/oauth/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: "anthropic" }),
+    });
+    expect(started.status).toBe(200);
+    const startPayload = await started.json() as { authorization_url: string };
+    const cookie = started.headers.get("set-cookie")!.split(";")[0]!;
+    expect(startPayload.authorization_url).toContain("https://claude.ai/");
+    expect(cookie).not.toContain("provider-verifier");
+
+    coreMocks.saveCompanionProvider.mockResolvedValueOnce({
+      provider_id: "anthropic",
+      auth_method: "subscription",
+      connected_by: "user-1",
+      created_at: companion.created_at,
+      updated_at: companion.updated_at,
+    });
+    const completed = await app.request("/v1/companion-providers/oauth/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", cookie },
+      body: JSON.stringify({ authorization_code: "one-time-code" }),
+    });
+    const completedBody = JSON.stringify(await completed.json());
+
+    expect(completed.status).toBe(200);
+    expect(coreMocks.completeAnthropicProviderOAuth).toHaveBeenCalledWith(expect.objectContaining({
+      authorizationInput: "one-time-code",
+      flow: expect.objectContaining({ verifier: "provider-verifier" }),
+    }));
+    expect(coreMocks.saveCompanionProvider).toHaveBeenCalledWith(expect.objectContaining({
+      providerId: "anthropic",
+      authMethod: "subscription",
+      credential: expect.objectContaining({ type: "oauth", access: "claude-access-secret" }),
+    }));
+    expect(completedBody).not.toContain("claude-access-secret");
+    expect(completedBody).not.toContain("claude-refresh-secret");
+  });
+
+  it("connects Codex with a device code while keeping device and OAuth secrets off the browser", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, {
+      COMPANION_COMPANIONS_ENABLED: "true",
+      COMPANION_SECRETS_MASTER_KEY: Buffer.alloc(32, 19).toString("base64"),
+    });
+    const started = await app.request("/v1/companion-providers/oauth/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: "openai-codex" }),
+    });
+    const payload = await started.json() as { verification_url: string; user_code: string };
+    const cookie = started.headers.get("set-cookie")!.split(";")[0]!;
+
+    expect(payload).toMatchObject({
+      verification_url: "https://auth.openai.com/codex/device",
+      user_code: "ABCD-EFGH",
+    });
+    expect(cookie).not.toContain("device-auth-secret");
+
+    coreMocks.saveCompanionProvider.mockResolvedValueOnce({
+      provider_id: "openai-codex",
+      auth_method: "subscription",
+      connected_by: "user-1",
+      created_at: companion.created_at,
+      updated_at: companion.updated_at,
+    });
+    const polled = await app.request("/v1/companion-providers/oauth/poll", {
+      method: "POST",
+      headers: { cookie },
+    });
+    const responseText = JSON.stringify(await polled.json());
+
+    expect(polled.status).toBe(200);
+    expect(coreMocks.pollOpenAICodexProviderOAuth).toHaveBeenCalledWith(expect.objectContaining({
+      flow: expect.objectContaining({ deviceAuthId: "device-auth-secret" }),
+    }));
+    expect(responseText).not.toContain("codex-access-secret");
+    expect(responseText).not.toContain("codex-refresh-secret");
+  });
+
+  it("keeps provider OAuth unavailable to workspace members without admin rights", async () => {
+    coreMocks.listCompanionProviders.mockResolvedValueOnce({
+      catalog: [],
+      connections: [],
+      default_provider_id: null,
+      can_manage: false,
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, {
+      COMPANION_COMPANIONS_ENABLED: "true",
+      COMPANION_SECRETS_MASTER_KEY: Buffer.alloc(32, 23).toString("base64"),
+    });
+
+    const response = await app.request("/v1/companion-providers/oauth/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider_id: "anthropic" }),
+    });
+
+    expect(response.status).toBe(403);
+    expect(coreMocks.beginAnthropicProviderOAuth).not.toHaveBeenCalled();
   });
 
   it("manages labeled MCP accounts outside the Companion thread", async () => {

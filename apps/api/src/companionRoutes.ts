@@ -8,8 +8,13 @@ import {
   CompanionDeleteForbiddenError,
   CompanionPluginConflictError,
   CompanionPluginOAuthError,
+  CompanionProviderOAuthError,
+  COMPANION_PROVIDER_OAUTH_TTL_MS,
   CompanionRegistryUnavailableError,
+  beginAnthropicProviderOAuth,
+  beginOpenAICodexProviderOAuth,
   beginCompanionPluginOAuth,
+  completeAnthropicProviderOAuth,
   completeCompanionPluginOAuth,
   decryptOpaqueValue,
   encryptOpaqueValue,
@@ -43,6 +48,7 @@ import {
   listCompanionPlugins,
   listPendingCompanionMessages,
   projectCompanionPiEvents,
+  pollOpenAICodexProviderOAuth,
   recordCompanionPiProjection,
   resolveCompanionProviderAuth,
   resolveCompanionPluginInjection,
@@ -61,6 +67,8 @@ import type { CompanionPiEntry } from "@companion/core";
 import {
   createCompanionInputSchema,
   companionProviderIdSchema,
+  companionProviderOAuthCompleteInputSchema,
+  companionProviderOAuthStartInputSchema,
   companionPluginOAuthStartInputSchema,
   companionRegistryQuerySchema,
   companionRegistryServerNameSchema,
@@ -106,6 +114,8 @@ import {
 const companionIdSchema = z.string().uuid();
 const COMPANION_PLUGIN_OAUTH_FLOW_PURPOSE = "companion-mcp-oauth-flow";
 const COMPANION_PLUGIN_OAUTH_TTL_MS = 10 * 60_000;
+const COMPANION_PROVIDER_OAUTH_FLOW_PURPOSE = "companion-provider-oauth-flow";
+const COMPANION_PROVIDER_OAUTH_COOKIE = "companion_provider_oauth";
 
 type CompanionPluginOAuthState = {
   orgId: string;
@@ -193,6 +203,62 @@ function decodeCompanionPluginOAuthFlow(input: {
   };
 }
 
+type CompanionProviderOAuthCookie = {
+  orgId: string;
+  nonce: string;
+  encrypted: OpaqueCiphertext;
+};
+
+function encodeCompanionProviderOAuthFlow(input: {
+  orgId: string;
+  userId: string;
+  flow:
+    | ReturnType<typeof beginAnthropicProviderOAuth>["flow"]
+    | Awaited<ReturnType<typeof beginOpenAICodexProviderOAuth>>["flow"];
+  masterKey: Buffer;
+}): string {
+  const nonce = randomUUID();
+  const encrypted = encryptOpaqueValue({
+    orgId: input.orgId,
+    purpose: COMPANION_PROVIDER_OAUTH_FLOW_PURPOSE,
+    subjectId: nonce,
+    value: JSON.stringify({ userId: input.userId, flow: input.flow }),
+  }, input.masterKey);
+  return Buffer.from(JSON.stringify({ orgId: input.orgId, nonce, encrypted }), "utf8")
+    .toString("base64url");
+}
+
+function decodeCompanionProviderOAuthFlow(input: {
+  value: string;
+  masterKey: Buffer;
+}): {
+  orgId: string;
+  userId: string;
+  flow:
+    | ReturnType<typeof beginAnthropicProviderOAuth>["flow"]
+    | Awaited<ReturnType<typeof beginOpenAICodexProviderOAuth>>["flow"];
+} {
+  const cookie = JSON.parse(
+    Buffer.from(input.value, "base64url").toString("utf8"),
+  ) as CompanionProviderOAuthCookie;
+  const plaintext = decryptOpaqueValue({
+    orgId: cookie.orgId,
+    purpose: COMPANION_PROVIDER_OAUTH_FLOW_PURPOSE,
+    subjectId: cookie.nonce,
+    ...cookie.encrypted,
+  }, input.masterKey);
+  const pending = JSON.parse(plaintext) as {
+    userId: string;
+    flow:
+      | ReturnType<typeof beginAnthropicProviderOAuth>["flow"]
+      | Awaited<ReturnType<typeof beginOpenAICodexProviderOAuth>>["flow"];
+  };
+  if (!pending.userId || !pending.flow || pending.flow.expiresAt < Date.now()) {
+    throw new CompanionProviderOAuthError("oauth_expired", "Provider sign-in expired. Start again.");
+  }
+  return { orgId: cookie.orgId, ...pending };
+}
+
 type RuntimeFactory = () => CompanionBoxRuntime;
 
 class CompanionAccessForbiddenError extends Error {
@@ -218,6 +284,9 @@ function errorStatus(error: unknown): number {
     if (error.code === "oauth_not_supported") return 400;
     if (error.code === "oauth_not_configured") return 503;
     return 502;
+  }
+  if (error instanceof CompanionProviderOAuthError) {
+    return error.code === "oauth_unavailable" ? 502 : 400;
   }
   if (error instanceof CompanionRegistryUnavailableError) return 503;
   if (error instanceof CompanionRuntimeStartBudgetError) return 504;
@@ -625,6 +694,168 @@ export function registerCompanionRoutes(
         listCompanionProviders({ actor, orgId, database }));
       return c.json(providers);
     } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companion-providers/oauth/start", async (c) => {
+    try {
+      const body = companionProviderOAuthStartInputSchema.parse(await c.req.json());
+      const context = await tenant(c, async ({ actor, orgId, database }) => {
+        const providers = await listCompanionProviders({ actor, orgId, database });
+        if (!providers.can_manage) throw new CompanionProviderForbiddenError();
+        return { actor, orgId };
+      });
+      const masterKey = loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY);
+      const storePendingFlow = (
+        flow: Parameters<typeof encodeCompanionProviderOAuthFlow>[0]["flow"],
+      ) => {
+        setCookie(c, COMPANION_PROVIDER_OAUTH_COOKIE, encodeCompanionProviderOAuthFlow({
+          orgId: context.orgId,
+          userId: context.actor.id,
+          flow,
+          masterKey,
+        }), {
+          path: "/v1/companion-providers/oauth",
+          httpOnly: true,
+          sameSite: "Lax",
+          secure: env.NODE_ENV === "production",
+          maxAge: COMPANION_PROVIDER_OAUTH_TTL_MS / 1000,
+        });
+      };
+      if (body.provider_id === "anthropic") {
+        const started = beginAnthropicProviderOAuth();
+        storePendingFlow(started.flow);
+        return c.json({
+          flow: "authorization_code",
+          provider_id: "anthropic",
+          authorization_url: started.authorizationUrl,
+        });
+      }
+      const started = await beginOpenAICodexProviderOAuth();
+      storePendingFlow(started.flow);
+      return c.json({
+        flow: "device_code",
+        provider_id: "openai-codex",
+        verification_url: started.verificationUrl,
+        user_code: started.userCode,
+        poll_interval_seconds: started.pollIntervalSeconds,
+        expires_at: new Date(started.flow.expiresAt).toISOString(),
+      });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companion-providers/oauth/complete", async (c) => {
+    try {
+      const body = companionProviderOAuthCompleteInputSchema.parse(await c.req.json());
+      const context = await tenant(c, async ({ actor, orgId, database }) => {
+        const providers = await listCompanionProviders({ actor, orgId, database });
+        if (!providers.can_manage) throw new CompanionProviderForbiddenError();
+        return { actor, orgId };
+      });
+      const masterKey = loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY);
+      const cookie = getCookie(c, COMPANION_PROVIDER_OAUTH_COOKIE);
+      if (!cookie) {
+        throw new CompanionProviderOAuthError("oauth_expired", "Provider sign-in expired. Start again.");
+      }
+      const pending = decodeCompanionProviderOAuthFlow({ value: cookie, masterKey });
+      if (
+        pending.userId !== context.actor.id
+        || pending.orgId !== context.orgId
+        || pending.flow.providerId !== "anthropic"
+      ) {
+        throw new CompanionProviderOAuthError("oauth_invalid", "Provider sign-in does not match this workspace.");
+      }
+      const credential = await completeAnthropicProviderOAuth({
+        flow: pending.flow,
+        authorizationInput: body.authorization_code,
+      });
+      const connection = await withTenantContext(
+        { orgId: context.orgId, userId: context.actor.id },
+        (database) => saveCompanionProvider({
+          actor: context.actor,
+          orgId: context.orgId,
+          providerId: "anthropic",
+          authMethod: "subscription",
+          credential,
+          masterKey,
+          database,
+        }),
+      );
+      setCookie(c, COMPANION_PROVIDER_OAUTH_COOKIE, "", {
+        path: "/v1/companion-providers/oauth",
+        maxAge: 0,
+        httpOnly: true,
+        sameSite: "Lax",
+        secure: env.NODE_ENV === "production",
+      });
+      return c.json({ connection });
+    } catch (error) {
+      setCookie(c, COMPANION_PROVIDER_OAUTH_COOKIE, "", {
+        path: "/v1/companion-providers/oauth",
+        maxAge: 0,
+        httpOnly: true,
+        sameSite: "Lax",
+        secure: env.NODE_ENV === "production",
+      });
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companion-providers/oauth/poll", async (c) => {
+    try {
+      const context = await tenant(c, async ({ actor, orgId, database }) => {
+        const providers = await listCompanionProviders({ actor, orgId, database });
+        if (!providers.can_manage) throw new CompanionProviderForbiddenError();
+        return { actor, orgId };
+      });
+      const masterKey = loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY);
+      const cookie = getCookie(c, COMPANION_PROVIDER_OAUTH_COOKIE);
+      if (!cookie) {
+        throw new CompanionProviderOAuthError("oauth_expired", "Provider sign-in expired. Start again.");
+      }
+      const pending = decodeCompanionProviderOAuthFlow({ value: cookie, masterKey });
+      if (
+        pending.userId !== context.actor.id
+        || pending.orgId !== context.orgId
+        || pending.flow.providerId !== "openai-codex"
+      ) {
+        throw new CompanionProviderOAuthError("oauth_invalid", "Provider sign-in does not match this workspace.");
+      }
+      const result = await pollOpenAICodexProviderOAuth({ flow: pending.flow });
+      if (result.status === "pending") return c.json({ status: "pending" }, 202);
+      const connection = await withTenantContext(
+        { orgId: context.orgId, userId: context.actor.id },
+        (database) => saveCompanionProvider({
+          actor: context.actor,
+          orgId: context.orgId,
+          providerId: "openai-codex",
+          authMethod: "subscription",
+          credential: result.credential,
+          masterKey,
+          database,
+        }),
+      );
+      setCookie(c, COMPANION_PROVIDER_OAUTH_COOKIE, "", {
+        path: "/v1/companion-providers/oauth",
+        maxAge: 0,
+        httpOnly: true,
+        sameSite: "Lax",
+        secure: env.NODE_ENV === "production",
+      });
+      return c.json({ status: "connected", connection });
+    } catch (error) {
+      if (!(error instanceof CompanionProviderOAuthError) || error.code !== "oauth_unavailable") {
+        setCookie(c, COMPANION_PROVIDER_OAUTH_COOKIE, "", {
+          path: "/v1/companion-providers/oauth",
+          maxAge: 0,
+          httpOnly: true,
+          sameSite: "Lax",
+          secure: env.NODE_ENV === "production",
+        });
+      }
       return routeError(c, error);
     }
   });

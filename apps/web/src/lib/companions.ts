@@ -6,6 +6,7 @@ import type {
   CompanionPluginOAuthStartResponse,
   CompanionPluginsResponse,
   CompanionProviderConnection,
+  CompanionProviderOAuthStartResponse,
   CompanionProvidersResponse,
   CompanionRegistryDetailResponse,
   CompanionRegistryListResponse,
@@ -141,6 +142,44 @@ export async function saveCompanionProvider(
     },
   );
   return result.connection;
+}
+
+export async function startCompanionProviderOAuth(
+  orgId: string,
+  providerId: "anthropic" | "openai-codex",
+): Promise<CompanionProviderOAuthStartResponse> {
+  return apiFetch<CompanionProviderOAuthStartResponse>("/v1/companion-providers/oauth/start", {
+    method: "POST",
+    headers: orgHeaders(orgId),
+    body: JSON.stringify({ provider_id: providerId }),
+  });
+}
+
+export async function completeCompanionProviderOAuth(
+  orgId: string,
+  authorizationCode: string,
+): Promise<CompanionProviderConnection> {
+  const result = await apiFetch<{ connection: CompanionProviderConnection }>(
+    "/v1/companion-providers/oauth/complete",
+    {
+      method: "POST",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify({ authorization_code: authorizationCode }),
+    },
+  );
+  return result.connection;
+}
+
+export async function pollCompanionProviderOAuth(
+  orgId: string,
+): Promise<
+  | { status: "pending" }
+  | { status: "connected"; connection: CompanionProviderConnection }
+> {
+  return apiFetch("/v1/companion-providers/oauth/poll", {
+    method: "POST",
+    headers: orgHeaders(orgId),
+  });
 }
 
 export async function deleteCompanionProvider(orgId: string, providerId: string): Promise<void> {

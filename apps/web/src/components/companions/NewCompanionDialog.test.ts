@@ -10,6 +10,7 @@ function providers(overrides: Partial<CompanionProvidersResponse> = {}): Compani
   return {
     catalog: [
       { id: "anthropic", name: "Claude", auth_methods: ["api_key", "subscription"], description: "" },
+      { id: "kimi-coding", name: "Kimi", auth_methods: ["api_key"], description: "" },
       { id: "zai", name: "z.ai", auth_methods: ["api_key"], description: "" },
     ],
     connections: [{
@@ -53,6 +54,20 @@ describe("NewCompanionDialog", () => {
 
     expect(markup).toContain("No provider is connected yet.");
     expect(markup).toContain("Connect one");
+  });
+
+  it("uses the shared catalog to render Kimi once it is connected", () => {
+    const kimi = {
+      ...providers().connections[0]!,
+      provider_id: "kimi-coding",
+    };
+    const markup = render(providers({
+      connections: [kimi],
+      default_provider_id: "kimi-coding",
+    }));
+
+    expect(markup).toContain("Kimi");
+    expect(markup).not.toContain("Claude");
   });
 
   it("tells a member without provider rights who can connect one", () => {

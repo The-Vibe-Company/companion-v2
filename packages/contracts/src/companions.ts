@@ -29,19 +29,43 @@ export const COMPANION_PROVIDER_CATALOG = [
     id: "anthropic",
     name: "Claude",
     auth_methods: ["api_key", "subscription"],
-    description: "Anthropic API key or Claude Pro/Max authentication exported by Pi.",
+    description: "Anthropic API key or Claude Pro/Max browser authentication.",
   },
   {
     id: "openai-codex",
     name: "Codex",
     auth_methods: ["subscription"],
-    description: "ChatGPT Plus/Pro authentication exported by Pi.",
+    description: "ChatGPT Plus/Pro device authentication.",
+  },
+  {
+    id: "kimi-coding",
+    name: "Kimi",
+    auth_methods: ["api_key"],
+    description: "Kimi For Coding API key.",
+  },
+  {
+    id: "moonshot",
+    name: "Moonshot",
+    auth_methods: ["api_key"],
+    description: "Moonshot AI API key.",
   },
   {
     id: "zai",
     name: "z.ai",
     auth_methods: ["api_key"],
     description: "z.ai API key, including Coding Plan keys.",
+  },
+  {
+    id: "openai",
+    name: "OpenAI API",
+    auth_methods: ["api_key"],
+    description: "OpenAI API key.",
+  },
+  {
+    id: "google",
+    name: "Google Gemini",
+    auth_methods: ["api_key"],
+    description: "Google Gemini API key.",
   },
 ] as const satisfies ReadonlyArray<{
   id: string;
@@ -211,25 +235,48 @@ const apiKeyProviderAuthInputSchema = z.object({
   }),
 }).strict();
 
-const subscriptionProviderAuthInputSchema = z.object({
-  auth_method: z.literal("subscription"),
-  credential: z.record(z.unknown()).refine(
-    (credential) => credential.type === "oauth",
-    "subscription credential must be a Pi OAuth auth.json entry",
-  ).refine(
-    (credential) => JSON.stringify(credential).length <= 65_536,
-    "subscription credential is too large",
-  ),
-}).strict();
-
-export const saveCompanionProviderInputSchema = z.discriminatedUnion("auth_method", [
-  apiKeyProviderAuthInputSchema,
-  subscriptionProviderAuthInputSchema,
-]);
+/**
+ * The public credential write accepts API keys only. Subscription credentials are minted by the
+ * server-side OAuth broker, so a browser can never submit or receive a Pi auth.json entry.
+ */
+export const saveCompanionProviderInputSchema = apiKeyProviderAuthInputSchema;
 export type SaveCompanionProviderInput = z.infer<typeof saveCompanionProviderInputSchema>;
 
 export const setDefaultCompanionProviderInputSchema = z.object({
   provider_id: companionProviderIdSchema,
+}).strict();
+
+export const companionProviderOAuthStartInputSchema = z.object({
+  provider_id: z.enum(["anthropic", "openai-codex"]),
+}).strict();
+export type CompanionProviderOAuthStartInput = z.infer<
+  typeof companionProviderOAuthStartInputSchema
+>;
+
+export const companionProviderOAuthStartResponseSchema = z.discriminatedUnion("flow", [
+  z.object({
+    flow: z.literal("authorization_code"),
+    provider_id: z.literal("anthropic"),
+    authorization_url: z.string().url(),
+  }).strict(),
+  z.object({
+    flow: z.literal("device_code"),
+    provider_id: z.literal("openai-codex"),
+    verification_url: z.string().url(),
+    user_code: z.string().min(1).max(128),
+    poll_interval_seconds: z.number().int().min(1).max(60),
+    expires_at: z.string().datetime(),
+  }).strict(),
+]);
+export type CompanionProviderOAuthStartResponse = z.infer<
+  typeof companionProviderOAuthStartResponseSchema
+>;
+
+export const companionProviderOAuthCompleteInputSchema = z.object({
+  authorization_code: z.string().trim().min(1).max(4_096).refine(
+    (value) => !/[\r\n\0]/.test(value),
+    "authorization code must be a single line",
+  ),
 }).strict();
 
 /**

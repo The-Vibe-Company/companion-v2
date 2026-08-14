@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  COMPANION_PROVIDER_CATALOG,
+  companionProviderOAuthCompleteInputSchema,
+  companionProviderOAuthStartInputSchema,
   companionDesktopSchema,
   companionMessageEventId,
   companionThreadSchema,
@@ -14,22 +17,45 @@ import {
 } from "../src/companions";
 
 describe("Companion provider contracts", () => {
-  it("requires a single-line API key and accepts Pi OAuth subscription entries", () => {
+  it("keeps API keys write-only and removes browser-submitted subscription credentials", () => {
     expect(saveCompanionProviderInputSchema.parse({
       auth_method: "api_key",
       credential: "sk-test",
     })).toEqual({ auth_method: "api_key", credential: "sk-test" });
-    expect(saveCompanionProviderInputSchema.parse({
+    expect(() => saveCompanionProviderInputSchema.parse({
       auth_method: "subscription",
       credential: { type: "oauth", access: "token", refresh: "refresh", expires: 123 },
-    })).toMatchObject({ auth_method: "subscription" });
+    })).toThrow();
     expect(() => saveCompanionProviderInputSchema.parse({
       auth_method: "api_key",
       credential: "line-one\nline-two",
     })).toThrow();
-    expect(() => saveCompanionProviderInputSchema.parse({
-      auth_method: "subscription",
-      credential: { type: "api_key", key: "wrong shape" },
+  });
+
+  it("pins Pi's Kimi, Moonshot, OpenAI, and Google API-key providers", () => {
+    expect(COMPANION_PROVIDER_CATALOG).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "kimi-coding", auth_methods: ["api_key"] }),
+      expect.objectContaining({ id: "moonshot", auth_methods: ["api_key"] }),
+      expect.objectContaining({ id: "openai", auth_methods: ["api_key"] }),
+      expect.objectContaining({ id: "google", auth_methods: ["api_key"] }),
+    ]));
+  });
+
+  it("starts only native Claude/Codex subscription login and accepts one-time codes only", () => {
+    expect(companionProviderOAuthStartInputSchema.parse({
+      provider_id: "anthropic",
+    })).toEqual({ provider_id: "anthropic" });
+    expect(companionProviderOAuthStartInputSchema.parse({
+      provider_id: "openai-codex",
+    })).toEqual({ provider_id: "openai-codex" });
+    expect(() => companionProviderOAuthStartInputSchema.parse({
+      provider_id: "zai",
+    })).toThrow();
+    expect(companionProviderOAuthCompleteInputSchema.parse({
+      authorization_code: "one-time-code",
+    })).toEqual({ authorization_code: "one-time-code" });
+    expect(() => companionProviderOAuthCompleteInputSchema.parse({
+      authorization_code: "{\"type\":\n\"oauth\"}",
     })).toThrow();
   });
 
