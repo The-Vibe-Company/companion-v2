@@ -1397,6 +1397,33 @@ export async function setDefaultCompanionProvider(input: {
   });
 }
 
+/**
+ * Read the selected workspace provider generation without decrypting its credential. Runtime callers
+ * use this to decide whether an already-running Pi can safely stay on the prompt-only path.
+ */
+export async function getCompanionProviderCredentialGeneration(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  database?: Db;
+}): Promise<{ providerId: string | null; credentialGeneration: string | null }> {
+  const database = input.database ?? db;
+  const companion = await getCompanionForRuntime({ ...input, database });
+  const providerId = companion.runtime.provider_ids[0] ?? null;
+  if (!providerId) return { providerId: null, credentialGeneration: null };
+  const row = await database.query.companionProviderConnections.findFirst({
+    where: and(
+      eq(schema.companionProviderConnections.orgId, input.orgId),
+      eq(schema.companionProviderConnections.providerId, providerId),
+    ),
+    columns: { credentialGeneration: true },
+  });
+  return {
+    providerId,
+    credentialGeneration: row?.credentialGeneration ?? null,
+  };
+}
+
 export async function resolveCompanionProviderAuth(input: {
   actor: ActorContext;
   orgId: string;

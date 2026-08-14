@@ -37,6 +37,7 @@ import {
   deleteCompanionPlugin,
   deleteCompanionProvider,
   getCompanion,
+  getCompanionProviderCredentialGeneration,
   getCompanionRegistryServer,
   listCompanionRegistry,
   getCompanionForRuntime,
@@ -339,6 +340,16 @@ function piIsReachable(companion: Companion): boolean {
   return Boolean(companion.runtime.box_id)
     && companion.runtime.state === "running"
     && companion.runtime.daemon_state === "running";
+}
+
+function providerAuthIsCurrent(
+  companion: Companion,
+  current: { providerId: string | null; credentialGeneration: string | null } | null,
+): boolean {
+  return current !== null
+    && current.credentialGeneration !== null
+    && current.providerId === companion.runtime.provider_ids[0]
+    && current.credentialGeneration === companion.runtime.provider_credential_generation;
 }
 
 function recordProjection(input: {
@@ -1099,8 +1110,9 @@ export function registerCompanionRoutes(
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
       const body = updateCompanionInputSchema.parse(await c.req.json());
-      const companion = await tenant(c, ({ actor, orgId, database }) =>
-        updateCompanion({
+      const updated = await tenant(c, async ({ actor, orgId, database }) => {
+        const previous = await getCompanion({ actor, orgId, companionId, database });
+        const companion = await updateCompanion({
           actor,
           orgId,
           companionId,
@@ -1108,8 +1120,29 @@ export function registerCompanionRoutes(
           persona: body.persona,
           providerId: body.provider_id,
           database,
-        }));
-      return c.json({ companion });
+        });
+        return {
+          companion,
+          providerChanged: body.provider_id !== undefined
+            && previous.runtime.provider_ids[0] !== body.provider_id,
+        };
+      });
+      if (updated.providerChanged && piIsReachable(updated.companion)) {
+        // Settings must never wake a sleeping Box. Confirm the projected online state is still live
+        // before routing the provider change through startRuntime, which rewrites auth and recycles Pi.
+        const observed = await runtimeFactory().status({
+          boxId: updated.companion.runtime.box_id!,
+        }).catch(() => null);
+        if (observed?.runtimeState === "running" && observed.daemonState === "running") {
+          const started = await startRuntime(
+            c,
+            companionId,
+            startCompanionRuntimeInputSchema.parse({ client_surface: "web" }),
+          );
+          return c.json({ companion: started.companion });
+        }
+      }
+      return c.json({ companion: updated.companion });
     } catch (error) {
       return routeError(c, error);
     }
@@ -1213,10 +1246,16 @@ export function registerCompanionRoutes(
         // backlog in order rather than this message alone. A resent send that was already
         // delivered is not pending, so it is never handed to Pi a second time either.
         const state = await listPendingCompanionMessages({ actor, orgId, companionId, database });
+        const provider = state.pending.length > 0
+          ? await getCompanionProviderCredentialGeneration({
+              actor, orgId, companionId, database,
+            })
+          : null;
         return {
           actor,
           orgId,
           companion,
+          provider,
           pending: state.pending,
           deliveredOrdinal: state.deliveredOrdinal,
           ...result,
@@ -1239,7 +1278,7 @@ export function registerCompanionRoutes(
       }
       let runtime: CompanionBoxRuntime | undefined;
       let boxId: string | undefined;
-      if (piIsReachable(sent.companion)) {
+      if (piIsReachable(sent.companion) && providerAuthIsCurrent(sent.companion, sent.provider)) {
         // Provider TTL can archive a Box while the control-plane projection still says running.
         // Observe without resuming; a genuinely warm daemon stays on the prompt-only path, while a
         // stale projection falls through to the same start path as an explicitly asleep Companion.
@@ -1293,10 +1332,16 @@ export function registerCompanionRoutes(
   app.post("/v1/companions/:id/thread/sync", async (c) => {
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
+      const body = startCompanionRuntimeInputSchema.parse(await c.req.json().catch(() => ({})));
       const resolved = await tenant(c, async ({ actor, orgId, database }) => {
         const companion = await getCompanionForRuntime({ actor, orgId, companionId, database });
         const state = await listPendingCompanionMessages({ actor, orgId, companionId, database });
-        return { actor, orgId, companion, ...state };
+        const provider = piIsReachable(companion)
+          ? await getCompanionProviderCredentialGeneration({
+              actor, orgId, companionId, database,
+            })
+          : null;
+        return { actor, orgId, companion, provider, ...state };
       });
       if (!piIsReachable(resolved.companion)) {
         const thread = await withTenantContext(
@@ -1307,8 +1352,26 @@ export function registerCompanionRoutes(
         );
         return c.json({ thread, source: "control_plane" as const });
       }
-      const boxId = resolved.companion.runtime.box_id!;
-      const runtime = runtimeFactory();
+      let boxId = resolved.companion.runtime.box_id!;
+      let runtime = runtimeFactory();
+      const observed = await runtime.status({ boxId }).catch(() => null);
+      if (observed?.runtimeState !== "running" || observed.daemonState !== "running") {
+        const thread = await withTenantContext(
+          { orgId: resolved.orgId, userId: resolved.actor.id },
+          (database) => getCompanionThread({
+            actor: resolved.actor, orgId: resolved.orgId, companionId, database,
+          }),
+        );
+        return c.json({ thread, source: "control_plane" as const });
+      }
+      if (!providerAuthIsCurrent(resolved.companion, resolved.provider)) {
+        const started = await startRuntime(c, companionId, body);
+        if (!started.companion.runtime.box_id) {
+          throw new CompanionRuntimeTransitionError("companion start completed without a Box");
+        }
+        runtime = started.runtime;
+        boxId = started.companion.runtime.box_id;
+      }
       let deliveredOrdinal: number | undefined;
       try {
         for (const message of resolved.pending) {
