@@ -511,7 +511,7 @@ credential material must remain behind the adapter boundary.
 | Claude | `anthropic` | Anthropic API key or Claude Pro/Max browser OAuth |
 | Codex | `openai-codex` | ChatGPT Plus/Pro device OAuth |
 | Kimi | `kimi-coding` | Kimi For Coding API key |
-| Moonshot | `moonshot` | Moonshot AI API key |
+| Moonshot | `moonshotai` | Moonshot AI API key |
 | z.ai | `zai` | z.ai API key, including Coding Plan keys |
 | OpenAI API | `openai` | OpenAI API key |
 | Google Gemini | `google` | Google Gemini API key |

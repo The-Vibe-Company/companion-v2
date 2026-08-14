@@ -44,7 +44,7 @@ export const COMPANION_PROVIDER_CATALOG = [
     description: "Kimi For Coding API key.",
   },
   {
-    id: "moonshot",
+    id: "moonshotai",
     name: "Moonshot",
     auth_methods: ["api_key"],
     description: "Moonshot AI API key.",
