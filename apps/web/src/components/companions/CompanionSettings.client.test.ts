@@ -13,7 +13,12 @@ const { updateCompanion, deleteCompanion } = vi.hoisted(() => ({
 
 vi.mock("@/lib/companions", () => ({ updateCompanion, deleteCompanion }));
 vi.mock("@/lib/apiClient", () => ({
-  apiFetch: vi.fn(async () => []),
+  apiFetch: vi.fn(async (path: string) => {
+    if (String(path).includes("/v1/companion-plugins")) {
+      return { accounts: [] };
+    }
+    return [];
+  }),
 }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -60,6 +65,7 @@ function companion(access: Companion["access"] = "owner"): Companion {
     model_id: "claude-opus-4-8",
     selected_skill_ids: [],
     can_write_skills: false,
+    selected_mcp_account_ids: [],
     owner_id: "user-1",
     access,
     runtime: {
@@ -168,6 +174,7 @@ describe("CompanionSettings", () => {
         model_id: "gpt-5.5",
         selected_skill_ids: [],
         can_write_skills: false,
+        selected_mcp_account_ids: [],
       },
     );
     expect(onSaved).toHaveBeenCalledOnce();
@@ -186,6 +193,7 @@ describe("CompanionSettings", () => {
     expect(container.textContent).toContain("Claude Opus 4.8");
     expect(container.textContent).toContain("Skills");
     expect(container.textContent).toContain("May create and update skills on my behalf");
+    expect(container.textContent).toContain("Plugins");
     expect(container.querySelector(".companions-skills-picker fieldset")).toHaveProperty("disabled", true);
     expect(container.querySelector(".companions-skills-picker__write input")).toHaveProperty("disabled", true);
     expect(container.textContent).not.toContain("Save changes");

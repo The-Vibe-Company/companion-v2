@@ -9,10 +9,12 @@ import {
   providerDefaultModel,
 } from "./CompanionProviderModelPicker";
 import { CompanionSkillPicker } from "./CompanionSkillPicker";
+import { CompanionPluginPicker } from "./CompanionPluginPicker";
 
 /**
  * Creation asks for name, persona, provider/model, which Skills Hub packages this Companion may
- * use, and whether it may publish skills on the owner's behalf.
+ * use, whether it may publish skills on the owner's behalf, and which already-connected MCP
+ * plugins it may stage onto its Box.
  */
 export function NewCompanionDialog({
   orgId,
@@ -38,6 +40,7 @@ export function NewCompanionDialog({
   const [modelId, setModelId] = useState(providerDefaultModel(providers, initialProviderId));
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [canWriteSkills, setCanWriteSkills] = useState(false);
+  const [selectedMcpAccountIds, setSelectedMcpAccountIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -56,6 +59,7 @@ export function NewCompanionDialog({
         model_id: modelId,
         selected_skill_ids: selectedSkillIds,
         can_write_skills: canWriteSkills,
+        selected_mcp_account_ids: selectedMcpAccountIds,
       }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Companion could not be created.");
@@ -67,7 +71,7 @@ export function NewCompanionDialog({
     <Dialog
       icon="bot"
       title="New companion"
-      desc="A name, one line about what it does, the provider and model it runs on, then the skills it may use."
+      desc="A name, one line about what it does, the provider and model it runs on, then the skills and plugins it may use."
       onClose={onClose}
       closeDisabled={busy}
       className="og-dialog companions-new-dialog"
@@ -146,14 +150,22 @@ export function NewCompanionDialog({
           </p>
         )}
         {connected ? (
-          <CompanionSkillPicker
-            orgId={orgId}
-            selectedSkillIds={selectedSkillIds}
-            canWriteSkills={canWriteSkills}
-            disabled={busy}
-            onSelectedSkillIdsChange={setSelectedSkillIds}
-            onCanWriteSkillsChange={setCanWriteSkills}
-          />
+          <>
+            <CompanionSkillPicker
+              orgId={orgId}
+              selectedSkillIds={selectedSkillIds}
+              canWriteSkills={canWriteSkills}
+              disabled={busy}
+              onSelectedSkillIdsChange={setSelectedSkillIds}
+              onCanWriteSkillsChange={setCanWriteSkills}
+            />
+            <CompanionPluginPicker
+              orgId={orgId}
+              selectedMcpAccountIds={selectedMcpAccountIds}
+              disabled={busy}
+              onSelectedMcpAccountIdsChange={setSelectedMcpAccountIds}
+            />
+          </>
         ) : null}
       </form>
     </Dialog>

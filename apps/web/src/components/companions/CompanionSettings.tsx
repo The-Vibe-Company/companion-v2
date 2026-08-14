@@ -10,6 +10,7 @@ import {
   providerSelectedModel,
 } from "./CompanionProviderModelPicker";
 import { CompanionSkillPicker } from "./CompanionSkillPicker";
+import { CompanionPluginPicker } from "./CompanionPluginPicker";
 
 export function CompanionSettings({
   orgId,
@@ -35,6 +36,9 @@ export function CompanionSettings({
   );
   const [selectedSkillIds, setSelectedSkillIds] = useState(companion.selected_skill_ids);
   const [canWriteSkills, setCanWriteSkills] = useState(companion.can_write_skills);
+  const [selectedMcpAccountIds, setSelectedMcpAccountIds] = useState(
+    companion.selected_mcp_account_ids,
+  );
   const [busy, setBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -50,8 +54,19 @@ export function CompanionSettings({
       || modelId !== companion.model_id
       || canWriteSkills !== companion.can_write_skills
       || selectedSkillIds.length !== companion.selected_skill_ids.length
-      || selectedSkillIds.some((id, index) => id !== companion.selected_skill_ids[index]),
-    [canWriteSkills, companion, instructions, modelId, name, providerId, selectedSkillIds],
+      || selectedSkillIds.some((id, index) => id !== companion.selected_skill_ids[index])
+      || selectedMcpAccountIds.length !== companion.selected_mcp_account_ids.length
+      || selectedMcpAccountIds.some((id, index) => id !== companion.selected_mcp_account_ids[index]),
+    [
+      canWriteSkills,
+      companion,
+      instructions,
+      modelId,
+      name,
+      providerId,
+      selectedMcpAccountIds,
+      selectedSkillIds,
+    ],
   );
 
   const submit = async (event: FormEvent) => {
@@ -68,6 +83,7 @@ export function CompanionSettings({
         model_id: modelId,
         selected_skill_ids: selectedSkillIds,
         can_write_skills: canWriteSkills,
+        selected_mcp_account_ids: selectedMcpAccountIds,
       });
       onSaved(updated);
       setName(updated.name);
@@ -77,6 +93,7 @@ export function CompanionSettings({
       setModelId(providerSelectedModel(providers, updatedProviderId, updated.model_id));
       setSelectedSkillIds(updated.selected_skill_ids);
       setCanWriteSkills(updated.can_write_skills);
+      setSelectedMcpAccountIds(updated.selected_mcp_account_ids);
       setSaved(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Companion settings could not be saved.");
@@ -166,7 +183,7 @@ export function CompanionSettings({
             }}
           />
           <p className="companions-settings__hint" id="companion-provider-hint">
-            If Online, changing provider, model, or skills recycles Pi. The Box stays online.
+            If Online, changing provider, model, skills, or plugins recycles Pi. The Box stays online.
           </p>
 
           <CompanionSkillPicker
@@ -180,6 +197,16 @@ export function CompanionSettings({
             }}
             onCanWriteSkillsChange={(value) => {
               setCanWriteSkills(value);
+              setSaved(false);
+            }}
+          />
+
+          <CompanionPluginPicker
+            orgId={orgId}
+            selectedMcpAccountIds={selectedMcpAccountIds}
+            disabled={!canEdit || busy}
+            onSelectedMcpAccountIdsChange={(ids) => {
+              setSelectedMcpAccountIds(ids);
               setSaved(false);
             }}
           />

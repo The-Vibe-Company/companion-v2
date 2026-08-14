@@ -59,6 +59,7 @@ describe("NewCompanionDialog", () => {
     expect(markup.match(/<input/g)?.length).toBeGreaterThanOrEqual(4);
     expect(markup).toContain("Skills");
     expect(markup).toContain("May create and update skills on my behalf");
+    expect(markup).toContain("Plugins");
     expect(markup).not.toContain("z.ai");
     expect(markup).not.toContain("GLM-4.7");
   });

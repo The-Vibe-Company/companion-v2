@@ -388,6 +388,11 @@ export const companions = pgTable(
      * behalf. Off by default; Viewer never writes this flag.
      */
     canWriteSkills: boolean("can_write_skills").notNull().default(false),
+    /**
+     * Exact companion_mcp_accounts ids this Companion may stage onto its Box. Empty means no
+     * member MCP pins beyond whatever the Pi runtime itself requires (the adapter binary only).
+     */
+    selectedMcpAccountIds: jsonb("selected_mcp_account_ids").$type<string[]>().notNull().default([]),
     boxId: text("box_id"),
     runtimeState: companionRuntimeStateEnum("runtime_state").notNull().default("not_created"),
     daemonState: companionDaemonStateEnum("daemon_state").notNull().default("unknown"),

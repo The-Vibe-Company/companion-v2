@@ -32,6 +32,7 @@ export async function createCompanion(
     model_id: string;
     selected_skill_ids?: string[];
     can_write_skills?: boolean;
+    selected_mcp_account_ids?: string[];
   },
 ): Promise<Companion> {
   const result = await apiFetch<{ companion: Companion }>("/v1/companions", {
