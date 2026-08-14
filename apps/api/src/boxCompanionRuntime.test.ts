@@ -2565,7 +2565,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     const runtime = new AsciiBoxCompanionRuntime({
       COMPANION_BOX_API_KEY: "box_test",
       COMPANION_BOX_POLL_INTERVAL_MS: "1",
-      COMPANION_BOX_DESKTOP_MINT_BUDGET_MS: "5",
+      COMPANION_BOX_DESKTOP_MINT_BUDGET_MS: "50",
     });
 
     const desktop = await runtime.desktop({ boxId: "bx_23456789" });
@@ -2577,8 +2577,12 @@ describe("AsciiBoxCompanionRuntime", () => {
     });
     // Every ask but the last one is the VNC ask: a Box that has not produced that stream yet is
     // asked again for as long as the budget lasts, and the other transport is what is left over.
-    expect(desktopCalls.length).toBeGreaterThan(2);
-    expect(desktopCalls.slice(0, -1).every((path) => path.endsWith("/desktop?vnc=1"))).toBe(true);
+    // How many polls fit inside a wall-clock budget is the machine's business, so the shape of the
+    // asks is what is asserted here; the poll count is settled at the helper, on a clock the test
+    // moves itself.
+    const vncAsks = desktopCalls.slice(0, -1);
+    expect(vncAsks.length).toBeGreaterThanOrEqual(1);
+    expect(vncAsks.every((path) => path === "/boxes/bx_23456789/desktop?vnc=1")).toBe(true);
     expect(desktopCalls.at(-1)).toBe("/boxes/bx_23456789/desktop");
     // Reaching a desktop over either stream still observes a Box and never resumes one.
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
