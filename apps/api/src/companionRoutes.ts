@@ -6,6 +6,7 @@ import {
   COMPANION_PLUGIN_OAUTH_SERVERS,
   CompanionNotFoundError,
   CompanionDeleteForbiddenError,
+  CompanionDuplicateForbiddenError,
   CompanionPluginConflictError,
   CompanionPluginOAuthError,
   CompanionProviderOAuthError,
@@ -44,6 +45,7 @@ import {
   deleteCompanion,
   deleteCompanionPlugin,
   deleteCompanionProvider,
+  duplicateCompanion,
   expireCompanionDecisions,
   getCompanion,
   getCompanionProviderCredentialGeneration,
@@ -58,6 +60,7 @@ import {
   listCompanionPlugins,
   listOnlineCompanionsForSkillSync,
   listPendingCompanionMessages,
+  markCompanionThreadRead,
   projectCompanionPiEvents,
   pollOpenAICodexProviderOAuth,
   recordCompanionPiProjection,
@@ -72,6 +75,7 @@ import {
   setDefaultCompanionProvider,
   updateCompanionObservation,
   updateCompanion,
+  updateCompanionMemberState,
   updateCompanionRuntime,
 } from "@companion/core";
 import { issueApiToken } from "@companion/core/services";
@@ -93,6 +97,7 @@ import {
   startCompanionRuntimeInputSchema,
   saveCompanionPluginInputSchema,
   updateCompanionInputSchema,
+  updateCompanionMemberStateInputSchema,
 } from "@companion/contracts";
 import type {
   Companion,
@@ -296,6 +301,7 @@ function errorStatus(error: unknown): number {
   if (error instanceof CompanionPluginSelectionError) return 400;
   if (error instanceof CompanionWriteSkillsForbiddenError) return 403;
   if (error instanceof CompanionDeleteForbiddenError) return 403;
+  if (error instanceof CompanionDuplicateForbiddenError) return 403;
   if (error instanceof CompanionProviderForbiddenError) return 403;
   if (error instanceof CompanionShareForbiddenError) return 403;
   if (error instanceof CompanionProviderError) return 422;
@@ -1251,6 +1257,43 @@ export function registerCompanionRoutes(
     }
   });
 
+  /**
+   * Pin / hide / mark-unread for the current member only (THE-351). Does not archive the Companion
+   * or its Box, and never reintroduces individual share.
+   */
+  app.patch("/v1/companions/:id/member-state", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const body = updateCompanionMemberStateInputSchema.parse(await c.req.json());
+      const companion = await tenant(c, ({ actor, orgId, database }) =>
+        updateCompanionMemberState({
+          actor,
+          orgId,
+          companionId,
+          patch: body,
+          database,
+        }));
+      return c.json({ companion });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  /**
+   * Owner-only clone into a new Companion with a new Box. Copies name, instructions, model, skill
+   * selection, and plugin selection; workspace share stays off.
+   */
+  app.post("/v1/companions/:id/duplicate", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const companion = await tenant(c, ({ actor, orgId, database }) =>
+        duplicateCompanion({ actor, orgId, companionId, database }));
+      return c.json({ companion }, 201);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
   app.patch("/v1/companions/:id", async (c) => {
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
@@ -1628,6 +1671,16 @@ export function registerCompanionRoutes(
             desktopAvailable: observed.desktopAvailable,
           })
         : null;
+      // Opening/syncing the thread clears unread for this member, including while Pi answers.
+      await withTenantContext(
+        { orgId: resolved.orgId, userId: resolved.actor.id },
+        (database) => markCompanionThreadRead({
+          actor: resolved.actor,
+          orgId: resolved.orgId,
+          companionId,
+          database,
+        }),
+      );
       return c.json({ thread: framed ?? thread, source: "box" as const });
     } catch (error) {
       return runtimeRouteError(c, error);
