@@ -29,7 +29,7 @@ const navigation: CompanionNavigation = {
 
 const providers: CompanionProvidersResponse = {
   catalog: [
-    { id: "anthropic", name: "Claude", auth_methods: ["api_key", "subscription"], description: "" },
+    { id: "anthropic", name: "Claude", auth_methods: ["api_key", "subscription"], description: "", models: [{ id: "claude-opus-4-8", name: "Claude Opus 4.8", default: true }] },
   ],
   connections: [{
     provider_id: "anthropic",
@@ -47,6 +47,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
     id: "11111111-1111-4111-8111-111111111111",
     name: "Luna",
     persona: "Content marketing assistant",
+    model_id: "claude-opus-4-8",
     owner_id: "user-1",
     access: "owner",
     runtime: {
@@ -117,7 +118,8 @@ describe("CompanionsApp", () => {
     expect(markup).toContain("Search companions");
     // The Companion Owner keeps sharing; a Viewer row must not offer it.
     expect(markup.match(/>Share</g)).toHaveLength(1);
-    expect(markup.match(/aria-label="Settings for/g)).toHaveLength(1);
+    // Both rows expose settings; the Viewer receives its provider and model as disabled controls.
+    expect(markup.match(/aria-label="Settings for/g)).toHaveLength(2);
   });
 
   it("carries the recorded reason next to an Error status in the list", () => {
@@ -185,7 +187,8 @@ describe("CompanionsApp", () => {
 
     expect(settings).toContain("Companion settings");
     expect(settings).toContain("Instructions");
-    expect(settings).toContain("Provider / model");
+    expect(settings).toContain("1. Provider");
+    expect(settings).toContain("2. Model");
     expect(settings).toContain("Delete Companion");
     expect(settings).not.toContain("Search companions");
     expect(settings).not.toContain("Chat with Luna");

@@ -464,6 +464,11 @@
   gap: 8px;
 }
 
+.companions-provider-model-picker {
+  display: grid;
+  gap: 14px;
+}
+
 .companions-picker legend {
   padding: 0 0 5px;
   color: var(--color-fg);
@@ -622,8 +627,7 @@
   border-color: var(--color-accent-edge);
 }
 
-.companions-settings__form :is(input, textarea):disabled,
-.companions-settings__form .companions-picker:disabled {
+.companions-settings__form :is(input, textarea):disabled {
   cursor: not-allowed;
   opacity: 0.62;
 }

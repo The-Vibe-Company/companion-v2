@@ -116,9 +116,7 @@ export function CompanionsApp({
   const [error, setError] = useState<string | null>(null);
   const [sharing, setSharing] = useState<Companion | null>(null);
   const [settingsId, setSettingsId] = useState<string | null>(
-    () => initialCompanions.some(
-      (item) => item.id === initialSettingsCompanionId && item.access !== "viewer",
-    )
+    () => initialCompanions.some((item) => item.id === initialSettingsCompanionId)
       ? initialSettingsCompanionId ?? null
       : null,
   );
@@ -783,16 +781,14 @@ export function CompanionsApp({
                           <UpdatedAt iso={companion.updated_at} />
                           <span className="companions-row-actions">
                             <span className="companions-role">{companion.access}</span>
-                            {companion.access !== "viewer" && (
-                              <button
-                                type="button"
-                                className="cds-btn cds-btn--ghost cds-btn--sm"
-                                aria-label={`Settings for ${companion.name}`}
-                                onClick={() => router.push(`/companions/${companion.id}/settings`)}
-                              >
-                                Settings
-                              </button>
-                            )}
+                            <button
+                              type="button"
+                              className="cds-btn cds-btn--ghost cds-btn--sm"
+                              aria-label={`Settings for ${companion.name}`}
+                              onClick={() => router.push(`/companions/${companion.id}/settings`)}
+                            >
+                              Settings
+                            </button>
                             {companion.access === "owner" && currentOrg.kind !== "personal" && (
                               <button
                                 type="button"

@@ -52,7 +52,7 @@ const navigation: CompanionNavigation = {
 };
 
 const providers: CompanionProvidersResponse = {
-  catalog: [{ id: "anthropic", name: "Claude", auth_methods: ["api_key"], description: "" }],
+  catalog: [{ id: "anthropic", name: "Claude", auth_methods: ["api_key"], description: "", models: [{ id: "claude-opus-4-8", name: "Claude Opus 4.8", default: true }] }],
   connections: [{
     provider_id: "anthropic",
     auth_method: "api_key",
@@ -68,6 +68,7 @@ const companion: Companion = {
   id: companionId,
   name: "Luna",
   persona: "Content marketing assistant",
+  model_id: "claude-opus-4-8",
   owner_id: "user-1",
   access: "owner",
   runtime: {

@@ -28,10 +28,11 @@ Give organizations one secure, self-hostable place to govern reusable AI coding 
 
 ### Optional Companions
 
-- Behind `companions`, members can create a Companion with one connected Pi provider.
+- Behind `companions`, members can create a Companion with one connected Pi provider and one model
+  from that provider's pinned catalog.
 - Owner/Admin can connect or disconnect envelope-encrypted workspace provider credentials and choose
   a workspace default. The compact shared catalog exposes Claude, Codex, Kimi, Moonshot, z.ai,
-  OpenAI API, and Google Gemini.
+  OpenAI API, and Google Gemini, plus the Pi-accepted models available under each provider.
 - Pi-supported API-key entries use one write-only field. Claude and Codex subscription entries are
   minted through browser PKCE or device authorization instead of pasted `auth.json`; access and
   refresh tokens stay server-side. Auth entries are resolved only for the selected Companion and

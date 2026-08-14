@@ -5,6 +5,10 @@ import type { Companion, CompanionProvidersResponse } from "@companion/contracts
 import { deleteCompanion, updateCompanion } from "@/lib/companions";
 import { Icon } from "../Icon";
 import { Dialog } from "../org/primitives";
+import {
+  CompanionProviderModelPicker,
+  providerDefaultModel,
+} from "./CompanionProviderModelPicker";
 
 export function CompanionSettings({
   orgId,
@@ -21,9 +25,13 @@ export function CompanionSettings({
   onSaved: (companion: Companion) => void;
   onDeleted: (companionId: string) => void;
 }) {
+  const initialProviderId = companion.runtime.provider_ids[0] ?? "";
   const [name, setName] = useState(companion.name);
   const [instructions, setInstructions] = useState(companion.persona ?? "");
-  const [providerId, setProviderId] = useState(companion.runtime.provider_ids[0] ?? "");
+  const [providerId, setProviderId] = useState(initialProviderId);
+  const [modelId, setModelId] = useState(
+    companion.model_id ?? providerDefaultModel(providers, initialProviderId),
+  );
   const [busy, setBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -31,19 +39,18 @@ export function CompanionSettings({
   const canEdit = companion.access === "owner" || companion.access === "editor";
   const canDelete = companion.access === "owner";
 
-  const providerName = (id: string) =>
-    providers.catalog.find((provider) => provider.id === id)?.name ?? id;
   const changed = useMemo(
     () =>
       name.trim() !== companion.name
       || instructions.trim() !== (companion.persona ?? "")
-      || providerId !== (companion.runtime.provider_ids[0] ?? ""),
-    [companion, instructions, name, providerId],
+      || providerId !== (companion.runtime.provider_ids[0] ?? "")
+      || modelId !== companion.model_id,
+    [companion, instructions, modelId, name, providerId],
   );
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!canEdit || !name.trim() || !providerId || !changed) return;
+    if (!canEdit || !name.trim() || !providerId || !modelId || !changed) return;
     setBusy(true);
     setError(null);
     setSaved(false);
@@ -52,11 +59,14 @@ export function CompanionSettings({
         name: name.trim(),
         persona: instructions.trim() || null,
         provider_id: providerId,
+        model_id: modelId,
       });
       onSaved(updated);
       setName(updated.name);
       setInstructions(updated.persona ?? "");
-      setProviderId(updated.runtime.provider_ids[0] ?? "");
+      const updatedProviderId = updated.runtime.provider_ids[0] ?? "";
+      setProviderId(updatedProviderId);
+      setModelId(updated.model_id ?? providerDefaultModel(providers, updatedProviderId));
       setSaved(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Companion settings could not be saved.");
@@ -132,37 +142,21 @@ export function CompanionSettings({
             Applied the next time this Companion starts.
           </p>
 
-          <fieldset
-            className="companions-picker"
+          <CompanionProviderModelPicker
+            providers={providers}
+            providerId={providerId}
+            modelId={modelId}
+            namePrefix="companion-settings"
+            descriptionId="companion-provider-hint"
             disabled={!canEdit || busy}
-            aria-describedby="companion-provider-hint"
-          >
-            <legend>Provider / model</legend>
-            {providers.connections.map((connection) => (
-              <label
-                key={connection.provider_id}
-                className={
-                  "companions-chip"
-                  + (providerId === connection.provider_id ? " companions-chip--active" : "")
-                }
-              >
-                <input
-                  type="radio"
-                  name="companion-settings-provider"
-                  value={connection.provider_id}
-                  checked={providerId === connection.provider_id}
-                  onChange={() => {
-                    setProviderId(connection.provider_id);
-                    setSaved(false);
-                  }}
-                />
-                <span>{providerName(connection.provider_id)}</span>
-                {providers.default_provider_id === connection.provider_id && <em>Default</em>}
-              </label>
-            ))}
-          </fieldset>
+            onChange={(selection) => {
+              setProviderId(selection.providerId);
+              setModelId(selection.modelId);
+              setSaved(false);
+            }}
+          />
           <p className="companions-settings__hint" id="companion-provider-hint">
-            Applied the next time this Companion starts. Changing it does not restart the Box.
+            If Online, changing provider or model recycles Pi. The Box stays online.
           </p>
 
           {canEdit && (
@@ -170,7 +164,7 @@ export function CompanionSettings({
               <button
                 type="submit"
                 className="cds-btn cds-btn--primary cds-btn--md"
-                disabled={busy || !changed || !name.trim() || !providerId}
+                disabled={busy || !changed || !name.trim() || !providerId || !modelId}
               >
                 {busy ? "Saving..." : "Save changes"}
               </button>

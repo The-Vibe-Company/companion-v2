@@ -23,10 +23,10 @@ const roots: Root[] = [];
 const connectedAt = "2026-08-14T12:00:00.000Z";
 const providers: CompanionProvidersResponse = {
   catalog: [
-    { id: "anthropic", name: "Claude", auth_methods: ["api_key", "subscription"], description: "" },
-    { id: "openai-codex", name: "Codex", auth_methods: ["subscription"], description: "" },
-    { id: "kimi-coding", name: "Kimi", auth_methods: ["api_key"], description: "" },
-    { id: "zai", name: "z.ai", auth_methods: ["api_key"], description: "" },
+    { id: "anthropic", name: "Claude", auth_methods: ["api_key", "subscription"], description: "", models: [{ id: "claude-opus-4-8", name: "Claude Opus 4.8", default: true }] },
+    { id: "openai-codex", name: "Codex", auth_methods: ["subscription"], description: "", models: [{ id: "gpt-5.5", name: "GPT-5.5", default: true }] },
+    { id: "kimi-coding", name: "Kimi", auth_methods: ["api_key"], description: "", models: [{ id: "kimi-for-coding", name: "Kimi K2.7 Code", default: true }] },
+    { id: "zai", name: "z.ai", auth_methods: ["api_key"], description: "", models: [{ id: "glm-4.7", name: "GLM-4.7", default: true }] },
   ],
   connections: [],
   default_provider_id: null,

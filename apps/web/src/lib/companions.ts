@@ -25,7 +25,7 @@ function orgHeaders(orgId: string): HeadersInit {
 
 export async function createCompanion(
   orgId: string,
-  input: { name: string; persona?: string; provider_id: string },
+  input: { name: string; persona?: string; provider_id: string; model_id: string },
 ): Promise<Companion> {
   const result = await apiFetch<{ companion: Companion }>("/v1/companions", {
     method: "POST",

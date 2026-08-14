@@ -62,6 +62,7 @@ describe("Companion settings persistence and roles", () => {
       name: "Research",
       persona: "Check the incident.",
       providerIds: ["anthropic"],
+      modelId: "claude-opus-4-8",
       boxId: "bx_23456789",
       runtimeState: "stopped",
       daemonState: "stopped",
@@ -93,6 +94,7 @@ describe("Companion settings persistence and roles", () => {
       access: "owner",
     });
     expect(ownerEdit.runtime.provider_ids).toEqual(["openai-codex"]);
+    expect(ownerEdit.model_id).toBe("gpt-5.5");
     expect(ownerEdit.runtime.provider_credential_generation).toBeNull();
 
     await integrationDb.insert(schema.companionWorkspaceAccess).values({
@@ -144,6 +146,55 @@ describe("Companion settings persistence and roles", () => {
       persona: "Challenge every source.",
     });
     expect(reloaded.runtime.provider_ids).toEqual(["openai-codex"]);
+    expect(reloaded.model_id).toBe("gpt-5.5");
+  });
+
+  it("persists only a model pinned to the selected provider", async () => {
+    const updated = await updateCompanion({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      modelId: "claude-sonnet-4-6",
+      database: integrationDb,
+    });
+    expect(updated.model_id).toBe("claude-sonnet-4-6");
+
+    await expect(updateCompanion({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      modelId: "glm-4.7",
+      database: integrationDb,
+    })).rejects.toMatchObject({
+      code: "provider_model_invalid",
+      providerId: "anthropic",
+    });
+  });
+
+  it("keeps legacy provider-less Companions editable until a provider is selected", async () => {
+    const legacyCompanionId = randomUUID();
+    await integrationDb.insert(schema.companions).values({
+      id: legacyCompanionId,
+      orgId: fixture.orgA,
+      ownerId: fixture.developer.id,
+      name: "Legacy Companion",
+    });
+
+    const updated = await updateCompanion({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId: legacyCompanionId,
+      name: "Renamed legacy Companion",
+      persona: "Keep existing setup readable.",
+      database: integrationDb,
+    });
+
+    expect(updated).toMatchObject({
+      name: "Renamed legacy Companion",
+      persona: "Keep existing setup readable.",
+      model_id: null,
+    });
+    expect(updated.runtime.provider_ids).toEqual([]);
   });
 
   it("allows only the Companion Owner to claim and finish permanent deletion", async () => {

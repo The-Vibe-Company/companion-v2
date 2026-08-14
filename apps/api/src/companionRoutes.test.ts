@@ -115,6 +115,7 @@ const companion = {
   id: "11111111-1111-4111-8111-111111111111",
   name: "Research",
   persona: "Incident research assistant",
+  model_id: "claude-opus-4-8",
   owner_id: "user-1",
   access: "owner" as const,
   runtime: {
@@ -451,6 +452,7 @@ describe("Companions API feature gate", () => {
   it("applies a provider change immediately when Box and Pi are already running", async () => {
     const changed = {
       ...runningCompanion,
+      model_id: "gpt-5.5",
       runtime: {
         ...runningCompanion.runtime,
         provider_ids: ["openai-codex"],
@@ -492,8 +494,56 @@ describe("Companions API feature gate", () => {
       boxId: companion.runtime.box_id,
       providerAuth: { "openai-codex": { type: "oauth", access: "secret-b" } },
       replaceProviderAuth: true,
+      modelId: "gpt-5.5",
       allowBoxWake: false,
     }));
+  });
+
+  it("recycles Pi for an online model-only change without replacing provider auth", async () => {
+    const changed = { ...runningCompanion, model_id: "claude-sonnet-4-6" };
+    coreMocks.getCompanion.mockResolvedValueOnce(runningCompanion);
+    coreMocks.updateCompanion.mockResolvedValueOnce(changed);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValueOnce(changed);
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model_id: "claude-sonnet-4-6" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtime.status).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
+      boxId: companion.runtime.box_id,
+      modelId: "claude-sonnet-4-6",
+      replaceProviderAuth: false,
+      restartPi: true,
+      allowBoxWake: false,
+    }));
+  });
+
+  it("saves a model-only change without waking an asleep Box", async () => {
+    const changed = { ...companion, model_id: "claude-sonnet-4-6" };
+    coreMocks.getCompanion.mockResolvedValueOnce(companion);
+    coreMocks.updateCompanion.mockResolvedValueOnce(changed);
+    const runtimeFactory = vi.fn(() => {
+      throw new Error("Box client must not be created");
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model_id: "claude-sonnet-4-6" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtimeFactory).not.toHaveBeenCalled();
+    expect(coreMocks.claimCompanionRuntimeStart).not.toHaveBeenCalled();
   });
 
   it("does not contact or recycle Pi for a name-only save on a running Companion", async () => {
@@ -556,6 +606,7 @@ describe("Companions API feature gate", () => {
     expect(runtime.status).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
     expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       allowBoxWake: false,
     }));
   });
@@ -1285,6 +1336,7 @@ describe("Companions API feature gate", () => {
     expect(runtime.status).not.toHaveBeenCalled();
     expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
     }));
     expect(runtime.start.mock.invocationCallOrder[0]!)
       .toBeLessThan(runtime.prompt.mock.invocationCallOrder[0]!);
@@ -1634,6 +1686,7 @@ describe("Companions API feature gate", () => {
     expect(runtime.status).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
     expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       allowBoxWake: false,
     }));
     expect(runtime.start.mock.invocationCallOrder[0]!)
@@ -1671,6 +1724,7 @@ describe("Companions API feature gate", () => {
     expect(runtime.status).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
     expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       allowBoxWake: false,
     }));
     expect(runtime.prompt).toHaveBeenCalledOnce();
@@ -1889,7 +1943,7 @@ describe("Companions API feature gate", () => {
     expect(runtimeFactory).not.toHaveBeenCalled();
   });
 
-  it("creates a Companion from a name, a persona, and one connected provider", async () => {
+  it("creates a Companion from a name, persona, connected provider, and pinned model", async () => {
     const app = new Hono<{ Variables: ApiVariables }>();
     registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
 
@@ -1900,6 +1954,7 @@ describe("Companions API feature gate", () => {
         name: "Luna",
         persona: "Content marketing assistant",
         provider_id: "anthropic",
+        model_id: "claude-opus-4-8",
       }),
     });
 
@@ -1909,7 +1964,31 @@ describe("Companions API feature gate", () => {
       name: "Luna",
       persona: "Content marketing assistant",
       providerId: "anthropic",
+      modelId: "claude-opus-4-8",
     }));
+  });
+
+  it.each([
+    ["create", "/v1/companions", "POST", { name: "Luna", provider_id: "anthropic", model_id: "glm-4.7" }],
+    [
+      "update",
+      `/v1/companions/${companion.id}`,
+      "PATCH",
+      { provider_id: "anthropic", model_id: "glm-4.7" },
+    ],
+  ])("rejects a model from another provider on %s", async (_name, path, method, body) => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    const response = await app.request(path, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    expect(response.status).toBe(400);
+    expect(coreMocks.createCompanion).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanion).not.toHaveBeenCalled();
   });
 
   it("rejects a persona longer than the stored column allows", async () => {
@@ -1983,6 +2062,7 @@ describe("Companions API feature gate", () => {
         anthropic: { type: "api_key", key: "secret-a" },
       },
       replaceProviderAuth: true,
+      modelId: "claude-opus-4-8",
       mcpCredentials: [
         { env_key: "GITHUB_TOKEN_WORK", value: "secret-b" },
       ],
