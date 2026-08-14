@@ -179,12 +179,11 @@ export function canWakeCompanion(access: CompanionAccess): boolean {
 function toCompanion(row: CompanionRow, access: CompanionAccess): Companion {
   const providerId = row.providerIds[0];
   const modelId = row.modelId ?? (providerId ? companionProviderDefaultModel(providerId) : undefined);
-  if (!modelId) throw new Error("companion has no model");
   return {
     id: row.id,
     name: row.name,
     persona: row.persona,
-    model_id: modelId,
+    model_id: modelId ?? null,
     owner_id: row.ownerId,
     access,
     runtime: {

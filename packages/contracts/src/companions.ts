@@ -163,7 +163,8 @@ export const companionSchema = z.object({
   name: z.string(),
   /** One short line describing what this Companion is for; shown under the name in the list. */
   persona: z.string().nullable(),
-  model_id: companionModelIdSchema,
+  /** Null only for legacy rows created before a provider was selected. */
+  model_id: companionModelIdSchema.nullable(),
   owner_id: z.string(),
   access: companionAccessSchema,
   runtime: z.object({

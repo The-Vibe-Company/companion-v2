@@ -516,6 +516,14 @@ export function registerCompanionRoutes(
           : await listCompanionRuntimeSkillPackages({ actor, orgId, database });
         return { actor, orgId, companion, provider, plugins, skillPackages };
       }), budget.signal);
+      const modelId = mutation.companion.model_id;
+      if (!modelId) {
+        throw new CompanionProviderError(
+          "provider_model_invalid",
+          "Choose a model before starting this Companion.",
+          mutation.provider.providerId,
+        );
+      }
       const skills = await withinBudget(
         // Object storage has no timeout of its own, so these reads are held to the wake's deadline
         // like every other step: a bucket that stops answering must not become a Companion that
@@ -550,7 +558,7 @@ export function registerCompanionRoutes(
         providerAuth: {
           [mutation.provider.providerId]: mutation.provider.authEntry,
         },
-        modelId: mutation.companion.model_id,
+        modelId,
         instructions: mutation.companion.persona,
         // Skipping the write preserves a subscription token Pi refreshed on disk. A layout refresh
         // remains a cold resource-injection path, but it does not replace current provider auth or

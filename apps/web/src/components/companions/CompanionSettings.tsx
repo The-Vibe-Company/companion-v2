@@ -5,7 +5,10 @@ import type { Companion, CompanionProvidersResponse } from "@companion/contracts
 import { deleteCompanion, updateCompanion } from "@/lib/companions";
 import { Icon } from "../Icon";
 import { Dialog } from "../org/primitives";
-import { CompanionProviderModelPicker } from "./CompanionProviderModelPicker";
+import {
+  CompanionProviderModelPicker,
+  providerDefaultModel,
+} from "./CompanionProviderModelPicker";
 
 export function CompanionSettings({
   orgId,
@@ -22,10 +25,13 @@ export function CompanionSettings({
   onSaved: (companion: Companion) => void;
   onDeleted: (companionId: string) => void;
 }) {
+  const initialProviderId = companion.runtime.provider_ids[0] ?? "";
   const [name, setName] = useState(companion.name);
   const [instructions, setInstructions] = useState(companion.persona ?? "");
-  const [providerId, setProviderId] = useState(companion.runtime.provider_ids[0] ?? "");
-  const [modelId, setModelId] = useState(companion.model_id);
+  const [providerId, setProviderId] = useState(initialProviderId);
+  const [modelId, setModelId] = useState(
+    companion.model_id ?? providerDefaultModel(providers, initialProviderId),
+  );
   const [busy, setBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -58,8 +64,9 @@ export function CompanionSettings({
       onSaved(updated);
       setName(updated.name);
       setInstructions(updated.persona ?? "");
-      setProviderId(updated.runtime.provider_ids[0] ?? "");
-      setModelId(updated.model_id);
+      const updatedProviderId = updated.runtime.provider_ids[0] ?? "";
+      setProviderId(updatedProviderId);
+      setModelId(updated.model_id ?? providerDefaultModel(providers, updatedProviderId));
       setSaved(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Companion settings could not be saved.");
