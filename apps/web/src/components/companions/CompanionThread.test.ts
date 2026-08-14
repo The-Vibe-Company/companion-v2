@@ -193,6 +193,44 @@ describe("CompanionThread", () => {
     expect(markup).toContain("2 messages saved. Wake Luna to deliver.");
   });
 
+  it("stops offering a wake in the footer once the Companion is awake or coming up", () => {
+    // The footer reads the projected runtime the status chip reads, so a Companion a send has just
+    // woken says what its messages are waiting for instead of asking to be woken again.
+    const waiting = thread({ pending_count: 1 });
+    const running = render({ thread: waiting });
+
+    expect(running).toContain("1 message waiting for a reply.");
+    expect(running).not.toContain("Wake Luna to deliver.");
+
+    const starting = render({
+      companion: companion({
+        runtime: { ...companion().runtime, state: "provisioning", daemon_state: "starting" },
+      }),
+      thread: waiting,
+    });
+
+    expect(starting).toContain("Box · starting");
+    expect(starting).toContain("1 message saved. Luna is waking to deliver.");
+    expect(starting).not.toContain("Wake Luna to deliver.");
+  });
+
+  it("keeps a Viewer's footer read-only even while messages are waiting on a wake", () => {
+    const markup = render({
+      companion: companion({ ...asleep, access: "viewer" }),
+      thread: thread({
+        viewer_id: "user-9",
+        access: "viewer",
+        read_only: true,
+        can_send: false,
+        pending_count: 2,
+      }),
+    });
+
+    expect(markup).toContain("Viewer access is read-only");
+    expect(markup).not.toContain("Wake Luna to deliver.");
+    expect(markup).not.toContain(">Wake<");
+  });
+
   it("explains an Error status to a runner with the reason the API recorded", () => {
     const markup = render({
       companion: companion({

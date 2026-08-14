@@ -259,6 +259,18 @@ describe("CompanionsApp send", () => {
       expect(composer.value).toBe("");
     });
 
+    it("leaves an online thread's footer and chip exactly where they were", async () => {
+      const container = await openThread();
+      type(container, "What year is it?");
+
+      await pressEnter(container);
+      await poll(1);
+
+      expect(container.querySelector(".chat-hint")?.textContent)
+        .toBe("Enter sends. Shift + Enter starts a new line.");
+      expect(container.querySelector(".chat-box")?.textContent).toContain("Box · online");
+    });
+
     it("names the message it sends, so a replayed request cannot become a second turn", async () => {
       const container = await openThread();
       type(container, "What year is it?");

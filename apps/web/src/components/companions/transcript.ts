@@ -1,4 +1,8 @@
-import type { CompanionThread, CompanionTranscriptEntry } from "@companion/contracts";
+import type {
+  CompanionRuntimeState,
+  CompanionThread,
+  CompanionTranscriptEntry,
+} from "@companion/contracts";
 
 /**
  * How long a writer keeps the floor. Consecutive turns from the same writer inside this window read
@@ -88,16 +92,23 @@ export function replyExpected(input: {
   return input.entries[input.entries.length - 1]?.role === "user";
 }
 
-/** What the composer says under itself: delivery when messages are waiting, keys otherwise. */
+/**
+ * What the composer says under itself: delivery when messages are waiting, keys otherwise. Delivery
+ * is read from the same projected runtime state as the Box status chip, so the footer of a Companion
+ * a send has just woken never keeps offering the wake that already happened, and a Companion still
+ * coming up is reported as coming up rather than as one nobody has woken yet.
+ */
 export function composerHint(input: {
   thread: CompanionThread | null;
   companionName: string;
-  awake: boolean;
+  state: CompanionRuntimeState;
 }): string {
   const pending = input.thread?.pending_count ?? 0;
   if (pending < 1) return "Enter sends. Shift + Enter starts a new line.";
   const count = `${pending} message${pending === 1 ? "" : "s"}`;
-  return input.awake
-    ? `${count} waiting for a reply.`
-    : `${count} saved. Wake ${input.companionName} to deliver.`;
+  if (input.state === "running") return `${count} waiting for a reply.`;
+  if (input.state === "provisioning") {
+    return `${count} saved. ${input.companionName} is waking to deliver.`;
+  }
+  return `${count} saved. Wake ${input.companionName} to deliver.`;
 }
