@@ -53,6 +53,9 @@ function companion(overrides: Partial<Companion> = {}): Companion {
     selected_mcp_account_ids: [],
     owner_id: "user-1",
     access: "owner",
+    pinned: false,
+    hidden: false,
+    unread: false,
     runtime: {
       state: "running",
       daemon_state: "running",
@@ -109,6 +112,9 @@ describe("CompanionsApp", () => {
         name: "Milo",
         persona: "Developer assistant",
         access: "viewer",
+        pinned: false,
+        hidden: false,
+        unread: false,
         runtime: { ...companion().runtime, state: "stopped", box_id: null },
       }),
     ]);
@@ -123,6 +129,27 @@ describe("CompanionsApp", () => {
     expect(markup.match(/>Share</g)).toHaveLength(1);
     // Both rows expose settings; the Viewer receives its provider and model as disabled controls.
     expect(markup.match(/aria-label="Settings for/g)).toHaveLength(2);
+    expect(markup.match(/aria-label="Actions for/g)).toHaveLength(2);
+    expect(markup).toContain("Pin");
+    expect(markup).toContain("Mark as unread");
+    expect(markup).toContain("Hide");
+    // Duplicate stays Owner-only.
+    expect(markup.match(/>Duplicate</g)).toHaveLength(1);
+  });
+
+  it("keeps hidden Companions out of the main list and offers unhide", () => {
+    const markup = render([
+      companion({ name: "Visible" }),
+      companion({
+        id: "22222222-2222-4222-8222-222222222222",
+        name: "Stashed",
+        hidden: true,
+      }),
+    ]);
+    expect(markup).toContain("Visible");
+    expect(markup).toContain("Hidden");
+    expect(markup).toContain("Stashed");
+    expect(markup).toContain("Unhide");
   });
 
   it("carries the recorded reason next to an Error status in the list", () => {

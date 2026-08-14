@@ -64,6 +64,36 @@ export async function deleteCompanion(orgId: string, companionId: string): Promi
   });
 }
 
+export async function updateCompanionMemberState(
+  orgId: string,
+  companionId: string,
+  input: { pinned?: boolean; hidden?: boolean; unread?: boolean },
+): Promise<Companion> {
+  const result = await apiFetch<{ companion: Companion }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/member-state`,
+    {
+      method: "PATCH",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify(input),
+    },
+  );
+  return result.companion;
+}
+
+export async function duplicateCompanion(
+  orgId: string,
+  companionId: string,
+): Promise<Companion> {
+  const result = await apiFetch<{ companion: Companion }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/duplicate`,
+    {
+      method: "POST",
+      headers: orgHeaders(orgId),
+    },
+  );
+  return result.companion;
+}
+
 export async function saveCompanionPlugin(
   orgId: string,
   input: SaveCompanionPluginInput,

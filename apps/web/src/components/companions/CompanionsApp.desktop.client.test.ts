@@ -78,6 +78,9 @@ function companion(overrides: Partial<Companion> = {}): Companion {
     selected_mcp_account_ids: [],
     owner_id: "user-1",
     access: "owner",
+    pinned: false,
+    hidden: false,
+    unread: false,
     runtime: {
       state: "running",
       daemon_state: "running",
@@ -611,6 +614,9 @@ describe("CompanionsApp Computer panel", () => {
     );
     const container = await open(companion({
       access: "viewer",
+      pinned: false,
+      hidden: false,
+      unread: false,
       runtime: { ...companion().runtime, box_id: null, desktop_available: false },
     }));
 

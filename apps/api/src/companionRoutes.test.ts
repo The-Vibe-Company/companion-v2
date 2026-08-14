@@ -30,6 +30,8 @@ const coreMocks = vi.hoisted(() => ({
   listCompanionPlugins: vi.fn(),
   createCompanion: vi.fn(),
   updateCompanion: vi.fn(),
+  updateCompanionMemberState: vi.fn(),
+  duplicateCompanion: vi.fn(),
   claimCompanionDeletion: vi.fn(),
   deleteCompanion: vi.fn(),
   saveCompanionPlugin: vi.fn(),
@@ -51,6 +53,7 @@ const coreMocks = vi.hoisted(() => ({
   getCompanion: vi.fn(),
   getCompanionForRuntime: vi.fn(),
   getCompanionThread: vi.fn(),
+  markCompanionThreadRead: vi.fn(),
   sendCompanionMessage: vi.fn(),
   listPendingCompanionMessages: vi.fn(),
   recordCompanionPiProjection: vi.fn(),
@@ -153,6 +156,9 @@ const companion = {
   selected_mcp_account_ids: [],
   owner_id: "user-1",
   access: "owner" as const,
+  pinned: false,
+  hidden: false,
+  unread: false,
   runtime: {
     state: "stopped" as const,
     daemon_state: "stopped" as const,
@@ -344,6 +350,12 @@ describe("Companions API feature gate", () => {
     coreMocks.deleteCompanionPlugin.mockResolvedValue(undefined);
     coreMocks.createCompanion.mockResolvedValue(companion);
     coreMocks.updateCompanion.mockResolvedValue(companion);
+    coreMocks.updateCompanionMemberState.mockResolvedValue(companion);
+    coreMocks.duplicateCompanion.mockResolvedValue({
+      ...companion,
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "Research (copy)",
+    });
     coreMocks.claimCompanionDeletion.mockResolvedValue(companion);
     coreMocks.deleteCompanion.mockResolvedValue(undefined);
     coreMocks.saveCompanionProvider.mockResolvedValue({
@@ -372,6 +384,7 @@ describe("Companions API feature gate", () => {
     coreMocks.getCompanion.mockResolvedValue(companion);
     coreMocks.getCompanionForRuntime.mockResolvedValue(companion);
     coreMocks.getCompanionThread.mockResolvedValue(viewerThread);
+    coreMocks.markCompanionThreadRead.mockResolvedValue(undefined);
     coreMocks.sendCompanionMessage.mockResolvedValue({
       thread: { ...viewerThread, access: "owner", read_only: false, can_send: true },
       entry: message,
