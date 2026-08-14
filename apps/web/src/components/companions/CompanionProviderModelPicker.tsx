@@ -47,6 +47,7 @@ export function CompanionProviderModelPicker({
               name={`${namePrefix}-provider`}
               value={connection.provider_id}
               checked={providerId === connection.provider_id}
+              disabled={disabled}
               onChange={() => onChange({
                 providerId: connection.provider_id,
                 modelId: providerDefaultModel(providers, connection.provider_id),
@@ -73,6 +74,7 @@ export function CompanionProviderModelPicker({
               name={`${namePrefix}-model`}
               value={model.id}
               checked={modelId === model.id}
+              disabled={disabled || !selectedProvider}
               onChange={() => onChange({ providerId, modelId: model.id })}
             />
             <span>{model.name}</span>

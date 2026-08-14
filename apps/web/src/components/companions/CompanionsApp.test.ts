@@ -187,7 +187,8 @@ describe("CompanionsApp", () => {
 
     expect(settings).toContain("Companion settings");
     expect(settings).toContain("Instructions");
-    expect(settings).toContain("Provider / model");
+    expect(settings).toContain("1. Provider");
+    expect(settings).toContain("2. Model");
     expect(settings).toContain("Delete Companion");
     expect(settings).not.toContain("Search companions");
     expect(settings).not.toContain("Chat with Luna");
