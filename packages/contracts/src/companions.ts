@@ -189,6 +189,16 @@ export const createCompanionInputSchema = z.object({
 }).strict();
 export type CreateCompanionInput = z.infer<typeof createCompanionInputSchema>;
 
+export const updateCompanionInputSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  persona: companionPersonaSchema.nullable().optional(),
+  provider_id: companionProviderIdSchema.optional(),
+}).strict().refine(
+  (input) => input.name !== undefined || input.persona !== undefined || input.provider_id !== undefined,
+  "At least one Companion setting is required",
+);
+export type UpdateCompanionInput = z.infer<typeof updateCompanionInputSchema>;
+
 export const setCompanionProviderInputSchema = z.object({
   provider_id: companionProviderIdSchema,
 }).strict();

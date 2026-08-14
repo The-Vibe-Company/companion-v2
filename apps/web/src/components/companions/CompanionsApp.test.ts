@@ -72,6 +72,7 @@ function render(
   companions: Companion[],
   initialCompanionId?: string | null,
   initialPluginsOpen = false,
+  initialSettingsCompanionId?: string | null,
 ) {
   return renderToStaticMarkup(React.createElement(CompanionsApp, {
     orgs: [org],
@@ -91,6 +92,7 @@ function render(
     }],
     initialCompanionId,
     initialPluginsOpen,
+    initialSettingsCompanionId,
   }));
 }
 
@@ -115,6 +117,7 @@ describe("CompanionsApp", () => {
     expect(markup).toContain("Search companions");
     // The Companion Owner keeps sharing; a Viewer row must not offer it.
     expect(markup.match(/>Share</g)).toHaveLength(1);
+    expect(markup.match(/>Settings</g)).toHaveLength(1);
   });
 
   it("carries the recorded reason next to an Error status in the list", () => {
@@ -175,5 +178,16 @@ describe("CompanionsApp", () => {
     expect(chat).toContain("Chat with Luna");
     expect(chat).not.toContain(">Plugins<");
     expect(chat).not.toContain("Add MCP");
+  });
+
+  it("renders settings as a separate surface for a runner and keeps them out of the list", () => {
+    const settings = render([companion()], null, false, companion().id);
+
+    expect(settings).toContain("Companion settings");
+    expect(settings).toContain("Instructions");
+    expect(settings).toContain("Provider / model");
+    expect(settings).toContain("Delete Companion");
+    expect(settings).not.toContain("Search companions");
+    expect(settings).not.toContain("Chat with Luna");
   });
 });

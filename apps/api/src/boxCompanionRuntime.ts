@@ -184,6 +184,8 @@ export interface CompanionBoxRuntime {
     clientSurface: CompanionClientSurface;
     providerAuth: Record<string, Record<string, unknown>>;
     replaceProviderAuth: boolean;
+    /** Operator instructions applied when Pi next starts; changing them never restarts a warm Box. */
+    instructions?: string | null;
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
@@ -402,6 +404,9 @@ exec 3<>"$fifo"
 skill_args=(--no-skills)
 if find "$root/skills" -type f -name SKILL.md -print -quit 2>/dev/null | grep -q .; then
   skill_args+=(--skill "$root/skills")
+fi
+if [ -s "$root/state/instructions.txt" ]; then
+  skill_args+=(--append-system-prompt "$(cat "$root/state/instructions.txt")")
 fi
 # One line per start, so the log always carries this start's timestamp and the invocation it made:
 # a Pi that dies without complaining is then reported as the command it was, not as silence.
@@ -1118,6 +1123,7 @@ exit 0`,
     clientSurface: CompanionClientSurface;
     providerAuth: Record<string, Record<string, unknown>>;
     replaceProviderAuth: boolean;
+    instructions?: string | null;
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
@@ -1163,6 +1169,11 @@ exit 0`,
         client_surface: input.clientSurface,
         skills: injectedSkills.map(({ slug, version, checksum }) => ({ slug, version, checksum })),
       }, null, 2)}\n`,
+    );
+    await this.#writeFile(
+      input.boxId,
+      ".companion/runtime/state/instructions.txt",
+      input.instructions?.trim() ? `${input.instructions.trim()}\n` : "",
     );
     const staged = new Map<string, string>();
     for (const skill of injectedSkills) {
@@ -1210,6 +1221,7 @@ exit 0`,
     clientSurface: CompanionClientSurface;
     providerAuth: Record<string, Record<string, unknown>>;
     replaceProviderAuth: boolean;
+    instructions?: string | null;
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
@@ -1232,6 +1244,7 @@ exit 0`,
     clientSurface: CompanionClientSurface;
     providerAuth: Record<string, Record<string, unknown>>;
     replaceProviderAuth: boolean;
+    instructions?: string | null;
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
@@ -1297,6 +1310,7 @@ exit 0`,
       clientSurface: input.clientSurface,
       providerAuth: input.providerAuth,
       replaceProviderAuth,
+      instructions: input.instructions,
       mcpCredentials: input.mcpCredentials,
       mcpAccounts: input.mcpAccounts,
       skills: input.skills,

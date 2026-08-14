@@ -21,6 +21,7 @@ import {
 import { Icon } from "../Icon";
 import { CompanionProvidersDialog } from "./CompanionProvidersDialog";
 import { CompanionPlugins } from "./CompanionPlugins";
+import { CompanionSettings } from "./CompanionSettings";
 import { CompanionThread } from "./CompanionThread";
 import { NewCompanionDialog } from "./NewCompanionDialog";
 import { ShareCompanionDialog } from "./ShareCompanionDialog";
@@ -87,6 +88,7 @@ export function CompanionsApp({
   initialProviders,
   initialPlugins,
   initialCompanionId,
+  initialSettingsCompanionId,
   initialPluginsOpen = false,
 }: {
   orgs: OrgVM[];
@@ -96,6 +98,7 @@ export function CompanionsApp({
   initialProviders: CompanionProvidersResponse;
   initialPlugins: CompanionPluginAccount[];
   initialCompanionId?: string | null;
+  initialSettingsCompanionId?: string | null;
   initialPluginsOpen?: boolean;
 }) {
   const router = useRouter();
@@ -111,8 +114,16 @@ export function CompanionsApp({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sharing, setSharing] = useState<Companion | null>(null);
+  const [settingsId, setSettingsId] = useState<string | null>(
+    () => initialCompanions.some(
+      (item) => item.id === initialSettingsCompanionId && item.access !== "viewer",
+    )
+      ? initialSettingsCompanionId ?? null
+      : null,
+  );
   const [openedId, setOpenedId] = useState<string | null>(
-    () => initialCompanions.some((item) => item.id === initialCompanionId)
+    () => !initialSettingsCompanionId
+      && initialCompanions.some((item) => item.id === initialCompanionId)
       ? initialCompanionId ?? null
       : null,
   );
@@ -137,6 +148,10 @@ export function CompanionsApp({
   const opened = useMemo(
     () => companions.find((companion) => companion.id === openedId) ?? null,
     [companions, openedId],
+  );
+  const settingsCompanion = useMemo(
+    () => companions.find((companion) => companion.id === settingsId) ?? null,
+    [companions, settingsId],
   );
   const canRunOpened = opened !== null && opened.access !== "viewer";
   const openedAwake = opened?.runtime.state === "running";
@@ -173,6 +188,7 @@ export function CompanionsApp({
     setThreadError(null);
     setDesktopError(null);
     setPluginsOpen(false);
+    setSettingsId(null);
     threadUrl(companion.id);
   };
 
@@ -205,6 +221,11 @@ export function CompanionsApp({
     const url = new URL(window.location.href);
     url.searchParams.delete("view");
     window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+  };
+
+  const closeSettings = () => {
+    setSettingsId(null);
+    router.push("/companions");
   };
 
   /** One refresh of the open thread: Pi delivery plus projection when awake, read model otherwise. */
@@ -481,10 +502,12 @@ export function CompanionsApp({
           if (mode === "skills") router.push("/skills");
         }}
         companions={sidebarCompanions}
-        activeCompanionId={openedId}
+        activeCompanionId={openedId ?? settingsId}
         onSelectCompanion={(companionId) => {
           const companion = companions.find((item) => item.id === companionId);
-          if (companion) openCompanion(companion);
+          if (!companion) return;
+          if (settingsCompanion) router.push(`/companions?companion=${companion.id}`);
+          else openCompanion(companion);
         }}
         navigationOnly
         localActive={false}
@@ -537,6 +560,22 @@ export function CompanionsApp({
               onDesktop={() => void onDesktop()}
             />
           </>
+        ) : settingsCompanion ? (
+          <CompanionSettings
+            orgId={currentOrg.id}
+            companion={settingsCompanion}
+            providers={providers}
+            onBack={closeSettings}
+            onSaved={(updated) => {
+              setCompanions((current) =>
+                current.map((item) => item.id === updated.id ? updated : item));
+            }}
+            onDeleted={(companionId) => {
+              setCompanions((current) => current.filter((item) => item.id !== companionId));
+              setSettingsId(null);
+              router.push("/companions");
+            }}
+          />
         ) : pluginsOpen ? (
           <CompanionPlugins
             orgId={currentOrg.id}
@@ -641,6 +680,15 @@ export function CompanionsApp({
                           <UpdatedAt iso={companion.updated_at} />
                           <span className="companions-row-actions">
                             <span className="companions-role">{companion.access}</span>
+                            {companion.access !== "viewer" && (
+                              <button
+                                type="button"
+                                className="cds-btn cds-btn--ghost cds-btn--sm"
+                                onClick={() => router.push(`/companions/${companion.id}/settings`)}
+                              >
+                                Settings
+                              </button>
+                            )}
                             {companion.access === "owner" && currentOrg.kind !== "personal" && (
                               <button
                                 type="button"

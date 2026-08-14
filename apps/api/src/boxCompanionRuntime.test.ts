@@ -263,6 +263,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         anthropic: { type: "api_key", key: "provider-secret" },
       },
       replaceProviderAuth: true,
+      instructions: "Challenge every source before answering.",
       mcpCredentials: [
         { env_key: "GITHUB_TOKEN_WORK", value: "mcp-secret" },
       ],
@@ -297,6 +298,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(String(createBody?.setupScript)).toContain("ExecStart=%h/.companion/bin/pi-daemon");
     expect(String(createBody?.setupScript)).toContain("npm:pi-mcp-adapter@2.12.1");
     expect(String(createBody?.setupScript)).toContain("--no-skills");
+    expect(String(createBody?.setupScript)).toContain("--append-system-prompt");
     expect(String(createBody?.setupScript)).not.toContain("OpenCode");
     expect(fileBody).toEqual({
       path: ".companion/runtime/state/providers.env",
@@ -312,6 +314,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(files.get(".companion/pi/mcp.json")).not.toContain("mcp-secret");
     expect(files.get(".companion/pi/mcp.json")).not.toContain("provider-secret");
     expect(files.get(".companion/runtime/state/mcp-accounts.json")).toContain("GitHub work");
+    expect(files.get(".companion/runtime/state/instructions.txt"))
+      .toBe("Challenge every source before answering.\n");
     expect(assigned).toHaveBeenCalledWith("bx_23456789");
     expect(result).toEqual({
       boxId: "bx_23456789",

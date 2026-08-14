@@ -10,6 +10,7 @@ import {
   sendCompanionMessageInputSchema,
   setCompanionWorkspaceShareInputSchema,
   startCompanionRuntimeInputSchema,
+  updateCompanionInputSchema,
 } from "../src/companions";
 
 describe("Companion provider contracts", () => {
@@ -53,6 +54,20 @@ describe("Companion provider contracts", () => {
     expect(() => startCompanionRuntimeInputSchema.parse({
       credentials: [{ provider: "anthropic", env_key: "ANTHROPIC_API_KEY", value: "must-not-enter-start" }],
     })).toThrow();
+  });
+
+  it("accepts only the editable Companion settings and supports clearing instructions", () => {
+    expect(updateCompanionInputSchema.parse({
+      name: "Luna research",
+      persona: null,
+      provider_id: "openai-codex",
+    })).toEqual({
+      name: "Luna research",
+      persona: null,
+      provider_id: "openai-codex",
+    });
+    expect(() => updateCompanionInputSchema.parse({})).toThrow();
+    expect(() => updateCompanionInputSchema.parse({ owner_id: "user-2" })).toThrow();
   });
 });
 

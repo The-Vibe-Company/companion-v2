@@ -687,6 +687,130 @@
   font-size: var(--text-xs);
 }
 
+.companions-settings__head {
+  align-items: flex-start;
+}
+
+.companions-settings__title {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.companions-settings__title > div {
+  min-width: 0;
+}
+
+.companions-settings__title p {
+  margin: 5px 0 0;
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+
+.companions-settings__content {
+  max-width: 720px;
+  margin-left: max(0px, calc((100% - var(--content-max)) / 2));
+  gap: 18px;
+}
+
+.companions-settings__form {
+  display: grid;
+  gap: 18px;
+}
+
+.companions-settings__form > label {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.companions-settings__form :is(input, textarea) {
+  width: 100%;
+  border: 1px solid var(--air-line-soft);
+  border-radius: var(--air-radius);
+  background: var(--air-glass);
+  backdrop-filter: var(--air-blur);
+  -webkit-backdrop-filter: var(--air-blur);
+  color: var(--color-fg);
+  font: inherit;
+  font-size: var(--text-md);
+  font-weight: 400;
+}
+
+.companions-settings__form > label input {
+  min-height: 44px;
+  padding: 0 14px;
+}
+
+.companions-settings__form > label textarea {
+  min-height: 112px;
+  padding: 12px 14px;
+  line-height: var(--leading-normal);
+  resize: vertical;
+}
+
+.companions-settings__form :is(input, textarea):focus-visible {
+  outline: 2px solid var(--color-accent-ring);
+  outline-offset: 1px;
+  border-color: var(--color-accent-edge);
+}
+
+.companions-settings__form :is(input, textarea):disabled,
+.companions-settings__form .companions-picker:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.companions-settings__hint {
+  margin: -13px 0 0;
+  color: var(--color-faint);
+  font-size: var(--text-xs);
+}
+
+.companions-settings__actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.companions-settings__saved {
+  color: var(--color-ok);
+  font-size: var(--text-sm);
+}
+
+.companions-settings__danger {
+  margin-top: 22px;
+  padding-top: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  border-top: 1px solid var(--air-line);
+}
+
+.companions-settings__danger h2,
+.companions-settings__danger p {
+  margin: 0;
+}
+
+.companions-settings__danger h2 {
+  color: var(--color-fg);
+  font-size: var(--text-md);
+}
+
+.companions-settings__danger p {
+  margin-top: 5px;
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+
+.companions-delete-dialog {
+  width: min(500px, calc(100vw - 28px));
+}
+
 .companions-new-form input:focus-visible,
 .companions-provider-add :is(input, select, textarea):focus-visible {
   outline: 2px solid var(--color-accent-ring);
@@ -1491,6 +1615,11 @@ button.chat-box:focus-visible {
 
   .companions-plugins__head > .cds-btn {
     margin-left: 42px;
+  }
+
+  .companions-settings__danger {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .companions-plugin-row {
