@@ -5,12 +5,7 @@ import type { Companion, CompanionDesktop, CompanionThread as Thread } from "@co
 import { Icon } from "../Icon";
 import { CompanionComputer } from "./CompanionComputer";
 import { CompanionTranscript } from "./CompanionTranscript";
-import {
-  COMPANION_BOX_CHIP_PREFIX,
-  companionBoxStateWord,
-  companionBoxStatusLabel,
-  companionStatus,
-} from "./status";
+import { companionBoxStatusLabel, companionStatus } from "./status";
 import { useVisualViewportPin } from "./useVisualViewportPin";
 
 /**
@@ -47,8 +42,10 @@ export function CompanionThread({
   waking,
   openingDesktop,
   computer,
+  newSince,
   onBack,
   onSend,
+  onSettings,
   onThread,
   onWake,
   onDesktop,
@@ -61,8 +58,11 @@ export function CompanionThread({
   waking: boolean;
   openingDesktop: boolean;
   computer: CompanionComputerPanel;
+  /** The newest line this reader had already seen when the thread was opened. */
+  newSince?: string | null;
   onBack: () => void;
   onSend: (content: string, clientMessageId: string) => Promise<boolean>;
+  onSettings: () => void;
   onThread: (thread: Thread) => void;
   onWake: () => void;
   onDesktop: () => void;
@@ -72,7 +72,6 @@ export function CompanionThread({
   const canSend = thread ? thread.can_send : companion.access !== "viewer";
   const awake = companion.runtime.state === "running";
   const boxLabel = companionBoxStatusLabel(companion.runtime.state);
-  const boxWord = companionBoxStateWord(companion.runtime.state);
   // Computer use is the Box desktop Lux drives, reached from the status chip itself so the header
   // keeps one control. A Viewer reads the same chip without the action: a sleeping Box has no
   // desktop, and a Viewer must never be handed anything that could start one.
@@ -99,7 +98,7 @@ export function CompanionThread({
         <button type="button" className="iconbtn chat-back" aria-label="Back to Companions" onClick={onBack}>
           <Icon name="arrow-left" size={16} />
         </button>
-        <span className="companions-avatar" aria-hidden="true">
+        <span className="companions-avatar chat-avatar" aria-hidden="true">
           {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
         </span>
         <div className="chat-identity">
@@ -107,29 +106,44 @@ export function CompanionThread({
           {companion.persona && <p>{companion.persona}</p>}
         </div>
         {/*
-          The chip is a dot, what it reports, and the state word. The two halves are separate
-          elements so a narrow header can drop `Box ·` and keep the word: the state must never be
-          left to the colour of the dot alone.
+          The chip is a dot and the state word, and the word is never left to the dot's colour. What
+          the state is about — the Box — rides in the accessible name and the tooltip rather than in
+          the visible text, because the header has to hold a name, a lifecycle control, and two
+          toggles beside it at 320px.
         */}
         {canOpenDesktop ? (
           <button
             type="button"
             className={`companions-state companions-state--${status.tone} chat-box`}
             aria-label={`${boxLabel} — open the Box desktop`}
+            title={boxLabel}
             disabled={openingDesktop}
             onClick={onDesktop}
           >
             <i aria-hidden="true" />
-            <span className="chat-box__prefix">{COMPANION_BOX_CHIP_PREFIX}</span>{" "}
-            <span className="chat-box__state">{openingDesktop ? "opening desktop" : boxWord}</span>
+            <span className="chat-box__state">
+              {openingDesktop ? "Opening desktop" : status.label}
+            </span>
           </button>
         ) : (
-          <span className={`companions-state companions-state--${status.tone} chat-box`}>
+          <span
+            className={`companions-state companions-state--${status.tone} chat-box`}
+            aria-label={boxLabel}
+            title={boxLabel}
+          >
             <i aria-hidden="true" />
-            <span className="chat-box__prefix">{COMPANION_BOX_CHIP_PREFIX}</span>{" "}
-            <span className="chat-box__state">{boxWord}</span>
+            <span className="chat-box__state">{status.label}</span>
           </span>
         )}
+        <button
+          type="button"
+          className="iconbtn chat-settings"
+          aria-label={`Settings for ${companion.name}`}
+          title="Settings"
+          onClick={onSettings}
+        >
+          <Icon name="settings" size={16} />
+        </button>
         {canSend && (
           <button
             type="button"
@@ -174,6 +188,7 @@ export function CompanionThread({
           thread={thread}
           orgId={orgId}
           busy={busy}
+          newSince={newSince}
           onSend={onSend}
           onThread={onThread}
         />

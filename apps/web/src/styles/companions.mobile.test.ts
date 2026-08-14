@@ -168,9 +168,10 @@ describe("Companions mobile viewport", () => {
       .toMatch(/padding: .*max\(12px, env\(safe-area-inset-bottom, 0px\)\);/);
   });
 
-  it("shortens the Box chip on a phone rather than wrapping the header", () => {
-    expect(declarationsFor(".chat-box__prefix", PHONE)[0]).toContain("display: none;");
-    // The state word stays: status is never left to the colour of the dot alone.
+  it("keeps the Box chip's state word on a phone rather than wrapping the header", () => {
+    // The chip is a dot and one word at every width; what it is about rides in its accessible name,
+    // so a phone has nothing left to shorten. The word itself never gives way: status is never left
+    // to the colour of the dot alone.
     expect(declarationsFor(".chat-box__state", PHONE)).toHaveLength(0);
     expect(declarationsFor(".chat-head > *")[0]).toContain("flex: none;");
   });
@@ -208,11 +209,11 @@ describe("Companions mobile viewport", () => {
 
     expect(declarationsFor(".chat-head .chat-back", coarse)[0]).toContain("min-height: 44px;");
     expect(declarationsFor(".chat-head .cds-btn", coarse)[0]).toContain("min-height: 44px;");
-    // THE-346: Send is the control the composer exists for, and 30px is not a thumb target.
+    // THE-346: Send is the control the composer exists for, and the pointer decides its size.
     const send = declarationsFor(".chat-send", coarse)[0];
     expect(send).toContain("width: 44px;");
     expect(send).toContain("height: 44px;");
-    // A mouse still points at the compact square.
-    expect(declarationsFor(".chat-send")[0]).toContain("width: 30px;");
+    // A mouse still points at the round accent button inside the composer's right edge.
+    expect(declarationsFor(".chat-send")[0]).toContain("width: 36px;");
   });
 });

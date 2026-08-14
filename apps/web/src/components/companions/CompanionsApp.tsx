@@ -155,6 +155,8 @@ export function CompanionsApp({
    * first paint identical on both sides.
    */
   const [viewed, setViewed] = useState<CompanionViewedMap>({});
+  /** The newest line already seen when the open thread was opened; the "New" divider sits after it. */
+  const [newSince, setNewSince] = useState<string | null>(null);
   /**
    * Why the last desktop handoff opened nothing. It is kept apart from `threadError` because the
    * live thread poll clears that one every couple of seconds, which would erase this answer before
@@ -319,6 +321,15 @@ export function CompanionsApp({
 
   // Read state is per device, so it can only be read once the client owns the page.
   useEffect(() => setViewed(readViewed(currentOrg.id)), [currentOrg.id]);
+
+  /**
+   * Where this reader left off, captured before opening the thread marks it read. It stays put while
+   * the thread is open, so the divider does not walk down the transcript as new messages arrive; it
+   * is re-read the next time a thread is opened.
+   */
+  useEffect(() => {
+    setNewSince(openedId ? readViewed(currentOrg.id)[openedId] ?? null : null);
+  }, [currentOrg.id, openedId]);
 
   /**
    * The conversation list re-reads every thread's last line on a slow cadence. It is the
@@ -724,8 +735,10 @@ export function CompanionsApp({
                 onToggle: () => setComputerOpen((open) => !open),
                 onJoin: () => void joinComputer(),
               }}
+              newSince={newSince}
               onBack={closeThread}
               onSend={onSend}
+              onSettings={() => router.push(`/companions/${opened.id}/settings`)}
               onThread={setThread}
               onWake={() => void onWake()}
               onDesktop={() => void onDesktop()}

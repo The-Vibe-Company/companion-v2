@@ -237,7 +237,7 @@ describe("CompanionsApp Box desktop", () => {
     expect(window.open).not.toHaveBeenCalledWith("", "_blank");
     expect(tab.location.replace).not.toHaveBeenCalled();
     expect(companionsApi.openCompanionDesktop).toHaveBeenCalledWith("org-1", companionId);
-    expect(container.textContent).toContain("Box · opening desktop");
+    expect(container.textContent).toContain("Opening desktop");
 
     await resolveDesktop({
       desktop_url: "https://box.ascii.dev/desktop/bx_23456789?token=opaque",
@@ -296,7 +296,7 @@ describe("CompanionsApp Box desktop", () => {
     );
     expect(tab.close).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain("cross-origin");
-    expect(container.textContent).toContain("Box · online");
+    expect(container.textContent).toContain("Online");
   });
 
   it("closes the claimed tab when the browser refuses to send it to the desktop", async () => {
@@ -316,7 +316,7 @@ describe("CompanionsApp Box desktop", () => {
     expect(tab.close).toHaveBeenCalled();
     expect(container.textContent).toContain("The desktop tab could not be reached.");
     expect(container.textContent).not.toContain("token=opaque");
-    expect(container.textContent).toContain("Box · online");
+    expect(container.textContent).toContain("Online");
   });
 
   it("says so on the thread when the browser blocks the desktop tab", async () => {
@@ -333,7 +333,7 @@ describe("CompanionsApp Box desktop", () => {
     expect(container.textContent).toContain("blocked the Box desktop tab");
     // The handoff URL carries a Box token, so a failure never spells it out on the thread.
     expect(container.textContent).not.toContain("token=opaque");
-    expect(container.textContent).toContain("Box · online");
+    expect(container.textContent).toContain("Online");
   });
 
   it("closes the claimed tab and reports a failed handoff", async () => {
@@ -347,7 +347,7 @@ describe("CompanionsApp Box desktop", () => {
     expect(tab.close).toHaveBeenCalled();
     expect(tab.location.replace).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Box is unreachable.");
-    expect(container.textContent).toContain("Box · online");
+    expect(container.textContent).toContain("Online");
   });
 
   it("keeps a failed handoff readable while the thread keeps polling", async () => {
@@ -414,7 +414,7 @@ describe("CompanionsApp Box desktop", () => {
       live: true,
     });
     expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Box · asleep");
+    expect(container.textContent).toContain("Asleep");
   });
 });
 

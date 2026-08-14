@@ -91,6 +91,7 @@ async function mount(
       onBack: () => {},
       orgId: "org-1",
       onSend,
+      onSettings: () => {},
       onThread: () => {},
       onWake: overrides.onWake ?? (() => {}),
       onDesktop: overrides.onDesktop ?? (() => {}),
@@ -118,6 +119,7 @@ async function mountPolling(initial: Thread) {
         onBack: () => {},
         orgId: "org-1",
         onSend: async () => true,
+        onSettings: () => {},
         onThread: () => {},
         onWake: () => {},
         onDesktop: () => {},
@@ -323,6 +325,7 @@ describe("CompanionThread composer", () => {
         sentId = clientMessageId;
         return new Promise<boolean>((resolve) => { settle = resolve; });
       },
+      onSettings: () => {},
       onThread: () => {},
       onWake: () => {},
       onDesktop: () => {},
@@ -504,16 +507,18 @@ describe("CompanionThread Box chip", () => {
     document.body.innerHTML = "";
   });
 
-  it("carries the state word in its own element so a phone header can drop the prefix", async () => {
-    // THE-345: `Box · asleep` does not fit beside Back, the name, and Wake at 320px. The phone
-    // stylesheet hides the prefix, so the word has to be addressable on its own — and it has to stay,
-    // because the dot's colour is not allowed to be the only thing reporting status.
+  it("shows one state word and keeps the compute it reports in its accessible name", async () => {
+    // THE-345: `Box · asleep` does not fit beside Back, the name, the settings and panel toggles, and
+    // Wake at 320px. The visible chip is the dot and the word — the word has to stay, because the
+    // dot's colour is not allowed to be the only thing reporting status — and what the state is
+    // about rides in the accessible name and the tooltip instead.
     const container = await mount(async () => true);
     const chip = boxChip(container);
 
-    expect(chip.querySelector(".chat-box__prefix")?.textContent).toBe("Box ·");
-    expect(chip.querySelector(".chat-box__state")?.textContent).toBe("online");
-    expect(chip.textContent).toContain("Box · online");
+    expect(chip.querySelector(".chat-box__state")?.textContent).toBe("Online");
+    expect(chip.textContent).not.toContain("Box ·");
+    expect(chip.getAttribute("aria-label")).toContain("Box · online");
+    expect(chip.getAttribute("title")).toBe("Box · online");
   });
 
   it("hands a runner the Box desktop from the status chip", async () => {
@@ -534,8 +539,8 @@ describe("CompanionThread Box chip", () => {
     });
     const chip = boxChip(container);
 
-    expect(chip.querySelector(".chat-box__prefix")?.textContent).toBe("Box ·");
-    expect(chip.querySelector(".chat-box__state")?.textContent).toBe("online");
+    expect(chip.querySelector(".chat-box__state")?.textContent).toBe("Online");
+    expect(chip.getAttribute("aria-label")).toBe("Box · online");
   });
 
   it("leaves a Viewer's chip inert so reading a thread cannot reach Box", async () => {

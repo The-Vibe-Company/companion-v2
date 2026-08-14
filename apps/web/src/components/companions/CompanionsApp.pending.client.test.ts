@@ -187,6 +187,7 @@ async function wait(seconds: number) {
   });
 }
 
+/** The chip's visible half: the state word. What it reports about is its accessible name. */
 const chip = (container: HTMLElement) => container.querySelector(".chat-box")?.textContent;
 const wakeControl = (container: HTMLElement) =>
   [...container.querySelectorAll("button")].find((button) => button.textContent === "Wake") ?? null;
@@ -214,12 +215,12 @@ describe("CompanionsApp while a Companion is starting", () => {
       wakeControl(container)?.click();
     });
     await wait(20);
-    expect(chip(container)).toContain("Box · starting");
+    expect(chip(container)).toContain("Starting");
 
     api.boxCameUp();
     await wait(5);
 
-    expect(chip(container)).toContain("Box · online");
+    expect(chip(container)).toContain("Online");
     expect(wakeControl(container)).toBeNull();
   });
 
@@ -229,7 +230,7 @@ describe("CompanionsApp while a Companion is starting", () => {
     api.wakeFailed();
     await wait(5);
 
-    expect(chip(container)).toContain("Box · error");
+    expect(chip(container)).toContain("Error");
     expect(container.textContent).toContain("Pi resources failed to prepare");
     expect(wakeControl(container)).not.toBeNull();
   });
@@ -253,14 +254,14 @@ describe("CompanionsApp while a Companion is starting", () => {
     await wait(4);
     api.boxCameUp();
     await wait(8);
-    expect(chip(container)).toContain("Box · online");
+    expect(chip(container)).toContain("Online");
 
     await act(async () => {
       api.releaseFirstRead();
       await vi.advanceTimersByTimeAsync(0);
     });
 
-    expect(chip(container)).toContain("Box · online");
+    expect(chip(container)).toContain("Online");
   });
 
   it("stops watching once the lifecycle settles", async () => {

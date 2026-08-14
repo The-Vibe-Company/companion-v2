@@ -1144,6 +1144,17 @@
   font-size: var(--text-xs);
 }
 
+/* The face in the header is the same one the conversation list carries, so moving between the two
+   surfaces stays one Companion rather than two treatments of it. */
+.chat-head .chat-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-full);
+  background: var(--color-accent-tint);
+  color: var(--color-fg);
+  font-size: var(--text-sm);
+}
+
 /* The chat chip names the compute it reports. Asleep stays neutral; a live Box carries the low tint
    of its status tone, and for a runner the same chip is the only way into the Box desktop. */
 .chat-box {
@@ -1363,8 +1374,9 @@ button.chat-box:focus-visible {
   flex-direction: column;
 }
 
-/* One transcript, one column. A writer keeps the floor across consecutive turns, so the name and the
-   clock appear once per passage and the turns underneath are just the words. */
+/* One transcript, two sides. A writer keeps the floor across consecutive turns, so the name and the
+   clock appear once per passage and the turns underneath are just the words; the side a turn sits on
+   is who wrote it, and the bubble's square corner points back at the passage it belongs to. */
 .chat-turn {
   display: grid;
   gap: 3px;
@@ -1378,6 +1390,41 @@ button.chat-box:focus-visible {
   margin-top: 0;
 }
 
+/* A separator is drawn by the turn that opens the day or the unread run. It is a grid item like the
+   bubble above it, and only the bubble narrows, so the separator reaches the full column on its own. */
+.chat-sep {
+  margin: 22px 0 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--color-faint);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.chat-sep::before,
+.chat-sep::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--color-line);
+}
+
+/* Where reading stopped. It carries the accent because it is the one line in a long transcript a
+   returning reader is looking for. */
+.chat-sep--new {
+  color: var(--color-accent-edge);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+}
+
+.chat-sep--new::before,
+.chat-sep--new::after {
+  background: var(--color-accent-line);
+}
+
 .chat-turn__meta {
   margin: 0;
   display: flex;
@@ -1386,6 +1433,10 @@ button.chat-box:focus-visible {
   color: var(--color-faint);
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
+}
+
+.chat-turn--said .chat-turn__meta {
+  justify-content: flex-end;
 }
 
 .chat-turn__author {
@@ -1404,13 +1455,26 @@ button.chat-box:focus-visible {
   overflow-wrap: anywhere;
 }
 
-/* A member's message is a tinted block so the ask is scannable; the reply is plain text on the page,
-   which is what a reader is here to read. */
+/* Both sides are bubbles: a member's message is an accent-tinted block on the right, a reply is a
+   bordered surface block on the left. The corner nearest the writer stays square so a passage of
+   several turns reads as one side of a conversation rather than as a stack of identical cards. */
+.chat-turn--said .chat-turn__text,
+.chat-turn--reply .chat-turn__text {
+  max-width: 76%;
+  padding: 8px 12px;
+}
+
 .chat-turn--said .chat-turn__text {
-  justify-self: start;
-  padding: 7px 11px;
-  border-radius: var(--radius-md);
+  justify-self: end;
+  border-radius: 14px 14px 4px 14px;
   background: var(--color-accent-tint);
+}
+
+.chat-turn--reply .chat-turn__text {
+  justify-self: start;
+  border-radius: 14px 14px 14px 4px;
+  border: 1px solid var(--color-line);
+  background: var(--color-surface);
 }
 
 /* Sent, not yet saved: the message is on screen immediately and settles once the API answers. */
@@ -1765,16 +1829,22 @@ button.chat-box:focus-visible {
   background: var(--color-surface);
 }
 
-/* The field and its send control are one object, so the composer reads as a single place to type. */
+/* The field and its send control are one object, so the composer reads as a single place to type: one
+   pill, with the send control inside its right edge. */
 .chat-composer__field {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
   gap: 8px;
-  padding: 6px 6px 6px 12px;
+  padding: 6px 6px 6px 16px;
   border: 1px solid var(--color-line-strong);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-full);
   background: var(--color-canvas);
+}
+
+/* A draft long enough to wrap is no longer a pill; the corners relax so the text keeps its inset. */
+.chat-composer__field:has(.chat-composer__input:not(:placeholder-shown)) {
+  border-radius: var(--radius-lg);
 }
 
 .chat-composer__field:focus-within {
@@ -1805,14 +1875,14 @@ button.chat-box:focus-visible {
 }
 
 .chat-send {
-  width: 30px;
-  height: 30px;
+  width: 36px;
+  height: 36px;
   flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: 1px solid transparent;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-full);
   background: var(--color-accent);
   color: var(--color-accent-fg);
   cursor: pointer;
@@ -1933,12 +2003,6 @@ button.chat-box:focus-visible {
 
   .chat-head {
     padding: 10px 14px;
-  }
-
-  /* The chip names the compute on a screen with room to say so; on a phone the dot and the state
-     word are the whole message, and `Box ·` is what gives way. */
-  .chat-box__prefix {
-    display: none;
   }
 
   /* The name is the point of the header, so the avatar beside it yields its width first. */

@@ -20,6 +20,14 @@ export interface TranscriptTurn {
   lead: boolean;
   /** True while the control plane has not confirmed this message yet. */
   sending: boolean;
+  /**
+   * The day this turn opens, as `YYYY-MM-DD`, or null when it continues the day above it. The key is
+   * the stored UTC day rather than the reader's, so server and client agree on where a separator
+   * goes; the label itself is reformatted to the local clock once the client owns the page.
+   */
+  startsDay: string | null;
+  /** True on the first message this reader has not caught up on, which is where "New" is drawn. */
+  startsNew: boolean;
 }
 
 /**
@@ -55,9 +63,20 @@ export function transcriptTurns(
     companionName: string;
     /** The message this composer is still sending, named by the event id it will be stored under. */
     sendingEventId?: string | null;
+    /**
+     * The newest line this reader had already seen when they opened the thread. The first message
+     * after it that somebody else wrote is where "New" is drawn. Null leaves the thread undivided,
+     * which is what a first visit and a thread the reader has caught up on both look like.
+     */
+    newSince?: string | null;
   },
 ): TranscriptTurn[] {
   let previous: { author: string | null; role: string; at: number } | null = null;
+  // Day boundaries and the new-message divider are drawn on what was said, not on what ran: a tool
+  // chip is chrome between two turns, so a separator that landed on one would separate a reply from
+  // the machinery of its own turn.
+  let previousDay: string | null = null;
+  let newDrawn = false;
   return entries.map((entry) => {
     const author = transcriptAuthor(entry, context.viewerId, context.companionName);
     const at = millis(entry.created_at);
@@ -67,6 +86,20 @@ export function transcriptTurns(
       || previous.role !== entry.role
       || at - previous.at > PASSAGE_WINDOW_MS;
     previous = { author, role: entry.role, at };
+
+    const said = entry.role === "user" || entry.role === "assistant";
+    const day = entry.created_at.slice(0, 10);
+    const startsDay = said && day !== previousDay ? day : null;
+    if (said) previousDay = day;
+
+    const mine = entry.role === "user" && entry.author_id === context.viewerId;
+    const startsNew = said
+      && !mine
+      && !newDrawn
+      && Boolean(context.newSince)
+      && entry.created_at > context.newSince!;
+    if (startsNew) newDrawn = true;
+
     return {
       entry,
       author,
@@ -74,6 +107,8 @@ export function transcriptTurns(
       sending: context.sendingEventId !== undefined
         && context.sendingEventId !== null
         && entry.event_id === context.sendingEventId,
+      startsDay,
+      startsNew,
     };
   });
 }

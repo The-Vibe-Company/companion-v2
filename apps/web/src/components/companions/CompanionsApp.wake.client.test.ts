@@ -271,13 +271,13 @@ describe("CompanionsApp wake on send", () => {
     const container = await openThread();
 
     expect(footer(container)).toContain("Enter sends");
-    expect(chip(container)).toContain("Box · asleep");
+    expect(chip(container)).toContain("Asleep");
 
     await send(container, "Draft the launch note");
 
     expect(footer(container)).not.toContain("Wake Luna to deliver.");
     expect(footer(container)).toContain("1 message waiting for a reply.");
-    expect(chip(container)).toContain("Box · online");
+    expect(chip(container)).toContain("Online");
     expect(api.runtimeReads()).toBeGreaterThan(0);
 
     // The woken thread now syncs, so the message Pi refused is delivered and answered without anyone
@@ -300,7 +300,7 @@ describe("CompanionsApp wake on send", () => {
     await send(container, "Draft the launch note");
 
     expect(wakeControls(container)).toHaveLength(0);
-    expect(chip(container)).toContain("Box · online");
+    expect(chip(container)).toContain("Online");
     expect(footer(container)).toContain("Enter sends");
 
     // A woken thread pulls Pi, so the reply arrives on the live cadence instead of on a reload.

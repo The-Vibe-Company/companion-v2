@@ -116,6 +116,75 @@ describe("transcriptTurns", () => {
   });
 });
 
+describe("transcript separators", () => {
+  const context = { viewerId: "user-1", companionName: "Luna" };
+
+  it("opens each day the thread was written in, and only the first turn of it", () => {
+    const turns = transcriptTurns([
+      entry({ event_id: "msg:1", created_at: "2026-08-12T12:00:00.000Z" }),
+      entry({ event_id: "pi:1", role: "assistant", author_id: null, created_at: "2026-08-12T12:01:00.000Z" }),
+      entry({ event_id: "msg:2", created_at: "2026-08-14T09:00:00.000Z" }),
+    ], context);
+
+    expect(turns.map((turn) => turn.startsDay)).toEqual(["2026-08-12", null, "2026-08-14"]);
+  });
+
+  it("keeps a day boundary off a tool run, which is chrome inside a turn", () => {
+    // A separator on a chip would part a reply from the machinery of its own turn.
+    const turns = transcriptTurns([
+      entry({
+        event_id: "tool:1",
+        role: "tool",
+        author_id: null,
+        created_at: "2026-08-14T00:00:10.000Z",
+        tool: {
+          call_id: "call-1",
+          kind: "shell",
+          name: "shell",
+          title: "npm test",
+          status: "ok",
+          detail: null,
+          screenshot: null,
+        },
+      }),
+      entry({ event_id: "pi:1", role: "assistant", author_id: null, created_at: "2026-08-14T00:00:20.000Z" }),
+    ], context);
+
+    expect(turns.map((turn) => turn.startsDay)).toEqual([null, "2026-08-14"]);
+  });
+
+  it("draws the new-message divider once, on the first line somebody else wrote", () => {
+    const turns = transcriptTurns([
+      entry({ event_id: "pi:1", role: "assistant", author_id: null, created_at: "2026-08-14T09:00:00.000Z" }),
+      entry({ event_id: "pi:2", role: "assistant", author_id: null, created_at: "2026-08-14T09:05:00.000Z" }),
+      entry({ event_id: "pi:3", role: "assistant", author_id: null, created_at: "2026-08-14T09:06:00.000Z" }),
+    ], { ...context, newSince: "2026-08-14T09:01:00.000Z" });
+
+    expect(turns.map((turn) => turn.startsNew)).toEqual([false, true, false]);
+  });
+
+  it("never divides a thread at this reader's own message", () => {
+    const turns = transcriptTurns([
+      entry({ event_id: "msg:1", created_at: "2026-08-14T09:05:00.000Z" }),
+      entry({ event_id: "pi:1", role: "assistant", author_id: null, created_at: "2026-08-14T09:06:00.000Z" }),
+    ], { ...context, newSince: "2026-08-14T09:00:00.000Z" });
+
+    expect(turns.map((turn) => turn.startsNew)).toEqual([false, true]);
+  });
+
+  it("leaves a thread undivided when the reader has caught up, or has never been here", () => {
+    const entries = [
+      entry({ event_id: "pi:1", role: "assistant", author_id: null, created_at: "2026-08-14T09:00:00.000Z" }),
+    ];
+
+    expect(transcriptTurns(entries, { ...context, newSince: "2026-08-14T09:30:00.000Z" })
+      .some((turn) => turn.startsNew)).toBe(false);
+    // A first visit has nothing to return to, so the whole thread is simply the thread.
+    expect(transcriptTurns(entries, { ...context, newSince: null })
+      .some((turn) => turn.startsNew)).toBe(false);
+  });
+});
+
 describe("replyExpected", () => {
   it("waits on a running Box whose transcript ends on a member's message", () => {
     expect(replyExpected({ entries: [entry()], awake: true })).toBe(true);

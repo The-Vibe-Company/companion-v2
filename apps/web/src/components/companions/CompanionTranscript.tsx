@@ -109,6 +109,56 @@ const TurnText: TextMessagePartComponent = ({ text }) => <p className="chat-turn
 
 const TEXT_ONLY = { Text: TurnText };
 
+/**
+ * The stored UTC day, reformatted to the reader's clock. Server markup keeps the stable key so both
+ * renders agree on where the separator goes; the friendly form arrives with the client's clock.
+ */
+function DaySeparator({ day }: { day: string }) {
+  const [text, setText] = useState(day);
+  useEffect(() => {
+    const at = new Date(`${day}T12:00:00.000Z`);
+    const today = new Date();
+    const daysApart = Math.round(
+      (Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())
+        - Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate())) / 86_400_000,
+    );
+    if (daysApart === 0) setText("Today");
+    else if (daysApart === 1) setText("Yesterday");
+    else {
+      setText(at.toLocaleDateString(undefined, {
+        month: "long",
+        day: "numeric",
+        ...(daysApart > 300 ? { year: "numeric" } : {}),
+        timeZone: "UTC",
+      }));
+    }
+  }, [day]);
+  return (
+    <p className="chat-sep">
+      <time dateTime={day}>{text}</time>
+    </p>
+  );
+}
+
+/**
+ * Where this reader left off. It is drawn once, on the first message somebody else wrote after the
+ * newest line they had already seen, so returning to a busy thread starts where reading stopped.
+ */
+function NewSeparator() {
+  return <p className="chat-sep chat-sep--new">New</p>;
+}
+
+/** Both separators, at the top of whichever message opens the day or the unread run. */
+function TurnSeparators({ turn }: { turn: TranscriptTurn | undefined }) {
+  if (!turn) return null;
+  return (
+    <>
+      {turn.startsDay && <DaySeparator day={turn.startsDay} />}
+      {turn.startsNew && <NewSeparator />}
+    </>
+  );
+}
+
 function Turn({ tone }: { tone: "said" | "reply" }) {
   const turn = useTurn();
   return (
@@ -118,6 +168,9 @@ function Turn({ tone }: { tone: "said" | "reply" }) {
         + (turn?.sending ? " chat-turn--sending" : "")}
       aria-busy={turn?.sending || undefined}
     >
+      {/* Rendered inside the message rather than between messages: the primitives own the list, and
+          a turn that opens a day is the only thing that knows it does. */}
+      <TurnSeparators turn={turn} />
       {turn?.lead && turn.author && (
         <p className="chat-turn__meta">
           <span className="chat-turn__author">{turn.author}</span>
@@ -448,6 +501,7 @@ export function CompanionTranscript({
   thread,
   orgId,
   busy,
+  newSince,
   onSend,
   onThread,
 }: {
@@ -455,6 +509,8 @@ export function CompanionTranscript({
   thread: Thread | null;
   orgId: string;
   busy: boolean;
+  /** The newest line this reader had already seen when the thread was opened; null draws no divider. */
+  newSince?: string | null;
   onSend: (content: string, clientMessageId: string) => Promise<boolean>;
   /** Replace the thread after a permission card is decided, without a full poll cycle. */
   onThread: (thread: Thread) => void;
@@ -499,8 +555,9 @@ export function CompanionTranscript({
       viewerId,
       companionName: companion.name,
       sendingEventId: outgoing?.event_id ?? null,
+      newSince: newSince ?? null,
     }),
-    [companion.name, messages, outgoing, viewerId],
+    [companion.name, messages, newSince, outgoing, viewerId],
   );
   const turnsById = useMemo(
     () => new Map(turns.map((turn) => [turn.entry.event_id, turn])),
@@ -656,7 +713,7 @@ export function CompanionTranscript({
                   onPointerDown={sendOnPress}
                   onClick={swallowClickAfterPress}
                 >
-                  <Icon name="send" size={15} />
+                  <Icon name="arrow-up" size={17} />
                 </ComposerPrimitive.Send>
               </div>
               <p className="chat-hint">
