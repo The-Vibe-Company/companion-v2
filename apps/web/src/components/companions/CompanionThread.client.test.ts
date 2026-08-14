@@ -3,7 +3,7 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Companion, CompanionThread as Thread } from "@companion/contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CompanionThread } from "./CompanionThread";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -441,6 +441,18 @@ describe("CompanionThread Box chip", () => {
     document.body.innerHTML = "";
   });
 
+  it("carries the state word in its own element so a phone header can drop the prefix", async () => {
+    // THE-345: `Box · asleep` does not fit beside Back, the name, and Wake at 320px. The phone
+    // stylesheet hides the prefix, so the word has to be addressable on its own — and it has to stay,
+    // because the dot's colour is not allowed to be the only thing reporting status.
+    const container = await mount(async () => true);
+    const chip = boxChip(container);
+
+    expect(chip.querySelector(".chat-box__prefix")?.textContent).toBe("Box ·");
+    expect(chip.querySelector(".chat-box__state")?.textContent).toBe("online");
+    expect(chip.textContent).toContain("Box · online");
+  });
+
   it("hands a runner the Box desktop from the status chip", async () => {
     let opened = 0;
     const container = await mount(async () => true, { onDesktop: () => { opened += 1; } });
@@ -450,6 +462,17 @@ describe("CompanionThread Box chip", () => {
     });
 
     expect(opened).toBe(1);
+  });
+
+  it("keeps the Viewer's chip on the same two halves", async () => {
+    const container = await mount(async () => true, {
+      companion: { ...companion, access: "viewer" },
+      thread: { ...thread, access: "viewer", read_only: true, can_send: false },
+    });
+    const chip = boxChip(container);
+
+    expect(chip.querySelector(".chat-box__prefix")?.textContent).toBe("Box ·");
+    expect(chip.querySelector(".chat-box__state")?.textContent).toBe("online");
   });
 
   it("leaves a Viewer's chip inert so reading a thread cannot reach Box", async () => {
@@ -467,5 +490,75 @@ describe("CompanionThread Box chip", () => {
 
     expect(chip.tagName).toBe("SPAN");
     expect(opened).toBe(0);
+  });
+});
+
+/**
+ * Product promise:
+ * An open thread is sized on the box the phone keyboard leaves visible, so focusing the composer does
+ * not push it behind the keyboard or pan the page.
+ *
+ * Regression caught:
+ * THE-345 — `100dvh` is the layout viewport, which the keyboard does not shrink.
+ *
+ * Why this test is component-level:
+ * The reporting has to start when a thread opens and stop when it closes; that lifecycle is the part
+ * a stylesheet cannot state and arithmetic cannot prove.
+ *
+ * Failure proof:
+ * Dropping the resize listener, or leaving the properties behind on unmount, fails a case below.
+ */
+describe("CompanionThread visual viewport", () => {
+  class FakeVisualViewport extends EventTarget {
+    height = 640;
+    offsetTop = 0;
+  }
+
+  const viewport = new FakeVisualViewport();
+
+  function pinned() {
+    const root = document.documentElement;
+    return {
+      height: root.style.getPropertyValue("--chat-viewport-h"),
+      top: root.style.getPropertyValue("--chat-viewport-top"),
+    };
+  }
+
+  beforeEach(() => {
+    viewport.height = 640;
+    viewport.offsetTop = 0;
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: viewport });
+  });
+
+  afterEach(() => {
+    act(() => roots.splice(0).forEach((root) => root.unmount()));
+    document.body.innerHTML = "";
+    document.documentElement.removeAttribute("style");
+    Reflect.deleteProperty(window, "visualViewport");
+  });
+
+  it("follows the keyboard shrinking and offsetting the visible box", async () => {
+    await mount(async () => true);
+
+    expect(pinned()).toEqual({ height: "640px", top: "0px" });
+
+    await act(async () => {
+      viewport.height = 350;
+      viewport.offsetTop = 24;
+      viewport.dispatchEvent(new Event("resize"));
+    });
+
+    expect(pinned()).toEqual({ height: "350px", top: "24px" });
+  });
+
+  it("stops reporting once the thread is closed", async () => {
+    await mount(async () => true);
+    expect(pinned().height).toBe("640px");
+
+    act(() => roots.splice(0).forEach((root) => root.unmount()));
+
+    // A list page is an ordinary scrolling document; leaving a stale height behind would freeze it at
+    // whatever the thread last measured.
+    expect(pinned()).toEqual({ height: "", top: "" });
   });
 });

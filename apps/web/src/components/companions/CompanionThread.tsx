@@ -4,7 +4,13 @@ import { useEffect, useRef } from "react";
 import type { Companion, CompanionThread as Thread } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { CompanionTranscript } from "./CompanionTranscript";
-import { companionBoxStatusLabel, companionStatus } from "./status";
+import {
+  COMPANION_BOX_CHIP_PREFIX,
+  companionBoxStateWord,
+  companionBoxStatusLabel,
+  companionStatus,
+} from "./status";
+import { useVisualViewportPin } from "./useVisualViewportPin";
 
 /**
  * One Companion, one thread. The header carries the identity, the Box status chip, and at most one
@@ -40,6 +46,7 @@ export function CompanionThread({
   const canSend = thread ? thread.can_send : companion.access !== "viewer";
   const awake = companion.runtime.state === "running";
   const boxLabel = companionBoxStatusLabel(companion.runtime.state);
+  const boxWord = companionBoxStateWord(companion.runtime.state);
   // Computer use is the Box desktop Lux drives, reached from the status chip itself so the header
   // keeps one control. A Viewer reads the same chip without the action: a sleeping Box has no
   // desktop, and a Viewer must never be handed anything that could start one.
@@ -52,6 +59,10 @@ export function CompanionThread({
   useEffect(() => {
     headingRef.current?.focus();
   }, [companion.id]);
+
+  // A thread is the only Companions surface a phone keyboard opens over, so it is the only one that
+  // has to follow the visual viewport.
+  useVisualViewportPin();
 
   return (
     <section className="chat" aria-label={`Chat with ${companion.name}`}>
@@ -66,6 +77,11 @@ export function CompanionThread({
           <h1 ref={headingRef} tabIndex={-1}>{companion.name}</h1>
           {companion.persona && <p>{companion.persona}</p>}
         </div>
+        {/*
+          The chip is a dot, what it reports, and the state word. The two halves are separate
+          elements so a narrow header can drop `Box ·` and keep the word: the state must never be
+          left to the colour of the dot alone.
+        */}
         {canOpenDesktop ? (
           <button
             type="button"
@@ -75,12 +91,14 @@ export function CompanionThread({
             onClick={onDesktop}
           >
             <i aria-hidden="true" />
-            {openingDesktop ? "Box · opening desktop" : boxLabel}
+            <span className="chat-box__prefix">{COMPANION_BOX_CHIP_PREFIX}</span>{" "}
+            <span className="chat-box__state">{openingDesktop ? "opening desktop" : boxWord}</span>
           </button>
         ) : (
           <span className={`companions-state companions-state--${status.tone} chat-box`}>
             <i aria-hidden="true" />
-            {boxLabel}
+            <span className="chat-box__prefix">{COMPANION_BOX_CHIP_PREFIX}</span>{" "}
+            <span className="chat-box__state">{boxWord}</span>
           </span>
         )}
         {canSend && !awake && (

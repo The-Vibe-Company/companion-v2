@@ -24,11 +24,20 @@ export function companionStatus(
 }
 
 /**
- * The chat chip names the compute it reports, because that is where an operator reaches the Box
- * desktop. One dot, the word Box, and the same single state word the list and sidebar use.
+ * What the chat chip calls the compute it reports, because that is where an operator reaches the Box
+ * desktop. It is rendered apart from the state word so a phone header can drop it and keep the dot
+ * and the word, which is the part that says what is going on.
  */
+export const COMPANION_BOX_CHIP_PREFIX = "Box ·";
+
+/** The same single state word the list and the sidebar use, in the chip's lower case. */
+export function companionBoxStateWord(state: CompanionRuntimeState): string {
+  return companionStatus(state).label.toLocaleLowerCase("en-US");
+}
+
+/** The whole chip as one string: what a screen reader hears and what a wide header shows. */
 export function companionBoxStatusLabel(state: CompanionRuntimeState): string {
-  return `Box · ${companionStatus(state).label.toLocaleLowerCase("en-US")}`;
+  return `${COMPANION_BOX_CHIP_PREFIX} ${companionBoxStateWord(state)}`;
 }
 
 const RELATIVE_UNITS: ReadonlyArray<[Intl.RelativeTimeFormatUnit, number]> = [
