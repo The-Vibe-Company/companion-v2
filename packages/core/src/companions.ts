@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, inArray, lt, max, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lt, max, notInArray, or, sql } from "drizzle-orm";
 import type {
   Companion,
   CompanionAccess,
