@@ -102,7 +102,18 @@ an empty skill set. This is enforced by the API and again by the Box adapter bef
 
 Desktop responses are secret-bearing and are returned only to the authorized caller. They are never
 stored. The response advertises `automation: "lux"`, so computer use is the Box desktop Lux drives
-and nothing else; no second computer-use surface may be added beside it.
+and nothing else; no automation other than Lux may be introduced through it.
+
+Every request mints a fresh URL, because Box rotates the stream token on every Box state change and a
+kept URL is one that has already stopped working. The mint asks `POST /boxes/{id}/desktop?vnc=1`
+first: the VNC stream is a plain WebSocket that still reaches a Box from a network blocking
+peer-to-peer traffic, and it answers `provisioning` before it answers with a URL, so the mint polls
+that answer inside a short budget rather than reporting a Box with no desktop. `POST
+/boxes/{id}/desktop` is the WebRTC fallback, used when Box has no VNC stream to give and when a
+provider build refuses the flag outright, so a refused query parameter cannot take computer use down
+with it. The response names which stream a join got in `transport`. The mint never creates or resumes
+a Box: a Box outside `ready`, `idle`, or `running` is refused before any stream is minted for it,
+which is what keeps opening a desktop surface from being a wake.
 
 The web chat header carries that boundary as one chip. It reads `Box · online`, `Box · starting`,
 `Box · asleep`, or `Box · error` from the same runtime state the list and sidebar show, and for an
@@ -120,6 +131,19 @@ Companion that is asleep offers Wake instead, because a desktop request cannot r
 Viewer reads the chip as text: their thread polls only the control-plane projection, while a runner's
 open thread refreshes `GET /v1/companions/:id/runtime?live=true` on a slow interval, so a stale chip
 is corrected by an observation rather than by a wake.
+
+Beside the conversation, the same runner can open a Computer panel that frames that desktop in the
+thread, so watching Pi work costs no context switch. The panel is a second pane rather than a change
+to the transcript: the assistant-ui primitives, the composer, and the chip all behave exactly as they
+do with the panel closed, and below the two-pane breakpoint the panel takes the stage while the header
+toggle moves back to the conversation. It joins by the same `POST /v1/companions/:id/runtime/desktop`
+route, so opening the panel, reconnecting it, and using `Open desktop` are three joins and three
+freshly minted URLs; none is held beyond the join that minted it, and closing the panel, moving to
+another Companion, or a Box that stops under the stream each drop it. The desktop is another origin's
+document, so it is framed with no top-level navigation and no popups, and the panel prints no part of
+the URL. A sleeping Box shows as asleep beside the header's own Wake control, because a desktop
+request cannot resume one. A Viewer is offered neither the panel nor its toggle, and the route refuses
+them before a Box client exists, so the panel is not a wake path for anybody.
 
 A Companion the control plane is still resolving is watched more closely, and on the plain projection
 read: every few seconds while its state is `provisioning` or `stopping`. That window used to be the
@@ -539,6 +563,8 @@ Optional settings:
 - `COMPANION_BOX_TTL_SECONDS` (default `21600`)
 - `COMPANION_BOX_POLL_INTERVAL_MS` (default `1000`)
 - `COMPANION_BOX_READY_TIMEOUT_MS` (default `120000`)
+- `COMPANION_BOX_DESKTOP_MINT_BUDGET_MS` (default `15000`) — how long one desktop mint waits for a VNC
+  stream Box is still bringing up before it tries the WebRTC fallback
 - `COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS` (default `20000`)
 - `COMPANION_PI_INSTALL_COMMAND`
 - `COMPANION_PI_MCP_ADAPTER_PACKAGE` (default pinned to `npm:pi-mcp-adapter@2.12.1`)
