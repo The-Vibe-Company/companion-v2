@@ -841,6 +841,45 @@
   grid-column: 1 / -1;
 }
 
+.companions-provider-oauth,
+.companions-provider-oauth-intro {
+  grid-column: 1 / -1;
+}
+
+.companions-provider-oauth {
+  padding: 12px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+}
+
+.companions-provider-oauth p,
+.companions-provider-oauth-intro p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+  font-weight: 400;
+}
+
+.companions-provider-oauth label {
+  width: 100%;
+}
+
+.companions-provider-oauth__code {
+  padding: 6px 9px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  letter-spacing: 0.08em;
+  user-select: all;
+}
+
 .companions-provider-add > button {
   grid-column: 1 / -1;
   justify-self: start;

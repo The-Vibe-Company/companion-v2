@@ -67,7 +67,10 @@ function companion(access: Companion["access"] = "owner"): Companion {
 
 const roots: Root[] = [];
 
-async function mount(access: Companion["access"] = "owner") {
+async function mount(
+  access: Companion["access"] = "owner",
+  providerResponse: CompanionProvidersResponse = providers,
+) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -78,7 +81,7 @@ async function mount(access: Companion["access"] = "owner") {
     root.render(React.createElement(CompanionSettings, {
       orgId: "org-1",
       companion: companion(access),
-      providers,
+      providers: providerResponse,
       onBack: vi.fn(),
       onSaved,
       onDeleted,
@@ -155,6 +158,26 @@ describe("CompanionSettings", () => {
     expect(container.textContent).not.toContain("Save changes");
     expect(container.textContent).not.toContain("Delete Companion");
     expect(updateCompanion).not.toHaveBeenCalled();
+  });
+
+  it("shows both Kimi and z.ai when both workspace connections exist", async () => {
+    const apiConnections: CompanionProvidersResponse = {
+      catalog: [
+        { id: "kimi-coding", name: "Kimi", auth_methods: ["api_key"], description: "" },
+        { id: "zai", name: "z.ai", auth_methods: ["api_key"], description: "" },
+      ],
+      connections: [
+        { ...providers.connections[0]!, provider_id: "kimi-coding" },
+        { ...providers.connections[0]!, provider_id: "zai" },
+      ],
+      default_provider_id: "zai",
+      can_manage: true,
+    };
+    const { container } = await mount("owner", apiConnections);
+
+    expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(2);
+    expect(container.textContent).toContain("Kimi");
+    expect(container.textContent).toContain("z.ai");
   });
 
   it("requires Owner confirmation before deletion", async () => {

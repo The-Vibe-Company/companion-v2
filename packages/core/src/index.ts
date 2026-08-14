@@ -9,6 +9,7 @@ export * from "./billing";
 export * from "./billingService";
 export * from "./featureFlags";
 export * from "./companions";
+export * from "./companionProviderOAuth";
 export * from "./companionRegistry";
 export * from "./companionPluginOAuth";
 export * from "./companionPiEvents";

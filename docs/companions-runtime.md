@@ -93,6 +93,9 @@ an empty skill set. This is enforced by the API and again by the Box adapter bef
 | `PUT` | `/v1/companion-providers/:provider` | Never; Owner/Admin only |
 | `DELETE` | `/v1/companion-providers/:provider` | Never; Owner/Admin only |
 | `PUT` | `/v1/companion-providers/default` | Never; Owner/Admin only |
+| `POST` | `/v1/companion-providers/oauth/start` | Never; Owner/Admin only |
+| `POST` | `/v1/companion-providers/oauth/complete` | Never; Owner/Admin only |
+| `POST` | `/v1/companion-providers/oauth/poll` | Never; Owner/Admin only |
 | `GET/POST/DELETE` | `/v1/companion-plugins` | Never; current member's private MCP accounts only |
 | `POST/GET` | `/v1/companion-plugins/oauth/start`, `/oauth/callback` | Never; curated MCP pins only, signed PKCE callback |
 
@@ -488,10 +491,13 @@ Migration `0065` clears `provider_ids` for existing rows. Before it, that column
 credential tags a start request carried, including MCP account tags, so no legacy value can name a
 workspace connection. Owners attach a real provider afterwards through the one-time route below.
 
-Subscription setup deliberately reuses Pi's authentication implementation. Run `/login` with the
-same pinned Pi version on a trusted machine, then submit only that provider's `{ "type": "oauth",
-... }` entry from Pi's `auth.json`. Never submit the whole auth file. API keys are stored as
-literal Pi `api_key` entries, so shell-command and environment interpolation are not accepted.
+Subscription setup uses Pi's native public-client OAuth protocols without asking an administrator
+to copy `auth.json`. Claude opens the PKCE browser flow and accepts the one-time authorization code;
+Codex opens ChatGPT's device page and polls the device grant. The API exchanges those short-lived
+values and writes the resulting Pi `{ "type": "oauth", ... }` entry directly through the same
+envelope-encrypted provider store. Access and refresh tokens are never returned to the browser.
+API keys are stored as literal Pi `api_key` entries, so shell-command and environment interpolation
+are not accepted.
 
 Provider failures use stable codes suitable for the chat surface:
 `provider_not_configured`, `provider_auth_invalid`, `provider_auth_expired`, and
@@ -502,9 +508,13 @@ credential material must remain behind the adapter boundary.
 
 | Picker label | Pi auth key | Authentication |
 |---|---|---|
-| Claude | `anthropic` | Anthropic API key or Claude Pro/Max Pi OAuth entry |
-| Codex | `openai-codex` | ChatGPT Plus/Pro Pi OAuth entry |
+| Claude | `anthropic` | Anthropic API key or Claude Pro/Max browser OAuth |
+| Codex | `openai-codex` | ChatGPT Plus/Pro device OAuth |
+| Kimi | `kimi-coding` | Kimi For Coding API key |
+| Moonshot | `moonshot` | Moonshot AI API key |
 | z.ai | `zai` | z.ai API key, including Coding Plan keys |
+| OpenAI API | `openai` | OpenAI API key |
+| Google Gemini | `google` | Google Gemini API key |
 
 The web picker intentionally shows only this short list. The API and storage key use Pi provider
 ids and accept any valid lowercase Pi provider id, so another built-in provider can be connected
