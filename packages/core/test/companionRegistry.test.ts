@@ -104,7 +104,7 @@ describe("listCompanionRegistry", () => {
     expect(githubPin?.connect).toEqual({
       transport: "http",
       url: "https://api.githubcopilot.com/mcp/",
-      credential: expect.objectContaining({ name: "Authorization" }),
+      credential: null,
     });
 
     // Deprecated + deleted are filtered; the pinned GitHub name is removed from the browse list.

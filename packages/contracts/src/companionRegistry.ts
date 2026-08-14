@@ -1,6 +1,38 @@
 import { z } from "zod";
 
 /**
+ * Curated catalog pins whose official hosted remotes support the brokered OAuth flow. This is an
+ * allowlist, not registry metadata: arbitrary registry entries can never opt themselves into the
+ * control-plane OAuth broker.
+ */
+export const COMPANION_PLUGIN_OAUTH_SERVER_NAMES = [
+  "app.linear/linear",
+  "io.github.github/github-mcp-server",
+  "com.notion/mcp",
+] as const;
+export const companionPluginOAuthServerNameSchema = z.enum(
+  COMPANION_PLUGIN_OAUTH_SERVER_NAMES,
+);
+export type CompanionPluginOAuthServerName = z.infer<
+  typeof companionPluginOAuthServerNameSchema
+>;
+
+export const companionPluginOAuthStartInputSchema = z.object({
+  server_name: companionPluginOAuthServerNameSchema,
+  label: z.string().trim().min(1).max(40),
+}).strict();
+export type CompanionPluginOAuthStartInput = z.infer<
+  typeof companionPluginOAuthStartInputSchema
+>;
+
+export const companionPluginOAuthStartResponseSchema = z.object({
+  authorization_url: z.string().url(),
+}).strict();
+export type CompanionPluginOAuthStartResponse = z.infer<
+  typeof companionPluginOAuthStartResponseSchema
+>;
+
+/**
  * Contracts for the official MCP registry browse surface (THE-327). The browser never talks to
  * `registry.modelcontextprotocol.io` directly — it reads these normalized shapes from the
  * companion-v2 API, which proxies, caches, and applies the pin overrides. Connecting reuses

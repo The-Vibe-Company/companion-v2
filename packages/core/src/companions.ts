@@ -32,6 +32,11 @@ import {
 } from "./companionRuntimeErrors";
 import { decryptOpaqueValue, encryptOpaqueValue, type OpaqueCiphertext } from "./secretsCrypto";
 import { assertMember, getOrgRole, type ActorContext } from "./services";
+import {
+  COMPANION_PLUGIN_OAUTH_SERVERS,
+  refreshCompanionPluginOAuth,
+  type CompanionPluginStoredOAuthCredential,
+} from "./companionPluginOAuth";
 
 type CompanionRow = typeof schema.companions.$inferSelect;
 /**
@@ -56,6 +61,7 @@ export const COMPANION_RUNTIME_START_BUDGET_MS = 3 * 60_000;
 const COMPANION_RUNTIME_CLAIM_STALE_MS = COMPANION_RUNTIME_START_BUDGET_MS + 30_000;
 const PROVIDER_CREDENTIAL_PURPOSE = "companion-provider-credential";
 const MCP_CREDENTIAL_PURPOSE = "companion-mcp-credential";
+const OAUTH_REFRESH_SKEW_MS = 5 * 60_000;
 
 /** Drizzle query errors nest postgres.js SQLSTATE on `cause`; check both layers. */
 function isPostgresUniqueViolation(error: unknown): boolean {
@@ -894,6 +900,8 @@ export async function saveCompanionPlugin(input: {
   actor: ActorContext;
   orgId: string;
   plugin: SaveCompanionPluginInput;
+  /** Callback-only OAuth grant. The public token/header route never accepts this field. */
+  oauthCredential?: CompanionPluginStoredOAuthCredential;
   masterKey?: Buffer;
   database?: Db;
 }): Promise<CompanionPluginAccount> {
@@ -934,7 +942,7 @@ export async function saveCompanionPlugin(input: {
     orgId: input.orgId,
     purpose: MCP_CREDENTIAL_PURPOSE,
     subjectId: `${id}:${generation}`,
-    value: JSON.stringify(credentials),
+    value: JSON.stringify(input.oauthCredential ?? credentials),
   }, input.masterKey);
   try {
     const [row] = await database
@@ -975,6 +983,35 @@ export async function saveCompanionPlugin(input: {
   }
 }
 
+/** Complete a brokered OAuth callback through the same encrypted account insert as THE-321. */
+export async function saveCompanionOAuthPlugin(input: {
+  actor: ActorContext;
+  orgId: string;
+  provider: string;
+  label: string;
+  remoteUrl: string;
+  credential: CompanionPluginStoredOAuthCredential;
+  masterKey?: Buffer;
+  database?: Db;
+}): Promise<CompanionPluginAccount> {
+  return saveCompanionPlugin({
+    actor: input.actor,
+    orgId: input.orgId,
+    plugin: {
+      provider: input.provider,
+      label: input.label,
+      transport: "http",
+      url: input.remoteUrl,
+      args: [],
+      credential_name: "Authorization",
+      credential_value: `Bearer ${input.credential.accessToken}`,
+    },
+    oauthCredential: input.credential,
+    masterKey: input.masterKey,
+    database: input.database,
+  });
+}
+
 export async function deleteCompanionPlugin(input: {
   actor: ActorContext;
   orgId: string;
@@ -1013,6 +1050,7 @@ export async function resolveCompanionPluginInjection(input: {
   companionId: string;
   masterKey?: Buffer;
   database?: Db;
+  fetchImpl?: typeof fetch;
 }): Promise<{ accounts: CompanionMcpAccount[]; credentials: CompanionMcpCredential[] }> {
   const database = input.database ?? db;
   await getCompanionForRuntime({ ...input, database });
@@ -1028,7 +1066,8 @@ export async function resolveCompanionPluginInjection(input: {
   const credentials: CompanionMcpCredential[] = [];
   for (const row of rows) {
     try {
-      accounts.push(companionMcpAccountSchema.parse(row.accountConfig));
+      const account = companionMcpAccountSchema.parse(row.accountConfig);
+      accounts.push(account);
       const plaintext = decryptOpaqueValue({
         orgId: input.orgId,
         purpose: MCP_CREDENTIAL_PURPOSE,
@@ -1036,9 +1075,63 @@ export async function resolveCompanionPluginInjection(input: {
         ...mcpCiphertext(row),
       }, input.masterKey);
       const parsed = JSON.parse(plaintext);
-      if (!Array.isArray(parsed)) throw new Error("invalid MCP credential payload");
-      credentials.push(...parsed.map((value) => companionMcpCredentialSchema.parse(value)));
-    } catch {
+      if (Array.isArray(parsed)) {
+        credentials.push(...parsed.map((value) => companionMcpCredentialSchema.parse(value)));
+        continue;
+      }
+      const oauth = parsed as CompanionPluginStoredOAuthCredential;
+      if (
+        oauth?.kind !== "oauth"
+        || oauth.version !== 1
+        || !(oauth.serverName in COMPANION_PLUGIN_OAUTH_SERVERS)
+        || typeof oauth.accessToken !== "string"
+        || !oauth.accessToken
+        || typeof oauth.tokenEndpoint !== "string"
+        || typeof oauth.resource !== "string"
+        || !oauth.client
+      ) {
+        throw new Error("invalid MCP OAuth credential payload");
+      }
+      let active = oauth;
+      const expiresAt = active.accessExpiresAt ? new Date(active.accessExpiresAt).getTime() : null;
+      if (expiresAt !== null && expiresAt <= Date.now() + OAUTH_REFRESH_SKEW_MS) {
+        active = await refreshCompanionPluginOAuth({
+          credential: active,
+          fetchImpl: input.fetchImpl,
+        });
+        const generation = randomUUID();
+        const encrypted = encryptOpaqueValue({
+          orgId: input.orgId,
+          purpose: MCP_CREDENTIAL_PURPOSE,
+          subjectId: `${row.id}:${generation}`,
+          value: JSON.stringify(active),
+        }, input.masterKey);
+        const [updated] = await database
+          .update(schema.companionMcpAccounts)
+          .set({ credentialGeneration: generation, ...encrypted, updatedAt: new Date() })
+          .where(and(
+            eq(schema.companionMcpAccounts.orgId, input.orgId),
+            eq(schema.companionMcpAccounts.ownerId, input.actor.id),
+            eq(schema.companionMcpAccounts.id, row.id),
+            eq(schema.companionMcpAccounts.credentialGeneration, row.credentialGeneration),
+          ))
+          .returning({ id: schema.companionMcpAccounts.id });
+        if (!updated) {
+          throw new CompanionProviderError(
+            "provider_unavailable",
+            `Authentication for ${row.provider} (${row.label}) changed while refreshing. Try again.`,
+          );
+        }
+      }
+      const envKey = account.transport === "http"
+        ? Object.values(account.headers)[0]
+        : undefined;
+      credentials.push(companionMcpCredentialSchema.parse({
+        env_key: envKey,
+        value: `Bearer ${active.accessToken}`,
+      }));
+    } catch (error) {
+      if (error instanceof CompanionProviderError) throw error;
       throw new CompanionProviderError(
         "provider_auth_invalid",
         `Authentication for ${row.provider} (${row.label}) is invalid. Reconnect it in Plugins.`,

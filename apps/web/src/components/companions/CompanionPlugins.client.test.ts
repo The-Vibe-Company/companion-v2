@@ -13,11 +13,13 @@ import { CompanionPlugins } from "./CompanionPlugins";
 const {
   deleteCompanionPlugin,
   saveCompanionPlugin,
+  startCompanionPluginOAuth,
   listCompanionRegistry,
   getCompanionRegistryServer,
 } = vi.hoisted(() => ({
   deleteCompanionPlugin: vi.fn(),
   saveCompanionPlugin: vi.fn(),
+  startCompanionPluginOAuth: vi.fn(),
   listCompanionRegistry: vi.fn(),
   getCompanionRegistryServer: vi.fn(),
 }));
@@ -25,6 +27,7 @@ const {
 vi.mock("@/lib/companions", () => ({
   deleteCompanionPlugin,
   saveCompanionPlugin,
+  startCompanionPluginOAuth,
   listCompanionRegistry,
   getCompanionRegistryServer,
 }));
@@ -54,7 +57,7 @@ const linearPin: CompanionRegistryServer = {
   connect: {
     transport: "http",
     url: "https://mcp.linear.app/mcp",
-    credential: { name: "Authorization", description: null, is_secret: true, required: false },
+    credential: null,
   },
 };
 
@@ -73,7 +76,7 @@ async function flush() {
   });
 }
 
-async function mount() {
+async function mount(initialAccounts: CompanionPluginAccount[] = []) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -81,7 +84,7 @@ async function mount() {
   await act(async () => {
     root.render(React.createElement(CompanionPlugins, {
       orgId: "org-1",
-      initialAccounts: [],
+      initialAccounts,
       onBack: () => {},
     }));
   });
@@ -117,6 +120,7 @@ async function openAndSubmit(container: HTMLElement) {
 
 describe("CompanionPlugins", () => {
   beforeEach(() => {
+    window.location.href = "http://localhost/companions";
     listCompanionRegistry.mockResolvedValue(listResponse);
     getCompanionRegistryServer.mockResolvedValue({ server: linearPin, source: "live" });
   });
@@ -159,8 +163,10 @@ describe("CompanionPlugins", () => {
     expect(submit.disabled).toBe(false);
   });
 
-  it("renders the pin and connects it with a required label", async () => {
-    saveCompanionPlugin.mockResolvedValue(account);
+  it("starts OAuth for a curated pin with a required label and no token field", async () => {
+    startCompanionPluginOAuth.mockResolvedValue(
+      "https://mcp.linear.app/authorize?state=signed-state",
+    );
     const container = await mount();
 
     expect(container.textContent).toContain("Recommended");
@@ -175,17 +181,78 @@ describe("CompanionPlugins", () => {
 
     const dialog = container.querySelector("#companion-registry-connect") as HTMLFormElement;
     const label = dialog.querySelector("input") as HTMLInputElement;
+    expect(dialog.querySelector('input[type="password"]')).toBeNull();
+    expect(container.textContent).toContain("Continue with OAuth");
     await act(async () => setControlled(label, "personal"));
     await act(async () => {
       dialog.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
 
-    expect(saveCompanionPlugin).toHaveBeenCalledWith("org-1", {
-      provider: "linear",
+    expect(startCompanionPluginOAuth).toHaveBeenCalledWith("org-1", {
+      server_name: "app.linear/linear",
       label: "personal",
-      transport: "http",
-      url: "https://mcp.linear.app/mcp",
-      args: [],
     });
+    expect(saveCompanionPlugin).not.toHaveBeenCalled();
+    expect(window.location.href).toBe("https://mcp.linear.app/authorize?state=signed-state");
+  });
+
+  it("shows the connected callback result and removes OAuth query parameters", async () => {
+    window.location.href = "http://localhost/companions?view=plugins&oauth=connected";
+
+    const container = await mount([account]);
+
+    expect(container.querySelector('[role="status"]')?.textContent).toBe("MCP account connected.");
+    expect(container.textContent).toContain("work");
+    expect(window.location.search).toBe("?view=plugins");
+  });
+
+  it("reports an OAuth start failure and restores the submit action", async () => {
+    startCompanionPluginOAuth.mockRejectedValue(new Error("OAuth service is unavailable."));
+    const container = await mount();
+    const connectButton = container.querySelector<HTMLButtonElement>(
+      ".companions-registry-card button",
+    );
+    await act(async () => connectButton?.click());
+    const form = container.querySelector("#companion-registry-connect") as HTMLFormElement;
+    await act(async () => setControlled(form.querySelector("input")!, "work"));
+    await act(async () => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    expect(container.querySelector('[role="alert"]')?.textContent)
+      .toBe("OAuth service is unavailable.");
+    expect((container.querySelector(
+      'button[form="companion-registry-connect"]',
+    ) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("starts only one OAuth flow while the first request is pending", async () => {
+    startCompanionPluginOAuth.mockReturnValue(new Promise(() => undefined));
+    const container = await mount();
+    const connectButton = container.querySelector<HTMLButtonElement>(
+      ".companions-registry-card button",
+    );
+    await act(async () => connectButton?.click());
+    const form = container.querySelector("#companion-registry-connect") as HTMLFormElement;
+    await act(async () => setControlled(form.querySelector("input")!, "work"));
+    await act(async () => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    expect(startCompanionPluginOAuth).toHaveBeenCalledTimes(1);
+    expect((container.querySelector(
+      'button[form="companion-registry-connect"]',
+    ) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("explains a duplicate-label callback and removes the error parameter", async () => {
+    window.location.href = "http://localhost/companions?view=plugins&oauth_error=duplicate_label";
+
+    const container = await mount();
+
+    expect(container.querySelector('[role="alert"]')?.textContent)
+      .toBe("That provider already has an account with this label.");
+    expect(window.location.search).toBe("?view=plugins");
   });
 });
