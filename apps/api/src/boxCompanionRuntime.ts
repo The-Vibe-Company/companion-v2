@@ -16,9 +16,9 @@ import {
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
 const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
 // Layout 5 made the daemon wrapper report its own failures. Layout 6 moves MCP credentials off the
-// snapshotted Box disk and into the user runtime directory: systemd can reread them for an automatic
-// restart, but Box stop/reboot still destroys them with the tmpfs that held them.
-export const COMPANION_PI_DISK_LAYOUT_VERSION = 6;
+// snapshotted Box disk and into the user runtime directory. Layout 7 teaches the daemon wrapper to
+// append the staged Companion instructions, so existing Boxes must reinstall the wrapper once.
+export const COMPANION_PI_DISK_LAYOUT_VERSION = 7;
 /** Content bytes the provider's file API refuses in one `PUT /boxes/:id/files` body. */
 const BOX_FILE_WRITE_LIMIT_BYTES = 5 * 1024 * 1024;
 /**

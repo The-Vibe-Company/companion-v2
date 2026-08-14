@@ -968,6 +968,9 @@ export function registerCompanionRoutes(
           actor: claimed.actor,
           orgId: claimed.orgId,
           companionId,
+          // A delete may claim this Companion while the Box archive is in flight. Do not let this
+          // older stop completion clear the deletion lock after the archive succeeds.
+          expectedUpdatedAt: new Date(claimed.companion.updated_at),
           patch: {
             runtimeState: observed.runtimeState,
             daemonState: observed.daemonState,
@@ -987,6 +990,7 @@ export function registerCompanionRoutes(
             actor: mutation!.actor,
             orgId: mutation!.orgId,
             companionId,
+            expectedUpdatedAt: new Date(mutation!.companion.updated_at),
             patch: {
               runtimeState: "error",
               daemonState: "error",

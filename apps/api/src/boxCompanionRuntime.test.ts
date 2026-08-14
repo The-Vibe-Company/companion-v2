@@ -8,6 +8,7 @@ import {
   AsciiBoxCompanionRuntime,
   BoxRuntimeConfigurationError,
   BoxRuntimeProviderError,
+  COMPANION_PI_DISK_LAYOUT_VERSION,
   COMPANION_PI_EVENT_READ_LIMIT,
   composeDaemonFailureDetail,
   PI_DAEMON_FAILURE_MESSAGE,
@@ -1379,6 +1380,11 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(markerIndex).toBeGreaterThan(-1);
     expect(piResolveIndex).toBeGreaterThan(-1);
     expect(markerIndex).toBeLessThan(piResolveIndex);
+    // Layout 7 replaces wrappers from layout 6 so existing Boxes gain staged instructions.
+    expect(COMPANION_PI_DISK_LAYOUT_VERSION).toBe(7);
+    expect(createdSetupScript)
+      .toContain("expected_layout='7:npm:pi-mcp-adapter@2.12.1'");
+    expect(createdSetupScript).toContain("--append-system-prompt");
     // The supervised daemon gets a minimal PATH from the systemd user manager, so Pi is resolved at
     // layout time and pinned both in the wrapper and on the unit.
     expect(createdSetupScript).toContain("pi_bin=\"$(command -v pi)\"");

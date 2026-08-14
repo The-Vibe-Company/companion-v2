@@ -132,7 +132,11 @@ export function CompanionSettings({
             Applied the next time this Companion starts.
           </p>
 
-          <fieldset className="companions-picker" disabled={!canEdit || busy}>
+          <fieldset
+            className="companions-picker"
+            disabled={!canEdit || busy}
+            aria-describedby="companion-provider-hint"
+          >
             <legend>Provider / model</legend>
             {providers.connections.map((connection) => (
               <label
@@ -157,6 +161,9 @@ export function CompanionSettings({
               </label>
             ))}
           </fieldset>
+          <p className="companions-settings__hint" id="companion-provider-hint">
+            Applied the next time this Companion starts. Changing it does not restart the Box.
+          </p>
 
           {canEdit && (
             <div className="companions-settings__actions">

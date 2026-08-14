@@ -4,12 +4,15 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CompanionDeleteForbiddenError,
   CompanionNotFoundError,
+  CompanionRuntimeTransitionError,
   CompanionSettingsForbiddenError,
   claimCompanionDeletion,
+  claimCompanionRuntimeStop,
   deleteCompanion,
   getCompanion,
   saveCompanionProvider,
   updateCompanion,
+  updateCompanionRuntime,
 } from "@companion/core";
 import { schema } from "@companion/db";
 import {
@@ -165,6 +168,54 @@ describe("Companion settings persistence and roles", () => {
       database: integrationDb,
     });
     expect(claimed.runtime.state).toBe("stopping");
+
+    await deleteCompanion({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      database: integrationDb,
+    });
+    await expect(getCompanion({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      database: integrationDb,
+    })).rejects.toBeInstanceOf(CompanionNotFoundError);
+  });
+
+  it("keeps a deletion claim authoritative over an older stop completion", async () => {
+    const stopClaim = await claimCompanionRuntimeStop({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      database: integrationDb,
+    });
+    await claimCompanionDeletion({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      database: integrationDb,
+    });
+    await integrationDb
+      .update(schema.companions)
+      .set({ updatedAt: new Date(new Date(stopClaim.updated_at).getTime() + 1_000) })
+      .where(and(
+        eq(schema.companions.orgId, fixture.orgA),
+        eq(schema.companions.id, companionId),
+      ));
+
+    await expect(updateCompanionRuntime({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      expectedUpdatedAt: new Date(stopClaim.updated_at),
+      patch: {
+        runtimeState: "stopped",
+        daemonState: "stopped",
+        stoppedAt: new Date(),
+      },
+      database: integrationDb,
+    })).rejects.toBeInstanceOf(CompanionRuntimeTransitionError);
 
     await deleteCompanion({
       actor: fixture.developer,

@@ -1389,6 +1389,8 @@ export async function updateCompanionRuntime(input: {
   actor: ActorContext;
   orgId: string;
   companionId: string;
+  /** Compare-and-set guard for a lifecycle finalizer that must not overwrite a newer claim. */
+  expectedUpdatedAt?: Date;
   patch: {
     boxId?: string | null;
     runtimeState?: CompanionRuntimeState;
@@ -1430,8 +1432,17 @@ export async function updateCompanionRuntime(input: {
       ...(input.patch.stoppedAt ? { lastStoppedAt: input.patch.stoppedAt } : {}),
       updatedAt: now,
     })
-    .where(and(eq(schema.companions.orgId, input.orgId), eq(schema.companions.id, input.companionId)))
+    .where(and(
+      eq(schema.companions.orgId, input.orgId),
+      eq(schema.companions.id, input.companionId),
+      input.expectedUpdatedAt
+        ? eq(schema.companions.updatedAt, input.expectedUpdatedAt)
+        : undefined,
+    ))
     .returning();
+  if (!row && input.expectedUpdatedAt) {
+    throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
+  }
   if (!row) throw new CompanionNotFoundError();
   return toCompanion(row, current.access);
 }
