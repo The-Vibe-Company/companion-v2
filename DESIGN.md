@@ -276,6 +276,8 @@ Rows should expose the operational facts in stable order: status, name or id, li
 
 Detail belongs in a right slide-over drawer. Do not make modal dialogs the default detail surface. The drawer should keep the list visible behind a flat scrim, support Esc and scrim close, and return focus to the originating row.
 
+A selected row's summary is a lighter thing than a drawer: a persistent panel beside the list, not over it, with no scrim and nothing modal about it. It answers what one row is, who wrote it, whether it is installed, how its `SKILL.md` opens, and which Companions stage it, plus the one action that skill is for and an Open into the full page. Everything else — every tab, every secondary action — stays on the page. It sits inline where there is room and comes over the list below 1100px.
+
 Forms are direct and compact. Use labels, concise helper text, and explicit consequences. For destructive or delayed lifecycle actions, explain the declared-state effect rather than hiding it behind vague confirmation copy.
 
 ## Elevation & Depth
@@ -332,7 +334,12 @@ immediate subfolder, while the selected sort remains stable inside each block. E
 horizontal inset regardless of subfolder depth; order and quiet path metadata carry the hierarchy rather
 than extra indentation. Flat mode keeps the full folder chips within that scope. In both modes the literal slug
 is the only visible row identity, set in monospace, and accessible labels repeat the slug rather than a
-display title. Skill icons resolve from the package manifest, then the deepest custom folder icon and
+display title; one truncated line of the description rides beside it as quiet metadata, never as a
+second name. The list is a dense table of four columns — Skill, Labels, People, Upd. — and rows carry
+no controls of their own: Upd. gives way first on a narrow screen, then People, and the one action a
+skill is currently for lives in the panel beside the list and on the skill's own page. A click selects
+a row into that panel and a double click opens the page; Esc puts the panel away. Selection is
+ephemeral and stays out of the URL, because a glance at a row is not a place to return to. Skill icons resolve from the package manifest, then the deepest custom folder icon and
 color for that occurrence, then a neutral package glyph. Keep this rhythm dense on mobile by wrapping
 controls and metadata, not by turning rows or groups into cards.
 

@@ -331,6 +331,27 @@ function clickButton(container: HTMLElement, label: string) {
   });
 }
 
+/** Put a skill in the panel beside the list, which is what one click on its row does. */
+function selectSkill(container: HTMLElement, id: string) {
+  const button = findButton(container, `Open skill ${id}`);
+  act(() => {
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+  });
+}
+
+/**
+ * Open a skill's full page the way the list does: a click selects the row into the panel beside it,
+ * and the second click of a double click is what opens it.
+ */
+function openSkill(container: HTMLElement, id: string) {
+  const button = findButton(container, `Open skill ${id}`);
+  act(() => {
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 2 }));
+    button.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  });
+}
+
 function expectContextualInstallButton(container: HTMLElement) {
   const button = findButton(container, "Install skill");
   expect(button.textContent?.trim()).toBe("Install");
@@ -858,6 +879,7 @@ describe("SkillsApp contextual skill actions", () => {
     const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
     await flushEffects();
 
+    selectSkill(container, "loose-skill");
     clickButton(container, "Install skill loose-skill");
     await flushEffects();
 
@@ -883,6 +905,7 @@ describe("SkillsApp contextual skill actions", () => {
     const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
     await flushEffects();
 
+    selectSkill(container, "loose-skill");
     clickButton(container, "Install skill loose-skill");
     await flushEffects();
     await flushEffects();
@@ -909,6 +932,7 @@ describe("SkillsApp contextual skill actions", () => {
     const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
     await flushEffects();
 
+    selectSkill(container, "loose-skill");
     clickButton(container, "Install skill loose-skill");
     await flushEffects();
     expect(queryMocks.fetchSkillBySlug).toHaveBeenCalledTimes(1);
@@ -935,6 +959,7 @@ describe("SkillsApp contextual skill actions", () => {
     const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
     await flushEffects();
 
+    selectSkill(container, "loose-skill");
     clickButton(container, "Install skill loose-skill");
     await flushEffects();
     expect(queryMocks.fetchSkillBySlug).toHaveBeenCalledTimes(1);
@@ -1074,7 +1099,7 @@ describe("SkillsApp contextual skill actions", () => {
 
     clickButton(container, "More actions");
     clickButton(container, "Archive skill");
-    clickButton(container, "Open skill brand-kit");
+    openSkill(container, "brand-kit");
     clickButton(container, "More actions");
     clickButton(container, "Mark as installed");
     await flushEffects();
@@ -1104,7 +1129,7 @@ describe("SkillsApp contextual skill actions", () => {
     await flushEffects();
     expect(refreshResolvers).toHaveLength(2);
 
-    clickButton(container, "Open skill brand-kit");
+    openSkill(container, "brand-kit");
     clickButton(container, "More actions");
     clickButton(container, "Archive skill");
     await flushEffects();
@@ -1234,7 +1259,7 @@ describe("SkillsApp optimistic label assignment", () => {
     expect(queryMocks.assignSkillLabel).not.toHaveBeenCalled();
 
     // The press never blocked the row's click, so opening the skill still works.
-    clickButton(container, "Open skill loose-skill");
+    openSkill(container, "loose-skill");
     await flushEffects();
     expectContextualInstallButton(container);
   });
@@ -1722,7 +1747,7 @@ describe("SkillsApp navigation", () => {
     // The default route keeps the complete selected library visible.
     expect(container.textContent).toContain("loose-skill");
 
-    clickButton(container, "Open skill loose-skill");
+    openSkill(container, "loose-skill");
     await flushEffects();
     expect(window.location.pathname + window.location.search).toBe("/skills?lib=org&skill=loose-skill");
     expectContextualInstallButton(container);
@@ -1745,7 +1770,7 @@ describe("SkillsApp navigation", () => {
     );
     await flushEffects();
 
-    clickButton(container, "Open skill seo-helper");
+    openSkill(container, "seo-helper");
     await flushEffects();
 
     expect(window.location.pathname + window.location.search).toBe(
@@ -1780,7 +1805,7 @@ describe("SkillsApp navigation", () => {
     );
     await flushEffects();
 
-    clickButton(container, "Open skill my-draft");
+    openSkill(container, "my-draft");
     await flushEffects();
 
     expect(window.location.pathname + window.location.search).toBe("/skills?skill=my-draft");
@@ -1794,7 +1819,7 @@ describe("SkillsApp navigation", () => {
     try {
       const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
       await flushEffects();
-      clickButton(container, "Open skill loose-skill");
+      openSkill(container, "loose-skill");
       await flushEffects();
       expect(window.location.pathname + window.location.search).toBe("/skills?lib=org&skill=loose-skill");
 
@@ -1826,7 +1851,7 @@ describe("SkillsApp navigation", () => {
         },
       );
       await flushEffects();
-      clickButton(container, "Open skill my-draft");
+      openSkill(container, "my-draft");
       await flushEffects();
       expect(window.location.pathname + window.location.search).toBe("/skills?skill=my-draft");
 
@@ -1849,7 +1874,7 @@ describe("SkillsApp navigation", () => {
     try {
       const { container } = await mountSkillsApp({ lib: "org", kind: "all" });
       await flushEffects();
-      clickButton(container, "Open skill loose-skill");
+      openSkill(container, "loose-skill");
       await flushEffects();
 
       await act(async () => {
@@ -1950,7 +1975,7 @@ describe("SkillsApp label folder creation", () => {
     await flushEffects();
 
     // Open a skill under the active folder so the route carries both label + skill.
-    clickButton(container, "Open skill seo-helper");
+    openSkill(container, "seo-helper");
     await flushEffects();
     expect(window.location.pathname + window.location.search).toBe(
       "/skills?lib=org&view=label&label=marketing%2Fseo&skill=seo-helper",

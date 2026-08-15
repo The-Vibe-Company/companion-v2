@@ -36,6 +36,7 @@ import { fetchSettingsAppData } from "@/lib/settingsClient";
 import { mapSkill, type MeVM, type OrgVM, type SkillVM } from "@/lib/types";
 import { Sidebar } from "./Sidebar";
 import { ListView } from "./ListView";
+import { SkillPanel } from "./SkillPanel";
 import { treeRowKey } from "./dragGeometry";
 import { useSkillDrag, type PointerLike } from "./useSkillDrag";
 import { ArchivedListView } from "./ArchivedListView";
@@ -389,6 +390,13 @@ export function SkillsApp({
   const [lastId, setLastId] = useState<string | null>(() =>
     initialRoute.kind === "local" ? null : initialRoute.skill ?? null,
   );
+  /**
+   * The row whose detail is in the panel beside the list, by database id rather than slug: the same
+   * slug can exist in both My Skills and Organization, and a selection has to mean one row. It is
+   * deliberately not in the URL — a glance at a row is not a place to come back to; opening one is,
+   * and that is what the full page is for.
+   */
+  const [selectedUuid, setSelectedUuid] = useState<string | null>(null);
   const [preferenceStatus, setPreferenceStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [toast, setToast] = useState<{ msg: string; undo?: () => void } | null>(null);
   const openIdRef = useRef<string | null>(null);
@@ -1277,6 +1285,28 @@ export function SkillsApp({
     [skills, selection, filters],
   );
 
+  /** A selection only survives while its row is still on screen: a filter, a folder, or a search
+   *  that no longer contains it leaves the panel showing something the list does not.
+   */
+  const selected = useMemo(
+    () => filtered.find((item) => item.uuid === selectedUuid) ?? null,
+    [filtered, selectedUuid],
+  );
+  useEffect(() => {
+    if (selectedUuid !== null && selected === null) setSelectedUuid(null);
+  }, [selected, selectedUuid]);
+
+  // Esc puts the panel away, the way it closes every other transient surface here.
+  useEffect(() => {
+    if (selectedUuid === null) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      setSelectedUuid(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedUuid]);
+
   const activeLabel = selection.kind === "label" ? selection.label ?? null : null;
   const breadcrumb = useMemo(() => {
     if (selection.kind === "installed") return ["Installed"];
@@ -1741,8 +1771,8 @@ export function SkillsApp({
               onGroupByChange={setGroupBy}
               onOpen={open}
               onUpload={openUpload}
-              actorId={me.id}
-              onPrimaryAction={executeSkillAction}
+              onSelect={(picked) => setSelectedUuid(picked?.uuid ?? null)}
+              selectedUuid={selectedUuid}
               lastId={lastId}
               filters={filters}
               onToggleFilter={toggleFilter}
@@ -1762,6 +1792,25 @@ export function SkillsApp({
                     : null
               }
               onUpgrade={() => openSettings({ view: "billing" })}
+              panel={
+                /*
+                  The selected row's detail, beside the list rather than over it: the list stays
+                  where it was, and the panel is one row's worth of answers. It exists only in the
+                  workspace libraries; local and archived have their own surfaces and actions.
+                */
+                selected ? (
+                  <SkillPanel
+                    skill={selected}
+                    labels={labels}
+                    actorId={me.id}
+                    orgId={currentOrg.id}
+                    companionsEnabled={companionsEnabled}
+                    onOpen={open}
+                    onAction={executeSkillAction}
+                    onClose={() => setSelectedUuid(null)}
+                  />
+                ) : null
+              }
             />
           </>
         )}
