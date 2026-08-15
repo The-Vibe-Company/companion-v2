@@ -76,7 +76,9 @@ export const DecisionToolCard: ToolCallMessagePartComponent<CompanionDecisionArg
       data-slot="companion-decision"
       className={cn(
         "my-2 w-full rounded-md border p-2.5 text-sm",
-        pending && "border-primary/40 bg-primary/5",
+        // Full-alpha accent: Pi is blocked on this, so it has to out-weigh the hairline every
+        // ordinary tool run gets, not sit under it.
+        pending && "border-primary bg-primary/10",
         !pending && settledWell && "border-border bg-muted/40",
         !pending && !settledWell && "border-destructive/40 bg-destructive/5",
       )}

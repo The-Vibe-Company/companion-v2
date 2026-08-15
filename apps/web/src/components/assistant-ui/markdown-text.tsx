@@ -145,12 +145,21 @@ const defaultComponents = memoizeMarkdownComponents({
       {...props}
     />
   ),
+  /**
+   * The same reasoning as the image below, one click further away: the destination is chosen by
+   * model output, which can repeat what a page Pi browsed told it to say. It opens in a new tab so
+   * the conversation is not replaced, with no referrer and no handle back on this window, and it is
+   * marked as untrusted. Blocking links outright would break the ordinary case — Pi citing a runbook
+   * — so this is the reader's decision, made with the link visibly external.
+   */
   a: ({ className, ...props }) => (
     <a
       className={cn(
         "aui-md-a text-primary hover:text-primary/80 underline underline-offset-2",
         className,
       )}
+      target="_blank"
+      rel="noopener noreferrer nofollow ugc"
       {...props}
     />
   ),

@@ -686,11 +686,12 @@ export const companionTranscriptEntries = pgTable(
       "companion_transcript_entries_reasoning_role_check",
       sql`${t.reasoning} is null or ${t.role}::text = 'assistant'`,
     ),
-    // The contract caps reasoning at 16k characters; this is that cap in bytes, so a projection that
+    // The contract caps reasoning at 16 000 UTF-16 units, which cannot encode to more than 48 000
+    // UTF-8 bytes. Bounding the column there is what makes it a real backstop: a projection that
     // stopped truncating cannot quietly turn every poll into a large read.
     boundedReasoning: check(
       "companion_transcript_entries_reasoning_size_check",
-      sql`${t.reasoning} is null or octet_length(${t.reasoning}) <= 65536`,
+      sql`${t.reasoning} is null or octet_length(${t.reasoning}) <= 48000`,
     ),
     boundedDecision: check(
       "companion_transcript_entries_decision_size_check",

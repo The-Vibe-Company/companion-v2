@@ -377,7 +377,8 @@ asked for; a run that moved the Box desktop shows one frame of it in place, boun
 asked for, offers Allow / Deny or an answer field to Owner and Editor only, and stays on the transcript once decided with
 who decided it. A run note is one quiet muted line. Loading uses static skeleton lines; a running Box that owes a reply
 says so with the typing indicator described under Motion, always paired with the same sentence in text. A reply carries
-one hover action, Copy, and no edit, regenerate, or branch controls, because none of those exist here. The composer is
+one action, Copy, sitting under it rather than appearing on hover — an action that exists only for a mouse
+exists for almost nobody — and no edit, regenerate, or branch controls, because none of those exist here. The composer is
 one field with its send control inside it, one hint line underneath, and no toolbar: no attachments, dictation, slash
 commands, mentions, model picker, or tool controls belong in the thread. A Viewer gets the same transcript with a
 read-only note in place of the composer. Empty threads state what happens next instead of greeting the reader, and there

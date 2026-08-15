@@ -69,8 +69,11 @@
  * Inlined on purpose: a utility emits `var(--primary)` rather than a copy of its value, so switching
  * the theme or the accent preset re-colours this surface with everything else.
  *
- * Radius, shadow, mono, and the text scale are deliberately absent: tokens.css already owns those
- * names unlayered, so `rounded-lg`, `shadow-md`, and `text-sm` here resolve to the app's own scale.
+ * Radius, mono, and the text sizes are deliberately absent: tokens.css already owns those names
+ * unlayered, so `rounded-md` and `text-sm` take the app's own values. Only the sizes, though —
+ * Tailwind pairs each size with a `--text-*--line-height` the app does not define, so leading falls
+ * back to Tailwind's ratio unless a `leading-*` utility says otherwise. Shadows are not inherited at
+ * all: v4 inlines them, so the two controls that need one ask for `var(--shadow-*)` directly.
  */
 @theme inline {
   --color-background: var(--background);
@@ -110,6 +113,13 @@
 
   .aui-scope :where(h1, h2, h3, h4, h5, h6, p, blockquote, figure, pre, hr, dl, dd) {
     margin: 0;
+  }
+
+  /* `border: 0` above leaves a thematic break with nothing to draw; preflight compensates and this
+     scope has to as well, or `---` in a reply renders as empty space. */
+  .aui-scope :where(hr) {
+    height: 0;
+    border-top-width: 1px;
   }
 
   .aui-scope :where(ol, ul) {

@@ -47,7 +47,7 @@ import {
  *
  * What survives is the ChatGPT-shaped reading experience: a viewport that anchors to the newest turn,
  * a floating scroll-to-bottom, right-aligned member bubbles, replies as markdown, reasoning and tool
- * calls behind their own disclosures, and a hover action bar that copies.
+ * calls behind their own disclosures, and an action bar that copies.
  */
 
 export type ThreadComponents = {
@@ -94,7 +94,12 @@ export const Thread: FC<ThreadProps> = ({
         style={{ ["--thread-max-width" as string]: "44rem" }}
       >
         <ThreadPrimitive.Viewport
-          turnAnchor="top"
+          // Anchored to the bottom, which is what keeps the log following the conversation. The
+          // registry anchors new turns to the top instead, and that switch also turns auto-scroll
+          // off — it is replaced by a reserve that only engages while a run is streaming. Nothing
+          // streams here: this thread polls, so the reserve never engages and every reply, tool
+          // card, and permission card would land below the fold behind a Jump button.
+          turnAnchor="bottom"
           data-slot="aui_thread-viewport"
           {...viewportProps}
           className={cn(
@@ -189,8 +194,11 @@ const AssistantMessage: FC = () => {
  */
 const AssistantActionBar: FC = () => {
   return (
+    // Not autohidden. The registry hides the bar unless the message is hovered, and it does that by
+    // rendering nothing at all — so the one action this thread has would exist for a mouse on a
+    // desktop and for nobody else: a keyboard cannot tab to an absent button and a phone never fires
+    // the hover at all.
     <ActionBarPrimitive.Root
-      autohide="not-last"
       className="text-muted-foreground motion-safe:animate-in motion-safe:fade-in -ms-1.5 flex gap-1 duration-200"
     >
       <ActionBarPrimitive.Copy asChild>

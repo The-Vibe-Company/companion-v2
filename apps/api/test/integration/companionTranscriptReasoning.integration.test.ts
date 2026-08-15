@@ -113,15 +113,30 @@ describe("Companion transcript reasoning", () => {
     `).rejects.toThrow(/companion_transcript_entries_reasoning_role_check/);
   });
 
+  it("takes reasoning right up to the contract cap", async () => {
+    // The bound has to admit everything the projection can legitimately produce, or a long but valid
+    // turn would fail to store at all.
+    await expect(integrationSql`
+      insert into companion_transcript_entries (
+        org_id, companion_id, event_id, ordinal, role, content, reasoning
+      ) values (
+        ${org}, ${companionId}, 'pi:at-the-cap', 900, 'assistant', 'Answered',
+        ${"t".repeat(COMPANION_REASONING_MAX_CHARACTERS)}
+      )
+    `).resolves.toBeDefined();
+  });
+
   it("refuses more reasoning than the contract caps a row at", async () => {
     // The column's byte bound is the backstop for the projection's character cap; a projection that
-    // stopped truncating must not be able to turn every poll into a large read.
+    // stopped truncating must not be able to turn every poll into a large read. One character past
+    // the cap is the case that matters — a wildly oversized value would be caught by a far looser
+    // bound and would prove nothing about this one.
     await expect(integrationSql`
       insert into companion_transcript_entries (
         org_id, companion_id, event_id, ordinal, role, content, reasoning
       ) values (
         ${org}, ${companionId}, 'pi:too-long', 901, 'assistant', 'Answered',
-        ${"t".repeat(COMPANION_REASONING_MAX_CHARACTERS * 5)}
+        ${"t".repeat(COMPANION_REASONING_MAX_CHARACTERS * 3 + 1)}
       )
     `).rejects.toThrow(/companion_transcript_entries_reasoning_size_check/);
   });

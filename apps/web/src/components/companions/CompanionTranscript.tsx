@@ -28,6 +28,7 @@ import type {
 } from "@companion/contracts";
 import { companionMessageEventId } from "@companion/contracts";
 import { Thread as AssistantThread } from "@/components/assistant-ui/thread";
+import { cn } from "@/lib/utils";
 import { decideCompanionDecision } from "../../lib/companions";
 import { DecisionActionsContext, type DecisionAction } from "./decisionActions";
 import { DecisionToolCard } from "./DecisionToolCard";
@@ -138,7 +139,11 @@ function UserFrame({ children }: { children: ReactNode }) {
   return (
     <div className="flex w-full flex-col items-end" aria-busy={message?.sending || undefined}>
       <PassageLead message={message} />
-      <div className={message?.sending ? "opacity-60" : undefined}>{children}</div>
+      {/* Full width on purpose: the bubble inside is capped as a percentage, and a fit-content
+          wrapper would make that percentage resolve against the bubble's own text. */}
+      <div className={cn("flex w-full flex-col items-end", message?.sending && "opacity-60")}>
+        {children}
+      </div>
     </div>
   );
 }
@@ -447,7 +452,7 @@ function Footer() {
           className="border-input focus-within:border-ring bg-card flex items-end gap-2 rounded-2xl border py-1.5 pe-1.5 ps-3"
         >
           <ComposerPrimitive.Input
-            className="text-foreground max-h-42 min-h-8 flex-1 resize-none bg-transparent py-1 outline-none"
+            className="text-foreground max-h-42 min-h-8 flex-1 resize-none overscroll-contain bg-transparent py-1 outline-none"
             placeholder={`Message ${companionName}`}
             aria-label={`Message ${companionName}`}
             rows={1}
