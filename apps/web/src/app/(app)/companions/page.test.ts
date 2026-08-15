@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const authMocks = vi.hoisted(() => ({ loadServerAuth: vi.fn() }));
 const orgMocks = vi.hoisted(() => ({ loadOrgContext: vi.fn() }));
 const navigationMocks = vi.hoisted(() => ({ notFound: vi.fn(), redirect: vi.fn() }));
+const apiMocks = vi.hoisted(() => ({ serverApiFetch: vi.fn() }));
 
 vi.mock("@/lib/serverAuth", () => authMocks);
 vi.mock("@/lib/currentOrg", () => orgMocks);
@@ -27,9 +28,7 @@ vi.mock("@/components/org/WorkspaceLoadError", () => ({
   AuthUnavailable: () => null,
   WorkspaceLoadError: () => null,
 }));
-vi.mock("@/components/skills/sidebarTree", () => ({ deriveTreeRows: vi.fn(() => []) }));
-vi.mock("@/lib/apiServer", () => ({ serverApiFetch: vi.fn() }));
-vi.mock("@/lib/types", () => ({ mapSkill: vi.fn() }));
+vi.mock("@/lib/apiServer", () => apiMocks);
 
 import CompanionsPage from "./page";
 
@@ -106,5 +105,68 @@ describe("Companions page access gate", () => {
       "redirect:/onboarding",
     );
     expect(navigationMocks.notFound).not.toHaveBeenCalled();
+  });
+
+  it("does not block the list route on the external provider catalog", async () => {
+    process.env.COMPANION_COMPANIONS_ENABLED = "true";
+    process.env.COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS = "thevibecompany.co";
+    authMocks.loadServerAuth.mockResolvedValue({
+      status: "authenticated",
+      user: {
+        userId: "user-1",
+        email: "user@thevibecompany.co",
+        name: "Ada",
+        needsOnboarding: false,
+      },
+    });
+    orgMocks.loadOrgContext.mockResolvedValue({
+      orgs: [{
+        id: "org-1",
+        name: "Acme",
+        slug: "acme",
+        kind: "team",
+        myRole: "owner",
+        color: null,
+        logoUrl: null,
+      }],
+      current: {
+        id: "org-1",
+        name: "Acme",
+        slug: "acme",
+        kind: "team",
+        myRole: "owner",
+        color: null,
+        logoUrl: null,
+      },
+    });
+    apiMocks.serverApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/v1/companions") return { companions: [] };
+      if (path === "/v1/companion-plugins") return { accounts: [] };
+      if (path === "/v1/skills?lib=mine") {
+        return [{ id: "personal-1", slug: "my-private-skill" }];
+      }
+      if (path === "/v1/skills?lib=org") {
+        return [{ id: "org-skill-1", slug: "shared-skill" }];
+      }
+      return [];
+    });
+
+    const element = await CompanionsPage({ searchParams: Promise.resolve({}) }) as {
+      props: { initialProviders: unknown; skills: Array<{ id: string; slug: string }> };
+    };
+    const requestedPaths = apiMocks.serverApiFetch.mock.calls.map(([path]) => path);
+
+    expect(requestedPaths).not.toContain("/v1/companion-providers");
+    expect(requestedPaths).not.toContain("/v1/personal-labels");
+    expect(requestedPaths).not.toContain("/v1/labels");
+    expect(requestedPaths).not.toContain("/v1/local-skills");
+    expect(requestedPaths).not.toContain("/v1/skills?lib=accessible");
+    expect(requestedPaths).toContain("/v1/skills?lib=mine");
+    expect(requestedPaths).toContain("/v1/skills?lib=org");
+    expect(element.props.initialProviders).toBeNull();
+    expect(element.props.skills).toEqual([
+      { id: "personal-1", slug: "my-private-skill" },
+      { id: "org-skill-1", slug: "shared-skill" },
+    ]);
   });
 });

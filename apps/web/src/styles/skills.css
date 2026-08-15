@@ -69,7 +69,7 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
   border-radius: var(--radius-md); background: var(--color-surface-sunken); }
 .modeseg__btn { flex: 1; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   height: 28px; padding: 0 8px; border: none; border-radius: var(--radius-sm); background: transparent;
-  font-family: var(--font-ui); font-size: var(--text-sm); color: var(--color-muted); cursor: pointer;
+  font-family: var(--font-ui); font-size: var(--text-sm); color: var(--color-muted); cursor: pointer; text-decoration: none;
   transition: background-color var(--duration-fast) var(--ease-out-quint), color var(--duration-fast) var(--ease-out-quint); }
 .modeseg__btn:hover { color: var(--color-fg); }
 .modeseg__btn.is-active { background: var(--color-accent-tint); color: var(--color-fg); font-weight: 500;

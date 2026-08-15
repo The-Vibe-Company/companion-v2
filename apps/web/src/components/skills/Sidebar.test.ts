@@ -100,6 +100,8 @@ describe("Sidebar Companions feature gate", () => {
     expect(markup).toContain("Workspace mode");
     expect(markup).toContain(">Skills</span>");
     expect(markup).toContain(">Companions</span>");
+    expect(markup).toContain('href="/skills"');
+    expect(markup).toContain('href="/companions"');
     expect(markup).toContain("My Skills");
   });
 
