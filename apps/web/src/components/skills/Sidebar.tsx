@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent, type Ref } from "react";
+import Link from "next/link";
 import type { LabelColor, LabelIcon } from "@companion/contracts";
 import { LABEL_COLORS, LABEL_ICONS, labelDisplayNameToPath } from "@companion/contracts";
 import { Icon } from "../Icon";
@@ -508,7 +509,6 @@ export function Sidebar({
   secretsActive = false,
   companionsEnabled = false,
   mode = "skills",
-  onSelectMode = () => {},
   companions = [],
   activeCompanionId = null,
   onSelectCompanion = () => {},
@@ -568,7 +568,6 @@ export function Sidebar({
   companionsEnabled?: boolean;
   /** Companions mode replaces the Skills libraries with the workspace Companion list. */
   mode?: SidebarMode;
-  onSelectMode?: (mode: SidebarMode) => void;
   companions?: SidebarCompanion[];
   activeCompanionId?: string | null;
   onSelectCompanion?: (companionId: string) => void;
@@ -722,23 +721,29 @@ export function Sidebar({
         </button>
       </div>
       {companionsEnabled && (
-        <div className="modeseg" role="group" aria-label="Workspace mode">
+        <nav className="modeseg" aria-label="Workspace mode">
           {(["skills", "companions"] as const).map((value) => (
-            <button
+            <Link
               key={value}
-              type="button"
+              href={value === "skills" ? "/skills" : "/companions"}
+              prefetch
               className={"modeseg__btn" + (mode === value ? " is-active" : "")}
-              aria-pressed={mode === value}
-              onClick={() => runAndClose(() => onSelectMode(value))}
+              aria-current={mode === value ? "page" : undefined}
+              onClick={(event) => {
+                onCloseMobile();
+                // The selected half is state, not a refresh control. Keep the current route and
+                // its local UI intact when it is clicked again.
+                if (mode === value) event.preventDefault();
+              }}
               title={value === "skills" ? "Skills" : "Companions"}
             >
               <span className="modeseg__ico">
                 <Icon name={value === "skills" ? "layers" : "bot"} size={15} />
               </span>
               <span className="modeseg__label">{value === "skills" ? "Skills" : "Companions"}</span>
-            </button>
+            </Link>
           ))}
-        </div>
+        </nav>
       )}
       <nav className="side__nav" aria-label="Primary">
         {companionsMode ? (
