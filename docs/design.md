@@ -145,10 +145,16 @@ compare-and-set settlement so a late result cannot overwrite the timeout. The co
 unscoped Pi abort, touches no Box on the read fallback, never marks the Box Starting, and never
 exposes Wake. If user messages were accepted into the timed-out turn after its tool call but no
 assistant reply followed, settlement moves the delivery watermark behind that user tail. Those
-messages are pending rather than an in-flight reply until the next live sync or send prompts them
-again, so recycling Pi cannot strand already-watermarked follow-ups. A one-shot recovery watermark
-also covers timeouts persisted before recovery shipped; a narrow database definer lets Viewer reads
-trigger that housekeeping without granting general thread writes. A settled `browse` or `computer` run receives
+messages are pending rather than an in-flight reply until the next live sync or send recycles Pi and
+prompts them again, so a FIFO write behind the aborted turn cannot strand already-watermarked
+follow-ups. Settlement and Viewer reads remain control-plane-only and never touch Box. A one-shot
+recovery watermark also covers timeouts persisted before recovery shipped, and a separate restart
+watermark prevents a later send from recycling the recovered turn again. A delivery-progress
+watermark keeps the exact unaccepted suffix recoverable from an older writer's ordinary watermark
+until the fresh Pi has accepted it. The lifecycle claim revalidates restart eligibility so a delayed
+concurrent request cannot recycle that Pi twice. A narrow database definer lets Viewer reads trigger
+settlement housekeeping without granting general thread writes. A settled
+`browse` or `computer` run receives
 exactly one frame, attributed by the run id whose settlement won and captured directly from the
 existing Box desktop source, never through Pi `read`; the stored frame remains read-only for Viewers.
 

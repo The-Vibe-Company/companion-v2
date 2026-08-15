@@ -67,13 +67,15 @@ export function replyExpected(input: {
   if (!input.awake) return false;
   const tail = input.entries[input.entries.length - 1];
   if (tail?.role === "user") {
-    if (input.pendingCount !== undefined) return input.pendingCount === 0;
     for (let index = input.entries.length - 2; index >= 0; index -= 1) {
       const entry = input.entries[index];
       if (entry?.role === "assistant") return true;
-      if (entry?.role === "tool" && entry.tool?.status === "timeout") return false;
+      if (entry?.role === "tool") return entry.tool?.status !== "timeout";
+      if (entry?.role === "decision") return true;
     }
-    return true;
+    // `pending_count` says only that Pi's FIFO accepted the message. It cannot revive the turn a
+    // timed-out tool aborted, so transcript history remains authoritative for that boundary.
+    return input.pendingCount === undefined || input.pendingCount === 0;
   }
   if (tail?.role === "tool") return tail.tool?.status !== "timeout";
   if (tail?.role === "decision") return true;
