@@ -80,7 +80,7 @@ DECLARE
     'public.companion_list_billing_sync_candidates(timestamp with time zone,boolean,integer)'::regprocedure,
     'public.companion_claim_github_sync_destinations(text,integer,integer)'::regprocedure,
     'public.companion_expire_tool_runs(uuid,uuid,timestamp with time zone,integer,integer)'::regprocedure,
-    'public.companion_claim_reconcile_candidates(text,integer,integer)'::regprocedure,
+    'public.companion_claim_reconcile_candidates(text,integer,integer,integer,integer)'::regprocedure,
     'public.companion_settle_reconcile_lease(uuid,uuid,text,text,integer)'::regprocedure
   ];
 BEGIN
@@ -326,7 +326,7 @@ BEGIN
       public.companion_list_billing_sync_candidates(timestamp with time zone, boolean, integer),
       public.companion_claim_github_sync_destinations(text, integer, integer),
       public.companion_expire_tool_runs(uuid, uuid, timestamp with time zone, integer, integer),
-      public.companion_claim_reconcile_candidates(text, integer, integer),
+      public.companion_claim_reconcile_candidates(text, integer, integer, integer, integer),
       public.companion_settle_reconcile_lease(uuid, uuid, text, text, integer)
      TO %I',
     worker_role

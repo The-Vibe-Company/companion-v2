@@ -2470,6 +2470,44 @@ describe("Companions API feature gate", () => {
     }));
   });
 
+  it("hands expired-card cancellations to a running Pi even when a replay has nothing to deliver", async () => {
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.sendCompanionMessage.mockResolvedValue({
+      thread: { ...viewerThread, access: "owner", read_only: false, can_send: true },
+      entry: message,
+    });
+    // The send is an idempotent replay: everything is already delivered, nothing is pending.
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [],
+      piLogOffset: 0,
+      deliveredOrdinal: message.ordinal,
+      timeoutRecoveryPending: false,
+      timeoutRestartPending: false,
+      timeoutRecoveryOrdinal: null,
+    });
+    coreMocks.settleExpiredCompanionDecisions.mockResolvedValue([
+      { type: "extension_ui_response", id: "ui-stale-replay", confirmed: false },
+    ]);
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident" }),
+    });
+
+    expect(response.status).toBe(200);
+    // Pi is still blocked on the stale question; the replay must not strand its cancellation
+    // behind the next sync. No prompt goes out — there is nothing to deliver.
+    expect(runtime.respondExtensionUi).toHaveBeenCalledWith({
+      boxId: companion.runtime.box_id,
+      response: { type: "extension_ui_response", id: "ui-stale-replay", confirmed: false },
+    });
+    expect(runtime.prompt).not.toHaveBeenCalled();
+  });
+
   it("cancels an expired permission card in Pi before delivering the new send", async () => {
     coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
     coreMocks.sendCompanionMessage.mockResolvedValue({

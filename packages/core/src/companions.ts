@@ -3095,11 +3095,15 @@ export async function claimCompanionReconcileCandidates(input: {
   database?: Db;
 }): Promise<CompanionReconcileCandidate[]> {
   const database = input.database ?? db;
+  // The sweep the claim leads to runs env-aware deadlines; the claim detects with the same ones so
+  // an operator override cannot make the worker claim a run the sweep then refuses to expire.
   const result = await database.execute(sql`
     select * from public.companion_claim_reconcile_candidates(
       ${input.workerId},
       ${input.limit ?? 5}::integer,
-      ${input.leaseSeconds ?? 300}::integer
+      ${input.leaseSeconds ?? 300}::integer,
+      ${Math.round(companionToolRunTimeoutMs(process.env) / 1000)}::integer,
+      ${Math.round(companionExecToolRunTimeoutMs(process.env) / 1000)}::integer
     )
   `);
   const rows = Array.from(result as unknown as Iterable<{

@@ -59,7 +59,9 @@ ALTER TABLE "companion_reconcile_leases" FORCE ROW LEVEL SECURITY;
 CREATE FUNCTION public.companion_claim_reconcile_candidates(
   p_worker_id text,
   p_limit integer,
-  p_lease_seconds integer
+  p_lease_seconds integer,
+  p_timeout_seconds integer,
+  p_exec_timeout_seconds integer
 )
 RETURNS TABLE (
   org_id uuid,
@@ -79,6 +81,10 @@ DECLARE
   v_worker text := NULLIF(trim(p_worker_id), '');
   v_limit integer := LEAST(GREATEST(COALESCE(p_limit, 5), 1), 50);
   v_lease integer := LEAST(GREATEST(COALESCE(p_lease_seconds, 300), 60), 3600);
+  -- Same clamps as companion_expire_tool_runs, so the sweep the claim triggers agrees with the
+  -- deadline the claim itself detected against — including operator overrides.
+  v_timeout integer := LEAST(GREATEST(COALESCE(p_timeout_seconds, 90), 30), 3600);
+  v_exec_timeout integer := LEAST(GREATEST(COALESCE(p_exec_timeout_seconds, 600), 30), 3600);
   v_now timestamp with time zone := statement_timestamp();
   v_claimed integer := 0;
   v_attempts integer;
@@ -145,12 +151,15 @@ BEGIN
             e.role::text = 'tool'
             AND e.tool->>'status' = 'running'
             AND e.created_at <= v_now - make_interval(
-              secs => CASE WHEN e.tool->>'kind' = 'shell' THEN 600 ELSE 90 END
+              secs => CASE WHEN e.tool->>'kind' = 'shell' THEN v_exec_timeout ELSE v_timeout END
             )
           )
           OR (
             e.role::text = 'decision'
             AND e.decision->>'status' = 'pending'
+            -- Contracts validate expires_at on write, but one malformed historical row must not
+            -- abort the whole claim and strand every other stale Companion behind it.
+            AND pg_input_is_valid(e.decision->>'expires_at', 'timestamptz')
             AND (e.decision->>'expires_at')::timestamptz <= v_now
           )
         )
@@ -268,19 +277,19 @@ CREATE POLICY "companion_reconcile_leases_maintenance_rls"
     current_user = pg_get_userbyid((
       SELECT p.proowner
       FROM pg_proc p
-      WHERE p.oid = 'public.companion_claim_reconcile_candidates(text,integer,integer)'::regprocedure
+      WHERE p.oid = 'public.companion_claim_reconcile_candidates(text,integer,integer,integer,integer)'::regprocedure
     ))
   )
   WITH CHECK (
     current_user = pg_get_userbyid((
       SELECT p.proowner
       FROM pg_proc p
-      WHERE p.oid = 'public.companion_claim_reconcile_candidates(text,integer,integer)'::regprocedure
+      WHERE p.oid = 'public.companion_claim_reconcile_candidates(text,integer,integer,integer,integer)'::regprocedure
     ))
   );
 --> statement-breakpoint
 REVOKE ALL ON FUNCTION public.companion_claim_reconcile_candidates(
-  text, integer, integer
+  text, integer, integer, integer, integer
 ) FROM PUBLIC;
 --> statement-breakpoint
 REVOKE ALL ON FUNCTION public.companion_settle_reconcile_lease(

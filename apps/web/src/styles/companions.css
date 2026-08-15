@@ -1420,8 +1420,13 @@
 }
 
 /* Quiet by design: the transcript is not wrong while polls fail, so the word stays muted rather
-   than taking an alert treatment. It may shrink with an ellipsis before it can crowd the name
-   out of a 320px header. */
+   than taking an alert treatment. The head pins every child to its intrinsic width, so this one
+   opts back into shrinking: at 320px it gives way with an ellipsis before it can push the Box
+   chip or the controls off the row. */
+.chat-head .chat-reconnecting {
+  flex: 0 1 auto;
+}
+
 .chat-reconnecting {
   color: var(--color-muted);
   font-size: var(--text-xs);

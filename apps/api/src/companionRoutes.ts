@@ -1171,6 +1171,19 @@ export function registerCompanionRoutes(
           await runtimeFactory().refreshTtl({ boxId: sent.companion.runtime.box_id })
             .catch(() => undefined);
         }
+        // A card that expired on this read still blocks Pi on its FIFO answer even though the
+        // replay has nothing to prompt. Hand the cancellations to an already-running Pi now
+        // rather than leaving them for the next sync; never wake anything for them.
+        if (sent.decisionResponses.length && piIsReachable(sent.companion)
+          && sent.companion.runtime.box_id) {
+          const candidate = runtimeFactory();
+          for (const response of sent.decisionResponses) {
+            await candidate.respondExtensionUi({
+              boxId: sent.companion.runtime.box_id,
+              response,
+            }).catch(() => undefined);
+          }
+        }
         return c.json({
           thread: sent.thread,
           delivery: delivered ? ("delivered" as const) : ("pending" as const),
