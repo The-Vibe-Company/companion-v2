@@ -33,7 +33,7 @@ import {
 import { db, schema, type Db } from "@companion/db";
 import { canManageOrg } from "./authz";
 import type { CompanionPiEntry, CompanionPiToolCompletion } from "./companionPiEvents";
-import { matchCompanionToolCompletions, timeoutCompanionToolRun } from "./companionPiEvents";
+import { matchCompanionToolCompletions } from "./companionPiEvents";
 import {
   companionRuntimeErrorForAccess,
   sanitizeCompanionRuntimeError,
@@ -1494,10 +1494,16 @@ async function readRunningCompanionToolRuns(
   database: Db,
   orgId: string,
   companionId: string,
-): Promise<Array<{ eventId: string; tool: CompanionStoredToolRun; createdAt: Date }>> {
+): Promise<Array<{
+  eventId: string;
+  ordinal: number;
+  tool: CompanionStoredToolRun;
+  createdAt: Date;
+}>> {
   const rows = await database
     .select({
       eventId: schema.companionTranscriptEntries.eventId,
+      ordinal: schema.companionTranscriptEntries.ordinal,
       tool: schema.companionTranscriptEntries.tool,
       createdAt: schema.companionTranscriptEntries.createdAt,
     })
@@ -1510,7 +1516,12 @@ async function readRunningCompanionToolRuns(
     ))
     .orderBy(asc(schema.companionTranscriptEntries.ordinal));
   return rows.flatMap((row) => (row.tool
-    ? [{ eventId: row.eventId, tool: row.tool, createdAt: row.createdAt }]
+    ? [{
+      eventId: row.eventId,
+      ordinal: row.ordinal,
+      tool: row.tool,
+      createdAt: row.createdAt,
+    }]
     : []));
 }
 
@@ -1567,25 +1578,21 @@ export async function expireCompanionToolRuns(input: {
   // Settlement is transcript-only and is safe for read-only viewers to trigger. It must not inherit
   // runtime authorization because the viewer fallback is precisely where a Box must not be touched.
   const companion = await getCompanion({ ...input, database });
-  const now = input.now ?? new Date();
-  const open = await readRunningCompanionToolRuns(database, input.orgId, input.companionId);
-  const timedOut: CompanionSettledToolRun[] = [];
-  for (const run of open.flatMap((entry) => {
-    const expired = timeoutCompanionToolRun(entry, now);
-    return expired ? [{ ...expired, kind: entry.tool.kind }] : [];
-  })) {
-    const updated = await database
-      .update(schema.companionTranscriptEntries)
-      .set({ tool: run.tool })
-      .where(and(
-        eq(schema.companionTranscriptEntries.orgId, input.orgId),
-        eq(schema.companionTranscriptEntries.companionId, input.companionId),
-        eq(schema.companionTranscriptEntries.eventId, run.eventId),
-        sql`${schema.companionTranscriptEntries.tool}->>'status' = 'running'`,
-      ))
-      .returning({ eventId: schema.companionTranscriptEntries.eventId });
-    if (updated.length) timedOut.push({ eventId: run.eventId, kind: run.kind });
-  }
+  // The narrow definer lets a read-only Viewer trigger deadline housekeeping without receiving
+  // general transcript/thread write access under FORCE RLS. It also assesses timeout rows written
+  // by older versions once, so #305-era tails are recovered without repeated prompts.
+  const expiredResult = await database.execute(sql`
+    select * from public.companion_expire_tool_runs(
+      ${input.orgId}::uuid,
+      ${input.companionId}::uuid,
+      ${(input.now ?? new Date()).toISOString()}::timestamp with time zone
+    )
+  `);
+  const expired = Array.from(expiredResult as unknown as Iterable<{
+    event_id: string;
+    kind: CompanionStoredToolRun["kind"];
+  }>);
+  const timedOut = expired.map((run) => ({ eventId: run.event_id, kind: run.kind }));
   const [row, entries] = await Promise.all([
     readCompanionThreadRow(database, input.orgId, input.companionId),
     readCompanionTranscript(database, input.orgId, input.companionId),

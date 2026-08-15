@@ -598,8 +598,13 @@ export const companionThreads = pgTable(
       .references(() => companions.id, { onDelete: "cascade" }),
     /** Next transcript ordinal to hand out; monotonic, so concurrent sends cannot collide. */
     nextOrdinal: integer("next_ordinal").notNull().default(0),
-    /** Highest user-message ordinal already delivered to Pi; null when nothing was delivered. */
+    /**
+     * Highest user-message ordinal already delivered to Pi. Timeout settlement may move it behind
+     * an unanswered post-tool tail so a recycled Pi receives those stranded messages again.
+     */
     deliveredOrdinal: integer("delivered_ordinal"),
+    /** Highest timed-out tool whose unanswered tail has been assessed for one-time re-delivery. */
+    timeoutRecoveryOrdinal: integer("timeout_recovery_ordinal"),
     /** Bytes of `~/.companion/runtime/logs/pi.rpc.ndjson` already projected into the transcript. */
     piLogOffset: bigint("pi_log_offset", { mode: "number" }).notNull().default(0),
     lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
@@ -616,6 +621,10 @@ export const companionThreads = pgTable(
     nonnegativeDeliveredOrdinal: check(
       "companion_threads_delivered_ordinal_check",
       sql`${t.deliveredOrdinal} is null or ${t.deliveredOrdinal} >= 0`,
+    ),
+    nonnegativeTimeoutRecoveryOrdinal: check(
+      "companion_threads_timeout_recovery_ordinal_check",
+      sql`${t.timeoutRecoveryOrdinal} is null or ${t.timeoutRecoveryOrdinal} >= 0`,
     ),
     nonnegativeLogOffset: check("companion_threads_pi_log_offset_check", sql`${t.piLogOffset} >= 0`),
   }),

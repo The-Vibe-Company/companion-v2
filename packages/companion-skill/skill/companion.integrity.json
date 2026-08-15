@@ -1,7 +1,7 @@
 {
   "files": {
-    "SKILL.md": "sha256:c7a0ba4fdf9f2666f0c73f7a671b6550b03738a7091b9a5ef2fe372550dccd38",
-    "companion.json": "sha256:e71c8fa7c03be687c4a9f80eb0acc30bfe7092cd0ee2b4d9ff8bf81d97dacfd7",
+    "SKILL.md": "sha256:4420d675183ca7b917965c7f64ef483f038f77d7f8cd5a8e19b2ba9fc0d90830",
+    "companion.json": "sha256:8c800b1435bd08fd60e9ee1b0edbbf31e0bdbba16bb26713f8ce2967ec0811c0",
     "evals/evals.json": "sha256:e798e4ee34de8b0bcc4ca4509d3ffab2c05c0ae84d169d201831aeda2d161f33",
     "scripts/bootstrap.py": "sha256:fcc58a22a3d8d270d3d2faef448bafefc3215556462aa5e66c37da82567711a0",
     "scripts/bootstrap_integrity.py": "sha256:697301a13d7fae907966209507e2636692b276c401e334ee97e4596e7b7b2ebe",
@@ -19,5 +19,5 @@
     "scripts/tools.json": "sha256:38829413bac88d339347c474cbe3613a6760f3388bd58f1c79dddb170c89ebcb"
   },
   "schemaVersion": 1,
-  "version": "1.63.0"
+  "version": "1.64.0"
 }

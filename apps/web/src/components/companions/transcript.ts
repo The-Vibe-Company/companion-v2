@@ -61,10 +61,20 @@ export function localDay(iso: string): string {
 export function replyExpected(input: {
   entries: readonly CompanionTranscriptEntry[];
   awake: boolean;
+  /** Messages waiting for Pi rather than a reply. Omit only when judging transcript history alone. */
+  pendingCount?: number;
 }): boolean {
   if (!input.awake) return false;
   const tail = input.entries[input.entries.length - 1];
-  if (tail?.role === "user") return true;
+  if (tail?.role === "user") {
+    if (input.pendingCount !== undefined) return input.pendingCount === 0;
+    for (let index = input.entries.length - 2; index >= 0; index -= 1) {
+      const entry = input.entries[index];
+      if (entry?.role === "assistant") return true;
+      if (entry?.role === "tool" && entry.tool?.status === "timeout") return false;
+    }
+    return true;
+  }
   if (tail?.role === "tool") return tail.tool?.status !== "timeout";
   if (tail?.role === "decision") return true;
   return false;
@@ -84,7 +94,7 @@ export function composerHint(input: {
   const pending = input.thread?.pending_count ?? 0;
   if (pending < 1) return "Enter sends. Shift + Enter starts a new line.";
   const count = `${pending} message${pending === 1 ? "" : "s"}`;
-  if (input.state === "running") return `${count} waiting for a reply.`;
+  if (input.state === "running") return `${count} waiting for delivery.`;
   if (input.state === "provisioning") {
     return `${count} saved. ${input.companionName} is starting to deliver.`;
   }

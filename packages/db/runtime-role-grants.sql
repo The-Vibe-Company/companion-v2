@@ -70,7 +70,8 @@ DECLARE
     'public.companion_revoke_agent_transfer_tickets(text,text,text)'::regprocedure,
     'public.companion_skill_share_target(text,text)'::regprocedure,
     'public.companion_billing_org_for_stripe_event(text,text)'::regprocedure,
-    'public.companion_revoke_inactive_skill_database_realm_shares(uuid,uuid)'::regprocedure
+    'public.companion_revoke_inactive_skill_database_realm_shares(uuid,uuid)'::regprocedure,
+    'public.companion_expire_tool_runs(uuid,uuid,timestamp with time zone)'::regprocedure
   ];
   worker_functions regprocedure[] := ARRAY[
     'public.companion_claim_skill_database_object_deletions(integer,integer)'::regprocedure,
@@ -306,7 +307,8 @@ BEGIN
       public.companion_revoke_agent_transfer_tickets(text, text, text),
       public.companion_skill_share_target(text, text),
       public.companion_billing_org_for_stripe_event(text, text),
-      public.companion_revoke_inactive_skill_database_realm_shares(uuid, uuid)
+      public.companion_revoke_inactive_skill_database_realm_shares(uuid, uuid),
+      public.companion_expire_tool_runs(uuid, uuid, timestamp with time zone)
      TO %I',
     api_role
   );
