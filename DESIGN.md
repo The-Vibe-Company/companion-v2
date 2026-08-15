@@ -291,6 +291,11 @@ Motion is sparse and functional. Use `duration-fast` (120ms), `duration-base` (1
 changes, and short copy confirmation. Do not animate layout properties such as width, height, margin, or top. Respect
 `prefers-reduced-motion` by removing drawer slide and scrim fade.
 
+The Companion thread is the one surface where motion also reports state, because a conversation is the one place where
+waiting is the message. It may animate a typing indicator while a reply is owed, a spinner on a tool run that is still
+open, a short rise as a message arrives, and the height of a disclosure it opens. Nothing else in the thread moves: a
+status dot stays static there as everywhere else, and every one of these stops under `prefers-reduced-motion`.
+
 ## Shapes
 
 Radii are small and pragmatic:
@@ -299,6 +304,9 @@ Radii are small and pragmatic:
 - `md` for buttons, inputs, cards, rows, and error blocks.
 - `lg` for drawers and larger panels.
 - `full` only for status dots, toggle thumbs, and true pills.
+- `2xl` (16px) only inside the Companion thread, for a member's message bubble and the composer field it is answered
+  from. A bubble that reads as a bubble is what makes a two-sided conversation legible at a glance; nothing outside that
+  thread may claim this radius.
 
 Do not use oversized rounded SaaS cards. Do not put cards inside cards. Page sections are not decorative floating cards; reserve cards for actual framed data groups, repeated resource items, and compact panels.
 
@@ -357,16 +365,23 @@ navigation. The Owner alone sees a hairline-separated delete action and an expli
 confirmation; Editor can save but cannot delete, and Viewer sees disabled read-only fields. The thread, Box
 chip, Plugins, Lux, and top-level navigation remain unchanged.
 
-**Companion thread** is one transcript in one reading column, not a two-sided bubble chat. Turns are
-left-aligned in a column narrower than the page; a writer keeps the floor across consecutive turns, so
-the writer and the time appear once per passage and the turns under it are only the words. A member's
-message is a tinted block with `md` radius and no border; a Companion reply is plain text on the page;
-a run note is one quiet muted line. Loading uses static skeleton lines, and a running Box that owes a
-reply says so as a muted line, never as an animated indicator. The composer is one field with its send
-control inside it, one hint line underneath, and no toolbar: no attachments, dictation, slash commands,
-mentions, model picker, or tool controls belong in the thread. A Viewer gets the same transcript with a
-read-only note in place of the composer. Empty threads state what happens next instead of greeting the
-reader, and there is no centered welcome panel and no thread list.
+**Companion thread** is a two-sided conversation in one reading column narrower than the page. A member's message is a
+right-aligned tinted bubble with `2xl` radius and no border; a Companion reply is rich text on the page, left-aligned and
+unboxed, rendered as markdown with headings, lists, tables, links, and code blocks that carry their own copy control. A
+writer keeps the floor across consecutive messages, so the writer and the time appear once per passage and the messages
+under it are only the words. One Companion turn is one message however many parts it took: the reasoning behind the
+reply, the reply, and the tool runs and permission cards produced along the way all belong to it, in the order they
+happened. Reasoning sits behind a collapsed disclosure labelled as reasoning — it is never shown as the answer. A tool
+run is a hairline card reading what ran and how it ended, with its arguments, its result, and any Box desktop frame
+folded away until asked for. A permission card is the one thing in the thread a reader can act on: it states what Pi
+asked for, offers Allow / Deny or an answer field to Owner and Editor only, and stays on the transcript once decided with
+who decided it. A run note is one quiet muted line. Loading uses static skeleton lines; a running Box that owes a reply
+says so with the typing indicator described under Motion, always paired with the same sentence in text. A reply carries
+one hover action, Copy, and no edit, regenerate, or branch controls, because none of those exist here. The composer is
+one field with its send control inside it, one hint line underneath, and no toolbar: no attachments, dictation, slash
+commands, mentions, model picker, or tool controls belong in the thread. A Viewer gets the same transcript with a
+read-only note in place of the composer. Empty threads state what happens next instead of greeting the reader, and there
+is no centered welcome panel and no thread list.
 
 **Status dot plus label** is mandatory for health and lifecycle state. Dots are static 6px to 8px circles. No pulse, no glow, no animation.
 
