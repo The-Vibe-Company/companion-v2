@@ -170,6 +170,10 @@ const companion = {
     disk_layout_version: 1,
     desktop_available: true,
     last_error: null,
+    skills_revision: 1,
+    skills_applied_revision: 1,
+    skills_applied_at: null,
+    skills_last_error: null,
     last_observed_at: null,
     last_started_at: null,
     last_stopped_at: null,
@@ -754,6 +758,100 @@ describe("Companions API feature gate", () => {
     expect(response.status).toBe(200);
     expect(runtimeFactory).not.toHaveBeenCalled();
     expect(coreMocks.claimCompanionRuntimeStart).not.toHaveBeenCalled();
+  });
+
+  it("records the claimed skills revision as applied when an online skills change recycles Pi", async () => {
+    const changed = {
+      ...runningCompanion,
+      selected_skill_ids: ["33333333-3333-4333-8333-333333333333"],
+      runtime: { ...runningCompanion.runtime, skills_revision: 5, skills_applied_revision: 4 },
+    };
+    coreMocks.getCompanion.mockResolvedValueOnce(runningCompanion);
+    coreMocks.updateCompanion.mockResolvedValueOnce(changed);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValueOnce(changed);
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        selected_skill_ids: ["33333333-3333-4333-8333-333333333333"],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
+      restartPi: true,
+      allowBoxWake: false,
+    }));
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({
+        skillsAppliedRevision: 5,
+        skillsLastError: null,
+      }),
+    }));
+  });
+
+  it("restages a pending skill revision on start and refuses to record a warm shortcut as applied", async () => {
+    const pending = {
+      ...runningCompanion,
+      runtime: { ...runningCompanion.runtime, skills_revision: 6, skills_applied_revision: 4 },
+    };
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(pending);
+    // A warm answer reports it staged nothing; the row must stay pending and keep its error trace.
+    const runtime = boxRuntime({
+      start: vi.fn(async () => ({
+        boxId: companion.runtime.box_id,
+        runtimeState: "running" as const,
+        daemonState: "running" as const,
+        desktopAvailable: true,
+        staged: false,
+      })),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ client_surface: "web" }),
+    });
+
+    expect(response.status).toBe(200);
+    // Pending forces the restage this start's settings copy promises.
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ restartPi: true }));
+    for (const call of coreMocks.updateCompanionRuntime.mock.calls) {
+      expect(call[0].patch).not.toHaveProperty("skillsAppliedRevision");
+      expect(call[0].patch).not.toHaveProperty("skillsLastError");
+    }
+  });
+
+  it("never records applied skills for a native-mobile start that stages none", async () => {
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "Summarize the incident",
+        client_surface: "native_mobile",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ skills: [] }));
+    for (const call of coreMocks.updateCompanionRuntime.mock.calls) {
+      expect(call[0].patch).not.toHaveProperty("skillsAppliedRevision");
+    }
   });
 
   it("does not contact or recycle Pi for a name-only save on a running Companion", async () => {

@@ -164,6 +164,25 @@ instead, because an operator hint such as a missing `COMPANION_BOX_API_KEY` woul
 reader who cannot run Box to try. Any lifecycle write that leaves `error`, including the claim a
 retry takes, clears the line.
 
+The saved skill list also answers "is it on the Box yet". `companions.skills_revision` is the
+desired monotonic revision: it bumps in the same write as a selection change, and again for every
+selector — Online or asleep — when a selected skill is published, archived, restored, or renamed
+(the bump never touches `updated_at`, so a background publish cannot reorder another member's list
+or refresh the stale-claim clock). `companions.skills_applied_revision` records the revision a
+successful stage carried, written monotonically and never above desired, with `skills_applied_at`
+beside it; native-mobile starts stage no library skills and never record an apply, and a warm start
+that skipped resource injection reports `staged: false` and records nothing — instead, a start that
+finds the row pending forces the same Pi-recycling restage an online skills change performs, so
+"reapplies on next start" stays true. `applied < desired` therefore reads as pending —
+settings shows it as applying (awake Box) or as applying on the next wake (asleep Box, which a save
+never wakes) and polls the control-plane runtime read only while an awake Box is behind. A failed
+background restage after a publish records one sanitized line in `companions.skills_last_error`
+instead of failing the publish; the next bump or successful apply clears it, and a Viewer reads a
+generic line. The Companion skill picker lists the caller's accessible library
+(`GET /v1/skills?lib=accessible`: every org skill plus their own personal skills), searchable and
+filterable by scope, with the current selection pinned and ids the caller cannot see rendered as
+removable unknown rows rather than silently kept.
+
 Pi sessions, RPC events, and logs live only under `~/.companion/runtime` on snapshotted Box disk.
 PostgreSQL stores Box id and last-observed lifecycle metadata so list/open never wakes Box. A start
 whose assigned Box failed Pi setup, reached its terminal error state, or no longer exists retires

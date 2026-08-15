@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { SkillListRow } from "@companion/contracts";
 import { apiFetch } from "@/lib/apiClient";
-import { Icon } from "../Icon";
+import { OptionMultiSelect } from "./OptionMultiSelect";
 
 export type CompanionSkillOption = {
   id: string;
@@ -38,6 +38,7 @@ export function CompanionSkillPicker({
   selectedSkillIds,
   canWriteSkills,
   disabled,
+  footer,
   onSelectedSkillIdsChange,
   onCanWriteSkillsChange,
 }: {
@@ -45,6 +46,8 @@ export function CompanionSkillPicker({
   selectedSkillIds: string[];
   canWriteSkills: boolean;
   disabled?: boolean;
+  /** Rendered under the skill list — the Box sync status line in settings. */
+  footer?: ReactNode;
   onSelectedSkillIdsChange: (ids: string[]) => void;
   onCanWriteSkillsChange: (value: boolean) => void;
 }) {
@@ -70,56 +73,31 @@ export function CompanionSkillPicker({
     };
   }, [orgId]);
 
-  const toggle = (id: string, checked: boolean) => {
-    onSelectedSkillIdsChange(
-      checked
-        ? [...selectedSkillIds, id]
-        : selectedSkillIds.filter((current) => current !== id),
-    );
-  };
-
   return (
     <div className="companions-skills-picker">
-      <fieldset disabled={disabled} className="companions-skills-picker__skills">
-        <legend>Skills</legend>
-        <p className="companions-skills-picker__hint">
-          Choose which Skills Hub packages this Companion may use. Empty means only the bundled
-          Companion agent skill stays on the Box.
-        </p>
-        {error ? <div className="companions-error" role="alert">{error}</div> : null}
-        {skills === null ? (
-          <p className="companions-skills-picker__empty">Loading skills…</p>
-        ) : skills.length === 0 && !error ? (
-          <p className="companions-skills-picker__empty">No skills in your library yet.</p>
-        ) : skills.length === 0 ? null : (
-          <div className="companions-skills-picker__list" role="group" aria-label="Skills this Companion may use">
-            {skills.map((skill) => {
-              const checked = selectedSkillIds.includes(skill.id);
-              return (
-                <label key={skill.id} className={checked ? "is-selected" : undefined}>
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={(event) => toggle(skill.id, event.target.checked)}
-                  />
-                  <span>
-                    <strong>{skill.name}</strong>
-                    <code>
-                      {skill.slug}
-                      {skill.version ? ` · v${skill.version}` : ""}
-                    </code>
-                    <small>{skill.scope === "personal" ? "Personal" : "Organization"}</small>
-                  </span>
-                  {checked ? <Icon name="circle-check" size={14} /> : null}
-                </label>
-              );
-            })}
-          </div>
-        )}
-        <div className="companions-skills-picker__foot">
-          {selectedSkillIds.length} selected
-        </div>
-      </fieldset>
+      <OptionMultiSelect
+        legend="Skills"
+        hint="Choose which Skills Hub packages this Companion may use. Empty means only the bundled Companion agent skill stays on the Box."
+        options={skills?.map((skill) => ({
+          id: skill.id,
+          title: skill.name,
+          mono: `${skill.slug}${skill.version ? ` · v${skill.version}` : ""}`,
+          meta: skill.scope === "personal" ? "Personal" : "Organization",
+          filterKey: skill.scope,
+        })) ?? null}
+        selectedIds={selectedSkillIds}
+        disabled={disabled}
+        error={error}
+        searchPlaceholder="Search skills…"
+        filters={[
+          { key: "org", label: "Organization" },
+          { key: "personal", label: "Personal" },
+        ]}
+        emptyText="No skills in your library yet."
+        missingLabel="Not in your library"
+        footer={footer}
+        onChange={onSelectedSkillIdsChange}
+      />
 
       <label className="companions-skills-picker__write">
         <input

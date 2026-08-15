@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type {
   Companion,
   CompanionProvidersResponse,
@@ -21,6 +21,12 @@ import {
 } from "./CompanionProviderModelPicker";
 import { CompanionSkillPicker } from "./CompanionSkillPicker";
 import { CompanionPluginPicker } from "./CompanionPluginPicker";
+import { CompanionSkillsSyncStatus } from "./CompanionSkillsSyncStatus";
+
+/** How often to re-read the control-plane row while a skill apply is in flight on an awake Box. */
+const SKILLS_SYNC_POLL_MS = 3_000;
+/** A stalled apply stops moving on its own; cap the poll instead of reading forever. */
+const SKILLS_SYNC_POLL_MAX_TICKS = 40;
 
 export function CompanionSettings({
   orgId,
@@ -60,6 +66,10 @@ export function CompanionSettings({
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [hidden, setHidden] = useState(companion.hidden);
+  // Freshest row this view has seen, for the skills sync line: save responses land here, and while
+  // an apply is in flight on an awake Box a short poll keeps it moving without waking anything.
+  const [latest, setLatest] = useState(companion);
+  const syncReadRef = useRef(0);
   const canEdit = companion.access === "owner" || companion.access === "editor";
   const canDelete = companion.access === "owner";
   const online = runtimeSnapshot.state === "running" && runtimeSnapshot.daemon_state === "running";
@@ -68,6 +78,35 @@ export function CompanionSettings({
     setRuntimeSnapshot(companion.runtime);
     setRuntimeNeedsRefresh(false);
   }, [companion.runtime]);
+
+  useEffect(() => {
+    setLatest(companion);
+  }, [companion]);
+
+  const skillsPending = latest.runtime.skills_applied_revision < latest.runtime.skills_revision;
+  // A recorded restage failure will not clear on its own — only the next start or save retries it —
+  // so it stops the poll rather than reading the same answer forever.
+  const skillsApplying = skillsPending
+    && !latest.runtime.skills_last_error
+    && (latest.runtime.state === "provisioning" || latest.runtime.state === "running");
+  useEffect(() => {
+    if (!skillsApplying) return;
+    let ticks = 0;
+    const interval = setInterval(() => {
+      if (++ticks > SKILLS_SYNC_POLL_MAX_TICKS) {
+        clearInterval(interval);
+        return;
+      }
+      const readId = ++syncReadRef.current;
+      void getCompanionRuntime(orgId, companion.id)
+        .then((next) => {
+          if (readId !== syncReadRef.current) return;
+          setLatest(next);
+        })
+        .catch(() => undefined);
+    }, SKILLS_SYNC_POLL_MS);
+    return () => clearInterval(interval);
+  }, [skillsApplying, orgId, companion.id]);
 
   const changed = useMemo(
     () =>
@@ -109,6 +148,8 @@ export function CompanionSettings({
         selected_mcp_account_ids: selectedMcpAccountIds,
       });
       onSaved(updated);
+      syncReadRef.current += 1;
+      setLatest(updated);
       setName(updated.name);
       setInstructions(updated.persona ?? "");
       const updatedProviderId = updated.runtime.provider_ids[0] ?? "";
@@ -253,6 +294,7 @@ export function CompanionSettings({
             selectedSkillIds={selectedSkillIds}
             canWriteSkills={canWriteSkills}
             disabled={!canEdit || busy}
+            footer={<CompanionSkillsSyncStatus companion={latest} />}
             onSelectedSkillIdsChange={(ids) => {
               setSelectedSkillIds(ids);
               setSaved(false);

@@ -587,7 +587,14 @@
       "idx": 83,
       "version": "7",
       "when": 1787332000000,
-      "tag": "0083_companion_timeout_recovery",
+      "tag": "0083_companion_skills_sync",
+      "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1787418400000,
+      "tag": "0084_companion_timeout_recovery",
       "breakpoints": true
     }
   ]

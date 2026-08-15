@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import type { CompanionPluginsResponse } from "@companion/contracts";
 import { apiFetch } from "@/lib/apiClient";
-import { Icon } from "../Icon";
+import { OptionMultiSelect } from "./OptionMultiSelect";
 
 export type CompanionPluginOption = {
   id: string;
@@ -69,59 +69,25 @@ export function CompanionPluginPicker({
     };
   }, [orgId]);
 
-  const toggle = (id: string, checked: boolean) => {
-    onSelectedMcpAccountIdsChange(
-      checked
-        ? [...selectedMcpAccountIds, id]
-        : selectedMcpAccountIds.filter((current) => current !== id),
-    );
-  };
-
   return (
     <div className="companions-skills-picker">
-      <fieldset disabled={disabled} className="companions-skills-picker__skills">
-        <legend>Plugins</legend>
-        <p className="companions-skills-picker__hint">
-          Choose which already-connected MCP plugins this Companion may use. Empty means no extra
-          MCP pins on the Box. Detach does not disconnect the plugin from Plugins.
-        </p>
-        {error ? <div className="companions-error" role="alert">{error}</div> : null}
-        {plugins === null ? (
-          <p className="companions-skills-picker__empty">Loading plugins…</p>
-        ) : plugins.length === 0 && !error ? (
-          <p className="companions-skills-picker__empty">
-            No plugins connected yet. Connect them from the Plugins page first.
-          </p>
-        ) : plugins.length === 0 ? null : (
-          <div
-            className="companions-skills-picker__list"
-            role="group"
-            aria-label="Plugins this Companion may use"
-          >
-            {plugins.map((plugin) => {
-              const checked = selectedMcpAccountIds.includes(plugin.id);
-              return (
-                <label key={plugin.id} className={checked ? "is-selected" : undefined}>
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={(event) => toggle(plugin.id, event.target.checked)}
-                  />
-                  <span>
-                    <strong>{plugin.provider}</strong>
-                    <code>{plugin.label} · {plugin.transport}</code>
-                    <small>{plugin.endpoint}</small>
-                  </span>
-                  {checked ? <Icon name="circle-check" size={14} /> : null}
-                </label>
-              );
-            })}
-          </div>
-        )}
-        <div className="companions-skills-picker__foot">
-          {selectedMcpAccountIds.length} selected
-        </div>
-      </fieldset>
+      <OptionMultiSelect
+        legend="Plugins"
+        hint="Choose which already-connected MCP plugins this Companion may use. Empty means no extra MCP pins on the Box. Detach does not disconnect the plugin from Plugins."
+        options={plugins?.map((plugin) => ({
+          id: plugin.id,
+          title: plugin.provider,
+          mono: `${plugin.label} · ${plugin.transport}`,
+          meta: plugin.endpoint,
+        })) ?? null}
+        selectedIds={selectedMcpAccountIds}
+        disabled={disabled}
+        error={error}
+        searchPlaceholder="Search plugins…"
+        emptyText="No plugins connected yet. Connect them from the Plugins page first."
+        missingLabel="Not connected anymore"
+        onChange={onSelectedMcpAccountIdsChange}
+      />
     </div>
   );
 }

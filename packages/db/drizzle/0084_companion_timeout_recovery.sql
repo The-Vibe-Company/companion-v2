@@ -1,5 +1,5 @@
 -- Timeout recovery is deliberately one-shot. Existing #305 timeout rows need their unanswered
--- user tail re-delivered after this migration, while a tail Pi accepts later must not be reset on
+-- user tail re-delivered after migration 0084, while a tail Pi accepts later must not be reset on
 -- every thread read or live sync.
 
 ALTER TABLE "companion_threads" ADD COLUMN "timeout_recovery_ordinal" integer;--> statement-breakpoint
