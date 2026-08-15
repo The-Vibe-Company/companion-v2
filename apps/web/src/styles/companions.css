@@ -1096,7 +1096,7 @@
 
 .chat-head {
   flex: none;
-  min-height: 62px;
+  min-height: var(--topbar-height);
   padding: 12px 20px;
   display: flex;
   align-items: center;
