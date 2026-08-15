@@ -118,9 +118,67 @@ describe("replyExpected", () => {
 
   it("keeps waiting while a permission card is still open mid-turn", () => {
     expect(replyExpected({
-      entries: [entry(), entry({ event_id: "decision:ui-1", role: "decision" })],
+      entries: [entry(), entry({
+        event_id: "decision:ui-1",
+        role: "decision",
+        decision: {
+          request_id: "ui-1",
+          kind: "shell",
+          name: "bash",
+          title: "ls",
+          detail: null,
+          status: "pending",
+          answer: null,
+          decided_by_id: null,
+          decided_by_name: null,
+          decided_at: null,
+          expires_at: "2026-08-12T12:05:00.000Z",
+        },
+      })],
       awake: true,
     })).toBe(true);
+  });
+
+  it("keeps waiting after a permission decision unblocks the same Pi turn", () => {
+    expect(replyExpected({
+      entries: [entry(), entry({
+        event_id: "decision:ui-1",
+        role: "decision",
+        decision: {
+          request_id: "ui-1",
+          kind: "shell",
+          name: "bash",
+          title: "ls",
+          detail: null,
+          status: "allowed",
+          answer: null,
+          decided_by_id: "user-1",
+          decided_by_name: "Owner",
+          decided_at: "2026-08-12T12:00:05.000Z",
+          expires_at: "2026-08-12T12:05:00.000Z",
+        },
+      })],
+      awake: true,
+    })).toBe(true);
+  });
+
+  it("stops waiting when a hung tool is failed closed", () => {
+    expect(replyExpected({
+      entries: [entry(), entry({
+        event_id: "pi:read",
+        role: "tool",
+        tool: {
+          call_id: "call-read",
+          kind: "file",
+          name: "read",
+          title: "/tmp/conductor-cli.png",
+          status: "timeout",
+          detail: "Timed out after 90 seconds without a tool result.",
+          screenshot: null,
+        },
+      })],
+      awake: true,
+    })).toBe(false);
   });
 
   it("never waits on a Box that is not running, because nothing has been delivered", () => {

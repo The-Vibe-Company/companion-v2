@@ -51,6 +51,7 @@ const TOOL_STATUS_LABELS = {
   running: "running",
   ok: "done",
   error: "failed",
+  timeout: "timed out",
 } as const;
 
 export const ToolRunCard: ToolCallMessagePartComponent<CompanionToolArgs> = ({ args }) => {
@@ -59,7 +60,7 @@ export const ToolRunCard: ToolCallMessagePartComponent<CompanionToolArgs> = ({ a
   if (!run) return null;
   const KindIcon = TOOL_ICONS[run.kind];
   const named = run.title !== run.name;
-  const failed = run.status === "error";
+  const failed = run.status === "error" || run.status === "timeout";
 
   return (
     <Collapsible

@@ -384,10 +384,13 @@ under it are only the words. One Companion turn is one message however many part
 reply, the reply, and the tool runs and question cards produced along the way all belong to it, in the order they
 happened. Reasoning sits behind a collapsed disclosure labelled as reasoning — it is never shown as the answer. A tool
 run is a hairline card reading what ran and how it ended, with its arguments and its result folded away until asked for;
-a run that moved the Box desktop shows one frame of it in place, bounded so it never widens the column. Pi runs shell and
-file tools without approval. An `ask_user` question card is the one thing in the thread a reader can act on: it states
-what Pi asked, offers an answer field or Deny to Owner and Editor only, and stays on the transcript once decided with who
-decided it. Historical Allow / Deny cards remain readable in place. A run note is one quiet muted
+a run that moved the Box desktop shows exactly one direct Box frame in place, without a Pi image
+read, bounded so it never widens the column. A tool that reports no result fails closed after 90
+seconds without changing Box lifecycle or leaving the thread in-flight. Pi runs shell and file
+tools without approval. An `ask_user` question card is the one thing in the thread a reader can act
+on: it states what Pi asked, offers an answer field or Deny to Owner and Editor only, and stays on
+the transcript once decided with who decided it. Historical Allow / Deny cards remain readable in
+place. A run note is one quiet muted
 line. The transcript is parted by day, once per day it was written in, and a reader returning to a thread gets one `New`
 divider on the first message somebody else wrote past their own read watermark — the member-private one the list badge
 uses, not a per-device guess. Neither separator ever lands inside a turn, because a tool run is chrome the turn owns; the

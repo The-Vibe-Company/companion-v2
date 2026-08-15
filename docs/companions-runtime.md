@@ -287,14 +287,25 @@ plain `tool`), a short title, the arguments as truncated detail, and a status th
 Pi's tool result then settles it: a result naming its call closes exactly that chip, a harness that
 reports no call id closes the oldest chip still running, and a result matching nothing is dropped
 rather than guessed at, so a chunk read twice cannot close a run some later call started. A run whose
-result never arrives stays `running`, which is what the reader is owed — the chip spins because the
-tool has not answered.
+result never arrives is failed closed after 90 seconds. The staged Pi extension owns the active-turn
+deadline for every accepted execution tool and clears all sibling timers before its scoped
+`ctx.abort()`, so a later queued follow-up cannot be cancelled by a retry. The control plane never
+sends an unscoped
+abort into Pi's FIFO: both live sync and the read-only thread fallback settle overdue rows directly,
+and a late result and the timeout update compare-and-set only a still-running chip, so whichever
+settles it first wins. This closes the chip and the browser's in-flight state without changing Box or
+daemon lifecycle, so a stalled tool never turns an Online Companion into Starting or exposes Wake.
+The extension also refuses image paths before Pi's built-in `read` can enter its vision path;
+`ask_user` retains its separate five-minute interactive decision deadline.
 
-A visual run — `browse` or `computer` — is worth a picture, so when one settles the sync captures a
-single frame of the Box desktop and stores it on that run as a `data:` URL, bounded to the same size
-limit the contract enforces. It is one frame per sync and only for the most recent settled visual run
-that has none, taken with the screenshot tool the Box already has; a Box with no desktop, no capture
-tool, or a capture that fails simply leaves the chip without a picture rather than failing the sync.
+A visual run — `browse` or `computer` — is worth a picture, so when one settles (including by the
+fail-closed deadline) the sync captures from the Box desktop and stores exactly one frame on that run
+as a `data:` URL, bounded to the same size limit the contract enforces. Frame attribution comes only
+from the exact run ids whose database settlement won in that sync; replayed or late results cannot
+photograph a historical chip. One desktop capture can satisfy several visual runs settled in the
+same Pi log chunk, but each run receives at most one stored frame. Capture comes directly from the
+Box desktop rather than through Pi `read`; a Box with no desktop, no capture tool, or a capture that
+fails simply leaves the chip without a picture rather than failing the sync.
 Frames are never uploaded to object storage and never minted as a desktop URL, so a screenshot in the
 thread is not a second way to reach a live stream. Because capture happens on the Owner/Editor sync
 path, a Viewer reads chips and whatever frames were already stored without any of it touching a Box.
@@ -344,16 +355,16 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
         └── pi.stderr.log  # Pi's stderr and the daemon wrapper's own account of a failed start
 ```
 
-Layout version `10` is written to the control-plane row after a successful Skills/MCP-aware start and
+Layout version `11` is written to the control-plane row after a successful Skills/MCP-aware start and
 to an on-disk marker keyed by the adapter package. Starts repair older Box snapshots before resource
 injection. Runtime transcripts and files do not enter PostgreSQL. A systemd user unit supervises Pi
 while Box is active; the lifecycle API starts it after a Box resume. Each start also stages the
 interaction extension under the legacy `~/.companion/pi/extensions/companion-permission-broker.ts`
 path. Reusing that path overwrites older shell/file approval logic; the current extension leaves Pi's
-tools unrestricted and pauses only explicit `ask_user` questions for a control-plane answer. A warm
-Pi is never restarted just to activate a layout migration because that could interrupt an active
-turn or question. The replacement extension is staged before layout 10 is published, and the staged
-layout loads on Pi's next natural daemon start.
+tools unrestricted, refuses image reads, bounds execution tools, and pauses only explicit `ask_user`
+questions for a control-plane answer. Layout 11 restarts a warm legacy Pi once after staging because
+extensions load at daemon start; that ensures every already-running Box gains the fail-closed guard
+instead of retaining layout 10 until an unrelated restart.
 
 MCP credential values are not part of that snapshotted tree. A start stages them through the
 owner-only Box file channel, moves the file into `%t/companion/providers.env` in the systemd user

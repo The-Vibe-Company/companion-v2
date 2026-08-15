@@ -1764,10 +1764,10 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(markerIndex).toBeGreaterThan(-1);
     expect(piResolveIndex).toBeGreaterThan(-1);
     expect(markerIndex).toBeLessThan(piResolveIndex);
-    // Layout 10 replaces the old approval broker so existing Boxes run shell and file tools freely.
-    expect(COMPANION_PI_DISK_LAYOUT_VERSION).toBe(10);
+    // Layout 11 keeps unrestricted tools while adding bounded execution and the image-read refusal.
+    expect(COMPANION_PI_DISK_LAYOUT_VERSION).toBe(11);
     expect(createdSetupScript)
-      .toContain("expected_layout='10:npm:pi-mcp-adapter@2.12.1'");
+      .toContain("expected_layout='11:npm:pi-mcp-adapter@2.12.1'");
     expect(createdSetupScript).toContain("--append-system-prompt");
     // The supervised daemon gets a minimal PATH from the systemd user manager, so Pi is resolved at
     // layout time and pinned both in the wrapper and on the unit.
