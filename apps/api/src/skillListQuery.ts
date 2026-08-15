@@ -1,7 +1,7 @@
 import { labelPathSchema } from "@companion/contracts";
 
 export interface SkillListQuery {
-  library: "org" | "mine";
+  library: "org" | "mine" | "accessible";
   labelValid: boolean;
   label: string | undefined;
   nolabel: boolean;
@@ -12,7 +12,8 @@ export interface SkillListQuery {
 }
 
 export function parseSkillListQuery(read: (name: string) => string | undefined): SkillListQuery {
-  const library = read("lib") === "mine" ? ("mine" as const) : ("org" as const);
+  const lib = read("lib");
+  const library = lib === "mine" ? ("mine" as const) : lib === "accessible" ? ("accessible" as const) : ("org" as const);
   const labelRaw = read("label")?.trim();
   const query = read("q")?.trim() || undefined;
   return {

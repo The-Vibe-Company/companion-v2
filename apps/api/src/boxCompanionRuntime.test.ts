@@ -562,6 +562,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       runtimeState: "running",
       daemonState: "running",
       desktopAvailable: true,
+      staged: true,
     });
   });
 
@@ -607,7 +608,9 @@ describe("AsciiBoxCompanionRuntime", () => {
       onBoxAssigned: async () => undefined,
     });
 
-    expect(result).toMatchObject({ runtimeState: "running", daemonState: "running" });
+    // `staged: false` is the warm contract: nothing was injected, so the lifecycle caller must not
+    // record a skills apply for this start.
+    expect(result).toMatchObject({ runtimeState: "running", daemonState: "running", staged: false });
     expect(commands).toHaveLength(1);
     expect(commands[0]).toContain("is-active --quiet companion-pi-daemon.service");
     expect(commands[0]).toContain('[ -f "$XDG_RUNTIME_DIR/companion/providers.env" ]');
@@ -2891,6 +2894,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       runtimeState: "running",
       daemonState: "running",
       desktopAvailable: true,
+      staged: true,
     });
   });
 
