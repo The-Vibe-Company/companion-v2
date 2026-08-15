@@ -372,8 +372,8 @@ writer keeps the floor across consecutive messages, so the writer and the time a
 under it are only the words. One Companion turn is one message however many parts it took: the reasoning behind the
 reply, the reply, and the tool runs and permission cards produced along the way all belong to it, in the order they
 happened. Reasoning sits behind a collapsed disclosure labelled as reasoning — it is never shown as the answer. A tool
-run is a hairline card reading what ran and how it ended, with its arguments, its result, and any Box desktop frame
-folded away until asked for. A permission card is the one thing in the thread a reader can act on: it states what Pi
+run is a hairline card reading what ran and how it ended, with its arguments and its result folded away until
+asked for; a run that moved the Box desktop shows one frame of it in place, bounded so it never widens the column. A permission card is the one thing in the thread a reader can act on: it states what Pi
 asked for, offers Allow / Deny or an answer field to Owner and Editor only, and stays on the transcript once decided with
 who decided it. A run note is one quiet muted line. Loading uses static skeleton lines; a running Box that owes a reply
 says so with the typing indicator described under Motion, always paired with the same sentence in text. A reply carries

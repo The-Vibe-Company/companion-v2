@@ -123,6 +123,18 @@ function text(markup: string): string {
   return markup.replace(/<[^>]*>/g, "");
 }
 
+/**
+ * The markup with only the parts nobody can perceive taken out. Class names and data attributes are
+ * the component library talking to itself — one of them says `tooltip` — but an `aria-label`, an
+ * `alt`, or a `title` is something a screen-reader user is read out loud, so it stays in scope for
+ * any assertion about what this surface offers.
+ */
+function perceivable(markup: string): string {
+  return markup
+    .replace(/\s(?:class|style)="[^"]*"/g, "")
+    .replace(/\sdata-[\w-]+="[^"]*"/g, "");
+}
+
 const asleep = companion({
   runtime: { ...companion().runtime, state: "stopped", daemon_state: "stopped", box_id: null },
 });
@@ -167,9 +179,10 @@ describe("CompanionThread", () => {
     });
 
     expect(markup).toContain("The run stopped before Pi replied.");
-    // Read from what a person sees, not from the markup: the thread is built out of a component
-    // library now, and its class names say `tooltip` without offering anyone a Pi tool.
-    expect(text(markup)).not.toMatch(/tool|skill|mcp/i);
+    // Read from everything a person can perceive — text and accessible names both. Only the class
+    // names and data attributes are dropped, because that is the component library talking to
+    // itself, and one of them says `tooltip` without offering anyone a Pi tool.
+    expect(perceivable(markup)).not.toMatch(/tool|skill|mcp/i);
     // Computer use is the Box desktop and nothing else, reached from the one status chip.
     expect(markup.match(/open the Box desktop/g)).toHaveLength(1);
   });
@@ -436,11 +449,11 @@ describe("CompanionThread", () => {
       pending_count: 1,
     });
 
-    expect(render({ thread: awaiting })).toContain("is replying");
+    expect(render({ thread: awaiting })).toContain("is replying...");
     // A sleeping Box owes nothing until it is woken, and the composer hint says so instead.
-    expect(render({ companion: asleep, thread: awaiting })).not.toContain("is replying");
+    expect(render({ companion: asleep, thread: awaiting })).not.toContain("is replying...");
     // A reply that already landed ends the wait.
-    expect(render({})).not.toContain("is replying");
+    expect(render({})).not.toContain("is replying...");
   });
 
   it("renders a pending shell permission card with Allow / Deny for Owner/Editor", () => {

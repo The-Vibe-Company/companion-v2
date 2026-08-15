@@ -16,12 +16,17 @@
 @layer theme, base, components, utilities;
 
 @import "tailwindcss/theme.css" layer(theme);
-@import "tailwindcss/utilities.css" layer(utilities);
+/*
+ * `source(none)` is load-bearing, not tidiness. Without it Tailwind's automatic detection scans the
+ * whole app and emits a utility for every candidate string it finds anywhere — into the one
+ * stylesheet all fifteen hand-authored pages load. A hand-authored class that happens to share a
+ * name with a utility would then quietly gain that utility's declarations. Turning detection off
+ * and naming the three directories the thread is built from is what actually scopes this.
+ */
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
 @import "tw-animate-css";
-@import "tw-shimmer";
 @import "@assistant-ui/react-markdown/styles/dot.css";
 
-/* Only the chat surface is written in utilities, so only it is scanned. */
 @source "../components/assistant-ui";
 @source "../components/companions";
 @source "../components/ui";
@@ -151,11 +156,15 @@
 }
 
 /*
- * Unlayered on purpose: tokens.css draws the app-wide focus outline unlayered, so a utility could
- * never turn it off. The composer field is the one control that must, because the box around it is
- * already drawing the focus ring — the outline would be a second ring inside the first. Everything
- * else in this scope keeps the app's outline, which is the only focus indicator it has.
+ * One focus treatment for this whole surface, unlayered on purpose: tokens.css draws the app-wide
+ * outline unlayered, so a utility could never turn it off, and several controls here already draw a
+ * ring of their own — a focused Allow button got two, and the round Send button got a square one
+ * around a circle. A ring drawn as a shadow follows whatever radius the control has, so a circle
+ * stays a circle and a card stays a card. The outline is still what a forced-colors mode falls back
+ * to, so it is replaced rather than removed.
  */
-.aui-scope [data-slot="composer-field"] :where(textarea):focus-visible {
-  outline: none;
+.aui-scope :where(a, button, input, textarea, select, summary, [tabindex]):focus-visible {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px var(--ring);
 }

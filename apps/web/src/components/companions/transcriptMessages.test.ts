@@ -1,5 +1,29 @@
 // @vitest-environment happy-dom
 
+/**
+ * Product promise:
+ * A Companion turn reads as one thing that happened. Everything Pi produced between two
+ * interruptions — its reasoning, its replies, its tool runs, its permission cards — is one message
+ * in the order it happened, a writer is named once per passage, and a message the composer is still
+ * sending is marked as such. Identity survives polling, so a settling chip re-renders its own turn
+ * and nothing else.
+ *
+ * Regression caught:
+ * THE-364 replaced `transcriptTurns` with this module. The failures it guards against are a turn
+ * fragmenting into one message per entry, a turn changing id as it grows (which remounts it
+ * mid-conversation), a passage re-announcing its writer on every line, and the poll-identity caches
+ * either never or always invalidating.
+ *
+ * Why this test is at this level:
+ * Grouping is pure — entries in, messages out — so it is provable without a runtime, and the
+ * identity caches are hooks, so they are exercised through a probe component rather than by reading
+ * their internals.
+ *
+ * Failure proof:
+ * Emitting one message per entry, keying a group by anything but its first entry's event id, or
+ * making `sameGroup`/`unchanged` unconditional each fails a case below.
+ */
+
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type {
@@ -175,6 +199,14 @@ describe("grouping a transcript into messages", () => {
 
     expect(groups.map((group) => group.sending)).toEqual([false, true]);
   });
+
+  it("marks nothing while no send is in flight", () => {
+    // A saved entry is never on its way, and the id it was stored under is the same one the composer
+    // named, so an absent id must not read as a match — every message would dim at once.
+    const groups = groupTranscriptEntries([said("Saved"), entry({ content: "Answered." })], context);
+
+    expect(groups.every((group) => !group.sending)).toBe(true);
+  });
 });
 
 describe("converting a message for the thread", () => {
@@ -262,6 +294,33 @@ describe("converting a message for the thread", () => {
     const [message] = rendered([entry({ content: "" })]);
 
     expect(message?.parts).toEqual(["text:"]);
+  });
+
+  it("refuses to attach reasoning to anything that is not a reply", () => {
+    // The contract and a database constraint both forbid this, so it can only arrive from drift or a
+    // hand-written row. The runtime answers a reasoning part on a member's message by throwing, and
+    // that throw takes the whole conversation down — so the incoherent field is dropped instead.
+    const note = rendered([entry({
+      role: "system",
+      content: "Pi ended the turn without a visible reply.",
+      reasoning: "should never be shown",
+    })]);
+    const member = rendered([said("Ship it", { reasoning: "should never be shown" })]);
+
+    expect(note[0]?.parts).toEqual(["text:Pi ended the turn without a visible reply."]);
+    expect(member[0]?.parts).toEqual(["text:Ship it"]);
+  });
+
+  it("keeps the serialised copy of a run's arguments empty", () => {
+    // A visual run carries a whole Box screenshot in `args`, and the runtime stringifies `args` into
+    // a second copy whenever this is absent — re-doing it for every earlier run each time the turn
+    // grows. Nothing in this thread reads that copy.
+    const message = toThreadMessageLike(groupTranscriptEntries([
+      entry({ role: "tool", content: "click", tool: run({ screenshot: "data:image/png;base64,AAAA" }) }),
+    ], context)[0]!);
+    const part = (typeof message.content === "string" ? [] : message.content)[0]!;
+
+    expect(part.type === "tool-call" && part.argsText).toBe("");
   });
 });
 

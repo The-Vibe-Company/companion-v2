@@ -67,7 +67,7 @@ export const ToolRunCard: ToolCallMessagePartComponent<CompanionToolArgs> = ({ a
       onOpenChange={setOpen}
       data-slot="companion-tool-run"
       className={cn(
-        "my-1.5 w-full rounded-lg border text-sm",
+        "my-1.5 w-full rounded-md border text-sm",
         failed ? "border-destructive/40 bg-destructive/5" : "border-border bg-muted/40",
       )}
       aria-busy={run.status === "running" || undefined}
@@ -108,15 +108,18 @@ export const ToolRunCard: ToolCallMessagePartComponent<CompanionToolArgs> = ({ a
         </span>
       </CollapsibleTrigger>
       {run.detail && (
-        <CollapsibleContent className="data-closed:animate-collapsible-up data-open:animate-collapsible-down overflow-hidden">
+        <CollapsibleContent className="data-closed:animate-collapsible-up data-open:animate-collapsible-down overflow-hidden motion-reduce:animate-none">
           <pre className="text-muted-foreground max-h-64 overflow-auto px-2.5 pb-2 font-mono text-xs leading-relaxed whitespace-pre-wrap">
             {run.detail}
           </pre>
         </CollapsibleContent>
       )}
       {run.screenshot && (
+        // A still, so it is sized like a figure in the transcript rather than like the Computer
+        // panel: it never grows past the column it sits in, and never past the width at which a
+        // desktop frame stops being readable anyway.
         <img
-          className="border-border mx-2.5 mb-2.5 rounded-md border"
+          className="border-border bg-muted mx-2.5 mb-2.5 max-w-[min(100%,460px)] rounded-md border"
           src={run.screenshot}
           alt={`The Box desktop after ${run.title}`}
           loading="lazy"

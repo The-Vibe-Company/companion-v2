@@ -8,7 +8,6 @@ import {
   ReasoningText,
   ReasoningTrigger,
 } from "@/components/assistant-ui/reasoning";
-import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { cn } from "@/lib/utils";
 import {
@@ -62,7 +61,7 @@ export type ThreadComponents = {
   UserMessageFrame?: ComponentType<{ children: ReactNode }> | undefined;
   /** Rendered around a Companion turn, for the same reason. */
   AssistantMessageFrame?: ComponentType<{ children: ReactNode }> | undefined;
-  /** Tool UIs by name, and what an unrecognised tool falls back to. */
+  /** Tool UIs by name. An unregistered tool name renders nothing — see `AssistantMessage`. */
   tools?: Record<string, ToolCallMessagePartComponent | undefined> | undefined;
 };
 
@@ -133,7 +132,7 @@ const ThreadScrollToBottom: FC = () => {
       <TooltipIconButton
         tooltip="Jump to the newest message"
         variant="outline"
-        className="border-border bg-background hover:bg-accent sticky bottom-2 z-10 size-8 self-center rounded-full border p-1.5 shadow-sm disabled:hidden"
+        className="border-border bg-background hover:bg-accent sticky bottom-2 z-10 size-8 self-center rounded-full border p-1.5 shadow-[var(--shadow-sm)] disabled:hidden"
       >
         <ArrowDownIcon />
       </TooltipIconButton>
@@ -158,7 +157,11 @@ const AssistantMessage: FC = () => {
   const components = useMemo(() => ({
     Text: MarkdownText,
     Reasoning: ReasoningPart,
-    tools: { by_name: tools ?? {}, Fallback: ToolFallback },
+    // No fallback. The registry ships one, but it carries its own Allow / Deny approval bar with no
+    // idea of this thread's Owner/Editor boundary, and the only tool names that can reach here are
+    // the two registered above — the transcript is the only thing that produces them. An unknown
+    // name rendering nothing is the safe end of that trade.
+    tools: { by_name: tools ?? {} },
   }), [tools]);
 
   return (
@@ -188,15 +191,15 @@ const AssistantActionBar: FC = () => {
   return (
     <ActionBarPrimitive.Root
       autohide="not-last"
-      className="text-muted-foreground animate-in fade-in -ms-1.5 flex gap-1 duration-200"
+      className="text-muted-foreground motion-safe:animate-in motion-safe:fade-in -ms-1.5 flex gap-1 duration-200"
     >
       <ActionBarPrimitive.Copy asChild>
         <TooltipIconButton tooltip="Copy reply">
           <AuiIf condition={(s) => s.message.isCopied}>
-            <CheckIcon className="animate-in zoom-in-50 fade-in duration-200 ease-out" />
+            <CheckIcon className="motion-safe:animate-in motion-safe:zoom-in-50 motion-safe:fade-in duration-200 ease-out" />
           </AuiIf>
           <AuiIf condition={(s) => !s.message.isCopied}>
-            <CopyIcon className="animate-in zoom-in-75 fade-in duration-150" />
+            <CopyIcon className="motion-safe:animate-in motion-safe:zoom-in-75 motion-safe:fade-in duration-150" />
           </AuiIf>
         </TooltipIconButton>
       </ActionBarPrimitive.Copy>

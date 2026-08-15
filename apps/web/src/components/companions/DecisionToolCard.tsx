@@ -75,7 +75,7 @@ export const DecisionToolCard: ToolCallMessagePartComponent<CompanionDecisionArg
     <section
       data-slot="companion-decision"
       className={cn(
-        "my-2 w-full rounded-lg border p-2.5 text-sm",
+        "my-2 w-full rounded-md border p-2.5 text-sm",
         pending && "border-primary/40 bg-primary/5",
         !pending && settledWell && "border-border bg-muted/40",
         !pending && !settledWell && "border-destructive/40 bg-destructive/5",
@@ -116,7 +116,7 @@ export const DecisionToolCard: ToolCallMessagePartComponent<CompanionDecisionArg
         </p>
       )}
       {decision.status === "expired" && !decision.decided_by_name && (
-        <p className="text-muted-foreground mt-1.5 text-xs">Timed out — denied</p>
+        <p className="text-muted-foreground mt-1.5 text-xs">Timed out, denied</p>
       )}
 
       {interactive && decision.kind === "question" && (

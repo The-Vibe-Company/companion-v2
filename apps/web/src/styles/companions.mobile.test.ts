@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 /**
@@ -40,6 +40,22 @@ const toolRunCard = readFileSync(
   new URL("../components/companions/ToolRunCard.tsx", import.meta.url),
   "utf8",
 );
+const decisionCard = readFileSync(
+  new URL("../components/companions/DecisionToolCard.tsx", import.meta.url),
+  "utf8",
+);
+
+/** Every vendored component the thread can render, so a promise about it cannot be scoped away. */
+function sourcesIn(directory: string): Array<{ name: string; source: string }> {
+  const dir = new URL(`../components/${directory}/`, import.meta.url);
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(".tsx"))
+    .sort()
+    .map((name) => ({ name, source: readFileSync(new URL(name, dir), "utf8") }));
+}
+
+const uiSources = sourcesIn("ui");
+const assistantUiSources = sourcesIn("assistant-ui");
 /** Comments explain what was removed and why, so the assertions read the rules alone. */
 const css = source.replace(/\/\*[\s\S]*?\*\//g, "");
 
@@ -137,15 +153,29 @@ describe("Companions mobile viewport", () => {
     expect(css).not.toContain("companions-thread-scrim");
     // Nothing in this stylesheet may animate a surface across the screen. A keyframe that only
     // moves in place is not that, so the assertion is on what the keyframes do rather than on there
-    // being none — the conversation's own motion now lives in the chat stylesheet's utilities.
-    const keyframes = rules.filter((rule) =>
-      rule.at.some((entry) => entry.startsWith("@keyframes")));
-    for (const frame of keyframes) {
+    // being none.
+    for (const frame of rules.filter((rule) =>
+      rule.at.some((entry) => entry.startsWith("@keyframes")))) {
       expect(frame.declarations).not.toMatch(/translate|left|right|inset|margin/);
     }
     expect(css).not.toContain("translateX(16px)");
-    // A message arriving may rise a few pixels into place; nothing may arrive from the side.
-    expect(transcript + thread).not.toMatch(/slide-in-from-(left|right|start|end)/);
+
+    // The thread's own motion moved into utilities, so the promise has to follow it there or it
+    // stops being a promise: this stylesheet no longer holds a single keyframe, and a loop over
+    // nothing passes forever. A message or a card may rise a few pixels into place; no surface the
+    // conversation is made of may arrive from the side.
+    const surfaces = [transcript, thread, toolRunCard, decisionCard];
+    expect(surfaces.some((source) => /slide-in-from-(top|bottom)/.test(source))).toBe(true);
+    for (const source of surfaces) {
+      expect(source).not.toMatch(/slide-(in-from|out-to)-(left|right|start|end)/);
+    }
+    // A tooltip is the one exception, and it is deliberately bounded to that one file: it is a
+    // transient overlay a few pixels wide, not a surface, and it belongs to the vendored control.
+    const sideSliders = uiSources
+      .concat(assistantUiSources)
+      .filter(({ source }) => /slide-in-from-(left|right)/.test(source))
+      .map(({ name }) => name);
+    expect(sideSliders).toEqual(["tooltip.tsx"]);
   });
 
   it("keeps the shell on the dynamic viewport and clips the inline axis", () => {
@@ -160,7 +190,8 @@ describe("Companions mobile viewport", () => {
     // The list scrolls in the main box and the thread scrolls in the log; neither may hand the
     // gesture on to the page underneath it.
     expect(declarationsFor(".companions-main")[0]).toContain("overscroll-behavior: none;");
-    expect(thread).toContain("overscroll-none");
+    // On the element that actually scrolls, not merely somewhere in the file.
+    expect(thread).toMatch(/aui_thread-viewport[\s\S]{0,400}?overflow-y-auto overscroll-none/);
     // The thread's own frame never scrolls: the log owns it.
     expect(declarationsFor(".companions-main--chat")[0]).toContain("overflow: hidden;");
   });
@@ -182,8 +213,10 @@ describe("Companions mobile viewport", () => {
 
   it("keeps the composer clear of the home indicator", () => {
     // The keyboard covers the home indicator, so the inset is a floor on the existing padding rather
-    // than an addition to it.
-    expect(transcript).toContain("pb-[max(14px,env(safe-area-inset-bottom,0px))]");
+    // than an addition to it — and it has to be on the composer root, not on some other element.
+    expect(transcript).toMatch(
+      /ComposerPrimitive\.Root[\s\S]{0,300}?pb-\[max\(14px,env\(safe-area-inset-bottom,0px\)\)\]/,
+    );
   });
 
   it("shortens the Box chip on a phone rather than wrapping the header", () => {
@@ -213,12 +246,17 @@ describe("Companions mobile viewport", () => {
 
   it("holds a tool run's card and its Box frame inside the thread's width", () => {
     // A command line or a desktop frame left to size itself takes its own pixels and drags the whole
-    // conversation sideways on a phone. The card is bound to the column, the run's title is allowed
-    // to shrink before it is allowed to push, the disclosed body scrolls inside the card rather than
-    // widening it, and every image in this scope is bound by the mini-preflight.
-    expect(toolRunCard).toContain("w-full");
-    expect(toolRunCard).toContain("min-w-0 flex-1 truncate");
-    expect(toolRunCard).toContain("overflow-auto");
+    // conversation sideways on a phone. Each clause below is pinned to the element that carries it,
+    // because the class existing somewhere in the file is not the promise.
+    // The card itself is bound to the column it sits in.
+    expect(toolRunCard).toMatch(/data-slot="companion-tool-run"[\s\S]{0,400}?\bw-full\b/);
+    // The run's title shrinks before it pushes.
+    expect(toolRunCard).toMatch(/min-w-0 flex-1 truncate/);
+    // The disclosed body scrolls inside the card rather than widening it.
+    expect(toolRunCard).toMatch(/<pre[\s\S]{0,200}?overflow-auto/);
+    // The frame is a still, sized like a figure: never past the column, never past readable width.
+    expect(toolRunCard).toMatch(/max-w-\[min\(100%,460px\)\][\s\S]{0,200}?src=\{run\.screenshot\}/);
+    // And every image in this scope has the preflight bound underneath all of that.
     expect(chatCss).toMatch(/\.aui-scope :where\(img[^)]*\)[\s\S]*?max-width: 100%;/);
   });
 
@@ -228,7 +266,9 @@ describe("Companions mobile viewport", () => {
     expect(declarationsFor(".chat-head .chat-back", coarse)[0]).toContain("min-height: 44px;");
     expect(declarationsFor(".chat-head .cds-btn", coarse)[0]).toContain("min-height: 44px;");
     // THE-346: Send is the control the composer exists for, and 32px is not a thumb target. A mouse
-    // still points at the compact square.
-    expect(transcript).toMatch(/pointer-coarse:size-11[\s\S]{0,80}size-8|size-8[\s\S]{0,80}pointer-coarse:size-11/);
+    // still points at the compact square. Both classes have to sit on the Send control itself.
+    expect(transcript).toMatch(
+      /ComposerPrimitive\.Send[\s\S]{0,600}?pointer-coarse:size-11 grid size-8/,
+    );
   });
 });

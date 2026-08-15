@@ -158,6 +158,10 @@ function partsOf(entry: CompanionTranscriptEntry): MessagePart[] {
       toolCallId: entry.event_id,
       toolName: COMPANION_TOOL_NAME,
       args: { run: entry.tool },
+      // Empty on purpose. The runtime serialises `args` into a text copy when this is absent, and a
+      // visual run's args carry a whole Box screenshot — up to 192 KB that would be stringified
+      // again every time another entry joins the turn. Nothing reads the text copy.
+      argsText: "",
       // A running chip has no result yet. Everything the card shows is read from the run in `args`,
       // because this thread polls rather than streams: a part is never mid-flight, it is simply the
       // run as the last poll saw it.
@@ -170,21 +174,27 @@ function partsOf(entry: CompanionTranscriptEntry): MessagePart[] {
       toolCallId: entry.event_id,
       toolName: COMPANION_DECISION_TOOL_NAME,
       args: { decision: entry.decision },
+      argsText: "",
       result: entry.decision.status === "pending" ? undefined : { status: entry.decision.status },
     }];
   }
   const parts: MessagePart[] = [];
   // Reasoning comes before the reply it produced, which is the order it happened in and the order a
-  // reader who opens the disclosure expects to read it.
-  if (entry.reasoning) parts.push({ type: "reasoning", text: entry.reasoning });
+  // reader who opens the disclosure expects to read it. The role is checked here even though the
+  // contract and a database constraint both already forbid reasoning anywhere else: the runtime
+  // refuses a reasoning part on a member's message by throwing, and that throw would blank the whole
+  // conversation rather than the one malformed line.
+  if (entry.role === "assistant" && entry.reasoning) {
+    parts.push({ type: "reasoning", text: entry.reasoning });
+  }
   if (entry.content) parts.push({ type: "text", text: entry.content });
   return parts;
 }
 
 /**
- * One grouped message as assistant-ui reads it. An assistant message with no parts at all would
- * render as an empty turn, so it keeps one empty text part — the same thing the runtime does for a
- * reply that has not produced anything yet.
+ * One grouped message as assistant-ui reads it. The empty-text fallback is there for a `system`
+ * note, which the runtime refuses unless it carries exactly one text part; an assistant message
+ * drops empty text again on its way in, and a turn with nothing to show cannot be projected anyway.
  */
 export function toThreadMessageLike(group: TranscriptMessage): ThreadMessageLike {
   const content = group.entries.flatMap(partsOf);
@@ -200,6 +210,10 @@ export function toThreadMessageLike(group: TranscriptMessage): ThreadMessageLike
  * Keep one object per entry across polls. The thread is re-read every couple of seconds and arrives
  * as fresh JSON each time, so without this every message would look new to the runtime and the whole
  * transcript would re-render mid-conversation.
+ *
+ * The cache is written during render, which is only safe because the comparison below is total: it
+ * names every field a poll can move, so a discarded render and a kept one reach the same answer.
+ * Anything that starts changing after a row is stored has to be added to it.
  */
 export function useStableEntries(
   entries: CompanionTranscriptEntry[],

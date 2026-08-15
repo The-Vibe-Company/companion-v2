@@ -399,9 +399,12 @@ function Welcome() {
 }
 
 /**
- * Pi owes this thread a reply and has not produced one yet. The dots are the whole message for a
- * reader who can see them and nothing at all for one who cannot, so the sentence is stated outright
- * beside them.
+ * Pi owes this thread a reply and has not produced one yet.
+ *
+ * The dots are the decoration; the sentence is the message. A reader who has asked for reduced
+ * motion gets three motionless dots, so leaving the words to a screen-reader-only span would tell
+ * that reader nothing at all — the sentence is on the page for everyone, and the dots are hidden
+ * from assistive technology because they say the same thing again.
  */
 function Trailer() {
   const { companionName, replying } = useChrome();
@@ -409,9 +412,8 @@ function Trailer() {
   return (
     <p
       data-slot="companion-replying"
-      className="text-muted-foreground flex items-center gap-1.5 text-sm"
+      className="text-muted-foreground flex items-center gap-2 text-sm"
     >
-      <span className="sr-only">{companionName} is replying</span>
       <span aria-hidden="true" className="flex items-center gap-1">
         {[0, 1, 2].map((index) => (
           <span
@@ -421,6 +423,7 @@ function Trailer() {
           />
         ))}
       </span>
+      <span>{companionName} is replying...</span>
     </p>
   );
 }
@@ -441,7 +444,7 @@ function Footer() {
         {/* The field and its send control are one object, so the composer reads as one place to type. */}
         <div
           data-slot="composer-field"
-          className="border-input focus-within:ring-ring/50 bg-card flex items-end gap-2 rounded-2xl border py-1.5 pe-1.5 ps-3 focus-within:ring-[3px]"
+          className="border-input focus-within:border-ring bg-card flex items-end gap-2 rounded-2xl border py-1.5 pe-1.5 ps-3"
         >
           <ComposerPrimitive.Input
             className="text-foreground max-h-42 min-h-8 flex-1 resize-none bg-transparent py-1 outline-none"
