@@ -23,8 +23,10 @@ import type {
   UpdateCompanionMemberStateInput,
 } from "@companion/contracts";
 import {
+  COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS,
   COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS,
   COMPANION_PROVIDER_CATALOG,
+  COMPANION_TOOL_RUN_TIMEOUT_MS,
   companionProviderDefaultModel,
   companionMcpAccountSchema,
   companionMcpCredentialSchema,
@@ -1686,6 +1688,21 @@ async function completeCompanionToolRuns(input: {
   return completed;
 }
 
+function positiveMsEnv(value: string | undefined, fallback: number): number {
+  const parsed = value === undefined ? Number.NaN : Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** Deadline for a non-shell tool result, env-overridable so operators can tune without a deploy. */
+export function companionToolRunTimeoutMs(env: NodeJS.ProcessEnv): number {
+  return positiveMsEnv(env.COMPANION_TOOL_RUN_TIMEOUT_MS, COMPANION_TOOL_RUN_TIMEOUT_MS);
+}
+
+/** Deadline for a shell run: builds and test sweeps legitimately outlive the default ceiling. */
+export function companionExecToolRunTimeoutMs(env: NodeJS.ProcessEnv): number {
+  return positiveMsEnv(env.COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS, COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS);
+}
+
 /**
  * Fail closed any tool result Pi has owed for too long. This changes only the durable transcript
  * projection. The staged Pi extension owns cancellation of the active operation, so this operation
@@ -1712,7 +1729,9 @@ export async function expireCompanionToolRuns(input: {
     select * from public.companion_expire_tool_runs(
       ${input.orgId}::uuid,
       ${input.companionId}::uuid,
-      ${(input.now ?? new Date()).toISOString()}::timestamp with time zone
+      ${(input.now ?? new Date()).toISOString()}::timestamp with time zone,
+      ${Math.round(companionToolRunTimeoutMs(process.env) / 1000)}::integer,
+      ${Math.round(companionExecToolRunTimeoutMs(process.env) / 1000)}::integer
     )
   `);
   const expired = Array.from(expiredResult as unknown as Iterable<{
@@ -1797,8 +1816,11 @@ async function recordCompanionPiProjectionResult(
       orgId: input.orgId,
       companionId: input.companionId,
       count: input.entries.length,
-      lastMessageAt: input.entries.at(-1)?.createdAt,
+      lastMessageAt: input.entries.length ? new Date() : undefined,
     });
+    // Rows deliberately take the database clock, not Pi's `entry.createdAt`: tool-run deadlines are
+    // measured against `created_at` in PostgreSQL, and a skewed Box clock would move them both ways.
+    // Ordering is owned by `ordinal`, so the projection timestamp only has to be honest, not Pi's.
     await database
       .insert(schema.companionTranscriptEntries)
       .values(input.entries.map((entry, index) => ({
@@ -1811,7 +1833,6 @@ async function recordCompanionPiProjectionResult(
         reasoning: entry.reasoning ?? null,
         tool: entry.tool ?? null,
         decision: entry.decision ?? null,
-        createdAt: entry.createdAt,
       })))
       .onConflictDoNothing();
   }
@@ -1938,7 +1959,35 @@ export async function expireCompanionDecisions(input: {
   responses: CompanionExtensionUiResponse[];
 }> {
   const database = input.database ?? db;
-  const companion = await getCompanionForRuntime({ ...input, database });
+  const companion = await getCompanion({ ...input, database });
+  const responses = await settleExpiredCompanionDecisions({ ...input, database });
+  const [threadRow, entries] = await Promise.all([
+    readCompanionThreadRow(database, input.orgId, input.companionId),
+    readCompanionTranscript(database, input.orgId, input.companionId),
+  ]);
+  return {
+    thread: toThread({ actor: input.actor, companion, row: threadRow, entries }),
+    responses,
+  };
+}
+
+/**
+ * The settlement half alone: flip pending cards past their deadline to `expired` and return the
+ * FIFO cancellations. The hot read paths call this — they already read the thread themselves, and
+ * rebuilding a full transcript per poll tick just to discard it tripled the read cost of a poll.
+ */
+export async function settleExpiredCompanionDecisions(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  now?: Date;
+  database?: Db;
+}): Promise<CompanionExtensionUiResponse[]> {
+  const database = input.database ?? db;
+  // Expiry is deadline housekeeping, not a decision: like expireCompanionToolRuns it must be safe
+  // to trigger from any thread read. A Viewer's session still cannot write the settlement rows —
+  // RLS admits only Owner/Editor updates — so for them the sweep is a no-op, never an error.
+  await getCompanion({ ...input, database });
   const now = input.now ?? new Date();
   const pending = await database
     .select({
@@ -1977,14 +2026,7 @@ export async function expireCompanionDecisions(input: {
       ));
     responses.push(extensionUiResponseFor(row.decision, "expire"));
   }
-  const [threadRow, entries] = await Promise.all([
-    readCompanionThreadRow(database, input.orgId, input.companionId),
-    readCompanionTranscript(database, input.orgId, input.companionId),
-  ]);
-  return {
-    thread: toThread({ actor: input.actor, companion, row: threadRow, entries }),
-    responses,
-  };
+  return responses;
 }
 
 /**
@@ -3021,4 +3063,92 @@ export async function claimCompanionRuntimeStop(input: {
     .returning();
   if (!claimed) throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
   return toCompanion(claimed, current.access, memberFromCompanion(current));
+}
+
+export type CompanionReconcileReason =
+  | "stale_start"
+  | "archive_resume"
+  | "deletion_stuck"
+  | "redelivery"
+  | "liveness"
+  | "expiry_sweep";
+
+export interface CompanionReconcileCandidate {
+  orgId: string;
+  companionId: string;
+  /** The Companion's owner; the worker runs every org-scoped service as this member. */
+  owner: { id: string; email: string; name: string };
+  reason: CompanionReconcileReason;
+  boxId: string | null;
+  attempts: number;
+}
+
+/**
+ * Claim Companions that need reconciler attention, most urgent first. Worker-only: the SECURITY
+ * DEFINER function is granted to the worker role alone and is cross-tenant by design — the lease
+ * upsert inside it is what keeps two ticking workers on disjoint sets.
+ */
+export async function claimCompanionReconcileCandidates(input: {
+  workerId: string;
+  limit?: number;
+  leaseSeconds?: number;
+  database?: Db;
+}): Promise<CompanionReconcileCandidate[]> {
+  const database = input.database ?? db;
+  // The sweep the claim leads to runs env-aware deadlines; the claim detects with the same ones so
+  // an operator override cannot make the worker claim a run the sweep then refuses to expire.
+  const result = await database.execute(sql`
+    select * from public.companion_claim_reconcile_candidates(
+      ${input.workerId},
+      ${input.limit ?? 5}::integer,
+      ${input.leaseSeconds ?? 300}::integer,
+      ${Math.round(companionToolRunTimeoutMs(process.env) / 1000)}::integer,
+      ${Math.round(companionExecToolRunTimeoutMs(process.env) / 1000)}::integer
+    )
+  `);
+  const rows = Array.from(result as unknown as Iterable<{
+    org_id: string;
+    companion_id: string;
+    owner_id: string;
+    owner_email: string;
+    owner_name: string | null;
+    reason: CompanionReconcileReason;
+    box_id: string | null;
+    attempts: number;
+  }>);
+  return rows.map((row) => ({
+    orgId: row.org_id,
+    companionId: row.companion_id,
+    owner: { id: row.owner_id, email: row.owner_email, name: row.owner_name ?? row.owner_email },
+    reason: row.reason,
+    boxId: row.box_id,
+    attempts: row.attempts,
+  }));
+}
+
+/**
+ * Release one claimed lease. A positive backoff records a failed attempt and gates the Companion
+ * until the moment passes; zero records success and clears the attempt counter. Returns false when
+ * this worker no longer held the lease — a stale claim another worker has since taken over.
+ */
+export async function settleCompanionReconcileLease(input: {
+  orgId: string;
+  companionId: string;
+  workerId: string;
+  outcome: string;
+  backoffSeconds?: number;
+  database?: Db;
+}): Promise<boolean> {
+  const database = input.database ?? db;
+  const result = await database.execute(sql`
+    select public.companion_settle_reconcile_lease(
+      ${input.orgId}::uuid,
+      ${input.companionId}::uuid,
+      ${input.workerId},
+      ${input.outcome},
+      ${input.backoffSeconds ?? 0}::integer
+    ) as settled
+  `);
+  const [row] = Array.from(result as unknown as Iterable<{ settled: boolean }>);
+  return row?.settled ?? false;
 }

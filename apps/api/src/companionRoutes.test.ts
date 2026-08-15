@@ -15,8 +15,8 @@ import {
   BoxRuntimeConfigurationError,
   BoxRuntimeProviderError,
   COMPANION_PI_DISK_LAYOUT_VERSION,
-} from "./boxCompanionRuntime";
-import { COMPANION_RUNTIME_UNKNOWN_ERROR } from "./companionRuntimeError";
+  COMPANION_RUNTIME_UNKNOWN_ERROR,
+} from "@companion/box-runtime";
 import { registerCompanionRoutes as registerCompanionRoutesImpl } from "./companionRoutes";
 
 const contextMocks = vi.hoisted(() => ({
@@ -62,6 +62,7 @@ const coreMocks = vi.hoisted(() => ({
   attachCompanionToolRunScreenshot: vi.fn(),
   decideCompanionDecision: vi.fn(),
   expireCompanionDecisions: vi.fn(),
+  settleExpiredCompanionDecisions: vi.fn(),
   expireCompanionToolRuns: vi.fn(),
   listCompanionShares: vi.fn(),
   setCompanionWorkspaceShare: vi.fn(),
@@ -143,7 +144,7 @@ vi.mock("@companion/db", async (importOriginal) => ({
 
 vi.mock("@companion/storage", () => storageMocks);
 vi.mock("@companion/skills", () => skillsMocks);
-vi.mock("./companionSkillPackage", () => companionSkillPackageMocks);
+vi.mock("@companion/box-runtime/companionSkillPackage", () => companionSkillPackageMocks);
 vi.mock("@companion/core/services", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@companion/core/services")>()),
   ...servicesMocks,
@@ -229,6 +230,7 @@ function boxRuntime(overrides: Record<string, unknown> = {}) {
     refreshTtl: vi.fn(async () => undefined),
     readEvents: vi.fn(async () => ({ chunk: "", offset: 0 })),
     captureDesktopFrame: vi.fn(async () => null),
+    healPiDaemon: vi.fn(async () => ({ daemonState: "running" as const, detail: null })),
     ...overrides,
   };
 }
@@ -415,6 +417,7 @@ describe("Companions API feature gate", () => {
       },
       settledToolRuns: [],
     });
+    coreMocks.settleExpiredCompanionDecisions.mockResolvedValue([]);
     coreMocks.recordCompanionTimeoutRestart.mockResolvedValue(undefined);
     coreMocks.expireCompanionDecisions.mockImplementation(async () => {
       const last = coreMocks.recordCompanionPiProjectionWithEffects.mock.results.at(-1);
@@ -1785,6 +1788,10 @@ describe("Companions API feature gate", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ thread: viewerThread });
     expect(coreMocks.expireCompanionToolRuns).toHaveBeenCalledOnce();
+    // A read must also close permission cards past their deadline — a sleeping Box otherwise
+    // leaves the card spinning on every control-plane read — while still never contacting Box.
+    // Settlement-only: this path reads its own thread, so no thread is built to be discarded.
+    expect(coreMocks.settleExpiredCompanionDecisions).toHaveBeenCalledOnce();
     expect(coreMocks.getCompanionThread).toHaveBeenCalledOnce();
     expect(runtimeFactory).not.toHaveBeenCalled();
   });
@@ -2461,6 +2468,86 @@ describe("Companions API feature gate", () => {
     expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: 1,
     }));
+  });
+
+  it("hands expired-card cancellations to a running Pi even when a replay has nothing to deliver", async () => {
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.sendCompanionMessage.mockResolvedValue({
+      thread: { ...viewerThread, access: "owner", read_only: false, can_send: true },
+      entry: message,
+    });
+    // The send is an idempotent replay: everything is already delivered, nothing is pending.
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [],
+      piLogOffset: 0,
+      deliveredOrdinal: message.ordinal,
+      timeoutRecoveryPending: false,
+      timeoutRestartPending: false,
+      timeoutRecoveryOrdinal: null,
+    });
+    coreMocks.settleExpiredCompanionDecisions.mockResolvedValue([
+      { type: "extension_ui_response", id: "ui-stale-replay", confirmed: false },
+    ]);
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident" }),
+    });
+
+    expect(response.status).toBe(200);
+    // Pi is still blocked on the stale question; the replay must not strand its cancellation
+    // behind the next sync. No prompt goes out — there is nothing to deliver.
+    expect(runtime.respondExtensionUi).toHaveBeenCalledWith({
+      boxId: companion.runtime.box_id,
+      response: { type: "extension_ui_response", id: "ui-stale-replay", confirmed: false },
+    });
+    expect(runtime.prompt).not.toHaveBeenCalled();
+  });
+
+  it("cancels an expired permission card in Pi before delivering the new send", async () => {
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.sendCompanionMessage.mockResolvedValue({
+      thread: { ...viewerThread, access: "owner", read_only: false, can_send: true },
+      entry: message,
+    });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    coreMocks.settleExpiredCompanionDecisions.mockResolvedValue([
+      { type: "extension_ui_response", id: "ui-stale", confirmed: false },
+    ]);
+    const order: string[] = [];
+    const runtime = boxRuntime({
+      respondExtensionUi: vi.fn(async () => {
+        order.push("cancel");
+      }),
+      prompt: vi.fn(async () => {
+        order.push("prompt");
+      }),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident" }),
+    });
+
+    expect(response.status).toBe(200);
+    // The stale question blocks Pi on its FIFO answer; the cancel must land before the prompt so
+    // the turn this send starts cannot deadlock behind it.
+    expect(order).toEqual(["cancel", "prompt"]);
+    expect(runtime.respondExtensionUi).toHaveBeenCalledWith({
+      boxId: companion.runtime.box_id,
+      response: { type: "extension_ui_response", id: "ui-stale", confirmed: false },
+    });
   });
 
   it("leaves the newest message pending when Pi accepts only the backlog", async () => {

@@ -39,6 +39,7 @@ export function CompanionThread({
   thread,
   orgId,
   error,
+  reconnecting = false,
   busy,
   openingDesktop,
   context,
@@ -50,11 +51,14 @@ export function CompanionThread({
   onSettings,
   onThread,
   onDesktop,
+  onComposeIntent,
 }: {
   companion: Companion;
   thread: Thread | null;
   orgId: string;
   error: string | null;
+  /** Consecutive thread refreshes have failed; the transcript on screen may be behind. */
+  reconnecting?: boolean;
   busy: boolean;
   openingDesktop: boolean;
   context: CompanionContextPanel;
@@ -70,6 +74,8 @@ export function CompanionThread({
   onSettings: (() => void) | null;
   onThread: (thread: Thread) => void;
   onDesktop: () => void;
+  /** Fired as the reader types, so the surface can wake an asleep Box ahead of the send. */
+  onComposeIntent?: () => void;
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -157,6 +163,16 @@ export function CompanionThread({
           {companion.persona && <p>{companion.persona}</p>}
         </div>
         {/*
+          A word, not an alert: the transcript on screen is not wrong, it may just be behind. It sits
+          beside the chip so the reader who wonders why nothing moves finds the answer where they
+          look for liveness, and it disappears on the first poll that answers. The live region stays
+          mounted and only its text toggles — a region mounted together with its content is not
+          reliably announced.
+        */}
+        <span className="chat-reconnecting" role="status">
+          {reconnecting ? "Reconnecting…" : ""}
+        </span>
+        {/*
           The chip is a dot and the state word, and the word is never left to the dot's colour. What
           the state is about — the Box — rides in the accessible name and the tooltip rather than in
           the visible text, because the header has to hold a name, a lifecycle control, and two
@@ -235,6 +251,7 @@ export function CompanionThread({
           openedThroughOrdinal={openedThroughOrdinal}
           onSend={onSend}
           onThread={onThread}
+          onComposeIntent={onComposeIntent}
         />
         {showContext && overlay && (
           <button

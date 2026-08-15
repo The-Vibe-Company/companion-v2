@@ -65,7 +65,7 @@ describe("Skills Hub PostgreSQL isolation", () => {
       grant select on memberships, companions, companion_workspace_access,
         companion_transcript_entries, companion_threads to ${migrationRole};
       grant update on companion_transcript_entries, companion_threads to ${migrationRole};
-      alter function companion_expire_tool_runs(uuid, uuid, timestamp with time zone)
+      alter function companion_expire_tool_runs(uuid, uuid, timestamp with time zone, integer, integer)
         owner to ${migrationRole}
     `);
     const grants = extractRuntimeRoleGrantBlock(await readFile(await resolveRuntimeRoleGrantsFile(), "utf8"));
@@ -81,7 +81,7 @@ describe("Skills Hub PostgreSQL isolation", () => {
     await fixture.cleanup();
     await integrationSql.unsafe(`drop owned by ${apiRole}`);
     await integrationSql.unsafe(`drop owned by ${workerRole}`);
-    await integrationSql.unsafe(`alter function companion_expire_tool_runs(uuid, uuid, timestamp with time zone) owner to ${functionOwner}`);
+    await integrationSql.unsafe(`alter function companion_expire_tool_runs(uuid, uuid, timestamp with time zone, integer, integer) owner to ${functionOwner}`);
     await integrationSql.unsafe(`drop owned by ${migrationRole}`);
     await integrationSql.unsafe(`drop role ${apiRole}`);
     await integrationSql.unsafe(`drop role ${workerRole}`);
@@ -377,7 +377,7 @@ describe("Skills Hub PostgreSQL isolation", () => {
         returning event_id
       `;
       const expired = await tx<Array<{ event_id: string; kind: string }>>`
-        select * from companion_expire_tool_runs(${fixture.orgA}, ${companionId}, now())
+        select * from companion_expire_tool_runs(${fixture.orgA}, ${companionId}, now(), 90, 600)
       `;
       const [state] = await tx<Array<{
         status: string;
@@ -403,7 +403,7 @@ describe("Skills Hub PostgreSQL isolation", () => {
       await tx.unsafe(`set local role ${apiRole}`);
       await tx`select set_config('app.org_id', ${fixture.orgB}, true), set_config('app.user_id', ${fixture.outsider.id}, true)`;
       return tx<Array<{ event_id: string }>>`
-        select * from companion_expire_tool_runs(${fixture.orgA}, ${companionId}, now())
+        select * from companion_expire_tool_runs(${fixture.orgA}, ${companionId}, now(), 90, 600)
       `;
     });
     expect(crossTenant).toEqual([]);

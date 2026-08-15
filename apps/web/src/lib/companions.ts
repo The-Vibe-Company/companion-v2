@@ -23,6 +23,17 @@ function orgHeaders(orgId: string): HeadersInit {
 }
 
 /**
+ * A send or an explicit wake may legitimately ride a cold Box wake, which the API bounds at three
+ * minutes and the Next proxy at 210 seconds. The client outlasts the proxy by a hair so the proxy's
+ * own 504 — not a client abort — decides the outcome; everything shorter uses apiFetch's default.
+ */
+const RUNTIME_WAKE_TIMEOUT_MS = 215_000;
+/** A sync can continue an archive-resume; bounded well under the wake since polling retries it. */
+const THREAD_SYNC_TIMEOUT_MS = 60_000;
+/** Live runtime reads and desktop handoffs run one bounded Box command plus proxy overhead. */
+const BOX_OBSERVE_TIMEOUT_MS = 45_000;
+
+/**
  * Every Companion the caller may read, with each thread's last line projected on. This is the poll
  * behind the conversation list, so it stays on the control-plane read model and never contacts Box.
  */
@@ -298,6 +309,7 @@ export async function sendCompanionMessage(
       headers: orgHeaders(orgId),
       body: JSON.stringify({ content, client_message_id: clientMessageId }),
     },
+    { timeoutMs: RUNTIME_WAKE_TIMEOUT_MS },
   );
   return result.thread;
 }
@@ -310,6 +322,7 @@ export async function syncCompanionThread(
   const result = await apiFetch<{ thread: CompanionThread }>(
     `/v1/companions/${encodeURIComponent(companionId)}/thread/sync`,
     { method: "POST", headers: orgHeaders(orgId), body: "{}" },
+    { timeoutMs: THREAD_SYNC_TIMEOUT_MS },
   );
   return result.thread;
 }
@@ -330,6 +343,7 @@ export async function decideCompanionDecision(
       headers: orgHeaders(orgId),
       body: JSON.stringify(input),
     },
+    { timeoutMs: BOX_OBSERVE_TIMEOUT_MS },
   );
   return result.thread;
 }
@@ -347,6 +361,7 @@ export async function getCompanionRuntime(
   const result = await apiFetch<{ companion: Companion }>(
     `/v1/companions/${encodeURIComponent(companionId)}/runtime${options.live ? "?live=true" : ""}`,
     { headers: orgHeaders(orgId) },
+    options.live ? { timeoutMs: BOX_OBSERVE_TIMEOUT_MS } : undefined,
   );
   return result.companion;
 }
@@ -362,6 +377,7 @@ export async function startCompanionRuntime(
       headers: orgHeaders(orgId),
       body: JSON.stringify({ client_surface: "web" }),
     },
+    { timeoutMs: RUNTIME_WAKE_TIMEOUT_MS },
   );
   return result.companion;
 }
@@ -379,6 +395,7 @@ export async function restartCompanionRuntime(
       headers: orgHeaders(orgId),
       body: JSON.stringify(input),
     },
+    { timeoutMs: RUNTIME_WAKE_TIMEOUT_MS },
   );
   return result.companion;
 }
@@ -395,6 +412,7 @@ export async function openCompanionDesktop(
   return apiFetch<CompanionDesktop>(
     `/v1/companions/${encodeURIComponent(companionId)}/runtime/desktop`,
     { method: "POST", headers: orgHeaders(orgId), body: "{}" },
+    { timeoutMs: BOX_OBSERVE_TIMEOUT_MS },
   );
 }
 

@@ -27,8 +27,9 @@ const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
 // Layout 9 staged the permission broker for shell, file, and question cards. Layout 10 overwrites
 // that legacy filename with the ask_user-only extension so shell and file tools run unrestricted.
 // Layout 11 refuses image reads and bounds every non-interactive execution tool so a Pi vision/tool
-// stall cannot hold a turn open indefinitely.
-export const COMPANION_PI_DISK_LAYOUT_VERSION = 11;
+// stall cannot hold a turn open indefinitely. Layout 12 gives shell runs their own longer execution
+// deadline so a legitimate build or test sweep is no longer aborted at the 90-second default.
+export const COMPANION_PI_DISK_LAYOUT_VERSION = 12;
 /** Content bytes the provider's file API refuses in one `PUT /boxes/:id/files` body. */
 const BOX_FILE_WRITE_LIMIT_BYTES = 5 * 1024 * 1024;
 /**
@@ -286,6 +287,15 @@ export interface CompanionBoxRuntime {
   }): Promise<void>;
   /** Reset the provider's idle clock after Pi accepts a durable message. */
   refreshTtl(input: { boxId: string }): Promise<void>;
+  /**
+   * Restart a Pi daemon that systemd has latched as failed or that stopped: reset-failed, start the
+   * unit, and wait for it to report active within the daemon-active budget. Never touches a healthy
+   * daemon (an `is-active` daemon returns immediately) and never resumes or creates a Box.
+   */
+  healPiDaemon(input: { boxId: string }): Promise<{
+    daemonState: "running" | "stopped" | "error";
+    detail: string | null;
+  }>;
   /** Read Pi RPC output from `offset` so the control plane can project new events. */
   readEvents(input: { boxId: string; offset: number }): Promise<CompanionPiEventChunk>;
   /**
@@ -1739,6 +1749,45 @@ printf '%s\\n' ${shellQuote(command)} > "$fifo"`,
       method: "PATCH",
       body: JSON.stringify({ ttlSeconds: this.#ttlSeconds }),
     });
+  }
+
+  /**
+   * Restart a Pi daemon that systemd has latched as failed or that stopped. The unit is already
+   * provisioned, so nothing is staged and no credential is rewritten: the latched failure is
+   * cleared, the unit is started, and the daemon gets the same active window a wake gives it. A
+   * healthy daemon returns on the first probe untouched, and a daemon that stays down is an answer
+   * with its reason rather than a thrown failure — only transport-level errors the other methods
+   * would also throw for travel out of here.
+   */
+  async healPiDaemon(input: { boxId: string }): Promise<{
+    daemonState: "running" | "stopped" | "error";
+    detail: string | null;
+  }> {
+    if (await this.#daemonState(input.boxId) === "running") {
+      return { daemonState: "running", detail: null };
+    }
+    const started = await this.#command(
+      input.boxId,
+      `set -e
+${PREPARE_USER_BUS}
+# A unit that crash-looped past systemd's start limit refuses every later start until its failure is
+# cleared, so the latched failure is cleared first; a unit with nothing latched is unaffected.
+systemctl --user reset-failed companion-pi-daemon.service >/dev/null 2>&1 || true
+systemctl --user start companion-pi-daemon.service`,
+      120,
+    );
+    if (!started.success) {
+      return {
+        daemonState: "error",
+        detail: `Pi daemon failed to start${commandFailureDetail(started)}`,
+      };
+    }
+    const daemonState = await this.#waitDaemonActive(input.boxId);
+    if (daemonState === "running") return { daemonState: "running", detail: null };
+    return {
+      daemonState: "error",
+      detail: `${PI_DAEMON_FAILURE_MESSAGE}${await this.#daemonFailureDetail(input.boxId)}`,
+    };
   }
 
   /**

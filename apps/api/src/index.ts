@@ -263,7 +263,7 @@ import {
 import { appRouter } from "./trpc";
 import { assertNoCompanionRetarget, assertTargetedSkillUpdate, assertUpdateIsTargeted, parseSkillPublishAction } from "./skillPublishGuards";
 import { buildInlineCompanionManifest, uploadDependencyValues, withResolvedManifestDependencies } from "./skillCompanionManifest";
-import { buildCompanionSkillRow, getCompanionSkillPackage } from "./companionSkillPackage";
+import { buildCompanionSkillRow, getCompanionSkillPackage } from "@companion/box-runtime";
 import { parseSkillListQuery } from "./skillListQuery";
 import { registerAgentAuthRoutes } from "./agentAuthRoutes";
 import { registerCompanionRoutes } from "./companionRoutes";

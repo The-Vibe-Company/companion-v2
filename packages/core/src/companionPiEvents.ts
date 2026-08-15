@@ -158,26 +158,36 @@ function truncate(content: string, limit = MAX_CONTENT_CHARACTERS): string {
  * whole first and then as a word inside a longer name, so `bash` and `run_bash_command` both read as
  * shell while an unfamiliar tool falls through to `tool` rather than being filed under a guess.
  */
-const TOOL_KIND_NAMES: ReadonlyArray<readonly [CompanionToolRunKind, ReadonlySet<string>]> = [
-  ["computer", new Set([
+/**
+ * The catalog in serializable form, exported because the staged Pi extension embeds it verbatim to
+ * pick the longer shell execution deadline in the Box — the in-Box timer and the control-plane
+ * settlement must classify a run's kind identically, priority order included.
+ */
+export const COMPANION_TOOL_KIND_NAME_TABLE: ReadonlyArray<
+  readonly [CompanionToolRunKind, readonly string[]]
+> = [
+  ["computer", [
     "computer", "computeruse", "desktop", "lux", "screenshot", "screencapture", "screen",
     "click", "doubleclick", "rightclick", "type", "key", "press", "scroll", "drag", "mouse",
     "cursor", "hover", "wait",
-  ])],
-  ["browse", new Set([
+  ]],
+  ["browse", [
     "browse", "browser", "web", "websearch", "webfetch", "fetch", "search", "navigate", "goto",
     "openurl", "url", "http", "https", "request", "curl", "crawl", "page",
-  ])],
-  ["shell", new Set([
+  ]],
+  ["shell", [
     "bash", "sh", "zsh", "shell", "terminal", "exec", "execute", "run", "command", "cmd",
     "process", "script", "python", "node", "npm", "pnpm", "git",
-  ])],
-  ["file", new Set([
+  ]],
+  ["file", [
     "file", "files", "read", "write", "edit", "editor", "patch", "apply", "applypatch", "create",
     "delete", "remove", "move", "copy", "ls", "list", "dir", "glob", "grep", "find", "rg", "view",
     "notebook", "strreplace", "replace", "insert", "open",
-  ])],
+  ]],
 ];
+
+const TOOL_KIND_NAMES: ReadonlyArray<readonly [CompanionToolRunKind, ReadonlySet<string>]> =
+  COMPANION_TOOL_KIND_NAME_TABLE.map(([kind, names]) => [kind, new Set(names)] as const);
 
 /** Split a tool name into comparable words: `str_replace-editor` and `strReplaceEditor` agree. */
 function toolNameWords(name: string): string[] {

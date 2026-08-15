@@ -22,6 +22,7 @@ import type {
 } from "@companion/contracts";
 import { COMPANION_PROVIDER_CATALOG } from "@companion/contracts";
 import type { OrgVM } from "@/lib/types";
+import { ApiFetchError } from "@/lib/apiClient";
 import {
   companionProviderSettingsCache,
   type CompanionProviderSettingsCacheSnapshot,
@@ -35,6 +36,7 @@ import {
   openCompanionDesktop,
   sendCompanionMessage,
   setCompanionProvider,
+  startCompanionRuntime,
   syncCompanionThread,
   updateCompanionMemberState,
 } from "@/lib/companions";
@@ -85,6 +87,17 @@ const PENDING_POLL_MS = 3_000;
  * wakes a Box for any Companion — including the ones nobody has opened.
  */
 const LIST_POLL_MS = 45_000;
+/**
+ * Where a failing open-thread poll backs off to. The surface keeps trying — a Box mid-wake or a
+ * network blip both deserve the retry — but not at the live cadence, which against a dead proxy is
+ * thirty doomed requests a minute queued behind each other.
+ */
+const MAX_POLL_BACKOFF_MS = 15_000;
+
+/** Polls skip hidden tabs: nobody is reading, and a backgrounded laptop should not keep a Box warm. */
+function pageHidden(): boolean {
+  return typeof document !== "undefined" && document.visibilityState === "hidden";
+}
 
 export interface CompanionNavigation {
   mineTreeRows: TreeRow[];
@@ -422,6 +435,13 @@ export function CompanionsApp({
   );
   const [thread, setThread] = useState<Thread | null>(null);
   const [threadError, setThreadError] = useState<string | null>(null);
+  /**
+   * Consecutive open-thread polls that failed. One miss is network weather and changes nothing; from
+   * the second the surface says "Reconnecting" beside the chip and the poll cadence backs off, and
+   * the first answered poll clears both. Kept separate from `threadError` deliberately: a transcript
+   * already on screen is not wrong, so a failed refresh must not cover it with an alert.
+   */
+  const [threadPollFailures, setThreadPollFailures] = useState(0);
   /** This reader's watermark when the open thread was opened; the "New" divider sits just past it. */
   const [lastReadOrdinal, setLastReadOrdinal] = useState<number | null>(null);
   /** How far the thread went when it was opened, so the divider marks reading rather than arrivals. */
@@ -459,6 +479,8 @@ export function CompanionsApp({
     joining: boolean;
   } | null>(null);
   const threadRequestRef = useRef(0);
+  /** Whether the open thread has a transcript on screen, for failure handling without dep churn. */
+  const threadLoadedRef = useRef(false);
   /** The thread currently on screen, available to async completions without a stale render closure. */
   const openedIdRef = useRef(openedId);
   const providerRequestRef = useRef(0);
@@ -712,6 +734,7 @@ export function CompanionsApp({
       if (next && requestId === threadRequestRef.current) {
         setThread(next);
         setThreadError(null);
+        setThreadPollFailures(0);
         // The control plane advances this member's watermark as it answers. Opening from the list
         // already cleared the row optimistically; this covers the thread nobody clicked into — a
         // deep link — which would otherwise keep a dot on a thread that is on screen.
@@ -720,7 +743,17 @@ export function CompanionsApp({
       }
     } catch (cause) {
       if (requestId === threadRequestRef.current) {
-        setThreadError(cause instanceof Error ? cause.message : "This thread could not be loaded.");
+        // A timeout, a network failure, or a 5xx is connectivity weather: count it toward the
+        // reconnect indicator and back the cadence off — whether or not a transcript loaded yet,
+        // hammering a dead network at the live cadence helps nobody. A stable 4xx is a verdict,
+        // not weather, and its message must reach the reader instead of an eternal quiet
+        // "Reconnecting". With no transcript yet, any failure is also the page's failure.
+        const status = cause instanceof ApiFetchError ? cause.status : null;
+        const connectivity = status === null || status === 408 || status >= 500;
+        if (connectivity) setThreadPollFailures((failures) => failures + 1);
+        if (!connectivity || !threadLoadedRef.current) {
+          setThreadError(cause instanceof Error ? cause.message : "This thread could not be loaded.");
+        }
       }
     }
   }, [currentOrg.id, openedId]);
@@ -778,6 +811,7 @@ export function CompanionsApp({
    */
   useEffect(() => {
     const timer = setInterval(() => {
+      if (pageHidden()) return;
       writtenRef.current.clear();
       void listCompanions(currentOrg.id)
         .then((latest) => setCompanions((current) => {
@@ -801,17 +835,53 @@ export function CompanionsApp({
     void refreshThread(false);
   }, [openedId, refreshThread]);
 
+  // Whether the transcript on screen belongs to the open thread, readable from async completions.
+  useEffect(() => {
+    threadLoadedRef.current = thread?.companion_id === openedId;
+  }, [openedId, thread]);
+
+  // Moving to another thread resets the reconnect count: its connection has not failed anything yet.
+  useEffect(() => setThreadPollFailures(0), [openedId]);
+
   useEffect(() => {
     if (!openedId) return;
     // A runner's thread sync is also the automatic continuation for an accepted wake that is
     // waiting on Box archival, and retries an abandoned provisioning claim after its stale window.
     // Viewer reads and an explicit Stop (`stopping`/`stopped`) stay on the control-plane-only path.
     const live = canRunOpened && (openedAwake || openedArchiveWait || openedStartRecovery);
-    const timer = setInterval(
-      () => void refreshThread(live),
-      live ? LIVE_POLL_MS : READ_MODEL_POLL_MS,
-    );
+    const base = live ? LIVE_POLL_MS : READ_MODEL_POLL_MS;
+    // Consecutive failures stretch the cadence toward the cap; the first answered poll resets it.
+    const interval = Math.min(base * 2 ** Math.min(threadPollFailures, 3), MAX_POLL_BACKOFF_MS);
+    const timer = setInterval(() => {
+      if (pageHidden()) return;
+      void refreshThread(live);
+    }, interval);
     return () => clearInterval(timer);
+  }, [
+    canRunOpened,
+    openedArchiveWait,
+    openedAwake,
+    openedId,
+    openedStartRecovery,
+    refreshThread,
+    threadPollFailures,
+  ]);
+
+  // Coming back — the tab re-shown, the network back up — revalidates immediately instead of
+  // waiting out a backed-off interval, and resets the cadence the failures had stretched.
+  useEffect(() => {
+    if (!openedId) return;
+    const revalidate = () => {
+      if (pageHidden()) return;
+      setThreadPollFailures(0);
+      void refreshThread(canRunOpened && (openedAwake || openedArchiveWait || openedStartRecovery));
+    };
+    window.addEventListener("online", revalidate);
+    document.addEventListener("visibilitychange", revalidate);
+    return () => {
+      window.removeEventListener("online", revalidate);
+      document.removeEventListener("visibilitychange", revalidate);
+    };
   }, [canRunOpened, openedArchiveWait, openedAwake, openedId, openedStartRecovery, refreshThread]);
 
   /**
@@ -849,9 +919,55 @@ export function CompanionsApp({
         ? BOX_STATUS_POLL_MS
         : READ_MODEL_POLL_MS;
     void refreshCompanion(openedId, live);
-    const timer = setInterval(() => void refreshCompanion(openedId, live), interval);
+    const timer = setInterval(() => {
+      if (pageHidden()) return;
+      void refreshCompanion(openedId, live);
+    }, interval);
     return () => clearInterval(timer);
   }, [canRunOpened, openedAwake, openedId, openedPending, refreshCompanion, sending]);
+
+  /** The thread already prewarmed since it was opened; typing more must not start a second wake. */
+  const prewarmedRef = useRef<string | null>(null);
+  useEffect(() => {
+    prewarmedRef.current = null;
+  }, [openedId]);
+
+  /**
+   * Typing is the strongest pre-send signal there is, so the first keystroke into an asleep or
+   * retryably-errored Companion starts its wake: by the time Send lands, the 45-65-second cold
+   * start has a head start. One shot per opened thread, never for a Companion mid-transition —
+   * and the server-side claim still refuses anything this surface got wrong about the state.
+   */
+  const openedRuntimeState = opened?.runtime.state;
+  const onComposeIntent = useCallback(() => {
+    if (!openedId || !canRunOpened) return;
+    // `not_created` is the commonest cold start of all: a brand-new Companion whose first message
+    // is being typed right now renders the same Asleep chip and deserves the same head start.
+    const state = openedRuntimeState;
+    if (state !== "stopped" && state !== "error" && state !== "not_created") return;
+    if (prewarmedRef.current === openedId) return;
+    prewarmedRef.current = openedId;
+    const companionId = openedId;
+    // The chip flips to Starting now; the pending-poll cadence takes over from there, so the reader
+    // watches the wake they caused rather than an Asleep chip beside a request nothing reports on.
+    writtenRef.current.add(companionId);
+    setCompanions((current) => current.map((item) => item.id === companionId
+      ? {
+        ...item,
+        runtime: { ...item.runtime, state: "provisioning", daemon_state: "starting" },
+      }
+      : item));
+    void startCompanionRuntime(currentOrg.id, companionId)
+      .then((companion) => replaceCompanion(companion))
+      .catch(() => {
+        // A lost race with another wake or a failed start both leave the truth in the projection;
+        // re-read it rather than guessing, and let a later keystroke try again.
+        prewarmedRef.current = null;
+        void refreshCompanion(companionId);
+      });
+    // Keyed on the state string, not the whole Companion object: this callback rides the transcript
+    // chrome context, and a new identity per poll would re-render the composer every few seconds.
+  }, [canRunOpened, currentOrg.id, openedId, openedRuntimeState, refreshCompanion, replaceCompanion]);
 
   /** Resolves false when the message never reached the control plane, so the composer keeps its text. */
   const onSend = async (content: string, clientMessageId: string): Promise<boolean> => {
@@ -1167,6 +1283,7 @@ export function CompanionsApp({
               thread={thread}
               orgId={currentOrg.id}
               error={desktopError ?? threadError}
+              reconnecting={threadPollFailures >= 2 && thread?.companion_id === openedId}
               busy={sending}
               openingDesktop={openingDesktop}
               context={{
@@ -1190,6 +1307,7 @@ export function CompanionsApp({
                 : () => router.push(`/companions/${opened.id}/settings`)}
               onThread={setThread}
               onDesktop={() => void onDesktop()}
+              onComposeIntent={onComposeIntent}
             />
           </>
         ) : settingsCompanion && providers ? (

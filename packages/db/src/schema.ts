@@ -830,6 +830,47 @@ export const companionProviderConnections = pgTable(
 );
 
 /**
+ * Reconciler bookkeeping: one lease row per Companion the worker is treating or backing off from.
+ * Kept beside `companions` because that table's `updated_at` is the CAS token of every lifecycle
+ * finalizer and reconciler housekeeping must never move it. Under FORCE RLS only the SECURITY
+ * DEFINER claim/settle functions' owner touches rows; runtime roles have no direct row access.
+ */
+export const companionReconcileLeases = pgTable(
+  "companion_reconcile_leases",
+  {
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    companionId: uuid("companion_id")
+      .primaryKey()
+      .references(() => companions.id, { onDelete: "cascade" }),
+    /** Worker instance currently holding the lease; null when free. */
+    claimedBy: text("claimed_by"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    /** Why the reconciler last claimed this Companion. */
+    reason: text("reason").notNull(),
+    /** Consecutive failed attempts for the current condition; reset by a successful settle. */
+    attempts: integer("attempts").notNull().default(0),
+    /** Backoff gate: the claim function skips this Companion until the moment passes. */
+    nextAttentionAt: timestamp("next_attention_at", { withTimezone: true }),
+    lastOutcome: text("last_outcome"),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    companionOrgFk: foreignKey({
+      columns: [t.orgId, t.companionId],
+      foreignColumns: [companions.orgId, companions.id],
+      name: "companion_reconcile_leases_companion_fk",
+    }),
+    nonnegativeAttempts: check(
+      "companion_reconcile_leases_attempts_check",
+      sql`${t.attempts} >= 0`,
+    ),
+  }),
+);
+
+/**
  * Member-owned MCP accounts used by web and mobile-web Companions. Transport metadata persists so
  * the Plugins screen is useful without waking Box. Credential payloads are envelope-encrypted and
  * are only decrypted after the Companion runtime authorization guard.

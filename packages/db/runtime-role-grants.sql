@@ -71,14 +71,17 @@ DECLARE
     'public.companion_skill_share_target(text,text)'::regprocedure,
     'public.companion_billing_org_for_stripe_event(text,text)'::regprocedure,
     'public.companion_revoke_inactive_skill_database_realm_shares(uuid,uuid)'::regprocedure,
-    'public.companion_expire_tool_runs(uuid,uuid,timestamp with time zone)'::regprocedure
+    'public.companion_expire_tool_runs(uuid,uuid,timestamp with time zone,integer,integer)'::regprocedure
   ];
   worker_functions regprocedure[] := ARRAY[
     'public.companion_claim_skill_database_object_deletions(integer,integer)'::regprocedure,
     'public.companion_complete_skill_database_object_deletion(text,uuid)'::regprocedure,
     'public.companion_defer_skill_database_object_deletion(text,uuid)'::regprocedure,
     'public.companion_list_billing_sync_candidates(timestamp with time zone,boolean,integer)'::regprocedure,
-    'public.companion_claim_github_sync_destinations(text,integer,integer)'::regprocedure
+    'public.companion_claim_github_sync_destinations(text,integer,integer)'::regprocedure,
+    'public.companion_expire_tool_runs(uuid,uuid,timestamp with time zone,integer,integer)'::regprocedure,
+    'public.companion_claim_reconcile_candidates(text,integer,integer,integer,integer)'::regprocedure,
+    'public.companion_settle_reconcile_lease(uuid,uuid,text,text,integer)'::regprocedure
   ];
 BEGIN
   IF api_role IS NULL OR worker_role IS NULL THEN
@@ -308,19 +311,23 @@ BEGIN
       public.companion_skill_share_target(text, text),
       public.companion_billing_org_for_stripe_event(text, text),
       public.companion_revoke_inactive_skill_database_realm_shares(uuid, uuid),
-      public.companion_expire_tool_runs(uuid, uuid, timestamp with time zone)
+      public.companion_expire_tool_runs(uuid, uuid, timestamp with time zone, integer, integer)
      TO %I',
     api_role
   );
 
   -- Claims, exact-lease admission, heartbeats, cleanup and discovery belong only to the worker.
+  -- Tool-run deadline settlement is additionally worker-callable so unattended threads are swept.
   EXECUTE format(
     'GRANT EXECUTE ON FUNCTION
       public.companion_claim_skill_database_object_deletions(integer, integer),
       public.companion_complete_skill_database_object_deletion(text, uuid),
       public.companion_defer_skill_database_object_deletion(text, uuid),
       public.companion_list_billing_sync_candidates(timestamp with time zone, boolean, integer),
-      public.companion_claim_github_sync_destinations(text, integer, integer)
+      public.companion_claim_github_sync_destinations(text, integer, integer),
+      public.companion_expire_tool_runs(uuid, uuid, timestamp with time zone, integer, integer),
+      public.companion_claim_reconcile_candidates(text, integer, integer, integer, integer),
+      public.companion_settle_reconcile_lease(uuid, uuid, text, text, integer)
      TO %I',
     worker_role
   );

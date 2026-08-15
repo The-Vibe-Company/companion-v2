@@ -81,6 +81,19 @@ describe("Companion tool-run settlement", () => {
     await integrationSql`delete from "user" where id in (${owner.id}, ${viewer.id})`;
   });
 
+  /**
+   * Rows take the database clock at projection time — Pi's own timestamps are untrusted since the
+   * deadline is measured in PostgreSQL. Aging a chip therefore means backdating the stored row,
+   * exactly what a real stall looks like to the settlement function.
+   */
+  const backdateToolRun = async (eventId: string, seconds: number) => {
+    await integrationSql`
+      update companion_transcript_entries
+      set created_at = now() - make_interval(secs => ${seconds})
+      where org_id = ${org} and companion_id = ${companionId} and event_id = ${eventId}
+    `;
+  };
+
   it("keeps a timeout terminal when a late Pi result loses the completion race", async () => {
     const eventId = "pi:tool-timeout";
     await asOwner((database) => recordCompanionPiProjectionWithEffects({
@@ -104,6 +117,7 @@ describe("Companion tool-run settlement", () => {
       }],
       database,
     }));
+    await backdateToolRun(eventId, 91);
 
     // A Viewer can close the durable deadline through the read-only thread path without receiving
     // runtime mutation authority.
@@ -111,7 +125,6 @@ describe("Companion tool-run settlement", () => {
       actor: viewer,
       orgId: org,
       companionId,
-      now: new Date(createdAt.getTime() + 90_001),
       database,
     }));
     expect(expired.timedOut).toEqual([{ eventId, kind: "file" }]);
@@ -161,7 +174,6 @@ describe("Companion tool-run settlement", () => {
     }));
 
     const eventId = "pi:tool-stranded-tail";
-    const toolCreatedAt = new Date("2026-08-15T13:00:00.000Z");
     await asOwner((database) => recordCompanionPiProjectionWithEffects({
       actor: owner,
       orgId: org,
@@ -179,10 +191,11 @@ describe("Companion tool-run settlement", () => {
           detail: null,
           screenshot: null,
         },
-        createdAt: toolCreatedAt,
+        createdAt: new Date("2026-08-15T13:00:00.000Z"),
       }],
       database,
     }));
+    await backdateToolRun(eventId, 91);
     const alors = await asOwner((database) => sendCompanionMessage({
       actor: owner,
       orgId: org,
@@ -210,7 +223,6 @@ describe("Companion tool-run settlement", () => {
       actor: viewer,
       orgId: org,
       companionId,
-      now: new Date(toolCreatedAt.getTime() + 90_001),
       database,
     }));
     const pending = await asOwner((database) => listPendingCompanionMessages({
@@ -227,6 +239,124 @@ describe("Companion tool-run settlement", () => {
     expect(pending.pending).toEqual([alors.entry, caVa.entry]);
     expect(pending.timeoutRecoveryPending).toBe(true);
     expect(pending.timeoutRestartPending).toBe(true);
+  });
+
+  it("gives shell runs the longer execution deadline and names it in the detail", async () => {
+    const eventId = "pi:tool-shell-run";
+    await asOwner((database) => recordCompanionPiProjectionWithEffects({
+      actor: owner,
+      orgId: org,
+      companionId,
+      entries: [{
+        eventId,
+        role: "tool",
+        content: "pnpm test",
+        tool: {
+          call_id: "call-shell-run",
+          kind: "shell",
+          name: "bash",
+          title: "pnpm test",
+          status: "running",
+          detail: null,
+          screenshot: null,
+        },
+        createdAt,
+      }],
+      database,
+    }));
+
+    // Past the default deadline but inside the shell one: a build must keep running.
+    await backdateToolRun(eventId, 91);
+    const early = await asOwner((database) => expireCompanionToolRuns({
+      actor: owner,
+      orgId: org,
+      companionId,
+      database,
+    }));
+    expect(early.timedOut).toEqual([]);
+    expect(early.thread.entries.find((entry) => entry.event_id === eventId)?.tool?.status)
+      .toBe("running");
+
+    await backdateToolRun(eventId, 601);
+    const late = await asOwner((database) => expireCompanionToolRuns({
+      actor: owner,
+      orgId: org,
+      companionId,
+      database,
+    }));
+    expect(late.timedOut).toEqual([{ eventId, kind: "shell" }]);
+    expect(late.thread.entries.find((entry) => entry.event_id === eventId)?.tool?.detail)
+      .toBe("Timed out after 600 seconds without a tool result.");
+  });
+
+  it("rewinds only the tail when no user message precedes the timed-out tool", async () => {
+    // A dedicated companion: the guarantee is about the very first entries of a thread.
+    const firstTurnCompanion = randomUUID();
+    await integrationSql`
+      insert into companions (id, org_id, owner_id, name)
+      values (${firstTurnCompanion}, ${org}, ${owner.id}, 'First Turn Companion')
+    `;
+    const eventId = "pi:tool-first-entry";
+    await asOwner((database) => recordCompanionPiProjectionWithEffects({
+      actor: owner,
+      orgId: org,
+      companionId: firstTurnCompanion,
+      entries: [{
+        eventId,
+        role: "tool",
+        content: "/tmp/conductor-cli.png",
+        tool: {
+          call_id: "call-first-entry",
+          kind: "file",
+          name: "read",
+          title: "/tmp/conductor-cli.png",
+          status: "running",
+          detail: null,
+          screenshot: null,
+        },
+        createdAt,
+      }],
+      database,
+    }));
+    const alors = await asOwner((database) => sendCompanionMessage({
+      actor: owner,
+      orgId: org,
+      companionId: firstTurnCompanion,
+      content: "Alors ?",
+      database,
+    }));
+    await asOwner((database) => recordCompanionPiProjectionWithEffects({
+      actor: owner,
+      orgId: org,
+      companionId: firstTurnCompanion,
+      entries: [],
+      deliveredOrdinal: alors.entry.ordinal,
+      database,
+    }));
+    await integrationSql`
+      update companion_transcript_entries
+      set created_at = now() - make_interval(secs => 91)
+      where org_id = ${org} and companion_id = ${firstTurnCompanion} and event_id = ${eventId}
+    `;
+
+    const expired = await asOwner((database) => expireCompanionToolRuns({
+      actor: owner,
+      orgId: org,
+      companionId: firstTurnCompanion,
+      database,
+    }));
+    const pending = await asOwner((database) => listPendingCompanionMessages({
+      actor: owner,
+      orgId: org,
+      companionId: firstTurnCompanion,
+      database,
+    }));
+
+    expect(expired.timedOut).toEqual([{ eventId, kind: "file" }]);
+    // The watermark lands on the tool's own ordinal, so exactly the unanswered tail after it is
+    // re-queued. A NULL watermark here would have marked the whole thread undelivered.
+    expect(pending.deliveredOrdinal).not.toBeNull();
+    expect(pending.pending).toEqual([alors.entry]);
   });
 
   it("recovers an already-settled timeout tail once for #305-era threads", async () => {
