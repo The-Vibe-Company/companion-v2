@@ -6,6 +6,7 @@ import {
   CompanionNotFoundError,
   CompanionRuntimeTransitionError,
   CompanionSettingsForbiddenError,
+  bumpCompanionSkillsRevisionForSkill,
   claimCompanionDeletion,
   claimCompanionRuntimeStop,
   deleteCompanion,
@@ -23,6 +24,7 @@ import {
   createIntegrationFixture,
   integrationDb,
   integrationSql,
+  seedSkill,
   type IntegrationFixture,
 } from "./testDatabase";
 
@@ -210,6 +212,130 @@ describe("Companion settings persistence and roles", () => {
       model_id: null,
     });
     expect(updated.runtime.provider_ids).toEqual([]);
+  });
+
+  it("tracks the skill list from saved to applied through the revision pair", async () => {
+    const skill = await seedSkill({
+      orgId: fixture.orgA,
+      creator: fixture.developer,
+      slug: `sync-skill-${fixture.suffix.slice(0, 8)}`,
+      scope: "org",
+    });
+    const before = await getCompanion({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      database: integrationDb,
+    });
+    expect(before.runtime.skills_revision).toBe(1);
+    expect(before.runtime.skills_applied_revision).toBe(0);
+
+    // A selection change bumps desired in the same write; a no-op save must not.
+    const changed = await updateCompanion({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      selectedSkillIds: [skill.id],
+      database: integrationDb,
+    });
+    expect(changed.runtime.skills_revision).toBe(2);
+    const noop = await updateCompanion({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      selectedSkillIds: [skill.id],
+      database: integrationDb,
+    });
+    expect(noop.runtime.skills_revision).toBe(2);
+
+    // Applying is monotonic and capped by desired: a stale write cannot regress it and a runaway
+    // value cannot claim a revision nobody asked for yet.
+    const applied = await updateCompanionRuntime({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      patch: { skillsAppliedRevision: 2 },
+      database: integrationDb,
+    });
+    expect(applied.runtime.skills_applied_revision).toBe(2);
+    expect(applied.runtime.skills_applied_at).not.toBeNull();
+    const stale = await updateCompanionRuntime({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      patch: { skillsAppliedRevision: 1 },
+      database: integrationDb,
+    });
+    expect(stale.runtime.skills_applied_revision).toBe(2);
+    const ahead = await updateCompanionRuntime({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      patch: { skillsAppliedRevision: 99 },
+      database: integrationDb,
+    });
+    expect(ahead.runtime.skills_applied_revision).toBe(2);
+
+    // A publish-style bump reaches every selector in the org — and only in this org, and only
+    // Companions actually selecting the skill.
+    const bystanderId = randomUUID();
+    await integrationDb.insert(schema.companions).values({
+      id: bystanderId,
+      orgId: fixture.orgA,
+      ownerId: fixture.developer.id,
+      name: "No selection",
+    });
+    const foreignId = randomUUID();
+    await integrationDb.insert(schema.companions).values({
+      id: foreignId,
+      orgId: fixture.orgB,
+      ownerId: fixture.outsider.id,
+      name: "Foreign selector",
+      selectedSkillIds: [skill.id],
+    });
+    await bumpCompanionSkillsRevisionForSkill({
+      orgId: fixture.orgA,
+      skillId: skill.id,
+      database: integrationDb,
+    });
+    const bumped = await getCompanion({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      database: integrationDb,
+    });
+    expect(bumped.runtime.skills_revision).toBe(3);
+    expect(bumped.runtime.skills_applied_revision).toBe(2);
+    const [bystander] = await integrationDb
+      .select({ skillsRevision: schema.companions.skillsRevision })
+      .from(schema.companions)
+      .where(eq(schema.companions.id, bystanderId));
+    expect(bystander!.skillsRevision).toBe(1);
+    const [foreign] = await integrationDb
+      .select({ skillsRevision: schema.companions.skillsRevision })
+      .from(schema.companions)
+      .where(eq(schema.companions.id, foreignId));
+    expect(foreign!.skillsRevision).toBe(1);
+    await integrationDb.delete(schema.companions).where(eq(schema.companions.id, foreignId));
+
+    // A recorded restage failure survives sanitized, and the next bump clears it.
+    const failed = await updateCompanionRuntime({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      patch: { skillsLastError: "Box exec timed out" },
+      database: integrationDb,
+    });
+    expect(failed.runtime.skills_last_error).toBe("Box exec timed out");
+    const cleared = await updateCompanion({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      selectedSkillIds: [],
+      database: integrationDb,
+    });
+    expect(cleared.runtime.skills_revision).toBe(4);
+    expect(cleared.runtime.skills_last_error).toBeNull();
   });
 
   it("allows only the Companion Owner to claim and finish permanent deletion", async () => {

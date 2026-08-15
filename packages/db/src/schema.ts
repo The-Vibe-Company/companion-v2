@@ -400,6 +400,20 @@ export const companions = pgTable(
     providerIds: jsonb("provider_ids").$type<string[]>().notNull().default([]),
     /** Encrypted provider credential generation last applied to the Box Pi auth file. */
     providerCredentialGeneration: uuid("provider_credential_generation"),
+    /**
+     * Monotonic desired skill-set revision; bumped when the selection changes and when a selected
+     * skill is republished, archived, restored, or renamed. Compared against skillsAppliedRevision
+     * to answer "is the saved skill list effective on the Box yet".
+     */
+    skillsRevision: integer("skills_revision").notNull().default(1),
+    /** Last skills revision successfully staged onto the Box Pi runtime. */
+    skillsAppliedRevision: integer("skills_applied_revision").notNull().default(0),
+    skillsAppliedAt: timestamp("skills_applied_at", { withTimezone: true }),
+    /**
+     * Why the last skill restage failed, as one sanitized operator line; cleared on the next bump
+     * and on a successful apply. Credential material must never reach it.
+     */
+    skillsLastError: text("skills_last_error"),
     diskLayoutVersion: integer("disk_layout_version").notNull().default(1),
     desktopAvailable: boolean("desktop_available").notNull().default(false),
     /**
@@ -435,6 +449,14 @@ export const companions = pgTable(
     lastErrorLength: check(
       "companions_last_error_check",
       sql`${t.lastError} is null or char_length(${t.lastError}) <= 500`,
+    ),
+    skillsRevisionBounds: check(
+      "companions_skills_revision_check",
+      sql`${t.skillsRevision} >= 1 and ${t.skillsAppliedRevision} >= 0 and ${t.skillsAppliedRevision} <= ${t.skillsRevision}`,
+    ),
+    skillsLastErrorLength: check(
+      "companions_skills_last_error_check",
+      sql`${t.skillsLastError} is null or char_length(${t.skillsLastError}) <= 500`,
     ),
   }),
 );

@@ -219,6 +219,15 @@ export interface CompanionRuntimeObservation {
   desktopAvailable: boolean;
 }
 
+/**
+ * What a start reports beyond the observation: whether this start actually staged runtime
+ * resources (skills, auth, MCP). A warm shortcut returns `staged: false`, and the lifecycle caller
+ * must not record a skills apply for it — the Box still runs whatever was staged before.
+ */
+export interface CompanionRuntimeStartObservation extends CompanionRuntimeObservation {
+  staged?: boolean;
+}
+
 /** A byte range of the Pi RPC log; `offset` is where the next read must resume. */
 export interface CompanionPiEventChunk {
   chunk: string;
@@ -258,7 +267,7 @@ export interface CompanionBoxRuntime {
      * it does, so a wake the control plane stopped waiting for stops working too.
      */
     signal?: AbortSignal;
-  }): Promise<CompanionRuntimeObservation>;
+  }): Promise<CompanionRuntimeStartObservation>;
   stop(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
   status(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
   /** Mint one fresh desktop URL for a Box that is already running; never creates or resumes one. */
@@ -1442,7 +1451,7 @@ exit 0`,
     hubEnv?: Record<string, string>;
     onBoxAssigned: (boxId: string | null) => Promise<void>;
     signal?: AbortSignal;
-  }): Promise<CompanionRuntimeObservation> {
+  }): Promise<CompanionRuntimeStartObservation> {
     this.#startSignal = input.signal;
     try {
       return await this.#startBox(input);
@@ -1469,7 +1478,7 @@ exit 0`,
     skills: CompanionRuntimeSkill[];
     hubEnv?: Record<string, string>;
     onBoxAssigned: (boxId: string | null) => Promise<void>;
-  }): Promise<CompanionRuntimeObservation> {
+  }): Promise<CompanionRuntimeStartObservation> {
     const allowBoxWake = input.allowBoxWake !== false;
     const assigned = input.boxId ? await this.#getAssignedBox(input.boxId) : null;
     // A recorded id that names a machine this Companion does not own is treated as no assignment at
@@ -1537,7 +1546,9 @@ exit 0`,
       allowBoxWake,
     );
     box = first.box;
-    if (first.warm) return observation(await this.#get(box.id), "running");
+    // A warm shortcut staged nothing: the Box keeps whatever resources the previous injection
+    // left. `staged: false` is what stops the caller from recording a skills apply for it.
+    if (first.warm) return { ...observation(await this.#get(box.id), "running"), staged: false };
     await this.#ensurePiLayout(box.id);
     await this.#injectPiResources({
       boxId: box.id,
@@ -1605,7 +1616,7 @@ trap - EXIT`,
         502,
       );
     }
-    return observation(await this.#get(box.id), daemonState);
+    return { ...observation(await this.#get(box.id), daemonState), staged: true };
   }
 
   async stop(input: { boxId: string }): Promise<CompanionRuntimeObservation> {

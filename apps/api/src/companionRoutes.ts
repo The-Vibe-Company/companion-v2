@@ -628,6 +628,14 @@ export function registerCompanionRoutes(
           mutation.provider.providerId,
         );
       }
+      // A pending skill revision means the Box does not run the saved list yet (a save while it
+      // slept, a failed publish push, an archived selection). A warm shortcut would keep it stale
+      // forever while settings promise "reapplies on next start", so a pending start restages —
+      // the same Pi recycle an online skills change already performs. Never for native_mobile,
+      // which stages no library skills.
+      const skillsPending = body.client_surface !== "native_mobile"
+        && mutation.companion.runtime.skills_applied_revision
+          < mutation.companion.runtime.skills_revision;
       const librarySkills = await withinBudget(
         // Object storage has no timeout of its own, so these reads are held to the wake's deadline
         // like every other step: a bucket that stops answering must not become a Companion that
@@ -689,7 +697,7 @@ export function registerCompanionRoutes(
           !mutation.companion.runtime.box_id
           || mutation.companion.runtime.provider_credential_generation
             !== mutation.provider.credentialGeneration,
-        restartPi: options.restartPi,
+        restartPi: options.restartPi || skillsPending,
         refreshRuntimeLayout:
           mutation.companion.runtime.disk_layout_version !== COMPANION_PI_DISK_LAYOUT_VERSION,
         allowBoxWake: options.allowBoxWake,
@@ -750,6 +758,17 @@ export function registerCompanionRoutes(
               providerCredentialGeneration: mutation!.provider.credentialGeneration,
               diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
               desktopAvailable: observed.desktopAvailable,
+              // The staged set matches the revision read in the claim transaction. Recorded only
+              // when this start actually staged: native_mobile stages no library skills, and a
+              // warm shortcut (`staged: false`) left the Box running whatever was staged before —
+              // writing "applied" for either would show "up to date" for packages the Box never
+              // received.
+              ...(body.client_surface !== "native_mobile" && observed.staged !== false
+                ? {
+                    skillsAppliedRevision: mutation!.companion.runtime.skills_revision,
+                    skillsLastError: null,
+                  }
+                : {}),
               observedAt: new Date(),
               startedAt: new Date(),
             },

@@ -117,6 +117,10 @@ const dbMocks = vi.hoisted(() => ({
   withTenantContext: vi.fn(async (_ctx: unknown, fn: (database: unknown) => unknown) => fn({})),
 }));
 
+const coreMocks = vi.hoisted(() => ({
+  bumpCompanionSkillsRevisionForSkill: vi.fn(async () => undefined),
+}));
+
 const authMocks = vi.hoisted(() => ({
   getSession: vi.fn(async (): Promise<unknown | null> => null),
   handler: vi.fn(),
@@ -144,6 +148,11 @@ vi.mock("@companion/auth", () => ({
 }));
 
 vi.mock("@companion/db", () => dbMocks);
+
+vi.mock("@companion/core", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@companion/core")>()),
+  ...coreMocks,
+}));
 
 vi.mock("@companion/core/services", () => serviceMocks);
 vi.mock("@companion/storage", async (importActual) => ({
@@ -665,6 +674,10 @@ describe("POST /v1/skills/:slug/rename", () => {
         title: "Skill Creator and Eval",
       }),
     );
+    // Boxes stage skills by slug, so a rename marks every selecting Companion as needing a restage.
+    expect(coreMocks.bumpCompanionSkillsRevisionForSkill).toHaveBeenCalledWith(
+      expect.objectContaining({ orgId: "org-1", skillId: "skill-1" }),
+    );
   });
 
   it("validates the new slug before calling the service", async () => {
@@ -867,6 +880,15 @@ describe("GET /v1/skills", () => {
     expect(serviceMocks.listSkills).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({ actor: actorA, orgId: "org-1", library: "mine", installedOnly: false }),
+    );
+  });
+
+  it("passes lib=accessible through so personal skills reach the Companion skill picker", async () => {
+    const res = await app.request("/v1/skills?lib=accessible", { headers: { Authorization: "Bearer read-a" } });
+
+    expect(res.status).toBe(200);
+    expect(serviceMocks.listSkills).toHaveBeenCalledWith(
+      expect.objectContaining({ actor: actorA, orgId: "org-1", library: "accessible" }),
     );
   });
 

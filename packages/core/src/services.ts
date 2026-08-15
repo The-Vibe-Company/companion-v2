@@ -3913,7 +3913,7 @@ export async function archiveSkill(input: {
   slug: string;
   reason?: string;
   database?: Db;
-}): Promise<void> {
+}): Promise<{ id: string }> {
   const database = input.database ?? db;
   const skill = await getSkillBySlug(input);
   if (!skill) throw new Error("skill not found");
@@ -3936,6 +3936,7 @@ export async function archiveSkill(input: {
     metadata: { slug: skill.slug, reason: input.reason ?? null },
   });
   if (skill.scope === "org") await enqueueGitHubAfterOrgSkillMutation(database, input.orgId);
+  return { id: skill.id };
 }
 
 export async function restoreSkill(input: {
@@ -3943,7 +3944,7 @@ export async function restoreSkill(input: {
   orgId: string;
   slug: string;
   database?: Db;
-}): Promise<void> {
+}): Promise<{ id: string }> {
   const database = input.database ?? db;
   const skill = await getSkillBySlug(input);
   if (!skill) throw new Error("skill not found");
@@ -3974,6 +3975,7 @@ export async function restoreSkill(input: {
     metadata: { slug: skill.slug },
   });
   if (skill.scope === "org") await enqueueGitHubAfterOrgSkillMutation(database, input.orgId);
+  return { id: skill.id };
 }
 
 export async function renameSkill(input: {

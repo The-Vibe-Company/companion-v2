@@ -35,6 +35,7 @@ import { canManageOrg } from "./authz";
 import type { CompanionPiEntry, CompanionPiToolCompletion } from "./companionPiEvents";
 import { matchCompanionToolCompletions } from "./companionPiEvents";
 import {
+  COMPANION_SKILLS_SYNC_ERROR_VIEWER_MESSAGE,
   companionRuntimeErrorForAccess,
   sanitizeCompanionRuntimeError,
 } from "./companionRuntimeErrors";
@@ -338,6 +339,14 @@ function toCompanion(
         lastError: row.lastError,
         access,
       }),
+      skills_revision: row.skillsRevision,
+      skills_applied_revision: row.skillsAppliedRevision,
+      skills_applied_at: row.skillsAppliedAt?.toISOString() ?? null,
+      skills_last_error: row.skillsLastError
+        ? access === "viewer"
+          ? COMPANION_SKILLS_SYNC_ERROR_VIEWER_MESSAGE
+          : row.skillsLastError
+        : null,
       last_observed_at: row.lastObservedAt?.toISOString() ?? null,
       last_started_at: row.lastStartedAt?.toISOString() ?? null,
       last_stopped_at: row.lastStoppedAt?.toISOString() ?? null,
@@ -995,6 +1004,14 @@ export async function updateCompanion(input: {
         database,
       })
     : undefined;
+  // Same-transaction desired-revision bump: the Box does not have this skill set yet. A no-op save
+  // (identical resolved array) must not bump, or the sync line would show a pending apply forever
+  // on an asleep Box that has nothing new to receive.
+  const skillsChanged = selectedSkillIds !== undefined
+    && (
+      selectedSkillIds.length !== companion.selected_skill_ids.length
+      || selectedSkillIds.some((id, index) => id !== companion.selected_skill_ids[index])
+    );
   const [row] = await database
     .update(schema.companions)
     .set({
@@ -1009,6 +1026,12 @@ export async function updateCompanion(input: {
           : {}
       ),
       ...(selectedSkillIds !== undefined ? { selectedSkillIds } : {}),
+      ...(skillsChanged
+        ? {
+            skillsRevision: sql`${schema.companions.skillsRevision} + 1`,
+            skillsLastError: null,
+          }
+        : {}),
       ...(input.canWriteSkills !== undefined ? { canWriteSkills: input.canWriteSkills } : {}),
       ...(selectedMcpAccountIds !== undefined ? { selectedMcpAccountIds } : {}),
       ...(providerChanged ? { providerCredentialGeneration: null } : {}),
@@ -1070,6 +1093,31 @@ export async function listOnlineCompanionsForSkillSync(input: {
       && Array.isArray(row.selectedSkillIds)
       && row.selectedSkillIds.includes(input.skillId))
     .map((row) => ({ id: row.id, ownerId: row.ownerId, boxId: row.boxId! }));
+}
+
+/**
+ * Mark every Companion selecting this skill as needing a restage — including asleep ones, which is
+ * what makes "published while the Box slept" honestly read as pending until the next wake. One
+ * org-scoped UPDATE; the jsonb containment matches the exact skill id inside selected_skill_ids.
+ */
+export async function bumpCompanionSkillsRevisionForSkill(input: {
+  orgId: string;
+  skillId: string;
+  database?: Db;
+}): Promise<void> {
+  const database = input.database ?? db;
+  // `updatedAt` is deliberately left alone: it orders other members' conversation lists and feeds
+  // the stale-claim recovery clock, and a background publish must not reshuffle either.
+  await database
+    .update(schema.companions)
+    .set({
+      skillsRevision: sql`${schema.companions.skillsRevision} + 1`,
+      skillsLastError: null,
+    })
+    .where(and(
+      eq(schema.companions.orgId, input.orgId),
+      sql`${schema.companions.selectedSkillIds} @> jsonb_build_array(${input.skillId}::text)`,
+    ));
 }
 
 /**
@@ -2569,6 +2617,14 @@ export async function updateCompanionRuntime(input: {
     desktopAvailable?: boolean;
     /** Sanitized before it is stored; any state other than `error` clears it instead. */
     lastError?: string | null;
+    /**
+     * The skills revision the just-finished stage carried. Written monotonically and never above
+     * the current desired revision, so a stage that raced a newer selection change stays pending.
+     */
+    skillsAppliedRevision?: number;
+    skillsAppliedAt?: Date;
+    /** Sanitized before it is stored. Null clears a stale line after a successful restage. */
+    skillsLastError?: string | null;
     observedAt?: Date;
     startedAt?: Date;
     stoppedAt?: Date;
@@ -2595,6 +2651,19 @@ export async function updateCompanionRuntime(input: {
         ? { desktopAvailable: input.patch.desktopAvailable }
         : {}),
       ...runtimeErrorPatch(input.patch),
+      ...(input.patch.skillsAppliedRevision !== undefined
+        ? {
+            skillsAppliedRevision: sql`least(${schema.companions.skillsRevision}, greatest(${schema.companions.skillsAppliedRevision}, ${input.patch.skillsAppliedRevision}))`,
+            skillsAppliedAt: input.patch.skillsAppliedAt ?? now,
+          }
+        : {}),
+      ...(input.patch.skillsLastError !== undefined
+        ? {
+            skillsLastError: input.patch.skillsLastError
+              ? sanitizeCompanionRuntimeError(input.patch.skillsLastError) || null
+              : null,
+          }
+        : {}),
       ...(input.patch.observedAt ? { lastObservedAt: input.patch.observedAt } : {}),
       ...(input.patch.startedAt ? { lastStartedAt: input.patch.startedAt } : {}),
       ...(input.patch.stoppedAt ? { lastStoppedAt: input.patch.stoppedAt } : {}),

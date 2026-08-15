@@ -1,4 +1,5 @@
 import {
+  bumpCompanionSkillsRevisionForSkill,
   claimCompanionRuntimeStart,
   listCompanionRuntimeSkillPackages,
   listOnlineCompanionsForSkillSync,
@@ -30,13 +31,24 @@ export async function syncPublishedSkillToOnlineCompanions(input: {
   runtimeFactory?: () => CompanionBoxRuntime;
 }): Promise<void> {
   const env = input.env ?? process.env;
+  // Every selector — Online or asleep — now needs a restage; the desired-revision bump is what
+  // makes the settings UI read "pending" until the package actually lands (on this push for Online
+  // Boxes, on the next wake for asleep ones). If the bump itself fails, stop: the publish already
+  // committed, and pushing unbumped packages would record nothing either way.
   const targets = await withTenantContext(
     { orgId: input.orgId, userId: input.actor.id },
-    (database) => listOnlineCompanionsForSkillSync({
-      orgId: input.orgId,
-      skillId: input.skillId,
-      database,
-    }),
+    async (database) => {
+      await bumpCompanionSkillsRevisionForSkill({
+        orgId: input.orgId,
+        skillId: input.skillId,
+        database,
+      });
+      return listOnlineCompanionsForSkillSync({
+        orgId: input.orgId,
+        skillId: input.skillId,
+        database,
+      });
+    },
   );
   if (!targets.length) return;
 
@@ -65,6 +77,9 @@ export async function syncPublishedSkillToOnlineCompanions(input: {
           database,
         });
         if (!companion.model_id || !companion.runtime.box_id) return;
+        // Captured before staging: a selection change that lands mid-push bumps desired past this
+        // value, so the monotonic applied write below leaves the Companion honestly pending.
+        const stagedSkillsRevision = companion.runtime.skills_revision;
         const skillPackages = await listCompanionRuntimeSkillPackages({
           actor: input.actor,
           orgId: input.orgId,
@@ -119,7 +134,10 @@ export async function syncPublishedSkillToOnlineCompanions(input: {
           hubEnv,
           onBoxAssigned: async () => undefined,
         });
+        // This push always recycles Pi (`restartPi: true`), so a real runtime cannot answer warm —
+        // but only a start that actually staged may claim the revision as applied.
         if (observed.runtimeState !== "running" || observed.daemonState !== "running") return;
+        if (observed.staged === false) return;
         await updateCompanionRuntime({
           actor: input.actor,
           orgId: input.orgId,
@@ -131,12 +149,29 @@ export async function syncPublishedSkillToOnlineCompanions(input: {
             desktopAvailable: observed.desktopAvailable,
             diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
             providerCredentialGeneration: provider.credentialGeneration,
+            skillsAppliedRevision: stagedSkillsRevision,
+            skillsLastError: null,
           },
           database,
         });
       });
-    } catch {
+    } catch (error) {
       // Best-effort: a failed Box sync must not fail the Skills Hub publish that already committed.
+      // But it must leave a trace — without it, "not yet effective" and "permanently broken" read
+      // identically forever. Never touches runtime_state; applied < desired keeps the row pending.
+      await withTenantContext({ orgId: input.orgId, userId: input.actor.id }, (database) =>
+        updateCompanionRuntime({
+          actor: input.actor,
+          orgId: input.orgId,
+          companionId: target.id,
+          patch: {
+            skillsLastError: error instanceof Error && error.message
+              ? error.message
+              : "Skill sync to the Box failed.",
+          },
+          database,
+        }),
+      ).catch(() => undefined);
     }
   }
 }

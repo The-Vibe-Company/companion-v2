@@ -138,6 +138,7 @@ import {
   SkillPublicReleaseValidationError,
 } from "@companion/core/services";
 import {
+  bumpCompanionSkillsRevisionForSkill,
   describeSkillDatabase,
   executeSkillDatabaseStatement,
   getCurrentSkillDatabaseDeclaration,
@@ -1762,7 +1763,9 @@ app.get("/v1/skills", async (c) => {
     actorFromContext(c, true);
     await requireScope(c, "skills:read");
     // `?lib=mine` returns the caller's "My Skills" (authored personal skills + org skills they have
-    // installed); `?lib=org` (default) is the flat org-wide library. `?label=marketing/seo` filters to
+    // installed); `?lib=accessible` is everything the caller may reference (all org skills plus their
+    // own personal skills — the Companion skill picker's view); `?lib=org` (default) is the flat
+    // org-wide library. `?label=marketing/seo` filters to
     // skills filed under that path OR any descendant (personal folders for `mine`, org folders for
     // `org`); `?nolabel=true` filters to skills with no folder; `?installed=true` narrows to skills
     // the caller has reported installed.
@@ -2151,15 +2154,19 @@ app.post("/v1/skills/:slug/rename", async (c) => {
     const body = renameSkillInputSchema.parse(await c.req.json());
     const result = await withTenant(
       c,
-      ({ actor, orgId, database }) =>
-        renameSkill({
+      async ({ actor, orgId, database }) => {
+        const renamed = await renameSkill({
           actor,
           orgId,
           slug: c.req.param("slug"),
           newSlug: body.newSlug,
           title: body.title,
           database,
-        }),
+        });
+        // Boxes stage the skill under its slug, so a rename changes their effective tree too.
+        await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: renamed.id, database });
+        return renamed;
+      },
       true,
     );
     return c.json(result);
@@ -2601,8 +2608,14 @@ app.post("/v1/skills/:slug/archive", async (c) => {
     const body = archiveSkillInputSchema.parse(await c.req.json().catch(() => ({})));
     await withTenant(
       c,
-      ({ actor, orgId, database }) =>
-        archiveSkill({ actor, orgId, slug: c.req.param("slug"), reason: body.reason, database }),
+      async ({ actor, orgId, database }) => {
+        const archived = await archiveSkill({
+          actor, orgId, slug: c.req.param("slug"), reason: body.reason, database,
+        });
+        // Archiving removes the skill from every selector's staged set on its next start, so those
+        // Companions are no longer up to date.
+        await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: archived.id, database });
+      },
       true,
     );
     return c.json({ ok: true });
@@ -2618,7 +2631,10 @@ app.post("/v1/skills/:slug/restore", async (c) => {
     await requireScope(c, "skills:write");
     await withTenant(
       c,
-      ({ actor, orgId, database }) => restoreSkill({ actor, orgId, slug: c.req.param("slug"), database }),
+      async ({ actor, orgId, database }) => {
+        const restored = await restoreSkill({ actor, orgId, slug: c.req.param("slug"), database });
+        await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: restored.id, database });
+      },
       true,
     );
     return c.json({ ok: true });

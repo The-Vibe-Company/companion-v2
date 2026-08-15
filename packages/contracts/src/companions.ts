@@ -240,6 +240,16 @@ export const companionSchema = z.object({
      * detail, and no configuration or credential material appears here for anyone.
      */
     last_error: z.string().nullable(),
+    /**
+     * Skill-list sync marker (THE-360 follow-up): `skills_applied_revision < skills_revision`
+     * means the saved selection has not been staged onto the Box yet (it applies on the next
+     * start; settings never wake a sleeping Box). `skills_last_error` carries one sanitized line
+     * when a background restage failed; a Viewer receives a generic line instead.
+     */
+    skills_revision: z.number().int().positive(),
+    skills_applied_revision: z.number().int().nonnegative(),
+    skills_applied_at: z.string().datetime().nullable(),
+    skills_last_error: z.string().nullable(),
     last_observed_at: z.string().datetime().nullable(),
     last_started_at: z.string().datetime().nullable(),
     last_stopped_at: z.string().datetime().nullable(),

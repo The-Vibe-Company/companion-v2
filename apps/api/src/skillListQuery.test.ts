@@ -29,6 +29,11 @@ describe("parseSkillListQuery", () => {
     });
   });
 
+  it("parses the accessible library and falls back to org for unknown values", () => {
+    expect(parse({ lib: "accessible" })).toMatchObject({ library: "accessible" });
+    expect(parse({ lib: "everything" })).toMatchObject({ library: "org" });
+  });
+
   it("validates label paths before they can reach the list query", () => {
     expect(parse({ label: "marketing/seo" })).toMatchObject({
       labelValid: true,
