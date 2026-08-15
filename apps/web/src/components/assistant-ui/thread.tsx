@@ -2,6 +2,7 @@
 
 import { MarkdownText } from "@/components/assistant-ui/markdown-text";
 import {
+  Reasoning,
   ReasoningContent,
   ReasoningRoot,
   ReasoningText,
@@ -13,38 +14,62 @@ import { cn } from "@/lib/utils";
 import {
   ActionBarPrimitive,
   AuiIf,
-  groupPartByType,
   MessagePrimitive,
   ThreadPrimitive,
+  type ReasoningMessagePartComponent,
   type ToolCallMessagePartComponent,
   useAuiState,
 } from "@assistant-ui/react";
 import { ArrowDownIcon, CheckIcon, CopyIcon } from "lucide-react";
-import { createContext, useContext, type ComponentType, type FC } from "react";
+import {
+  createContext,
+  useContext,
+  useMemo,
+  type ComponentType,
+  type FC,
+  type ReactNode,
+} from "react";
 
 /**
  * The assistant-ui registry thread (`r.assistant-ui.com/thread.json`, v0.15.14), pruned to what the
- * Companion thread actually offers. Everything removed is a capability this surface does not have —
- * attachments and their dropzone, dictation, prompt suggestions, branching, editing a sent message,
- * regeneration, and cancelling a run — because the model runs in a remote Box that the control plane
- * only polls: there is no stream to stop, no branch to pick, and no second attempt to ask for.
- * Re-fetching from the registry is an upgrade task, not a refresh: this file is the artifact.
+ * Companion thread offers and adapted to the surface it lives in.
+ *
+ * Everything removed is a capability this thread does not have — attachments and their dropzone,
+ * dictation, prompt suggestions, branching, editing a sent message, regeneration, cancelling a run —
+ * because the model runs in a remote Box that the control plane only polls: there is no stream to
+ * stop, no branch to pick, and no second attempt to ask for. Re-fetching from the registry is an
+ * upgrade task, not a refresh: this file is the artifact.
+ *
+ * The one structural change from the registry layout is that the composer sits *below* the scrolling
+ * viewport rather than sticky inside it. A phone keyboard shrinks the visual viewport and the shell
+ * around this thread is pinned to that box, so the composer is already sitting on the keyboard's top
+ * edge; putting it inside the scroller would hand that job back to the browser's own panning, which
+ * is the failure THE-346 fixed.
  *
  * What survives is the ChatGPT-shaped reading experience: a viewport that anchors to the newest turn,
- * a floating scroll-to-bottom, right-aligned member bubbles, assistant replies as markdown, reasoning
- * and tool calls behind their own disclosures, and a hover action bar that copies.
+ * a floating scroll-to-bottom, right-aligned member bubbles, replies as markdown, reasoning and tool
+ * calls behind their own disclosures, and a hover action bar that copies.
  */
 
 export type ThreadComponents = {
-  /** Rendered above the messages when the transcript is empty or still loading. */
+  /** Above the messages: the loading skeleton, or the note on an empty transcript. */
   Welcome?: ComponentType | undefined;
-  /** Rendered under the messages: the composer, or the Viewer's read-only note. */
+  /** Below the messages, inside the scroller: the typing indicator. */
+  Trailer?: ComponentType | undefined;
+  /** Below the viewport: the composer, or the Viewer's read-only note. */
   Footer?: ComponentType | undefined;
-  ToolFallback?: ToolCallMessagePartComponent | undefined;
+  /** Rendered around a member's message, which is where the author and the clock go. */
+  UserMessageFrame?: ComponentType<{ children: ReactNode }> | undefined;
+  /** Rendered around a Companion turn, for the same reason. */
+  AssistantMessageFrame?: ComponentType<{ children: ReactNode }> | undefined;
+  /** Tool UIs by name, and what an unrecognised tool falls back to. */
+  tools?: Record<string, ToolCallMessagePartComponent | undefined> | undefined;
 };
 
 export type ThreadProps = {
   components?: ThreadComponents | undefined;
+  /** Placed on the root, so the surface around this thread keeps owning the layout. */
+  className?: string | undefined;
   /** Placed on the viewport, which is the element that actually scrolls and announces. */
   viewportProps?: React.ComponentProps<typeof ThreadPrimitive.Viewport> | undefined;
 };
@@ -53,45 +78,42 @@ const EMPTY_COMPONENTS: ThreadComponents = {};
 
 const ThreadComponentsContext = createContext<ThreadComponents>(EMPTY_COMPONENTS);
 
+const Passthrough: FC<{ children: ReactNode }> = ({ children }) => <>{children}</>;
+
 export const Thread: FC<ThreadProps> = ({
   components = EMPTY_COMPONENTS,
+  className,
   viewportProps,
 }) => {
-  const { Welcome, Footer } = components;
+  const { Welcome, Trailer, Footer } = components;
   return (
     <ThreadComponentsContext.Provider value={components}>
       <ThreadPrimitive.Root
-        className="aui-scope aui-thread-root bg-background @container flex h-full min-h-0 flex-col"
-        style={{
-          ["--thread-max-width" as string]: "44rem",
-          ["--composer-radius" as string]: "1.25rem",
-        }}
+        className={cn("aui-scope bg-background flex min-h-0 flex-col", className)}
+        // One reading column, the same width ChatGPT settled on, centred inside whatever room the
+        // surface around this thread gives it.
+        style={{ ["--thread-max-width" as string]: "44rem" }}
       >
         <ThreadPrimitive.Viewport
           turnAnchor="top"
           data-slot="aui_thread-viewport"
           {...viewportProps}
           className={cn(
-            "relative flex flex-1 flex-col overflow-y-auto scroll-smooth",
+            "relative flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-none scroll-smooth px-(--chat-gutter) pt-4",
             viewportProps?.className,
           )}
         >
-          <div className="mx-auto flex w-full max-w-(--thread-max-width) flex-1 flex-col px-4 pt-4">
+          {/* A short conversation rests on the composer instead of floating under the header. */}
+          <div className="mx-auto mt-auto flex w-full max-w-(--thread-max-width) flex-col gap-y-5 pb-2">
             {Welcome ? <Welcome /> : null}
-            <div
-              data-slot="aui_message-group"
-              className="flex flex-col gap-y-5 pb-4 empty:hidden"
-            >
-              <ThreadPrimitive.Messages>
-                {() => <ThreadMessage />}
-              </ThreadPrimitive.Messages>
-            </div>
-            <ThreadPrimitive.ViewportFooter className="sticky bottom-0 mt-auto flex flex-col gap-2 overflow-visible pb-1">
-              <ThreadScrollToBottom />
-              {Footer ? <Footer /> : null}
-            </ThreadPrimitive.ViewportFooter>
+            <ThreadPrimitive.Messages>
+              {() => <ThreadMessage />}
+            </ThreadPrimitive.Messages>
+            {Trailer ? <Trailer /> : null}
           </div>
+          <ThreadScrollToBottom />
         </ThreadPrimitive.Viewport>
+        {Footer ? <Footer /> : null}
       </ThreadPrimitive.Root>
     </ThreadComponentsContext.Provider>
   );
@@ -100,16 +122,18 @@ export const Thread: FC<ThreadProps> = ({
 const ThreadMessage: FC = () => {
   const role = useAuiState((s) => s.message.role);
   if (role === "user") return <UserMessage />;
+  if (role === "system") return <SystemMessage />;
   return <AssistantMessage />;
 };
 
+/** Only reachable while the log is scrolled away from the newest turn; the primitive disables it. */
 const ThreadScrollToBottom: FC = () => {
   return (
     <ThreadPrimitive.ScrollToBottom asChild>
       <TooltipIconButton
-        tooltip="Scroll to bottom"
+        tooltip="Jump to the newest message"
         variant="outline"
-        className="aui-thread-scroll-to-bottom bg-background hover:bg-accent border-border absolute -top-10 z-10 self-center rounded-full border p-4 shadow-sm disabled:invisible"
+        className="border-border bg-background hover:bg-accent sticky bottom-2 z-10 self-center rounded-full border p-4 shadow-sm disabled:hidden"
       >
         <ArrowDownIcon />
       </TooltipIconButton>
@@ -117,55 +141,38 @@ const ThreadScrollToBottom: FC = () => {
   );
 };
 
+/** Thinking, folded away. It is disclosure, not the answer, so it opens only when asked for. */
+const ReasoningPart: ReasoningMessagePartComponent = (props) => (
+  <ReasoningRoot variant="ghost" className="mb-1">
+    <ReasoningTrigger />
+    <ReasoningContent>
+      <ReasoningText>
+        <Reasoning {...props} />
+      </ReasoningText>
+    </ReasoningContent>
+  </ReasoningRoot>
+);
+
 const AssistantMessage: FC = () => {
-  const { ToolFallback: ToolFallbackComponent = ToolFallback } = useContext(
-    ThreadComponentsContext,
-  );
+  const { tools, AssistantMessageFrame: Frame = Passthrough } = useContext(ThreadComponentsContext);
+  const components = useMemo(() => ({
+    Text: MarkdownText,
+    Reasoning: ReasoningPart,
+    tools: { by_name: tools ?? {}, Fallback: ToolFallback },
+  }), [tools]);
 
   return (
     <MessagePrimitive.Root
       data-slot="aui_assistant-message-root"
       data-role="assistant"
-      className="aui-assistant-message-root motion-safe:fade-in motion-safe:slide-in-from-bottom-1 motion-safe:animate-in relative duration-150"
+      className="aui-assistant-message-root motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 relative duration-150"
     >
-      <div
-        data-slot="aui_assistant-message-content"
-        className="text-foreground leading-relaxed wrap-break-word"
-      >
-        <MessagePrimitive.GroupedParts
-          groupBy={groupPartByType({
-            reasoning: ["group-reasoning"],
-            "tool-call": [],
-            "standalone-tool-call": [],
-          })}
-        >
-          {({ part, children }) => {
-            switch (part.type) {
-              case "group-reasoning":
-                return (
-                  <ReasoningRoot variant="ghost">
-                    <ReasoningTrigger />
-                    <ReasoningContent>
-                      <ReasoningText>{children}</ReasoningText>
-                    </ReasoningContent>
-                  </ReasoningRoot>
-                );
-              case "text":
-                return <MarkdownText />;
-              case "reasoning":
-                return <MarkdownText />;
-              case "tool-call":
-                return part.toolUI ?? <ToolFallbackComponent {...part} />;
-              default:
-                return null;
-            }
-          }}
-        </MessagePrimitive.GroupedParts>
-      </div>
-      <div
-        data-slot="aui_assistant-message-footer"
-        className="flex min-h-7 items-center pt-0.5"
-      >
+      <Frame>
+        <div className="text-foreground leading-relaxed wrap-break-word">
+          <MessagePrimitive.Parts components={components} />
+        </div>
+      </Frame>
+      <div className="flex min-h-7 items-center">
         <AssistantActionBar />
       </div>
     </MessagePrimitive.Root>
@@ -174,14 +181,14 @@ const AssistantMessage: FC = () => {
 
 /**
  * Copy, and only copy. Editing, regeneration, and export each need a control-plane route this thread
- * does not have — a reply is Pi's own turn, projected from its log, not something the browser can ask
- * to be produced again.
+ * does not have: a reply is Pi's own turn, projected from its log, not something a browser can ask to
+ * be produced again.
  */
 const AssistantActionBar: FC = () => {
   return (
     <ActionBarPrimitive.Root
       autohide="not-last"
-      className="aui-assistant-action-bar-root text-muted-foreground animate-in fade-in flex gap-1 duration-200"
+      className="text-muted-foreground animate-in fade-in -ms-1.5 flex gap-1 duration-200"
     >
       <ActionBarPrimitive.Copy asChild>
         <TooltipIconButton tooltip="Copy reply">
@@ -198,15 +205,33 @@ const AssistantActionBar: FC = () => {
 };
 
 const UserMessage: FC = () => {
+  const { UserMessageFrame: Frame = Passthrough } = useContext(ThreadComponentsContext);
   return (
     <MessagePrimitive.Root
       data-slot="aui_user-message-root"
       data-role="user"
-      className="aui-user-message-root motion-safe:fade-in motion-safe:slide-in-from-bottom-1 motion-safe:animate-in flex flex-col items-end duration-150"
+      className="motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-bottom-1 flex flex-col items-end duration-150"
     >
-      <div className="aui-user-message-content bg-muted text-foreground max-w-[85%] rounded-2xl px-4 py-2 wrap-break-word empty:hidden">
-        <MessagePrimitive.Parts />
-      </div>
+      <Frame>
+        <div className="bg-muted text-foreground max-w-[85%] rounded-2xl px-4 py-2 wrap-break-word empty:hidden">
+          <MessagePrimitive.Parts />
+        </div>
+      </Frame>
     </MessagePrimitive.Root>
   );
 };
+
+/**
+ * What happened to the run, not what anyone said: a refused message, or a turn that ended with
+ * nothing to show. It stays a quiet line rather than an error banner, because the conversation
+ * continues around it.
+ */
+const SystemMessage: FC = () => (
+  <MessagePrimitive.Root
+    data-slot="aui_system-message-root"
+    data-role="system"
+    className="text-muted-foreground text-center text-xs"
+  >
+    <MessagePrimitive.Parts />
+  </MessagePrimitive.Root>
+);

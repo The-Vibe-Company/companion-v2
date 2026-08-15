@@ -22,6 +22,24 @@ import { describe, expect, it } from "vitest";
  */
 
 const source = readFileSync(new URL("./companions.css", import.meta.url), "utf8");
+/**
+ * The transcript itself is written in utilities now, so the promises about the conversation are read
+ * from the components that carry those classes and from the scoped Tailwind stylesheet. Everything
+ * around the conversation — the shell, the header, the dialogs — is still hand-authored CSS.
+ */
+const chatCss = readFileSync(new URL("./chat.css", import.meta.url), "utf8");
+const transcript = readFileSync(
+  new URL("../components/companions/CompanionTranscript.tsx", import.meta.url),
+  "utf8",
+);
+const thread = readFileSync(
+  new URL("../components/assistant-ui/thread.tsx", import.meta.url),
+  "utf8",
+);
+const toolRunCard = readFileSync(
+  new URL("../components/companions/ToolRunCard.tsx", import.meta.url),
+  "utf8",
+);
 /** Comments explain what was removed and why, so the assertions read the rules alone. */
 const css = source.replace(/\/\*[\s\S]*?\*\//g, "");
 
@@ -118,15 +136,16 @@ describe("Companions mobile viewport", () => {
     expect(css).not.toContain("companions-scrim-in");
     expect(css).not.toContain("companions-thread-scrim");
     // Nothing in this stylesheet may animate a surface across the screen. A keyframe that only
-    // rotates in place — the tool-run spinner — is not that, so the assertion is on what the
-    // keyframes do rather than on there being none.
+    // moves in place is not that, so the assertion is on what the keyframes do rather than on there
+    // being none — the conversation's own motion now lives in the chat stylesheet's utilities.
     const keyframes = rules.filter((rule) =>
       rule.at.some((entry) => entry.startsWith("@keyframes")));
-    expect(keyframes.length).toBeGreaterThan(0);
     for (const frame of keyframes) {
       expect(frame.declarations).not.toMatch(/translate|left|right|inset|margin/);
     }
     expect(css).not.toContain("translateX(16px)");
+    // A message arriving may rise a few pixels into place; nothing may arrive from the side.
+    expect(transcript + thread).not.toMatch(/slide-in-from-(left|right|start|end)/);
   });
 
   it("keeps the shell on the dynamic viewport and clips the inline axis", () => {
@@ -141,7 +160,7 @@ describe("Companions mobile viewport", () => {
     // The list scrolls in the main box and the thread scrolls in the log; neither may hand the
     // gesture on to the page underneath it.
     expect(declarationsFor(".companions-main")[0]).toContain("overscroll-behavior: none;");
-    expect(declarationsFor(".chat-log")[0]).toContain("overscroll-behavior: none;");
+    expect(thread).toContain("overscroll-none");
     // The thread's own frame never scrolls: the log owns it.
     expect(declarationsFor(".companions-main--chat")[0]).toContain("overflow: hidden;");
   });
@@ -164,8 +183,7 @@ describe("Companions mobile viewport", () => {
   it("keeps the composer clear of the home indicator", () => {
     // The keyboard covers the home indicator, so the inset is a floor on the existing padding rather
     // than an addition to it.
-    expect(declarationsFor(".chat-composer", PHONE)[0])
-      .toMatch(/padding: .*max\(12px, env\(safe-area-inset-bottom, 0px\)\);/);
+    expect(transcript).toContain("pb-[max(14px,env(safe-area-inset-bottom,0px))]");
   });
 
   it("shortens the Box chip on a phone rather than wrapping the header", () => {
@@ -193,14 +211,15 @@ describe("Companions mobile viewport", () => {
       .toContain("min-height: 40px;");
   });
 
-  it("holds a tool run's chip and its Box frame inside the thread's width", () => {
-    // A grid column left to size itself takes the longest command or the frame's own pixels, so a
-    // `max-width: 100%` underneath it resolves against that content rather than the thread and both
-    // parts run off a phone. Bounding the column is what makes those percentages mean the thread.
-    expect(declarationsFor(".chat-tool")[0]).toContain("grid-template-columns: minmax(0, 1fr);");
-    expect(declarationsFor(".chat-tool__head")[0]).toContain("max-width: 100%;");
-    expect(declarationsFor(".chat-tool__detail")[0]).toContain("max-width: 100%;");
-    expect(declarationsFor(".chat-tool__frame")[0]).toContain("max-width: min(100%, 460px);");
+  it("holds a tool run's card and its Box frame inside the thread's width", () => {
+    // A command line or a desktop frame left to size itself takes its own pixels and drags the whole
+    // conversation sideways on a phone. The card is bound to the column, the run's title is allowed
+    // to shrink before it is allowed to push, the disclosed body scrolls inside the card rather than
+    // widening it, and every image in this scope is bound by the mini-preflight.
+    expect(toolRunCard).toContain("w-full");
+    expect(toolRunCard).toContain("min-w-0 flex-1 truncate");
+    expect(toolRunCard).toContain("overflow-auto");
+    expect(chatCss).toMatch(/\.aui-scope :where\(img[^)]*\)[\s\S]*?max-width: 100%;/);
   });
 
   it("keeps Back, Wake, and Send at a 44px thumb target", () => {
@@ -208,11 +227,8 @@ describe("Companions mobile viewport", () => {
 
     expect(declarationsFor(".chat-head .chat-back", coarse)[0]).toContain("min-height: 44px;");
     expect(declarationsFor(".chat-head .cds-btn", coarse)[0]).toContain("min-height: 44px;");
-    // THE-346: Send is the control the composer exists for, and 30px is not a thumb target.
-    const send = declarationsFor(".chat-send", coarse)[0];
-    expect(send).toContain("width: 44px;");
-    expect(send).toContain("height: 44px;");
-    // A mouse still points at the compact square.
-    expect(declarationsFor(".chat-send")[0]).toContain("width: 30px;");
+    // THE-346: Send is the control the composer exists for, and 32px is not a thumb target. A mouse
+    // still points at the compact square.
+    expect(transcript).toMatch(/pointer-coarse:size-11[\s\S]{0,80}size-8|size-8[\s\S]{0,80}pointer-coarse:size-11/);
   });
 });

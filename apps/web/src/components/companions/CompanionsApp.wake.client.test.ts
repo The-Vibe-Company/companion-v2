@@ -246,7 +246,7 @@ async function poll(times: number) {
 }
 
 const footer = (container: HTMLElement) =>
-  container.querySelector(".chat-hint")?.textContent ?? "";
+  container.querySelector("[data-slot='composer-hint']")?.textContent ?? "";
 const chip = (container: HTMLElement) => container.querySelector(".chat-box")?.textContent ?? "";
 const wakeControls = (container: HTMLElement) =>
   [...container.querySelectorAll("button")].filter((button) => button.textContent === "Wake");

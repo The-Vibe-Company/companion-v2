@@ -21,7 +21,12 @@ const MarkdownTextImpl = () => {
       remarkPlugins={[remarkGfm]}
       className="aui-md"
       components={defaultComponents}
-      defer
+      // The registry turns both of these on for a token-by-token stream: `smooth` reveals text with
+      // a typewriter animation, and `defer` holds the re-parse until React has spare time. Nothing
+      // streams into this thread. A reply is projected from Pi's log and arrives whole, one poll
+      // after it was produced, so a typewriter would be an animation of something that already
+      // finished — and would hold back text the reader could be reading.
+      smooth={false}
     />
   );
 };

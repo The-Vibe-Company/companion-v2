@@ -5,52 +5,58 @@ import {
   useCallback,
   useContext,
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
 import {
   AssistantRuntimeProvider,
   ComposerPrimitive,
-  MessagePrimitive,
-  ThreadPrimitive,
   useAuiState,
   useExternalStoreRuntime,
   type AppendMessage,
   type AssistantRuntime,
-  type TextMessagePartComponent,
-  type ThreadMessageLike,
 } from "@assistant-ui/react";
+import { ArrowUpIcon } from "lucide-react";
 import type {
   Companion,
-  CompanionDecision,
-  CompanionDecisionKind,
   CompanionThread as Thread,
-  CompanionToolRun,
-  CompanionToolRunKind,
   CompanionTranscriptEntry,
 } from "@companion/contracts";
 import { companionMessageEventId } from "@companion/contracts";
-import { Icon } from "../Icon";
+import { Thread as AssistantThread } from "@/components/assistant-ui/thread";
 import { decideCompanionDecision } from "../../lib/companions";
+import { DecisionActionsContext, type DecisionAction } from "./decisionActions";
+import { DecisionToolCard } from "./DecisionToolCard";
+import { ToolRunCard } from "./ToolRunCard";
+import { composerHint, replyExpected } from "./transcript";
 import {
-  composerHint,
-  replyExpected,
-  transcriptTurns,
-  type TranscriptTurn,
-} from "./transcript";
+  COMPANION_DECISION_TOOL_NAME,
+  COMPANION_TOOL_NAME,
+  groupTranscriptEntries,
+  toThreadMessageLike,
+  useStableEntries,
+  useStableGroups,
+  type TranscriptMessage,
+} from "./transcriptMessages";
 
 /**
- * The conversation of one Companion, rendered through the assistant-ui Thread, Message, and Composer
- * primitives. The primitives own the transcript mechanics — viewport anchoring, the composer, keys,
- * focus — and nothing else: the messages come from the control-plane read model this component is
+ * The conversation of one Companion, rendered through assistant-ui.
+ *
+ * The library owns the transcript mechanics — viewport anchoring, the composer, keys, focus, message
+ * parts — and nothing else: the messages come from the control-plane read model this component is
  * handed, sending goes back out through the same callback the rest of Companions uses, and no
- * assistant-ui thread list, cloud, history, or tool surface is wired up. A Viewer gets the transcript
- * with a read-only note where the composer would be, and the runtime has nothing to contact, so
- * reading a thread still cannot reach Box.
+ * assistant-ui thread list, cloud, history, or model adapter is wired up. A Viewer gets the
+ * transcript with a read-only note where the composer would be, and the runtime has nothing to
+ * contact, so reading a thread still cannot reach Box.
+ *
+ * A Pi turn arrives here as one message whose parts are its reasoning, its reply, and every tool run
+ * and permission card it produced. The two cards are registered as tool UIs by name, which is how a
+ * permission decision — the one thing in this thread a reader can act on — reaches the control plane
+ * from inside a message part.
  */
 
 /**
@@ -60,39 +66,38 @@ import {
  */
 const PRESS_CLICK_MS = 700;
 
-/** Turn metadata by message id. The primitives render one component per message; this is its row. */
-const TurnsContext = createContext<ReadonlyMap<string, TranscriptTurn>>(new Map());
-
-type DecisionAction =
-  | { action: "allow" }
-  | { action: "deny" }
-  | { action: "answer"; answer: string };
-
-const DecisionActionsContext = createContext<{
-  canAct: boolean;
-  onDecide: (requestId: string, input: DecisionAction) => Promise<void>;
-}>({
-  canAct: false,
-  onDecide: async () => undefined,
-});
-
-function useTurn(): TranscriptTurn | undefined {
-  const turns = useContext(TurnsContext);
-  const id = useAuiState((state) => state.message.id);
-  return id ? turns.get(id) : undefined;
-}
+/** Message metadata by id: who wrote it, whether it opens a passage, whether it is still sending. */
+const MessagesContext = createContext<ReadonlyMap<string, TranscriptMessage>>(new Map());
 
 /**
- * A tool run is its own transcript entry, and the primitives know three roles. It rides in as the
- * quietest of them and is rendered from the entry itself, so the run keeps its place in the
- * conversation without the thread growing a fourth kind of message to lay out.
+ * What the chrome around the messages is showing. It travels by context because the thread mounts
+ * these as components: a new component *identity* on every render would remount the composer, and a
+ * remounted composer is a lost draft mid-keystroke.
  */
-const convertEntry = (entry: CompanionTranscriptEntry): ThreadMessageLike => ({
-  id: entry.event_id,
-  role: entry.role === "tool" || entry.role === "decision" ? "system" : entry.role,
-  content: [{ type: "text", text: entry.content }],
-  createdAt: new Date(entry.created_at),
-});
+interface TranscriptChrome {
+  companionName: string;
+  canSend: boolean;
+  loading: boolean;
+  empty: boolean;
+  replying: boolean;
+  hint: string;
+  onSendPress: (event: ReactPointerEvent<HTMLButtonElement>) => void;
+  onSendClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+}
+
+const ChromeContext = createContext<TranscriptChrome | null>(null);
+
+function useChrome(): TranscriptChrome {
+  const chrome = useContext(ChromeContext);
+  if (!chrome) throw new Error("the Companion thread chrome is only available inside the thread");
+  return chrome;
+}
+
+function useTranscriptMessage(): TranscriptMessage | undefined {
+  const messages = useContext(MessagesContext);
+  const id = useAuiState((state) => state.message.id);
+  return id ? messages.get(id) : undefined;
+}
 
 /** Server markup keeps the stable ISO minute; the local clock takes over on the client. */
 function SentAt({ iso }: { iso: string }) {
@@ -104,330 +109,53 @@ function SentAt({ iso }: { iso: string }) {
   return <time dateTime={iso}>{text}</time>;
 }
 
-/** Message text is prose, not markup: Pi's reply is shown literally, with its own line breaks. */
-const TurnText: TextMessagePartComponent = ({ text }) => <p className="chat-turn__text">{text}</p>;
-
-const TEXT_ONLY = { Text: TurnText };
-
-function Turn({ tone }: { tone: "said" | "reply" }) {
-  const turn = useTurn();
+/**
+ * A writer keeps the floor across consecutive messages, so the name and the clock appear once per
+ * passage and the messages underneath are just the words.
+ */
+function PassageLead({ message }: { message: TranscriptMessage | undefined }) {
+  if (!message?.lead || !message.author) return null;
   return (
-    <MessagePrimitive.Root
-      className={"chat-turn chat-turn--" + tone
-        + (turn?.lead ? " chat-turn--lead" : "")
-        + (turn?.sending ? " chat-turn--sending" : "")}
-      aria-busy={turn?.sending || undefined}
-    >
-      {turn?.lead && turn.author && (
-        <p className="chat-turn__meta">
-          <span className="chat-turn__author">{turn.author}</span>
-          <SentAt iso={turn.entry.created_at} />
-        </p>
-      )}
-      <MessagePrimitive.Parts components={TEXT_ONLY} />
-    </MessagePrimitive.Root>
+    <p className="text-muted-foreground mb-1 flex items-baseline gap-2 text-xs">
+      <span className="text-foreground font-medium">{message.author}</span>
+      <SentAt iso={message.createdAt} />
+    </p>
   );
 }
 
-/**
- * What happened to the run, not what anyone said: a refused message or a turn that ended with nothing
- * to show. It stays a quiet line in the transcript instead of an error banner, because the
- * conversation continues around it.
- */
-function Note() {
+function AssistantFrame({ children }: { children: ReactNode }) {
+  const message = useTranscriptMessage();
   return (
-    <MessagePrimitive.Root className="chat-note">
-      <MessagePrimitive.Parts components={TEXT_ONLY} />
-    </MessagePrimitive.Root>
+    <>
+      <PassageLead message={message} />
+      {children}
+    </>
   );
 }
 
-const TOOL_ICONS: Record<CompanionToolRunKind, string> = {
-  shell: "terminal",
-  file: "file-pen-line",
-  browse: "globe",
-  computer: "monitor",
-  tool: "braces",
-};
-
-/** What the chip says it is doing, for a reader who cannot see the spinner or the tick. */
-const TOOL_STATUS_LABELS = {
-  running: "running",
-  ok: "done",
-  error: "failed",
-} as const;
-
-/**
- * One tool run, as a chip on the transcript. It is deliberately not a message: the run is a line of
- * chrome between two turns, so the reply above it and the reply below it still read as a
- * conversation. The chip carries what ran and how it ended; the arguments and whatever the tool
- * returned stay folded away until a reader asks for them, because most runs are read at a glance and
- * skipped.
- *
- * A run that moved the Box desktop also carries one frame of that desktop, shown in place. It is the
- * screen as the run left it, not a live stream — watching the machine is what the Computer panel
- * beside the thread is for, and this thread is still readable by someone who may not open one.
- */
-function ToolChip({ run }: { run: CompanionToolRun }) {
-  const [open, setOpen] = useState(false);
-  const detailId = useId();
-  const status = TOOL_STATUS_LABELS[run.status];
-  const named = run.title !== run.name;
+function UserFrame({ children }: { children: ReactNode }) {
+  const message = useTranscriptMessage();
   return (
-    <MessagePrimitive.Root
-      className={"chat-tool chat-tool--" + run.status}
-      aria-busy={run.status === "running" || undefined}
-    >
-      <button
-        type="button"
-        className="chat-tool__head"
-        aria-expanded={run.detail ? open : undefined}
-        aria-controls={run.detail ? detailId : undefined}
-        // A run Pi reported nothing about has nothing to unfold, so the chip is a plain line.
-        disabled={!run.detail}
-        onClick={() => setOpen((shown) => !shown)}
-      >
-        <Icon name={TOOL_ICONS[run.kind]} size={13} className="chat-tool__kind" />
-        <span className="chat-tool__name">{run.name}</span>
-        {named && <span className="chat-tool__title">{run.title}</span>}
-        {run.status === "running"
-          ? <span className="chat-tool__spinner" aria-hidden="true" />
-          : (
-            <Icon
-              name={run.status === "ok" ? "check" : "alert-triangle"}
-              size={13}
-              className="chat-tool__state"
-            />
-          )}
-        <span className="sr-only">{status}</span>
-        {run.detail && (
-          <Icon
-            name={open ? "chevron-down" : "chevron-right"}
-            size={13}
-            className="chat-tool__caret"
-          />
-        )}
-      </button>
-      {run.detail && open && (
-        <pre className="chat-tool__detail" id={detailId}>{run.detail}</pre>
-      )}
-      {run.screenshot && (
-        <img
-          className="chat-tool__frame"
-          src={run.screenshot}
-          alt={`The Box desktop after ${run.title}`}
-          loading="lazy"
-        />
-      )}
-    </MessagePrimitive.Root>
+    <div className="flex w-full flex-col items-end" aria-busy={message?.sending || undefined}>
+      <PassageLead message={message} />
+      <div className={message?.sending ? "opacity-60" : undefined}>{children}</div>
+    </div>
   );
 }
 
-const DECISION_ICONS: Record<CompanionDecisionKind, string> = {
-  shell: "terminal",
-  file: "file-pen-line",
-  question: "message-square",
+const TOOL_UIS = {
+  [COMPANION_TOOL_NAME]: ToolRunCard,
+  [COMPANION_DECISION_TOOL_NAME]: DecisionToolCard,
 };
 
-const DECISION_KIND_LABELS: Record<CompanionDecisionKind, string> = {
-  shell: "run a command",
-  file: "edit a file",
-  question: "asks",
+const THREAD_COMPONENTS = {
+  Welcome,
+  Trailer,
+  Footer,
+  UserMessageFrame: UserFrame,
+  AssistantMessageFrame: AssistantFrame,
+  tools: TOOL_UIS,
 };
-
-const DECISION_STATUS_LABELS = {
-  pending: "waiting",
-  allowed: "allowed",
-  denied: "denied",
-  answered: "answered",
-  expired: "timed out",
-} as const;
-
-/**
- * One permission card in the thread. It sits beside THE-352 tool chips with the same quiet chrome:
- * pending cards offer Allow / Deny (or an answer field) to Owner/Editor only; Viewers see the
- * resolved state and never get the controls.
- */
-function DecisionCard({
-  decision,
-  canAct,
-  onDecide,
-}: {
-  decision: CompanionDecision;
-  canAct: boolean;
-  onDecide: (
-    requestId: string,
-    input: { action: "allow" } | { action: "deny" } | { action: "answer"; answer: string },
-  ) => Promise<void>;
-}) {
-  const [answer, setAnswer] = useState("");
-  const [busy, setBusy] = useState(false);
-  const pending = decision.status === "pending";
-  const interactive = pending && canAct && !busy;
-  const status = DECISION_STATUS_LABELS[decision.status];
-
-  async function act(
-    input: { action: "allow" } | { action: "deny" } | { action: "answer"; answer: string },
-  ) {
-    if (!interactive) return;
-    setBusy(true);
-    try {
-      await onDecide(decision.request_id, input);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <MessagePrimitive.Root
-      className={"chat-decision chat-decision--" + decision.status}
-      aria-busy={pending || undefined}
-    >
-      <div className="chat-decision__head">
-        <Icon name={DECISION_ICONS[decision.kind]} size={13} className="chat-decision__kind" />
-        <span className="chat-decision__label">
-          {decision.kind === "question" ? "Question" : `Allow ${DECISION_KIND_LABELS[decision.kind]}`}
-        </span>
-        <span className="chat-decision__name">{decision.name}</span>
-        {pending
-          ? <span className="chat-tool__spinner" aria-hidden="true" />
-          : (
-            <Icon
-              name={decision.status === "allowed" || decision.status === "answered"
-                ? "check"
-                : "alert-triangle"}
-              size={13}
-              className="chat-decision__state"
-            />
-          )}
-        <span className="sr-only">{status}</span>
-      </div>
-      <pre className="chat-decision__detail">{decision.title}</pre>
-      {decision.kind === "question" && decision.answer && (
-        <p className="chat-decision__answer">{decision.answer}</p>
-      )}
-      {!pending && decision.decided_by_name && (
-        <p className="chat-decision__meta">
-          {status} by {decision.decided_by_name}
-        </p>
-      )}
-      {decision.status === "expired" && !decision.decided_by_name && (
-        <p className="chat-decision__meta">Timed out — denied</p>
-      )}
-      {interactive && decision.kind === "question" && (
-        <form
-          className="chat-decision__actions"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const value = answer.trim();
-            if (!value) return;
-            void act({ action: "answer", answer: value });
-          }}
-        >
-          <input
-            className="chat-decision__input"
-            value={answer}
-            onChange={(event) => setAnswer(event.target.value)}
-            placeholder="Your answer"
-            aria-label="Answer"
-            disabled={busy}
-          />
-          <button type="submit" className="cds-btn cds-btn--primary" disabled={busy || !answer.trim()}>
-            Answer
-          </button>
-          <button
-            type="button"
-            className="cds-btn cds-btn--secondary"
-            disabled={busy}
-            onClick={() => void act({ action: "deny" })}
-          >
-            Deny
-          </button>
-        </form>
-      )}
-      {interactive && decision.kind !== "question" && (
-        <div className="chat-decision__actions">
-          <button
-            type="button"
-            className="cds-btn cds-btn--primary"
-            disabled={busy}
-            onClick={() => void act({ action: "allow" })}
-          >
-            Allow
-          </button>
-          <button
-            type="button"
-            className="cds-btn cds-btn--secondary"
-            disabled={busy}
-            onClick={() => void act({ action: "deny" })}
-          >
-            Deny
-          </button>
-        </div>
-      )}
-      {pending && !canAct && (
-        <p className="chat-decision__meta">Waiting for an Owner or Editor</p>
-      )}
-    </MessagePrimitive.Root>
-  );
-}
-
-/** A tool run or permission card arrives as a system message; everything else with that role is a note. */
-function SystemTurn() {
-  const entry = useTurn()?.entry;
-  const { canAct, onDecide } = useContext(DecisionActionsContext);
-  if (entry?.tool) return <ToolChip run={entry.tool} />;
-  if (entry?.decision) {
-    return <DecisionCard decision={entry.decision} canAct={canAct} onDecide={onDecide} />;
-  }
-  return <Note />;
-}
-
-const TURN_COMPONENTS = {
-  UserMessage: () => <Turn tone="said" />,
-  AssistantMessage: () => <Turn tone="reply" />,
-  SystemMessage: SystemTurn,
-};
-
-/**
- * Keep one object per entry across polls. The thread is re-read every couple of seconds and arrives
- * as fresh JSON each time, so without this every message would look new to the runtime and the whole
- * transcript would re-render mid-conversation.
- */
-function useStableEntries(entries: CompanionTranscriptEntry[]): CompanionTranscriptEntry[] {
-  const seen = useRef(new Map<string, CompanionTranscriptEntry>());
-  const previous = useRef<CompanionTranscriptEntry[]>([]);
-  return useMemo(() => {
-    const next = new Map<string, CompanionTranscriptEntry>();
-    const stable = entries.map((entry) => {
-      const kept = seen.current.get(entry.event_id);
-      const unchanged = kept
-        && kept.role === entry.role
-        && kept.content === entry.content
-        && kept.author_id === entry.author_id
-        && kept.author_name === entry.author_name
-        // A chip is the one entry that changes after it is stored: it settles, and a visual run then
-        // gains its frame. Only those three fields ever move, so comparing them is what keeps a
-        // finished run from re-rendering on every poll for the rest of the conversation.
-        && kept.tool?.status === entry.tool?.status
-        && kept.tool?.detail === entry.tool?.detail
-        && kept.tool?.screenshot === entry.tool?.screenshot
-        && kept.decision?.status === entry.decision?.status
-        && kept.decision?.answer === entry.decision?.answer
-        && kept.decision?.decided_by_id === entry.decision?.decided_by_id
-        && kept.created_at === entry.created_at;
-      const value = unchanged ? kept : entry;
-      next.set(entry.event_id, value);
-      return value;
-    });
-    seen.current = next;
-    const same = stable.length === previous.current.length
-      && stable.every((entry, index) => entry === previous.current[index]);
-    if (same) return previous.current;
-    previous.current = stable;
-    return stable;
-  }, [entries]);
-}
 
 function appendedText(message: AppendMessage): string {
   return message.content
@@ -487,25 +215,26 @@ export function CompanionTranscript({
     if (!outgoing || saved.some((entry) => entry.event_id === outgoing.event_id)) return [...saved];
     return [...saved, outgoing];
   }, [outgoing, thread]);
-  const messages = useStableEntries(entries);
+  const stableEntries = useStableEntries(entries);
+
+  const grouped = useMemo(
+    () => groupTranscriptEntries(stableEntries, {
+      viewerId,
+      companionName: companion.name,
+      sendingEventId: outgoing?.event_id ?? null,
+    }),
+    [companion.name, outgoing, stableEntries, viewerId],
+  );
+  const messages = useStableGroups(grouped);
+  const messagesById = useMemo(
+    () => new Map(messages.map((message) => [message.id, message])),
+    [messages],
+  );
 
   const onDecide = useCallback(async (requestId: string, input: DecisionAction) => {
     const next = await decideCompanionDecision(orgId, companion.id, requestId, input);
     onThread(next);
   }, [companion.id, onThread, orgId]);
-
-  const turns = useMemo(
-    () => transcriptTurns(messages, {
-      viewerId,
-      companionName: companion.name,
-      sendingEventId: outgoing?.event_id ?? null,
-    }),
-    [companion.name, messages, outgoing, viewerId],
-  );
-  const turnsById = useMemo(
-    () => new Map(turns.map((turn) => [turn.entry.event_id, turn])),
-    [turns],
-  );
 
   const send = useCallback(async (message: AppendMessage) => {
     const content = appendedText(message);
@@ -527,11 +256,11 @@ export function CompanionTranscript({
       ordinal: Number.MAX_SAFE_INTEGER,
       role: "user",
       content,
+      reasoning: null,
       author_id: viewerId,
       author_name: null,
       tool: null,
-    decision: null,
-      reasoning: null,
+      decision: null,
       created_at: new Date().toISOString(),
     });
     try {
@@ -546,7 +275,7 @@ export function CompanionTranscript({
 
   const runtime = useExternalStoreRuntime({
     messages,
-    convertMessage: convertEntry,
+    convertMessage: toThreadMessageLike,
     onNew: send,
     // Sending is the only thing this thread does: no editing, no branching, no regeneration, no
     // cancel, and no run of its own, so the primitives offer none of those controls.
@@ -589,93 +318,155 @@ export function CompanionTranscript({
     event.preventDefault();
   }, []);
 
-  const replying = replyExpected({ entries: messages, awake });
+  const replying = replyExpected({ entries: stableEntries, awake });
+  const loading = thread === null;
   const empty = thread !== null && messages.length === 0;
+  const hint = composerHint({
+    thread,
+    companionName: companion.name,
+    state: companion.runtime.state,
+  });
+
+  const chrome = useMemo<TranscriptChrome>(() => ({
+    companionName: companion.name,
+    canSend,
+    loading,
+    empty,
+    replying,
+    hint,
+    onSendPress: sendOnPress,
+    onSendClick: swallowClickAfterPress,
+  }), [
+    canSend,
+    companion.name,
+    empty,
+    hint,
+    loading,
+    replying,
+    sendOnPress,
+    swallowClickAfterPress,
+  ]);
+
+  const decisions = useMemo(() => ({ canAct: canSend, onDecide }), [canSend, onDecide]);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <DecisionActionsContext.Provider value={{ canAct: canSend, onDecide }}>
-      <TurnsContext.Provider value={turnsById}>
-        <ThreadPrimitive.Root className="chat-thread">
-          <ThreadPrimitive.Viewport
-            className="chat-log"
-            role="log"
-            aria-live="polite"
-            aria-busy={thread === null}
-          >
-            <div className="chat-column">
-              {thread === null && (
-                <>
-                  {/* The skeleton is decorative; the wait itself still has to be announced. */}
-                  <span className="sr-only" role="status">Loading conversation...</span>
-                  <p className="chat-loading" aria-hidden="true">
-                    <span /><span /><span />
-                  </p>
-                </>
-              )}
-              {empty && (
-                <div className="chat-start">
-                  <strong>No messages yet</strong>
-                  <p>
-                    {canSend
-                      ? `Messages are saved here. Wake ${companion.name} when you want a reply.`
-                      : "This transcript is read from the control plane, so opening it left the Box asleep."}
-                  </p>
-                </div>
-              )}
-              <ThreadPrimitive.Messages components={TURN_COMPONENTS} />
-              {replying && (
-                <p className="chat-replying">
-                  <span className="chat-turn__author">{companion.name}</span>
-                  <span>is replying...</span>
-                </p>
-              )}
-            </div>
-            <ThreadPrimitive.ScrollToBottom className="chat-jump">
-              <Icon name="chevron-down" size={14} /> Latest
-            </ThreadPrimitive.ScrollToBottom>
-          </ThreadPrimitive.Viewport>
-
-          {canSend ? (
-            <ComposerPrimitive.Root className="chat-composer">
-              <div className="chat-composer__field">
-                <ComposerPrimitive.Input
-                  className="chat-composer__input"
-                  placeholder={`Message ${companion.name}`}
-                  aria-label={`Message ${companion.name}`}
-                  // A phone keyboard labels its return key from this hint. Without it a textarea
-                  // offers `return`, which reads as a new line even though Enter sends here; Shift +
-                  // Enter is still the new line, on a phone as on a desktop.
-                  enterKeyHint="send"
-                  // Escape belongs to the thread, not to the draft: a stray keystroke must never
-                  // discard text this composer is holding on to.
-                  cancelOnEscape={false}
-                />
-                <ComposerPrimitive.Send
-                  className="chat-send"
-                  aria-label="Send message"
-                  onPointerDown={sendOnPress}
-                  onClick={swallowClickAfterPress}
-                >
-                  <Icon name="send" size={15} />
-                </ComposerPrimitive.Send>
-              </div>
-              <p className="chat-hint">
-                {composerHint({
-                  thread,
-                  companionName: companion.name,
-                  state: companion.runtime.state,
-                })}
-              </p>
-            </ComposerPrimitive.Root>
-          ) : (
-            <footer className="chat-readonly">
-              Viewer access is read-only. Sending, run, and desktop stay with the Owner and Editors.
-            </footer>
-          )}
-        </ThreadPrimitive.Root>
-      </TurnsContext.Provider>
+      <DecisionActionsContext.Provider value={decisions}>
+        <MessagesContext.Provider value={messagesById}>
+          <ChromeContext.Provider value={chrome}>
+            <AssistantThread
+              className="chat-thread min-w-0 flex-1"
+              components={THREAD_COMPONENTS}
+              viewportProps={{
+                role: "log",
+                "aria-live": "polite",
+                "aria-busy": loading,
+              }}
+            />
+          </ChromeContext.Provider>
+        </MessagesContext.Provider>
       </DecisionActionsContext.Provider>
     </AssistantRuntimeProvider>
+  );
+}
+
+function Welcome() {
+  const { canSend, companionName, empty, loading } = useChrome();
+  if (loading) {
+    return (
+      <>
+        {/* The skeleton is decorative; the wait itself still has to be announced. */}
+        <span className="sr-only" role="status">Loading conversation...</span>
+        <div className="grid gap-3" aria-hidden="true">
+          <span className="bg-muted h-3 w-2/5 rounded" />
+          <span className="bg-muted h-3 w-3/4 rounded" />
+          <span className="bg-muted h-3 w-3/5 rounded" />
+        </div>
+      </>
+    );
+  }
+  if (!empty) return null;
+  return (
+    <div className="text-muted-foreground max-w-[48ch] text-sm">
+      <strong className="text-foreground block text-base">No messages yet</strong>
+      <p className="mt-1">
+        {canSend
+          ? `Messages are saved here. Wake ${companionName} when you want a reply.`
+          : "This transcript is read from the control plane, so opening it left the Box asleep."}
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Pi owes this thread a reply and has not produced one yet. The dots are the whole message for a
+ * reader who can see them and nothing at all for one who cannot, so the sentence is stated outright
+ * beside them.
+ */
+function Trailer() {
+  const { companionName, replying } = useChrome();
+  if (!replying) return null;
+  return (
+    <p
+      data-slot="companion-replying"
+      className="text-muted-foreground flex items-center gap-1.5 text-sm"
+    >
+      <span className="sr-only">{companionName} is replying</span>
+      <span aria-hidden="true" className="flex items-center gap-1">
+        {[0, 1, 2].map((index) => (
+          <span
+            key={index}
+            className="bg-muted-foreground/70 size-1.5 animate-bounce rounded-full motion-reduce:animate-none"
+            style={{ animationDelay: `${index * 140}ms` }}
+          />
+        ))}
+      </span>
+    </p>
+  );
+}
+
+/** The composer, or — for a Viewer — the line that says why there is none. */
+function Footer() {
+  const { canSend, companionName, hint, onSendPress, onSendClick } = useChrome();
+  if (!canSend) {
+    return (
+      <footer className="border-border text-muted-foreground shrink-0 border-t px-(--chat-gutter) py-3 text-xs">
+        Viewer access is read-only. Sending, run, and desktop stay with the Owner and Editors.
+      </footer>
+    );
+  }
+  return (
+    <ComposerPrimitive.Root className="border-border bg-background shrink-0 border-t px-(--chat-gutter) pt-2.5 pb-[max(14px,env(safe-area-inset-bottom,0px))]">
+      <div className="mx-auto w-full max-w-(--thread-max-width)">
+        {/* The field and its send control are one object, so the composer reads as one place to type. */}
+        <div className="border-input focus-within:ring-ring/50 bg-card flex items-end gap-2 rounded-2xl border ps-3 py-1.5 pe-1.5 focus-within:ring-[3px]">
+          <ComposerPrimitive.Input
+            className="text-foreground max-h-42 min-h-8 flex-1 resize-none bg-transparent py-1 outline-none"
+            placeholder={`Message ${companionName}`}
+            aria-label={`Message ${companionName}`}
+            rows={1}
+            // A phone keyboard labels its return key from this hint. Without it a textarea offers
+            // `return`, which reads as a new line even though Enter sends here; Shift + Enter is
+            // still the new line, on a phone as on a desktop.
+            enterKeyHint="send"
+            // Escape belongs to the thread, not to the draft: a stray keystroke must never discard
+            // text this composer is holding on to.
+            cancelOnEscape={false}
+          />
+          <ComposerPrimitive.Send
+            // THE-346: Send is the control the composer exists for, and a 32px square is not a thumb
+            // target. The field grows around it rather than the control shrinking, and a mouse keeps
+            // the compact square it points at precisely.
+            className="bg-primary text-primary-foreground hover:bg-primary/90 disabled:bg-muted disabled:text-muted-foreground pointer-coarse:size-11 grid size-8 shrink-0 place-items-center rounded-full transition-colors disabled:cursor-not-allowed"
+            aria-label="Send message"
+            onPointerDown={onSendPress}
+            onClick={onSendClick}
+          >
+            <ArrowUpIcon className="size-4" />
+          </ComposerPrimitive.Send>
+        </div>
+        <p data-slot="composer-hint" className="text-muted-foreground mt-1.5 text-xs">{hint}</p>
+      </div>
+    </ComposerPrimitive.Root>
   );
 }

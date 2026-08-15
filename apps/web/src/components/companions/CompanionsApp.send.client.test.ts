@@ -290,7 +290,7 @@ describe("CompanionsApp send", () => {
       await pressEnter(container);
       await poll(1);
 
-      expect(container.querySelector(".chat-hint")?.textContent)
+      expect(container.querySelector("[data-slot='composer-hint']")?.textContent)
         .toBe("Enter sends. Shift + Enter starts a new line.");
       expect(container.querySelector(".chat-box")?.textContent).toContain("Box · online");
     });
@@ -324,7 +324,7 @@ describe("CompanionsApp send", () => {
       });
 
       expect(api.posts()).toBe(1);
-      expect(container.querySelectorAll(".chat-turn--said")).toHaveLength(1);
+      expect(container.querySelectorAll("[data-role='user']")).toHaveLength(1);
 
       await act(async () => {
         api.releaseSend();

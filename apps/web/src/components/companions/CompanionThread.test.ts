@@ -167,7 +167,9 @@ describe("CompanionThread", () => {
     });
 
     expect(markup).toContain("The run stopped before Pi replied.");
-    expect(markup).not.toMatch(/tool|skill|mcp/i);
+    // Read from what a person sees, not from the markup: the thread is built out of a component
+    // library now, and its class names say `tooltip` without offering anyone a Pi tool.
+    expect(text(markup)).not.toMatch(/tool|skill|mcp/i);
     // Computer use is the Box desktop and nothing else, reached from the one status chip.
     expect(markup.match(/open the Box desktop/g)).toHaveLength(1);
   });
@@ -434,11 +436,11 @@ describe("CompanionThread", () => {
       pending_count: 1,
     });
 
-    expect(render({ thread: awaiting })).toContain("is replying...");
+    expect(render({ thread: awaiting })).toContain("is replying");
     // A sleeping Box owes nothing until it is woken, and the composer hint says so instead.
-    expect(render({ companion: asleep, thread: awaiting })).not.toContain("is replying...");
+    expect(render({ companion: asleep, thread: awaiting })).not.toContain("is replying");
     // A reply that already landed ends the wait.
-    expect(render({})).not.toContain("is replying...");
+    expect(render({})).not.toContain("is replying");
   });
 
   it("renders a pending shell permission card with Allow / Deny for Owner/Editor", () => {
@@ -474,7 +476,7 @@ describe("CompanionThread", () => {
       }),
     });
 
-    expect(markup).toContain("chat-decision--pending");
+    expect(markup).toMatch(/data-slot="companion-decision"[^>]*aria-busy="true"/);
     expect(markup).toContain("Allow run a command");
     expect(markup).toContain("ls -la");
     expect(markup).toContain(">Allow<");
@@ -512,7 +514,8 @@ describe("CompanionThread", () => {
         ],
       }),
     });
-    expect(resolved).toContain("chat-decision--allowed");
+    expect(resolved).toContain('data-slot="companion-decision"');
+    expect(resolved).not.toContain('aria-busy="true"');
     expect(resolved).toContain("allowed by Ada");
     expect(resolved).not.toContain(">Allow<");
     expect(resolved).not.toContain(">Deny<");

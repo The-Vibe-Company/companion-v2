@@ -1,6 +1,6 @@
 import type { CompanionThread, CompanionTranscriptEntry } from "@companion/contracts";
 import { describe, expect, it } from "vitest";
-import { composerHint, replyExpected, transcriptAuthor, transcriptTurns } from "./transcript";
+import { composerHint, replyExpected, transcriptAuthor } from "./transcript";
 
 function entry(overrides: Partial<CompanionTranscriptEntry> = {}): CompanionTranscriptEntry {
   return {
@@ -46,75 +46,6 @@ describe("transcriptAuthor", () => {
     expect(transcriptAuthor(entry({ role: "assistant" }), "user-1", "Luna")).toBe("Luna");
     expect(transcriptAuthor(entry({ role: "system" }), "user-1", "Luna")).toBeNull();
     expect(transcriptAuthor(entry({ role: "decision" }), "user-1", "Luna")).toBeNull();
-  });
-});
-
-describe("transcriptTurns", () => {
-  const context = { viewerId: "user-1", companionName: "Luna" };
-
-  it("announces a writer once for a run of consecutive turns", () => {
-    const turns = transcriptTurns([
-      entry({ event_id: "msg:1", created_at: "2026-08-12T12:00:00.000Z" }),
-      entry({ event_id: "msg:2", created_at: "2026-08-12T12:00:40.000Z" }),
-    ], context);
-
-    expect(turns.map((turn) => turn.lead)).toEqual([true, false]);
-  });
-
-  it("announces the writer again when the floor changes hands", () => {
-    const turns = transcriptTurns([
-      entry({ event_id: "msg:1" }),
-      entry({ event_id: "pi:0", role: "assistant", created_at: "2026-08-12T12:00:20.000Z" }),
-      entry({ event_id: "msg:2", created_at: "2026-08-12T12:00:50.000Z" }),
-    ], context);
-
-    expect(turns.map((turn) => turn.lead)).toEqual([true, true, true]);
-  });
-
-  it("announces the writer again after a long pause", () => {
-    const turns = transcriptTurns([
-      entry({ event_id: "msg:1", created_at: "2026-08-12T12:00:00.000Z" }),
-      entry({ event_id: "msg:2", created_at: "2026-08-12T12:20:00.000Z" }),
-    ], context);
-
-    expect(turns.map((turn) => turn.lead)).toEqual([true, true]);
-  });
-
-  it("keeps a run note out of the passage it interrupts", () => {
-    const turns = transcriptTurns([
-      entry({ event_id: "msg:1" }),
-      entry({
-        event_id: "pi:12",
-        role: "system",
-        content: "Pi did not accept the message.",
-        author_id: null,
-        author_name: null,
-        reasoning: null,
-        created_at: "2026-08-12T12:00:10.000Z",
-      }),
-      entry({ event_id: "msg:2", created_at: "2026-08-12T12:00:20.000Z" }),
-    ], context);
-
-    expect(turns.map((turn) => turn.author)).toEqual(["You", null, "You"]);
-    // The note ends the passage, so the message after it names its writer again.
-    expect(turns[2]?.lead).toBe(true);
-  });
-
-  it("marks only the message the composer has not had confirmed yet", () => {
-    const turns = transcriptTurns(
-      [entry({ event_id: "msg:1" }), entry({ event_id: "msg:2" })],
-      { ...context, sendingEventId: "msg:2" },
-    );
-
-    expect(turns.map((turn) => turn.sending)).toEqual([false, true]);
-  });
-
-  it("marks nothing while no send is in flight", () => {
-    // A saved entry is never in flight, and the id is the same one the control plane stored, so
-    // nothing may go on claiming a message is still on its way once its send has settled.
-    const turns = transcriptTurns([entry({ event_id: "msg:1" })], context);
-
-    expect(turns[0]?.sending).toBe(false);
   });
 });
 
