@@ -15,3 +15,16 @@
 @import "../styles/companions.css";
 /* Last on purpose: Tailwind is scoped to the thread and must layer over the rest. */
 @import "../styles/chat.css";
+
+/* iOS zooms the page when a focused form control computes below 16px. Keep text-entry controls at
+   that floor on every touch-capable device, including phones in landscape and tablets. This lives
+   after every stylesheet import and is intentionally important so compact feature styles and the
+   scoped chat utilities cannot reintroduce the zoom. Non-text controls do not open a text keyboard,
+   and the OTP input already has a larger, purpose-built size. */
+@media (any-pointer: coarse) {
+  input:not([type="button"]):not([type="checkbox"]):not([type="color"]):not([type="date"]):not([type="datetime-local"]):not([type="file"]):not([type="hidden"]):not([type="image"]):not([type="month"]):not([type="radio"]):not([type="range"]):not([type="reset"]):not([type="submit"]):not([type="time"]):not([type="week"]):not(.otpinput),
+  textarea,
+  select {
+    font-size: max(1rem, 16px) !important;
+  }
+}
