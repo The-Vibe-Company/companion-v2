@@ -33,6 +33,14 @@ export async function listCompanions(orgId: string): Promise<Companion[]> {
   return result.companions;
 }
 
+/** Provider/model data is client-loaded so a cold pi.dev refresh cannot block the Companions list
+ * route. The API still owns the bounded live-catalog lookup and its bundled fallback. */
+export async function listCompanionProviders(orgId: string): Promise<CompanionProvidersResponse> {
+  return apiFetch<CompanionProvidersResponse>("/v1/companion-providers", {
+    headers: orgHeaders(orgId),
+  });
+}
+
 export async function createCompanion(
   orgId: string,
   input: {

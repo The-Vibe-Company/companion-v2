@@ -18,6 +18,7 @@ const companionsApi = vi.hoisted(() => ({
   getCompanionRuntime: vi.fn(),
   getCompanionThread: vi.fn(),
   listCompanions: vi.fn(),
+  listCompanionProviders: vi.fn(),
   openCompanionDesktop: vi.fn(),
   sendCompanionMessage: vi.fn(),
   setCompanionProvider: vi.fn(),
@@ -136,7 +137,11 @@ function thread(overrides: Partial<Thread> = {}): Thread {
 
 const roots: Root[] = [];
 
-async function render(companions: Companion[], openedId: string | null = null) {
+async function render(
+  companions: Companion[],
+  openedId: string | null = null,
+  initialProviderSettings: CompanionProvidersResponse | null = providers,
+) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -149,7 +154,7 @@ async function render(companions: Companion[], openedId: string | null = null) {
       navigation,
       skills: [],
       initialCompanions: companions,
-      initialProviders: providers,
+      initialProviders: initialProviderSettings,
       initialPlugins: [],
       initialCompanionId: openedId,
     }));
@@ -166,6 +171,7 @@ describe("CompanionsApp conversation list", () => {
     vi.clearAllMocks();
     window.localStorage.clear();
     companionsApi.listCompanions.mockResolvedValue([companion()]);
+    companionsApi.listCompanionProviders.mockResolvedValue(providers);
     companionsApi.getCompanionThread.mockResolvedValue(thread());
     companionsApi.syncCompanionThread.mockResolvedValue(thread());
     companionsApi.getCompanionRuntime.mockResolvedValue(companion());
@@ -182,6 +188,81 @@ describe("CompanionsApp conversation list", () => {
 
     expect(row(container).textContent).toContain("Drafted the launch note.");
     expect(row(container).querySelector(".cmprow__unread")).not.toBeNull();
+  });
+
+  it("renders the conversation list before the live provider catalog resolves", async () => {
+    let resolveProviders!: (value: CompanionProvidersResponse) => void;
+    companionsApi.listCompanionProviders.mockReturnValue(new Promise((resolve) => {
+      resolveProviders = resolve;
+    }));
+
+    const container = await render([companion()], null, null);
+    const newCompanion = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent?.includes("New companion")) as HTMLButtonElement;
+
+    expect(row(container).textContent).toContain("Drafted the launch note.");
+    expect(newCompanion.disabled).toBe(true);
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      "Loading provider settings",
+    );
+    expect(companionsApi.listCompanionProviders).toHaveBeenCalledWith("org-1");
+
+    await act(async () => {
+      resolveProviders(providers);
+      await Promise.resolve();
+    });
+
+    expect(newCompanion.disabled).toBe(false);
+    expect(container.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it("recovers provider actions after a failed request is retried", async () => {
+    companionsApi.listCompanionProviders
+      .mockRejectedValueOnce(new Error("Provider catalog unavailable."))
+      .mockResolvedValueOnce(providers);
+
+    const container = await render([], null, null);
+    const alert = container.querySelector('[role="alert"]') as HTMLElement;
+    const retry = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Retry") as HTMLButtonElement;
+
+    expect(alert.textContent).toContain("Provider catalog unavailable.");
+    expect(retry).toBeDefined();
+
+    await act(async () => {
+      retry.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    const newCompanion = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent?.includes("New companion")) as HTMLButtonElement;
+    expect(companionsApi.listCompanionProviders).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(newCompanion.disabled).toBe(false);
+  });
+
+  it("shows provider failure and Retry without leaving an open thread", async () => {
+    companionsApi.listCompanionProviders
+      .mockRejectedValueOnce(new Error("Provider catalog unavailable."))
+      .mockResolvedValueOnce(providers);
+
+    const container = await render([companion()], companionId, null);
+    const alert = container.querySelector('[role="alert"]') as HTMLElement;
+    const retry = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Retry") as HTMLButtonElement;
+
+    expect(alert.textContent).toContain("Provider catalog unavailable.");
+    expect(container.textContent).toContain("Drafted the launch note.");
+
+    await act(async () => {
+      retry.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(companionsApi.listCompanionProviders).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect([...container.querySelectorAll("button")]
+      .some((button) => button.textContent === "Providers")).toBe(true);
   });
 
   it("leaves a caught-up thread unmarked, whatever it last said", async () => {

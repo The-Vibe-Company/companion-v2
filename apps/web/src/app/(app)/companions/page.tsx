@@ -2,20 +2,15 @@ import { companionsAvailableToUser, companionsEnabled } from "@companion/core";
 import type {
   Companion,
   CompanionPluginsResponse,
-  CompanionProvidersResponse,
-  LabelsResponse,
-  LocalSkillRow,
   SkillListRow,
 } from "@companion/contracts";
 import { notFound, redirect } from "next/navigation";
 import { CompanionsApp } from "@/components/companions/CompanionsApp";
 import { AuthUnavailable, WorkspaceLoadError } from "@/components/org/WorkspaceLoadError";
-import { deriveTreeRows } from "@/components/skills/sidebarTree";
 import { serverApiFetch } from "@/lib/apiServer";
 import { loadOrgContext } from "@/lib/currentOrg";
 import { loadServerAuth } from "@/lib/serverAuth";
 import { initialsOf } from "@/lib/settingsViewModel";
-import { mapSkill } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -52,32 +47,21 @@ export default async function CompanionsPage({
   if (!current) redirect("/onboarding");
 
   const headers = { "x-companion-org": current.id };
-  const emptyLabels: LabelsResponse = { tree: [], flat: [] };
   const [
     mineRows,
     orgRows,
-    personalLabels,
-    orgLabels,
-    localSkills,
-    archivedMine,
-    archivedOrg,
     companionsResponse,
-    providers,
     plugins,
   ] =
     await Promise.all([
-      serverApiFetch<SkillListRow[]>("/v1/skills?lib=mine", { headers }).catch(() => null),
-      serverApiFetch<SkillListRow[]>("/v1/skills?lib=org", { headers }).catch(() => null),
-      serverApiFetch<LabelsResponse>("/v1/personal-labels", { headers }).catch(() => emptyLabels),
-      serverApiFetch<LabelsResponse>("/v1/labels", { headers }).catch(() => emptyLabels),
-      serverApiFetch<LocalSkillRow[]>("/v1/local-skills", { headers }).catch(() => []),
-      serverApiFetch<SkillListRow[]>("/v1/skills?lib=mine&archived=true", { headers }).catch(() => []),
-      serverApiFetch<SkillListRow[]>("/v1/skills?lib=org&archived=true", { headers }).catch(() => []),
+      // Only ids and slugs are needed by the optional context panel. Keep the public library
+      // queries separate, then union them without loading the hidden Skills trees or labels.
+      serverApiFetch<SkillListRow[]>("/v1/skills?lib=mine", { headers }).catch(() => []),
+      serverApiFetch<SkillListRow[]>("/v1/skills?lib=org", { headers }).catch(() => []),
       serverApiFetch<{ companions: Companion[] }>("/v1/companions", { headers }).catch(() => null),
-      serverApiFetch<CompanionProvidersResponse>("/v1/companion-providers", { headers }).catch(() => null),
       serverApiFetch<CompanionPluginsResponse>("/v1/companion-plugins", { headers }).catch(() => null),
     ]);
-  if (!mineRows || !orgRows || !companionsResponse || !providers || !plugins) {
+  if (!companionsResponse || !plugins) {
     return <WorkspaceLoadError />;
   }
   if (
@@ -99,12 +83,10 @@ export default async function CompanionsPage({
     avatarUrl: authState.user.avatarUrl ?? null,
   };
 
-  const mineSkills = mineRows.map(mapSkill);
-  const orgSkills = orgRows.map(mapSkill);
   // What the context panel can name a Companion's attached skills by. An id not in here belongs to
   // somebody else's personal library, and the panel counts it rather than guessing at a name.
   const visibleSkills = [...new Map(
-    [...mineSkills, ...orgSkills].map((skill) => [skill.uuid, { id: skill.uuid, slug: skill.id }]),
+    [...mineRows, ...orgRows].map((skill) => [skill.id, { id: skill.id, slug: skill.slug }]),
   ).values()];
   return (
     <CompanionsApp
@@ -114,25 +96,22 @@ export default async function CompanionsPage({
       viewer={viewer}
       skills={visibleSkills}
       initialCompanions={companionsResponse.companions}
-      initialProviders={providers}
+      initialProviders={null}
       initialPlugins={plugins.accounts}
       initialCompanionId={initialCompanionId}
       initialSettingsCompanionId={initialSettingsCompanionId}
       initialPluginsOpen={initialPluginsOpen}
       navigation={{
-        mineTreeRows: deriveTreeRows(
-          mineSkills.filter((skill) => skill.source === "authored"),
-          personalLabels.flat,
-        ),
-        orgTreeRows: deriveTreeRows(orgSkills, orgLabels.flat),
-        mineCount: mineSkills.length,
-        orgCount: orgSkills.length,
-        installedCount: mineSkills.filter((skill) => skill.source === "installed").length,
-        installedUpdateCount: mineSkills.filter(
-          (skill) => skill.source === "installed" && skill.installStatus === "update",
-        ).length,
-        localUpdateCount: localSkills.filter((skill) => skill.status === "update").length,
-        archivedCount: new Set([...archivedMine, ...archivedOrg].map((skill) => skill.id)).size,
+        // These fields belong to Skills mode and are deliberately absent from the Companions-mode
+        // DOM. Keep the shared Sidebar contract without paying for hidden data on every switch.
+        mineTreeRows: [],
+        orgTreeRows: [],
+        mineCount: 0,
+        orgCount: 0,
+        installedCount: 0,
+        installedUpdateCount: 0,
+        localUpdateCount: 0,
+        archivedCount: 0,
       }}
     />
   );

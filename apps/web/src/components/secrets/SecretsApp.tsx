@@ -376,9 +376,6 @@ export function SecretsApp({
         onSelectArchived={() => router.push(skillsRouteHref({ kind: "archived" }))}
         onSelectSecrets={noop}
         companionsEnabled={companionsEnabled}
-        onSelectMode={(mode) => {
-          if (mode === "companions") router.push("/companions");
-        }}
         secretsActive
         navigationOnly
         localActive={false}
