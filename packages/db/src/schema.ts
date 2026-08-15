@@ -653,7 +653,7 @@ export interface CompanionStoredToolRun {
   kind: "shell" | "file" | "browse" | "computer" | "tool";
   name: string;
   title: string;
-  status: "running" | "ok" | "error";
+  status: "running" | "ok" | "error" | "timeout";
   detail: string | null;
   /** One downscaled Box desktop frame as a `data:` image URL, or null when none was captured. */
   screenshot: string | null;

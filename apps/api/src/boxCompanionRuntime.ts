@@ -24,9 +24,11 @@ const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
 // Layout 5 made the daemon wrapper report its own failures. Layout 6 moves MCP credentials off the
 // snapshotted Box disk and into the user runtime directory. Layout 7 teaches the daemon wrapper to
 // append staged Companion instructions. Layout 8 passes the persisted model through `pi --model`.
-// Layout 9 stages the permission-broker extension that pauses shell / file / questions for Allow /
-// Deny cards in the control-plane thread.
-export const COMPANION_PI_DISK_LAYOUT_VERSION = 9;
+// Layout 9 staged the permission broker for shell, file, and question cards. Layout 10 overwrites
+// that legacy filename with the ask_user-only extension so shell and file tools run unrestricted.
+// Layout 11 refuses image reads and bounds every non-interactive execution tool so a Pi vision/tool
+// stall cannot hold a turn open indefinitely.
+export const COMPANION_PI_DISK_LAYOUT_VERSION = 11;
 /** Content bytes the provider's file API refuses in one `PUT /boxes/:id/files` body. */
 const BOX_FILE_WRITE_LIMIT_BYTES = 5 * 1024 * 1024;
 /**
@@ -244,7 +246,7 @@ export interface CompanionBoxRuntime {
     replaceProviderAuth: boolean;
     /** Recycle Pi after a process-level model selection changed, without rewriting provider auth. */
     restartPi?: boolean;
-    /** Force layout/resource injection without implying that a running Pi needs provider recycle. */
+    /** Force layout/resource injection without recycling a running Pi or interrupting its turn. */
     refreshRuntimeLayout?: boolean;
     /** Refuse creation or resume when a caller may touch only an already-runnable Box. */
     allowBoxWake?: boolean;
@@ -1317,6 +1319,24 @@ exit 0`,
     return sizes;
   }
 
+  /**
+   * Replace the legacy approval broker and stage the bounded guard before layout 11 is published.
+   * If Pi restarts during migration, it can only load the current unrestricted extension from disk.
+   */
+  async #stageCompanionInteractionExtension(boxId: string): Promise<void> {
+    await this.#command(
+      boxId,
+      'mkdir -p "$HOME/.companion/pi/extensions"',
+    );
+    await this.#writeFile(
+      boxId,
+      `.companion/pi/extensions/${COMPANION_PERMISSION_BROKER_EXTENSION_FILE}`,
+      COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE.endsWith("\n")
+        ? COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE
+        : `${COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE}\n`,
+    );
+  }
+
   async #injectPiResources(input: {
     boxId: string;
     clientSurface: CompanionClientSurface;
@@ -1380,19 +1400,6 @@ exit 0`,
       input.boxId,
       ".companion/runtime/state/model.txt",
       `${input.modelId}\n`,
-    );
-    // Permission broker: always rewrite so a Box that woke on an older layout still pauses shell /
-    // file / questions behind the control-plane Allow / Deny cards.
-    await this.#command(
-      input.boxId,
-      'mkdir -p "$HOME/.companion/pi/extensions"',
-    );
-    await this.#writeFile(
-      input.boxId,
-      `.companion/pi/extensions/${COMPANION_PERMISSION_BROKER_EXTENSION_FILE}`,
-      COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE.endsWith("\n")
-        ? COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE
-        : `${COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE}\n`,
     );
     const staged = new Map<string, string>();
     for (const skill of injectedSkills) {
@@ -1549,6 +1556,9 @@ exit 0`,
     // A warm shortcut staged nothing: the Box keeps whatever resources the previous injection
     // left. `staged: false` is what stops the caller from recording a skills apply for it.
     if (first.warm) return { ...observation(await this.#get(box.id), "running"), staged: false };
+    // Publish the approval-free extension before the layout marker. A daemon that happens to
+    // restart while the rest of the migration is staged must never reload the legacy broker.
+    await this.#stageCompanionInteractionExtension(box.id);
     await this.#ensurePiLayout(box.id);
     await this.#injectPiResources({
       boxId: box.id,
@@ -1592,6 +1602,7 @@ systemctl --user daemon-reload
 systemctl --user reset-failed companion-pi-daemon.service >/dev/null 2>&1 || true
 # Keep an unchanged-provider start idempotent so it cannot kill a turn already in flight. Replacing
 # auth.json is different: Pi loaded the old provider into memory, so only its daemon is recycled.
+# A refreshed layout is staged safely and becomes active on Pi's next natural daemon start.
 systemctl --user ${replaceProviderAuth || input.restartPi ? "restart" : "start"} companion-pi-daemon.service
 # Keep the tmpfs file while the Box is awake so Restart=on-failure can reread the same credentials.
 # Box stop/reboot destroys /run, and the explicit stop path removes it as soon as Pi is down.
@@ -1836,4 +1847,3 @@ function positiveInteger(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value ?? "", 10);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
-

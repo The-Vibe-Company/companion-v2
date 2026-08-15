@@ -53,23 +53,27 @@ export function localDay(iso: string): string {
 /**
  * Whether Pi owes this thread a reply. A running Box whose transcript ends on a member's message is
  * working on one, and saying so is the difference between a live thread and one that looks stuck. A
- * transcript ending on a tool run is the same promise mid-turn: Pi is doing the work the chip names
- * and has not spoken yet. It is read from the transcript the reader already has, so it never asks
- * Box anything: a sleeping Box owes nothing until it is woken, and the composer hint says so.
+ * transcript ending on a tool or decision is the same promise mid-turn. A timed-out tool is
+ * the exception: the control plane aborted that turn, so keeping it in-flight would leave the
+ * composer disabled after the tool had already failed closed. It is read from the transcript the
+ * reader already has, so it never asks Box anything.
  */
 export function replyExpected(input: {
   entries: readonly CompanionTranscriptEntry[];
   awake: boolean;
 }): boolean {
   if (!input.awake) return false;
-  const role = input.entries[input.entries.length - 1]?.role;
-  return role === "user" || role === "tool" || role === "decision";
+  const tail = input.entries[input.entries.length - 1];
+  if (tail?.role === "user") return true;
+  if (tail?.role === "tool") return tail.tool?.status !== "timeout";
+  if (tail?.role === "decision") return true;
+  return false;
 }
 
 /**
  * What the composer says under itself: delivery when messages are waiting, keys otherwise. Delivery
  * is read from the same projected runtime state as the Box status chip, so the footer of a Companion
- * a send has just woken never keeps offering the wake that already happened, and a Companion still
+ * a send has just started never suggests a second lifecycle action, and a Companion still
  * coming up is reported as coming up rather than as one nobody has woken yet.
  */
 export function composerHint(input: {
@@ -82,7 +86,7 @@ export function composerHint(input: {
   const count = `${pending} message${pending === 1 ? "" : "s"}`;
   if (input.state === "running") return `${count} waiting for a reply.`;
   if (input.state === "provisioning") {
-    return `${count} saved. ${input.companionName} is waking to deliver.`;
+    return `${count} saved. ${input.companionName} is starting to deliver.`;
   }
-  return `${count} saved. Wake ${input.companionName} to deliver.`;
+  return `${count} saved. Send another message to retry delivery.`;
 }

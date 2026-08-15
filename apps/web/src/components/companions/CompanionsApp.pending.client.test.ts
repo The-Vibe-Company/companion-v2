@@ -15,8 +15,8 @@ import { CompanionsApp, type CompanionNavigation } from "./CompanionsApp";
  *
  * Production reached the state this guards against: the wake finished, the Box came up, Pi answered
  * the queued message and the reply was on screen — and for about a minute the chip still read
- * Starting beside it, with the Wake control still offered, until an unrelated action happened to
- * re-read the row. The row itself was right within a second of the Box coming up; nothing was reading
+ * Starting beside it until an unrelated action happened to re-read the row. The row itself was
+ * right within a second of the Box coming up; nothing was reading
  * it. The Box-status poll only runs once the state is already `running`, and the request that starts a
  * wake answers once — before the lifecycle finishes, when it answers at all, since a wake can outlive
  * the proxy in front of the API.
@@ -220,9 +220,6 @@ describe("CompanionsApp while a Companion is starting", () => {
   it("reports the Box online once the wake records it, without being asked again", async () => {
     const container = await openThread(companionIn("provisioning"));
 
-    await act(async () => {
-      wakeControl(container)?.click();
-    });
     await wait(20);
     expect(chip(container)).toContain("Starting");
 
@@ -233,7 +230,7 @@ describe("CompanionsApp while a Companion is starting", () => {
     expect(wakeControl(container)).toBeNull();
   });
 
-  it("reports a wake that failed, so a stalled start is offered as a retry", async () => {
+  it("reports a start that failed without exposing a separate wake action", async () => {
     const container = await openThread(companionIn("provisioning"));
 
     api.wakeFailed();
@@ -241,7 +238,7 @@ describe("CompanionsApp while a Companion is starting", () => {
 
     expect(chip(container)).toContain("Error");
     expect(container.textContent).toContain("Pi resources failed to prepare");
-    expect(wakeControl(container)).not.toBeNull();
+    expect(wakeControl(container)).toBeNull();
   });
 
   it("watches the lifecycle with reads that never resume a Box", async () => {

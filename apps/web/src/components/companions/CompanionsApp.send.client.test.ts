@@ -99,6 +99,12 @@ const companion: Companion = {
   updated_at: "2026-08-12T12:00:00.000Z",
 };
 
+const otherCompanion: Companion = {
+  ...companion,
+  id: "22222222-2222-4222-8222-222222222222",
+  name: "Sol",
+};
+
 /**
  * A control plane with one durable transcript and a Pi that answers each prompt it accepted. It
  * stores a message under the event id the sender named and refuses a second copy of it, the way the
@@ -124,21 +130,25 @@ function controlPlane(
     headers: { "content-type": "application/json" },
   });
 
-  const thread = (): Thread => ({
-    companion_id: companionId,
+  const thread = (requestedCompanionId = companionId): Thread => {
+    const threadEntries = requestedCompanionId === companionId ? entries : [];
+    return {
+    companion_id: requestedCompanionId,
     viewer_id: "user-1",
     access: "owner",
     read_only: false,
     can_send: true,
-    entries: entries.map((entry) => ({ ...entry })),
-    pending_count: entries.filter((entry) => entry.role === "user" && entry.ordinal > delivered).length,
-    last_message_at: entries.at(-1)?.created_at ?? null,
+    entries: threadEntries.map((entry) => ({ ...entry })),
+    pending_count: threadEntries.filter((entry) => entry.role === "user" && entry.ordinal > delivered).length,
+    last_message_at: threadEntries.at(-1)?.created_at ?? null,
     last_read_ordinal: null,
-  });
+  };
+  };
 
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
+    const requestedCompanionId = url.match(/\/companions\/([^/?]+)/)?.[1] ?? companionId;
     requests.push(`${method} ${url}`);
     if (method === "POST" && url.endsWith("/messages")) {
       const body = JSON.parse(String(init?.body ?? "{}")) as {
@@ -174,7 +184,7 @@ function controlPlane(
         });
       }
       if (options.holdSend) await held;
-      return json({ thread: thread(), delivery: "delivered" });
+      return json({ thread: thread(requestedCompanionId), delivery: "delivered" });
     }
     if (method === "POST" && url.endsWith("/thread/sync")) {
       while (owed > 0) {
@@ -192,9 +202,9 @@ function controlPlane(
           created_at: new Date().toISOString(),
         });
       }
-      return json({ thread: thread(), source: "box" });
+      return json({ thread: thread(requestedCompanionId), source: "box" });
     }
-    if (url.includes("/thread")) return json({ thread: thread() });
+    if (url.includes("/thread")) return json({ thread: thread(requestedCompanionId) });
     if (url.includes("/runtime")) return json({ companion: runtime, source: "control_plane" });
     return json({});
   });
@@ -211,7 +221,7 @@ function controlPlane(
 
 const roots: Root[] = [];
 
-async function openThread(who: Companion = companion) {
+async function openThread(who: Companion = companion, companions: Companion[] = [who]) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -223,7 +233,7 @@ async function openThread(who: Companion = companion) {
       viewer: { id: "user-1", name: "Ada", email: "ada@example.test", initials: "A", avatarUrl: null },
       navigation,
       skills: [],
-      initialCompanions: [who],
+      initialCompanions: companions,
       initialProviders: providers,
       initialPlugins: [],
       initialCompanionId: companionId,
@@ -346,6 +356,31 @@ describe("CompanionsApp send", () => {
       expect(api.posts()).toBe(1);
       expect(api.entries.filter((entry) => entry.role === "user")).toHaveLength(1);
       expect(composer.value).toBe("");
+    });
+
+    it("does not apply a held send after the reader switches threads", async () => {
+      const container = await openThread(companion, [companion, otherCompanion]);
+      type(container, "Only Luna should show this");
+
+      await act(async () => {
+        (container.querySelector("textarea") as HTMLTextAreaElement)
+          .dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      });
+      await act(async () => {
+        [...container.querySelectorAll("button")]
+          .find((button) => button.textContent?.includes("Sol"))?.click();
+      });
+
+      expect(container.querySelector("h1")?.textContent).toBe("Sol");
+
+      await act(async () => {
+        api.releaseSend();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(container.querySelector("h1")?.textContent).toBe("Sol");
+      expect(container.textContent).not.toContain("Only Luna should show this");
+      expect(container.querySelector("textarea")).toHaveProperty("disabled", false);
     });
   });
 

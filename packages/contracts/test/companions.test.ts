@@ -23,6 +23,7 @@ import {
   updateCompanionInputSchema,
   updateCompanionMemberStateInputSchema,
 } from "../src/companions";
+import { restartCompanionRuntimeInputSchema } from "../src/companionRuntime";
 
 describe("Companion provider contracts", () => {
   it("keeps API keys write-only and removes browser-submitted subscription credentials", () => {
@@ -106,6 +107,13 @@ describe("Companion provider contracts", () => {
     expect(() => startCompanionRuntimeInputSchema.parse({
       credentials: [{ provider: "anthropic", env_key: "ANTHROPIC_API_KEY", value: "must-not-enter-start" }],
     })).toThrow();
+  });
+
+  it("accepts only the two explicit runtime restart targets", () => {
+    expect(restartCompanionRuntimeInputSchema.parse({ target: "pi" })).toEqual({ target: "pi" });
+    expect(restartCompanionRuntimeInputSchema.parse({ target: "box" })).toEqual({ target: "box" });
+    expect(() => restartCompanionRuntimeInputSchema.parse({ target: "server" })).toThrow();
+    expect(() => restartCompanionRuntimeInputSchema.parse({ target: "pi", wake: true })).toThrow();
   });
 
   it("persists skill selection and write-on-behalf on update", () => {

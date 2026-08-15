@@ -56,10 +56,11 @@ const coreMocks = vi.hoisted(() => ({
   markCompanionThreadRead: vi.fn(),
   sendCompanionMessage: vi.fn(),
   listPendingCompanionMessages: vi.fn(),
-  recordCompanionPiProjection: vi.fn(),
+  recordCompanionPiProjectionWithEffects: vi.fn(),
   attachCompanionToolRunScreenshot: vi.fn(),
   decideCompanionDecision: vi.fn(),
   expireCompanionDecisions: vi.fn(),
+  expireCompanionToolRuns: vi.fn(),
   listCompanionShares: vi.fn(),
   setCompanionWorkspaceShare: vi.fn(),
   listCompanionRuntimeSkillPackages: vi.fn(),
@@ -400,16 +401,19 @@ describe("Companions API feature gate", () => {
       piLogOffset: 0,
       deliveredOrdinal: null,
     });
-    coreMocks.recordCompanionPiProjection.mockResolvedValue({
-      ...viewerThread,
-      access: "owner",
-      read_only: false,
-      can_send: true,
+    coreMocks.recordCompanionPiProjectionWithEffects.mockResolvedValue({
+      thread: {
+        ...viewerThread,
+        access: "owner",
+        read_only: false,
+        can_send: true,
+      },
+      settledToolRuns: [],
     });
     coreMocks.expireCompanionDecisions.mockImplementation(async () => {
-      const last = coreMocks.recordCompanionPiProjection.mock.results.at(-1);
+      const last = coreMocks.recordCompanionPiProjectionWithEffects.mock.results.at(-1);
       const thread = last?.type === "return"
-        ? await last.value
+        ? (await last.value).thread
         : {
           ...viewerThread,
           access: "owner",
@@ -417,6 +421,18 @@ describe("Companions API feature gate", () => {
           can_send: true,
         };
       return { thread, responses: [] };
+    });
+    coreMocks.expireCompanionToolRuns.mockImplementation(async () => {
+      const last = coreMocks.recordCompanionPiProjectionWithEffects.mock.results.at(-1);
+      const thread = last?.type === "return"
+        ? (await last.value).thread
+        : {
+          ...viewerThread,
+          access: "owner",
+          read_only: false,
+          can_send: true,
+        };
+      return { thread, timedOut: [] };
     });
     coreMocks.decideCompanionDecision.mockResolvedValue({
       thread: {
@@ -1088,6 +1104,254 @@ describe("Companions API feature gate", () => {
     expect(runtimeFactory).not.toHaveBeenCalled();
   });
 
+  it("restarts only Pi inside an observably online Box", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const start = vi.fn(async () => ({
+      boxId: "bx_23456789",
+      runtimeState: "running" as const,
+      daemonState: "running" as const,
+      desktopAvailable: true,
+    }));
+    const stop = vi.fn();
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(runningCompanion);
+    coreMocks.updateCompanionObservation.mockResolvedValue(runningCompanion);
+    coreMocks.updateCompanionRuntime.mockResolvedValue(runningCompanion);
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      vi.fn(() => boxRuntime({ start, stop })),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "pi" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      boxId: "bx_23456789",
+      allowBoxWake: false,
+      restartPi: true,
+    }));
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  it("restarts the full Box by archiving it before resuming it", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const start = vi.fn(async () => ({
+      boxId: "bx_23456789",
+      runtimeState: "running" as const,
+      daemonState: "running" as const,
+      desktopAvailable: true,
+    }));
+    const stop = vi.fn(async () => ({
+      boxId: "bx_23456789",
+      runtimeState: "stopped" as const,
+      daemonState: "stopped" as const,
+      desktopAvailable: false,
+    }));
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStop.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue({
+      ...runningCompanion,
+      runtime: { ...runningCompanion.runtime, state: "stopped", daemon_state: "stopped" },
+    });
+    coreMocks.updateCompanionObservation.mockResolvedValue(runningCompanion);
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        state: input.patch.runtimeState ?? "running",
+        daemon_state: input.patch.daemonState ?? "running",
+      },
+    }));
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      vi.fn(() => boxRuntime({ start, stop })),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "box" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(start).toHaveBeenCalledOnce();
+    expect(stop.mock.invocationCallOrder[0]).toBeLessThan(start.mock.invocationCallOrder[0]!);
+  });
+
+  it("keeps the stop failure projected and never starts after a partial full-Box restart", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const start = vi.fn();
+    const stop = vi.fn(async () => {
+      throw new BoxRuntimeProviderError("Box archive failed", 502);
+    });
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStop.mockResolvedValue(runningCompanion);
+    coreMocks.updateCompanionObservation.mockResolvedValue(runningCompanion);
+    coreMocks.updateCompanionRuntime.mockResolvedValue({
+      ...runningCompanion,
+      runtime: { ...runningCompanion.runtime, state: "error", daemon_state: "error" },
+    });
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      vi.fn(() => boxRuntime({ start, stop })),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "box" }),
+    });
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({ error: "Box archive failed" });
+    expect(start).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({
+        runtimeState: "error",
+        daemonState: "error",
+        lastError: "Box archive failed",
+      }),
+    }));
+  });
+
+  it("projects an error when full-Box archive succeeds but resume fails", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const start = vi.fn(async () => {
+      throw new BoxRuntimeProviderError("Box resume failed", 502);
+    });
+    const stop = vi.fn(async () => ({
+      boxId: "bx_23456789",
+      runtimeState: "stopped" as const,
+      daemonState: "stopped" as const,
+      desktopAvailable: false,
+    }));
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStop.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue({
+      ...runningCompanion,
+      runtime: { ...runningCompanion.runtime, state: "stopped", daemon_state: "stopped" },
+    });
+    coreMocks.updateCompanionObservation.mockResolvedValue(runningCompanion);
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        state: input.patch.runtimeState ?? "running",
+        daemon_state: input.patch.daemonState ?? "running",
+      },
+    }));
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      vi.fn(() => boxRuntime({ start, stop })),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "box" }),
+    });
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({ error: "Box resume failed" });
+    expect(stop).toHaveBeenCalledOnce();
+    expect(start).toHaveBeenCalledOnce();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenLastCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({
+        runtimeState: "error",
+        daemonState: "error",
+        lastError: "Box resume failed",
+      }),
+    }));
+  });
+
+  it("rejects an unknown restart target before creating a Box client", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const runtimeFactory = vi.fn(() => {
+      throw new Error("Box client must not be created");
+    });
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "machine" }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(runtimeFactory).not.toHaveBeenCalled();
+    // Authorization still runs before body validation so an unauthorized caller cannot probe this
+    // operator-only contract, but no Box client or lifecycle claim is created for invalid input.
+    expect(coreMocks.getCompanionForRuntime).toHaveBeenCalledOnce();
+    expect(coreMocks.claimCompanionRuntimeStart).not.toHaveBeenCalled();
+    expect(coreMocks.claimCompanionRuntimeStop).not.toHaveBeenCalled();
+  });
+
+  it("refuses to restart an asleep Companion without creating a Box client", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const runtimeFactory = vi.fn(() => {
+      throw new Error("Box client must not be created");
+    });
+    coreMocks.getCompanionForRuntime.mockResolvedValue(companion);
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "pi" }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(runtimeFactory).not.toHaveBeenCalled();
+    expect(coreMocks.claimCompanionRuntimeStart).not.toHaveBeenCalled();
+  });
+
+  it("corrects a stale Online projection and refuses to wake the stopped Box", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const start = vi.fn();
+    const stop = vi.fn();
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.updateCompanionObservation.mockResolvedValue({
+      ...runningCompanion,
+      runtime: { ...runningCompanion.runtime, state: "stopped", daemon_state: "stopped" },
+    });
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      vi.fn(() => boxRuntime({
+        start,
+        stop,
+        status: vi.fn(async () => ({
+          boxId: "bx_23456789",
+          runtimeState: "stopped" as const,
+          daemonState: "stopped" as const,
+          desktopAvailable: false,
+        })),
+      })),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "box" }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(coreMocks.updateCompanionObservation).toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({ runtimeState: "stopped", daemonState: "stopped" }),
+    }));
+    expect(start).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
+  });
+
   it("serves a viewer thread from the control plane without creating a Box client", async () => {
     const app = new Hono<{ Variables: ApiVariables }>();
     const runtimeFactory = vi.fn(() => {
@@ -1099,6 +1363,7 @@ describe("Companions API feature gate", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ thread: viewerThread });
+    expect(coreMocks.expireCompanionToolRuns).toHaveBeenCalledOnce();
     expect(coreMocks.getCompanionThread).toHaveBeenCalledOnce();
     expect(runtimeFactory).not.toHaveBeenCalled();
   });
@@ -1243,7 +1508,7 @@ describe("Companions API feature gate", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
     expect(coreMocks.sendCompanionMessage).toHaveBeenCalledOnce();
-    expect(coreMocks.recordCompanionPiProjection).not.toHaveBeenCalled();
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).not.toHaveBeenCalled();
     expect(runtime.prompt).not.toHaveBeenCalled();
     expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
       companionId: companion.id,
@@ -1591,7 +1856,7 @@ describe("Companions API feature gate", () => {
       message: message.content,
       requestId: message.event_id,
     });
-    expect(coreMocks.recordCompanionPiProjection).toHaveBeenCalledWith(expect.objectContaining({
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: 0,
       entries: [],
     }));
@@ -1688,7 +1953,7 @@ describe("Companions API feature gate", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
-    expect(coreMocks.recordCompanionPiProjection).toHaveBeenCalledWith(expect.objectContaining({
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: message.ordinal,
     }));
   });
@@ -1723,7 +1988,7 @@ describe("Companions API feature gate", () => {
       "Earlier ask",
       "Summarize the incident",
     ]);
-    expect(coreMocks.recordCompanionPiProjection).toHaveBeenCalledWith(expect.objectContaining({
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: 1,
     }));
   });
@@ -1758,7 +2023,7 @@ describe("Companions API feature gate", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
     // The watermark stops at what Pi accepted, so the refused message is retried instead of lost.
-    expect(coreMocks.recordCompanionPiProjection).toHaveBeenCalledWith(expect.objectContaining({
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: 0,
     }));
   });
@@ -1786,7 +2051,70 @@ describe("Companions API feature gate", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
-    expect(coreMocks.recordCompanionPiProjection).not.toHaveBeenCalled();
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).not.toHaveBeenCalled();
+  });
+
+  it("delivers a follow-up after terminalizing the prior tool without a control-plane abort", async () => {
+    const timedOutThread = {
+      ...viewerThread,
+      access: "owner" as const,
+      read_only: false,
+      can_send: true,
+      entries: [message],
+    };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    coreMocks.expireCompanionToolRuns.mockResolvedValue({
+      thread: timedOutThread,
+      timedOut: [],
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Alors ?" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
+    expect(runtime.prompt).toHaveBeenCalledOnce();
+  });
+
+  it("refreshes an already-running legacy Pi layout before delivering a message", async () => {
+    const legacy = {
+      ...runningCompanion,
+      runtime: { ...runningCompanion.runtime, disk_layout_version: 9 },
+    };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(legacy);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(legacy);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Alors ?" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
+      refreshRuntimeLayout: true,
+      restartPi: true,
+    }));
+    expect(runtime.prompt).toHaveBeenCalledOnce();
   });
 
   it("carries the sender's message id into persistence so one send is one turn", async () => {
@@ -1858,7 +2186,7 @@ describe("Companions API feature gate", () => {
     await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
     expect(runtime.prompt).not.toHaveBeenCalled();
     expect(runtime.refreshTtl).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
-    expect(coreMocks.recordCompanionPiProjection).not.toHaveBeenCalled();
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).not.toHaveBeenCalled();
   });
 
   it("delivers a resent send whose first attempt never reached Pi", async () => {
@@ -1937,11 +2265,11 @@ describe("Companions API feature gate", () => {
       offset: 512,
     });
     // Delivery is claimed before the log is read, so the prompt cannot be repeated by a retry.
-    expect(coreMocks.recordCompanionPiProjection).toHaveBeenNthCalledWith(1, expect.objectContaining({
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenNthCalledWith(1, expect.objectContaining({
       deliveredOrdinal: 0,
       entries: [],
     }));
-    expect(coreMocks.recordCompanionPiProjection).toHaveBeenNthCalledWith(2, expect.objectContaining({
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenNthCalledWith(2, expect.objectContaining({
       piLogOffset: 512 + Buffer.byteLength(reply, "utf8"),
       piLogRewound: false,
       entries: [expect.objectContaining({ role: "assistant", content: "Two services timed out." })],
@@ -1983,6 +2311,37 @@ describe("Companions API feature gate", () => {
     }));
     expect(runtime.start.mock.invocationCallOrder[0]!)
       .toBeLessThan(runtime.prompt.mock.invocationCallOrder[0]!);
+  });
+
+  it("refreshes an already-running legacy Pi layout before syncing its thread", async () => {
+    const legacy = {
+      ...runningCompanion,
+      runtime: { ...runningCompanion.runtime, disk_layout_version: 9 },
+    };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(legacy);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(legacy);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
+      refreshRuntimeLayout: true,
+      restartPi: true,
+      allowBoxWake: false,
+    }));
+    expect(runtime.readEvents).toHaveBeenCalledOnce();
   });
 
   it("retries stale provider recovery when a prior sync left the projection in error", async () => {
@@ -2051,7 +2410,7 @@ describe("Companions API feature gate", () => {
     });
 
     expect(response.status).toBe(200);
-    expect(coreMocks.recordCompanionPiProjection).toHaveBeenNthCalledWith(2, expect.objectContaining({
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenNthCalledWith(2, expect.objectContaining({
       entries: [expect.objectContaining({ role: "assistant", content: "2025" })],
     }));
   });
@@ -2075,7 +2434,7 @@ describe("Companions API feature gate", () => {
 
     expect(response.status).toBe(400);
     // The failed read must not cost Pi a second copy of the same message on the next sync.
-    expect(coreMocks.recordCompanionPiProjection).toHaveBeenCalledWith(expect.objectContaining({
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: 0,
       entries: [],
     }));
@@ -2095,7 +2454,7 @@ describe("Companions API feature gate", () => {
     });
 
     expect(response.status).toBe(200);
-    expect(coreMocks.recordCompanionPiProjection).toHaveBeenCalledWith(expect.objectContaining({
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
       piLogOffset: 0,
       piLogRewound: true,
     }));
@@ -2171,33 +2530,37 @@ describe("Companions API feature gate", () => {
     }
 
     it("hands Pi's call and its result to the projection as a run and its completion", async () => {
-      coreMocks.recordCompanionPiProjection.mockResolvedValue({
-        ...viewerThread,
-        access: "owner",
-        read_only: false,
-        can_send: true,
-        entries: [visualRun()],
+      coreMocks.recordCompanionPiProjectionWithEffects.mockResolvedValue({
+        thread: {
+          ...viewerThread,
+          access: "owner",
+          read_only: false,
+          can_send: true,
+          entries: [visualRun()],
+        },
+        settledToolRuns: [],
       });
       const runtime = boxRuntime({ readEvents: vi.fn(async () => ({ chunk, offset: 512 })) });
 
       const response = await syncing(runtime);
 
       expect(response.status).toBe(200);
-      expect(coreMocks.recordCompanionPiProjection).toHaveBeenCalledWith(expect.objectContaining({
+      expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
         entries: [expect.objectContaining({
           role: "tool",
           tool: expect.objectContaining({ kind: "computer", status: "running" }),
         })],
         toolCompletions: [expect.objectContaining({ callId: "call_1", status: "ok" })],
       }));
+      // Raw log completion is not enough: only the database compare-and-set winner gets a frame.
+      expect(runtime.captureDesktopFrame).not.toHaveBeenCalled();
     });
 
     it("photographs the Box once for the visual run this sync finished", async () => {
       const frame = "data:image/jpeg;base64,/9j/4AAQSkZJRg==";
-      coreMocks.recordCompanionPiProjection.mockResolvedValue({
-        ...viewerThread,
-        access: "owner",
-        entries: [visualRun()],
+      coreMocks.recordCompanionPiProjectionWithEffects.mockResolvedValue({
+        thread: { ...viewerThread, access: "owner", entries: [visualRun()] },
+        settledToolRuns: [{ eventId: "pi:512:tool:0", kind: "computer" }],
       });
       coreMocks.attachCompanionToolRunScreenshot.mockResolvedValue({
         ...viewerThread,
@@ -2213,6 +2576,7 @@ describe("Companions API feature gate", () => {
       const body = await response.json() as { thread: { entries: Array<{ tool: { screenshot: string } }> } };
 
       expect(runtime.captureDesktopFrame).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
+      expect(runtime.captureDesktopFrame).toHaveBeenCalledOnce();
       expect(coreMocks.attachCompanionToolRunScreenshot).toHaveBeenCalledWith(expect.objectContaining({
         eventId: "pi:512:tool:0",
         screenshot: frame,
@@ -2221,11 +2585,88 @@ describe("Companions API feature gate", () => {
       expect(body.thread.entries[0]?.tool.screenshot).toBe(frame);
     });
 
-    it("leaves a run that touched no screen without a picture", async () => {
-      coreMocks.recordCompanionPiProjection.mockResolvedValue({
+    it("stores one frame on each exact visual run when one Pi chunk settles several", async () => {
+      const frame = "data:image/jpeg;base64,/9j/4AAQSkZJRg==";
+      const second = {
+        ...visualRun(),
+        event_id: "pi:512:tool:1",
+        tool: { ...visualRun().tool, call_id: "call_2" },
+      };
+      coreMocks.recordCompanionPiProjectionWithEffects.mockResolvedValue({
+        thread: { ...viewerThread, access: "owner", entries: [visualRun(), second] },
+        settledToolRuns: [
+          { eventId: "pi:512:tool:0", kind: "computer" },
+          { eventId: "pi:512:tool:1", kind: "computer" },
+        ],
+      });
+      coreMocks.attachCompanionToolRunScreenshot.mockResolvedValue({
         ...viewerThread,
         access: "owner",
-        entries: [shellRun],
+        entries: [visualRun(frame), { ...second, tool: { ...second.tool, screenshot: frame } }],
+      });
+      const runtime = boxRuntime({
+        readEvents: vi.fn(async () => ({ chunk, offset: 512 })),
+        captureDesktopFrame: vi.fn(async () => frame),
+      });
+
+      expect((await syncing(runtime)).status).toBe(200);
+
+      expect(runtime.captureDesktopFrame).toHaveBeenCalledOnce();
+      expect(coreMocks.attachCompanionToolRunScreenshot).toHaveBeenCalledTimes(2);
+      expect(coreMocks.attachCompanionToolRunScreenshot.mock.calls.map(([input]) => input.eventId))
+        .toEqual(["pi:512:tool:0", "pi:512:tool:1"]);
+    });
+
+    it("fails a hung read closed without changing Box lifecycle or sending an unscoped abort", async () => {
+      const runningRead = {
+        ...visualRun(),
+        event_id: "pi:read:tool:0",
+        content: "/tmp/conductor-cli.png",
+        tool: {
+          ...visualRun().tool,
+          call_id: "call-read",
+          kind: "file" as const,
+          name: "read",
+          title: "/tmp/conductor-cli.png",
+          status: "running" as const,
+        },
+      };
+      const timedOutRead = {
+        ...runningRead,
+        tool: {
+          ...runningRead.tool,
+          status: "timeout" as const,
+          detail: "Timed out after 90 seconds without a tool result.",
+        },
+      };
+      coreMocks.recordCompanionPiProjectionWithEffects.mockResolvedValue({
+        thread: { ...viewerThread, access: "owner", entries: [runningRead] },
+        settledToolRuns: [],
+      });
+      coreMocks.expireCompanionToolRuns.mockResolvedValue({
+        thread: { ...viewerThread, access: "owner", entries: [timedOutRead] },
+        timedOut: [{ eventId: runningRead.event_id, kind: "file" }],
+      });
+      coreMocks.expireCompanionDecisions.mockResolvedValue({
+        thread: { ...viewerThread, access: "owner", entries: [timedOutRead] },
+        responses: [],
+      });
+      const runtime = boxRuntime({ readEvents: vi.fn(async () => ({ chunk: "", offset: 512 })) });
+
+      const response = await syncing(runtime);
+      const body = await response.json() as { thread: { entries: Array<typeof timedOutRead> } };
+
+      expect(response.status).toBe(200);
+      expect(body.thread.entries[0]?.tool.status).toBe("timeout");
+      expect(runtime.start).not.toHaveBeenCalled();
+      expect(runtime.stop).not.toHaveBeenCalled();
+      expect(runtime.captureDesktopFrame).not.toHaveBeenCalled();
+    });
+
+    it("leaves a run that touched no screen without a picture", async () => {
+      coreMocks.recordCompanionPiProjectionWithEffects.mockResolvedValue({
+        thread: { ...viewerThread, access: "owner", entries: [shellRun] },
+        settledToolRuns: [{ eventId: shellRun.event_id, kind: "shell" }],
       });
       const runtime = boxRuntime({ readEvents: vi.fn(async () => ({ chunk, offset: 512 })) });
 
@@ -2237,10 +2678,13 @@ describe("Companions API feature gate", () => {
     it("leaves a run that already has its picture alone", async () => {
       // The desktop only tells the truth about the run that just ended, so a second capture would
       // replace the screen as the run left it with whatever is on it now.
-      coreMocks.recordCompanionPiProjection.mockResolvedValue({
-        ...viewerThread,
-        access: "owner",
-        entries: [visualRun("data:image/jpeg;base64,/9j/4AAQSkZJRg==")],
+      coreMocks.recordCompanionPiProjectionWithEffects.mockResolvedValue({
+        thread: {
+          ...viewerThread,
+          access: "owner",
+          entries: [visualRun("data:image/jpeg;base64,/9j/4AAQSkZJRg==")],
+        },
+        settledToolRuns: [],
       });
       const runtime = boxRuntime({ readEvents: vi.fn(async () => ({ chunk, offset: 512 })) });
 
@@ -2250,10 +2694,9 @@ describe("Companions API feature gate", () => {
     });
 
     it("does not reach for a frame on a Box with no desktop", async () => {
-      coreMocks.recordCompanionPiProjection.mockResolvedValue({
-        ...viewerThread,
-        access: "owner",
-        entries: [visualRun()],
+      coreMocks.recordCompanionPiProjectionWithEffects.mockResolvedValue({
+        thread: { ...viewerThread, access: "owner", entries: [visualRun()] },
+        settledToolRuns: [{ eventId: "pi:512:tool:0", kind: "computer" }],
       });
       const runtime = boxRuntime({
         readEvents: vi.fn(async () => ({ chunk, offset: 512 })),
@@ -2271,10 +2714,9 @@ describe("Companions API feature gate", () => {
     });
 
     it("keeps the projected transcript when the capture fails", async () => {
-      coreMocks.recordCompanionPiProjection.mockResolvedValue({
-        ...viewerThread,
-        access: "owner",
-        entries: [visualRun()],
+      coreMocks.recordCompanionPiProjectionWithEffects.mockResolvedValue({
+        thread: { ...viewerThread, access: "owner", entries: [visualRun()] },
+        settledToolRuns: [{ eventId: "pi:512:tool:0", kind: "computer" }],
       });
       const runtime = boxRuntime({
         readEvents: vi.fn(async () => ({ chunk, offset: 512 })),
@@ -2386,12 +2828,15 @@ describe("Companions API feature gate", () => {
     it("expires pending cards on sync and sends cancel to Pi", async () => {
       coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
       coreMocks.listPendingCompanionMessages.mockResolvedValue({ pending: [], piLogOffset: 0 });
-      coreMocks.recordCompanionPiProjection.mockResolvedValue({
-        ...viewerThread,
-        access: "owner",
-        can_send: true,
-        read_only: false,
-        entries: [pendingDecision],
+      coreMocks.recordCompanionPiProjectionWithEffects.mockResolvedValue({
+        thread: {
+          ...viewerThread,
+          access: "owner",
+          can_send: true,
+          read_only: false,
+          entries: [pendingDecision],
+        },
+        settledToolRuns: [],
       });
       coreMocks.expireCompanionDecisions.mockResolvedValue({
         thread: {
@@ -2429,10 +2874,32 @@ describe("Companions API feature gate", () => {
   });
 
   it("syncs a sleeping thread from the control plane without contacting Box", async () => {
+    const timedOut = {
+      event_id: "pi:sleeping-read",
+      ordinal: 1,
+      role: "tool" as const,
+      content: "/tmp/conductor-cli.png",
+      author_id: null,
+      author_name: null,
+      tool: {
+        call_id: "call-sleeping-read",
+        kind: "file" as const,
+        name: "read",
+        title: "/tmp/conductor-cli.png",
+        status: "timeout" as const,
+        detail: "Timed out after 90 seconds without a tool result.",
+        screenshot: null,
+      },
+      created_at: companion.created_at,
+    };
     coreMocks.listPendingCompanionMessages.mockResolvedValue({
       pending: [message],
       piLogOffset: 0,
       deliveredOrdinal: null,
+    });
+    coreMocks.expireCompanionToolRuns.mockResolvedValue({
+      thread: { ...viewerThread, entries: [timedOut] },
+      timedOut: [{ eventId: timedOut.event_id, kind: "file" }],
     });
     const runtimeFactory = vi.fn(() => {
       throw new Error("Box client must not be created");
@@ -2447,9 +2914,12 @@ describe("Companions API feature gate", () => {
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ source: "control_plane" });
+    await expect(response.json()).resolves.toMatchObject({
+      source: "control_plane",
+      thread: { entries: [{ tool: { status: "timeout" } }] },
+    });
     expect(runtimeFactory).not.toHaveBeenCalled();
-    expect(coreMocks.recordCompanionPiProjection).not.toHaveBeenCalled();
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).not.toHaveBeenCalled();
   });
 
   it("does not register chat routes when the flag is off", async () => {
@@ -2537,6 +3007,7 @@ describe("Companions API feature gate", () => {
 
   it.each([
     ["start", `/v1/companions/${companion.id}/runtime/start`],
+    ["restart", `/v1/companions/${companion.id}/runtime/restart`],
     ["stop", `/v1/companions/${companion.id}/runtime/stop`],
     ["desktop", `/v1/companions/${companion.id}/runtime/desktop`],
     // The Computer panel's join is this same route, so a Viewer who reached for one — by any means —
@@ -2805,6 +3276,7 @@ describe("Companions API feature gate", () => {
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       replaceProviderAuth,
       refreshRuntimeLayout,
+      restartPi: refreshRuntimeLayout,
     }));
   });
 

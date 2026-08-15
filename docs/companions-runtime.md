@@ -85,10 +85,11 @@ an empty skill set. This is enforced by the API and again by the Box adapter bef
 | `GET` | `/v1/companions/:id/thread` | Never; authorized read-only control-plane projection |
 | `POST` | `/v1/companions/:id/messages` | Owner/editor only; persists first, starts when not already running, then delivers |
 | `POST` | `/v1/companions/:id/thread/sync` | Owner/editor only; delivers and projects without resuming Box |
-| `POST` | `/v1/companions/:id/decisions/:requestId` | Owner/editor only; Allow / Deny / answer a pending permission card |
+| `POST` | `/v1/companions/:id/decisions/:requestId` | Owner/editor only; answer a pending `ask_user` question or settle a legacy approval card |
 | `GET` | `/v1/companions/:id/runtime` | Never |
 | `GET` | `/v1/companions/:id/runtime?live=true` | Owner/editor only; observes without resuming |
 | `POST` | `/v1/companions/:id/runtime/start` | Creates or resumes Box, then starts Pi |
+| `POST` | `/v1/companions/:id/runtime/restart` | Owner/editor only; while fully online, recycles Pi or archives and resumes the same Box; never wakes an offline Companion |
 | `POST` | `/v1/companions/:id/runtime/stop` | Stops Pi, then snapshots/archives Box |
 | `POST` | `/v1/companions/:id/runtime/desktop` | Owner/editor only; never resumes Box |
 | `GET` | `/v1/companion-providers` | Never |
@@ -131,10 +132,12 @@ leave the handoff silently unmade. A still-provisioning Box, a blocked tab, or a
 closes that tab and states why on the thread without ever naming the secret-bearing URL. That reason is held apart from the thread's own load failure, so the
 two-second refresh of an awake thread cannot clear it and leave a failed handoff looking like nothing
 happened. The URL is used once and never stored by the browser surface either. A
-Companion that is asleep offers Wake instead, because a desktop request cannot resume a Box, and a
-Viewer reads the chip as text: their thread polls only the control-plane projection, while a runner's
-open thread refreshes `GET /v1/companions/:id/runtime?live=true` on a slow interval, so a stale chip
-is corrected by an observation rather than by a wake.
+Companion that is asleep tells its runner to send a message to start it, because a desktop request
+cannot resume a Box, and a Viewer reads the chip as text. Opening a thread and beginning a send both
+trigger an immediate status read. While a send is open or the projection is transitioning, the web
+polls every three seconds; once settled it returns to the slower cadence. An Owner or Editor may use
+`GET /v1/companions/:id/runtime?live=true` to observe a Box already projected online, while a Viewer
+uses only the control-plane projection. Neither path wakes a Box.
 
 Beside the conversation, the same runner can open a Computer panel that frames that desktop in the
 thread, so watching Pi work costs no context switch. The panel is a second pane rather than a change
@@ -145,29 +148,24 @@ route, so opening the panel, reconnecting it, and using `Open desktop` are three
 freshly minted URLs; none is held beyond the join that minted it, and closing the panel, moving to
 another Companion, or a Box that stops under the stream each drop it. The desktop is another origin's
 document, so it is framed with no top-level navigation and no popups, and the panel prints no part of
-the URL. A sleeping Box shows as asleep beside the header's own Wake control, because a desktop
-request cannot resume one. A Viewer is offered neither the panel nor its toggle, and the route refuses
+the URL. A sleeping Box shows as asleep with guidance to send a message, because a desktop request
+cannot resume one. A Viewer is offered neither the panel nor its toggle, and the route refuses
 them before a Box client exists, so the panel is not a wake path for anybody.
 
-A Companion the control plane is still resolving is watched more closely, and on the plain projection
-read: every few seconds while its state is `provisioning` or `stopping`. That window used to be the
-one nothing watched at all. The observation above begins only once the state is already `running`, and
-the request that starts a lifecycle reports it once — before it finishes, if the wake outlives the
-proxy in front of the API, and not at all if the browser has gone. Production spent about a minute
-reading `Box · starting`, still offering Wake, beside a reply Pi had already sent: the row had said
-`running` within a second of the Box coming up, and nothing had read it since. The chip, the wake
-control, and the composer footer all derive from that row, so they leave Starting together, and
-because this read is the projection it never resumes a Box and is as safe for a Viewer as their own.
-Watching stops as soon as the state settles, `error` included: that is where a failed lifecycle
-finishes, and its reason is already on screen. Watching that closely means these reads overlap, so each
-one is kept only while it is the newest for that Companion; an older read that answers late would
-otherwise put a state the Companion has already left back on a chip that had reached Online.
+A Companion the control plane is still resolving is watched more closely on the plain projection
+read: every three seconds while its state is `provisioning` or `stopping`, and for the full duration
+of an open send that may be starting it. The status chip and composer footer derive from that row, so
+they leave Starting together without waiting for the send request to finish or the page to reload.
+Watching closely stops as soon as the send and state transition have both settled, `error` included:
+that is where a failed lifecycle finishes, and its reason is already on screen. Because these reads
+can overlap, each response is kept only while it is the newest for that Companion; an older read that
+answers late cannot put a state the Companion has already left back on a chip that reached Online.
 
 ## Lifecycle failure reporting
 
 A failure is diagnosable without server logs. A failed start or stop records `runtime_state: error`
 together with one sanitized line in `companions.last_error`, and the failing start, stop, and sync
-responses carry that same line as `error`, so the operator who pressed Wake and the operator who
+responses carry that same line as `error`, so the operator who initiated the lifecycle and the operator who
 reloads later read the same reason.
 
 Only recognized failures explain themselves: Box configuration (`COMPANION_BOX_API_KEY` unset), Box
@@ -201,7 +199,7 @@ teammate's name. Pi output carries no author.
 `POST /v1/companions/:id/messages` is Owner/Editor only and persists first. When a lightweight
 runtime observation confirms both Box and Pi are running, it delivers directly without claiming a
 lifecycle transition or resolving injection resources. Otherwise it claims the
-same lifecycle start as Wake: an archived Box resumes and a stopped Pi starts. Delivery then hands
+same lifecycle start as `/runtime/start`: an archived Box resumes and a stopped Pi starts. Delivery then hands
 Pi every still-pending message oldest first, not just the new one, so a backlog a sleeping Box missed
 keeps its order and never skips the watermark. An undelivered message stays pending under its
 idempotency key; if automatic wake fails, the lifecycle records `last_error` and the response keeps
@@ -219,8 +217,17 @@ spends recording its reason) so the send outlives a normal wake and returns the 
 not an unbounded wait: every step of a wake already bounds itself against the budget, so a stalled
 upstream still returns well inside it. The send route itself never answers a wake with `500`/`504`
 within budget — it swallows a failed automatic start and returns the pending turn — so the proxy was
-the only 30s cliff on this path; explicit Wake (`/runtime/start`) still returns `504` on an exhausted
+the only 30s cliff on this path; an explicit `/runtime/start` still returns `504` on an exhausted
 budget, comfortably inside the raised proxy window.
+
+`POST /v1/companions/:id/runtime/restart` is an operator control, not a wake path. It authorizes an
+Owner or Editor before constructing a Box client, then observes Box and Pi without resuming either.
+It accepts only a fully online, settled Companion. The default `pi` target reinjects persisted
+configuration and recycles only Pi with Box wake disabled. The `box` target stops Pi, archives the
+Box, and resumes that same Box through the normal full start path; Settings requires an explicit
+confirmation because this interrupts all work on the Box. An asleep, errored, provisioning, or
+stopping Companion is refused without contact that could wake it, and lifecycle failures keep using
+the existing projected error state and sanitized reason.
 
 One send is one turn. The sender names the message it is creating with `client_message_id`, a UUID,
 and the control plane stores it as that entry's event id (`msg:<client_message_id>`), so the
@@ -280,30 +287,42 @@ plain `tool`), a short title, the arguments as truncated detail, and a status th
 Pi's tool result then settles it: a result naming its call closes exactly that chip, a harness that
 reports no call id closes the oldest chip still running, and a result matching nothing is dropped
 rather than guessed at, so a chunk read twice cannot close a run some later call started. A run whose
-result never arrives stays `running`, which is what the reader is owed — the chip spins because the
-tool has not answered.
+result never arrives is failed closed after 90 seconds. The staged Pi extension owns the active-turn
+deadline for every accepted execution tool and clears all sibling timers before its scoped
+`ctx.abort()`, so a later queued follow-up cannot be cancelled by a retry. The control plane never
+sends an unscoped
+abort into Pi's FIFO: both live sync and the read-only thread fallback settle overdue rows directly,
+and a late result and the timeout update compare-and-set only a still-running chip, so whichever
+settles it first wins. This closes the chip and the browser's in-flight state without changing Box or
+daemon lifecycle, so a stalled tool never turns an Online Companion into Starting or exposes Wake.
+The extension also refuses image paths before Pi's built-in `read` can enter its vision path;
+`ask_user` retains its separate five-minute interactive decision deadline.
 
-A visual run — `browse` or `computer` — is worth a picture, so when one settles the sync captures a
-single frame of the Box desktop and stores it on that run as a `data:` URL, bounded to the same size
-limit the contract enforces. It is one frame per sync and only for the most recent settled visual run
-that has none, taken with the screenshot tool the Box already has; a Box with no desktop, no capture
-tool, or a capture that fails simply leaves the chip without a picture rather than failing the sync.
+A visual run — `browse` or `computer` — is worth a picture, so when one settles (including by the
+fail-closed deadline) the sync captures from the Box desktop and stores exactly one frame on that run
+as a `data:` URL, bounded to the same size limit the contract enforces. Frame attribution comes only
+from the exact run ids whose database settlement won in that sync; replayed or late results cannot
+photograph a historical chip. One desktop capture can satisfy several visual runs settled in the
+same Pi log chunk, but each run receives at most one stored frame. Capture comes directly from the
+Box desktop rather than through Pi `read`; a Box with no desktop, no capture tool, or a capture that
+fails simply leaves the chip without a picture rather than failing the sync.
 Frames are never uploaded to object storage and never minted as a desktop URL, so a screenshot in the
 thread is not a second way to reach a live stream. Because capture happens on the Owner/Editor sync
 path, a Viewer reads chips and whatever frames were already stored without any of it touching a Box.
 
-Before a risky tool runs, the Companion permission-broker Pi extension emits an
-`extension_ui_request` (confirm for bash / write / edit, input for `ask_user`) and blocks until the
-control plane answers. Sync projects those requests as `decision` transcript entries carrying the
-request in `companion_transcript_entries.decision`, coupled to the `decision` role by a check
-constraint. Owner and Editor Allow / Deny / answer through
-`POST /v1/companions/:id/decisions/:requestId`, which persists who decided and writes an
-`extension_ui_response` to the same FIFO Pi reads for prompts — Allow resumes the tool, Deny and
-timeout never execute it. Timeout is fail-closed at five minutes on both sides: the extension passes
-that window to Pi's dialog, and sync expires any card still pending past `expires_at`. Viewers read
-resolved cards on the control-plane thread and cannot act. Fire-and-forget extension UI and prompts
-minted outside the Companion title grammar (`companion:<kind>:<name>`) are ignored so third-party
-extension chrome does not become Allow / Deny cards.
+Pi runs its built-in `bash`, `write`, and `edit` tools directly without asking for approval. The
+Companion interaction extension only adds `ask_user`: that tool emits an `extension_ui_request` and
+blocks until the control plane receives an answer. Sync projects the request as a `decision`
+transcript entry carrying the question in `companion_transcript_entries.decision`, coupled to the
+`decision` role by a check constraint. Owner and Editor answer or deny through
+`POST /v1/companions/:id/decisions/:requestId`, which persists who answered and writes an
+`extension_ui_response` to the same FIFO Pi reads for prompts. Timeout is fail-closed at five minutes
+on both sides: the extension passes that window to Pi's dialog, and sync expires any question still
+pending past `expires_at`. Viewers read resolved questions on the control-plane thread and cannot
+act. The contract continues to render and settle shell/file approval cards already stored by an
+older runtime, but the current extension never creates new ones. Fire-and-forget extension UI and
+prompts minted outside the Companion title grammar (`companion:<kind>:<name>`) are ignored so
+third-party extension chrome does not become interactive cards.
 
 Delivery reads the pending list before it claims the watermark, so two requests that overlap inside
 that window can hand Pi the same prompt twice. One client cannot do this: the web surface runs its
@@ -321,7 +340,7 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
 ├── pi/                    # isolated PI_CODING_AGENT_DIR
 │   ├── auth.json          # owner-only Pi API key or refreshable OAuth entry
 │   ├── mcp.json           # pi-mcp-adapter config; environment references only
-│   └── extensions/        # Companion permission-broker (Allow / Deny / ask_user)
+│   └── extensions/        # Companion interaction extension (ask_user)
 └── runtime/
     ├── skills/            # exact current packages exposed through Pi native Skills
     ├── sessions/          # Pi session tree files (`pi --session-dir`)
@@ -336,12 +355,16 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
         └── pi.stderr.log  # Pi's stderr and the daemon wrapper's own account of a failed start
 ```
 
-Layout version `9` is written to the control-plane row after a successful Skills/MCP-aware start and
+Layout version `11` is written to the control-plane row after a successful Skills/MCP-aware start and
 to an on-disk marker keyed by the adapter package. Starts repair older Box snapshots before resource
 injection. Runtime transcripts and files do not enter PostgreSQL. A systemd user unit supervises Pi
 while Box is active; the lifecycle API starts it after a Box resume. Each start also stages the
-permission-broker extension under `~/.companion/pi/extensions/` so Pi pauses shell, file edits, and
-`ask_user` behind control-plane Allow / Deny cards.
+interaction extension under the legacy `~/.companion/pi/extensions/companion-permission-broker.ts`
+path. Reusing that path overwrites older shell/file approval logic; the current extension leaves Pi's
+tools unrestricted, refuses image reads, bounds execution tools, and pauses only explicit `ask_user`
+questions for a control-plane answer. Layout 11 restarts a warm legacy Pi once after staging because
+extensions load at daemon start; that ensures every already-running Box gains the fail-closed guard
+instead of retaining layout 10 until an unrelated restart.
 
 MCP credential values are not part of that snapshotted tree. A start stages them through the
 owner-only Box file channel, moves the file into `%t/companion/providers.env` in the systemd user
@@ -646,4 +669,3 @@ Boxes are always created/resumed with `noEnv: true` and receive only tenant/Comp
 Preinstall pinned Pi and MCP adapter versions in the Box environment/template when possible.
 Otherwise set a pinned, operator-controlled Pi install command; the setup installs the configured
 adapter package and fails closed if either dependency is unavailable.
-

@@ -181,4 +181,52 @@ describe("Companions page access gate", () => {
       { id: "org-skill-1", slug: "shared-skill" },
     ]);
   });
+
+  it("allows a Viewer to open Companion settings in read-only mode", async () => {
+    process.env.COMPANION_COMPANIONS_ENABLED = "true";
+    process.env.COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS = "thevibecompany.co";
+    authMocks.loadServerAuth.mockResolvedValue({
+      status: "authenticated",
+      user: {
+        userId: "user-1",
+        email: "user@thevibecompany.co",
+        name: "Ada",
+        needsOnboarding: false,
+      },
+    });
+    orgMocks.loadOrgContext.mockResolvedValue({
+      orgs: [{
+        id: "org-1",
+        name: "Acme",
+        slug: "acme",
+        kind: "team",
+        myRole: "developer",
+        color: null,
+        logoUrl: null,
+      }],
+      current: {
+        id: "org-1",
+        name: "Acme",
+        slug: "acme",
+        kind: "team",
+        myRole: "developer",
+        color: null,
+        logoUrl: null,
+      },
+    });
+    apiMocks.serverApiFetch.mockImplementation(async (path: string) => {
+      if (path === "/v1/companions") {
+        return { companions: [{ id: "viewer-companion", access: "viewer" }] };
+      }
+      if (path === "/v1/companion-plugins") return { accounts: [] };
+      return [];
+    });
+
+    const element = await CompanionsPage({
+      searchParams: Promise.resolve({ settings: "viewer-companion" }),
+    }) as { props: { initialSettingsCompanionId: string | null } };
+
+    expect(navigationMocks.notFound).not.toHaveBeenCalled();
+    expect(element.props.initialSettingsCompanionId).toBe("viewer-companion");
+  });
 });

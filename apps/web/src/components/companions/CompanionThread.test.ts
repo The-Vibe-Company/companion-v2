@@ -102,7 +102,6 @@ function render(props: {
   thread?: Thread | null;
   error?: string | null;
   busy?: boolean;
-  waking?: boolean;
   openingDesktop?: boolean;
   context?: Partial<CompanionContextPanel>;
   lastReadOrdinal?: number | null;
@@ -112,7 +111,6 @@ function render(props: {
     thread: props.thread === undefined ? thread() : props.thread,
     error: props.error ?? null,
     busy: props.busy ?? false,
-    waking: props.waking ?? false,
     openingDesktop: props.openingDesktop ?? false,
     context: contextPanel(props.context),
     contextSkills: [],
@@ -122,7 +120,6 @@ function render(props: {
     onSend: async () => true,
     onSettings: () => {},
     onThread: () => {},
-    onWake: () => {},
     onDesktop: () => {},
   }));
 }
@@ -256,25 +253,26 @@ describe("CompanionThread", () => {
     expect(render({ thread: thread() })).toContain(">You<");
   });
 
-  it("offers a wake control only to a runner whose Box is asleep", () => {
-    expect(render({ companion: asleep })).toContain(">Wake<");
+  it("never offers a wake control because sending starts an asleep Companion", () => {
+    expect(render({ companion: asleep })).not.toContain(">Wake<");
     expect(render({})).not.toContain(">Wake<");
   });
 
-  it("tells a runner that saved messages wait for a wake", () => {
+  it("tells a runner how to retry saved messages without offering a wake", () => {
     const markup = render({ companion: asleep, thread: thread({ pending_count: 2 }) });
 
-    expect(markup).toContain("2 messages saved. Wake Luna to deliver.");
+    expect(markup).toContain("2 messages saved. Send another message to retry delivery.");
+    expect(markup).not.toContain(">Wake<");
   });
 
-  it("stops offering a wake in the footer once the Companion is awake or coming up", () => {
+  it("reports whether delivery is waiting for a reply or for startup", () => {
     // The footer reads the projected runtime the status chip reads, so a Companion a send has just
     // woken says what its messages are waiting for instead of asking to be woken again.
     const waiting = thread({ pending_count: 1 });
     const running = render({ thread: waiting });
 
     expect(running).toContain("1 message waiting for a reply.");
-    expect(running).not.toContain("Wake Luna to deliver.");
+    expect(running).not.toContain("retry delivery");
 
     const starting = render({
       companion: companion({
@@ -284,8 +282,8 @@ describe("CompanionThread", () => {
     });
 
     expect(text(starting)).toContain("Starting");
-    expect(starting).toContain("1 message saved. Luna is waking to deliver.");
-    expect(starting).not.toContain("Wake Luna to deliver.");
+    expect(starting).toContain("1 message saved. Luna is starting to deliver.");
+    expect(starting).not.toContain("retry delivery");
   });
 
   it("keeps a Viewer's footer read-only even while messages are waiting on a wake", () => {
@@ -301,7 +299,7 @@ describe("CompanionThread", () => {
     });
 
     expect(markup).toContain("Viewer access is read-only");
-    expect(markup).not.toContain("Wake Luna to deliver.");
+    expect(markup).not.toContain("retry delivery");
     expect(markup).not.toContain(">Wake<");
   });
 
@@ -361,7 +359,7 @@ describe("CompanionThread", () => {
     const markup = render({ thread: thread({ entries: [], pending_count: 0, last_message_at: null }) });
 
     expect(markup).toContain("No messages yet");
-    expect(markup).toContain("Messages are saved here. Wake Luna when you want a reply.");
+    expect(markup).toContain("Send a message to start Luna and get a reply.");
   });
 
   it("announces the wait while the transcript is still loading", () => {

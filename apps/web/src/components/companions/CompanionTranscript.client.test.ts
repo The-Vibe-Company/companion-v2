@@ -304,6 +304,34 @@ describe("a tool run in the thread", () => {
     expect(runCard.getAttribute("aria-busy")).toBe("true");
     expect(runCard.textContent).toContain("running");
   });
+
+  it("settles a timed-out run so the thread is no longer busy", () => {
+    const container = mount(thread([
+      entry({
+        role: "tool",
+        content: "/tmp/conductor-cli.png",
+        tool: run({
+          name: "read",
+          title: "/tmp/conductor-cli.png",
+          status: "timeout",
+          detail: "Timed out after 90 seconds without a tool result.",
+        }),
+      }),
+    ]));
+    const runCard = container.querySelector("[data-slot='companion-tool-run']") as HTMLElement;
+    const composer = container.querySelector("textarea[aria-label='Message Luna']") as HTMLTextAreaElement;
+    const send = container.querySelector("button[aria-label='Send message']") as HTMLButtonElement;
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
+    act(() => {
+      setter?.call(composer, "Alors ?");
+      composer.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    expect(runCard.getAttribute("aria-busy")).toBeNull();
+    expect(runCard.textContent).toContain("timed out");
+    expect(container.textContent).not.toContain("Luna is replying...");
+    expect(send.disabled).toBe(false);
+  });
 });
 
 describe("a permission card in the thread", () => {

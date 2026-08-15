@@ -79,7 +79,6 @@ async function mount(
     companion?: Companion;
     thread?: Thread;
     onDesktop?: () => void;
-    onWake?: () => void;
     context?: Partial<CompanionContextPanel>;
   } = {},
 ) {
@@ -93,7 +92,6 @@ async function mount(
       thread: overrides.thread ?? thread,
       error: null,
       busy: false,
-      waking: false,
       openingDesktop: false,
       context: contextPanel(overrides.context),
       contextSkills: [],
@@ -102,7 +100,6 @@ async function mount(
       onSend,
       onSettings: () => {},
       onThread: () => {},
-      onWake: overrides.onWake ?? (() => {}),
       onDesktop: overrides.onDesktop ?? (() => {}),
     }));
   });
@@ -122,7 +119,6 @@ async function mountPolling(initial: Thread) {
         thread: next,
         error: null,
         busy: false,
-        waking: false,
         openingDesktop: false,
         context: contextPanel(),
         contextSkills: [],
@@ -131,7 +127,6 @@ async function mountPolling(initial: Thread) {
         onSend: async () => true,
         onSettings: () => {},
         onThread: () => {},
-        onWake: () => {},
         onDesktop: () => {},
       }));
     });
@@ -326,7 +321,6 @@ describe("CompanionThread composer", () => {
       thread: next,
       error: null,
       busy: false,
-      waking: false,
       openingDesktop: false,
       context: contextPanel(),
       contextSkills: [],
@@ -338,7 +332,6 @@ describe("CompanionThread composer", () => {
       },
       onSettings: () => {},
       onThread: () => {},
-      onWake: () => {},
       onDesktop: () => {},
     });
     await act(async () => {
@@ -535,8 +528,8 @@ describe("CompanionThread Box chip", () => {
   });
 
   it("shows one state word and keeps the compute it reports in its accessible name", async () => {
-    // THE-345: `Box · asleep` does not fit beside Back, the name, the settings and panel toggles, and
-    // Wake at 320px. The visible chip is the dot and the word — the word has to stay, because the
+    // THE-345: `Box · asleep` does not fit beside Back, the name, settings, and the panel toggle at
+    // 320px. The visible chip is the dot and the word — the word has to stay, because the
     // dot's colour is not allowed to be the only thing reporting status — and what the state is
     // about rides in the accessible name and the tooltip instead.
     const container = await mount(async () => true);
@@ -688,11 +681,9 @@ describe("CompanionThread context panel", () => {
     expect(joins).toBe(1);
   });
 
-  it("offers a sleeping Box the wake control instead of a stream", async () => {
-    let woken = 0;
+  it("explains that sending starts a sleeping Box instead of offering a lifecycle control", async () => {
     const container = await mount(async () => true, {
       companion: asleep,
-      onWake: () => { woken += 1; },
       context: {
         open: true,
         // A stream minted before the Box stopped is not a stream: a sleeping Box has no desktop.
@@ -708,12 +699,8 @@ describe("CompanionThread context panel", () => {
     expect(container.querySelector(".chat-context__frame")).toBeNull();
     expect(container.innerHTML).not.toContain("token=stale");
     expect(panel(container)?.textContent).toContain("this Box is not running");
-    // Waking is the same control the header offers, so the panel adds no second lifecycle path.
-    await act(async () => {
-      actionNamed(container, "Wake")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-
-    expect(woken).toBe(1);
+    expect(panel(container)?.textContent).toContain("Send a message to start Luna");
+    expect(actionNamed(container, "Wake")).toBeUndefined();
   });
 
   it("says why a join produced no screen without spelling out the URL", async () => {

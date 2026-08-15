@@ -132,16 +132,12 @@ describe("CompanionsApp", () => {
     expect(markup).toContain("Asleep");
     expect(markup).toContain("New companion");
     expect(markup).toContain("Search companions");
-    // The Companion Owner keeps sharing; a Viewer row must not offer it.
-    expect(markup.match(/>Share</g)).toHaveLength(1);
-    // Both rows expose settings; the Viewer receives its provider and model as disabled controls.
-    expect(markup.match(/aria-label="Settings for/g)).toHaveLength(2);
+    expect(markup).toContain('class="companions-main companions-main--list"');
+    expect(markup).toContain('class="chead companions-list__head"');
+    // Secondary actions stay out of the row until its single menu opens.
     expect(markup.match(/aria-label="Actions for/g)).toHaveLength(2);
-    expect(markup).toContain("Pin");
-    expect(markup).toContain("Mark as unread");
-    expect(markup).toContain("Hide");
-    // Duplicate stays Owner-only.
-    expect(markup.match(/>Duplicate</g)).toHaveLength(1);
+    expect(markup).not.toContain(">Share<");
+    expect(markup).not.toContain(">Settings<");
   });
 
   it("keeps hidden Companions out of the main list and offers unhide", () => {
@@ -156,7 +152,7 @@ describe("CompanionsApp", () => {
     expect(markup).toContain("Visible");
     expect(markup).toContain("Hidden");
     expect(markup).toContain("Stashed");
-    expect(markup).toContain("Unhide");
+    expect(markup).toContain('aria-label="Actions for Stashed"');
   });
 
   it("carries the recorded reason next to an Error status in the list", () => {
@@ -180,7 +176,7 @@ describe("CompanionsApp", () => {
 
     expect(markup).toContain("No Companions yet");
     expect(markup).toContain("New companion");
-    expect(markup).not.toContain("Search companions");
+    expect(markup).toContain("Search companions");
   });
 
   it("keeps the sidebar in Companions mode with the Skills switch available", () => {

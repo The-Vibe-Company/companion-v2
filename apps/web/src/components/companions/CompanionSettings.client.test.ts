@@ -6,12 +6,27 @@ import type { Companion, CompanionProvidersResponse } from "@companion/contracts
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CompanionSettings } from "./CompanionSettings";
 
-const { updateCompanion, deleteCompanion } = vi.hoisted(() => ({
+const {
+  updateCompanion,
+  deleteCompanion,
+  getCompanionRuntime,
+  restartCompanionRuntime,
+  updateCompanionMemberState,
+} = vi.hoisted(() => ({
   updateCompanion: vi.fn(),
   deleteCompanion: vi.fn(),
+  getCompanionRuntime: vi.fn(),
+  restartCompanionRuntime: vi.fn(),
+  updateCompanionMemberState: vi.fn(),
 }));
 
-vi.mock("@/lib/companions", () => ({ updateCompanion, deleteCompanion }));
+vi.mock("@/lib/companions", () => ({
+  updateCompanion,
+  deleteCompanion,
+  getCompanionRuntime,
+  restartCompanionRuntime,
+  updateCompanionMemberState,
+}));
 vi.mock("@/lib/apiClient", () => ({
   apiFetch: vi.fn(async (path: string) => {
     if (String(path).includes("/v1/companion-plugins")) {
@@ -143,6 +158,15 @@ describe("CompanionSettings", () => {
       runtime: { ...companion().runtime, provider_ids: [input.provider_id] },
     }));
     deleteCompanion.mockResolvedValue(undefined);
+    getCompanionRuntime.mockResolvedValue(companion());
+    restartCompanionRuntime.mockResolvedValue({
+      ...companion(),
+      runtime: {
+        ...companion().runtime,
+        state: "running",
+        daemon_state: "running",
+      },
+    });
   });
 
   afterEach(async () => {
@@ -207,6 +231,7 @@ describe("CompanionSettings", () => {
     expect(pickers.every((fieldset) => fieldset.matches(":disabled"))).toBe(true);
     expect(container.querySelector(".companions-skills-picker__write input")).toHaveProperty("disabled", true);
     expect(container.textContent).not.toContain("Save changes");
+    expect(container.textContent).not.toContain("Restart Companion");
     expect(container.textContent).not.toContain("Delete Companion");
     expect(updateCompanion).not.toHaveBeenCalled();
   });
@@ -283,7 +308,7 @@ describe("CompanionSettings", () => {
     };
     const { container } = await mount("owner", apiConnections);
 
-    expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(2);
+    expect(container.querySelectorAll('.companions-settings__form input[type="radio"]')).toHaveLength(2);
     expect(container.textContent).toContain("Kimi");
     expect(container.textContent).toContain("z.ai");
     await act(async () => {
@@ -310,5 +335,147 @@ describe("CompanionSettings", () => {
     });
     expect(deleteCompanion).toHaveBeenCalledWith("org-1", companion().id);
     expect(onDeleted).toHaveBeenCalledWith(companion().id);
+  });
+
+  it("restarts Pi by default for an online Owner or Editor", async () => {
+    const online = {
+      ...companion("editor"),
+      runtime: {
+        ...companion("editor").runtime,
+        state: "running" as const,
+        daemon_state: "running" as const,
+      },
+    };
+    restartCompanionRuntime.mockResolvedValue(online);
+    const { container, onSaved } = await mount("editor", providers, online);
+    const pi = container.querySelector<HTMLInputElement>('input[name="restart-target"][value="pi"]')!;
+    const button = [...container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent === "Restart Pi") as HTMLButtonElement;
+
+    expect(pi.checked).toBe(true);
+    await act(async () => button.click());
+
+    expect(restartCompanionRuntime).toHaveBeenCalledWith("org-1", online.id, { target: "pi" });
+    expect(onSaved).toHaveBeenCalledWith(online);
+    expect(container.textContent).toContain("Pi restarted. The Box stayed online.");
+  });
+
+  it("confirms a full Box restart before interrupting the server", async () => {
+    const online = {
+      ...companion(),
+      runtime: {
+        ...companion().runtime,
+        state: "running" as const,
+        daemon_state: "running" as const,
+      },
+    };
+    restartCompanionRuntime.mockResolvedValue(online);
+    const { container } = await mount("owner", providers, online);
+    const box = container.querySelector<HTMLInputElement>('input[name="restart-target"][value="box"]')!;
+
+    await act(async () => box.click());
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((candidate) => candidate.textContent === "Restart full Box")?.click();
+    });
+
+    expect(restartCompanionRuntime).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Restart Luna's full Box?");
+
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .filter((candidate) => candidate.textContent === "Restart full Box")
+        .at(-1)?.click();
+    });
+
+    expect(restartCompanionRuntime).toHaveBeenCalledWith("org-1", online.id, { target: "box" });
+    expect(container.textContent).toContain("The full Box restarted and is online.");
+  });
+
+  it("keeps restart busy until Pi answers", async () => {
+    let resolveRestart = (_value: Companion) => {};
+    const pending = new Promise<Companion>((resolve) => { resolveRestart = resolve; });
+    const online = {
+      ...companion(),
+      runtime: {
+        ...companion().runtime,
+        state: "running" as const,
+        daemon_state: "running" as const,
+      },
+    };
+    restartCompanionRuntime.mockReturnValue(pending);
+    const { container } = await mount("owner", providers, online);
+    const button = [...container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent === "Restart Pi") as HTMLButtonElement;
+
+    act(() => button.click());
+
+    expect(button.disabled).toBe(true);
+    expect(button.textContent).toBe("Restarting Pi...");
+
+    await act(async () => resolveRestart(online));
+    expect(button.disabled).toBe(false);
+  });
+
+  it("reconciles and disables runtime controls after restart fails", async () => {
+    const online = {
+      ...companion(),
+      runtime: {
+        ...companion().runtime,
+        state: "running" as const,
+        daemon_state: "running" as const,
+      },
+    };
+    const failed = {
+      ...online,
+      runtime: {
+        ...online.runtime,
+        state: "error" as const,
+        daemon_state: "error" as const,
+        last_error: "Pi did not become ready.",
+      },
+    };
+    restartCompanionRuntime.mockRejectedValue(new Error("Pi did not become ready."));
+    getCompanionRuntime.mockResolvedValue(failed);
+    const { container, onSaved } = await mount("owner", providers, online);
+
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((candidate) => candidate.textContent === "Restart Pi")?.click();
+    });
+
+    expect(getCompanionRuntime).toHaveBeenCalledWith("org-1", online.id);
+    expect(onSaved).toHaveBeenCalledWith(failed);
+    expect(container.textContent).toContain("Pi did not become ready.");
+    expect([...container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent === "Restart Pi"))
+      .toHaveProperty("disabled", true);
+  });
+
+  it("keeps restart unavailable while offline or while settings are unsaved", async () => {
+    const offline = await mount("owner");
+    const offlineRestart = [...offline.container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent === "Restart Pi") as HTMLButtonElement;
+
+    expect(offlineRestart.disabled).toBe(true);
+    expect(offline.container.textContent).toContain("must be Online");
+
+    const online = {
+      ...companion(),
+      runtime: {
+        ...companion().runtime,
+        state: "running" as const,
+        daemon_state: "running" as const,
+      },
+    };
+    const unsaved = await mount("owner", providers, online);
+    const name = unsaved.container.querySelector('input[name="name"]') as HTMLInputElement;
+    await act(async () => setControlled(name, "Luna changed"));
+    const unsavedRestart = [...unsaved.container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent === "Restart Pi") as HTMLButtonElement;
+
+    expect(unsavedRestart.disabled).toBe(true);
+    expect(unsaved.container.textContent).toContain("Save your changes before restarting.");
+    expect(restartCompanionRuntime).not.toHaveBeenCalled();
   });
 });

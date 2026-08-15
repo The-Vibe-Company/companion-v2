@@ -46,6 +46,7 @@ import {
   deleteCompanionProvider,
   duplicateCompanion,
   expireCompanionDecisions,
+  expireCompanionToolRuns,
   getCompanion,
   getCompanionProviderCredentialGeneration,
   getCompanionForRuntime,
@@ -60,7 +61,7 @@ import {
   markCompanionThreadRead,
   projectCompanionPiEvents,
   pollOpenAICodexProviderOAuth,
-  recordCompanionPiProjection,
+  recordCompanionPiProjectionWithEffects,
   resolveCompanionProviderAuth,
   resolveCompanionPluginInjection,
   saveCompanionProvider,
@@ -76,7 +77,12 @@ import {
   updateCompanionRuntime,
 } from "@companion/core";
 import { issueApiToken } from "@companion/core/services";
-import type { CompanionPiEntry, CompanionPiToolCompletion } from "@companion/core";
+import type {
+  CompanionPiEntry,
+  CompanionPiProjectionResult,
+  CompanionPiToolCompletion,
+  CompanionSettledToolRun,
+} from "@companion/core";
 import {
   createCompanionInputSchema,
   companionProviderIdSchema,
@@ -94,6 +100,7 @@ import {
   updateCompanionInputSchema,
   updateCompanionMemberStateInputSchema,
 } from "@companion/contracts";
+import { restartCompanionRuntimeInputSchema } from "@companion/contracts/companion-runtime";
 import type {
   Companion,
   CompanionDesktop,
@@ -381,51 +388,49 @@ function recordProjection(input: {
   piLogOffset?: number;
   piLogRewound?: boolean;
   deliveredOrdinal?: number;
-}): Promise<CompanionThread> {
+}): Promise<CompanionPiProjectionResult> {
   return withTenantContext(
     { orgId: input.orgId, userId: input.actor.id },
-    (database) => recordCompanionPiProjection({ ...input, database }),
+    (database) => recordCompanionPiProjectionWithEffects({ ...input, database }),
   );
 }
 
 /**
  * Give the visual run this sync just finished one picture of the Box desktop.
  *
- * Only the newest unphotographed run is offered a frame, and only in the sync that closed it: the
- * live desktop can only tell the truth about the run that just ended, so an older run keeps no
- * picture rather than being given a misleading one. Everything here is best-effort — no desktop, no
- * capture tool, a Box that stopped answering, a frame too large — because the transcript this sync
- * already stored is the thing that mattered, and a run without a picture is still a run.
+ * Only exact run ids whose settlement won in this sync are offered a frame. One desktop capture can
+ * satisfy several visual calls projected from the same Pi chunk, while the database guard keeps
+ * every run at one immutable frame. Everything here is best-effort — no desktop, no capture tool, a
+ * Box that stopped answering, a frame too large — because the transcript this sync already stored is
+ * the thing that mattered, and a run without a picture is still a run.
  */
-async function attachDesktopFrame(input: {
+async function attachDesktopFrames(input: {
   actor: ReturnType<typeof actorFromContext>;
   orgId: string;
   companionId: string;
   boxId: string;
   runtime: CompanionBoxRuntime;
-  thread: CompanionThread;
+  eventIds: string[];
   desktopAvailable: boolean;
 }): Promise<CompanionThread | null> {
-  if (!input.desktopAvailable) return null;
-  const target = [...input.thread.entries].reverse().find((entry) =>
-    entry.tool !== null
-    && entry.tool.status !== "running"
-    && entry.tool.screenshot === null
-    && companionToolRunIsVisual(entry.tool.kind));
-  if (!target) return null;
+  if (!input.desktopAvailable || !input.eventIds.length) return null;
   const frame = await input.runtime.captureDesktopFrame({ boxId: input.boxId }).catch(() => null);
   if (!frame) return null;
-  return withTenantContext(
-    { orgId: input.orgId, userId: input.actor.id },
-    (database) => attachCompanionToolRunScreenshot({
-      actor: input.actor,
-      orgId: input.orgId,
-      companionId: input.companionId,
-      eventId: target.event_id,
-      screenshot: frame,
-      database,
-    }),
-  ).catch(() => null);
+  let thread: CompanionThread | null = null;
+  for (const eventId of [...new Set(input.eventIds)]) {
+    thread = await withTenantContext(
+      { orgId: input.orgId, userId: input.actor.id },
+      (database) => attachCompanionToolRunScreenshot({
+        actor: input.actor,
+        orgId: input.orgId,
+        companionId: input.companionId,
+        eventId,
+        screenshot: frame,
+        database,
+      }),
+    ).catch(() => thread);
+  }
+  return thread;
 }
 
 /**
@@ -455,7 +460,7 @@ async function deliverCompanionMessages(input: {
     // Leave the undelivered tail pending instead of losing it or failing the persisted send.
   }
   if (deliveredOrdinal === undefined) return null;
-  const thread = await recordProjection({
+  const { thread } = await recordProjection({
     actor: input.actor,
     orgId: input.orgId,
     companionId: input.companionId,
@@ -679,6 +684,8 @@ export function registerCompanionRoutes(
           ];
         })(), budget.signal);
       const runtime = runtimeFactory();
+      const refreshRuntimeLayout =
+        mutation.companion.runtime.disk_layout_version !== COMPANION_PI_DISK_LAYOUT_VERSION;
       const observed = await withinBudget(runtime.start({
         signal: budget.signal,
         companionId,
@@ -692,14 +699,17 @@ export function registerCompanionRoutes(
         instructions: mutation.companion.persona,
         // Skipping the write preserves a subscription token Pi refreshed on disk. A layout refresh
         // remains a cold resource-injection path, but it does not replace current provider auth or
-        // recycle Pi unless the credential generation itself is stale.
+        // recycle a warm Pi; staged resources load on its next natural start.
         replaceProviderAuth:
           !mutation.companion.runtime.box_id
           || mutation.companion.runtime.provider_credential_generation
             !== mutation.provider.credentialGeneration,
-        restartPi: options.restartPi || skillsPending,
-        refreshRuntimeLayout:
-          mutation.companion.runtime.disk_layout_version !== COMPANION_PI_DISK_LAYOUT_VERSION,
+        // Extensions are loaded when Pi starts. Refreshing files beneath an already-running layout
+        // is not enough: recycle that daemon once so every live Box actually gains the new guard.
+        // A pending skill revision recycles too — a warm shortcut would keep the Box's staged
+        // skills stale while settings promise "reapplies on next start".
+        restartPi: options.restartPi === true || refreshRuntimeLayout || skillsPending,
+        refreshRuntimeLayout,
         allowBoxWake: options.allowBoxWake,
         mcpCredentials: body.client_surface === "native_mobile"
           ? []
@@ -811,6 +821,70 @@ export function registerCompanionRoutes(
       throw error;
     } finally {
       budget.release();
+    }
+  }
+
+  /**
+   * Stop and archive one Companion through the lifecycle claim used by the public stop route and by
+   * a full-Box restart. Keeping the failure write here gives both callers the same retryable Error
+   * state and prevents a restart from inventing a second, subtly different stop path.
+   */
+  async function stopRuntime(c: Context<{ Variables: ApiVariables }>, companionId: string): Promise<Companion> {
+    let mutation:
+      | {
+          actor: ReturnType<typeof actorFromContext>;
+          orgId: string;
+          companion: Awaited<ReturnType<typeof claimCompanionRuntimeStop>>;
+        }
+      | undefined;
+    try {
+      mutation = await tenant(c, async ({ actor, orgId, database }) => {
+        const companion = await claimCompanionRuntimeStop({
+          actor, orgId, companionId, database,
+        });
+        return { actor, orgId, companion };
+      });
+      const claimed = mutation;
+      const observed = await runtimeFactory().stop({ boxId: claimed.companion.runtime.box_id! });
+      return withTenantContext(
+        { orgId: claimed.orgId, userId: claimed.actor.id },
+        (database) => updateCompanionRuntime({
+          actor: claimed.actor,
+          orgId: claimed.orgId,
+          companionId,
+          // A delete may claim this Companion while the Box archive is in flight. Do not let this
+          // older stop completion clear the deletion lock after the archive succeeds.
+          expectedUpdatedAt: new Date(claimed.companion.updated_at),
+          patch: {
+            runtimeState: observed.runtimeState,
+            daemonState: observed.daemonState,
+            desktopAvailable: observed.desktopAvailable,
+            observedAt: new Date(),
+            stoppedAt: new Date(),
+          },
+          database,
+        }),
+      );
+    } catch (error) {
+      if (mutation) {
+        await withTenantContext(
+          { orgId: mutation.orgId, userId: mutation.actor.id },
+          (database) => updateCompanionRuntime({
+            actor: mutation!.actor,
+            orgId: mutation!.orgId,
+            companionId,
+            expectedUpdatedAt: new Date(mutation!.companion.updated_at),
+            patch: {
+              runtimeState: "error",
+              daemonState: "error",
+              lastError: companionRuntimeErrorMessage(error),
+              observedAt: new Date(),
+            },
+            database,
+          }),
+        ).catch(() => undefined);
+      }
+      throw error;
     }
   }
 
@@ -1434,8 +1508,12 @@ export function registerCompanionRoutes(
   app.get("/v1/companions/:id/thread", async (c) => {
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
-      const thread = await tenant(c, ({ actor, orgId, database }) =>
-        getCompanionThread({ actor, orgId, companionId, database }));
+      // Thread reads are also the control-plane fallback when live Box polling is unavailable.
+      // Settle overdue chips here without contacting or waking the Box.
+      const thread = await tenant(c, async ({ actor, orgId, database }) => {
+        await expireCompanionToolRuns({ actor, orgId, companionId, database });
+        return getCompanionThread({ actor, orgId, companionId, database });
+      });
       return c.json({ thread });
     } catch (error) {
       return routeError(c, error);
@@ -1494,7 +1572,11 @@ export function registerCompanionRoutes(
       }
       let runtime: CompanionBoxRuntime | undefined;
       let boxId: string | undefined;
-      if (piIsReachable(sent.companion) && providerAuthIsCurrent(sent.companion, sent.provider)) {
+      if (
+        piIsReachable(sent.companion)
+        && providerAuthIsCurrent(sent.companion, sent.provider)
+        && sent.companion.runtime.disk_layout_version === COMPANION_PI_DISK_LAYOUT_VERSION
+      ) {
         // Provider TTL can archive a Box while the control-plane projection still says running.
         // Observe without resuming; a genuinely warm daemon stays on the prompt-only path, while a
         // stale projection falls through to the same start path as an explicitly asleep Companion.
@@ -1525,6 +1607,15 @@ export function registerCompanionRoutes(
           return c.json({ thread: sent.thread, delivery: "pending" as const });
         }
       }
+      const toolRuns = await withTenantContext(
+        { orgId: sent.orgId, userId: sent.actor.id },
+        (database) => expireCompanionToolRuns({
+          actor: sent.actor,
+          orgId: sent.orgId,
+          companionId,
+          database,
+        }),
+      );
       const delivered = await deliverCompanionMessages({
         actor: sent.actor,
         orgId: sent.orgId,
@@ -1535,7 +1626,7 @@ export function registerCompanionRoutes(
       });
       const deliveredOrdinal = delivered?.deliveredOrdinal ?? sent.deliveredOrdinal;
       return c.json({
-        thread: delivered?.thread ?? sent.thread,
+        thread: delivered?.thread ?? toolRuns.thread,
         delivery: deliveredOrdinal !== null && deliveredOrdinal >= sent.entry.ordinal
           ? ("delivered" as const)
           : ("pending" as const),
@@ -1563,28 +1654,34 @@ export function registerCompanionRoutes(
       });
       const mayRecoverProvider = resolved.companion.runtime.state === "error"
         && !providerAuthIsCurrent(resolved.companion, resolved.provider);
+      // Timeout settlement is control-plane work. Run it before every runtime gate so a stopped Box
+      // or daemon cannot leave a durable chip spinning. The staged Pi extension owns cancellation
+      // of the active operation; the control plane never sends an unscoped abort into Pi's FIFO.
+      const beforeRuntime = await withTenantContext(
+        { orgId: resolved.orgId, userId: resolved.actor.id },
+        (database) => expireCompanionToolRuns({
+          actor: resolved.actor,
+          orgId: resolved.orgId,
+          companionId,
+          database,
+        }),
+      );
       if (!piIsReachable(resolved.companion) && !mayRecoverProvider) {
-        const thread = await withTenantContext(
-          { orgId: resolved.orgId, userId: resolved.actor.id },
-          (database) => getCompanionThread({
-            actor: resolved.actor, orgId: resolved.orgId, companionId, database,
-          }),
-        );
-        return c.json({ thread, source: "control_plane" as const });
+        return c.json({ thread: beforeRuntime.thread, source: "control_plane" as const });
       }
       let boxId = resolved.companion.runtime.box_id!;
       let runtime = runtimeFactory();
       const observed = await runtime.status({ boxId }).catch(() => null);
-      if (observed?.runtimeState !== "running" || observed.daemonState !== "running") {
-        const thread = await withTenantContext(
-          { orgId: resolved.orgId, userId: resolved.actor.id },
-          (database) => getCompanionThread({
-            actor: resolved.actor, orgId: resolved.orgId, companionId, database,
-          }),
-        );
-        return c.json({ thread, source: "control_plane" as const });
+      if (!observed) {
+        return c.json({ thread: beforeRuntime.thread, source: "control_plane" as const });
       }
-      if (!providerAuthIsCurrent(resolved.companion, resolved.provider)) {
+      if (observed.runtimeState !== "running" || observed.daemonState !== "running") {
+        return c.json({ thread: beforeRuntime.thread, source: "control_plane" as const });
+      }
+      if (
+        !providerAuthIsCurrent(resolved.companion, resolved.provider)
+        || resolved.companion.runtime.disk_layout_version !== COMPANION_PI_DISK_LAYOUT_VERSION
+      ) {
         const started = await startRuntime(c, companionId, body, { allowBoxWake: false });
         if (!started.companion.runtime.box_id) {
           throw new CompanionRuntimeTransitionError("companion start completed without a Box");
@@ -1599,8 +1696,6 @@ export function registerCompanionRoutes(
           deliveredOrdinal = message.ordinal;
         }
       } finally {
-        // Record what Pi accepted before reading its log. Whatever happens next — a failed read, a
-        // failed projection, a refused prompt — a retry must not prompt the same message twice.
         if (deliveredOrdinal !== undefined) {
           const recorded = await recordProjection({
             actor: resolved.actor,
@@ -1609,14 +1704,12 @@ export function registerCompanionRoutes(
             entries: [],
             deliveredOrdinal,
           }).then(() => true, () => false);
-          if (recorded) {
-            await runtime.refreshTtl({ boxId }).catch(() => undefined);
-          }
+          if (recorded) await runtime.refreshTtl({ boxId }).catch(() => undefined);
         }
       }
       const events = await runtime.readEvents({ boxId, offset: resolved.piLogOffset });
       const projection = projectCompanionPiEvents({ chunk: events.chunk, offset: events.offset });
-      let thread = await recordProjection({
+      const projected = await recordProjection({
         actor: resolved.actor,
         orgId: resolved.orgId,
         companionId,
@@ -1627,6 +1720,15 @@ export function registerCompanionRoutes(
         // outright; otherwise the offset only moves forward.
         piLogRewound: events.offset < resolved.piLogOffset,
       });
+      const afterProjection = await withTenantContext(
+        { orgId: resolved.orgId, userId: resolved.actor.id },
+        (database) => expireCompanionToolRuns({
+          actor: resolved.actor,
+          orgId: resolved.orgId,
+          companionId,
+          database,
+        }),
+      );
       // Fail-closed: pending cards past their timeout become Deny before the client sees them spin.
       const expired = await withTenantContext(
         { orgId: resolved.orgId, userId: resolved.actor.id },
@@ -1637,21 +1739,27 @@ export function registerCompanionRoutes(
           database,
         }),
       );
-      thread = expired.thread;
+      let thread = expired.thread;
       for (const response of expired.responses) {
         await runtime.respondExtensionUi({ boxId, response }).catch(() => undefined);
       }
-      const framed = projection.toolCompletions.length
-        ? await attachDesktopFrame({
+      const visualRuns: CompanionSettledToolRun[] = [
+        ...projected.settledToolRuns,
+        ...beforeRuntime.timedOut,
+        ...afterProjection.timedOut,
+      ].filter((run) => companionToolRunIsVisual(run.kind));
+      const framed = visualRuns.length
+        ? await attachDesktopFrames({
             actor: resolved.actor,
             orgId: resolved.orgId,
             companionId,
             boxId,
             runtime,
-            thread,
+            eventIds: visualRuns.map((run) => run.eventId),
             desktopAvailable: observed.desktopAvailable,
           })
         : null;
+      thread = framed ?? thread;
       // Opening/syncing the thread clears unread for this member, including while Pi answers.
       await withTenantContext(
         { orgId: resolved.orgId, userId: resolved.actor.id },
@@ -1662,16 +1770,16 @@ export function registerCompanionRoutes(
           database,
         }),
       );
-      return c.json({ thread: framed ?? thread, source: "box" as const });
+      return c.json({ thread, source: "box" as const });
     } catch (error) {
       return runtimeRouteError(c, error);
     }
   });
 
   /**
-   * Allow / Deny / answer a pending permission card. Owner/Editor only; Viewer is refused before any
-   * Box contact. The decision is persisted on the transcript, then the matching FIFO response
-   * unblocks Pi so Allow proceeds and Deny / timeout never executes the tool.
+   * Answer or deny a pending ask_user question. The wider action contract remains compatible with
+   * shell/file approval cards stored by older runtimes. Owner/Editor only; Viewer is refused before
+   * any Box contact. The decision is persisted before the matching FIFO response unblocks Pi.
    */
   app.post("/v1/companions/:id/decisions/:requestId", async (c) => {
     try {
@@ -1758,64 +1866,78 @@ export function registerCompanionRoutes(
     }
   });
 
-  app.post("/v1/companions/:id/runtime/stop", async (c) => {
+  app.post("/v1/companions/:id/runtime/restart", async (c) => {
     const companionId = c.req.param("id");
-    let mutation:
-      | {
-          actor: ReturnType<typeof actorFromContext>;
-          orgId: string;
-          companion: Awaited<ReturnType<typeof claimCompanionRuntimeStop>>;
-        }
-      | undefined;
     try {
       companionIdSchema.parse(companionId);
-      mutation = await tenant(c, async ({ actor, orgId, database }) => {
-        const companion = await claimCompanionRuntimeStop({
-          actor, orgId, companionId, database,
-        });
-        return { actor, orgId, companion };
+      const rawBody = await c.req.json();
+
+      // Restart is deliberately not a wake. Resolve authorization and the projected state before a
+      // Box client exists, then observe the already-running machine without resuming it. A stale
+      // Online projection is corrected and refused rather than turning Restart into Start.
+      const resolved = await tenant(c, async ({ actor, orgId, database }) => ({
+        actor,
+        orgId,
+        companion: await getCompanionForRuntime({ actor, orgId, companionId, database }),
+      }));
+      const body = restartCompanionRuntimeInputSchema.parse(rawBody);
+      if (
+        !resolved.companion.runtime.box_id
+        || resolved.companion.runtime.state !== "running"
+        || resolved.companion.runtime.daemon_state !== "running"
+      ) {
+        throw new CompanionRuntimeTransitionError("companion must be online to restart");
+      }
+
+      const observed = await runtimeFactory().status({
+        boxId: resolved.companion.runtime.box_id,
       });
-      const claimed = mutation;
-      const observed = await runtimeFactory().stop({ boxId: claimed.companion.runtime.box_id! });
-      const companion = await withTenantContext(
-        { orgId: claimed.orgId, userId: claimed.actor.id },
-        (database) => updateCompanionRuntime({
-          actor: claimed.actor,
-          orgId: claimed.orgId,
+      await withTenantContext(
+        { orgId: resolved.orgId, userId: resolved.actor.id },
+        (database) => updateCompanionObservation({
+          actor: resolved.actor,
+          orgId: resolved.orgId,
           companionId,
-          // A delete may claim this Companion while the Box archive is in flight. Do not let this
-          // older stop completion clear the deletion lock after the archive succeeds.
-          expectedUpdatedAt: new Date(claimed.companion.updated_at),
           patch: {
             runtimeState: observed.runtimeState,
             daemonState: observed.daemonState,
             desktopAvailable: observed.desktopAvailable,
             observedAt: new Date(),
-            stoppedAt: new Date(),
           },
           database,
         }),
       );
+      if (observed.runtimeState !== "running" || observed.daemonState !== "running") {
+        throw new CompanionRuntimeTransitionError("companion must be online to restart");
+      }
+
+      const startInput = startCompanionRuntimeInputSchema.parse({ client_surface: "web" });
+      if (body.target === "pi") {
+        const started = await startRuntime(c, companionId, startInput, {
+          allowBoxWake: false,
+          restartPi: true,
+        });
+        return c.json({ companion: started.companion });
+      }
+
+      // The observation above proves this is a restart of an online Box, not a disguised Wake.
+      // Stop owns the archive and failure projection; start owns the resume and its own failure
+      // projection, so a partial restart always leaves one durable, diagnosable state.
+      await stopRuntime(c, companionId);
+      const started = await startRuntime(c, companionId, startInput);
+      return c.json({ companion: started.companion });
+    } catch (error) {
+      return runtimeRouteError(c, error);
+    }
+  });
+
+  app.post("/v1/companions/:id/runtime/stop", async (c) => {
+    const companionId = c.req.param("id");
+    try {
+      companionIdSchema.parse(companionId);
+      const companion = await stopRuntime(c, companionId);
       return c.json({ companion });
     } catch (error) {
-      if (mutation) {
-        await withTenantContext(
-          { orgId: mutation.orgId, userId: mutation.actor.id },
-          (database) => updateCompanionRuntime({
-            actor: mutation!.actor,
-            orgId: mutation!.orgId,
-            companionId,
-            expectedUpdatedAt: new Date(mutation!.companion.updated_at),
-            patch: {
-              runtimeState: "error",
-              daemonState: "error",
-              lastError: companionRuntimeErrorMessage(error),
-              observedAt: new Date(),
-            },
-            database,
-          }),
-        ).catch(() => undefined);
-      }
       return runtimeRouteError(c, error);
     }
   });

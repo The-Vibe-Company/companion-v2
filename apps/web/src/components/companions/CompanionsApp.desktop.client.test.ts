@@ -391,14 +391,16 @@ describe("CompanionsApp Box desktop", () => {
 
   it("keeps a Viewer's open thread free of every Box call, including status", async () => {
     vi.useFakeTimers();
-    companionsApi.getCompanionThread.mockResolvedValue(
-      thread({ viewer_id: "user-9", access: "viewer", read_only: true, can_send: false }),
-    );
-    const container = await open(companion({ access: "viewer", runtime: {
+    const viewerCompanion = companion({ access: "viewer", runtime: {
       ...companion().runtime,
       box_id: null,
       desktop_available: false,
-    } }));
+    } });
+    companionsApi.getCompanionThread.mockResolvedValue(
+      thread({ viewer_id: "user-9", access: "viewer", read_only: true, can_send: false }),
+    );
+    companionsApi.getCompanionRuntime.mockResolvedValue(viewerCompanion);
+    const container = await open(viewerCompanion);
 
     await clickBoxChip(container);
     await act(async () => {
@@ -409,18 +411,24 @@ describe("CompanionsApp Box desktop", () => {
     expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
     expect(companionsApi.syncCompanionThread).not.toHaveBeenCalled();
     expect(window.open).not.toHaveBeenCalled();
-    // A Viewer's chip is a read-only projection: no live observation is requested for them.
-    expect(companionsApi.getCompanionRuntime).not.toHaveBeenCalled();
+    // A Viewer follows the control-plane projection and never requests a live Box observation.
+    expect(companionsApi.getCompanionRuntime).toHaveBeenCalled();
+    expect(companionsApi.getCompanionRuntime.mock.calls
+      .some((call) => call[2]?.live === true)).toBe(false);
     expect(companionsApi.getCompanionThread).toHaveBeenCalled();
   });
 
   it("re-observes a runner's running Box so the chip cannot go stale", async () => {
     vi.useFakeTimers();
-    companionsApi.getCompanionRuntime.mockResolvedValue(companion({
-      runtime: { ...companion().runtime, state: "stopped", daemon_state: "stopped" },
-    }));
+    let online = true;
+    companionsApi.getCompanionRuntime.mockImplementation(async () => online
+      ? companion()
+      : companion({
+        runtime: { ...companion().runtime, state: "stopped", daemon_state: "stopped" },
+      }));
     const container = await open(companion());
 
+    online = false;
     await act(async () => {
       await vi.advanceTimersByTimeAsync(15_000);
     });
@@ -546,15 +554,19 @@ describe("CompanionsApp context panel", () => {
       desktopPayload("https://box.ascii.dev/vnc/bx_23456789?token=first"),
     );
     // The runner's slow re-observation finds the Box has stopped underneath the stream.
-    companionsApi.getCompanionRuntime.mockResolvedValue(companion({
-      runtime: { ...companion().runtime, state: "stopped", daemon_state: "stopped" },
-    }));
+    let online = true;
+    companionsApi.getCompanionRuntime.mockImplementation(async () => online
+      ? companion()
+      : companion({
+        runtime: { ...companion().runtime, state: "stopped", daemon_state: "stopped" },
+      }));
     const container = await open(companion());
 
     await clickContextToggle(container);
 
     expect(panelFrame(container)?.getAttribute("src")).toContain("token=first");
 
+    online = false;
     await act(async () => {
       await vi.advanceTimersByTimeAsync(15_000);
     });
@@ -566,33 +578,20 @@ describe("CompanionsApp context panel", () => {
     expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
   });
 
-  it("wakes an asleep Box from the panel only when a runner asks", async () => {
-    companionsApi.startCompanionRuntime.mockResolvedValue(companion());
-    companionsApi.openCompanionDesktop.mockResolvedValue(
-      desktopPayload("https://box.ascii.dev/vnc/bx_23456789?token=first"),
-    );
+  it("keeps an asleep panel read-only and explains that sending starts the Companion", async () => {
     const asleep = companion({
       runtime: { ...companion().runtime, state: "stopped", daemon_state: "stopped" },
     });
+    companionsApi.getCompanionRuntime.mockResolvedValue(asleep);
     const container = await open(asleep);
 
     await clickContextToggle(container);
 
     // Opening the panel on a sleeping Box mints nothing and starts nothing.
     expect(companionsApi.openCompanionDesktop).not.toHaveBeenCalled();
-    expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
     expect(container.textContent).toContain("this Box is not running");
-
-    const wake = [...container.querySelectorAll(".chat-context button")]
-      .find((button) => (button.textContent ?? "").includes("Wake")) as HTMLButtonElement;
-    await act(async () => {
-      wake.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-
-    // The wake is the existing one, and the Box it brings up is then joined for its screen.
-    expect(companionsApi.startCompanionRuntime).toHaveBeenCalledWith("org-1", companionId);
-    expect(companionsApi.openCompanionDesktop).toHaveBeenCalledTimes(1);
-    expect(panelFrame(container)?.getAttribute("src")).toContain("token=first");
+    expect(container.textContent).toContain("Send a message to start Luna");
+    expect(container.textContent).not.toContain("Wake");
   });
 
   it("hands the panel the open Companion's own join when a runner switches threads", async () => {
@@ -684,6 +683,7 @@ describe("CompanionsApp context panel", () => {
       ],
     });
     companionsApi.listCompanions.mockResolvedValue([staged]);
+    companionsApi.getCompanionRuntime.mockResolvedValue(staged);
     await act(async () => {
       root.render(React.createElement(CompanionsApp, {
         orgs: [org],

@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./agent-operations": "./src/agentOperations.ts"
+    "./agent-operations": "./src/agentOperations.ts",
+    "./companion-runtime": "./src/companionRuntime.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

@@ -103,13 +103,15 @@ const asleep: Companion = {
  * `piAcceptsOnWake: false` reproduces the Box that came up while Pi refused the first prompt, so the
  * message stays durable and pending until the next sync hands it over.
  */
-function controlPlane(options: { piAcceptsOnWake: boolean }) {
+function controlPlane(options: { piAcceptsOnWake: boolean; holdSend?: boolean }) {
   const entries: CompanionTranscriptEntry[] = [];
   const requests: string[] = [];
   const runtime = { ...asleep.runtime };
   let ordinal = 0;
   let delivered = -1;
   let owed = 0;
+  let release = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
 
   const json = (body: unknown) => new Response(JSON.stringify(body), {
     status: 200,
@@ -137,6 +139,13 @@ function controlPlane(options: { piAcceptsOnWake: boolean }) {
     runtime.box_id = "bx_23456789";
     runtime.desktop_available = true;
     runtime.last_started_at = new Date().toISOString();
+  };
+
+  const startWake = () => {
+    runtime.state = "provisioning";
+    runtime.daemon_state = "starting";
+    runtime.box_id = "bx_23456789";
+    runtime.desktop_available = false;
   };
 
   /** Hand Pi everything it has not received, the way one sync does. */
@@ -171,7 +180,9 @@ function controlPlane(options: { piAcceptsOnWake: boolean }) {
           created_at: new Date().toISOString(),
         });
       }
-      wake();
+      if (options.holdSend) startWake();
+      else wake();
+      if (options.holdSend) await held;
       if (options.piAcceptsOnWake) deliverPending();
       return json({
         thread: thread(),
@@ -209,6 +220,8 @@ function controlPlane(options: { piAcceptsOnWake: boolean }) {
     entries,
     runtimeReads: () => requests.filter((request) => request.includes("/runtime")).length,
     posts: () => requests.filter((request) => request.endsWith("/messages")).length,
+    boxCameUp: wake,
+    releaseSend: () => release(),
   };
 }
 
@@ -301,12 +314,12 @@ describe("CompanionsApp wake on send", () => {
     expect(footer(container)).toContain("Enter sends");
   });
 
-  it("retires the wake control the send made unnecessary without offering a second one", async () => {
+  it("never exposes a separate wake control before or after an automatic start", async () => {
     const api = controlPlane({ piAcceptsOnWake: true });
     vi.stubGlobal("fetch", api.fetchMock);
     const container = await openThread();
 
-    expect(wakeControls(container)).toHaveLength(1);
+    expect(wakeControls(container)).toHaveLength(0);
 
     await send(container, "Draft the launch note");
 
@@ -318,5 +331,41 @@ describe("CompanionsApp wake on send", () => {
     await poll(1);
 
     expect(container.textContent).toContain("On it.");
+  });
+
+  it("moves Starting to Online while the send request is still waiting on the wake", async () => {
+    const api = controlPlane({ piAcceptsOnWake: true, holdSend: true });
+    vi.stubGlobal("fetch", api.fetchMock);
+    const container = await openThread();
+
+    const composer = container.querySelector("textarea") as HTMLTextAreaElement;
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
+    act(() => {
+      setter?.call(composer, "Draft the launch note");
+      composer.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => {
+      composer.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_100);
+    });
+
+    expect(api.posts()).toBe(1);
+    expect(chip(container)).toContain("Starting");
+    expect(wakeControls(container)).toHaveLength(0);
+
+    api.boxCameUp();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_100);
+    });
+
+    expect(chip(container)).toContain("Online");
+    expect(footer(container)).not.toContain("Wake");
+
+    await act(async () => {
+      api.releaseSend();
+      await vi.advanceTimersByTimeAsync(0);
+    });
   });
 });
