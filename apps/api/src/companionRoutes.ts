@@ -797,8 +797,15 @@ export function registerCompanionRoutes(
 
   app.get("/v1/companions", async (c) => {
     try {
+      // `preview=false` answers with the roster and nothing anyone said. It is for a caller that
+      // needs names and attachments — the Skills page asking which Companions stage a skill — and
+      // keeps chat text off a surface that displays none of it.
+      const withLastMessage = c.req.query("preview") !== "false";
       const companions = await tenant(c, ({ actor, orgId, database }) =>
-        listCompanions({ actor, orgId, database }));
+        listCompanions({ actor, orgId, withLastMessage, database }));
+      // The list carries each thread's last line now, so it is chat text and must not sit in a disk
+      // cache after the session that read it, the way every other sensitive read here is treated.
+      c.header("Cache-Control", "private, no-store");
       return c.json({ companions });
     } catch (error) {
       return jsonError(c, error, errorStatus(error));
@@ -1203,7 +1210,9 @@ export function registerCompanionRoutes(
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
       const companion = await tenant(c, ({ actor, orgId, database }) =>
-        getCompanion({ actor, orgId, companionId, database }));
+        // A single-Companion read answers the same row the list draws, so it carries the preview.
+        getCompanion({ actor, orgId, companionId, withLastMessage: true, database }));
+      c.header("Cache-Control", "private, no-store");
       return c.json({ companion });
     } catch (error) {
       return jsonError(c, error, errorStatus(error));
@@ -1683,10 +1692,11 @@ export function registerCompanionRoutes(
       const live = c.req.query("live") === "true";
       const resolved = await tenant(c, async ({ actor, orgId, database }) => {
         const companion = live
-          ? await getCompanionForRuntime({ actor, orgId, companionId, database })
-          : await getCompanion({ actor, orgId, companionId, database });
+          ? await getCompanionForRuntime({ actor, orgId, companionId, withLastMessage: true, database })
+          : await getCompanion({ actor, orgId, companionId, withLastMessage: true, database });
         return { actor, orgId, companion };
       });
+      c.header("Cache-Control", "private, no-store");
       if (!live || !resolved.companion.runtime.box_id) {
         return c.json({ companion: resolved.companion, source: "control_plane" as const });
       }
@@ -1706,7 +1716,12 @@ export function registerCompanionRoutes(
           database,
         }),
       );
-      return c.json({ companion, source: "box" as const });
+      // The observation is a lifecycle write and answers without a preview; this read asked for one,
+      // so it keeps the one it already read rather than handing back a row with a blank line.
+      return c.json({
+        companion: { ...companion, last_message: resolved.companion.last_message },
+        source: "box" as const,
+      });
     } catch (error) {
       return jsonError(c, error, errorStatus(error));
     }

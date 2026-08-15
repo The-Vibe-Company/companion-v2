@@ -159,6 +159,7 @@ const companion = {
   pinned: false,
   hidden: false,
   unread: false,
+  last_message: null,
   runtime: {
     state: "stopped" as const,
     daemon_state: "stopped" as const,
@@ -473,6 +474,66 @@ describe("Companions API feature gate", () => {
     expect(contextMocks.actorFromContext).toHaveBeenCalledOnce();
     expect(contextMocks.orgIdFromContext).toHaveBeenCalledOnce();
     expect(coreMocks.listCompanions).toHaveBeenCalledOnce();
+  });
+
+  it("carries each thread's last line on the list a conversation sidebar reads", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    coreMocks.listCompanions.mockResolvedValue([{
+      ...companion,
+      last_message: {
+        preview: "Drafted the launch note.",
+        role: "assistant",
+        author_id: null,
+        author_name: null,
+        created_at: "2026-08-14T09:05:00.000Z",
+      },
+    }]);
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => {
+      throw new Error("Box client must not be created");
+    });
+
+    const response = await app.request("/v1/companions");
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as { companions: Array<{ last_message: unknown }> };
+    expect(body.companions[0]?.last_message).toEqual({
+      preview: "Drafted the launch note.",
+      role: "assistant",
+      author_id: null,
+      author_name: null,
+      created_at: "2026-08-14T09:05:00.000Z",
+    });
+  });
+
+  it("answers without previews when a caller asks for the roster alone", async () => {
+    // The Skills page needs names and attachments to say which Companions stage a skill. It shows
+    // nobody's conversation, so it must not be handed everybody's.
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    await app.request("/v1/companions?preview=false");
+    expect(coreMocks.listCompanions).toHaveBeenCalledWith(
+      expect.objectContaining({ withLastMessage: false }),
+    );
+
+    await app.request("/v1/companions");
+    expect(coreMocks.listCompanions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ withLastMessage: true }),
+    );
+  });
+
+  it("keeps the chat text it now carries out of the browser's disk cache", async () => {
+    // The list used to be settings and runtime state; it carries each thread's last line now, so it
+    // gets the same `no-store` every other read of sensitive content in this API gets.
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    const list = await app.request("/v1/companions");
+    expect(list.headers.get("cache-control")).toBe("private, no-store");
+
+    coreMocks.getCompanion.mockResolvedValue(companion);
+    const one = await app.request(`/v1/companions/${companion.id}`);
+    expect(one.headers.get("cache-control")).toBe("private, no-store");
   });
 
   it("saves a provider change without waking an asleep Box", async () => {

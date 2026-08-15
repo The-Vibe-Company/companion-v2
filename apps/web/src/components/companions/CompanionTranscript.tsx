@@ -38,9 +38,11 @@ import { Icon } from "../Icon";
 import { decideCompanionDecision } from "../../lib/companions";
 import {
   composerHint,
+  localDay,
   replyExpected,
   transcriptDisplayContent,
   transcriptTurns,
+  utcDay,
   type TranscriptTurn,
 } from "./transcript";
 
@@ -113,6 +115,57 @@ const TurnText: TextMessagePartComponent = ({ text }) => <p className="chat-turn
 
 const TEXT_ONLY = { Text: TurnText };
 
+/**
+ * One day separator. The key is already the day this turn belongs to — the stored one on the server,
+ * the reader's own once the client has a clock — and is read back at midday UTC so the round trip
+ * cannot shift it. Only the label gets friendlier after mount.
+ */
+function DaySeparator({ day }: { day: string }) {
+  const [text, setText] = useState(day);
+  useEffect(() => {
+    const at = new Date(`${day}T12:00:00.000Z`);
+    const today = new Date();
+    const daysApart = Math.round(
+      (Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())
+        - Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate())) / 86_400_000,
+    );
+    if (daysApart === 0) setText("Today");
+    else if (daysApart === 1) setText("Yesterday");
+    else {
+      setText(at.toLocaleDateString(undefined, {
+        month: "long",
+        day: "numeric",
+        ...(daysApart > 300 ? { year: "numeric" } : {}),
+        timeZone: "UTC",
+      }));
+    }
+  }, [day]);
+  return (
+    <p className="chat-sep">
+      <time dateTime={day}>{text}</time>
+    </p>
+  );
+}
+
+/**
+ * Where this reader left off. It is drawn once, on the first message somebody else wrote after the
+ * newest line they had already seen, so returning to a busy thread starts where reading stopped.
+ */
+function NewSeparator() {
+  return <p className="chat-sep chat-sep--new">New</p>;
+}
+
+/** Both separators, at the top of whichever message opens the day or the unread run. */
+function TurnSeparators({ turn }: { turn: TranscriptTurn | undefined }) {
+  if (!turn) return null;
+  return (
+    <>
+      {turn.startsDay && <DaySeparator day={turn.startsDay} />}
+      {turn.startsNew && <NewSeparator />}
+    </>
+  );
+}
+
 function Turn({ tone }: { tone: "said" | "reply" }) {
   const turn = useTurn();
   return (
@@ -122,6 +175,9 @@ function Turn({ tone }: { tone: "said" | "reply" }) {
         + (turn?.sending ? " chat-turn--sending" : "")}
       aria-busy={turn?.sending || undefined}
     >
+      {/* Rendered inside the message rather than between messages: the primitives own the list, and
+          a turn that opens a day is the only thing that knows it does. */}
+      <TurnSeparators turn={turn} />
       {turn?.lead && turn.author && (
         <p className="chat-turn__meta">
           <span className="chat-turn__author">{turn.author}</span>
@@ -452,6 +508,8 @@ export function CompanionTranscript({
   thread,
   orgId,
   busy,
+  lastReadOrdinal,
+  openedThroughOrdinal,
   onSend,
   onThread,
 }: {
@@ -459,6 +517,10 @@ export function CompanionTranscript({
   thread: Thread | null;
   orgId: string;
   busy: boolean;
+  /** This reader's unread watermark when the thread was opened; null draws no divider. */
+  lastReadOrdinal?: number | null;
+  /** The last ordinal the thread held when it was opened, so the divider stays where reading did. */
+  openedThroughOrdinal?: number | null;
   onSend: (content: string, clientMessageId: string) => Promise<boolean>;
   /** Replace the thread after a permission card is decided, without a full poll cycle. */
   onThread: (thread: Thread) => void;
@@ -498,13 +560,24 @@ export function CompanionTranscript({
     onThread(next);
   }, [companion.id, onThread, orgId]);
 
+  /**
+   * Which calendar the day separators belong to. Server markup has no reader clock, so it groups by
+   * the stored UTC day and both renders agree; the client then regroups by the reader's own day, so
+   * a separator never names a date the timestamps under it contradict.
+   */
+  const [dayOf, setDayOf] = useState<(iso: string) => string>(() => utcDay);
+  useEffect(() => setDayOf(() => localDay), []);
+
   const turns = useMemo(
     () => transcriptTurns(messages, {
       viewerId,
       companionName: companion.name,
       sendingEventId: outgoing?.event_id ?? null,
+      lastReadOrdinal: lastReadOrdinal ?? null,
+      openedThroughOrdinal: openedThroughOrdinal ?? null,
+      dayOf,
     }),
-    [companion.name, messages, outgoing, viewerId],
+    [companion.name, dayOf, lastReadOrdinal, messages, openedThroughOrdinal, outgoing, viewerId],
   );
   const turnsById = useMemo(
     () => new Map(turns.map((turn) => [turn.entry.event_id, turn])),
@@ -664,7 +737,7 @@ export function CompanionTranscript({
                   onPointerDown={sendOnPress}
                   onClick={swallowClickAfterPress}
                 >
-                  <Icon name="send" size={15} />
+                  <Icon name="arrow-up" size={17} />
                 </ComposerPrimitive.Send>
               </div>
               <p className="chat-hint">

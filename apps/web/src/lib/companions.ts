@@ -21,6 +21,17 @@ function orgHeaders(orgId: string): HeadersInit {
   return { "x-companion-org": orgId };
 }
 
+/**
+ * Every Companion the caller may read, with each thread's last line projected on. This is the poll
+ * behind the conversation list, so it stays on the control-plane read model and never contacts Box.
+ */
+export async function listCompanions(orgId: string): Promise<Companion[]> {
+  const result = await apiFetch<{ companions: Companion[] }>("/v1/companions", {
+    headers: orgHeaders(orgId),
+  });
+  return result.companions;
+}
+
 export async function createCompanion(
   orgId: string,
   input: {

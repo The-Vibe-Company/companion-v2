@@ -1130,7 +1130,7 @@
 
 .chat-head {
   flex: none;
-  min-height: 62px;
+  min-height: var(--topbar-height);
   padding: 12px 20px;
   display: flex;
   align-items: center;
@@ -1176,6 +1176,17 @@
 .chat-head .companions-state {
   color: var(--color-muted);
   font-size: var(--text-xs);
+}
+
+/* The face in the header is the same one the conversation list carries, so moving between the two
+   surfaces stays one Companion rather than two treatments of it. */
+.chat-head .chat-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-full);
+  background: var(--color-accent-tint);
+  color: var(--color-fg);
+  font-size: var(--text-sm);
 }
 
 /* The chat chip names the compute it reports. Asleep stays neutral; a live Box carries the low tint
@@ -1228,19 +1239,19 @@ button.chat-box:focus-visible {
   outline-offset: 2px;
 }
 
-/* The Computer toggle lives with the chip, in the same header row. Its pressed state is what says the
+/* The context toggle lives with the chip, in the same header row. Its pressed state is what says the
    panel is open, so the control still reads correctly when the panel itself is off screen. */
-.chat-computer-toggle {
+.chat-context-toggle {
   border-color: var(--color-line);
 }
 
-.chat-computer-toggle--on {
+.chat-context-toggle--on {
   border-color: var(--color-accent-line);
   background: var(--color-accent-tint);
   color: var(--color-accent-edge);
 }
 
-.chat-computer-toggle:focus-visible {
+.chat-context-toggle:focus-visible {
   outline: 2px solid var(--color-accent-ring);
   outline-offset: 1px;
 }
@@ -1250,10 +1261,12 @@ button.chat-box:focus-visible {
   margin: 12px var(--chat-gutter) 0;
 }
 
-/* The room below the header, shared by the conversation and the Computer panel. The conversation is
+/* The room below the header, shared by the conversation and the context panel. The conversation is
    the part that gives, so the panel keeps the width it asks for and the reading column narrows around
-   it; the gutter is a percentage resolved where it is used, so the turns stay centred either way. */
+   it; the gutter is a percentage resolved where it is used, so the turns stay centred either way.
+   `relative` is what lets a narrow screen bring the panel over the conversation instead of beside it. */
 .chat-stage {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -1268,10 +1281,10 @@ button.chat-box:focus-visible {
   flex-direction: column;
 }
 
-/* The Companion's screen, beside its conversation. */
-.chat-computer {
+/* What this Companion has beside its conversation: its screen, its routines, its skills. */
+.chat-context {
   flex: none;
-  width: min(440px, 40%);
+  width: 300px;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -1279,18 +1292,17 @@ button.chat-box:focus-visible {
   background: var(--color-surface);
 }
 
-.chat-computer__head {
+.chat-context__head {
   flex: none;
   min-height: 46px;
-  padding: 8px 10px 8px 14px;
+  padding: 8px 10px 8px 16px;
   display: flex;
   align-items: center;
   gap: 8px;
   border-bottom: 1px solid var(--color-line);
-  color: var(--color-muted);
 }
 
-.chat-computer__head h2 {
+.chat-context__head h2 {
   flex: 1;
   min-width: 0;
   margin: 0;
@@ -1300,81 +1312,241 @@ button.chat-box:focus-visible {
   letter-spacing: var(--tracking-tight);
 }
 
-/* Which of the two Box streams this join got. It is the difference between a desktop that will hold
-   on a network that blocks peer-to-peer traffic and one that may not, so it is said rather than
-   inferred from a picture that either appears or does not. */
-.chat-computer__transport {
-  flex: none;
-  padding: 2px 7px;
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-full);
-  background: var(--color-surface-raised);
-  color: var(--color-muted);
-  font-size: var(--text-xs);
+.chat-context__body {
+  flex: 1;
+  min-height: 0;
+  padding: 14px 16px 20px;
+  overflow-y: auto;
+  overscroll-behavior: none;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.chat-context__block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* The heading names the section; anything beside it is a control, not part of the name. */
+.chat-context__titlerow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-context__title {
+  margin: 0;
+  color: var(--color-faint);
+  font-size: 10px;
+  font-weight: 500;
   text-transform: uppercase;
   letter-spacing: var(--tracking-wide);
 }
 
-.chat-computer__screen {
-  flex: 1;
-  min-height: 0;
-  display: flex;
+/* Which of the two Box streams this join got. It is the difference between a desktop that will hold
+   on a network that blocks peer-to-peer traffic and one that may not, so it is said rather than
+   inferred from a picture that either appears or does not. */
+.chat-context__transport {
+  margin-left: auto;
+  padding: 1px 7px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-full);
   background: var(--color-surface-raised);
+  color: var(--color-muted);
+  font-size: 10px;
+  letter-spacing: var(--tracking-wide);
 }
 
-/* The desktop arrives at the Box's own aspect ratio, so the frame takes the pane and the stream
-   letterboxes itself inside it rather than being stretched to fit. */
-.chat-computer__frame {
+.chat-context__add {
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+  border-color: var(--color-line);
+}
+
+/* Nothing is behind it yet, so it must not answer the pointer as though something were. */
+.chat-context__add:disabled {
+  color: var(--color-faint);
+  cursor: not-allowed;
+}
+
+.chat-context__add:disabled:hover {
+  background: transparent;
+  color: var(--color-faint);
+}
+
+/* The screen as a card rather than a pane: a fixed 16:10 tile that keeps the panel's rhythm whatever
+   the Box's own resolution turns out to be. */
+.chat-context__screen {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  overflow: hidden;
+  display: flex;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-sunken);
+}
+
+/* A preview, not a second place to work: the pointer passes over it, and the caption underneath is
+   the handoff to the desktop that can be driven. */
+.chat-context__frame {
   flex: 1;
   min-width: 0;
   min-height: 0;
   border: 0;
+  pointer-events: none;
   background: var(--color-surface-sunken);
 }
 
-.chat-computer__empty {
+.chat-context__tile {
   flex: 1;
   min-width: 0;
-  padding: 24px 20px;
+  padding: 14px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 6px;
   color: var(--color-muted);
   text-align: center;
 }
 
-.chat-computer__empty strong {
+.chat-context__tile strong {
   color: var(--color-fg);
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
   font-weight: 500;
 }
 
-.chat-computer__empty p {
+.chat-context__tile p {
   margin: 0;
-  max-width: 34ch;
+  max-width: 30ch;
   font-size: var(--text-xs);
   line-height: var(--leading-normal);
 }
 
-.chat-computer__error {
-  flex: none;
+.chat-context__caption {
   margin: 0;
-  padding: 10px 14px;
-  border-top: 1px solid var(--color-danger-line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--color-faint);
+  font-size: var(--text-xs);
+}
+
+.chat-context__link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-muted);
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-out-quint);
+}
+
+.chat-context__link:hover:not(:disabled) {
+  color: var(--color-fg);
+}
+
+.chat-context__link:disabled {
+  color: var(--color-faint);
+  cursor: not-allowed;
+  text-decoration: none;
+}
+
+.chat-context__error {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--color-danger-line);
+  border-radius: var(--radius-md);
   background: var(--color-danger-tint);
   color: var(--color-fg);
   font-size: var(--text-xs);
 }
 
-.chat-computer__actions {
-  flex: none;
-  padding: 10px 14px;
+.chat-context__empty {
+  margin: 0;
+  color: var(--color-faint);
+  font-size: var(--text-xs);
+}
+
+.chat-context__chips {
+  margin: 0;
+  padding: 0;
+  list-style: none;
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  border-top: 1px solid var(--color-line);
+  gap: 6px;
+}
+
+/* A skill is named by its literal slug, with the accent dot saying it is staged rather than merely
+   available. */
+.chat-context__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-full);
+  background: var(--color-surface-raised);
+  color: var(--color-fg);
+  font-size: var(--text-xs);
+}
+
+.chat-context__chip i {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--color-accent-edge);
+}
+
+.chat-context__chip--quiet {
+  color: var(--color-faint);
+  font-family: var(--font-ui);
+}
+
+/* The scrim behind the panel when it comes over the conversation. It only exists in overlay mode:
+   a docked panel has nothing to dismiss. */
+.chat-context-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border: 0;
+  padding: 0;
+  background: var(--color-scrim);
+  cursor: pointer;
+}
+
+@media (min-width: 1024px) {
+  /* Wide enough for both: the panel is a sibling of the conversation and nothing is dismissed. */
+  .chat-context-scrim {
+    display: none;
+  }
+}
+
+/* Below this width there is no room for the panel beside a conversation without squeezing both into
+   uselessness, so it comes over the conversation instead, anchored to the right edge of the stage.
+   It slides nowhere: motion across the screen is what THE-344 removed from this surface. */
+@media (max-width: 1023px) {
+  .chat-context {
+    position: absolute;
+    z-index: 2;
+    inset: 0 0 0 auto;
+    width: min(320px, calc(100% - 24px));
+    box-shadow: var(--shadow-lg);
+  }
+}
+
+/* A phone has no room to leave a strip of conversation behind the panel, so it takes the stage. */
+@media (max-width: 560px) {
+  .chat-context {
+    width: 100%;
+    border-left: 0;
+  }
 }
 
 /* The conversation is the only thing that scrolls on a thread. A flick that reaches either end stops
@@ -1397,8 +1569,9 @@ button.chat-box:focus-visible {
   flex-direction: column;
 }
 
-/* One transcript, one column. A writer keeps the floor across consecutive turns, so the name and the
-   clock appear once per passage and the turns underneath are just the words. */
+/* One transcript, two sides. A writer keeps the floor across consecutive turns, so the name and the
+   clock appear once per passage and the turns underneath are just the words; the side a turn sits on
+   is who wrote it, and the bubble's square corner points back at the passage it belongs to. */
 .chat-turn {
   display: grid;
   gap: 3px;
@@ -1412,6 +1585,43 @@ button.chat-box:focus-visible {
   margin-top: 0;
 }
 
+/* A separator is drawn by the turn that opens the day or the unread run. It is a grid item like the
+   bubble above it, and only the bubble narrows, so the separator reaches the full column on its own. */
+.chat-sep {
+  margin: 22px 0 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--color-faint);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.chat-sep::before,
+.chat-sep::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--color-line);
+}
+
+/* Where reading stopped: the one line in a long transcript a returning reader is looking for. The
+   accent is carried by the hairlines rather than the word, because `accent-edge` is an edge token —
+   it is not lifted for the dark theme, and as small uppercase text on canvas it falls under the
+   contrast floor on every accent preset. The word stays at full foreground contrast. */
+.chat-sep--new {
+  color: var(--color-fg);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+}
+
+.chat-sep--new::before,
+.chat-sep--new::after {
+  background: var(--color-accent-line);
+}
+
 .chat-turn__meta {
   margin: 0;
   display: flex;
@@ -1420,6 +1630,10 @@ button.chat-box:focus-visible {
   color: var(--color-faint);
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
+}
+
+.chat-turn--said .chat-turn__meta {
+  justify-content: flex-end;
 }
 
 .chat-turn__author {
@@ -1438,13 +1652,26 @@ button.chat-box:focus-visible {
   overflow-wrap: anywhere;
 }
 
-/* A member's message is a tinted block so the ask is scannable; the reply is plain text on the page,
-   which is what a reader is here to read. */
+/* Both sides are bubbles: a member's message is an accent-tinted block on the right, a reply is a
+   bordered surface block on the left. The corner nearest the writer stays square so a passage of
+   several turns reads as one side of a conversation rather than as a stack of identical cards. */
+.chat-turn--said .chat-turn__text,
+.chat-turn--reply .chat-turn__text {
+  max-width: 76%;
+  padding: 8px 12px;
+}
+
 .chat-turn--said .chat-turn__text {
-  justify-self: start;
-  padding: 7px 11px;
-  border-radius: var(--radius-md);
+  justify-self: end;
+  border-radius: 14px 14px 4px 14px;
   background: var(--color-accent-tint);
+}
+
+.chat-turn--reply .chat-turn__text {
+  justify-self: start;
+  border-radius: 14px 14px 14px 4px;
+  border: 1px solid var(--color-line);
+  background: var(--color-surface);
 }
 
 /* Sent, not yet saved: the message is on screen immediately and settles once the API answers. */
@@ -1799,16 +2026,22 @@ button.chat-box:focus-visible {
   background: var(--color-surface);
 }
 
-/* The field and its send control are one object, so the composer reads as a single place to type. */
+/* The field and its send control are one object, so the composer reads as a single place to type: one
+   pill, with the send control inside its right edge. */
 .chat-composer__field {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
   gap: 8px;
-  padding: 6px 6px 6px 12px;
+  padding: 6px 6px 6px 16px;
   border: 1px solid var(--color-line-strong);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-full);
   background: var(--color-canvas);
+}
+
+/* A draft long enough to wrap is no longer a pill; the corners relax so the text keeps its inset. */
+.chat-composer__field:has(.chat-composer__input:not(:placeholder-shown)) {
+  border-radius: var(--radius-lg);
 }
 
 .chat-composer__field:focus-within {
@@ -1839,14 +2072,14 @@ button.chat-box:focus-visible {
 }
 
 .chat-send {
-  width: 30px;
-  height: 30px;
+  width: 36px;
+  height: 36px;
   flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: 1px solid transparent;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-full);
   background: var(--color-accent);
   color: var(--color-accent-fg);
   cursor: pointer;
@@ -1907,18 +2140,6 @@ button.chat-box:focus-visible {
     display: none;
   }
 
-  /* Below this width there is no room for a desktop beside a conversation without squeezing both into
-     uselessness, so the two share the stage instead: the Computer panel takes it, and the toggle in
-     the header is how an operator goes back to the conversation. */
-  .chat-stage--computer .chat-thread {
-    display: none;
-  }
-
-  .chat-stage--computer .chat-computer {
-    width: auto;
-    flex: 1;
-    border-left: 0;
-  }
 }
 
 @media (max-width: 820px) {
@@ -1967,12 +2188,6 @@ button.chat-box:focus-visible {
 
   .chat-head {
     padding: 10px 14px;
-  }
-
-  /* The chip names the compute on a screen with room to say so; on a phone the dot and the state
-     word are the whole message, and `Box ·` is what gives way. */
-  .chat-box__prefix {
-    display: none;
   }
 
   /* The name is the point of the header, so the avatar beside it yields its width first. */

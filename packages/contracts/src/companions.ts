@@ -167,6 +167,29 @@ export const companionSelectedSkillIdsSchema = z.array(z.string().uuid()).max(10
  */
 export const companionSelectedMcpAccountIdsSchema = z.array(z.string().uuid()).max(50);
 
+/** How much of the newest chat line a conversation list carries. One line, cut to fit a row. */
+export const COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS = 140;
+
+/**
+ * The newest chat line on a Companion's thread, projected onto reads so a conversation list can say
+ * who spoke last without opening every thread.
+ *
+ * Only a member message or a Pi reply qualifies. Tool runs and permission cards are deliberately not
+ * projected: a list is read by everyone who can see the Companion, and a tool title is a command, a
+ * path, or a URL, while a pending decision is a question nobody has answered yet. Neither belongs in
+ * a preview line that is shown outside the thread it was written in.
+ */
+export const companionLastMessageSchema = z.object({
+  /** First line of the message, collapsed and truncated; never the whole body. */
+  preview: z.string().max(COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS),
+  role: z.enum(["user", "assistant"]),
+  /** Member who wrote it, so a reader can tell their own last word from someone else's. Null for Pi. */
+  author_id: z.string().nullable(),
+  author_name: z.string().nullable(),
+  created_at: z.string().datetime(),
+}).strict();
+export type CompanionLastMessage = z.infer<typeof companionLastMessageSchema>;
+
 export const companionSchema = z.object({
   id: z.string().uuid(),
   name: z.string(),
@@ -197,6 +220,12 @@ export const companionSchema = z.object({
   pinned: z.boolean(),
   hidden: z.boolean(),
   unread: z.boolean(),
+  /**
+   * Newest chat line, or null when the thread is empty. Read paths project it; a mutation answers
+   * about the settings it just wrote and carries null, so a surface that keeps a list merges this
+   * field instead of replacing the row wholesale.
+   */
+  last_message: companionLastMessageSchema.nullable().default(null),
   runtime: z.object({
     state: companionRuntimeStateSchema,
     daemon_state: companionDaemonStateSchema,
@@ -387,6 +416,13 @@ export const companionThreadSchema = z.object({
   entries: z.array(companionTranscriptEntrySchema),
   pending_count: z.number().int().nonnegative(),
   last_message_at: z.string().datetime().nullable(),
+  /**
+   * This reader's own unread watermark (THE-351) as it stood *before* opening advanced it, so the
+   * transcript can draw one divider where they left off. It is carried by the read that opens a
+   * thread; a send or a sync answers about what it just wrote and carries null, as does a reader who
+   * has never opened this thread. Null means "no divider", which is what a first visit looks like.
+   */
+  last_read_ordinal: z.number().int().nonnegative().nullable().default(null),
 });
 export type CompanionThread = z.infer<typeof companionThreadSchema>;
 

@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
   type PointerEvent,
+  type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 import type { LabelVM, SkillGroupBy } from "@companion/contracts";
@@ -18,6 +19,7 @@ import type { SkillContributorVM, SkillVM } from "@/lib/types";
 import { InstallMark } from "./blocks";
 import { chipParts, type Filter } from "./filters";
 import { FilterAdd } from "./FilterMenu";
+import { exceedsThreshold } from "./dragGeometry";
 import {
   groupSkillsByRoot,
   pathsInLabelScope,
@@ -25,7 +27,7 @@ import {
   type GroupedSkillRow,
   type SkillListPath,
 } from "./listGrouping";
-import { resolveSkillActions, skillActionPermissions, type SkillAction } from "./skillActions";
+
 
 type SortKey = "default" | "name";
 
@@ -230,49 +232,92 @@ function SkillPaths({ paths, kind }: { paths: SkillListPath[]; kind: "folder" | 
 function SkillRow({
   row,
   library,
-  actorId,
   labels,
   activeLabel,
   flat,
   lastId,
+  selectedUuid,
   dragSkillId,
+  onSelect,
   onOpen,
-  onPrimaryAction,
   onSkillStartDrag,
 }: {
   row: GroupedSkillRow;
   library: "mine" | "org";
-  actorId: string;
   labels: LabelVM[];
   activeLabel: string | null;
   flat: boolean;
   lastId: string | null;
+  selectedUuid: string | null;
   dragSkillId: string | null;
+  onSelect: (skill: SkillVM) => void;
   onOpen: (id: string) => void;
-  onPrimaryAction: (skill: SkillVM, action: SkillAction) => void;
   onSkillStartDrag: (id: string, event: PointerEvent<HTMLElement>) => void;
 }) {
   const skill = row.skill;
   const canDrag = !(library === "mine" && skill.source === "installed");
   const dragging = canDrag && dragSkillId === skill.id;
-  const primary = resolveSkillActions(skill, skillActionPermissions(skill, actorId)).primary;
+  const selected = selectedUuid === skill.uuid;
   const scopedPaths = pathsInLabelScope(skill.labels, activeLabel);
   const icon = flat ? resolveSkillListIcon(skill, labels, scopedPaths) : row.icon;
+  /**
+   * Where the press that this click belongs to started. A drag that ends over its own row still
+   * delivers a click, and a drop is not a selection: a press that travelled far enough to be a drag
+   * is spent on the drop it just made.
+   */
+  const pressRef = useRef<{ x: number; y: number } | null>(null);
   return (
     <div
       data-skill-slug={skill.id}
-      className={`crow${lastId === skill.id ? " is-active" : ""}${dragging ? " crow--dragging" : ""}`}
+      data-skill-uuid={skill.uuid}
+      className={`crow${lastId === skill.id ? " is-active" : ""}`
+        + (selected ? " crow--selected" : "")
+        + (dragging ? " crow--dragging" : "")}
       title={peopleLabel(skill)}
-      onPointerDown={
-        canDrag
-          ? (event) => {
-              if (event.button !== 0) return;
-              onSkillStartDrag(skill.id, event);
-            }
-          : undefined
-      }
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        pressRef.current = { x: event.clientX, y: event.clientY };
+        if (canDrag) onSkillStartDrag(skill.id, event);
+      }}
     >
-      <button type="button" className="crow__hit" aria-label={`Open skill ${skill.id}`} onClick={() => onOpen(skill.id)} />
+      {/*
+        One row, two intents for a pointer: a click puts the skill in the panel beside the list, a
+        double click opens its full page. A keyboard has no second click, so it gets both: Enter does
+        what the row's accessible name says and opens the page, and Space selects into the panel —
+        which is the only place some of that detail, such as which Companions stage the skill, is
+        shown at all.
+      */}
+      <button
+        type="button"
+        className="crow__hit"
+        aria-label={`Open skill ${skill.id}`}
+        aria-current={selected ? "true" : undefined}
+        onClick={(event) => {
+          const from = pressRef.current;
+          pressRef.current = null;
+          // `detail` counts the clicks a pointer made: zero is a keyboard activating the button,
+          // and anything past the first belongs to the double click that already opened the skill.
+          if (event.detail === 0) {
+            onOpen(skill.id);
+            return;
+          }
+          // Only a row that can be dragged can have spent its click on a drop; on one that cannot,
+          // a few pixels of pointer drift is still an ordinary click and must still select.
+          if (canDrag && from && exceedsThreshold(from, { x: event.clientX, y: event.clientY })) {
+            return;
+          }
+          if (event.detail > 1) return;
+          onSelect(skill);
+        }}
+        onKeyDown={(event) => {
+          // Space would otherwise fire the same click Enter does; here it is the keyboard's way in
+          // to the panel, so it is claimed before the browser turns it into an activation.
+          if (event.key !== " " || event.repeat) return;
+          event.preventDefault();
+          onSelect(skill);
+        }}
+        onDoubleClick={() => onOpen(skill.id)}
+      />
       <span className="crow__skill">
         <span className="crow__skillicon" style={icon.color ? { color: icon.color } : undefined}>
           <Icon name={icon.name} size={15} />
@@ -282,36 +327,19 @@ function SkillRow({
           <ValidationMarker skill={skill} />
           <InstallMark state={skill.installStatus} />
         </span>
+        {/* One line of what it is, beside what it is called. It is the fastest way to tell two
+            similarly named skills apart, and it costs the row no height. */}
+        <span className="crow__desc">{skill.description}</span>
+      </span>
+      <span className="crow__filed">
         <SkillPaths
           paths={flat ? scopedPaths.map((path) => ({ path, label: path })) : row.relativePaths}
           kind={flat ? "folder" : "subfolder"}
         />
       </span>
       <PeopleStack skill={skill} />
-      <span className="r when when--by" title={`Updated by ${skill.updaterName} · ${skill.updated}`}>
-        <UserAvatar
-          className="avatar"
-          avatarUrl={skill.updaterAvatarUrl}
-          initials={skill.updaterInitials}
-          size={14}
-          style={{ fontSize: 7 }}
-        />
+      <span className="r when" title={`Updated by ${skill.updaterName} · ${skill.updated}`}>
         {skill.updated}
-      </span>
-      <span className="crow__primary r">
-        {primary ? (
-          <button
-            type="button"
-            className="rowact rowact--primary"
-            aria-label={`${primary.label} ${skill.id}`}
-            title={primary.label}
-            onPointerDown={(event) => event.stopPropagation()}
-            onClick={() => onPrimaryAction(skill, primary)}
-          >
-            <Icon name={primary.icon} size={12} />
-            <span className="rowact__label">{primary.contextualLabel ?? primary.label}</span>
-          </button>
-        ) : null}
       </span>
       <span className="crow__mobilemeta">
         <span>{skill.updated}</span>
@@ -340,8 +368,9 @@ export function ListView({
   onGroupByChange,
   onOpen,
   onUpload,
-  actorId,
-  onPrimaryAction,
+  onSelect,
+  selectedUuid,
+  panel,
   lastId,
   filters,
   onToggleFilter,
@@ -366,8 +395,11 @@ export function ListView({
   onGroupByChange: (groupBy: SkillGroupBy) => void;
   onOpen: (id: string) => void;
   onUpload: () => void;
-  actorId: string;
-  onPrimaryAction: (skill: SkillVM, action: SkillAction) => void;
+  /** Put one skill in the panel beside the list. Null clears it. */
+  onSelect: (skill: SkillVM | null) => void;
+  selectedUuid: string | null;
+  /** The selected row's detail, rendered beside the list rather than over it. */
+  panel?: ReactNode;
   lastId: string | null;
   filters: Filter[];
   onToggleFilter: (type: Filter["type"], value: string) => void;
@@ -413,6 +445,27 @@ export function ListView({
     [activeLabel, categoryOrder, labels, library, shown],
   );
 
+  /**
+   * A selection only lives as long as its row is on screen. The workspace filters are the caller's
+   * and it clears the selection itself; the search and the folded group bands are this list's own,
+   * and either can take a row away while the panel beside it keeps describing it.
+   */
+  const onScreenUuids = useMemo(() => {
+    if (groupBy !== "folder") return new Set(shown.map((skill) => skill.uuid));
+    const searching = !!q.trim();
+    const visible = new Set<string>();
+    for (const group of groups) {
+      if (group.kind !== "direct" && !searching && collapsed.has(group.key)) continue;
+      for (const row of group.rows) visible.add(row.skill.uuid);
+    }
+    return visible;
+  }, [collapsed, groupBy, groups, q, shown]);
+
+  useEffect(() => {
+    if (selectedUuid === null) return;
+    if (!onScreenUuids.has(selectedUuid)) onSelect(null);
+  }, [onScreenUuids, onSelect, selectedUuid]);
+
   const toggleGroup = useCallback(
     (key: string) => {
       setCollapsed((current) => {
@@ -432,13 +485,13 @@ export function ListView({
 
   const rowProps = {
     library,
-    actorId,
     labels,
     activeLabel,
     lastId,
+    selectedUuid,
     dragSkillId,
+    onSelect,
     onOpen,
-    onPrimaryAction,
     onSkillStartDrag,
   };
 
@@ -528,12 +581,13 @@ export function ListView({
         ) : null}
       </div>
 
+      <div className="clistrow">
       <div className={`clist${groupBy === "folder" ? " clist--grouped" : ""}`}>
         <div className="chead">
           <span>Skill</span>
+          <span>Labels</span>
           <span>People</span>
-          <span className="r">Updated</span>
-          <span className="r">Action</span>
+          <span className="r">Upd.</span>
         </div>
         {groupBy === "folder"
           ? groups.map((group) => {
@@ -596,6 +650,18 @@ export function ListView({
             </div>
           </div>
         ) : null}
+      </div>
+      {/* Below the two-pane width the panel comes over the list, so it gets the same scrim the
+          Companions panel has: something to click out of, not just an Escape to remember. */}
+      {panel && (
+        <button
+          type="button"
+          className="skpanel-scrim"
+          aria-label="Close the skill panel"
+          onClick={() => onSelect(null)}
+        />
+      )}
+      {panel}
       </div>
     </>
   );

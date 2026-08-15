@@ -2,10 +2,12 @@ import type { CompanionThread, CompanionTranscriptEntry } from "@companion/contr
 import { describe, expect, it } from "vitest";
 import {
   composerHint,
+  localDay,
   replyExpected,
   transcriptAuthor,
   transcriptDisplayContent,
   transcriptTurns,
+  utcDay,
 } from "./transcript";
 
 function entry(overrides: Partial<CompanionTranscriptEntry> = {}): CompanionTranscriptEntry {
@@ -33,6 +35,7 @@ function thread(overrides: Partial<CompanionThread> = {}): CompanionThread {
     entries: [],
     pending_count: 0,
     last_message_at: null,
+    last_read_ordinal: null,
     ...overrides,
   };
 }
@@ -153,6 +156,119 @@ describe("transcriptTurns", () => {
     const turns = transcriptTurns([entry({ event_id: "msg:1" })], context);
 
     expect(turns[0]?.sending).toBe(false);
+  });
+});
+
+describe("transcript separators", () => {
+  const context = { viewerId: "user-1", companionName: "Luna" };
+
+  it("opens each day the thread was written in, and only the first turn of it", () => {
+    const turns = transcriptTurns([
+      entry({ event_id: "msg:1", created_at: "2026-08-12T12:00:00.000Z" }),
+      entry({ event_id: "pi:1", role: "assistant", author_id: null, created_at: "2026-08-12T12:01:00.000Z" }),
+      entry({ event_id: "msg:2", created_at: "2026-08-14T09:00:00.000Z" }),
+    ], context);
+
+    expect(turns.map((turn) => turn.startsDay)).toEqual(["2026-08-12", null, "2026-08-14"]);
+  });
+
+  it("groups by the reader's own day once the client has a clock", () => {
+    // The stored day and the reader's day are different days for most of the world, and a separator
+    // that names one date above timestamps that name another is worse than no separator at all.
+    const entries = [
+      entry({ event_id: "pi:1", role: "assistant", author_id: null, created_at: "2026-08-14T23:30:00.000Z" }),
+      entry({ event_id: "pi:2", role: "assistant", author_id: null, created_at: "2026-08-15T00:30:00.000Z" }),
+    ];
+
+    // Server markup: the stored day, which both renders can agree on.
+    expect(transcriptTurns(entries, { ...context, dayOf: utcDay })
+      .map((turn) => turn.startsDay)).toEqual(["2026-08-14", "2026-08-15"]);
+
+    // A reader an hour ahead of UTC saw both of those arrive on the same evening.
+    const plusOneHour = (iso: string) => new Date(Date.parse(iso) + 3_600_000).toISOString().slice(0, 10);
+    expect(transcriptTurns(entries, { ...context, dayOf: plusOneHour })
+      .map((turn) => turn.startsDay)).toEqual(["2026-08-15", null]);
+  });
+
+  it("names a day the same way whatever clock produced the key", () => {
+    // Both keys are `YYYY-MM-DD`, so the separator's own label formats identically either way.
+    expect(utcDay("2026-08-14T23:30:00.000Z")).toBe("2026-08-14");
+    expect(localDay("2026-08-14T23:30:00.000Z")).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it("keeps a day boundary off a tool run, which is chrome inside a turn", () => {
+    // A separator on a chip would part a reply from the machinery of its own turn.
+    const turns = transcriptTurns([
+      entry({
+        event_id: "tool:1",
+        role: "tool",
+        author_id: null,
+        created_at: "2026-08-14T00:00:10.000Z",
+        tool: {
+          call_id: "call-1",
+          kind: "shell",
+          name: "shell",
+          title: "npm test",
+          status: "ok",
+          detail: null,
+          screenshot: null,
+        },
+      }),
+      entry({ event_id: "pi:1", role: "assistant", author_id: null, created_at: "2026-08-14T00:00:20.000Z" }),
+    ], context);
+
+    expect(turns.map((turn) => turn.startsDay)).toEqual([null, "2026-08-14"]);
+  });
+
+  it("draws the new-message divider once, on the first line past the reader's watermark", () => {
+    const turns = transcriptTurns([
+      entry({ event_id: "pi:1", ordinal: 0, role: "assistant", author_id: null }),
+      entry({ event_id: "pi:2", ordinal: 1, role: "assistant", author_id: null }),
+      entry({ event_id: "pi:3", ordinal: 2, role: "assistant", author_id: null }),
+    ], { ...context, lastReadOrdinal: 0 });
+
+    expect(turns.map((turn) => turn.startsNew)).toEqual([false, true, false]);
+  });
+
+  it("never divides a thread at this reader's own message", () => {
+    const turns = transcriptTurns([
+      entry({ event_id: "msg:1", ordinal: 1 }),
+      entry({ event_id: "pi:1", ordinal: 2, role: "assistant", author_id: null }),
+    ], { ...context, lastReadOrdinal: 0 });
+
+    expect(turns.map((turn) => turn.startsNew)).toEqual([false, true]);
+  });
+
+  it("marks where reading stopped, not what arrived while the reader watched", () => {
+    // A reply landing under the reader's eye is not a backlog. The divider is bounded to the
+    // transcript as it stood when the thread was opened.
+    const entries = [
+      entry({ event_id: "pi:1", ordinal: 1, role: "assistant", author_id: null }),
+      entry({ event_id: "pi:2", ordinal: 2, role: "assistant", author_id: null }),
+    ];
+
+    expect(transcriptTurns(entries, {
+      ...context,
+      lastReadOrdinal: 1,
+      openedThroughOrdinal: 2,
+    }).map((turn) => turn.startsNew)).toEqual([false, true]);
+
+    // The same reply, but it arrived after the thread was already open.
+    expect(transcriptTurns(entries, {
+      ...context,
+      lastReadOrdinal: 1,
+      openedThroughOrdinal: 1,
+    }).some((turn) => turn.startsNew)).toBe(false);
+  });
+
+  it("leaves a thread undivided when the reader has caught up, or has never been here", () => {
+    const entries = [entry({ event_id: "pi:1", ordinal: 3, role: "assistant", author_id: null })];
+
+    expect(transcriptTurns(entries, { ...context, lastReadOrdinal: 3 })
+      .some((turn) => turn.startsNew)).toBe(false);
+    // A first visit has no watermark to return to, so the whole thread is simply the thread.
+    expect(transcriptTurns(entries, { ...context, lastReadOrdinal: null })
+      .some((turn) => turn.startsNew)).toBe(false);
   });
 });
 

@@ -2,7 +2,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Companion, CompanionThread as Thread } from "@companion/contracts";
 import { describe, expect, it } from "vitest";
-import { CompanionThread, type CompanionComputerPanel } from "./CompanionThread";
+import { CompanionThread, type CompanionContextPanel } from "./CompanionThread";
 
 const companionId = "11111111-1111-4111-8111-111111111111";
 
@@ -20,6 +20,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
     pinned: false,
     hidden: false,
     unread: false,
+    last_message: null,
     runtime: {
       state: "running",
       daemon_state: "running",
@@ -72,12 +73,13 @@ function thread(overrides: Partial<Thread> = {}): Thread {
     ],
     pending_count: 0,
     last_message_at: "2026-08-12T12:01:20.000Z",
+    last_read_ordinal: null,
     ...overrides,
   };
 }
 
-/** A closed Computer panel: what a thread opens with, and what most of these cases render. */
-function computerPanel(overrides: Partial<CompanionComputerPanel> = {}): CompanionComputerPanel {
+/** A closed context panel: what these cases render unless one asks for it open. */
+function contextPanel(overrides: Partial<CompanionContextPanel> = {}): CompanionContextPanel {
   return {
     open: false,
     desktop: null,
@@ -96,7 +98,8 @@ function render(props: {
   busy?: boolean;
   waking?: boolean;
   openingDesktop?: boolean;
-  computer?: Partial<CompanionComputerPanel>;
+  context?: Partial<CompanionContextPanel>;
+  lastReadOrdinal?: number | null;
 }) {
   return renderToStaticMarkup(React.createElement(CompanionThread, {
     companion: props.companion ?? companion(),
@@ -105,23 +108,27 @@ function render(props: {
     busy: props.busy ?? false,
     waking: props.waking ?? false,
     openingDesktop: props.openingDesktop ?? false,
-    computer: computerPanel(props.computer),
+    context: contextPanel(props.context),
+    contextSkills: [],
+    lastReadOrdinal: props.lastReadOrdinal ?? null,
     onBack: () => {},
     orgId: "org-1",
     onSend: async () => true,
+    onSettings: () => {},
     onThread: () => {},
     onWake: () => {},
     onDesktop: () => {},
   }));
 }
 
-/**
- * What the header reads once the markup is taken out. The Box chip is two elements — `Box ·` and the
- * state word — so a phone can drop the first half and keep the second, which means its label only
- * exists as rendered text.
- */
+/** What the header reads once the markup is taken out, which is where the chip's state word lives. */
 function text(markup: string): string {
   return markup.replace(/<[^>]*>/g, "");
+}
+
+/** What the chip reports about the compute, which is its accessible name rather than its text. */
+function chipLabel(markup: string): string {
+  return markup.match(/aria-label="(Box · [^"]*)"/)?.[1] ?? "";
 }
 
 const asleep = companion({
@@ -143,7 +150,9 @@ describe("CompanionThread", () => {
     expect(markup).toContain("Draft the launch note");
     expect(markup).toContain("Here is a first pass at the launch note.");
     expect(markup).toContain("Message Luna");
-    expect(text(markup)).toContain("Box · online");
+    expect(text(markup)).toContain("Online");
+    // The word is what is shown; the compute it reports stays in the accessible name.
+    expect(chipLabel(markup)).toContain("Box · online");
   });
 
   it("keeps runtime tools and Skills out of the thread surface", () => {
@@ -191,7 +200,8 @@ describe("CompanionThread", () => {
       thread: viewerThread,
     });
 
-    expect(text(markup)).toContain("Box · online");
+    expect(text(markup)).toContain("Online");
+    expect(chipLabel(markup)).toBe("Box · online");
     expect(markup).not.toContain("open the Box desktop");
     expect(markup).not.toContain(">Wake<");
   });
@@ -199,17 +209,18 @@ describe("CompanionThread", () => {
   it("offers the Box desktop from the chip only while a runner's Box is already running", () => {
     const running = render({});
 
-    expect(text(running)).toContain("Box · online");
+    expect(text(running)).toContain("Online");
     expect(running).toContain("open the Box desktop");
     // An asleep Box has no desktop, so the chip stays a status read instead of becoming a start.
-    expect(text(render({ companion: asleep }))).toContain("Box · asleep");
+    expect(text(render({ companion: asleep }))).toContain("Asleep");
+    expect(chipLabel(render({ companion: asleep }))).toBe("Box · asleep");
     expect(render({ companion: asleep })).not.toContain("open the Box desktop");
   });
 
   it("reports an in-flight desktop handoff on the chip that started it", () => {
     const markup = render({ openingDesktop: true });
 
-    expect(text(markup)).toContain("Box · opening desktop");
+    expect(text(markup)).toContain("Opening desktop");
     expect(markup).toContain("disabled");
   });
 
@@ -249,7 +260,7 @@ describe("CompanionThread", () => {
       thread: waiting,
     });
 
-    expect(text(starting)).toContain("Box · starting");
+    expect(text(starting)).toContain("Starting");
     expect(starting).toContain("1 message saved. Luna is waking to deliver.");
     expect(starting).not.toContain("Wake Luna to deliver.");
   });
@@ -283,7 +294,8 @@ describe("CompanionThread", () => {
       }),
     });
 
-    expect(text(markup)).toContain("Box · error");
+    expect(text(markup)).toContain("Error");
+    expect(chipLabel(markup)).toBe("Box · error");
     expect(markup).toContain("Box runtime is not configured; set COMPANION_BOX_API_KEY");
   });
 
@@ -553,5 +565,58 @@ describe("CompanionThread", () => {
     expect(viewerPending).not.toContain(">Allow<");
     expect(viewerPending).not.toContain(">Answer<");
     expect(viewerPending).not.toContain(">Deny<");
+  });
+});
+
+describe("CompanionThread separators", () => {
+  it("parts the transcript by day, once per day the thread was written in", () => {
+    const markup = render({
+      thread: thread({
+        entries: [
+          {
+            event_id: "msg:1",
+            ordinal: 0,
+            role: "user",
+            content: "Draft the launch note",
+            author_id: "user-1",
+            author_name: "Ada",
+            tool: null,
+            decision: null,
+            created_at: "2026-08-12T12:00:00.000Z",
+          },
+          {
+            event_id: "pi:1",
+            ordinal: 1,
+            role: "assistant",
+            content: "Here it is.",
+            author_id: null,
+            author_name: null,
+            tool: null,
+            decision: null,
+            created_at: "2026-08-14T09:00:00.000Z",
+          },
+        ],
+      }),
+    });
+
+    // Server markup carries the stable stored day; the reader's clock reformats it on the client.
+    expect(markup).toContain('<time dateTime="2026-08-12">2026-08-12</time>');
+    expect(markup).toContain('<time dateTime="2026-08-14">2026-08-14</time>');
+    expect(markup.match(/chat-sep/g)).toHaveLength(2);
+  });
+
+  it("marks where a returning reader left off, and leaves a caught-up thread whole", () => {
+    const entries = thread().entries;
+
+    // The reader had read up to their own message; the reply after it is where they left off.
+    const returning = render({ lastReadOrdinal: 0, thread: thread({ entries }) });
+    expect(returning).toContain("chat-sep--new");
+    expect(returning).toContain(">New<");
+
+    // Nothing has been said since this reader was last here, so there is nothing to divide.
+    expect(render({ lastReadOrdinal: 1, thread: thread({ entries }) }))
+      .not.toContain("chat-sep--new");
+    // Neither is a first visit, which has no watermark to return to.
+    expect(render({ thread: thread({ entries }) })).not.toContain("chat-sep--new");
   });
 });

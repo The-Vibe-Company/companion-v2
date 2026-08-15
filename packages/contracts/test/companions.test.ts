@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS,
   COMPANION_PROVIDER_CATALOG,
   COMPANION_TOOL_RUN_SCREENSHOT_MAX_CHARACTERS,
   companionProviderOAuthCompleteInputSchema,
   companionProviderOAuthStartInputSchema,
   companionDesktopSchema,
+  companionLastMessageSchema,
   companionMessageEventId,
+  companionSchema,
   companionThreadSchema,
   companionToolRunSchema,
   companionTranscriptEntrySchema,
@@ -537,5 +540,73 @@ describe("Companion sharing contracts", () => {
       workspace_role: null,
       members: [],
     })).not.toThrow();
+  });
+});
+
+describe("Companion conversation-list contracts", () => {
+  const companion = {
+    id: "11111111-1111-1111-1111-111111111111",
+    name: "Luna",
+    persona: null,
+    model_id: "claude-opus-4-8",
+    selected_skill_ids: [],
+    can_write_skills: false,
+    selected_mcp_account_ids: [],
+    owner_id: "user-1",
+    access: "owner",
+    pinned: false,
+    hidden: false,
+    unread: false,
+    runtime: {
+      state: "running",
+      daemon_state: "running",
+      box_id: "bx_23456789",
+      provider_ids: ["anthropic"],
+      provider_credential_generation: null,
+      disk_layout_version: 6,
+      desktop_available: true,
+      last_error: null,
+      last_observed_at: null,
+      last_started_at: null,
+      last_stopped_at: null,
+    },
+    created_at: "2026-08-14T09:00:00.000Z",
+    updated_at: "2026-08-14T09:00:00.000Z",
+  };
+
+  it("previews the newest chat line and lets a mutation answer without one", () => {
+    const withPreview = companionSchema.parse({
+      ...companion,
+      last_message: {
+        preview: "Drafted the launch note.",
+        role: "assistant",
+        author_id: null,
+        author_name: null,
+        created_at: "2026-08-14T09:05:00.000Z",
+      },
+    });
+    expect(withPreview.last_message?.preview).toBe("Drafted the launch note.");
+    // A response that carries no preview — every mutation — parses to an explicit null.
+    expect(companionSchema.parse(companion).last_message).toBeNull();
+  });
+
+  it("carries only what a person or Pi said, in one bounded line", () => {
+    // Tool runs and permission cards are not chat roles, so they can never reach a list row.
+    for (const role of ["tool", "decision", "system"]) {
+      expect(() => companionLastMessageSchema.parse({
+        preview: "rm -rf /tmp/build",
+        role,
+        author_id: null,
+        author_name: null,
+        created_at: "2026-08-14T09:05:00.000Z",
+      })).toThrow();
+    }
+    expect(() => companionLastMessageSchema.parse({
+      preview: "x".repeat(COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS + 1),
+      role: "user",
+      author_id: "user-1",
+      author_name: "Ada",
+      created_at: "2026-08-14T09:05:00.000Z",
+    })).toThrow();
   });
 });

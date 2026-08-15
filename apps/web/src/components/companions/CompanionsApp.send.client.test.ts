@@ -77,6 +77,7 @@ const companion: Companion = {
   pinned: false,
   hidden: false,
   unread: false,
+  last_message: null,
   runtime: {
     state: "running",
     daemon_state: "running",
@@ -128,6 +129,7 @@ function controlPlane(
     entries: entries.map((entry) => ({ ...entry })),
     pending_count: entries.filter((entry) => entry.role === "user" && entry.ordinal > delivered).length,
     last_message_at: entries.at(-1)?.created_at ?? null,
+    last_read_ordinal: null,
   });
 
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -212,7 +214,9 @@ async function openThread(who: Companion = companion) {
     root.render(React.createElement(CompanionsApp, {
       orgs: [org],
       currentOrg: org,
+      viewer: { id: "user-1", name: "Ada", email: "ada@example.test", initials: "A", avatarUrl: null },
       navigation,
+      skills: [],
       initialCompanions: [who],
       initialProviders: providers,
       initialPlugins: [],
@@ -293,7 +297,7 @@ describe("CompanionsApp send", () => {
 
       expect(container.querySelector(".chat-hint")?.textContent)
         .toBe("Enter sends. Shift + Enter starts a new line.");
-      expect(container.querySelector(".chat-box")?.textContent).toContain("Box · online");
+      expect(container.querySelector(".chat-box")?.textContent).toContain("Online");
     });
 
     it("names the message it sends, so a replayed request cannot become a second turn", async () => {

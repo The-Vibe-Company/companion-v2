@@ -71,6 +71,7 @@ function companion(access: Companion["access"] = "owner"): Companion {
     pinned: false,
     hidden: false,
     unread: false,
+    last_message: null,
     runtime: {
       state: "stopped",
       daemon_state: "stopped",
