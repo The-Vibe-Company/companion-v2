@@ -159,6 +159,19 @@ test("documentation-only changes do not schedule application checks", () => {
   assert.deepEqual(plan.deferredGates, []);
 });
 
+test("Conductor launcher changes schedule the native development stack check", () => {
+  const plan = createVerificationPlan([".conductor/settings.toml", "scripts/setup-conductor.sh"], {
+    workspaces,
+  });
+  assert.deepEqual(plan.fastSteps.map(({ id }) => id), ["hygiene", "dev-stack", "quality"]);
+  const devStack = plan.fastSteps.find(({ id }) => id === "dev-stack");
+  assert.deepEqual(devStack, {
+    id: "dev-stack",
+    command: "bash",
+    args: ["scripts/dev-stack-check.sh"],
+  });
+});
+
 test("a web change selects the web workspace and browser validation", () => {
   const plan = createVerificationPlan(["apps/web/src/app/page.tsx"], {
     workspaces,

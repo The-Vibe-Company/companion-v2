@@ -4,38 +4,91 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-bash -n scripts/dev-stack.sh scripts/dev-conductor.sh scripts/dev-stack-check.sh
+bash -n scripts/dev-stack.sh scripts/setup-conductor.sh scripts/dev-conductor.sh scripts/dev-stack-check.sh
 
-config="$(
-  env -u CONDUCTOR_PORT -u CONDUCTOR_WORKSPACE_NAME \
-  COMPOSE_BIND_HOST=127.0.0.1 \
-  POSTGRES_PORT=15432 \
-  MINIO_PORT=19000 \
-  MINIO_CONSOLE_PORT=19001 \
-  MAILPIT_SMTP_PORT=11025 \
-  MAILPIT_WEB_PORT=18025 \
-  docker compose config
-)"
+# Conductor setup must select the native package manager before installing JS
+# dependencies. Exercise both branches with command shims so this remains safe
+# on CI hosts that have neither Homebrew nor dnf.
+(
+  mkdir -p "$ROOT/.context"
+  setup_test_dir="$(mktemp -d "$ROOT/.context/conductor-setup-test.XXXXXX")"
+  trap 'rm -rf "$setup_test_dir"' EXIT
+  mkdir -p "$setup_test_dir/bin"
 
-require_config() {
-  local expected="$1"
-  if ! printf '%s\n' "$config" | grep -Fq "$expected"; then
-    printf '[dev-stack-check] Missing expected Compose config: %s\n' "$expected" >&2
+  if ! grep -Fxq 'setup = "bash scripts/setup-conductor.sh"' "$ROOT/.conductor/settings.toml"; then
+    printf '[dev-stack-check] Conductor settings must invoke scripts/setup-conductor.sh\n' >&2
     exit 1
   fi
-}
 
-require_config "host_ip: 127.0.0.1"
-require_config 'published: "15432"'
-require_config "target: 5432"
-require_config 'published: "19000"'
-require_config "target: 9000"
-require_config 'published: "19001"'
-require_config "target: 9001"
-require_config 'published: "11025"'
-require_config "target: 1025"
-require_config 'published: "18025"'
-require_config "target: 8025"
+  for command_name in sudo dnf brew corepack pnpm; do
+    # The shim must expand these variables when Conductor's setup invokes it.
+    # shellcheck disable=SC2016
+    printf '%s\n' '#!/usr/bin/env bash' \
+      'printf "%s %s\\n" "$(basename "$0")" "$*" >>"$CONDUCTOR_SETUP_CALLS"' \
+      >"$setup_test_dir/bin/$command_name"
+    chmod +x "$setup_test_dir/bin/$command_name"
+  done
+
+  cloud_calls="$setup_test_dir/cloud-calls"
+  env PATH="$setup_test_dir/bin:$PATH" CONDUCTOR_IS_LOCAL=0 \
+    CONDUCTOR_SETUP_CALLS="$cloud_calls" bash "$ROOT/scripts/setup-conductor.sh"
+  if [ "$(cat "$cloud_calls")" != "$(printf '%s\n' \
+    'sudo dnf install -y lsof postgresql17 postgresql17-server' \
+    'corepack enable' \
+    'pnpm install')" ]; then
+    printf '[dev-stack-check] unexpected cloud Conductor setup calls:\n%s\n' \
+      "$(cat "$cloud_calls")" >&2
+    exit 1
+  fi
+
+  local_calls="$setup_test_dir/local-calls"
+  env PATH="$setup_test_dir/bin:$PATH" CONDUCTOR_IS_LOCAL=1 \
+    CONDUCTOR_SETUP_CALLS="$local_calls" bash "$ROOT/scripts/setup-conductor.sh"
+  if [ "$(cat "$local_calls")" != "$(printf '%s\n' \
+    'brew install postgresql@17' \
+    'brew install minio mailpit' \
+    'corepack enable' \
+    'pnpm install')" ]; then
+    printf '[dev-stack-check] unexpected local Conductor setup calls:\n%s\n' \
+      "$(cat "$local_calls")" >&2
+    exit 1
+  fi
+)
+
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+  config="$(
+    env -u CONDUCTOR_PORT -u CONDUCTOR_WORKSPACE_NAME \
+    COMPOSE_BIND_HOST=127.0.0.1 \
+    POSTGRES_PORT=15432 \
+    MINIO_PORT=19000 \
+    MINIO_CONSOLE_PORT=19001 \
+    MAILPIT_SMTP_PORT=11025 \
+    MAILPIT_WEB_PORT=18025 \
+    docker compose config
+  )"
+
+  require_config() {
+    local expected="$1"
+    if ! printf '%s\n' "$config" | grep -Fq "$expected"; then
+      printf '[dev-stack-check] Missing expected Compose config: %s\n' "$expected" >&2
+      exit 1
+    fi
+  }
+
+  require_config "host_ip: 127.0.0.1"
+  require_config 'published: "15432"'
+  require_config "target: 5432"
+  require_config 'published: "19000"'
+  require_config "target: 9000"
+  require_config 'published: "19001"'
+  require_config "target: 9001"
+  require_config 'published: "11025"'
+  require_config "target: 1025"
+  require_config 'published: "18025"'
+  require_config "target: 8025"
+else
+  printf '[dev-stack-check] SKIP Docker Compose config checks (docker compose unavailable)\n'
+fi
 
 env_output="$(
   env -u CONDUCTOR_PORT -u CONDUCTOR_WORKSPACE_NAME \
@@ -212,6 +265,29 @@ if [ "$cloud_network" != "3000|0.0.0.0|http://127.0.0.1:3000|http://127.0.0.1:30
   exit 1
 fi
 
+inspect_conductor_install_hints() {
+  local is_local="$1"
+  # The inner shell must read variables populated by the sourced launcher.
+  # shellcheck disable=SC2016
+  env CONDUCTOR_PORT=4310 CONDUCTOR_IS_LOCAL="$is_local" COMPANION_DEV_SKIP_ENV_FILE=1 \
+    bash -c 'script="$1"; shift; source "$script"; printf "%s|%s" "$LSOF_INSTALL_HINT" "$POSTGRES_INSTALL_HINT"' \
+    _ "$ROOT/scripts/dev-conductor.sh"
+}
+
+cloud_install_hints="$(inspect_conductor_install_hints 0)"
+if [ "$cloud_install_hints" != "sudo dnf install -y lsof|sudo dnf install -y postgresql17 postgresql17-server" ]; then
+  printf '[dev-stack-check] unexpected cloud Conductor install hints: %s\n' \
+    "$cloud_install_hints" >&2
+  exit 1
+fi
+
+local_install_hints="$(inspect_conductor_install_hints 1)"
+if [ "$local_install_hints" != "brew install lsof|brew install postgresql@17" ]; then
+  printf '[dev-stack-check] unexpected local Conductor install hints: %s\n' \
+    "$local_install_hints" >&2
+  exit 1
+fi
+
 local_network="$(inspect_conductor_network 1 4310)"
 if [ "$local_network" != "4310|127.0.0.1|http://127.0.0.1:4310|http://127.0.0.1:4311" ]; then
   printf '[dev-stack-check] unexpected local Conductor network config: %s\n' "$local_network" >&2
@@ -250,7 +326,10 @@ fi
   mkdir -p "$lock_test_dir/scripts" "$lock_test_dir/.conductor-pg"
   cp "$ROOT/scripts/dev-conductor.sh" "$lock_test_dir/scripts/dev-conductor.sh"
   cd "$lock_test_dir"
-  bash -c 'exec -a "bash scripts/dev-conductor.sh" sleep 30' &
+  # Keep bash as the long-lived process so `ps` retains the launcher marker.
+  # Amazon Linux implements sleep through a coreutils multicall binary, which
+  # discards the argv[0] marker used by `exec -a` on macOS.
+  bash -c 'while :; do sleep 1; done' "bash scripts/dev-conductor.sh" &
   lock_owner_pid=$!
   ln -s "$lock_owner_pid" .conductor-pg/run.lock
 

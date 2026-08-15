@@ -37,7 +37,7 @@ Do not introduce Projects, runs, sessions, prompts, transcripts, launch actions,
 
 ## Conductor
 
-Use `.conductor/settings.toml`. Setup runs `corepack enable && pnpm install`; run executes `bash scripts/dev-conductor.sh`; archive executes `bash scripts/dev-conductor.sh archive`.
+Use `.conductor/settings.toml`. Setup installs PostgreSQL 17 plus `lsof` with `dnf` in cloud workspaces, or PostgreSQL 17 plus optional MinIO/Mailpit with Homebrew locally, then runs `corepack enable && pnpm install`. Run executes `bash scripts/dev-conductor.sh`; archive executes `bash scripts/dev-conductor.sh archive`.
 
 The native Conductor stack starts per-workspace PostgreSQL plus optional MinIO and Mailpit under `.conductor-pg/`, then API, worker, and web. Ports derive from `CONDUCTOR_PORT`: web `+0`, API `+1`, PostgreSQL `+2`, MinIO API `+3`, console `+4`, SMTP `+5`, Mailpit UI `+6`. Cloud workspaces use base `3000`. Internal services bind loopback; cloud web binds `0.0.0.0`. Cookies use a workspace-specific prefix. Missing MinIO disables uploads; missing Mailpit falls back to logged email.
 
