@@ -45,6 +45,7 @@ export function CompanionThread({
   context,
   contextSkills,
   lastReadOrdinal,
+  openedThroughOrdinal,
   onBack,
   onSend,
   onSettings,
@@ -64,6 +65,8 @@ export function CompanionThread({
   contextSkills: CompanionContextSkill[];
   /** This reader's unread watermark when the thread was opened; the "New" divider sits past it. */
   lastReadOrdinal?: number | null;
+  /** The last ordinal the thread held when it was opened, so the divider stays where reading did. */
+  openedThroughOrdinal?: number | null;
   onBack: () => void;
   onSend: (content: string, clientMessageId: string) => Promise<boolean>;
   onSettings: () => void;
@@ -240,6 +243,7 @@ export function CompanionThread({
           orgId={orgId}
           busy={busy}
           lastReadOrdinal={lastReadOrdinal}
+          openedThroughOrdinal={openedThroughOrdinal}
           onSend={onSend}
           onThread={onThread}
         />

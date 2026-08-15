@@ -1313,6 +1313,10 @@ export function SkillsApp({
     if (selectedUuid === null) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
+      // The panel is the quietest surface on this page. Anything layered over it — a dialog, a
+      // menu — owns Escape first, so dismissing one of those must not also throw the panel away.
+      if ((event.target as HTMLElement | null)?.closest?.("[role='dialog'], [role='menu']")) return;
+      if (document.querySelector("[role='dialog']")) return;
       closeSkillPanel();
     };
     window.addEventListener("keydown", onKeyDown);

@@ -1206,7 +1206,9 @@ export function registerCompanionRoutes(
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
       const companion = await tenant(c, ({ actor, orgId, database }) =>
-        getCompanion({ actor, orgId, companionId, database }));
+        // A single-Companion read answers the same row the list draws, so it carries the preview.
+        getCompanion({ actor, orgId, companionId, withLastMessage: true, database }));
+      c.header("Cache-Control", "private, no-store");
       return c.json({ companion });
     } catch (error) {
       return jsonError(c, error, errorStatus(error));
@@ -1686,8 +1688,8 @@ export function registerCompanionRoutes(
       const live = c.req.query("live") === "true";
       const resolved = await tenant(c, async ({ actor, orgId, database }) => {
         const companion = live
-          ? await getCompanionForRuntime({ actor, orgId, companionId, database })
-          : await getCompanion({ actor, orgId, companionId, database });
+          ? await getCompanionForRuntime({ actor, orgId, companionId, withLastMessage: true, database })
+          : await getCompanion({ actor, orgId, companionId, withLastMessage: true, database });
         return { actor, orgId, companion };
       });
       if (!live || !resolved.companion.runtime.box_id) {

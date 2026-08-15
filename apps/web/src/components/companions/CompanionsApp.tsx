@@ -178,6 +178,8 @@ export function CompanionsApp({
   const [threadError, setThreadError] = useState<string | null>(null);
   /** This reader's watermark when the open thread was opened; the "New" divider sits just past it. */
   const [lastReadOrdinal, setLastReadOrdinal] = useState<number | null>(null);
+  /** How far the thread went when it was opened, so the divider marks reading rather than arrivals. */
+  const [openedThroughOrdinal, setOpenedThroughOrdinal] = useState<number | null>(null);
   /**
    * Why the last desktop handoff opened nothing. It is kept apart from `threadError` because the
    * live thread poll clears that one every couple of seconds, which would erase this answer before
@@ -384,12 +386,19 @@ export function CompanionsApp({
   /** One refresh of the open thread: Pi delivery plus projection when awake, read model otherwise. */
   const refreshThread = useCallback(async (live: boolean) => {
     if (!openedId) return;
-    const requestId = ++threadRequestRef.current;
+    // The request id is claimed by the call that actually goes out, not by the tick that asked for
+    // one. A tick the queue skips used to claim an id anyway, which invalidated the read already in
+    // flight and threw its answer away — including the one payload that carries where this reader
+    // left off, so a first read slower than one poll silently lost the divider for good.
+    let requestId = threadRequestRef.current;
     try {
       const next = await threadQueueRef.current.run(
-        () => live
-          ? syncCompanionThread(currentOrg.id, openedId)
-          : getCompanionThread(currentOrg.id, openedId),
+        () => {
+          requestId = ++threadRequestRef.current;
+          return live
+            ? syncCompanionThread(currentOrg.id, openedId)
+            : getCompanionThread(currentOrg.id, openedId);
+        },
         { skipWhenBusy: true },
       );
       if (next && requestId === threadRequestRef.current) {
@@ -423,11 +432,13 @@ export function CompanionsApp({
     if (!openedId) {
       capturedReadRef.current = null;
       setLastReadOrdinal(null);
+      setOpenedThroughOrdinal(null);
       return;
     }
     if (thread?.companion_id !== openedId || capturedReadRef.current === openedId) return;
     capturedReadRef.current = openedId;
     setLastReadOrdinal(thread.last_read_ordinal);
+    setOpenedThroughOrdinal(thread.entries.at(-1)?.ordinal ?? null);
   }, [openedId, thread]);
 
   /**
@@ -839,6 +850,7 @@ export function CompanionsApp({
               }}
               contextSkills={skills}
               lastReadOrdinal={lastReadOrdinal}
+              openedThroughOrdinal={openedThroughOrdinal}
               onBack={closeThread}
               onSend={onSend}
               onSettings={() => router.push(`/companions/${opened.id}/settings`)}

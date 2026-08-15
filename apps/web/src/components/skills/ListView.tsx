@@ -281,8 +281,10 @@ function SkillRow({
     >
       {/*
         One row, two intents for a pointer: a click puts the skill in the panel beside the list, a
-        double click opens its full page. A keyboard has no second click, so Enter does what the
-        row's accessible name says and opens it — the panel holds nothing the page does not.
+        double click opens its full page. A keyboard has no second click, so it gets both: Enter does
+        what the row's accessible name says and opens the page, and Space selects into the panel —
+        which is the only place some of that detail, such as which Companions stage the skill, is
+        shown at all.
       */}
       <button
         type="button"
@@ -304,6 +306,13 @@ function SkillRow({
             return;
           }
           if (event.detail > 1) return;
+          onSelect(skill);
+        }}
+        onKeyDown={(event) => {
+          // Space would otherwise fire the same click Enter does; here it is the keyboard's way in
+          // to the panel, so it is claimed before the browser turns it into an activation.
+          if (event.key !== " " || event.repeat) return;
+          event.preventDefault();
           onSelect(skill);
         }}
         onDoubleClick={() => onOpen(skill.id)}
@@ -434,6 +443,13 @@ export function ListView({
     () => groupSkillsByRoot(shown, labels, library, activeLabel, categoryOrder),
     [activeLabel, categoryOrder, labels, library, shown],
   );
+
+  // A selection only lives as long as its row is on screen. The workspace filters are the caller's
+  // and it clears the selection itself; this search is the list's own, and it can hide a row too.
+  useEffect(() => {
+    if (selectedUuid === null) return;
+    if (!shown.some((skill) => skill.uuid === selectedUuid)) onSelect(null);
+  }, [onSelect, selectedUuid, shown]);
 
   const toggleGroup = useCallback(
     (key: string) => {

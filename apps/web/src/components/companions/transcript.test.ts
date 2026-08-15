@@ -239,6 +239,28 @@ describe("transcript separators", () => {
     expect(turns.map((turn) => turn.startsNew)).toEqual([false, true]);
   });
 
+  it("marks where reading stopped, not what arrived while the reader watched", () => {
+    // A reply landing under the reader's eye is not a backlog. The divider is bounded to the
+    // transcript as it stood when the thread was opened.
+    const entries = [
+      entry({ event_id: "pi:1", ordinal: 1, role: "assistant", author_id: null }),
+      entry({ event_id: "pi:2", ordinal: 2, role: "assistant", author_id: null }),
+    ];
+
+    expect(transcriptTurns(entries, {
+      ...context,
+      lastReadOrdinal: 1,
+      openedThroughOrdinal: 2,
+    }).map((turn) => turn.startsNew)).toEqual([false, true]);
+
+    // The same reply, but it arrived after the thread was already open.
+    expect(transcriptTurns(entries, {
+      ...context,
+      lastReadOrdinal: 1,
+      openedThroughOrdinal: 1,
+    }).some((turn) => turn.startsNew)).toBe(false);
+  });
+
   it("leaves a thread undivided when the reader has caught up, or has never been here", () => {
     const entries = [entry({ event_id: "pi:1", ordinal: 3, role: "assistant", author_id: null })];
 

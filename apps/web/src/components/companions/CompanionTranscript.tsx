@@ -509,6 +509,7 @@ export function CompanionTranscript({
   orgId,
   busy,
   lastReadOrdinal,
+  openedThroughOrdinal,
   onSend,
   onThread,
 }: {
@@ -518,6 +519,8 @@ export function CompanionTranscript({
   busy: boolean;
   /** This reader's unread watermark when the thread was opened; null draws no divider. */
   lastReadOrdinal?: number | null;
+  /** The last ordinal the thread held when it was opened, so the divider stays where reading did. */
+  openedThroughOrdinal?: number | null;
   onSend: (content: string, clientMessageId: string) => Promise<boolean>;
   /** Replace the thread after a permission card is decided, without a full poll cycle. */
   onThread: (thread: Thread) => void;
@@ -571,9 +574,10 @@ export function CompanionTranscript({
       companionName: companion.name,
       sendingEventId: outgoing?.event_id ?? null,
       lastReadOrdinal: lastReadOrdinal ?? null,
+      openedThroughOrdinal: openedThroughOrdinal ?? null,
       dayOf,
     }),
-    [companion.name, dayOf, lastReadOrdinal, messages, outgoing, viewerId],
+    [companion.name, dayOf, lastReadOrdinal, messages, openedThroughOrdinal, outgoing, viewerId],
   );
   const turnsById = useMemo(
     () => new Map(turns.map((turn) => [turn.entry.event_id, turn])),

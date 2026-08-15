@@ -244,7 +244,10 @@ export function companionLastMessagePreview(content: string): string {
 }
 
 /**
- * Newest chat line per Companion, for the conversation list. `tool` and `decision` entries are
+ * Newest chat line per Companion, for the conversation list. Every write answers without one — a
+ * mutation reports what it just wrote, not a scan of the thread — so a surface that keeps a list
+ * merges the field rather than replacing the row; `last_message: null` means "not answered here".
+ * `tool` and `decision` entries are
  * excluded in the query rather than filtered afterwards, so a Companion whose last activity was a
  * tool run still previews the last thing a person or Pi actually said — and no tool title or pending
  * permission question can reach a surface outside the thread.
@@ -459,11 +462,15 @@ async function companionWithMemberState(input: {
   orgId: string;
   row: CompanionRow;
   access: CompanionAccess;
+  /** Only a surface that draws a conversation row needs the preview; it is a scan of the thread. */
+  withLastMessage?: boolean;
 }): Promise<Companion> {
   const [states, highest, previews] = await Promise.all([
     loadMemberStates(input.database, input.orgId, input.actorId, [input.row.id]),
     loadHighestTranscriptOrdinals(input.database, input.orgId, [input.row.id]),
-    loadCompanionLastMessages(input.database, input.orgId, [input.row.id]),
+    input.withLastMessage
+      ? loadCompanionLastMessages(input.database, input.orgId, [input.row.id])
+      : Promise.resolve(new Map<string, CompanionLastMessage>()),
   ]);
   return toCompanion(
     input.row,
@@ -516,6 +523,12 @@ export async function getCompanion(input: {
   actor: ActorContext;
   orgId: string;
   companionId: string;
+  /**
+   * Project this thread's newest chat line. Off by default: it is a scan of the transcript, and
+   * `getCompanion` is the shared primitive behind sends, syncs, lifecycle claims, and the thread
+   * read, none of which render a conversation row. On for the reads a row is drawn from.
+   */
+  withLastMessage?: boolean;
   database?: Db;
 }): Promise<Companion> {
   const database = input.database ?? db;
@@ -534,6 +547,7 @@ export async function getCompanion(input: {
     orgId: input.orgId,
     row,
     access,
+    withLastMessage: input.withLastMessage,
   });
 }
 
@@ -1011,9 +1025,7 @@ export async function updateCompanion(input: {
       selected_mcp_accounts: selectedMcpAccountIds !== undefined,
     },
   });
-  // Settings writes leave the thread alone, so the preview this update read is still the current
-  // one: carrying it keeps a saved Companion from blanking its own row in an open conversation list.
-  return toCompanion(row, companion.access, memberFromCompanion(companion), companion.last_message);
+  return toCompanion(row, companion.access, memberFromCompanion(companion));
 }
 
 /**
@@ -2263,7 +2275,7 @@ export async function setCompanionProvider(input: {
       "this Companion provider was already configured",
     );
   }
-  return toCompanion(row, "owner", memberFromCompanion(companion), companion.last_message);
+  return toCompanion(row, "owner", memberFromCompanion(companion));
 }
 
 export async function saveCompanionProvider(input: {
@@ -2502,6 +2514,7 @@ export async function getCompanionForRuntime(input: {
   actor: ActorContext;
   orgId: string;
   companionId: string;
+  withLastMessage?: boolean;
   database?: Db;
 }): Promise<Companion> {
   const companion = await getCompanion(input);
@@ -2585,8 +2598,7 @@ export async function updateCompanionRuntime(input: {
     throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
   }
   if (!row) throw new CompanionNotFoundError();
-  // A lifecycle write never touches the thread, so the preview this read carries is still current.
-  return toCompanion(row, current.access, memberFromCompanion(current), current.last_message);
+  return toCompanion(row, current.access, memberFromCompanion(current));
 }
 
 /**
@@ -2623,7 +2635,7 @@ export async function updateCompanionObservation(input: {
       notInArray(schema.companions.runtimeState, ["provisioning", "stopping"]),
     ))
     .returning();
-  if (row) return toCompanion(row, current.access, memberFromCompanion(current), current.last_message);
+  if (row) return toCompanion(row, current.access, memberFromCompanion(current));
   return getCompanionForRuntime({ ...input, database });
 }
 
@@ -2649,14 +2661,7 @@ export async function claimCompanionRuntimeStart(input: {
       eq(schema.companions.runtimeState, "not_created"),
     ))
     .returning();
-  if (row) {
-    return toCompanion(
-      row,
-      currentAccess.access,
-      memberFromCompanion(currentAccess),
-      currentAccess.last_message,
-    );
-  }
+  if (row) return toCompanion(row, currentAccess.access, memberFromCompanion(currentAccess));
 
   const current = await getCompanionForRuntime({ ...input, database });
   const transitional =
@@ -2683,7 +2688,7 @@ export async function claimCompanionRuntimeStart(input: {
     ))
     .returning();
   if (!claimed) throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
-  return toCompanion(claimed, current.access, memberFromCompanion(current), current.last_message);
+  return toCompanion(claimed, current.access, memberFromCompanion(current));
 }
 
 export async function claimCompanionRuntimeStop(input: {
@@ -2714,6 +2719,6 @@ export async function claimCompanionRuntimeStop(input: {
     ))
     .returning();
   if (!claimed) throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
-  return toCompanion(claimed, current.access, memberFromCompanion(current), current.last_message);
+  return toCompanion(claimed, current.access, memberFromCompanion(current));
 }
 

@@ -106,6 +106,11 @@ export function transcriptTurns(
      * says one date above a clock that says another is worse than no separator at all.
      */
     dayOf?: (iso: string) => string;
+    /**
+     * The highest ordinal the thread held when it was opened. The divider never moves past it, so a
+     * reply arriving under the reader's eye does not get announced as something they missed.
+     */
+    openedThroughOrdinal?: number | null;
   },
 ): TranscriptTurn[] {
   let previous: { author: string | null; role: string; at: number } | null = null;
@@ -130,11 +135,15 @@ export function transcriptTurns(
     if (said) previousDay = day;
 
     const mine = entry.role === "user" && entry.author_id === context.viewerId;
+    // "New" marks where reading stopped, not what has arrived since. A message that lands while the
+    // reader is watching is not a backlog, so the divider is bounded to the transcript as it stood
+    // when the thread was opened; past that, `newAt` has already been drawn or was never needed.
     const startsNew = said
       && !mine
       && !newDrawn
       && context.lastReadOrdinal != null
-      && entry.ordinal > context.lastReadOrdinal;
+      && entry.ordinal > context.lastReadOrdinal
+      && (context.openedThroughOrdinal == null || entry.ordinal <= context.openedThroughOrdinal);
     if (startsNew) newDrawn = true;
 
     return {

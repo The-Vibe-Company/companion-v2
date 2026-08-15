@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { listCompanions } from "@companion/core";
+import { getCompanionThread, listCompanions } from "@companion/core";
 import { withTenantContext } from "@companion/db";
 import { integrationSql, type TestActor } from "./testDatabase";
 
@@ -196,5 +196,25 @@ describe("Companion last-message projection", () => {
     const latest = second.find((item) => item.id === quiet)?.last_message;
     expect(latest?.role).toBe("assistant");
     expect(latest?.preview).toHaveLength(140);
+  });
+
+  it("reports the read watermark as it stood before the read that advanced it", async () => {
+    // The "New" divider is placed against this number, and opening the thread is what clears it. If
+    // the read answered with the watermark it had just written, every reader would look caught up
+    // and the divider would never appear. The order of those two writes is the whole feature.
+    const first = await asOwner((database) =>
+      getCompanionThread({ actor: owner, orgId: org, companionId: busy, database }));
+    expect(first.last_read_ordinal).toBeNull();
+    expect(first.entries.at(-1)?.ordinal).toBe(2);
+
+    // The same read advanced it, so the next one reports where this reader now is.
+    const second = await asOwner((database) =>
+      getCompanionThread({ actor: owner, orgId: org, companionId: busy, database }));
+    expect(second.last_read_ordinal).toBe(2);
+
+    // And it is member-private: nobody else's read moved it, and it belongs to one Companion.
+    const other = await asOwner((database) =>
+      getCompanionThread({ actor: owner, orgId: org, companionId: quiet, database }));
+    expect(other.last_read_ordinal).toBeNull();
   });
 });

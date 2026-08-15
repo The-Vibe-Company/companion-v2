@@ -505,6 +505,20 @@ describe("Companions API feature gate", () => {
     });
   });
 
+  it("keeps the chat text it now carries out of the browser's disk cache", async () => {
+    // The list used to be settings and runtime state; it carries each thread's last line now, so it
+    // gets the same `no-store` every other read of sensitive content in this API gets.
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    const list = await app.request("/v1/companions");
+    expect(list.headers.get("cache-control")).toBe("private, no-store");
+
+    coreMocks.getCompanion.mockResolvedValue(companion);
+    const one = await app.request(`/v1/companions/${companion.id}`);
+    expect(one.headers.get("cache-control")).toBe("private, no-store");
+  });
+
   it("saves a provider change without waking an asleep Box", async () => {
     const runtimeFactory = vi.fn(() => {
       throw new Error("Box client must not be created");

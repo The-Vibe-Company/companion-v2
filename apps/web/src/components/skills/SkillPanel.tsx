@@ -57,18 +57,18 @@ export function SkillPanel({
     setExcerpt(null);
     const version = skill.version;
     if (!version) return;
-    let active = true;
-    fetchSkillVersionFiles(skill.id, version)
+    // Reading the package means the server extracts an archive, and a reader moving down the list
+    // supersedes one selection per click. The request goes with the selection that asked for it.
+    const abort = new AbortController();
+    fetchSkillVersionFiles(skill.id, version, { signal: abort.signal })
       .then((response) => {
-        if (!active) return;
+        if (abort.signal.aborted) return;
         const file = response.files.find((entry) => entry.path === "SKILL.md");
         setExcerpt(file?.content?.split("\n").slice(0, EXCERPT_LINES).join("\n").trim() || null);
       })
       // A package whose files cannot be read still has a panel worth showing.
       .catch(() => {});
-    return () => {
-      active = false;
-    };
+    return () => abort.abort();
   }, [skill.id, skill.version]);
 
   /**
