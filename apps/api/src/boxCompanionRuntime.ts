@@ -995,6 +995,22 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     throw new BoxRuntimeProviderError("Box did not become ready before the configured timeout", 504);
   }
 
+  /**
+   * A graceful Box stop snapshots the disk asynchronously. Starting during that window must wait
+   * for the snapshot rather than turning the provider's ordinary `archiving` response into a
+   * lifecycle failure. The bounded fallback returns the latest observation so the control plane can
+   * keep projecting `stopping`; a later restart or wake can continue the same wait safely.
+   */
+  async #waitWhileArchiving(box: BoxInfo): Promise<BoxInfo> {
+    const deadline = Date.now() + this.#readyTimeoutMs;
+    let current = box;
+    while (current.state === "archiving" && Date.now() < deadline) {
+      await this.#pause();
+      current = await this.#get(box.id);
+    }
+    return current;
+  }
+
   async #resume(boxId: string): Promise<BoxInfo> {
     const resumed = await this.#request<BoxEnvelope>(
       `/boxes/${encodeURIComponent(boxId)}/resume`,
@@ -1517,13 +1533,21 @@ exit 0`,
       // control plane recorded for the Box this start replaced.
       replaceProviderAuth = true;
     }
+    const waitedForArchive = box.state === "archiving";
+    if (waitedForArchive) {
+      box = await this.#waitWhileArchiving(box);
+      // Archival can outlast one request budget. Keep the truthful, retryable projection instead of
+      // throwing the transient state through startRuntime's durable Error path.
+      if (box.state === "archiving") return observation(box, "stopped");
+    }
     if (box.state === "archived") {
       if (!allowBoxWake) {
+        // This caller found an Online Box and lost a race with an archive. Completing that expected
+        // wait may not turn an apply-only operation into either a wake or a durable failure.
+        if (waitedForArchive) return observation(box, "stopped");
         throw new BoxRuntimeProviderError("Box is asleep; apply on the next wake", 409);
       }
       box = await this.#resume(box.id);
-    } else if (box.state === "archiving") {
-      throw new BoxRuntimeProviderError("Box is still archiving; retry start after it is archived", 409);
     } else if (!READY_STATES.has(box.state) && !STARTING_STATES.has(box.state)) {
       throw new BoxRuntimeProviderError(`Box cannot start from state ${box.state}`, 409);
     }

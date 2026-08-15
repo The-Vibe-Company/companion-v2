@@ -68,7 +68,7 @@ function claimedCompanion(skillsRevision: number) {
 
 type ObservedState = {
   boxId: string;
-  runtimeState: "running" | "stopped";
+  runtimeState: "running" | "stopped" | "stopping";
   daemonState: "running" | "stopped";
   desktopAvailable: boolean;
   staged?: boolean;
@@ -170,7 +170,40 @@ describe("syncPublishedSkillToOnlineCompanions", () => {
     expect(coreMocks.updateCompanionRuntime).not.toHaveBeenCalled();
   });
 
-  it("does not record applied when the Box did not come back running", async () => {
+  it.each(["stopping", "stopped"] as const)(
+    "settles the apply-only start claim when the Box reports %s",
+    async (archiveState) => {
+    coreMocks.listOnlineCompanionsForSkillSync.mockResolvedValue([
+      { id: companionId, ownerId: "user-1", boxId: "bx_23456789" },
+    ]);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(claimedCompanion(4));
+    const { start, factory } = runtimeFactory(async () => ({
+      boxId: "bx_23456789",
+      runtimeState: archiveState,
+      daemonState: "stopped",
+      desktopAvailable: false,
+    }));
+
+    await syncPublishedSkillToOnlineCompanions({ orgId, skillId, actor, runtimeFactory: factory });
+
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ allowBoxWake: false }));
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith({
+      actor,
+      orgId,
+      companionId,
+      patch: {
+        boxId: "bx_23456789",
+        runtimeState: archiveState,
+        daemonState: "stopped",
+        desktopAvailable: false,
+        observedAt: expect.any(Date),
+      },
+      database: { tenant: true },
+    });
+    },
+  );
+
+  it("does not record the revision applied when the Box did not come back running", async () => {
     coreMocks.listOnlineCompanionsForSkillSync.mockResolvedValue([
       { id: companionId, ownerId: "user-1", boxId: "bx_23456789" },
     ]);
@@ -184,6 +217,14 @@ describe("syncPublishedSkillToOnlineCompanions", () => {
 
     await syncPublishedSkillToOnlineCompanions({ orgId, skillId, actor, runtimeFactory: factory });
 
-    expect(coreMocks.updateCompanionRuntime).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({
+        runtimeState: "stopped",
+        daemonState: "stopped",
+      }),
+    }));
+    expect(coreMocks.updateCompanionRuntime).not.toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({ skillsAppliedRevision: expect.any(Number) }),
+    }));
   });
 });

@@ -1138,6 +1138,67 @@ describe("Companions API feature gate", () => {
     expect(stop).not.toHaveBeenCalled();
   });
 
+  it.each(["stopping", "stopped"] as const)(
+    "does not turn a Pi-only archive race into an automatic full-Box wake when Box reports %s",
+    async (archiveState) => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const waiting = {
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        state: archiveState,
+        daemon_state: "stopped" as const,
+      },
+    };
+    const start = vi.fn(async () => ({
+      boxId: "bx_23456789",
+      runtimeState: archiveState,
+      daemonState: "stopped" as const,
+      desktopAvailable: false,
+    }));
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(runningCompanion);
+    coreMocks.updateCompanionObservation.mockResolvedValue(runningCompanion);
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...waiting,
+      runtime: {
+        ...waiting.runtime,
+        state: input.patch.runtimeState ?? waiting.runtime.state,
+        daemon_state: input.patch.daemonState ?? waiting.runtime.daemon_state,
+      },
+    }));
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      vi.fn(() => boxRuntime({ start })),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "pi" }),
+    });
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({
+      companion: { runtime: { state: archiveState, daemon_state: "stopped" } },
+    });
+    expect(coreMocks.updateCompanionRuntime).not.toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({ daemonState: "starting" }),
+    }));
+
+    coreMocks.getCompanionForRuntime.mockResolvedValue(waiting);
+    const sync = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(sync.status).toBe(200);
+    await expect(sync.json()).resolves.toMatchObject({ source: "control_plane" });
+    expect(start).toHaveBeenCalledOnce();
+    },
+  );
+
   it("restarts the full Box by archiving it before resuming it", async () => {
     const app = new Hono<{ Variables: ApiVariables }>();
     const start = vi.fn(async () => ({
@@ -1183,6 +1244,360 @@ describe("Companions API feature gate", () => {
     expect(stop).toHaveBeenCalledOnce();
     expect(start).toHaveBeenCalledOnce();
     expect(stop.mock.invocationCallOrder[0]).toBeLessThan(start.mock.invocationCallOrder[0]!);
+  });
+
+  it("keeps a full Box restart waiting without writing Error while archive is in flight", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const start = vi.fn();
+    const stop = vi.fn(async () => ({
+      boxId: "bx_23456789",
+      runtimeState: "stopping" as const,
+      daemonState: "stopped" as const,
+      desktopAvailable: false,
+    }));
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStop.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue({
+      ...runningCompanion,
+      runtime: { ...runningCompanion.runtime, state: "stopped", daemon_state: "stopped" },
+    });
+    coreMocks.updateCompanionObservation.mockResolvedValue(runningCompanion);
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        state: input.patch.runtimeState ?? "running",
+        daemon_state: input.patch.daemonState ?? "running",
+        last_error: input.patch.lastError ?? null,
+      },
+    }));
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      vi.fn(() => boxRuntime({ start, stop })),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "box" }),
+    });
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({
+      companion: { runtime: { state: "stopping", daemon_state: "starting", last_error: null } },
+    });
+    expect(start).not.toHaveBeenCalled();
+    expect(coreMocks.claimCompanionRuntimeStart).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionRuntime).not.toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({ runtimeState: "error" }),
+    }));
+  });
+
+  it("continues a waiting full Box restart once the archive is ready", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const waiting = {
+      ...runningCompanion,
+      runtime: { ...runningCompanion.runtime, state: "stopping" as const, daemon_state: "starting" as const },
+    };
+    const start = vi.fn(async () => ({
+      boxId: "bx_23456789",
+      runtimeState: "running" as const,
+      daemonState: "running" as const,
+      desktopAvailable: true,
+    }));
+    const stop = vi.fn();
+    coreMocks.getCompanionForRuntime.mockResolvedValue(waiting);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue({
+      ...waiting,
+      runtime: { ...waiting.runtime, state: "stopped", daemon_state: "stopped" },
+    });
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...waiting,
+      runtime: {
+        ...waiting.runtime,
+        state: input.patch.runtimeState ?? waiting.runtime.state,
+        daemon_state: input.patch.daemonState ?? waiting.runtime.daemon_state,
+      },
+    }));
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      vi.fn(() => boxRuntime({
+        start,
+        stop,
+        status: vi.fn(async () => ({
+          boxId: "bx_23456789",
+          runtimeState: "stopped" as const,
+          daemonState: "stopped" as const,
+          desktopAvailable: false,
+        })),
+      })),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "box", continuation: true }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      companion: { runtime: { state: "running", daemon_state: "running" } },
+    });
+    expect(stop).not.toHaveBeenCalled();
+    expect(start).toHaveBeenCalledOnce();
+    expect(coreMocks.claimCompanionRuntimeStart).toHaveBeenCalledWith(expect.objectContaining({
+      allowArchiveResume: true,
+    }));
+  });
+
+  it("lets a continuation reclaim a provisioning start instead of restarting the Box", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const claimed = {
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        state: "provisioning" as const,
+        daemon_state: "starting" as const,
+      },
+    };
+    const start = vi.fn(async () => ({
+      boxId: "bx_23456789",
+      runtimeState: "running" as const,
+      daemonState: "running" as const,
+      desktopAvailable: true,
+    }));
+    const stop = vi.fn();
+    coreMocks.getCompanionForRuntime.mockResolvedValue(claimed);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(claimed);
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...claimed,
+      runtime: {
+        ...claimed.runtime,
+        state: input.patch.runtimeState ?? claimed.runtime.state,
+        daemon_state: input.patch.daemonState ?? claimed.runtime.daemon_state,
+      },
+    }));
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      vi.fn(() => boxRuntime({
+        start,
+        stop,
+        status: vi.fn(async () => ({
+          boxId: "bx_23456789",
+          runtimeState: "stopped" as const,
+          daemonState: "stopped" as const,
+          desktopAvailable: false,
+        })),
+      })),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "box", continuation: true }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(stop).not.toHaveBeenCalled();
+    expect(start).toHaveBeenCalledOnce();
+    expect(coreMocks.claimCompanionRuntimeStart).toHaveBeenCalledWith(expect.objectContaining({
+      allowArchiveResume: true,
+    }));
+  });
+
+  it("lets a provisioning continuation replace a Box that disappeared with its owner", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const claimed = {
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        state: "provisioning" as const,
+        daemon_state: "starting" as const,
+      },
+    };
+    const start = vi.fn(async () => ({
+      boxId: "bx_replacement",
+      runtimeState: "running" as const,
+      daemonState: "running" as const,
+      desktopAvailable: true,
+    }));
+    const status = vi.fn(async () => {
+      throw new BoxRuntimeProviderError("Box not found", 404);
+    });
+    coreMocks.getCompanionForRuntime.mockResolvedValue(claimed);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(claimed);
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...claimed,
+      runtime: {
+        ...claimed.runtime,
+        box_id: input.patch.boxId ?? claimed.runtime.box_id,
+        state: input.patch.runtimeState ?? claimed.runtime.state,
+        daemon_state: input.patch.daemonState ?? claimed.runtime.daemon_state,
+      },
+    }));
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      vi.fn(() => boxRuntime({ start, status })),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "box", continuation: true }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(status).not.toHaveBeenCalled();
+    expect(start).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a retried full Box restart waiting while the provider still reports archiving", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const waiting = {
+      ...runningCompanion,
+      runtime: { ...runningCompanion.runtime, state: "stopping" as const, daemon_state: "starting" as const },
+    };
+    const start = vi.fn();
+    const stop = vi.fn();
+    coreMocks.getCompanionForRuntime.mockResolvedValue(waiting);
+    coreMocks.updateCompanionRuntime.mockResolvedValue(waiting);
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      vi.fn(() => boxRuntime({
+        start,
+        stop,
+        status: vi.fn(async () => ({
+          boxId: "bx_23456789",
+          runtimeState: "stopping" as const,
+          daemonState: "stopped" as const,
+          desktopAvailable: false,
+        })),
+      })),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "box", continuation: true }),
+    });
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({
+      companion: { runtime: { state: "stopping", last_error: null } },
+    });
+    expect(start).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionRuntime).not.toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({ runtimeState: "error" }),
+    }));
+  });
+
+  it("treats a delayed continuation as complete after another request brought the Box online", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const runtimeFactory = vi.fn(() => boxRuntime());
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      runtimeFactory,
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "box", continuation: true }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      companion: { runtime: { state: "running", daemon_state: "running" } },
+    });
+    expect(runtimeFactory).not.toHaveBeenCalled();
+    expect(coreMocks.claimCompanionRuntimeStop).not.toHaveBeenCalled();
+    expect(coreMocks.claimCompanionRuntimeStart).not.toHaveBeenCalled();
+  });
+
+  it("does not treat an explicit stop or deletion lock as a Box-restart continuation", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const runtimeFactory = vi.fn(() => boxRuntime());
+    coreMocks.getCompanionForRuntime.mockResolvedValue({
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        state: "stopping",
+        daemon_state: "stopped",
+      },
+    });
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      runtimeFactory,
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "box", continuation: true }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(runtimeFactory).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionRuntime).not.toHaveBeenCalled();
+  });
+
+  it("records a terminal provider state instead of leaving a restart labeled archiving", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const waiting = {
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        state: "stopping" as const,
+        daemon_state: "starting" as const,
+      },
+    };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(waiting);
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...waiting,
+      runtime: {
+        ...waiting.runtime,
+        state: input.patch.runtimeState ?? waiting.runtime.state,
+        daemon_state: input.patch.daemonState ?? waiting.runtime.daemon_state,
+        last_error: input.patch.lastError ?? null,
+      },
+    }));
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      vi.fn(() => boxRuntime({
+        status: vi.fn(async () => ({
+          boxId: "bx_23456789",
+          runtimeState: "error" as const,
+          daemonState: "error" as const,
+          desktopAvailable: false,
+        })),
+      })),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "box", continuation: true }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      expectedUpdatedAt: new Date(waiting.updated_at),
+      patch: expect.objectContaining({
+        runtimeState: "error",
+        daemonState: "error",
+        lastError: "companion Box cannot continue restart from error",
+      }),
+    }));
   });
 
   it("keeps the stop failure projected and never starts after a partial full-Box restart", async () => {
@@ -1517,6 +1932,55 @@ describe("Companions API feature gate", () => {
         daemonState: "error",
         lastError: "Box resume failed",
       }),
+    }));
+  });
+
+  it("keeps a wake pending without stamping Error while the Box is archiving", async () => {
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    const runtime = boxRuntime({
+      start: vi.fn(async () => ({
+        boxId: "bx_23456789",
+        runtimeState: "stopping" as const,
+        daemonState: "stopped" as const,
+        desktopAvailable: false,
+      })),
+    });
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...companion,
+      runtime: {
+        ...companion.runtime,
+        state: input.patch.runtimeState ?? companion.runtime.state,
+        daemon_state: input.patch.daemonState ?? companion.runtime.daemon_state,
+        last_error: input.patch.lastError ?? null,
+      },
+    }));
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
+    expect(runtime.prompt).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({
+        runtimeState: "stopping",
+        daemonState: "starting",
+      }),
+    }));
+    expect(coreMocks.updateCompanionRuntime).not.toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({ runtimeState: "error" }),
+    }));
+    expect(coreMocks.claimCompanionRuntimeStart).toHaveBeenCalledWith(expect.objectContaining({
+      allowArchiveResume: true,
     }));
   });
 
@@ -2326,6 +2790,197 @@ describe("Companions API feature gate", () => {
     }));
     expect(runtime.start.mock.invocationCallOrder[0]!)
       .toBeLessThan(runtime.prompt.mock.invocationCallOrder[0]!);
+  });
+
+  it("keeps sync on the control plane when Box starts archiving during provider refresh", async () => {
+    const stale = {
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        provider_credential_generation: "33333333-3333-4333-8333-333333333333",
+      },
+    };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(stale);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(stale);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...stale,
+      runtime: {
+        ...stale.runtime,
+        state: input.patch.runtimeState ?? stale.runtime.state,
+        daemon_state: input.patch.daemonState ?? stale.runtime.daemon_state,
+      },
+    }));
+    const runtime = boxRuntime({
+      start: vi.fn(async () => ({
+        boxId: "bx_23456789",
+        runtimeState: "stopping" as const,
+        daemonState: "stopped" as const,
+        desktopAvailable: false,
+      })),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ source: "control_plane" });
+    expect(runtime.prompt).not.toHaveBeenCalled();
+    expect(runtime.readEvents).not.toHaveBeenCalled();
+  });
+
+  it("automatically resumes a waiting wake on thread sync and delivers its pending message", async () => {
+    const waiting = {
+      ...companion,
+      runtime: {
+        ...companion.runtime,
+        state: "stopping" as const,
+        daemon_state: "starting" as const,
+      },
+    };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(waiting);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(waiting);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...waiting,
+      runtime: {
+        ...waiting.runtime,
+        state: input.patch.runtimeState ?? waiting.runtime.state,
+        daemon_state: input.patch.daemonState ?? waiting.runtime.daemon_state,
+      },
+    }));
+    const runtime = boxRuntime({
+      start: vi.fn(async () => ({
+        boxId: "bx_23456789",
+        runtimeState: "running" as const,
+        daemonState: "running" as const,
+        desktopAvailable: true,
+      })),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ source: "box" });
+    expect(coreMocks.claimCompanionRuntimeStart).toHaveBeenCalledWith(expect.objectContaining({
+      allowArchiveResume: true,
+    }));
+    expect(runtime.start).toHaveBeenCalledOnce();
+    expect(runtime.prompt).toHaveBeenCalledWith(expect.objectContaining({
+      boxId: "bx_23456789",
+      requestId: message.event_id,
+    }));
+    expect(runtime.readEvents).toHaveBeenCalledOnce();
+  });
+
+  it("keeps syncing until an abandoned provisioning wake can be reclaimed", async () => {
+    const provisioning = {
+      ...companion,
+      runtime: {
+        ...companion.runtime,
+        state: "provisioning" as const,
+        daemon_state: "starting" as const,
+      },
+    };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(provisioning);
+    coreMocks.claimCompanionRuntimeStart
+      .mockRejectedValueOnce(new CompanionRuntimeTransitionError("companion runtime is already provisioning"))
+      .mockResolvedValueOnce(provisioning);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...provisioning,
+      runtime: {
+        ...provisioning.runtime,
+        state: input.patch.runtimeState ?? provisioning.runtime.state,
+        daemon_state: input.patch.daemonState ?? provisioning.runtime.daemon_state,
+      },
+    }));
+    const runtime = boxRuntime({
+      start: vi.fn(async () => ({
+        boxId: "bx_23456789",
+        runtimeState: "running" as const,
+        daemonState: "running" as const,
+        desktopAvailable: true,
+      })),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const first = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(first.status).toBe(200);
+    await expect(first.json()).resolves.toMatchObject({ source: "control_plane" });
+    expect(runtime.start).not.toHaveBeenCalled();
+
+    const second = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(second.status).toBe(200);
+    await expect(second.json()).resolves.toMatchObject({ source: "box" });
+    expect(runtime.start).toHaveBeenCalledOnce();
+    expect(runtime.prompt).toHaveBeenCalledWith(expect.objectContaining({
+      boxId: "bx_23456789",
+      requestId: message.event_id,
+    }));
+  });
+
+  it("does not turn an abandoned no-wake provisioning claim into a thread wake", async () => {
+    const provisioning = {
+      ...companion,
+      runtime: {
+        ...companion.runtime,
+        state: "provisioning" as const,
+        daemon_state: "starting" as const,
+      },
+    };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(provisioning);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ source: "control_plane" });
+    expect(coreMocks.claimCompanionRuntimeStart).not.toHaveBeenCalled();
+    expect(runtime.start).not.toHaveBeenCalled();
   });
 
   it("refreshes an already-running legacy Pi layout before syncing its thread", async () => {
@@ -3810,6 +4465,63 @@ describe("Companions API feature gate", () => {
       mcpCredentials: [{ env_key: "COMPANION_MCP_ACCOUNT", value: "secret-mcp" }],
     }));
     expect(JSON.stringify(await response.json())).not.toContain("secret-mcp");
+  });
+
+  it("answers an explicit wake with 202 while archiving, then resumes it on retry", async () => {
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...companion,
+      runtime: {
+        ...companion.runtime,
+        state: input.patch.runtimeState ?? companion.runtime.state,
+        daemon_state: input.patch.daemonState ?? companion.runtime.daemon_state,
+        last_error: input.patch.lastError ?? null,
+      },
+    }));
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const start = vi.fn()
+      .mockResolvedValueOnce({
+        boxId: "bx_23456789",
+        runtimeState: "stopping" as const,
+        daemonState: "stopped" as const,
+        desktopAvailable: false,
+      })
+      .mockResolvedValueOnce({
+        boxId: "bx_23456789",
+        runtimeState: "running" as const,
+        daemonState: "running" as const,
+        desktopAvailable: true,
+      });
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      () => boxRuntime({ start }),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({
+      companion: { runtime: { state: "stopping", daemon_state: "starting", last_error: null } },
+    });
+
+    const retried = await app.request(`/v1/companions/${companion.id}/runtime/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(retried.status).toBe(200);
+    await expect(retried.json()).resolves.toMatchObject({
+      companion: { runtime: { state: "running", daemon_state: "running" } },
+    });
+    expect(coreMocks.claimCompanionRuntimeStart).toHaveBeenCalledTimes(2);
+    expect(coreMocks.claimCompanionRuntimeStart).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ allowArchiveResume: true }),
+    );
   });
 
   it("lets an owner attach a connected provider to a pre-provider Companion", async () => {

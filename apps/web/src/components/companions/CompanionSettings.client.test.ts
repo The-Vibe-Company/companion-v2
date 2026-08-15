@@ -512,4 +512,338 @@ describe("CompanionSettings", () => {
     expect(unsaved.container.textContent).toContain("Save your changes before restarting.");
     expect(restartCompanionRuntime).not.toHaveBeenCalled();
   });
+
+  it("shows an archiving wait and keeps Full Box retryable without wake copy", async () => {
+    const waiting = {
+      ...companion(),
+      runtime: {
+        ...companion().runtime,
+        state: "stopping" as const,
+        daemon_state: "starting" as const,
+      },
+    };
+    restartCompanionRuntime.mockResolvedValue(waiting);
+    const { container } = await mount("owner", providers, waiting);
+    const box = container.querySelector<HTMLInputElement>('input[name="restart-target"][value="box"]')!;
+    const pi = container.querySelector<HTMLInputElement>('input[name="restart-target"][value="pi"]')!;
+    const button = [...container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent === "Restart full Box") as HTMLButtonElement;
+
+    expect(box.checked).toBe(true);
+    expect(box.disabled).toBe(false);
+    expect(pi.disabled).toBe(true);
+    expect(button.disabled).toBe(false);
+    expect(container.textContent).toContain("The Box is archiving");
+    expect(container.textContent).not.toContain("Send a message to start it");
+  });
+
+  it("does not describe the Owner-deletion lock as a wakeable archive", async () => {
+    const deleting = {
+      ...companion(),
+      runtime: {
+        ...companion().runtime,
+        state: "stopping" as const,
+        daemon_state: "unknown" as const,
+      },
+    };
+    const { container } = await mount("owner", providers, deleting);
+    const button = [...container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent === "Restart Pi") as HTMLButtonElement;
+
+    expect(button.disabled).toBe(true);
+    expect(container.textContent).toContain("Companion deletion is in progress");
+    expect(container.textContent).not.toContain("can be woken");
+    expect(container.textContent).not.toContain("Send a message to start it");
+  });
+
+  it("automatically resumes a full Box restart after an archiving response", async () => {
+    vi.useFakeTimers();
+    try {
+      const online = {
+        ...companion(),
+        runtime: {
+          ...companion().runtime,
+          state: "running" as const,
+          daemon_state: "running" as const,
+        },
+      };
+      const waiting = {
+        ...online,
+        runtime: {
+          ...online.runtime,
+          state: "stopping" as const,
+          daemon_state: "starting" as const,
+        },
+      };
+      restartCompanionRuntime
+        .mockResolvedValueOnce(waiting)
+        .mockResolvedValueOnce(online);
+      const { container, onSaved } = await mount("owner", providers, online);
+
+      await act(async () => {
+        container.querySelector<HTMLInputElement>('input[name="restart-target"][value="box"]')!.click();
+      });
+      await act(async () => {
+        [...container.querySelectorAll("button")]
+          .find((candidate) => candidate.textContent === "Restart full Box")?.click();
+      });
+      await act(async () => {
+        [...container.querySelectorAll("button")]
+          .filter((candidate) => candidate.textContent === "Restart full Box")
+          .at(-1)?.click();
+      });
+
+      expect(container.textContent).toContain("will resume automatically");
+      expect(container.textContent).not.toContain("Restart Luna's full Box?");
+      expect(restartCompanionRuntime).toHaveBeenCalledTimes(1);
+      expect(restartCompanionRuntime).toHaveBeenNthCalledWith(1, "org-1", online.id, {
+        target: "box",
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_000);
+      });
+
+      expect(restartCompanionRuntime).toHaveBeenCalledTimes(2);
+      expect(restartCompanionRuntime).toHaveBeenNthCalledWith(2, "org-1", online.id, {
+        target: "box",
+        continuation: true,
+      });
+      expect(onSaved).toHaveBeenLastCalledWith(online);
+      expect(container.textContent).toContain("The full Box restarted and is online.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the archive continuation alive across a transient request failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const online = {
+        ...companion(),
+        runtime: {
+          ...companion().runtime,
+          state: "running" as const,
+          daemon_state: "running" as const,
+        },
+      };
+      const waiting = {
+        ...online,
+        runtime: {
+          ...online.runtime,
+          state: "stopping" as const,
+          daemon_state: "starting" as const,
+        },
+      };
+      restartCompanionRuntime
+        .mockResolvedValueOnce(waiting)
+        .mockRejectedValueOnce(new Error("temporary gateway failure"))
+        .mockResolvedValueOnce(online);
+      getCompanionRuntime.mockResolvedValue(waiting);
+      const { container, onSaved } = await mount("owner", providers, online);
+
+      await act(async () => {
+        container.querySelector<HTMLInputElement>('input[name="restart-target"][value="box"]')!.click();
+      });
+      await act(async () => {
+        [...container.querySelectorAll("button")]
+          .find((candidate) => candidate.textContent === "Restart full Box")?.click();
+      });
+      await act(async () => {
+        [...container.querySelectorAll("button")]
+          .filter((candidate) => candidate.textContent === "Restart full Box")
+          .at(-1)?.click();
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_000);
+      });
+
+      expect(restartCompanionRuntime).toHaveBeenCalledTimes(3);
+      expect(getCompanionRuntime).toHaveBeenCalledWith("org-1", online.id);
+      expect(onSaved).toHaveBeenLastCalledWith(online);
+      expect(container.textContent).toContain("The full Box restarted and is online.");
+      expect(container.textContent).not.toContain("temporary gateway failure");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps observing while another continuation owns the resume claim", async () => {
+    vi.useFakeTimers();
+    try {
+      const online = {
+        ...companion(),
+        runtime: {
+          ...companion().runtime,
+          state: "running" as const,
+          daemon_state: "running" as const,
+        },
+      };
+      const waiting = {
+        ...online,
+        runtime: {
+          ...online.runtime,
+          state: "stopping" as const,
+          daemon_state: "starting" as const,
+        },
+      };
+      const claimed = {
+        ...online,
+        runtime: {
+          ...online.runtime,
+          state: "provisioning" as const,
+          daemon_state: "starting" as const,
+        },
+      };
+      restartCompanionRuntime
+        .mockResolvedValueOnce(waiting)
+        .mockRejectedValueOnce(new Error("companion must be online to restart"))
+        .mockResolvedValueOnce(online);
+      getCompanionRuntime.mockResolvedValueOnce(claimed);
+      const { container, onSaved } = await mount("owner", providers, online);
+
+      await act(async () => {
+        container.querySelector<HTMLInputElement>('input[name="restart-target"][value="box"]')!.click();
+      });
+      await act(async () => {
+        [...container.querySelectorAll("button")]
+          .find((candidate) => candidate.textContent === "Restart full Box")?.click();
+      });
+      await act(async () => {
+        [...container.querySelectorAll("button")]
+          .filter((candidate) => candidate.textContent === "Restart full Box")
+          .at(-1)?.click();
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_000);
+      });
+
+      expect(restartCompanionRuntime).toHaveBeenCalledTimes(3);
+      expect(getCompanionRuntime).toHaveBeenCalledOnce();
+      expect(onSaved).toHaveBeenCalledWith(claimed);
+      expect(onSaved).toHaveBeenLastCalledWith(online);
+      expect(container.textContent).toContain("The full Box restarted and is online.");
+      expect(container.textContent).not.toContain("must be online to restart");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("surfaces an error when a competing continuation fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const online = {
+        ...companion(),
+        runtime: {
+          ...companion().runtime,
+          state: "running" as const,
+          daemon_state: "running" as const,
+        },
+      };
+      const waiting = {
+        ...online,
+        runtime: {
+          ...online.runtime,
+          state: "stopping" as const,
+          daemon_state: "starting" as const,
+        },
+      };
+      const claimed = {
+        ...online,
+        runtime: {
+          ...online.runtime,
+          state: "provisioning" as const,
+          daemon_state: "starting" as const,
+        },
+      };
+      const failed = {
+        ...online,
+        runtime: {
+          ...online.runtime,
+          state: "error" as const,
+          daemon_state: "error" as const,
+          last_error: "Box resume failed",
+        },
+      };
+      restartCompanionRuntime
+        .mockResolvedValueOnce(waiting)
+        .mockRejectedValueOnce(new Error("companion must be online to restart"))
+        .mockRejectedValueOnce(new Error("companion runtime is still provisioning"));
+      getCompanionRuntime
+        .mockResolvedValueOnce(claimed)
+        .mockResolvedValue(failed);
+      const { container, onSaved } = await mount("owner", providers, online);
+
+      await act(async () => {
+        container.querySelector<HTMLInputElement>('input[name="restart-target"][value="box"]')!.click();
+      });
+      await act(async () => {
+        [...container.querySelectorAll("button")]
+          .find((candidate) => candidate.textContent === "Restart full Box")?.click();
+      });
+      await act(async () => {
+        [...container.querySelectorAll("button")]
+          .filter((candidate) => candidate.textContent === "Restart full Box")
+          .at(-1)?.click();
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_000);
+      });
+
+      expect(onSaved).toHaveBeenCalledWith(claimed);
+      expect(onSaved).toHaveBeenLastCalledWith(failed);
+      expect(container.textContent).toContain("Box resume failed");
+      expect(container.textContent).not.toContain("The full Box restarted and is online.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["stopping", "stopped"] as const)(
+    "surfaces a %s archive race instead of claiming Pi restarted online",
+    async (archiveState) => {
+    const online = {
+      ...companion(),
+      runtime: {
+        ...companion().runtime,
+        state: "running" as const,
+        daemon_state: "running" as const,
+      },
+    };
+    const waiting = {
+      ...online,
+      runtime: {
+        ...online.runtime,
+        state: archiveState,
+        daemon_state: "stopped" as const,
+      },
+    };
+    restartCompanionRuntime.mockResolvedValue(waiting);
+    const { container, onSaved } = await mount("owner", providers, online);
+
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((candidate) => candidate.textContent === "Restart Pi")?.click();
+    });
+
+    expect(restartCompanionRuntime).toHaveBeenCalledOnce();
+    expect(onSaved).toHaveBeenCalledWith(waiting);
+    expect(container.textContent).toContain(archiveState === "stopping"
+      ? "The Box began archiving before Pi could restart"
+      : "The Box finished archiving before Pi could restart");
+    if (archiveState === "stopping") {
+      expect(container.textContent).toContain("It can be woken after the archive is ready");
+    } else {
+      expect(container.textContent).toContain("Wake it to apply the saved settings");
+    }
+    expect(container.textContent).not.toContain("Pi restarted. The Box stayed online.");
+    expect(container.querySelector<HTMLInputElement>('input[value="pi"]')?.checked).toBe(true);
+    expect([...container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent === "Restart Pi"))
+      .toHaveProperty("disabled", true);
+    },
+  );
 });

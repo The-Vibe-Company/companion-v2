@@ -134,6 +134,28 @@ export async function syncPublishedSkillToOnlineCompanions(input: {
           hubEnv,
           onBoxAssigned: async () => undefined,
         });
+        if (
+          (observed.runtimeState === "stopping" || observed.runtimeState === "stopped")
+          && observed.daemonState === "stopped"
+        ) {
+          // Skill publish is apply-only and may not wake a Box. If archival wins the observation
+          // race, settle the start claim into the explicit-wake marker instead of leaving the
+          // Companion durably provisioning until the stale-claim timeout.
+          await updateCompanionRuntime({
+            actor: input.actor,
+            orgId: input.orgId,
+            companionId: target.id,
+            patch: {
+              boxId: observed.boxId,
+              runtimeState: observed.runtimeState,
+              daemonState: "stopped",
+              desktopAvailable: observed.desktopAvailable,
+              observedAt: new Date(),
+            },
+            database,
+          });
+          return;
+        }
         // This push always recycles Pi (`restartPi: true`), so a real runtime cannot answer warm —
         // but only a start that actually staged may claim the revision as applied.
         if (observed.runtimeState !== "running" || observed.daemonState !== "running") return;

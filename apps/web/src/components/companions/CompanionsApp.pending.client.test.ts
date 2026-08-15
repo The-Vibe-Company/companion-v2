@@ -65,7 +65,7 @@ const providers: CompanionProvidersResponse = {
   can_manage: true,
 };
 
-function companionIn(state: "provisioning" | "running" | "error"): Companion {
+function companionIn(state: "provisioning" | "running" | "stopping" | "error"): Companion {
   return {
     id: companionId,
     name: "Luna",
@@ -119,9 +119,14 @@ const emptyThread: Thread = {
  * the test can land the wake the way the control plane does — by writing the row — rather than by
  * answering a request the browser may never hear back from.
  */
-function controlPlane(options: { wakeAnswers?: boolean; holdFirstRead?: boolean } = {}) {
-  let settled = companionIn("provisioning");
+function controlPlane(options: {
+  wakeAnswers?: boolean;
+  holdFirstRead?: boolean;
+  initialState?: "provisioning" | "running" | "stopping" | "error";
+} = {}) {
+  let settled = companionIn(options.initialState ?? "provisioning");
   const runtimeReads: string[] = [];
+  const threadSyncs: string[] = [];
   let held = 0;
   let release = () => {};
   const holding = new Promise<void>((resolve) => { release = resolve; });
@@ -150,13 +155,17 @@ function controlPlane(options: { wakeAnswers?: boolean; holdFirstRead?: boolean 
       }
       return json({ companion: settled, source: "control_plane" });
     }
-    if (url.includes("/thread")) return json({ thread: emptyThread });
+    if (url.includes("/thread")) {
+      if (method === "POST" && url.endsWith("/thread/sync")) threadSyncs.push(url);
+      return json({ thread: emptyThread });
+    }
     return json({});
   });
 
   return {
     fetchMock,
     runtimeReads,
+    threadSyncs,
     /** What the wake writes when the Box and Pi are up: the state the chip is waiting for. */
     boxCameUp: () => { settled = companionIn("running"); },
     /** What a wake that fails writes instead. */
@@ -248,6 +257,24 @@ describe("CompanionsApp while a Companion is starting", () => {
 
     expect(api.runtimeReads.length).toBeGreaterThan(1);
     expect(api.runtimeReads.filter((url) => url.includes("live=true"))).toHaveLength(0);
+  });
+
+  it("uses runner thread sync to continue an accepted wake waiting on Box archival", async () => {
+    api = controlPlane({ initialState: "stopping" });
+    vi.stubGlobal("fetch", api.fetchMock);
+    await openThread(companionIn("stopping"));
+
+    await wait(5);
+
+    expect(api.threadSyncs.length).toBeGreaterThan(0);
+  });
+
+  it("keeps runner thread sync active while a provisioning wake can become reclaimable", async () => {
+    await openThread(companionIn("provisioning"));
+
+    await wait(5);
+
+    expect(api.threadSyncs.length).toBeGreaterThan(0);
   });
 
   it("keeps the Box online when an overtaken read finally answers", async () => {

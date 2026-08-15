@@ -8,6 +8,7 @@ import {
   CompanionSettingsForbiddenError,
   bumpCompanionSkillsRevisionForSkill,
   claimCompanionDeletion,
+  claimCompanionRuntimeStart,
   claimCompanionRuntimeStop,
   deleteCompanion,
   getCompanion,
@@ -416,5 +417,156 @@ describe("Companion settings persistence and roles", () => {
       companionId,
       database: integrationDb,
     })).rejects.toBeInstanceOf(CompanionNotFoundError);
+  });
+
+  it("claims archive waits once and never mistakes the Owner-deletion lock for one", async () => {
+    await updateCompanionRuntime({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      patch: { runtimeState: "stopping", daemonState: "unknown" },
+      database: integrationDb,
+    });
+    await expect(claimCompanionRuntimeStart({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      allowArchiveResume: true,
+      database: integrationDb,
+    })).rejects.toBeInstanceOf(CompanionRuntimeTransitionError);
+
+    await updateCompanionRuntime({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      patch: { runtimeState: "stopping", daemonState: "starting" },
+      database: integrationDb,
+    });
+    const claims = await Promise.allSettled([
+      claimCompanionRuntimeStart({
+        actor: fixture.developer,
+        orgId: fixture.orgA,
+        companionId,
+        allowArchiveResume: true,
+        database: integrationDb,
+      }),
+      claimCompanionRuntimeStart({
+        actor: fixture.developer,
+        orgId: fixture.orgA,
+        companionId,
+        allowArchiveResume: true,
+        database: integrationDb,
+      }),
+    ]);
+
+    expect(claims.filter((claim) => claim.status === "fulfilled")).toHaveLength(1);
+    expect(claims.filter((claim) => claim.status === "rejected")).toHaveLength(1);
+    const current = await getCompanion({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      database: integrationDb,
+    });
+    expect(current.runtime).toMatchObject({ state: "provisioning", daemon_state: "starting" });
+  });
+
+  it("lets an explicit Wake reclaim a no-wake archive wait", async () => {
+    await updateCompanionRuntime({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      patch: { runtimeState: "stopping", daemonState: "stopped" },
+      database: integrationDb,
+    });
+
+    const claimed = await claimCompanionRuntimeStart({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      allowArchiveResume: true,
+      database: integrationDb,
+    });
+
+    expect(claimed.runtime).toMatchObject({ state: "provisioning", daemon_state: "starting" });
+  });
+
+  it("never lets a stale Owner-deletion lock become a Wake or Stop takeover", async () => {
+    await updateCompanionRuntime({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      patch: { runtimeState: "stopping", daemonState: "unknown" },
+      database: integrationDb,
+    });
+    await integrationDb
+      .update(schema.companions)
+      .set({ updatedAt: new Date("2020-01-01T00:00:00.000Z") })
+      .where(and(
+        eq(schema.companions.orgId, fixture.orgA),
+        eq(schema.companions.id, companionId),
+      ));
+
+    await expect(claimCompanionRuntimeStart({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      allowArchiveResume: true,
+      database: integrationDb,
+    })).rejects.toThrow("companion is being deleted");
+    await expect(claimCompanionRuntimeStop({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      database: integrationDb,
+    })).rejects.toThrow("companion is being deleted");
+  });
+
+  it("lets either deletion or archive resume win atomically without preserving both intents", async () => {
+    await updateCompanionRuntime({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      patch: { runtimeState: "stopping", daemonState: "starting" },
+      database: integrationDb,
+    });
+
+    const claims = await Promise.allSettled([
+      claimCompanionDeletion({
+        actor: fixture.developer,
+        orgId: fixture.orgA,
+        companionId,
+        database: integrationDb,
+      }),
+      claimCompanionRuntimeStart({
+        actor: fixture.developer,
+        orgId: fixture.orgA,
+        companionId,
+        allowArchiveResume: true,
+        database: integrationDb,
+      }),
+    ]);
+
+    expect(claims.filter((claim) => claim.status === "fulfilled")).toHaveLength(1);
+    expect(claims.filter((claim) => claim.status === "rejected")).toHaveLength(1);
+    const current = await getCompanion({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      database: integrationDb,
+    });
+    expect([
+      "provisioning/starting",
+      "stopping/unknown",
+    ]).toContain(`${current.runtime.state}/${current.runtime.daemon_state}`);
+
+    if (current.runtime.state === "stopping") {
+      await expect(claimCompanionRuntimeStart({
+        actor: fixture.developer,
+        orgId: fixture.orgA,
+        companionId,
+        allowArchiveResume: true,
+        database: integrationDb,
+      })).rejects.toBeInstanceOf(CompanionRuntimeTransitionError);
+    }
   });
 });

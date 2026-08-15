@@ -1140,7 +1140,10 @@ export async function claimCompanionDeletion(input: {
     .update(schema.companions)
     .set({
       runtimeState: "stopping",
-      daemonState: companion.runtime.box_id ? companion.runtime.daemon_state : "stopped",
+      // A deletion lock must never retain either archive-wake marker. `unknown` is deliberately
+      // distinct from `starting` (automatic continuation) and `stopped` (explicit Wake allowed),
+      // so the Owner's delete remains authoritative while the route archives the Box.
+      daemonState: "unknown",
       lastError: null,
       // This timestamp is also the lifecycle compare-and-set token. `clock_timestamp()` alone can
       // equal a stop claim created in the same millisecond after the driver rounds it to a Date.
@@ -1153,9 +1156,13 @@ export async function claimCompanionDeletion(input: {
       eq(schema.companions.orgId, input.orgId),
       eq(schema.companions.id, input.companionId),
       eq(schema.companions.ownerId, input.actor.id),
+      eq(schema.companions.runtimeState, companion.runtime.state),
+      eq(schema.companions.daemonState, companion.runtime.daemon_state),
     ))
     .returning();
-  if (!row) throw new CompanionNotFoundError();
+  if (!row) {
+    throw new CompanionRuntimeTransitionError("Companion deletion state changed; retry");
+  }
   return toCompanion(row, "owner");
 }
 
@@ -2823,6 +2830,8 @@ export async function claimCompanionRuntimeStart(input: {
   actor: ActorContext;
   orgId: string;
   companionId: string;
+  /** Resume an archive wait, except the `stopping`/`unknown` Owner-deletion lock. */
+  allowArchiveResume?: boolean;
   database?: Db;
 }): Promise<Companion> {
   const database = input.database ?? db;
@@ -2844,10 +2853,21 @@ export async function claimCompanionRuntimeStart(input: {
   if (row) return toCompanion(row, currentAccess.access, memberFromCompanion(currentAccess));
 
   const current = await getCompanionForRuntime({ ...input, database });
+  const archiveResume = input.allowArchiveResume === true
+    && current.runtime.state === "stopping"
+    && (
+      current.runtime.daemon_state === "starting"
+      || current.runtime.daemon_state === "stopped"
+    );
+  const deletionLocked = current.runtime.state === "stopping"
+    && current.runtime.daemon_state === "unknown";
   const transitional =
     current.runtime.state === "provisioning" || current.runtime.state === "stopping";
   const staleBefore = new Date(Date.now() - COMPANION_RUNTIME_CLAIM_STALE_MS);
-  if (transitional && new Date(current.updated_at) >= staleBefore) {
+  if (deletionLocked) {
+    throw new CompanionRuntimeTransitionError("companion is being deleted");
+  }
+  if (!archiveResume && transitional && new Date(current.updated_at) >= staleBefore) {
     throw new CompanionRuntimeTransitionError(
       `companion runtime is already ${current.runtime.state}`,
     );
@@ -2858,13 +2878,24 @@ export async function claimCompanionRuntimeStart(input: {
       runtimeState: "provisioning",
       daemonState: "starting",
       lastError: null,
-      updatedAt: new Date(),
+      // An archive continuation uses this write as its atomic handoff. Advance the timestamp even
+      // when two requests land inside the same driver millisecond so a later guarded finalizer cannot
+      // mistake the winner's claim for the older waiting projection.
+      updatedAt: archiveResume
+        ? sql<Date>`greatest(
+            clock_timestamp(),
+            ${schema.companions.updatedAt} + interval '1 millisecond'
+          )`
+        : new Date(),
     })
     .where(and(
       eq(schema.companions.orgId, input.orgId),
       eq(schema.companions.id, input.companionId),
       eq(schema.companions.runtimeState, current.runtime.state),
-      transitional ? lt(schema.companions.updatedAt, staleBefore) : undefined,
+      archiveResume ? eq(schema.companions.daemonState, current.runtime.daemon_state) : undefined,
+      archiveResume
+        ? eq(schema.companions.updatedAt, new Date(current.updated_at))
+        : transitional ? lt(schema.companions.updatedAt, staleBefore) : undefined,
     ))
     .returning();
   if (!claimed) throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
@@ -2880,6 +2911,11 @@ export async function claimCompanionRuntimeStop(input: {
   const database = input.database ?? db;
   const current = await getCompanionForRuntime({ ...input, database });
   if (!current.runtime.box_id) throw new CompanionRuntimeTransitionError("companion has no Box to stop");
+  const deletionLocked = current.runtime.state === "stopping"
+    && current.runtime.daemon_state === "unknown";
+  if (deletionLocked) {
+    throw new CompanionRuntimeTransitionError("companion is being deleted");
+  }
   const transitional =
     current.runtime.state === "provisioning" || current.runtime.state === "stopping";
   const staleBefore = new Date(Date.now() - COMPANION_RUNTIME_CLAIM_STALE_MS);
@@ -2890,7 +2926,13 @@ export async function claimCompanionRuntimeStop(input: {
   }
   const [claimed] = await database
     .update(schema.companions)
-    .set({ runtimeState: "stopping", lastError: null, updatedAt: new Date() })
+    .set({
+      runtimeState: "stopping",
+      // An explicit Stop cancels any stale auto-resume intent before contacting Box.
+      daemonState: "stopped",
+      lastError: null,
+      updatedAt: new Date(),
+    })
     .where(and(
       eq(schema.companions.orgId, input.orgId),
       eq(schema.companions.id, input.companionId),

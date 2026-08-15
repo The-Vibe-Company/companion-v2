@@ -538,8 +538,8 @@ export function registerCompanionRoutes(
     c: Context<{ Variables: ApiVariables }>,
     companionId: string,
     body: StartCompanionRuntimeInput,
-    options: { allowBoxWake?: boolean; restartPi?: boolean } = {},
-  ): Promise<{ companion: Companion; runtime: CompanionBoxRuntime }> {
+    options: { allowBoxWake?: boolean; restartPi?: boolean; allowArchiveResume?: boolean } = {},
+  ): Promise<{ companion: Companion; runtime: CompanionBoxRuntime; ready: boolean }> {
     let failureContext:
       | {
           actor: ReturnType<typeof actorFromContext>;
@@ -576,7 +576,11 @@ export function registerCompanionRoutes(
               actor, orgId, companionId, database,
             });
         const companion = await claimCompanionRuntimeStart({
-          actor, orgId, companionId, database,
+          actor,
+          orgId,
+          companionId,
+          allowArchiveResume: options.allowArchiveResume,
+          database,
         });
         const skillPackages = body.client_surface === "native_mobile"
           ? []
@@ -742,10 +746,46 @@ export function registerCompanionRoutes(
           await write;
         },
       }), budget.signal);
-      // A start that returns is a start that finished, so anything other than a running Pi is a
-      // failure with an observation attached rather than a wake still in progress. Writing this
-      // observation back verbatim is what turned such an answer into a Companion stuck on Starting:
-      // `provisioning` reads as a wake in flight, and no later step was ever going to correct it.
+      // A graceful Box archive may still be snapshotting after the adapter's bounded poll. That is
+      // a truthful waiting state, not a failed start: preserve it without last_error so the same
+      // full-Box restart or a later wake can resume once the provider reports `archived`.
+      const archiveInFlight = observed.runtimeState === "stopping"
+        && observed.daemonState === "stopped";
+      const noWakeArchiveCompleted = options.allowBoxWake === false
+        && observed.runtimeState === "stopped"
+        && observed.daemonState === "stopped";
+      if (archiveInFlight || noWakeArchiveCompleted) {
+        const companion = await withinBudget(
+          withTenantContext(
+            { orgId: mutation.orgId, userId: mutation.actor.id },
+            (database) => updateCompanionRuntime({
+              actor: mutation!.actor,
+              orgId: mutation!.orgId,
+              companionId,
+              patch: {
+                boxId: observed.boxId,
+                runtimeState: observed.runtimeState,
+                // `stopping` + `starting` is the durable archive-resume intent. It distinguishes an
+                // accepted wake/restart from an explicit stop or the Owner's deletion lock, while the
+                // runtime chip continues to project the truthful top-level Stopping state.
+                // A no-wake settings apply or Pi-only restart must not inherit that intent merely
+                // because Box began archiving during its observation race.
+                daemonState: archiveInFlight && options.allowBoxWake !== false
+                  ? "starting"
+                  : "stopped",
+                desktopAvailable: observed.desktopAvailable,
+                observedAt: new Date(),
+              },
+              database,
+            }),
+          ),
+          budget.signal,
+        );
+        return { companion, runtime, ready: false };
+      }
+      // A start that returns is otherwise a start that finished, so anything other than a running Pi
+      // is a failure with an observation attached rather than a wake still in progress. Writing a
+      // provisioning observation back verbatim would leave a Companion stuck on Starting.
       if (observed.runtimeState !== "running" || observed.daemonState !== "running") {
         throw new BoxRuntimeProviderError(
           `Box ${observed.boxId} answered this wake as ${observed.runtimeState}`
@@ -787,7 +827,7 @@ export function registerCompanionRoutes(
         ),
         budget.signal,
       );
-      return { companion, runtime };
+      return { companion, runtime, ready: true };
     } catch (raised) {
       // Cancellation surfaces as whatever call was in flight when the deadline landed, so the reason
       // this wake reports is the budget it spent rather than a bare abort from one Box request.
@@ -1600,9 +1640,16 @@ export function registerCompanionRoutes(
             c,
             companionId,
             startCompanionRuntimeInputSchema.parse({ client_surface: body.client_surface }),
+            { allowArchiveResume: true },
           );
           if (!started.companion.runtime.box_id) {
             throw new CompanionRuntimeTransitionError("companion start completed without a Box");
+          }
+          // The Box adapter may have exhausted its bounded archive poll and returned the truthful
+          // waiting projection. Keep the durable message pending; no command should be attempted
+          // against a Box that is still snapshotting.
+          if (!started.ready) {
+            return c.json({ thread: sent.thread, delivery: "pending" as const });
           }
           runtime = started.runtime;
           boxId = started.companion.runtime.box_id;
@@ -1642,14 +1689,30 @@ export function registerCompanionRoutes(
         // sync will deliver. Settlement itself remains PostgreSQL-only and never wakes Box.
         const toolRuns = await expireCompanionToolRuns({ actor, orgId, companionId, database });
         const state = await listPendingCompanionMessages({ actor, orgId, companionId, database });
+        const archiveResumePending = companion.runtime.state === "stopping"
+          && companion.runtime.daemon_state === "starting";
+        const startRecoveryPending = state.pending.length > 0
+          && companion.runtime.state === "provisioning"
+          && companion.runtime.daemon_state === "starting";
         const mayNeedProviderRecovery = piIsReachable(companion)
+          || archiveResumePending
+          || startRecoveryPending
           || (Boolean(companion.runtime.box_id) && companion.runtime.state === "error");
         const provider = mayNeedProviderRecovery
           ? await getCompanionProviderCredentialGeneration({
               actor, orgId, companionId, database,
             })
           : null;
-        return { actor, orgId, companion, provider, toolRuns, ...state };
+        return {
+          actor,
+          orgId,
+          companion,
+          provider,
+          archiveResumePending,
+          startRecoveryPending,
+          toolRuns,
+          ...state,
+        };
       });
       const mayRecoverProvider = resolved.companion.runtime.state === "error"
         && !providerAuthIsCurrent(resolved.companion, resolved.provider);
@@ -1657,28 +1720,63 @@ export function registerCompanionRoutes(
       // or daemon cannot leave a durable chip spinning. The staged Pi extension owns cancellation
       // of the active operation; the control plane never sends an unscoped abort into Pi's FIFO.
       const beforeRuntime = resolved.toolRuns;
-      if (!piIsReachable(resolved.companion) && !mayRecoverProvider) {
+      if (
+        !piIsReachable(resolved.companion)
+        && !mayRecoverProvider
+        && !resolved.archiveResumePending
+        && !resolved.startRecoveryPending
+      ) {
         return c.json({ thread: beforeRuntime.thread, source: "control_plane" as const });
       }
       let boxId = resolved.companion.runtime.box_id!;
+      let desktopAvailable = resolved.companion.runtime.desktop_available;
       let runtime = runtimeFactory();
-      const observed = await runtime.status({ boxId }).catch(() => null);
-      if (!observed) {
-        return c.json({ thread: beforeRuntime.thread, source: "control_plane" as const });
-      }
-      if (observed.runtimeState !== "running" || observed.daemonState !== "running") {
-        return c.json({ thread: beforeRuntime.thread, source: "control_plane" as const });
-      }
-      if (
-        !providerAuthIsCurrent(resolved.companion, resolved.provider)
-        || resolved.companion.runtime.disk_layout_version !== COMPANION_PI_DISK_LAYOUT_VERSION
-      ) {
-        const started = await startRuntime(c, companionId, body, { allowBoxWake: false });
+      if (resolved.archiveResumePending || resolved.startRecoveryPending) {
+        // The open thread is the automatic continuation for a wake that outlasted the adapter's
+        // bounded archive poll. It also keeps retrying a provisioning claim whose owning API process
+        // may have died; the lifecycle claim rejects while that owner is fresh and takes over after
+        // its stale window. Explicit Stop and Owner deletion remain read-only here.
+        let started;
+        try {
+          started = await startRuntime(c, companionId, body, { allowArchiveResume: true });
+        } catch (error) {
+          if (error instanceof CompanionRuntimeTransitionError) {
+            return c.json({ thread: beforeRuntime.thread, source: "control_plane" as const });
+          }
+          throw error;
+        }
         if (!started.companion.runtime.box_id) {
           throw new CompanionRuntimeTransitionError("companion start completed without a Box");
         }
+        if (!started.ready) {
+          return c.json({ thread: beforeRuntime.thread, source: "control_plane" as const });
+        }
         runtime = started.runtime;
         boxId = started.companion.runtime.box_id;
+        desktopAvailable = started.companion.runtime.desktop_available;
+      } else {
+        const observed = await runtime.status({ boxId }).catch(() => null);
+        if (!observed) {
+          return c.json({ thread: beforeRuntime.thread, source: "control_plane" as const });
+        }
+        if (observed.runtimeState !== "running" || observed.daemonState !== "running") {
+          return c.json({ thread: beforeRuntime.thread, source: "control_plane" as const });
+        }
+        desktopAvailable = observed.desktopAvailable;
+        if (
+          !providerAuthIsCurrent(resolved.companion, resolved.provider)
+          || resolved.companion.runtime.disk_layout_version !== COMPANION_PI_DISK_LAYOUT_VERSION
+        ) {
+          const started = await startRuntime(c, companionId, body, { allowBoxWake: false });
+          if (!started.companion.runtime.box_id) {
+            throw new CompanionRuntimeTransitionError("companion start completed without a Box");
+          }
+          if (!started.ready) {
+            return c.json({ thread: beforeRuntime.thread, source: "control_plane" as const });
+          }
+          runtime = started.runtime;
+          boxId = started.companion.runtime.box_id;
+        }
       }
       let deliveredOrdinal: number | undefined;
       try {
@@ -1747,7 +1845,7 @@ export function registerCompanionRoutes(
             boxId,
             runtime,
             eventIds: visualRuns.map((run) => run.eventId),
-            desktopAvailable: observed.desktopAvailable,
+            desktopAvailable,
           })
         : null;
       thread = framed ?? thread;
@@ -1850,8 +1948,8 @@ export function registerCompanionRoutes(
     try {
       companionIdSchema.parse(companionId);
       const body = startCompanionRuntimeInputSchema.parse(await c.req.json().catch(() => ({})));
-      const started = await startRuntime(c, companionId, body);
-      return c.json({ companion: started.companion });
+      const started = await startRuntime(c, companionId, body, { allowArchiveResume: true });
+      return c.json({ companion: started.companion }, started.ready ? 200 : 202);
     } catch (error) {
       return runtimeRouteError(c, error);
     }
@@ -1863,26 +1961,109 @@ export function registerCompanionRoutes(
       companionIdSchema.parse(companionId);
       const rawBody = await c.req.json();
 
-      // Restart is deliberately not a wake. Resolve authorization and the projected state before a
-      // Box client exists, then observe the already-running machine without resuming it. A stale
-      // Online projection is corrected and refused rather than turning Restart into Start.
+      // An initial Restart is deliberately not a wake. Resolve authorization and the projected
+      // state before a Box client exists, then observe the already-running machine without resuming
+      // it. The only stopped-state continuation is a Full Box restart this route already left
+      // waiting on an asynchronous archive.
       const resolved = await tenant(c, async ({ actor, orgId, database }) => ({
         actor,
         orgId,
         companion: await getCompanionForRuntime({ actor, orgId, companionId, database }),
       }));
       const body = restartCompanionRuntimeInputSchema.parse(rawBody);
+      const boxId = resolved.companion.runtime.box_id;
+      const continuationRequested = body.target === "box" && body.continuation === true;
+      const continuingBoxArchive = continuationRequested
+        && boxId !== null
+        && resolved.companion.runtime.state === "stopping"
+        && resolved.companion.runtime.daemon_state === "starting";
+      const continuingBoxStart = continuationRequested
+        && boxId !== null
+        && resolved.companion.runtime.state === "provisioning"
+        && resolved.companion.runtime.daemon_state === "starting";
+      const completedBoxArchive = continuationRequested
+        && boxId !== null
+        && resolved.companion.runtime.state === "running"
+        && resolved.companion.runtime.daemon_state === "running";
+      // A delayed continuation is idempotent after another tab/request already finished it. Do not
+      // observe and reinterpret a later unrelated archive as part of this completed operation.
+      if (completedBoxArchive) return c.json({ companion: resolved.companion });
       if (
-        !resolved.companion.runtime.box_id
-        || resolved.companion.runtime.state !== "running"
-        || resolved.companion.runtime.daemon_state !== "running"
+        !boxId
+        || (continuationRequested && !continuingBoxArchive && !continuingBoxStart)
+        || (!continuationRequested
+        && (
+          resolved.companion.runtime.state !== "running"
+          || resolved.companion.runtime.daemon_state !== "running"
+        ))
       ) {
         throw new CompanionRuntimeTransitionError("companion must be online to restart");
       }
 
+      if (continuingBoxStart) {
+        // Another continuation may own a fresh start claim. Retrying reaches this path until that
+        // owner settles; after the claim becomes stale, the ordinary start claim can take it over.
+        // Enter the adapter directly so its assigned-Box lookup can replace a Box the provider
+        // removed while the original continuation was abandoned.
+        const startInput = startCompanionRuntimeInputSchema.parse({ client_surface: "web" });
+        const started = await startRuntime(c, companionId, startInput, {
+          allowArchiveResume: true,
+        });
+        return c.json({ companion: started.companion }, started.ready ? 200 : 202);
+      }
       const observed = await runtimeFactory().status({
-        boxId: resolved.companion.runtime.box_id,
+        boxId,
       });
+      if (continuingBoxArchive) {
+        if (observed.runtimeState === "stopping") {
+          return c.json({ companion: resolved.companion }, 202);
+        }
+        if (observed.runtimeState === "stopped") {
+          const startInput = startCompanionRuntimeInputSchema.parse({ client_surface: "web" });
+          const started = await startRuntime(c, companionId, startInput, {
+            allowArchiveResume: true,
+          });
+          return c.json({ companion: started.companion }, started.ready ? 200 : 202);
+        }
+        if (observed.runtimeState === "running" && observed.daemonState === "running") {
+          const projected = await withTenantContext(
+            { orgId: resolved.orgId, userId: resolved.actor.id },
+            (database) => updateCompanionRuntime({
+              actor: resolved.actor,
+              orgId: resolved.orgId,
+              companionId,
+              expectedUpdatedAt: new Date(resolved.companion.updated_at),
+              patch: {
+                runtimeState: observed.runtimeState,
+                daemonState: observed.daemonState,
+                desktopAvailable: observed.desktopAvailable,
+                observedAt: new Date(),
+              },
+              database,
+            }),
+          );
+          return c.json({ companion: projected });
+        }
+        const message = `companion Box cannot continue restart from ${observed.runtimeState}`;
+        await withTenantContext(
+          { orgId: resolved.orgId, userId: resolved.actor.id },
+          (database) => updateCompanionRuntime({
+            actor: resolved.actor,
+            orgId: resolved.orgId,
+            companionId,
+            expectedUpdatedAt: new Date(resolved.companion.updated_at),
+            patch: {
+              runtimeState: "error",
+              daemonState: "error",
+              lastError: message,
+              desktopAvailable: observed.desktopAvailable,
+              observedAt: new Date(),
+            },
+            database,
+          }),
+        );
+        throw new CompanionRuntimeTransitionError(message);
+      }
       await withTenantContext(
         { orgId: resolved.orgId, userId: resolved.actor.id },
         (database) => updateCompanionObservation({
@@ -1908,15 +2089,33 @@ export function registerCompanionRoutes(
           allowBoxWake: false,
           restartPi: true,
         });
-        return c.json({ companion: started.companion });
+        return c.json({ companion: started.companion }, started.ready ? 200 : 202);
       }
 
       // The observation above proves this is a restart of an online Box, not a disguised Wake.
       // Stop owns the archive and failure projection; start owns the resume and its own failure
       // projection, so a partial restart always leaves one durable, diagnosable state.
-      await stopRuntime(c, companionId);
+      const stopped = await stopRuntime(c, companionId);
+      if (stopped.runtime.state === "stopping") {
+        const waiting = await withTenantContext(
+          { orgId: resolved.orgId, userId: resolved.actor.id },
+          (database) => updateCompanionRuntime({
+            actor: resolved.actor,
+            orgId: resolved.orgId,
+            companionId,
+            expectedUpdatedAt: new Date(stopped.updated_at),
+            patch: {
+              runtimeState: "stopping",
+              daemonState: "starting",
+              observedAt: new Date(),
+            },
+            database,
+          }),
+        );
+        return c.json({ companion: waiting }, 202);
+      }
       const started = await startRuntime(c, companionId, startInput);
-      return c.json({ companion: started.companion });
+      return c.json({ companion: started.companion }, started.ready ? 200 : 202);
     } catch (error) {
       return runtimeRouteError(c, error);
     }

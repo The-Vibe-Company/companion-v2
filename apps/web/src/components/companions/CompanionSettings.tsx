@@ -29,6 +29,8 @@ const SKILLS_SYNC_POLL_MS = 3_000;
 /** A stalled apply stops moving on its own; cap the poll instead of reading forever. */
 const SKILLS_SYNC_POLL_MAX_TICKS = 40;
 
+const BOX_RESTART_RETRY_MS = 3_000;
+
 export function CompanionSettings({
   orgId,
   companion,
@@ -71,13 +73,23 @@ export function CompanionSettings({
   // an apply is in flight on an awake Box a short poll keeps it moving without waking anything.
   const [latest, setLatest] = useState(companion);
   const syncReadRef = useRef(0);
+  const mounted = useRef(true);
   const canEdit = companion.access === "owner" || companion.access === "editor";
   const canDelete = companion.access === "owner";
   const online = runtimeSnapshot.state === "running" && runtimeSnapshot.daemon_state === "running";
+  const deletionLocked = runtimeSnapshot.state === "stopping"
+    && runtimeSnapshot.daemon_state === "unknown";
+  const waitingOnArchive = runtimeSnapshot.state === "stopping" && !deletionLocked;
+  const archiving = waitingOnArchive
+    && runtimeSnapshot.daemon_state === "starting";
 
   useEffect(() => {
     setRuntimeSnapshot(companion.runtime);
     setRuntimeNeedsRefresh(false);
+    if (
+      companion.runtime.state === "stopping"
+      && companion.runtime.daemon_state === "starting"
+    ) setRestartTarget("box");
   }, [companion.runtime]);
 
   useEffect(() => {
@@ -114,6 +126,13 @@ export function CompanionSettings({
     }, SKILLS_SYNC_POLL_MS);
     return () => clearInterval(interval);
   }, [skillsApplying, orgId, companion.id]);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const changed = useMemo(
     () =>
@@ -188,13 +207,99 @@ export function CompanionSettings({
   };
 
   const restart = async (target: RestartCompanionRuntimeInput["target"]) => {
-    if (!canEdit || !online || changed) return;
+    if (!canEdit || changed || (!online && !(target === "box" && archiving))) return;
     setBusy(true);
     setRestarting(target);
     setError(null);
     setRuntimeMessage(null);
     try {
-      const updated = await restartCompanionRuntime(orgId, companion.id, { target });
+      const continuation = target === "box" && archiving;
+      let updated = continuation
+        ? { ...companion, runtime: runtimeSnapshot }
+        : await restartCompanionRuntime(orgId, companion.id, { target });
+      while (
+        target === "box"
+        && (
+          updated.runtime.state === "stopping"
+          || updated.runtime.state === "provisioning"
+        )
+        && updated.runtime.daemon_state === "starting"
+      ) {
+        const competingResume = updated.runtime.state === "provisioning";
+        setRuntimeSnapshot(updated.runtime);
+        setRuntimeNeedsRefresh(false);
+        onSaved(updated);
+        setConfirmingBoxRestart(false);
+        setRuntimeMessage(competingResume
+          ? "The Box archive is ready. Companion is resuming automatically."
+          : "The Box is still archiving. Companion will resume automatically when the archive is ready.");
+        await new Promise((resolve) => setTimeout(resolve, BOX_RESTART_RETRY_MS));
+        if (!mounted.current) return;
+        try {
+          updated = await restartCompanionRuntime(orgId, companion.id, {
+            target,
+            continuation: true,
+          });
+        } catch (continuationError) {
+          // A continuation response can be lost while the server keeps the accepted restart marker
+          // (or even finishes the restart). Reconcile if possible; when that read also fails, retain
+          // the last confirmed marker and keep polling instead of abandoning automatic resume.
+          let latest: Companion | null = null;
+          try {
+            latest = await getCompanionRuntime(orgId, companion.id);
+          } catch {
+            // The last confirmed `stopping`/`starting` projection remains retryable.
+          }
+          if (!latest) continue;
+          setRuntimeSnapshot(latest.runtime);
+          setRuntimeNeedsRefresh(false);
+          onSaved(latest);
+          if (
+            (
+              latest.runtime.state === "stopping"
+              || latest.runtime.state === "provisioning"
+            )
+            && latest.runtime.daemon_state === "starting"
+          ) {
+            updated = latest;
+            continue;
+          }
+          if (
+            latest.runtime.state === "running"
+            && latest.runtime.daemon_state === "running"
+          ) {
+            updated = latest;
+            break;
+          }
+          throw new Error(
+            latest.runtime.last_error ??
+              (continuationError instanceof Error
+                ? continuationError.message
+                : "This Companion could not be restarted."),
+          );
+        }
+      }
+      if (
+        target === "pi"
+        && (updated.runtime.state === "stopping" || updated.runtime.state === "stopped")
+      ) {
+        setRuntimeSnapshot(updated.runtime);
+        setRuntimeNeedsRefresh(false);
+        onSaved(updated);
+        setRestartTarget("pi");
+        setRuntimeMessage(updated.runtime.state === "stopping"
+          ? "The Box began archiving before Pi could restart. It can be woken after the archive is ready."
+          : "The Box finished archiving before Pi could restart. Wake it to apply the saved settings.");
+        return;
+      }
+      if (
+        target === "box"
+        && (updated.runtime.state !== "running" || updated.runtime.daemon_state !== "running")
+      ) {
+        throw new Error(
+          updated.runtime.last_error ?? "The full Box restart did not return Online.",
+        );
+      }
       setRuntimeSnapshot(updated.runtime);
       setRuntimeNeedsRefresh(false);
       onSaved(updated);
@@ -344,7 +449,7 @@ export function CompanionSettings({
 
             <fieldset
               className="companions-settings__restart-options"
-              disabled={busy || changed || !online || runtimeNeedsRefresh}
+              disabled={busy || changed || runtimeNeedsRefresh}
               aria-describedby="restart-companion-hint"
             >
               <legend className="sr-only">Restart scope</legend>
@@ -354,6 +459,7 @@ export function CompanionSettings({
                   name="restart-target"
                   value="pi"
                   checked={restartTarget === "pi"}
+                  disabled={!online}
                   onChange={() => setRestartTarget("pi")}
                 />
                 <span>
@@ -367,6 +473,7 @@ export function CompanionSettings({
                   name="restart-target"
                   value="box"
                   checked={restartTarget === "box"}
+                  disabled={!online && !archiving}
                   onChange={() => setRestartTarget("box")}
                 />
                 <span>
@@ -380,18 +487,31 @@ export function CompanionSettings({
               <p className="companions-settings__hint" id="restart-companion-hint">
                 {runtimeNeedsRefresh
                   ? "Runtime status could not be refreshed. Reopen Settings before trying again."
-                  : !online
-                  ? "This Companion must be Online before it can restart. Send a message to start it."
-                  : changed
-                    ? "Save your changes before restarting."
-                    : restartTarget === "pi"
-                      ? "Pi restarts with the saved provider, model, skills, and plugins."
-                      : "Full Box restart requires confirmation."}
+                  : deletionLocked
+                    ? "Companion deletion is in progress. Runtime controls are unavailable."
+                    : restarting === "box"
+                      ? "Waiting for the Box archive to finish before Companion resumes."
+                      : waitingOnArchive
+                        ? archiving
+                          ? "The Box is archiving. Full Box restart will wait for the archive, then resume it."
+                          : "The Box is archiving. It can be woken after the archive is ready."
+                        : !online
+                          ? "This Companion must be Online before it can restart. Send a message to start it."
+                          : changed
+                            ? "Save your changes before restarting."
+                            : restartTarget === "pi"
+                              ? "Pi restarts with the saved provider, model, skills, and plugins."
+                              : "Full Box restart requires confirmation."}
               </p>
               <button
                 type="button"
                 className="cds-btn cds-btn--secondary cds-btn--md"
-                disabled={busy || changed || !online || runtimeNeedsRefresh}
+                disabled={
+                  busy
+                  || changed
+                  || runtimeNeedsRefresh
+                  || (!online && !(restartTarget === "box" && archiving))
+                }
                 onClick={() => {
                   if (restartTarget === "box") setConfirmingBoxRestart(true);
                   else void restart("pi");
