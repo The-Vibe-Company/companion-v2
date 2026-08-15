@@ -291,7 +291,7 @@ function CompanionActionsMenu({
                   type="button"
                   role="menuitem"
                   disabled={busy}
-                  onClick={() => run(() => onMemberState({ hidden: false }))}
+                  onClick={() => run(() => onMemberState({ hidden: false }), true)}
                 >
                   Unhide
                 </button>
@@ -330,7 +330,7 @@ function CompanionActionsMenu({
                     type="button"
                     role="menuitem"
                     disabled={busy}
-                    onClick={() => run(() => onMemberState({ hidden: true }))}
+                    onClick={() => run(() => onMemberState({ hidden: true }), true)}
                   >
                     Hide
                   </button>
@@ -452,7 +452,17 @@ export function CompanionsApp({
   const threadQueueRef = useRef(createThreadQueue());
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
   const searchRef = useRef<HTMLInputElement>(null);
+  const movedFocusRef = useRef<string | null>(null);
   const noop = () => {};
+
+  useLayoutEffect(() => {
+    const companionId = movedFocusRef.current;
+    if (!companionId) return;
+    movedFocusRef.current = null;
+    const row = rowRefs.current.get(companionId);
+    if (row?.isConnected) row.focus();
+    else searchRef.current?.focus();
+  }, [companions]);
 
   const opened = useMemo(
     () => companions.find((companion) => companion.id === openedId) ?? null,
@@ -559,16 +569,12 @@ export function CompanionsApp({
     setError(null);
     try {
       const next = await updateCompanionMemberState(currentOrg.id, companion.id, patch);
+      if (patch.hidden !== undefined) movedFocusRef.current = companion.id;
       resortCompanion(next);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not update this Companion.");
     } finally {
       setBusy(false);
-      if (patch.hidden !== undefined) {
-        window.requestAnimationFrame(() => {
-          (rowRefs.current.get(companion.id) ?? searchRef.current)?.focus();
-        });
-      }
     }
   };
 

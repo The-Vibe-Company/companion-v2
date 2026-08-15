@@ -391,7 +391,10 @@ describe("CompanionsApp conversation list", () => {
   });
 
   it("moves focus to search after hiding removes the active row", async () => {
-    companionsApi.updateCompanionMemberState.mockResolvedValue(companion({ hidden: true }));
+    let resolveHide!: (value: Companion) => void;
+    companionsApi.updateCompanionMemberState.mockReturnValue(new Promise((resolve) => {
+      resolveHide = resolve;
+    }));
     const container = await render([companion()]);
     const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Actions for Luna"]')!;
 
@@ -400,6 +403,14 @@ describe("CompanionsApp conversation list", () => {
       .find((item) => item.textContent === "Hide")!;
     await act(async () => hide.click());
     await act(async () => {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    });
+
+    expect(document.activeElement).toBe(trigger);
+
+    await act(async () => {
+      resolveHide(companion({ hidden: true }));
+      await Promise.resolve();
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
     });
 
