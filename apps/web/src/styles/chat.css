@@ -149,3 +149,13 @@
     text-indent: 0;
   }
 }
+
+/*
+ * Unlayered on purpose: tokens.css draws the app-wide focus outline unlayered, so a utility could
+ * never turn it off. The composer field is the one control that must, because the box around it is
+ * already drawing the focus ring — the outline would be a second ring inside the first. Everything
+ * else in this scope keeps the app's outline, which is the only focus indicator it has.
+ */
+.aui-scope [data-slot="composer-field"] :where(textarea):focus-visible {
+  outline: none;
+}

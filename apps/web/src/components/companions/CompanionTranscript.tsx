@@ -439,7 +439,10 @@ function Footer() {
     <ComposerPrimitive.Root className="border-border bg-background shrink-0 border-t px-(--chat-gutter) pt-2.5 pb-[max(14px,env(safe-area-inset-bottom,0px))]">
       <div className="mx-auto w-full max-w-(--thread-max-width)">
         {/* The field and its send control are one object, so the composer reads as one place to type. */}
-        <div className="border-input focus-within:ring-ring/50 bg-card flex items-end gap-2 rounded-2xl border ps-3 py-1.5 pe-1.5 focus-within:ring-[3px]">
+        <div
+          data-slot="composer-field"
+          className="border-input focus-within:ring-ring/50 bg-card flex items-end gap-2 rounded-2xl border py-1.5 pe-1.5 ps-3 focus-within:ring-[3px]"
+        >
           <ComposerPrimitive.Input
             className="text-foreground max-h-42 min-h-8 flex-1 resize-none bg-transparent py-1 outline-none"
             placeholder={`Message ${companionName}`}

@@ -133,7 +133,7 @@ const ThreadScrollToBottom: FC = () => {
       <TooltipIconButton
         tooltip="Jump to the newest message"
         variant="outline"
-        className="border-border bg-background hover:bg-accent sticky bottom-2 z-10 self-center rounded-full border p-4 shadow-sm disabled:hidden"
+        className="border-border bg-background hover:bg-accent sticky bottom-2 z-10 size-8 self-center rounded-full border p-1.5 shadow-sm disabled:hidden"
       >
         <ArrowDownIcon />
       </TooltipIconButton>
