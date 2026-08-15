@@ -91,6 +91,7 @@ legacy PAT:
 | Explicit legacy PAT refresh | `POST /tokens/refresh` | Legacy mode only, preserves existing scopes |
 | List org library skills | `GET /skills?lib=org` | `skills:read` |
 | List My Skills | `GET /skills?lib=mine` | `skills:read` |
+| List accessible skills | `GET /skills?lib=accessible` | `skills:read` |
 | List reported installed skills | `GET /skills?installed=true` | `skills:read` |
 | Get skill metadata | `GET /skills/{slug}` | `skills:read` |
 | Read org skill naming policy | `GET /v1/orgs/current/skill-naming-policy` (or `GET /orgs/current/skill-naming-policy` from `COMPANION_API_URL`) | `skills:read` |
@@ -505,7 +506,9 @@ A skill lives in one of two libraries, set by its `scope`:
   Organized with the creator's own **personal folders** (`/personal-labels`).
 
 `GET /skills?lib=mine` returns the caller's My Skills (their authored personal skills plus org skills
-they have installed); `GET /skills?lib=org` (the default) returns the org library. On first publish,
+they have installed); `GET /skills?lib=org` (the default) returns the org library;
+`GET /skills?lib=accessible` returns everything the caller may reference — every org skill plus
+their own personal skills — in one list. On first publish,
 the `scope` field chooses the library. The Companion skill must send `scope=personal` or `scope=org`
 explicitly for a brand-new skill after asking the user where to publish it; do not rely on server
 defaults. Re-publishing never changes scope, so do not send `scope` on updates. Depending on server

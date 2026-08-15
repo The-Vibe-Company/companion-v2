@@ -50,6 +50,9 @@ export const COMPANION_RUNTIME_ERROR_VIEWER_MESSAGE = "This Companion is unavail
 /** Owner/Editor line for an `error` state recorded without a message, such as a live Box poll. */
 export const COMPANION_RUNTIME_ERROR_FALLBACK = "This Companion's Box reported an error.";
 
+/** What a Viewer reads instead of the operator detail when a skill restage failed. */
+export const COMPANION_SKILLS_SYNC_ERROR_VIEWER_MESSAGE = "Skill sync failed.";
+
 /**
  * The error line a reader is allowed to see. Nothing is returned outside `error`, so a recovered
  * Companion never keeps explaining a failure it already retried past.
