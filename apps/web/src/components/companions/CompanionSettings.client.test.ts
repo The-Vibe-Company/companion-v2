@@ -128,7 +128,7 @@ async function mount(
       onDeleted,
     }));
   });
-  return { container, onSaved, onDeleted };
+  return { container, root, onSaved, onDeleted };
 }
 
 function setControlled(control: HTMLInputElement | HTMLTextAreaElement, value: string) {
@@ -279,6 +279,40 @@ describe("CompanionSettings", () => {
     );
   });
 
+  it("reconciles a stale provider selection when the live catalog replaces it", async () => {
+    const { container, root, onSaved, onDeleted } = await mount("owner");
+    const refreshed: CompanionProvidersResponse = {
+      ...providers,
+      connections: [providers.connections[1]!],
+      default_provider_id: "openai-codex",
+    };
+
+    await act(async () => {
+      root.render(React.createElement(CompanionSettings, {
+        orgId: "org-1",
+        companion: companion(),
+        providers: refreshed,
+        onBack: vi.fn(),
+        onSaved,
+        onDeleted,
+      }));
+    });
+
+    expect(container.querySelector<HTMLInputElement>('input[value="openai-codex"]')?.checked)
+      .toBe(true);
+    expect(container.querySelector<HTMLInputElement>('input[value="gpt-5.5"]')?.checked).toBe(true);
+    await act(async () => {
+      container.querySelector("form")?.dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(updateCompanion).toHaveBeenCalledWith(
+      "org-1",
+      companion().id,
+      expect.objectContaining({ provider_id: "openai-codex", model_id: "gpt-5.5" }),
+    );
+  });
+
   it("shows live z.ai models from the API payload in the two-step settings picker", async () => {
     const apiConnections: CompanionProvidersResponse = {
       catalog: [
@@ -304,7 +338,7 @@ describe("CompanionSettings", () => {
     };
     const { container } = await mount("owner", apiConnections);
 
-    expect(container.querySelectorAll('.companions-settings__form input[type="radio"]')).toHaveLength(2);
+    expect(container.querySelectorAll('.companions-settings__form input[type="radio"]')).toHaveLength(5);
     expect(container.textContent).toContain("Kimi");
     expect(container.textContent).toContain("z.ai");
     await act(async () => {

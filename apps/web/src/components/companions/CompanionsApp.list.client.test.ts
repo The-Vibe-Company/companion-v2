@@ -8,6 +8,10 @@ import type {
   CompanionThread as Thread,
 } from "@companion/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  COMPANION_PROVIDER_SETTINGS_CACHE_TTL_MS,
+  companionProviderSettingsCache,
+} from "@/lib/companionProviderSettingsCache";
 import { CompanionsApp, type CompanionNavigation } from "./CompanionsApp";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -18,12 +22,15 @@ vi.mock("next/navigation", () => ({ useRouter: () => ({ push: routerPush, refres
 
 const companionsApi = vi.hoisted(() => ({
   duplicateCompanion: vi.fn(),
+  deleteCompanionProvider: vi.fn(),
   getCompanionRuntime: vi.fn(),
   getCompanionThread: vi.fn(),
   listCompanions: vi.fn(),
   listCompanionProviders: vi.fn(),
   openCompanionDesktop: vi.fn(),
+  saveCompanionProvider: vi.fn(),
   sendCompanionMessage: vi.fn(),
+  setDefaultCompanionProvider: vi.fn(),
   setCompanionProvider: vi.fn(),
   startCompanionRuntime: vi.fn(),
   syncCompanionThread: vi.fn(),
@@ -145,6 +152,7 @@ async function render(
   companions: Companion[],
   openedId: string | null = null,
   initialProviderSettings: CompanionProvidersResponse | null = providers,
+  initialSettingsCompanionId: string | null = null,
 ) {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -161,6 +169,7 @@ async function render(
       initialProviders: initialProviderSettings,
       initialPlugins: [],
       initialCompanionId: openedId,
+      initialSettingsCompanionId,
     }));
   });
   return container;
@@ -176,15 +185,33 @@ function setControlled(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+function stubSettingsPickerFetches() {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    const body = path.includes("/v1/companion-plugins") ? { accounts: [] } : [];
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }));
+}
+
 describe("CompanionsApp conversation list", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    companionProviderSettingsCache.clear();
     window.localStorage.clear();
     companionsApi.listCompanions.mockResolvedValue([companion()]);
     companionsApi.listCompanionProviders.mockResolvedValue(providers);
     companionsApi.getCompanionThread.mockResolvedValue(thread());
     companionsApi.syncCompanionThread.mockResolvedValue(thread());
     companionsApi.getCompanionRuntime.mockResolvedValue(companion());
+    companionsApi.deleteCompanionProvider.mockResolvedValue(undefined);
+    companionsApi.saveCompanionProvider.mockResolvedValue({
+      ...providers.connections[0]!,
+      provider_id: "kimi-coding",
+    });
+    companionsApi.setDefaultCompanionProvider.mockResolvedValue(undefined);
     companionsApi.updateCompanionMemberState.mockImplementation(
       async (_orgId: string, _companionId: string, patch: Partial<Companion>) => companion(patch),
     );
@@ -231,6 +258,177 @@ describe("CompanionsApp conversation list", () => {
 
     expect(newCompanion.disabled).toBe(false);
     expect(container.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it("opens Companion settings immediately from a fresh provider cache without another request", async () => {
+    stubSettingsPickerFetches();
+    companionProviderSettingsCache.set(viewer.id, org.id, providers);
+
+    const container = await render([companion()], null, null, companionId);
+
+    expect(container.textContent).toContain("Companion settings");
+    expect(container.textContent).not.toContain("Loading provider settings");
+    expect(companionsApi.listCompanionProviders).not.toHaveBeenCalled();
+  });
+
+  it("keeps stale settings visible while one background refresh updates the cache", async () => {
+    stubSettingsPickerFetches();
+    const refreshed = {
+      ...providers,
+      catalog: providers.catalog.map((provider) => ({ ...provider, name: "Claude refreshed" })),
+    };
+    companionProviderSettingsCache.set(
+      viewer.id,
+      org.id,
+      providers,
+      Date.now() - COMPANION_PROVIDER_SETTINGS_CACHE_TTL_MS,
+    );
+    let resolveProviders!: (value: CompanionProvidersResponse) => void;
+    companionsApi.listCompanionProviders.mockReturnValue(new Promise((resolve) => {
+      resolveProviders = resolve;
+    }));
+
+    const container = await render([companion()], null, null, companionId);
+    expect(container.textContent).toContain("Companion settings");
+    expect(container.textContent).not.toContain("Loading provider settings");
+    expect(companionsApi.listCompanionProviders).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveProviders(refreshed);
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain("Claude refreshed");
+    expect(companionProviderSettingsCache.read(viewer.id, org.id)?.providers).toEqual(refreshed);
+  });
+
+  it("keeps stale settings usable and offers Retry when the background refresh fails", async () => {
+    stubSettingsPickerFetches();
+    companionProviderSettingsCache.set(
+      viewer.id,
+      org.id,
+      providers,
+      Date.now() - COMPANION_PROVIDER_SETTINGS_CACHE_TTL_MS,
+    );
+    companionsApi.listCompanionProviders
+      .mockRejectedValueOnce(new Error("Provider catalog unavailable."))
+      .mockResolvedValueOnce(providers);
+
+    const container = await render([companion()], null, null, companionId);
+    const alert = container.querySelector('[role="alert"]') as HTMLElement;
+    const retry = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Retry") as HTMLButtonElement;
+
+    expect(container.textContent).toContain("Companion settings");
+    expect(alert.textContent).toContain("Provider catalog unavailable.");
+    expect(retry).toBeDefined();
+
+    await act(async () => {
+      retry.click();
+      await Promise.resolve();
+    });
+
+    expect(companionsApi.listCompanionProviders).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.textContent).toContain("Companion settings");
+  });
+
+  it("writes provider mutations through to the shared cache", async () => {
+    const connected: CompanionProvidersResponse = {
+      ...providers,
+      catalog: [
+        ...providers.catalog,
+        {
+          id: "kimi-coding",
+          name: "Kimi",
+          auth_methods: ["api_key"],
+          description: "",
+          models: [{ id: "kimi-for-coding", name: "Kimi K2.7 Code", default: true }],
+        },
+      ],
+      connections: [
+        ...providers.connections,
+        {
+          ...providers.connections[0]!,
+          provider_id: "kimi-coding",
+        },
+      ],
+    };
+    const container = await render([companion()], null, connected);
+
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent === "Providers")?.click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent === "Make default")?.click();
+      await Promise.resolve();
+    });
+
+    expect(companionsApi.setDefaultCompanionProvider)
+      .toHaveBeenCalledWith(org.id, "kimi-coding");
+    expect(companionProviderSettingsCache.read(viewer.id, org.id)?.providers.default_provider_id)
+      .toBe("kimi-coding");
+  });
+
+  it("writes a new API-key connection through to the shared cache", async () => {
+    const connectable: CompanionProvidersResponse = {
+      ...providers,
+      catalog: [
+        ...providers.catalog,
+        {
+          id: "kimi-coding",
+          name: "Kimi",
+          auth_methods: ["api_key"],
+          description: "",
+          models: [{ id: "kimi-for-coding", name: "Kimi K2.7 Code", default: true }],
+        },
+      ],
+    };
+    const container = await render([companion()], null, connectable);
+
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent === "Providers")?.click();
+    });
+    const key = container.querySelector<HTMLInputElement>('input[type="password"]')!;
+    await act(async () => {
+      setControlled(key, "kimi-secret");
+    });
+    await act(async () => {
+      container.querySelector<HTMLFormElement>(".companions-provider-add")?.dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(companionsApi.saveCompanionProvider).toHaveBeenCalledWith(org.id, "kimi-coding", {
+      auth_method: "api_key",
+      credential: "kimi-secret",
+    });
+    expect(companionProviderSettingsCache.read(viewer.id, org.id)?.providers.connections)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ provider_id: "kimi-coding" })]));
+  });
+
+  it("writes a provider disconnection through to the shared cache", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const container = await render([companion()], null, providers);
+
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent === "Providers")?.click();
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent === "Disconnect")?.click();
+    });
+
+    expect(companionsApi.deleteCompanionProvider).toHaveBeenCalledWith(org.id, "anthropic");
+    expect(companionProviderSettingsCache.read(viewer.id, org.id)?.providers).toMatchObject({
+      connections: [],
+      default_provider_id: null,
+    });
+    confirm.mockRestore();
   });
 
   it("recovers provider actions after a failed request is retried", async () => {
