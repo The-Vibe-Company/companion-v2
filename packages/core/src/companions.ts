@@ -486,6 +486,12 @@ async function companionWithMemberState(input: {
 export async function listCompanions(input: {
   actor: ActorContext;
   orgId: string;
+  /**
+   * Project each thread's newest chat line. On by default, because the list is the conversation
+   * list. A caller that only needs names and attachments — the Skills page asking which Companions
+   * stage a skill — turns it off, so private chat text never reaches a surface that shows none.
+   */
+  withLastMessage?: boolean;
   database?: Db;
 }): Promise<Companion[]> {
   const database = input.database ?? db;
@@ -506,7 +512,9 @@ export async function listCompanions(input: {
   const [states, highest, previews] = await Promise.all([
     loadMemberStates(database, input.orgId, input.actor.id, companionIds),
     loadHighestTranscriptOrdinals(database, input.orgId, companionIds),
-    loadCompanionLastMessages(database, input.orgId, companionIds),
+    input.withLastMessage === false
+      ? Promise.resolve(new Map<string, CompanionLastMessage>())
+      : loadCompanionLastMessages(database, input.orgId, companionIds),
   ]);
   const pinnedAtById = new Map<string, Date>();
   const companions = accessible.map(({ row, access }) => {

@@ -75,16 +75,16 @@ export function SkillPanel({
    * Which Companions stage which skills. It is one read of the same list the Companions surface uses,
    * inverted here rather than asked for per skill, and a workspace without Companions never makes it.
    *
-   * It is keyed on the workspace rather than on the selected skill: that payload carries every
-   * Companion's own last chat line, and re-fetching it for each row a reader glances at would move
-   * private conversation text into this page once per click for no gain.
+   * It is keyed on the workspace rather than on the selected skill, and it asks for the roster
+   * without previews: this page shows nobody's conversation, so no conversation text belongs in it.
    */
   useEffect(() => {
     if (!companionsEnabled) return;
     let active = true;
-    apiFetch<{ companions: Pick<Companion, "name" | "selected_skill_ids">[] }>("/v1/companions", {
-      headers: { "x-companion-org": orgId },
-    })
+    apiFetch<{ companions: Pick<Companion, "name" | "selected_skill_ids">[] }>(
+      "/v1/companions?preview=false",
+      { headers: { "x-companion-org": orgId } },
+    )
       .then((response) => {
         if (active) setStagedBy(response.companions);
       })

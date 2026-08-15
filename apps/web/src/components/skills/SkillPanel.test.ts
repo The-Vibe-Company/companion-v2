@@ -175,7 +175,8 @@ describe("SkillPanel", () => {
     });
     const container = await mount({}, { companionsEnabled: true });
 
-    expect(apiMocks.apiFetch).toHaveBeenCalledWith("/v1/companions", {
+    // The roster without previews: this page shows no conversation, so it is handed none.
+    expect(apiMocks.apiFetch).toHaveBeenCalledWith("/v1/companions?preview=false", {
       headers: { "x-companion-org": "org-1" },
     });
     const usedBy = container.querySelector(".skpanel__block:last-child")?.textContent ?? "";

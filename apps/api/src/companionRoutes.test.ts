@@ -505,6 +505,23 @@ describe("Companions API feature gate", () => {
     });
   });
 
+  it("answers without previews when a caller asks for the roster alone", async () => {
+    // The Skills page needs names and attachments to say which Companions stage a skill. It shows
+    // nobody's conversation, so it must not be handed everybody's.
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
+
+    await app.request("/v1/companions?preview=false");
+    expect(coreMocks.listCompanions).toHaveBeenCalledWith(
+      expect.objectContaining({ withLastMessage: false }),
+    );
+
+    await app.request("/v1/companions");
+    expect(coreMocks.listCompanions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ withLastMessage: true }),
+    );
+  });
+
   it("keeps the chat text it now carries out of the browser's disk cache", async () => {
     // The list used to be settings and runtime state; it carries each thread's last line now, so it
     // gets the same `no-store` every other read of sensitive content in this API gets.

@@ -797,8 +797,12 @@ export function registerCompanionRoutes(
 
   app.get("/v1/companions", async (c) => {
     try {
+      // `preview=false` answers with the roster and nothing anyone said. It is for a caller that
+      // needs names and attachments — the Skills page asking which Companions stage a skill — and
+      // keeps chat text off a surface that displays none of it.
+      const withLastMessage = c.req.query("preview") !== "false";
       const companions = await tenant(c, ({ actor, orgId, database }) =>
-        listCompanions({ actor, orgId, database }));
+        listCompanions({ actor, orgId, withLastMessage, database }));
       // The list carries each thread's last line now, so it is chat text and must not sit in a disk
       // cache after the session that read it, the way every other sensitive read here is treated.
       c.header("Cache-Control", "private, no-store");
