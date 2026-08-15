@@ -864,6 +864,18 @@ export function CompanionsApp({
       >
         {opened ? (
           <>
+            {providersError && (
+              <div className="companions-thread-notice" role="alert">
+                <span>{providersError}</span>
+                <button
+                  type="button"
+                  className="cds-btn cds-btn--secondary cds-btn--sm"
+                  onClick={() => void loadProviderSettings()}
+                >
+                  Retry
+                </button>
+              </div>
+            )}
             {opened.access === "owner" && !opened.runtime.provider_ids.length && fallbackProvider && (
               <div className="companions-thread-notice">
                 <span>This Companion has no provider yet.</span>

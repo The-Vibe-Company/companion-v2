@@ -50,8 +50,6 @@ export default async function CompanionsPage({
   const [
     mineRows,
     orgRows,
-    archivedMine,
-    archivedOrg,
     companionsResponse,
     plugins,
   ] =
@@ -60,8 +58,6 @@ export default async function CompanionsPage({
       // queries separate, then union them without loading the hidden Skills trees or labels.
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=mine", { headers }).catch(() => []),
       serverApiFetch<SkillListRow[]>("/v1/skills?lib=org", { headers }).catch(() => []),
-      serverApiFetch<SkillListRow[]>("/v1/skills?lib=mine&archived=true", { headers }).catch(() => []),
-      serverApiFetch<SkillListRow[]>("/v1/skills?lib=org&archived=true", { headers }).catch(() => []),
       serverApiFetch<{ companions: Companion[] }>("/v1/companions", { headers }).catch(() => null),
       serverApiFetch<CompanionPluginsResponse>("/v1/companion-plugins", { headers }).catch(() => null),
     ]);
@@ -115,7 +111,7 @@ export default async function CompanionsPage({
         installedCount: 0,
         installedUpdateCount: 0,
         localUpdateCount: 0,
-        archivedCount: new Set([...archivedMine, ...archivedOrg].map((skill) => skill.id)).size,
+        archivedCount: 0,
       }}
     />
   );

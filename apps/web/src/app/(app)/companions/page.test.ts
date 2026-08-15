@@ -1,3 +1,4 @@
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -31,6 +32,7 @@ vi.mock("@/components/org/WorkspaceLoadError", () => ({
 vi.mock("@/lib/apiServer", () => apiMocks);
 
 import CompanionsPage from "./page";
+import CompanionsLoading from "./loading";
 
 const originalEnabled = process.env.COMPANION_COMPANIONS_ENABLED;
 const originalAllowlist = process.env.COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS;
@@ -107,6 +109,14 @@ describe("Companions page access gate", () => {
     expect(navigationMocks.notFound).not.toHaveBeenCalled();
   });
 
+  it("keeps the streamed loading fallback generic until access is resolved", () => {
+    const markup = renderToStaticMarkup(CompanionsLoading());
+
+    expect(markup).toContain("Loading workspace");
+    expect(markup).not.toContain("Companions");
+    expect(markup).not.toContain("Companion");
+  });
+
   it("does not block the list route on the external provider catalog", async () => {
     process.env.COMPANION_COMPANIONS_ENABLED = "true";
     process.env.COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS = "thevibecompany.co";
@@ -160,6 +170,8 @@ describe("Companions page access gate", () => {
     expect(requestedPaths).not.toContain("/v1/personal-labels");
     expect(requestedPaths).not.toContain("/v1/labels");
     expect(requestedPaths).not.toContain("/v1/local-skills");
+    expect(requestedPaths).not.toContain("/v1/skills?lib=mine&archived=true");
+    expect(requestedPaths).not.toContain("/v1/skills?lib=org&archived=true");
     expect(requestedPaths).not.toContain("/v1/skills?lib=accessible");
     expect(requestedPaths).toContain("/v1/skills?lib=mine");
     expect(requestedPaths).toContain("/v1/skills?lib=org");

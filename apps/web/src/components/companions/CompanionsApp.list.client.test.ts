@@ -241,6 +241,30 @@ describe("CompanionsApp conversation list", () => {
     expect(newCompanion.disabled).toBe(false);
   });
 
+  it("shows provider failure and Retry without leaving an open thread", async () => {
+    companionsApi.listCompanionProviders
+      .mockRejectedValueOnce(new Error("Provider catalog unavailable."))
+      .mockResolvedValueOnce(providers);
+
+    const container = await render([companion()], companionId, null);
+    const alert = container.querySelector('[role="alert"]') as HTMLElement;
+    const retry = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Retry") as HTMLButtonElement;
+
+    expect(alert.textContent).toContain("Provider catalog unavailable.");
+    expect(container.textContent).toContain("Drafted the launch note.");
+
+    await act(async () => {
+      retry.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(companionsApi.listCompanionProviders).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect([...container.querySelectorAll("button")]
+      .some((button) => button.textContent === "Providers")).toBe(true);
+  });
+
   it("leaves a caught-up thread unmarked, whatever it last said", async () => {
     // Read state is the control plane's per-member watermark (THE-351), not this device's guess.
     const container = await render([companion({ unread: false })]);
