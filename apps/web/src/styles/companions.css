@@ -1419,6 +1419,18 @@
   font-size: var(--text-sm);
 }
 
+/* Quiet by design: the transcript is not wrong while polls fail, so the word stays muted rather
+   than taking an alert treatment. It may shrink with an ellipsis before it can crowd the name
+   out of a 320px header. */
+.chat-reconnecting {
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
 /* The chat chip names the compute it reports. Asleep stays neutral; a live Box carries the low tint
    of its status tone, and for a runner the same chip is the only way into the Box desktop. */
 .chat-box {

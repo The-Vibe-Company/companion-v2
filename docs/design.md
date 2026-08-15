@@ -24,13 +24,15 @@ packages/companion-skill bundled external-agent workflow
 ```
 
 There is no Project/skill-run supervisor, model catalog, deployment reconciler, or runtime UI.
-The API owns one Box HTTP adapter for the gated Companions lifecycle; Pi remains inside Box.
+The Box HTTP adapter and the Companion lifecycle functions live in `packages/box-runtime`,
+parameterized by actor and org; the API consumes them through thin route wrappers for the gated
+Companions lifecycle, and Pi remains inside Box.
 
 ## Data model
 
 Every tenant-owned row carries `org_id`. The current Drizzle schema in `packages/db/src/schema.ts` is the source of truth.
 
-Core entities are organizations, users, memberships, invitations, skills, immutable skill versions/files, dependencies, installs, labels and personal labels, comments/images, public releases and transfer tickets, GitHub connections/destinations, skill-secret declarations/bindings/suggestions, encrypted secrets/versions/recipients, Skill Database declarations/realms/shares/object deletions, audit records, billing, tokens, onboarding/preferences, Agent Auth identities/grants, and gated Companion control-plane metadata plus encrypted workspace provider connections.
+Core entities are organizations, users, memberships, invitations, skills, immutable skill versions/files, dependencies, installs, labels and personal labels, comments/images, public releases and transfer tickets, GitHub connections/destinations, skill-secret declarations/bindings/suggestions, encrypted secrets/versions/recipients, Skill Database declarations/realms/shares/object deletions, audit records, billing, tokens, onboarding/preferences, Agent Auth identities/grants, and gated Companion control-plane metadata plus encrypted workspace provider connections and reconciler lease bookkeeping (`companion_reconcile_leases`, reachable only through worker-granted SECURITY DEFINER claim/settle functions).
 
 The forward migration `0063_skills_hub_only.sql` intentionally drops all historical Project, skill-run, sandbox-usage, model-provider, prompt, transcript, attachment, artifact, and runtime worker state. The cutover is fail-closed: its first statement refuses to drop ownership rows while Project workspaces, unsettled sandboxes, active usage, or S3-backed runtime metadata remain. Operators must quiesce the old release and drain or explicitly delete those external resources before upgrading. Because the release that owned the cleanup worker no longer exists, the one-shot `apps/api` `cutover` command performs that cleanup once: it reports every referenced object key and provider identity, deletes each object before removing the row that names it, and refuses to discard provider-backed rows without an explicit operator confirmation. Historical migrations remain immutable so already-migrated databases can upgrade safely.
 

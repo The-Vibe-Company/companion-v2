@@ -5,7 +5,11 @@
  * `$PI_CODING_AGENT_DIR/extensions/` and projects the `extension_ui_request` events it emits.
  */
 
-import { COMPANION_TOOL_RUN_TIMEOUT_MS } from "@companion/contracts";
+import {
+  COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS,
+  COMPANION_TOOL_RUN_TIMEOUT_MS,
+} from "@companion/contracts";
+import { COMPANION_TOOL_KIND_NAME_TABLE } from "@companion/core";
 
 /** Fail closed with the Box extension's own question timeout (5 minutes). Timeout → cancelled. */
 export const COMPANION_DECISION_TIMEOUT_MS = 5 * 60 * 1000;
@@ -67,6 +71,37 @@ import { Type } from "typebox";
 
 const DECISION_TIMEOUT_MS = ${COMPANION_DECISION_TIMEOUT_MS};
 const TOOL_TIMEOUT_MS = ${COMPANION_TOOL_RUN_TIMEOUT_MS};
+const EXEC_TOOL_TIMEOUT_MS = ${COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS};
+
+// The control plane classifies a run's kind from this same table with this same priority order,
+// so a run the transcript settles as shell also received the shell deadline here.
+const TOOL_KIND_NAMES: Array<[string, Set<string>]> =
+  (${JSON.stringify(COMPANION_TOOL_KIND_NAME_TABLE)} as Array<[string, string[]]>)
+    .map(([kind, names]) => [kind, new Set(names)]);
+
+function toolNameWords(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+function toolRunKind(name: string): string {
+  const collapsed = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+  for (const [kind, names] of TOOL_KIND_NAMES) {
+    if (names.has(collapsed)) return kind;
+  }
+  const words = toolNameWords(name);
+  for (const [kind, names] of TOOL_KIND_NAMES) {
+    if (words.some((word) => names.has(word))) return kind;
+  }
+  return "tool";
+}
+
+function toolTimeoutFor(toolName: string): number {
+  return toolRunKind(toolName) === "shell" ? EXEC_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS;
+}
 
 const IMAGE_PATH_PATTERN = /${COMPANION_IMAGE_READ_PATH_PATTERN.source}/${COMPANION_IMAGE_READ_PATH_PATTERN.flags};
 const toolTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
@@ -76,7 +111,7 @@ function clearToolTimeouts() {
   toolTimeouts.clear();
 }
 
-function startToolTimeout(toolCallId: string, ctx: { abort(): void }) {
+function startToolTimeout(toolCallId: string, toolName: string, ctx: { abort(): void }) {
   const existing = toolTimeouts.get(toolCallId);
   if (existing) clearTimeout(existing);
   toolTimeouts.set(toolCallId, setTimeout(() => {
@@ -84,7 +119,7 @@ function startToolTimeout(toolCallId: string, ctx: { abort(): void }) {
     // timer must disappear with it so none can abort a later queued turn.
     clearToolTimeouts();
     ctx.abort();
-  }, TOOL_TIMEOUT_MS));
+  }, toolTimeoutFor(toolName)));
 }
 
 function decisionTitle(name: string): string {
@@ -102,14 +137,14 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
           reason: ${JSON.stringify(COMPANION_IMAGE_READ_REFUSAL)},
         };
       }
-      startToolTimeout(event.toolCallId, ctx);
+      startToolTimeout(event.toolCallId, event.toolName, ctx);
       return undefined;
     }
     // ask_user is an interactive decision with its own five-minute fail-closed UI deadline. Its
     // execute body does not perform external work, so the shorter execution timer must not abort a
     // still-actionable question.
     if (event.toolName === "ask_user") return undefined;
-    startToolTimeout(event.toolCallId, ctx);
+    startToolTimeout(event.toolCallId, event.toolName, ctx);
     return undefined;
   });
 

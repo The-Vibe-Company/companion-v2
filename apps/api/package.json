@@ -22,6 +22,7 @@
     "@better-auth/drizzle-adapter": "^1.6.23",
     "@companion/auth": "workspace:*",
     "@companion/billing": "workspace:*",
+    "@companion/box-runtime": "workspace:*",
     "@companion/companion-skill": "workspace:*",
     "@companion/contracts": "workspace:*",
     "@companion/core": "workspace:*",

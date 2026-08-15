@@ -84,6 +84,8 @@ interface TranscriptChrome {
   hint: string;
   onSendPress: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   onSendClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  /** Typing is intent: the surface may start waking an asleep Box before Send is ever pressed. */
+  onComposeIntent?: () => void;
 }
 
 const ChromeContext = createContext<TranscriptChrome | null>(null);
@@ -254,6 +256,7 @@ export function CompanionTranscript({
   openedThroughOrdinal,
   onSend,
   onThread,
+  onComposeIntent,
 }: {
   companion: Companion;
   thread: Thread | null;
@@ -266,6 +269,8 @@ export function CompanionTranscript({
   onSend: (content: string, clientMessageId: string) => Promise<boolean>;
   /** Replace the thread after a permission card is decided, without a full poll cycle. */
   onThread: (thread: Thread) => void;
+  /** Fired as the reader types; the surface uses it to start a wake ahead of the send. */
+  onComposeIntent?: () => void;
 }) {
   const canSend = thread ? thread.can_send : companion.access !== "viewer";
   const awake = companion.runtime.state === "running";
@@ -431,12 +436,14 @@ export function CompanionTranscript({
     hint,
     onSendPress: sendOnPress,
     onSendClick: swallowClickAfterPress,
+    onComposeIntent,
   }), [
     canSend,
     companion.name,
     empty,
     hint,
     loading,
+    onComposeIntent,
     replying,
     sendOnPress,
     swallowClickAfterPress,
@@ -525,7 +532,7 @@ function Trailer() {
 
 /** The composer, or — for a Viewer — the line that says why there is none. */
 function Footer() {
-  const { canSend, companionName, hint, onSendPress, onSendClick } = useChrome();
+  const { canSend, companionName, hint, onSendPress, onSendClick, onComposeIntent } = useChrome();
   if (!canSend) {
     return (
       <footer className="border-border text-muted-foreground shrink-0 border-t px-(--chat-gutter) py-3 text-xs">
@@ -553,6 +560,9 @@ function Footer() {
             // Escape belongs to the thread, not to the draft: a stray keystroke must never discard
             // text this composer is holding on to.
             cancelOnEscape={false}
+            // Typing is the strongest signal a send is coming: the surface can begin waking an
+            // asleep Box now, so the 45-65-second cold start has a head start when Send lands.
+            onInput={onComposeIntent}
           />
           <ComposerPrimitive.Send
             // THE-346: Send is the control the composer exists for, and a 32px square is not a thumb

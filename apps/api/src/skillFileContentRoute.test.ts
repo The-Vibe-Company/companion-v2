@@ -164,7 +164,7 @@ vi.mock("@companion/auth", () => ({
 vi.mock("@companion/db", () => dbMocks);
 vi.mock("@companion/core/services", () => serviceMocks);
 vi.mock("@companion/storage", () => storageMocks);
-vi.mock("./companionSkillPackage", () => localPackageMocks);
+vi.mock("@companion/box-runtime/companionSkillPackage", () => localPackageMocks);
 
 import { app } from "./index";
 

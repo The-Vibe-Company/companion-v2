@@ -1767,10 +1767,11 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(markerIndex).toBeGreaterThan(-1);
     expect(piResolveIndex).toBeGreaterThan(-1);
     expect(markerIndex).toBeLessThan(piResolveIndex);
-    // Layout 11 keeps unrestricted tools while adding bounded execution and the image-read refusal.
-    expect(COMPANION_PI_DISK_LAYOUT_VERSION).toBe(11);
+    // Layout 12 keeps unrestricted tools with bounded execution, and gives shell runs the longer
+    // execution deadline so a warm legacy Pi restarts once and picks the two-tier timer up.
+    expect(COMPANION_PI_DISK_LAYOUT_VERSION).toBe(12);
     expect(createdSetupScript)
-      .toContain("expected_layout='11:npm:pi-mcp-adapter@2.12.1'");
+      .toContain("expected_layout='12:npm:pi-mcp-adapter@2.12.1'");
     expect(createdSetupScript).toContain("--append-system-prompt");
     // The supervised daemon gets a minimal PATH from the systemd user manager, so Pi is resolved at
     // layout time and pinned both in the wrapper and on the unit.
@@ -3809,6 +3810,123 @@ describe("AsciiBoxCompanionRuntime", () => {
       message: "Anyone home?",
       requestId: "msg:2",
     })).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("leaves a healthy daemon untouched when asked to heal it", async () => {
+    const commands: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/commands") && method === "POST") {
+        commands.push(String(body.command));
+        return json({ success: true, exitCode: 0, stdout: "active\n", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    const healed = await runtime.healPiDaemon({ boxId: "bx_23456789" });
+
+    expect(healed).toEqual({ daemonState: "running", detail: null });
+    // An `is-active` daemon is the whole answer: nothing is reset and nothing is started.
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("is-active companion-pi-daemon.service");
+    expect(commands.some((command) => command.includes("reset-failed"))).toBe(false);
+    expect(commands.some((command) =>
+      command.includes("start companion-pi-daemon.service"))).toBe(false);
+  });
+
+  it("clears a latched failure and starts a stopped daemon back to running", async () => {
+    const commands: string[] = [];
+    let probes = 0;
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        if (command.includes("is-active")) {
+          probes += 1;
+          // Stopped before the start, active on the first probe after it.
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: probes === 1 ? "failed\n" : "active\n",
+            stderr: "",
+          });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const healed = await runtime.healPiDaemon({ boxId: "bx_23456789" });
+
+    expect(healed).toEqual({ daemonState: "running", detail: null });
+    const start = commands.find((command) =>
+      command.includes("start companion-pi-daemon.service")) ?? "";
+    // The latched failure is cleared before the start, and nothing is staged or rewritten: this is
+    // a restart of an already-provisioned unit, so no file travels and no credential is replaced.
+    expect(start.indexOf("reset-failed companion-pi-daemon.service"))
+      .toBeLessThan(start.indexOf("start companion-pi-daemon.service"));
+    expect(start).not.toContain("restart companion-pi-daemon.service");
+    expect(start).not.toContain("providers.env");
+  });
+
+  it("answers with the daemon's own failure detail when it stays down after the heal", async () => {
+    const commands: string[] = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        if (command.includes("companion_label")) {
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: [
+              "companion-pi-state failed",
+              "companion-pi-stderr pi: error: unknown option '--skill'",
+              "",
+            ].join("\n"),
+            stderr: "",
+          });
+        }
+        if (command.includes("is-active")) {
+          return json({ success: true, exitCode: 0, stdout: "failed\n", stderr: "" });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS: "20",
+    });
+
+    const healed = await runtime.healPiDaemon({ boxId: "bx_23456789" });
+
+    // A daemon that stays down is an answer with its reason, not a thrown failure.
+    expect(healed.daemonState).toBe("error");
+    expect(healed.detail).toContain(PI_DAEMON_FAILURE_MESSAGE);
+    expect(healed.detail).toContain("pi.stderr.log: pi: error: unknown option '--skill'");
+    expect(commands.some((command) =>
+      command.includes("reset-failed companion-pi-daemon.service"))).toBe(true);
+    // Healing observes and starts the unit; it never resumes, archives, or creates a Box.
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/stop"))).toBe(false);
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
   });
 
   it("reads the Pi event log from the requested offset and reports the offset it used", async () => {

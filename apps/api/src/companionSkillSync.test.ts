@@ -39,10 +39,10 @@ vi.mock("@companion/skills", () => ({
 vi.mock("@companion/storage", () => ({
   getSkillArchive: vi.fn(async () => Buffer.from("stored")),
 }));
-vi.mock("./companionSkillPackage", () => packageMocks);
-vi.mock("./boxCompanionRuntime", () => ({
+vi.mock("@companion/box-runtime", () => ({
   AsciiBoxCompanionRuntime: class {},
   COMPANION_PI_DISK_LAYOUT_VERSION: 9,
+  ...packageMocks,
 }));
 
 import { syncPublishedSkillToOnlineCompanions } from "./companionSkillSync";

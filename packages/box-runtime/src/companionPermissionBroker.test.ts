@@ -32,17 +32,33 @@ describe("Companion Pi interaction extension", () => {
     expect(companionImageReadRefusal("bash", { path: "/tmp/conductor-cli.png" })).toBeNull();
   });
 
-  it("stages the refusal and a 90-second abort timer for every execution tool", () => {
+  it("stages the refusal and a kind-aware abort timer for every execution tool", () => {
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain(COMPANION_IMAGE_READ_REFUSAL);
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("const TOOL_TIMEOUT_MS = 90000");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
+      .toContain("const EXEC_TOOL_TIMEOUT_MS = 600000");
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("ctx.abort()");
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain('pi.on("tool_result"');
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain('pi.on("turn_end"');
-    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("startToolTimeout(event.toolCallId, ctx)");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
+      .toContain("startToolTimeout(event.toolCallId, event.toolName, ctx)");
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("clearToolTimeouts()");
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain(
       'if (event.toolName === "ask_user") return undefined',
     );
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).not.toContain("runtime.abortTurn");
+  });
+
+  it("classifies shell runs with the control plane's own catalog, priority order included", () => {
+    // The embedded table must match core's classifier verbatim so the Box-side deadline and the
+    // control-plane settlement can never disagree on which runs are shell runs.
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain('["shell",');
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain('"bash"');
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
+      .toContain('toolRunKind(toolName) === "shell" ? EXEC_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS');
+    const shellIndex = COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE.indexOf('["shell",');
+    const browseIndex = COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE.indexOf('["browse",');
+    expect(browseIndex).toBeGreaterThan(-1);
+    expect(browseIndex).toBeLessThan(shellIndex);
   });
 });

@@ -25,6 +25,13 @@ import type {
 } from "@companion/contracts";
 import { apiFetch } from "./apiClient";
 
+/**
+ * Budget for multipart uploads. A skill archive may be 25 MB and a comment can carry images; on a
+ * slow uplink those legitimately outlive apiFetch's short default, and an aborted publish only
+ * retries into the same wall.
+ */
+const UPLOAD_TIMEOUT_MS = 180_000;
+
 export type { SkillFile };
 
 export interface PublishResult {
@@ -71,7 +78,8 @@ export async function publishSkillPackage(
   if (opts.expectSlug) fd.append("expect_slug", opts.expectSlug);
   if (opts.expectSkillId) fd.append("expect_skill_id", opts.expectSkillId);
   for (const dep of opts.dependencies ?? []) fd.append("dependency", dep);
-  return apiFetch<PublishResult>("/v1/skills", { method: "POST", body: fd });
+  // A 25 MB archive on a slow uplink legitimately outlives the default deadline.
+  return apiFetch<PublishResult>("/v1/skills", { method: "POST", body: fd }, { timeoutMs: UPLOAD_TIMEOUT_MS });
 }
 
 /**
@@ -98,7 +106,7 @@ export async function validateSkillPackage(
   const data = await apiFetch<{ result: ValidationResult; dependency_plan?: DependencyPlan }>("/v1/skills", {
     method: "POST",
     body: fd,
-  });
+  }, { timeoutMs: UPLOAD_TIMEOUT_MS });
   return { result: data.result, dependencyPlan: data.dependency_plan ?? null };
 }
 
@@ -206,7 +214,11 @@ export async function addComment(
     fd.append("parent_id", opts.parentId ?? "");
     fd.append("version_id", opts.versionId ?? "");
     for (const file of opts.images) fd.append("image", file);
-    return apiFetch<SkillCommentRow>(`/v1/skills/${slug}/comments`, { method: "POST", body: fd });
+    return apiFetch<SkillCommentRow>(
+      `/v1/skills/${slug}/comments`,
+      { method: "POST", body: fd },
+      { timeoutMs: UPLOAD_TIMEOUT_MS },
+    );
   }
   return apiFetch<SkillCommentRow>(`/v1/skills/${slug}/comments`, {
     method: "POST",

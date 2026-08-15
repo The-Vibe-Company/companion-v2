@@ -15,9 +15,9 @@ import { getSkillArchive } from "@companion/storage";
 import {
   AsciiBoxCompanionRuntime,
   COMPANION_PI_DISK_LAYOUT_VERSION,
+  getCompanionSkillPackage,
   type CompanionBoxRuntime,
-} from "./boxCompanionRuntime";
-import { getCompanionSkillPackage } from "./companionSkillPackage";
+} from "@companion/box-runtime";
 
 /**
  * After a Skills Hub publish/update, push the new package onto every Online Box that has that skill

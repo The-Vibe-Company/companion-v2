@@ -9,7 +9,7 @@ import {
   buildCompanionSkillPrompts,
   buildCompanionSkillRow,
   getCompanionSkillPackage,
-} from "./companionSkillPackage";
+} from "@companion/box-runtime";
 
 const workspaceId = "org-1";
 

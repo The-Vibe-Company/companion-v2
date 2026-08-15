@@ -92,7 +92,13 @@ export function composerHint(input: {
   state: CompanionRuntimeState;
 }): string {
   const pending = input.thread?.pending_count ?? 0;
-  if (pending < 1) return "Enter sends. Shift + Enter starts a new line.";
+  if (pending < 1) {
+    // A wake with nothing queued yet is the prewarm a keystroke started: say what the wait is and
+    // roughly how long, so the reader keeps typing instead of wondering whether anything happened.
+    return input.state === "provisioning"
+      ? `${input.companionName} is waking, usually under a minute. Send when ready.`
+      : "Enter sends. Shift + Enter starts a new line.";
+  }
   const count = `${pending} message${pending === 1 ? "" : "s"}`;
   if (input.state === "running") return `${count} waiting for delivery.`;
   if (input.state === "provisioning") {
