@@ -684,7 +684,7 @@ export function registerCompanionRoutes(
         instructions: mutation.companion.persona,
         // Skipping the write preserves a subscription token Pi refreshed on disk. A layout refresh
         // remains a cold resource-injection path, but it does not replace current provider auth or
-        // recycle Pi unless the credential generation itself is stale.
+        // recycle a warm Pi; staged resources load on its next natural start.
         replaceProviderAuth:
           !mutation.companion.runtime.box_id
           || mutation.companion.runtime.provider_credential_generation
@@ -1650,9 +1650,9 @@ export function registerCompanionRoutes(
   });
 
   /**
-   * Allow / Deny / answer a pending permission card. Owner/Editor only; Viewer is refused before any
-   * Box contact. The decision is persisted on the transcript, then the matching FIFO response
-   * unblocks Pi so Allow proceeds and Deny / timeout never executes the tool.
+   * Answer or deny a pending ask_user question. The wider action contract remains compatible with
+   * shell/file approval cards stored by older runtimes. Owner/Editor only; Viewer is refused before
+   * any Box contact. The decision is persisted before the matching FIFO response unblocks Pi.
    */
   app.post("/v1/companions/:id/decisions/:requestId", async (c) => {
     try {

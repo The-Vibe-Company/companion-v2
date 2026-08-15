@@ -5,10 +5,15 @@
  * `$PI_CODING_AGENT_DIR/extensions/` and projects the `extension_ui_request` events it emits.
  */
 
-/** Fail closed with the Box extension's own dialog timeout (5 minutes). Timeout → Deny. */
+/** Fail closed with the Box extension's own question timeout (5 minutes). Timeout → cancelled. */
 export const COMPANION_DECISION_TIMEOUT_MS = 5 * 60 * 1000;
 
-/** On-disk name under `$PI_CODING_AGENT_DIR/extensions/`. */
+/**
+ * On-disk name under `$PI_CODING_AGENT_DIR/extensions/`.
+ *
+ * Keep the legacy permission-broker filename so every start overwrites the older extension that
+ * gated shell and file tools. The current extension only provides the interactive `ask_user` tool.
+ */
 export const COMPANION_PERMISSION_BROKER_EXTENSION_FILE = "companion-permission-broker.ts";
 
 /** Title the extension puts on extension_ui_request events: `companion:<kind>:<tool>`. */
@@ -28,61 +33,27 @@ export function parseCompanionDecisionTitle(title: string): {
 }
 
 /**
- * Source installed onto every Companion Box so Pi pauses risky tools for a human decision.
+ * Source installed onto every Companion Box so Pi can ask the human a blocking question.
+ * Shell and file tools are deliberately not intercepted: a Companion runs them without approval.
  * Kept as text so the API package does not depend on Pi's extension types.
  */
 export const COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE = `/**
- * Companion permission broker — Pi extension installed on every Companion Box.
+ * Companion question broker — Pi extension installed on every Companion Box.
  *
- * Before bash / write / edit run, and when the model calls ask_user, this extension emits an
- * extension_ui_request over Pi's RPC log and blocks until the control plane answers with an
- * extension_ui_response (or the timeout fails closed). Titles use \`companion:<kind>:<name>\` so the
- * control plane can project a transcript card without guessing from free-form prose.
+ * The model can call ask_user to emit an extension_ui_request over Pi's RPC log and block until the
+ * control plane answers with an extension_ui_response (or the timeout cancels the question).
+ * Built-in shell and file tools remain unrestricted and execute without a confirmation request.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 const DECISION_TIMEOUT_MS = ${COMPANION_DECISION_TIMEOUT_MS};
 
-const GATED_TOOLS: Record<string, "shell" | "file"> = {
-  bash: "shell",
-  write: "file",
-  edit: "file",
-};
-
-function decisionTitle(kind: "shell" | "file" | "question", name: string): string {
-  return \`companion:\${kind}:\${name}\`;
-}
-
-function summarize(kind: "shell" | "file", name: string, input: Record<string, unknown>): string {
-  if (kind === "shell") {
-    const command = input.command ?? input.cmd ?? input.script;
-    return typeof command === "string" && command.trim() ? command.trim() : name;
-  }
-  const path = input.path ?? input.file_path ?? input.filePath ?? input.file;
-  return typeof path === "string" && path.trim() ? path.trim() : name;
+function decisionTitle(name: string): string {
+  return \`companion:question:\${name}\`;
 }
 
 export default function companionPermissionBroker(pi: ExtensionAPI) {
-  pi.on("tool_call", async (event, ctx) => {
-    const kind = GATED_TOOLS[event.toolName];
-    if (!kind) return undefined;
-    if (!ctx.hasUI) {
-      return { block: true, reason: "Blocked: no permission UI available" };
-    }
-    const input = (event.input ?? {}) as Record<string, unknown>;
-    const detail = summarize(kind, event.toolName, input);
-    const allowed = await ctx.ui.confirm(
-      decisionTitle(kind, event.toolName),
-      detail,
-      { timeout: DECISION_TIMEOUT_MS },
-    );
-    if (!allowed) {
-      return { block: true, reason: "Denied by user or timed out" };
-    }
-    return undefined;
-  });
-
   pi.registerTool({
     name: "ask_user",
     label: "Ask user",
@@ -107,7 +78,7 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
         };
       }
       const answer = await ctx.ui.input(
-        decisionTitle("question", "ask_user"),
+        decisionTitle("ask_user"),
         question,
         { timeout: DECISION_TIMEOUT_MS },
       );
