@@ -1,12 +1,13 @@
 "use client";
 
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import type { Companion, CompanionProvidersResponse } from "@companion/contracts";
 import { createCompanion } from "@/lib/companions";
 import { Dialog } from "../org/primitives";
 import {
   CompanionProviderModelPicker,
   providerDefaultModel,
+  validProviderSelection,
 } from "./CompanionProviderModelPicker";
 import { CompanionSkillPicker } from "./CompanionSkillPicker";
 import { CompanionPluginPicker } from "./CompanionPluginPicker";
@@ -43,6 +44,12 @@ export function NewCompanionDialog({
   const [selectedMcpAccountIds, setSelectedMcpAccountIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const selection = validProviderSelection(providers, providerId, modelId);
+    if (selection.providerId !== providerId) setProviderId(selection.providerId);
+    if (selection.modelId !== modelId) setModelId(selection.modelId);
+  }, [modelId, providerId, providers]);
 
   const connected = providers.connections.length > 0;
 

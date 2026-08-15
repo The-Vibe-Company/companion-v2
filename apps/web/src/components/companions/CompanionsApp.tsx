@@ -23,6 +23,10 @@ import type {
 import { COMPANION_PROVIDER_CATALOG } from "@companion/contracts";
 import type { OrgVM } from "@/lib/types";
 import {
+  companionProviderSettingsCache,
+  type CompanionProviderSettingsCacheSnapshot,
+} from "@/lib/companionProviderSettingsCache";
+import {
   duplicateCompanion,
   getCompanionRuntime,
   getCompanionThread,
@@ -383,10 +387,20 @@ export function CompanionsApp({
 }) {
   const router = useRouter();
   const orgActions = useOrgActions();
+  const initialProviderCacheRef = useRef<
+    CompanionProviderSettingsCacheSnapshot | null | undefined
+  >(undefined);
+  if (initialProviderCacheRef.current === undefined) {
+    initialProviderCacheRef.current = initialProviders
+      ? null
+      : companionProviderSettingsCache.read(viewer.id, currentOrg.id);
+  }
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [companions, setCompanions] = useState(initialCompanions);
-  const [providers, setProviders] = useState<CompanionProvidersResponse | null>(initialProviders);
+  const [providers, setProviders] = useState<CompanionProvidersResponse | null>(
+    initialProviders ?? initialProviderCacheRef.current?.providers ?? null,
+  );
   const [providersError, setProvidersError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
@@ -498,11 +512,20 @@ export function CompanionsApp({
     ?? "";
   const canManageProviders = providers?.can_manage
     ?? (currentOrg.myRole === "owner" || currentOrg.myRole === "admin");
+  const updateProviders = useCallback((next: CompanionProvidersResponse) => {
+    setProviders(
+      companionProviderSettingsCache.updateAfterMutation(viewer.id, currentOrg.id, next),
+    );
+  }, [currentOrg.id, viewer.id]);
   const loadProviderSettings = useCallback(async () => {
     const requestId = ++providerRequestRef.current;
     setProvidersError(null);
     try {
-      const next = await listCompanionProviders(currentOrg.id);
+      const next = await companionProviderSettingsCache.refresh(
+        viewer.id,
+        currentOrg.id,
+        () => listCompanionProviders(currentOrg.id),
+      );
       if (requestId === providerRequestRef.current) setProviders(next);
     } catch (cause) {
       if (requestId !== providerRequestRef.current) return;
@@ -510,7 +533,7 @@ export function CompanionsApp({
         cause instanceof Error ? cause.message : "Provider settings could not be loaded.",
       );
     }
-  }, [currentOrg.id]);
+  }, [currentOrg.id, viewer.id]);
 
   const sidebarCompanions = useMemo(
     () => companions.map((companion) => {
@@ -701,16 +724,24 @@ export function CompanionsApp({
   // The panel preference is per device, so it can only be read once the client owns the page.
   useEffect(() => setContextOpen(readContextOpen()), []);
 
-  // The live pi.dev catalog may take up to its bounded network timeout on a cold API process. It is
-  // required by creation/settings, but not by the conversation list, so load it after the route has
-  // switched instead of making every Skills -> Companions navigation wait for an external service.
+  // The live pi.dev catalog may take up to its bounded network timeout on a cold API process. A
+  // fresh per-reader/workspace cache avoids that wait on return visits; stale data remains usable
+  // while one shared refresh runs in the background.
   useEffect(() => {
-    if (initialProviders) return;
-    void loadProviderSettings();
+    if (initialProviders) {
+      companionProviderSettingsCache.set(viewer.id, currentOrg.id, initialProviders);
+      return;
+    }
+    if (!initialProviderCacheRef.current?.fresh) {
+      // Another mount may have completed the shared refresh between this render and its effect.
+      const latest = companionProviderSettingsCache.read(viewer.id, currentOrg.id);
+      if (latest?.fresh) setProviders(latest.providers);
+      else void loadProviderSettings();
+    }
     return () => {
       providerRequestRef.current += 1;
     };
-  }, [initialProviders, loadProviderSettings]);
+  }, [currentOrg.id, initialProviders, loadProviderSettings, viewer.id]);
 
   /**
    * Where this reader left off, taken from the first thread payload after opening: the control plane
@@ -1155,20 +1186,34 @@ export function CompanionsApp({
             />
           </>
         ) : settingsCompanion && providers ? (
-          <CompanionSettings
-            orgId={currentOrg.id}
-            companion={settingsCompanion}
-            providers={providers}
-            onBack={closeSettings}
-            onSaved={(updated) => {
-              replaceCompanion(updated);
-            }}
-            onDeleted={(companionId) => {
-              setCompanions((current) => current.filter((item) => item.id !== companionId));
-              setSettingsId(null);
-              router.push("/companions");
-            }}
-          />
+          <>
+            {providersError && (
+              <div className="companions-thread-notice" role="alert">
+                <span>{providersError}</span>
+                <button
+                  type="button"
+                  className="cds-btn cds-btn--secondary cds-btn--sm"
+                  onClick={() => void loadProviderSettings()}
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+            <CompanionSettings
+              orgId={currentOrg.id}
+              companion={settingsCompanion}
+              providers={providers}
+              onBack={closeSettings}
+              onSaved={(updated) => {
+                replaceCompanion(updated);
+              }}
+              onDeleted={(companionId) => {
+                setCompanions((current) => current.filter((item) => item.id !== companionId));
+                setSettingsId(null);
+                router.push("/companions");
+              }}
+            />
+          </>
         ) : settingsCompanion ? (
           <div className="companions-content" role="status">
             <p className="companions-list-empty">
@@ -1382,7 +1427,7 @@ export function CompanionsApp({
         <CompanionProvidersDialog
           orgId={currentOrg.id}
           providers={providers}
-          onProviders={setProviders}
+          onProviders={updateProviders}
           onClose={() => setManagingProviders(false)}
         />
       )}

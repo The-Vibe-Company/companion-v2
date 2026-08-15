@@ -24,6 +24,30 @@ export function providerSelectedModel(
     : providerDefaultModel(providers, providerId);
 }
 
+export function validProviderSelection(
+  providers: CompanionProvidersResponse,
+  providerId: string,
+  modelId: string | null,
+): { providerId: string; modelId: string } {
+  const connectedProviderIds = providers.connections
+    .map((connection) => connection.provider_id)
+    .filter((id) => providers.catalog.some((provider) => provider.id === id));
+  const nextProviderId = connectedProviderIds.includes(providerId)
+    ? providerId
+    : providers.default_provider_id
+      && connectedProviderIds.includes(providers.default_provider_id)
+      ? providers.default_provider_id
+      : connectedProviderIds[0] ?? "";
+  return {
+    providerId: nextProviderId,
+    modelId: providerSelectedModel(
+      providers,
+      nextProviderId,
+      nextProviderId === providerId ? modelId : null,
+    ),
+  };
+}
+
 export function CompanionProviderModelPicker({
   providers,
   providerId,

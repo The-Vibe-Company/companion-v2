@@ -18,6 +18,7 @@ import { Dialog } from "../org/primitives";
 import {
   CompanionProviderModelPicker,
   providerSelectedModel,
+  validProviderSelection,
 } from "./CompanionProviderModelPicker";
 import { CompanionSkillPicker } from "./CompanionSkillPicker";
 import { CompanionPluginPicker } from "./CompanionPluginPicker";
@@ -78,6 +79,12 @@ export function CompanionSettings({
     setRuntimeSnapshot(companion.runtime);
     setRuntimeNeedsRefresh(false);
   }, [companion.runtime]);
+
+  useEffect(() => {
+    const selection = validProviderSelection(providers, providerId, modelId);
+    if (selection.providerId !== providerId) setProviderId(selection.providerId);
+    if (selection.modelId !== modelId) setModelId(selection.modelId);
+  }, [modelId, providerId, providers]);
 
   useEffect(() => {
     setLatest(companion);
