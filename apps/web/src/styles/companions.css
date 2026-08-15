@@ -695,6 +695,101 @@
   font-size: var(--text-sm);
 }
 
+.companions-settings__runtime {
+  margin-top: 22px;
+  padding-top: 24px;
+  display: grid;
+  gap: 16px;
+  border-top: 1px solid var(--color-line);
+}
+
+.companions-settings__runtime h2,
+.companions-settings__runtime p {
+  margin: 0;
+}
+
+.companions-settings__runtime h2 {
+  color: var(--color-fg);
+  font-size: var(--text-md);
+}
+
+.companions-settings__runtime > div:first-child p {
+  margin-top: 5px;
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+
+.companions-settings__restart-options {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.companions-settings__restart-options label {
+  min-width: 0;
+  padding: 12px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.companions-settings__restart-options label:has(input:checked) {
+  border-color: var(--color-accent-line);
+  background: var(--color-accent-tint);
+  box-shadow: inset 2px 0 0 var(--color-accent-edge);
+}
+
+.companions-settings__restart-options input {
+  margin: 3px 0 0;
+  accent-color: var(--color-accent-edge);
+}
+
+.companions-settings__restart-options input:focus-visible {
+  outline: 2px solid var(--color-accent-ring);
+  outline-offset: 2px;
+}
+
+.companions-settings__restart-options span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.companions-settings__restart-options strong {
+  color: var(--color-fg);
+  font-size: var(--text-sm);
+}
+
+.companions-settings__restart-options small {
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+.companions-settings__restart-options:disabled label {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.companions-settings__restart-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.companions-settings__restart-action .companions-settings__hint {
+  margin: 0;
+}
+
 .companions-settings__danger {
   margin-top: 22px;
   padding-top: 24px;
@@ -721,7 +816,8 @@
   font-size: var(--text-sm);
 }
 
-.companions-delete-dialog {
+.companions-delete-dialog,
+.companions-restart-dialog {
   width: min(500px, 100%);
 }
 
@@ -1141,7 +1237,7 @@
 
 /* The head is one row and stays one row. Everything beside the identity keeps the width it asks for,
    and the identity is the only thing that gives, so a long name shortens instead of pushing the Box
-   chip and Wake off the right edge. */
+   status chip and settings controls off the right edge. */
 .chat-head > * {
   flex: none;
 }
@@ -1654,6 +1750,15 @@ button.chat-box:focus-visible {
     flex-direction: column;
   }
 
+  .companions-settings__restart-options {
+    grid-template-columns: 1fr;
+  }
+
+  .companions-settings__restart-action {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .companions-plugin-row {
     grid-template-columns: 34px minmax(0, 1fr) auto;
     grid-template-areas:
@@ -1756,7 +1861,7 @@ button.chat-box:focus-visible {
     min-height: 44px;
   }
 
-  /* Back and Wake are thumb targets; the head grows a little rather than the controls shrinking. */
+  /* Back and header actions are thumb targets; the head grows rather than the controls shrinking. */
   .chat-head .chat-back {
     width: 44px;
     min-height: 44px;

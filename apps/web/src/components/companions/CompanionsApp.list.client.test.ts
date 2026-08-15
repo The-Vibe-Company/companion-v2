@@ -304,19 +304,13 @@ describe("CompanionsApp conversation list", () => {
     expect(row(container).querySelector(".cmprow__unread")).toBeNull();
   });
 
-  it("keeps a preview a mutation did not answer with", async () => {
-    // Every mutation reports `last_message: null`; replacing the row wholesale would blank the line
-    // the sidebar is showing. A wake is the mutation a reader is most likely to be watching.
-    companionsApi.startCompanionRuntime.mockResolvedValue(
+  it("keeps a preview a runtime read did not answer with", async () => {
+    // Runtime reads that update lifecycle state may report `last_message: null`; replacing the row
+    // wholesale would blank the line the sidebar is showing.
+    companionsApi.getCompanionRuntime.mockResolvedValue(
       companion({ last_message: null, runtime: { ...companion().runtime, state: "provisioning" } }),
     );
     const container = await render([companion()], companionId);
-
-    const wake = [...container.querySelectorAll("button")]
-      .find((button) => button.textContent?.includes("Wake")) as HTMLButtonElement;
-    await act(async () => {
-      wake.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
 
     expect(row(container).textContent).toContain("Drafted the launch note.");
   });
@@ -396,7 +390,7 @@ describe("CompanionsApp conversation list", () => {
       companion({ id: nova, name: "Nova", pinned: true, updated_at: "2026-08-10T09:00:00.000Z" }),
       luna,
     ];
-    companionsApi.startCompanionRuntime.mockResolvedValue({
+    companionsApi.getCompanionRuntime.mockResolvedValue({
       ...luna,
       runtime: { ...luna.runtime, state: "provisioning" },
     });
@@ -405,12 +399,6 @@ describe("CompanionsApp conversation list", () => {
     const names = () => [...container.querySelectorAll(".cmprow__name")]
       .map((row) => row.textContent);
     expect(names()).toEqual(["Nova", "Luna"]);
-
-    const wake = [...container.querySelectorAll("button")]
-      .find((button) => button.textContent?.includes("Wake")) as HTMLButtonElement;
-    await act(async () => {
-      wake.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
 
     expect(names()).toEqual(["Nova", "Luna"]);
   });

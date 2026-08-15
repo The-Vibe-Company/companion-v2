@@ -37,6 +37,9 @@ Give organizations one secure, self-hostable place to govern reusable AI coding 
   minted through browser PKCE or device authorization instead of pasted `auth.json`; access and
   refresh tokens stay server-side. Auth entries are resolved only for the selected Companion and
   sent to Box; provider errors are clear and value-free.
+- An open thread keeps `Starting / Online / Asleep / Error` synchronized without reload; sending a
+  message is the only normal wake action. Owner and Editor Settings expose online-only Pi restart by
+  default plus a confirmed full-Box restart, while Viewer sees neither runtime mutation control.
 
 ### Security
 
