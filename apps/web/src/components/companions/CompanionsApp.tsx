@@ -9,12 +9,14 @@ import type {
   CompanionProvidersResponse,
   CompanionThread as Thread,
 } from "@companion/contracts";
+import { COMPANION_PROVIDER_CATALOG } from "@companion/contracts";
 import type { OrgVM } from "@/lib/types";
 import {
   duplicateCompanion,
   getCompanionRuntime,
   getCompanionThread,
   listCompanions,
+  listCompanionProviders,
   openCompanionDesktop,
   sendCompanionMessage,
   setCompanionProvider,
@@ -144,7 +146,7 @@ export function CompanionsApp({
   /** Every skill this reader can see, so the context panel can name the ones a Companion stages. */
   skills: CompanionContextSkill[];
   initialCompanions: Companion[];
-  initialProviders: CompanionProvidersResponse;
+  initialProviders: CompanionProvidersResponse | null;
   initialPlugins: CompanionPluginAccount[];
   initialCompanionId?: string | null;
   initialSettingsCompanionId?: string | null;
@@ -155,7 +157,8 @@ export function CompanionsApp({
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [companions, setCompanions] = useState(initialCompanions);
-  const [providers, setProviders] = useState(initialProviders);
+  const [providers, setProviders] = useState<CompanionProvidersResponse | null>(initialProviders);
+  const [providersError, setProvidersError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
   const [managingProviders, setManagingProviders] = useState(false);
@@ -214,6 +217,7 @@ export function CompanionsApp({
     joining: boolean;
   } | null>(null);
   const threadRequestRef = useRef(0);
+  const providerRequestRef = useRef(0);
   /** The Companion whose read watermark has already been captured for the open thread. */
   const capturedReadRef = useRef<string | null>(null);
   /**
@@ -245,10 +249,26 @@ export function CompanionsApp({
   const openedPending = opened?.runtime.state === "provisioning" || opened?.runtime.state === "stopping";
 
   const providerName = (providerId: string) =>
-    providers.catalog.find((provider) => provider.id === providerId)?.name ?? providerId;
-  const fallbackProvider = providers.default_provider_id
-    ?? providers.connections[0]?.provider_id
+    (providers?.catalog ?? COMPANION_PROVIDER_CATALOG)
+      .find((provider) => provider.id === providerId)?.name ?? providerId;
+  const fallbackProvider = providers?.default_provider_id
+    ?? providers?.connections[0]?.provider_id
     ?? "";
+  const canManageProviders = providers?.can_manage
+    ?? (currentOrg.myRole === "owner" || currentOrg.myRole === "admin");
+  const loadProviderSettings = useCallback(async () => {
+    const requestId = ++providerRequestRef.current;
+    setProvidersError(null);
+    try {
+      const next = await listCompanionProviders(currentOrg.id);
+      if (requestId === providerRequestRef.current) setProviders(next);
+    } catch (cause) {
+      if (requestId !== providerRequestRef.current) return;
+      setProvidersError(
+        cause instanceof Error ? cause.message : "Provider settings could not be loaded.",
+      );
+    }
+  }, [currentOrg.id]);
 
   const sidebarCompanions = useMemo(
     () => companions.map((companion) => {
@@ -434,6 +454,17 @@ export function CompanionsApp({
 
   // The panel preference is per device, so it can only be read once the client owns the page.
   useEffect(() => setContextOpen(readContextOpen()), []);
+
+  // The live pi.dev catalog may take up to its bounded network timeout on a cold API process. It is
+  // required by creation/settings, but not by the conversation list, so load it after the route has
+  // switched instead of making every Skills -> Companions navigation wait for an external service.
+  useEffect(() => {
+    if (initialProviders) return;
+    void loadProviderSettings();
+    return () => {
+      providerRequestRef.current += 1;
+    };
+  }, [initialProviders, loadProviderSettings]);
 
   /**
    * Where this reader left off, taken from the first thread payload after opening: the control plane
@@ -796,13 +827,10 @@ export function CompanionsApp({
         onSelectSecrets={() => router.push("/secrets")}
         companionsEnabled
         mode="companions"
-        onSelectMode={(mode) => {
-          if (mode === "skills") router.push("/skills");
-        }}
         companions={sidebarCompanions}
         onOpenPlugins={openPlugins}
         pluginsActive={pluginsOpen}
-        onOpenProviders={providers.can_manage ? () => setManagingProviders(true) : undefined}
+        onOpenProviders={providers && canManageProviders ? () => setManagingProviders(true) : undefined}
         viewer={viewer}
         activeCompanionId={openedId ?? settingsId}
         onSelectCompanion={(companionId) => {
@@ -836,6 +864,18 @@ export function CompanionsApp({
       >
         {opened ? (
           <>
+            {providersError && (
+              <div className="companions-thread-notice" role="alert">
+                <span>{providersError}</span>
+                <button
+                  type="button"
+                  className="cds-btn cds-btn--secondary cds-btn--sm"
+                  onClick={() => void loadProviderSettings()}
+                >
+                  Retry
+                </button>
+              </div>
+            )}
             {opened.access === "owner" && !opened.runtime.provider_ids.length && fallbackProvider && (
               <div className="companions-thread-notice">
                 <span>This Companion has no provider yet.</span>
@@ -881,7 +921,7 @@ export function CompanionsApp({
               onDesktop={() => void onDesktop()}
             />
           </>
-        ) : settingsCompanion ? (
+        ) : settingsCompanion && providers ? (
           <CompanionSettings
             orgId={currentOrg.id}
             companion={settingsCompanion}
@@ -896,6 +936,21 @@ export function CompanionsApp({
               router.push("/companions");
             }}
           />
+        ) : settingsCompanion ? (
+          <div className="companions-content" role="status">
+            <p className="companions-list-empty">
+              {providersError ?? "Loading provider settings…"}
+            </p>
+            {providersError && (
+              <button
+                type="button"
+                className="cds-btn cds-btn--secondary cds-btn--md"
+                onClick={() => void loadProviderSettings()}
+              >
+                Retry
+              </button>
+            )}
+          </div>
         ) : pluginsOpen ? (
           <CompanionPlugins
             orgId={currentOrg.id}
@@ -916,7 +971,11 @@ export function CompanionsApp({
                 <button
                   type="button"
                   className="cds-btn cds-btn--primary cds-btn--md"
-                  onClick={() => setCreating(true)}
+                  disabled={!providers}
+                  onClick={() => {
+                    if (providers) setCreating(true);
+                  }}
+                  title={providers ? "New companion" : "Provider settings are loading"}
                 >
                   <Icon name="plus" size={15} /> New companion
                 </button>
@@ -925,6 +984,23 @@ export function CompanionsApp({
 
             <div className="companions-content">
               {error && <div className="companions-error" role="alert">{error}</div>}
+              {!providers && !providersError && (
+                <p className="companions-list-empty" role="status">
+                  Loading provider settings…
+                </p>
+              )}
+              {providersError && (
+                <div className="companions-error" role="alert">
+                  {providersError}{" "}
+                  <button
+                    type="button"
+                    className="cds-link"
+                    onClick={() => void loadProviderSettings()}
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
 
               {companions.length === 0 ? (
                 <div className="companions-empty">
@@ -934,7 +1010,10 @@ export function CompanionsApp({
                   <button
                     type="button"
                     className="cds-btn cds-btn--primary cds-btn--md"
-                    onClick={() => setCreating(true)}
+                    disabled={!providers}
+                    onClick={() => {
+                      if (providers) setCreating(true);
+                    }}
                   >
                     New companion
                   </button>
@@ -1131,7 +1210,7 @@ export function CompanionsApp({
         )}
       </main>
 
-      {creating && (
+      {creating && providers && (
         <NewCompanionDialog
           orgId={currentOrg.id}
           providers={providers}
@@ -1144,7 +1223,7 @@ export function CompanionsApp({
         />
       )}
 
-      {managingProviders && (
+      {managingProviders && providers && (
         <CompanionProvidersDialog
           orgId={currentOrg.id}
           providers={providers}
