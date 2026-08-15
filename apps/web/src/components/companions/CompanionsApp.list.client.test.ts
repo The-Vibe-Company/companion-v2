@@ -12,9 +12,12 @@ import { CompanionsApp, type CompanionNavigation } from "./CompanionsApp";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-vi.mock("next/navigation", () => ({ useRouter: () => ({ push: () => {}, refresh: () => {} }) }));
+const routerPush = vi.hoisted(() => vi.fn());
+
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: routerPush, refresh: () => {} }) }));
 
 const companionsApi = vi.hoisted(() => ({
+  duplicateCompanion: vi.fn(),
   getCompanionRuntime: vi.fn(),
   getCompanionThread: vi.fn(),
   listCompanions: vi.fn(),
@@ -23,6 +26,7 @@ const companionsApi = vi.hoisted(() => ({
   setCompanionProvider: vi.fn(),
   startCompanionRuntime: vi.fn(),
   syncCompanionThread: vi.fn(),
+  updateCompanionMemberState: vi.fn(),
 }));
 
 vi.mock("@/lib/companions", async (importOriginal) => ({
@@ -161,6 +165,12 @@ function row(container: HTMLElement, index = 0) {
   return container.querySelectorAll(".cmprow")[index] as HTMLElement;
 }
 
+function setControlled(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+  setter?.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 describe("CompanionsApp conversation list", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -169,6 +179,13 @@ describe("CompanionsApp conversation list", () => {
     companionsApi.getCompanionThread.mockResolvedValue(thread());
     companionsApi.syncCompanionThread.mockResolvedValue(thread());
     companionsApi.getCompanionRuntime.mockResolvedValue(companion());
+    companionsApi.updateCompanionMemberState.mockImplementation(
+      async (_orgId: string, _companionId: string, patch: Partial<Companion>) => companion(patch),
+    );
+    companionsApi.duplicateCompanion.mockResolvedValue(companion({
+      id: "33333333-3333-4333-8333-333333333333",
+      name: "Luna copy",
+    }));
   });
 
   afterEach(() => {
@@ -190,6 +207,143 @@ describe("CompanionsApp conversation list", () => {
 
     expect(row(container).textContent).toContain("Drafted the launch note.");
     expect(row(container).querySelector(".cmprow__unread")).toBeNull();
+  });
+
+  it("keeps the shared search toolbar visible for empty and no-match states", async () => {
+    const empty = await render([]);
+    expect(empty.querySelector<HTMLInputElement>('input[aria-label="Search companions"]')).not.toBeNull();
+    expect(empty.querySelector(".empty__title")?.textContent).toBe("No Companions yet");
+
+    act(() => roots.pop()?.unmount());
+    empty.remove();
+
+    const container = await render([
+      companion(),
+      companion({
+        id: "22222222-2222-4222-8222-222222222222",
+        name: "Stashed",
+        hidden: true,
+      }),
+    ]);
+    const search = container.querySelector<HTMLInputElement>('input[aria-label="Search companions"]')!;
+    await act(async () => setControlled(search, "missing"));
+
+    expect(container.querySelector(".empty__title")?.textContent).toBe("No Companions match");
+    expect(container.querySelector(".companions-hidden")).toBeNull();
+  });
+
+  it("opens the single row menu from the keyboard without opening the chat", async () => {
+    const container = await render([companion()]);
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Actions for Luna"]')!;
+    trigger.focus();
+
+    await act(async () => {
+      trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    });
+
+    const menu = document.body.querySelector<HTMLElement>('[role="menu"][aria-label="Actions for Luna"]');
+    expect(menu).not.toBeNull();
+    expect(menu?.textContent).toContain("Settings");
+    expect(menu?.textContent).toContain("Share");
+    expect(menu?.textContent).toContain("Pin");
+    expect(menu?.textContent).toContain("Mark as unread");
+    expect(menu?.textContent).toContain("Duplicate");
+    expect(menu?.textContent).toContain("Hide");
+    expect(document.activeElement?.textContent).toBe("Settings");
+    expect(container.textContent).not.toContain("Chat with Luna");
+
+    await act(async () => {
+      menu?.querySelector<HTMLButtonElement>('button[role="menuitem"]')?.click();
+    });
+    expect(routerPush).toHaveBeenCalledWith(`/companions/${companionId}/settings`);
+    expect(container.textContent).not.toContain("Chat with Luna");
+  });
+
+  it("keeps owner-only actions out of a Viewer's row menu", async () => {
+    const container = await render([companion({ access: "viewer", owner_id: "user-2" })]);
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Actions for Luna"]')!;
+
+    await act(async () => trigger.click());
+
+    const menu = document.body.querySelector<HTMLElement>('[role="menu"][aria-label="Actions for Luna"]');
+    expect(menu?.textContent).not.toContain("Settings");
+    expect(menu?.textContent).toContain("Pin");
+    expect(menu?.textContent).toContain("Mark as unread");
+    expect(menu?.textContent).toContain("Hide");
+    expect(menu?.textContent).not.toContain("Share");
+    expect(menu?.textContent).not.toContain("Duplicate");
+  });
+
+  it("opens the last menu action with ArrowUp", async () => {
+    const container = await render([companion()]);
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Actions for Luna"]')!;
+    trigger.focus();
+
+    await act(async () => {
+      trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    });
+
+    expect(document.activeElement?.textContent).toBe("Hide");
+  });
+
+  it("routes member-state actions through the row menu and applies the server result", async () => {
+    const container = await render([companion()]);
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Actions for Luna"]')!;
+
+    await act(async () => trigger.click());
+    const pin = [...document.body.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((item) => item.textContent === "Pin")!;
+    await act(async () => pin.click());
+
+    expect(companionsApi.updateCompanionMemberState).toHaveBeenCalledWith(
+      "org-1",
+      companionId,
+      { pinned: true },
+    );
+    expect(container.querySelector(".companions-row--pinned")).not.toBeNull();
+  });
+
+  it("duplicates from the row menu and renders the returned Companion", async () => {
+    const container = await render([companion()]);
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Actions for Luna"]')!;
+
+    await act(async () => trigger.click());
+    const duplicate = [...document.body.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((item) => item.textContent === "Duplicate")!;
+    await act(async () => duplicate.click());
+
+    expect(companionsApi.duplicateCompanion).toHaveBeenCalledWith("org-1", companionId);
+    expect(container.textContent).toContain("Luna copy");
+  });
+
+  it("keeps hidden Companions in the same row grammar with a focused restore menu", async () => {
+    const container = await render([
+      companion({ name: "Visible" }),
+      companion({
+        id: "22222222-2222-4222-8222-222222222222",
+        name: "Stashed",
+        hidden: true,
+      }),
+    ]);
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Actions for Stashed"]')!;
+
+    await act(async () => trigger.click());
+
+    const menu = document.body.querySelector<HTMLElement>('[role="menu"][aria-label="Actions for Stashed"]');
+    expect(menu?.textContent).toContain("Settings");
+    expect(menu?.textContent).toContain("Unhide");
+    expect(menu?.textContent).not.toContain("Hide");
+  });
+
+  it("opens the chat from the primary row button", async () => {
+    const container = await render([companion()]);
+    const main = container.querySelector<HTMLButtonElement>(".companions-row__main")!;
+
+    await act(async () => main.click());
+
+    expect(container.querySelector('[aria-label="Back to Companions"]')).not.toBeNull();
   });
 
   it("clears the mark on the thread it opens, including one reached by a deep link", async () => {

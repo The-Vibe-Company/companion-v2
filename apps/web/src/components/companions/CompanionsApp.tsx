@@ -1,6 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import type {
   Companion,
@@ -23,6 +34,13 @@ import {
   updateCompanionMemberState,
 } from "@/lib/companions";
 import { Icon } from "../Icon";
+import {
+  ResourceListColumns,
+  ResourceListEmpty,
+  ResourceListFrame,
+  ResourceListHeader,
+  ResourceListToolbar,
+} from "../ResourceList";
 import { RelativeTime } from "./RelativeTime";
 import { CompanionProvidersDialog } from "./CompanionProvidersDialog";
 import { CompanionPlugins } from "./CompanionPlugins";
@@ -121,6 +139,206 @@ function threadUrl(companionId: string | null): void {
   }
   else url.searchParams.delete("companion");
   window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+}
+
+function CompanionActionsMenu({
+  companion,
+  busy,
+  personalWorkspace,
+  hidden = false,
+  onSettings,
+  onShare,
+  onMemberState,
+  onDuplicate,
+}: {
+  companion: Companion;
+  busy: boolean;
+  personalWorkspace: boolean;
+  hidden?: boolean;
+  onSettings: () => void;
+  onShare: () => void;
+  onMemberState: (patch: { pinned?: boolean; hidden?: boolean; unread?: boolean }) => void;
+  onDuplicate: () => void;
+}) {
+  const menuId = useId();
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const openFocusRef = useRef<"first" | "last">("first");
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<CSSProperties>({ left: -9999, top: -9999 });
+
+  const positionMenu = useCallback(() => {
+    const trigger = triggerRef.current;
+    const menu = menuRef.current;
+    if (!trigger || !menu) return;
+    const anchor = trigger.getBoundingClientRect();
+    const box = menu.getBoundingClientRect();
+    const viewportPadding = 8;
+    const gap = 4;
+    let top = anchor.bottom + gap;
+    if (top + box.height > window.innerHeight - viewportPadding) {
+      top = Math.max(viewportPadding, anchor.top - box.height - gap);
+    }
+    const maxLeft = Math.max(viewportPadding, window.innerWidth - viewportPadding - box.width);
+    const left = Math.min(
+      Math.max(viewportPadding, anchor.right - box.width),
+      maxLeft,
+    );
+    setPosition({ left, top });
+  }, []);
+
+  const close = useCallback((returnFocus = false) => {
+    setOpen(false);
+    if (returnFocus) window.requestAnimationFrame(() => triggerRef.current?.focus());
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    positionMenu();
+    window.requestAnimationFrame(() => {
+      const items = menuRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
+      const item = openFocusRef.current === "last" ? items?.item((items?.length ?? 1) - 1) : items?.item(0);
+      item?.focus();
+    });
+  }, [open, positionMenu]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (triggerRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      close();
+    };
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      close(true);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onEscape);
+    window.addEventListener("resize", positionMenu);
+    window.addEventListener("scroll", positionMenu, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onEscape);
+      window.removeEventListener("resize", positionMenu);
+      window.removeEventListener("scroll", positionMenu, true);
+    };
+  }, [close, open, positionMenu]);
+
+  const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    let next = current;
+    if (event.key === "ArrowDown") next = current < items.length - 1 ? current + 1 : 0;
+    else if (event.key === "ArrowUp") next = current > 0 ? current - 1 : items.length - 1;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = items.length - 1;
+    else if (event.key === "Tab") {
+      close();
+      return;
+    } else return;
+    event.preventDefault();
+    items[next]?.focus();
+  };
+
+  const run = (action: () => void) => {
+    close();
+    action();
+  };
+
+  return (
+    <span className="companions-row-menu">
+      <button
+        ref={triggerRef}
+        type="button"
+        className="cds-btn cds-btn--ghost cds-btn--sm companions-row-menu__trigger"
+        aria-label={`Actions for ${companion.name}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        onClick={() => {
+          openFocusRef.current = "first";
+          setOpen((current) => !current);
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+          event.preventDefault();
+          openFocusRef.current = event.key === "ArrowUp" ? "last" : "first";
+          setOpen(true);
+        }}
+      >
+        <Icon name="more-horizontal" size={15} />
+      </button>
+      {open && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              ref={menuRef}
+              id={menuId}
+              className="companions-row-menu__panel"
+              role="menu"
+              aria-label={`Actions for ${companion.name}`}
+              style={position}
+              onKeyDown={onMenuKeyDown}
+            >
+              {companion.access !== "viewer" ? (
+                <button type="button" role="menuitem" onClick={() => run(onSettings)}>
+                  Settings
+                </button>
+              ) : null}
+              {hidden ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={busy}
+                  onClick={() => run(() => onMemberState({ hidden: false }))}
+                >
+                  Unhide
+                </button>
+              ) : (
+                <>
+                  {companion.access === "owner" && !personalWorkspace ? (
+                    <button type="button" role="menuitem" onClick={() => run(onShare)}>
+                      Share
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={busy}
+                    onClick={() => run(() => onMemberState({ pinned: !companion.pinned }))}
+                  >
+                    {companion.pinned ? "Unpin" : "Pin"}
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={busy || companion.unread}
+                    onClick={() => run(() => onMemberState({ unread: true }))}
+                  >
+                    Mark as unread
+                  </button>
+                  {companion.access === "owner" ? (
+                    <button type="button" role="menuitem" disabled={busy} onClick={() => run(onDuplicate)}>
+                      Duplicate
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={busy}
+                    onClick={() => run(() => onMemberState({ hidden: true }))}
+                  >
+                    Hide
+                  </button>
+                </>
+              )}
+            </div>,
+            document.body,
+          )
+        : null}
+    </span>
+  );
 }
 
 export function CompanionsApp({
@@ -830,7 +1048,9 @@ export function CompanionsApp({
       )}
 
       <main
-        className={"companions-main" + (opened ? " companions-main--chat" : "")}
+        className={"companions-main"
+          + (opened ? " companions-main--chat" : "")
+          + (!opened && !settingsCompanion && !pluginsOpen ? " companions-main--list" : "")}
         aria-hidden={mobileSidebarOpen || dialogOpen || undefined}
         inert={mobileSidebarOpen || dialogOpen ? true : undefined}
       >
@@ -904,229 +1124,153 @@ export function CompanionsApp({
           />
         ) : (
           <>
-            <header className="companions-head">
-              <h1>
-                Companions
-                <span className="companions-count tnum">{companions.length}</span>
-              </h1>
-              <div className="companions-head-actions">
-                {/* Providers and Plugins are workspace destinations, not actions on this list, so
-                    they sit in the sidebar foot where Secrets and Archived sit for Skills. What is
-                    left here is the one control that makes something. */}
-                <button
-                  type="button"
-                  className="cds-btn cds-btn--primary cds-btn--md"
-                  onClick={() => setCreating(true)}
-                >
-                  <Icon name="plus" size={15} /> New companion
+            <ResourceListHeader
+              title="Companions"
+              count={companions.length}
+              headingLevel={1}
+              action={(
+                <button type="button" className="btn-primary" onClick={() => setCreating(true)}>
+                  <Icon name="plus" size={14} /> New companion
                 </button>
-              </div>
-            </header>
+              )}
+            />
 
-            <div className="companions-content">
-              {error && <div className="companions-error" role="alert">{error}</div>}
+            {error ? <div className="companions-error companions-error--list" role="alert">{error}</div> : null}
 
-              {companions.length === 0 ? (
-                <div className="companions-empty">
-                  <Icon name="bot" size={22} />
-                  <strong>No Companions yet</strong>
-                  <p>A Companion is a name, one line of persona, and a model provider. It stays asleep until you open it.</p>
-                  <button
-                    type="button"
-                    className="cds-btn cds-btn--primary cds-btn--md"
-                    onClick={() => setCreating(true)}
+            <ResourceListToolbar
+              value={query}
+              onChange={setQuery}
+              placeholder="Search companions"
+              ariaLabel="Search companions"
+            />
+
+            <ResourceListFrame className="companions-list">
+              <ResourceListColumns className="companions-list__head">
+                <span>Companion</span>
+                <span>Status</span>
+                <span>Updated</span>
+                <span>Access</span>
+              </ResourceListColumns>
+
+              {visible.map((companion) => {
+                const status = companionStatus(companion.runtime.state);
+                return (
+                  <div
+                    className={`companions-row${companion.pinned ? " companions-row--pinned" : ""}`}
+                    key={companion.id}
                   >
-                    New companion
-                  </button>
-                </div>
-              ) : (
-                <>
-                  <label className="companions-search">
-                    <Icon name="search" size={15} />
-                    <input
-                      type="search"
-                      value={query}
-                      placeholder="Search companions"
-                      aria-label="Search companions"
-                      onChange={(event) => setQuery(event.target.value)}
-                    />
-                  </label>
+                    <button
+                      type="button"
+                      className="companions-row__main"
+                      aria-label={`Open ${companion.name}. ${status.label}. ${companion.access} access${companion.unread ? ". Unread" : ""}.`}
+                      ref={(node) => {
+                        if (node) rowRefs.current.set(companion.id, node);
+                        else rowRefs.current.delete(companion.id);
+                      }}
+                      onClick={() => openCompanion(companion)}
+                    >
+                      <span className="companions-avatar" aria-hidden="true">
+                        {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
+                        {companion.unread ? <i className="companions-unread" /> : null}
+                      </span>
+                      <span className="companions-row__text">
+                        <strong>
+                          {companion.pinned ? <Icon name="pin" size={12} /> : null}
+                          {companion.name}
+                        </strong>
+                        <span>
+                          {companion.persona
+                            ?? providerName(companion.runtime.provider_ids[0] ?? "No provider")}
+                        </span>
+                      </span>
+                    </button>
+                    <span
+                      className={`companions-state companions-state--${status.tone}`}
+                      title={companion.runtime.last_error ?? undefined}
+                    >
+                      <i aria-hidden="true" />
+                      {status.label}
+                    </span>
+                    <RelativeTime className="companions-row__time" iso={companion.updated_at} />
+                    <span className="companions-row-actions">
+                      <span className="companions-role">{companion.access}</span>
+                      <CompanionActionsMenu
+                        companion={companion}
+                        busy={busy}
+                        personalWorkspace={currentOrg.kind === "personal"}
+                        onSettings={() => router.push(`/companions/${companion.id}/settings`)}
+                        onShare={() => setSharing(companion)}
+                        onMemberState={(patch) => void applyMemberState(companion, patch)}
+                        onDuplicate={() => void onDuplicate(companion)}
+                      />
+                    </span>
+                  </div>
+                );
+              })}
 
-                  <div className="companions-list">
-                    <div className="companions-row companions-row--head">
-                      <span>Companion</span>
-                      <span>Status</span>
-                      <span>Updated</span>
-                      <span>Access</span>
-                    </div>
-                    {visible.map((companion) => {
-                      const status = companionStatus(companion.runtime.state);
-                      return (
-                        <div
-                          className={`companions-row${companion.pinned ? " companions-row--pinned" : ""}`}
-                          key={companion.id}
-                        >
-                          <button
-                            type="button"
-                            className="companions-row__main"
-                            ref={(node) => {
-                              if (node) rowRefs.current.set(companion.id, node);
-                              else rowRefs.current.delete(companion.id);
-                            }}
-                            onClick={() => openCompanion(companion)}
-                          >
-                            <span className="companions-avatar" aria-hidden="true">
-                              {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
-                              {companion.unread && (
-                                <i className="companions-unread" title="Unread" />
-                              )}
-                            </span>
-                            <span className="companions-row__text">
-                              <strong>
-                                {companion.pinned && (
-                                  <Icon name="pin" size={12} aria-hidden="true" />
-                                )}
-                                {companion.name}
-                              </strong>
-                              <span>
-                                {companion.persona
-                                  ?? providerName(companion.runtime.provider_ids[0] ?? "No provider")}
-                              </span>
-                            </span>
-                          </button>
-                          <span
-                            className={`companions-state companions-state--${status.tone}`}
-                            title={companion.runtime.last_error ?? undefined}
-                          >
-                            <i aria-hidden="true" />
-                            {status.label}
+              {visible.length === 0 ? (
+                <ResourceListEmpty
+                  icon={companions.length === 0 ? "bot" : "search-x"}
+                  title={companions.length === 0
+                    ? "No Companions yet"
+                    : query.trim()
+                      ? "No Companions match"
+                      : "No visible Companions"}
+                  description={companions.length === 0
+                    ? "Create a Companion with a name, one line of persona, and a connected model provider."
+                    : query.trim()
+                      ? "No Companions match your search. Clear the search to see the workspace in full."
+                      : "Your Companions are hidden from the active list. Use the Hidden section below to restore one."}
+                />
+              ) : null}
+
+              {hiddenCompanions.length > 0 && !query.trim() ? (
+                <section className="companions-hidden" aria-labelledby="companions-hidden-title">
+                  <h3 className="companions-hidden__heading" id="companions-hidden-title">
+                    <Icon name="eye-off" size={14} />
+                    <span>Hidden</span>
+                    <span className="companions-hidden__count tnum">{hiddenCompanions.length}</span>
+                  </h3>
+                  {hiddenCompanions.map((companion) => {
+                    const status = companionStatus(companion.runtime.state);
+                    return (
+                      <div className="companions-row companions-row--hidden" key={companion.id}>
+                        <div className="companions-row__main companions-row__main--static">
+                          <span className="companions-avatar" aria-hidden="true">
+                            {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
                           </span>
-                          <RelativeTime className="companions-row__time" iso={companion.updated_at} />
-                          <span className="companions-row-actions">
-                            <span className="companions-role">{companion.access}</span>
-                            <details className="companions-row-menu">
-                              <summary
-                                className="cds-btn cds-btn--ghost cds-btn--sm"
-                                aria-label={`Actions for ${companion.name}`}
-                              >
-                                <Icon name="more-horizontal" size={15} />
-                              </summary>
-                              <div className="companions-row-menu__panel" role="menu">
-                                <button
-                                  type="button"
-                                  role="menuitem"
-                                  disabled={busy}
-                                  onClick={(event) => {
-                                    event.currentTarget.closest("details")?.removeAttribute("open");
-                                    void applyMemberState(companion, { pinned: !companion.pinned });
-                                  }}
-                                >
-                                  {companion.pinned ? "Unpin" : "Pin"}
-                                </button>
-                                <button
-                                  type="button"
-                                  role="menuitem"
-                                  disabled={busy || companion.unread}
-                                  onClick={(event) => {
-                                    event.currentTarget.closest("details")?.removeAttribute("open");
-                                    void applyMemberState(companion, { unread: true });
-                                  }}
-                                >
-                                  Mark as unread
-                                </button>
-                                {companion.access === "owner" && (
-                                  <button
-                                    type="button"
-                                    role="menuitem"
-                                    disabled={busy}
-                                    onClick={(event) => {
-                                      event.currentTarget.closest("details")?.removeAttribute("open");
-                                      void onDuplicate(companion);
-                                    }}
-                                  >
-                                    Duplicate
-                                  </button>
-                                )}
-                                <button
-                                  type="button"
-                                  role="menuitem"
-                                  disabled={busy}
-                                  onClick={(event) => {
-                                    event.currentTarget.closest("details")?.removeAttribute("open");
-                                    void applyMemberState(companion, { hidden: true });
-                                  }}
-                                >
-                                  Hide
-                                </button>
-                              </div>
-                            </details>
-                            <button
-                              type="button"
-                              className="cds-btn cds-btn--ghost cds-btn--sm"
-                              aria-label={`Settings for ${companion.name}`}
-                              onClick={() => router.push(`/companions/${companion.id}/settings`)}
-                            >
-                              Settings
-                            </button>
-                            {companion.access === "owner" && currentOrg.kind !== "personal" && (
-                              <button
-                                type="button"
-                                className="cds-btn cds-btn--ghost cds-btn--sm"
-                                onClick={() => setSharing(companion)}
-                              >
-                                Share
-                              </button>
-                            )}
+                          <span className="companions-row__text">
+                            <strong>{companion.name}</strong>
+                            <span>{companion.persona ?? "Hidden from your list"}</span>
                           </span>
                         </div>
-                      );
-                    })}
-                    {visible.length === 0 && (
-                      <p className="companions-list-empty">No Companion matches this search.</p>
-                    )}
-                  </div>
-
-                  {hiddenCompanions.length > 0 && !query.trim() && (
-                    <section className="companions-hidden" aria-labelledby="companions-hidden-title">
-                      <h2 id="companions-hidden-title">Hidden</h2>
-                      <div className="companions-list">
-                        {hiddenCompanions.map((companion) => (
-                          <div className="companions-row" key={companion.id}>
-                            <div className="companions-row__main companions-row__main--static">
-                              <span className="companions-avatar" aria-hidden="true">
-                                {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
-                              </span>
-                              <span className="companions-row__text">
-                                <strong>{companion.name}</strong>
-                                <span>Hidden from your list</span>
-                              </span>
-                            </div>
-                            <span className="companions-row-actions">
-                              <button
-                                type="button"
-                                className="cds-btn cds-btn--ghost cds-btn--sm"
-                                disabled={busy}
-                                onClick={() => void applyMemberState(companion, { hidden: false })}
-                              >
-                                Unhide
-                              </button>
-                              <button
-                                type="button"
-                                className="cds-btn cds-btn--ghost cds-btn--sm"
-                                aria-label={`Settings for ${companion.name}`}
-                                onClick={() => router.push(`/companions/${companion.id}/settings`)}
-                              >
-                                Settings
-                              </button>
-                            </span>
-                          </div>
-                        ))}
+                        <span
+                          className={`companions-state companions-state--${status.tone}`}
+                          title={companion.runtime.last_error ?? undefined}
+                        >
+                          <i aria-hidden="true" />
+                          {status.label}
+                        </span>
+                        <RelativeTime className="companions-row__time" iso={companion.updated_at} />
+                        <span className="companions-row-actions">
+                          <span className="companions-role">{companion.access}</span>
+                          <CompanionActionsMenu
+                            companion={companion}
+                            busy={busy}
+                            hidden
+                            personalWorkspace={currentOrg.kind === "personal"}
+                            onSettings={() => router.push(`/companions/${companion.id}/settings`)}
+                            onShare={() => setSharing(companion)}
+                            onMemberState={(patch) => void applyMemberState(companion, patch)}
+                            onDuplicate={() => void onDuplicate(companion)}
+                          />
+                        </span>
                       </div>
-                    </section>
-                  )}
-                </>
-              )}
-            </div>
+                    );
+                  })}
+                </section>
+              ) : null}
+            </ResourceListFrame>
           </>
         )}
       </main>
