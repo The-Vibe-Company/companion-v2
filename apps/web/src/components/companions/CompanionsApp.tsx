@@ -31,7 +31,6 @@ import {
   openCompanionDesktop,
   sendCompanionMessage,
   setCompanionProvider,
-  startCompanionRuntime,
   syncCompanionThread,
   updateCompanionMemberState,
 } from "@/lib/companions";
@@ -73,7 +72,7 @@ const BOX_STATUS_POLL_MS = 15_000;
  * the Box-status poll below starts only once the state is already `running`, and the request that
  * began the transition answers once, before the lifecycle finishes when it outlives a proxy. That
  * left the chip reporting Starting against a Box that was already up, beside a reply Pi had already
- * sent. This is the control-plane projection, so it never resumes a Box and is safe for a Viewer.
+ * sent. The same fast cadence begins as soon as a send starts, before its long request can answer.
  */
 const PENDING_POLL_MS = 3_000;
 /**
@@ -419,8 +418,7 @@ export function CompanionsApp({
    * anyone could read it and leave a failed handoff looking like nothing happened at all.
    */
   const [desktopError, setDesktopError] = useState<string | null>(null);
-  const [sending, setSending] = useState(false);
-  const [waking, setWaking] = useState(false);
+  const [sendingCompanionId, setSendingCompanionId] = useState<string | null>(null);
   const [openingDesktop, setOpeningDesktop] = useState(false);
   /**
    * Whether a runner keeps the context panel beside the conversation. It is a preference rather than
@@ -447,6 +445,8 @@ export function CompanionsApp({
     joining: boolean;
   } | null>(null);
   const threadRequestRef = useRef(0);
+  /** The thread currently on screen, available to async completions without a stale render closure. */
+  const openedIdRef = useRef(openedId);
   const providerRequestRef = useRef(0);
   /** The Companion whose read watermark has already been captured for the open thread. */
   const capturedReadRef = useRef<string | null>(null);
@@ -488,6 +488,7 @@ export function CompanionsApp({
   // A lifecycle the control plane is still resolving. `error` is not one of these: it is where a
   // failed transition settles, and its reason is already on screen.
   const openedPending = opened?.runtime.state === "provisioning" || opened?.runtime.state === "stopping";
+  const sending = sendingCompanionId === openedId;
 
   const providerName = (providerId: string) =>
     (providers?.catalog ?? COMPANION_PROVIDER_CATALOG)
@@ -604,6 +605,7 @@ export function CompanionsApp({
 
   const openCompanion = (companion: Companion) => {
     threadRequestRef.current += 1;
+    openedIdRef.current = companion.id;
     setOpenedId(companion.id);
     setThread(null);
     setThreadError(null);
@@ -620,6 +622,7 @@ export function CompanionsApp({
   const closeThread = () => {
     const wasOpen = openedId;
     threadRequestRef.current += 1;
+    openedIdRef.current = null;
     setOpenedId(null);
     setThread(null);
     setThreadError(null);
@@ -636,6 +639,7 @@ export function CompanionsApp({
     // Plugins is now reachable from the sidebar, so it can be asked for while a thread is open — and
     // the thread wins the render. Leaving the thread open made the entry look dead.
     threadRequestRef.current += 1;
+    openedIdRef.current = null;
     setOpenedId(null);
     setThread(null);
     setThreadError(null);
@@ -792,28 +796,30 @@ export function CompanionsApp({
     }
   }, [currentOrg.id, replaceCompanion]);
 
-  // Only a runner whose Box is already running observes it, so opening a thread never wakes a Box
-  // and a Viewer's chip stays on the control-plane projection.
+  // Keep the open thread's lifecycle current without requiring a reload. Sending and transitional
+  // states use the fast cadence because a wake is actively changing the projection; otherwise an
+  // asleep or Viewer thread follows the read model and an online runner occasionally observes the
+  // already-running Box. The immediate read is important when a send has just begun: its request can
+  // remain open for the whole wake, so waiting for that POST to settle would leave the chip stale.
+  // A Viewer always takes the control-plane path, and no status read can resume a Box.
   useEffect(() => {
-    if (!openedId || !canRunOpened || !openedAwake) return;
-    const timer = setInterval(() => void refreshCompanion(openedId, true), BOX_STATUS_POLL_MS);
+    if (!openedId) return;
+    const live = canRunOpened && openedAwake;
+    const interval = sending || openedPending
+      ? PENDING_POLL_MS
+      : live
+        ? BOX_STATUS_POLL_MS
+        : READ_MODEL_POLL_MS;
+    void refreshCompanion(openedId, live);
+    const timer = setInterval(() => void refreshCompanion(openedId, live), interval);
     return () => clearInterval(timer);
-  }, [canRunOpened, openedAwake, openedId, refreshCompanion]);
-
-  // A pending lifecycle is the one window where the projection is expected to change on its own, so
-  // it is the one window that has to be watched. The chip, the wake control, and the composer footer
-  // all read this row, so they leave Starting together as soon as the wake records that it finished.
-  useEffect(() => {
-    if (!openedId || !openedPending) return;
-    const timer = setInterval(() => void refreshCompanion(openedId), PENDING_POLL_MS);
-    return () => clearInterval(timer);
-  }, [openedId, openedPending, refreshCompanion]);
+  }, [canRunOpened, openedAwake, openedId, openedPending, refreshCompanion, sending]);
 
   /** Resolves false when the message never reached the control plane, so the composer keeps its text. */
   const onSend = async (content: string, clientMessageId: string): Promise<boolean> => {
     if (!openedId) return false;
     const companionId = openedId;
-    setSending(true);
+    setSendingCompanionId(companionId);
     setThreadError(null);
     try {
       // Sending also delivers the backlog, so it waits for an in-flight sync instead of racing it.
@@ -823,39 +829,24 @@ export function CompanionsApp({
         () => sendCompanionMessage(currentOrg.id, companionId, content, clientMessageId),
         { skipWhenBusy: false },
       );
-      threadRequestRef.current += 1;
-      if (next) setThread(next);
+      if (openedIdRef.current === companionId && next?.companion_id === companionId) {
+        threadRequestRef.current += 1;
+        setThread(next);
+      }
       return true;
     } catch (cause) {
-      setThreadError(cause instanceof Error ? cause.message : "The message could not be sent.");
+      if (openedIdRef.current === companionId) {
+        setThreadError(cause instanceof Error ? cause.message : "The message could not be sent.");
+      }
       return false;
     } finally {
-      setSending(false);
+      setSendingCompanionId((current) => current === companionId ? null : current);
       // A send can wake this Companion, and it can also fail and record why, so the lifecycle it
       // leaves behind is re-read from the projection the status chip already uses. Everything the
-      // thread derives from the runtime — the chip, the wake control, the composer footer, and the
+      // thread derives from the runtime — the chip, the composer footer, and the
       // live cadence that projects Pi's reply — then moves off the pre-send state together instead
       // of waiting for a reload. The read is the control-plane projection, so it never wakes a Box.
       await refreshCompanion(companionId);
-    }
-  };
-
-  const onWake = async () => {
-    if (!opened) return;
-    const companionId = opened.id;
-    setWaking(true);
-    setThreadError(null);
-    try {
-      const updated = await startCompanionRuntime(currentOrg.id, companionId);
-      replaceCompanion(updated);
-      await refreshThread(true);
-    } catch (cause) {
-      setThreadError(cause instanceof Error ? cause.message : "This Companion could not be woken.");
-      // A failed start records why on the Companion, so re-read it: the status pill must show Error
-      // rather than the state the wake started from, and the reason must survive a reload.
-      await refreshCompanion(companionId);
-    } finally {
-      setWaking(false);
     }
   };
 
@@ -1139,7 +1130,6 @@ export function CompanionsApp({
               orgId={currentOrg.id}
               error={desktopError ?? threadError}
               busy={sending}
-              waking={waking}
               openingDesktop={openingDesktop}
               context={{
                 open: contextOpen,
@@ -1161,7 +1151,6 @@ export function CompanionsApp({
                 ? null
                 : () => router.push(`/companions/${opened.id}/settings`)}
               onThread={setThread}
-              onWake={() => void onWake()}
               onDesktop={() => void onDesktop()}
             />
           </>

@@ -18,8 +18,8 @@ export type CompanionContextSkill = { id: string; slug: string };
  * Box that stops all drop it and the next join asks again.
  *
  * The panel never wakes anything. A desktop request observes a Box and cannot resume one, so a
- * sleeping Box is reported as asleep beside the same Wake control the header offers, and a Viewer, who
- * must never start a Box, is never handed the panel at all.
+ * sleeping Box explains that sending a message starts it. A Viewer, who must never start a Box, is
+ * never handed the panel at all.
  */
 export function CompanionContext({
   companion,
@@ -27,11 +27,9 @@ export function CompanionContext({
   joining,
   error,
   openingDesktop,
-  waking,
   skills,
   onJoin,
   onDesktop,
-  onWake,
   onSettings,
   onClose,
 }: {
@@ -40,12 +38,10 @@ export function CompanionContext({
   joining: boolean;
   error: string | null;
   openingDesktop: boolean;
-  waking: boolean;
   /** The selected skills this surface could name; ids it cannot resolve are counted, not guessed. */
   skills: CompanionContextSkill[];
   onJoin: () => void;
   onDesktop: () => void;
-  onWake: () => void;
   /** Null for a Viewer, who does not receive the runner-only context panel. */
   onSettings: (() => void) | null;
   onClose: () => void;
@@ -118,7 +114,7 @@ export function CompanionContext({
                     ? joining
                       ? `Box is minting a fresh desktop for ${companion.name}.`
                       : "Reconnect to mint a fresh desktop for this Box."
-                    : `Wake ${companion.name} to see its screen. Opening this panel never starts a Box.`}
+                    : `Send a message to start ${companion.name} and make its screen available.`}
                 </p>
               </div>
             )}
@@ -148,16 +144,7 @@ export function CompanionContext({
                   </button>
                 )}
               </>
-            ) : (
-              <button
-                type="button"
-                className="chat-context__link"
-                disabled={waking}
-                onClick={onWake}
-              >
-                {waking ? "Waking..." : `Wake ${companion.name}`}
-              </button>
-            )}
+            ) : `Send a message to start ${companion.name}.`}
           </p>
         </section>
 
@@ -208,7 +195,7 @@ export function CompanionContext({
                 )}
               </ul>
               <p className="chat-context__caption">
-                Staged on the Box when {companion.name} wakes.
+                Staged on the Box when {companion.name} starts.
               </p>
             </>
           )}

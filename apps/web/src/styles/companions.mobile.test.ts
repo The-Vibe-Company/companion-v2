@@ -317,11 +317,10 @@ describe("Companions mobile viewport", () => {
     expect(chatCss).toMatch(/\.aui-scope :where\(img[^)]*\)[\s\S]*?max-width: 100%;/);
   });
 
-  it("keeps Back, Wake, and Send at a 44px thumb target", () => {
+  it("keeps Back and Send at a 44px thumb target", () => {
     const coarse = ["@media (pointer: coarse)"];
 
     expect(declarationsFor(".chat-head .chat-back", coarse)[0]).toContain("min-height: 44px;");
-    expect(declarationsFor(".chat-head .cds-btn", coarse)[0]).toContain("min-height: 44px;");
     // THE-346: Send is the control the composer exists for, and 32px is not a thumb target. A mouse
     // still points at the compact square. Both classes have to sit on the Send control itself.
     expect(transcript).toMatch(

@@ -482,7 +482,7 @@ function Welcome() {
       <strong className="text-foreground block text-base">No messages yet</strong>
       <p className="mt-1">
         {canSend
-          ? `Messages are saved here. Wake ${companionName} when you want a reply.`
+          ? `Send a message to start ${companionName} and get a reply.`
           : "This transcript is read from the control plane, so opening it left the Box asleep."}
       </p>
     </div>
