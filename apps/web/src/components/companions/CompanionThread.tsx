@@ -66,7 +66,7 @@ export function CompanionThread({
   openedThroughOrdinal?: number | null;
   onBack: () => void;
   onSend: (content: string, clientMessageId: string) => Promise<boolean>;
-  /** Null for a Viewer: the settings page refuses them, so the header must not offer the door. */
+  /** Null for a Viewer: read-only settings remain available from the workspace list, not the thread. */
   onSettings: (() => void) | null;
   onThread: (thread: Thread) => void;
   onDesktop: () => void;

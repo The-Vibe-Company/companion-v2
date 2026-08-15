@@ -126,8 +126,48 @@ function declarationsFor(selector: string, at: string[] = []): string[] {
 }
 
 const PHONE = ["@media (max-width: 560px)"];
+const COMPACT = ["@media (max-width: 860px)"];
+const NARROW = ["@media (max-width: 700px)"];
+const COARSE_POINTER = ["@media (pointer: coarse)"];
 
 describe("Companions mobile viewport", () => {
+  it("keeps the Companion list in the same flat full-height frame as Skills", () => {
+    const [declarations] = declarationsFor(".companions-main.companions-main--list");
+    expect(declarations).toContain("display: flex;");
+    expect(declarations).toContain("overflow: hidden;");
+    expect(declarations).toContain("padding: 0;");
+    expect(declarations).toContain("background: var(--color-surface);");
+  });
+
+  it("lets the shared header wrap before its primary action can be clipped", () => {
+    const header = declarationsFor(".companions-main--list .sh", PHONE)[0];
+    expect(header).toContain("height: auto;");
+    expect(header).toContain("flex-wrap: wrap;");
+    expect(declarationsFor(".companions-main--list .sh__spacer", PHONE)[0])
+      .toContain("display: none;");
+    expect(declarationsFor(".companions-main--list .sh .btn-primary", PHONE)[0])
+      .toContain("margin-left: auto;");
+  });
+
+  it("sheds Updated then Access without losing the row menu", () => {
+    expect(declarationsFor(".companions-list .companions-row", COMPACT)[0])
+      .toContain("grid-template-columns: minmax(160px, 1fr) 104px minmax(88px, auto);");
+    expect(declarationsFor(".companions-row__time", COMPACT)[0]).toContain("display: none;");
+    expect(declarationsFor(".companions-row .companions-role", NARROW)[0]).toContain("display: none;");
+
+    const phoneRow = declarationsFor(".companions-list .companions-row", PHONE)[0];
+    expect(phoneRow).toContain("grid-template-columns: minmax(0, 1fr) auto 44px;");
+    expect(phoneRow).toContain('"main status actions"');
+    expect(declarationsFor(".companions-list .companions-list__head", PHONE)[0]).toContain("display: none;");
+    expect(declarationsFor(".companions-row-menu__trigger", PHONE)[0]).toContain("width: 44px;");
+  });
+
+  it("keeps the sole row-action target touch-sized on coarse-pointer tablets", () => {
+    const trigger = declarationsFor(".companions-row-menu__trigger", COARSE_POINTER)[0];
+    expect(trigger).toContain("width: 44px;");
+    expect(trigger).toContain("height: 44px;");
+  });
+
   it("sizes every dialog against its scrim instead of the viewport width", () => {
     // `100vw` counts the scrollbar and the overscroll gutter, so a dialog came out wider than what is
     // on screen and the page could be dragged sideways behind it.

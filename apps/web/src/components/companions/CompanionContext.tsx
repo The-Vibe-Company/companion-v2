@@ -42,7 +42,7 @@ export function CompanionContext({
   skills: CompanionContextSkill[];
   onJoin: () => void;
   onDesktop: () => void;
-  /** Null for a Viewer, who cannot open Companion settings. */
+  /** Null for a Viewer, who does not receive the runner-only context panel. */
   onSettings: (() => void) | null;
   onClose: () => void;
 }) {

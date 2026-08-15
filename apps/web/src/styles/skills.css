@@ -863,7 +863,7 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .listbar { display: flex; align-items: center; gap: var(--space-3); padding: 9px var(--space-5); border-bottom: 1px solid var(--color-line); flex: none; }
 .listbar__search { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 11px; border: 1px solid var(--color-line);
   border-radius: var(--radius-md); background: var(--color-surface-sunken); transition: border-color var(--duration-fast) var(--ease-out-quint); }
-.listbar__search:focus-within { border-color: var(--color-line-strong); }
+.listbar__search:focus-within { border-color: var(--color-accent-edge); outline: 2px solid var(--color-accent-ring); outline-offset: 1px; }
 .listbar__search svg { color: var(--color-faint); flex: none; }
 .listbar__input { flex: 1; min-width: 0; border: none; background: none; outline: none; font-family: var(--font-ui); font-size: var(--text-sm); color: var(--color-fg); }
 .listbar__input::placeholder { color: var(--color-faint); }
