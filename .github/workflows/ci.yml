@@ -82,6 +82,9 @@ jobs:
       - name: Validate shell scripts
         run: git ls-files -z '*.sh' | xargs -0 shellcheck
 
+      - name: Validate development stack scripts
+        run: bash scripts/dev-stack-check.sh
+
       - name: Scan changed history for secrets
         env:
           EVENT_NAME: ${{ github.event_name }}
