@@ -269,6 +269,7 @@ function SkillRow({
   return (
     <div
       data-skill-slug={skill.id}
+      data-skill-uuid={skill.uuid}
       className={`crow${lastId === skill.id ? " is-active" : ""}`
         + (selected ? " crow--selected" : "")
         + (dragging ? " crow--dragging" : "")}
@@ -444,12 +445,26 @@ export function ListView({
     [activeLabel, categoryOrder, labels, library, shown],
   );
 
-  // A selection only lives as long as its row is on screen. The workspace filters are the caller's
-  // and it clears the selection itself; this search is the list's own, and it can hide a row too.
+  /**
+   * A selection only lives as long as its row is on screen. The workspace filters are the caller's
+   * and it clears the selection itself; the search and the folded group bands are this list's own,
+   * and either can take a row away while the panel beside it keeps describing it.
+   */
+  const onScreenUuids = useMemo(() => {
+    if (groupBy !== "folder") return new Set(shown.map((skill) => skill.uuid));
+    const searching = !!q.trim();
+    const visible = new Set<string>();
+    for (const group of groups) {
+      if (group.kind !== "direct" && !searching && collapsed.has(group.key)) continue;
+      for (const row of group.rows) visible.add(row.skill.uuid);
+    }
+    return visible;
+  }, [collapsed, groupBy, groups, q, shown]);
+
   useEffect(() => {
     if (selectedUuid === null) return;
-    if (!shown.some((skill) => skill.uuid === selectedUuid)) onSelect(null);
-  }, [onSelect, selectedUuid, shown]);
+    if (!onScreenUuids.has(selectedUuid)) onSelect(null);
+  }, [onScreenUuids, onSelect, selectedUuid]);
 
   const toggleGroup = useCallback(
     (key: string) => {
@@ -636,6 +651,16 @@ export function ListView({
           </div>
         ) : null}
       </div>
+      {/* Below the two-pane width the panel comes over the list, so it gets the same scrim the
+          Companions panel has: something to click out of, not just an Escape to remember. */}
+      {panel && (
+        <button
+          type="button"
+          className="skpanel-scrim"
+          aria-label="Close the skill panel"
+          onClick={() => onSelect(null)}
+        />
+      )}
       {panel}
       </div>
     </>

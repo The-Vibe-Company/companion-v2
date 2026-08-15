@@ -237,10 +237,13 @@ export function companionLastMessagePreview(content: string): string {
   const firstLine = content.split("\n").find((line) => line.trim().length > 0) ?? "";
   const collapsed = firstLine.replace(/\s+/g, " ").trim();
   if (collapsed.length <= COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS) return collapsed;
-  // Cut on code points, not code units: slicing through a surrogate pair leaves half a character,
-  // which renders as a replacement glyph and is what a reader would see at the end of every long
-  // preview containing an emoji or a non-BMP script.
-  return [...collapsed].slice(0, COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS).join("");
+  // The bound is the contract's, and the contract counts what JavaScript counts, so the cut is on
+  // code units — but never through a surrogate pair, which would leave half a character and render
+  // as a replacement glyph at the end of every long preview containing an emoji.
+  const cut = collapsed.slice(0, COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS);
+  const last = cut.charCodeAt(cut.length - 1);
+  const strandedHighSurrogate = last >= 0xd800 && last <= 0xdbff;
+  return strandedHighSurrogate ? cut.slice(0, -1) : cut;
 }
 
 /**

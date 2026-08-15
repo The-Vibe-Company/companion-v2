@@ -208,9 +208,18 @@ describe("CompanionsApp conversation list", () => {
     }));
 
     // Nobody clicked this row, so the optimistic clear on open never ran; the read that answers is
-    // what the control plane already marked, and the row has to agree with it.
-    const opened = await render([companion({ unread: true })], companionId);
-    expect(row(opened).querySelector(".cmprow__unread")).toBeNull();
+    // what the control plane already marked, and the row has to agree with it. Asserting the dot on
+    // the open thread would prove nothing — an open thread is never dotted — so the thread is
+    // closed first, which is the moment a row that never cleared would show one.
+    const container = await render([companion({ unread: true })], companionId);
+
+    const back = [...container.querySelectorAll("button")]
+      .find((button) => button.getAttribute("aria-label") === "Back to Companions") as HTMLButtonElement;
+    await act(async () => {
+      back.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(row(container).querySelector(".cmprow__unread")).toBeNull();
   });
 
   it("keeps a preview a mutation did not answer with", async () => {

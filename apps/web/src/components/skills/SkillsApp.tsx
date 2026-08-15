@@ -1301,12 +1301,16 @@ export function SkillsApp({
    * that held focus, so without this the next Tab restarts at the top of the document.
    */
   const closeSkillPanel = useCallback(() => {
-    const slug = selected?.id;
+    // By database id, not slug: the same slug exists in both libraries, and focus must come back to
+    // the row that was selected rather than the first one that happens to share its name.
+    const uuid = selectedUuid;
     setSelectedUuid(null);
     window.requestAnimationFrame(() => {
-      document.querySelector<HTMLElement>(`button[aria-label="Open skill ${slug}"]`)?.focus();
+      document
+        .querySelector<HTMLElement>(`.crow[data-skill-uuid="${uuid}"] .crow__hit`)
+        ?.focus();
     });
-  }, [selected]);
+  }, [selectedUuid]);
 
   // Esc puts the panel away, the way it closes every other transient surface here.
   useEffect(() => {

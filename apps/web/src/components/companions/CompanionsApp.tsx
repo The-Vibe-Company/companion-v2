@@ -216,6 +216,12 @@ export function CompanionsApp({
   const threadRequestRef = useRef(0);
   /** The Companion whose read watermark has already been captured for the open thread. */
   const capturedReadRef = useRef<string | null>(null);
+  /**
+   * Companions written since the list poll now in flight went out. The poll's snapshot is older than
+   * those writes, so applying it would put a row back the way it was before a pin, a wake, or a
+   * settings save the reader just made, until the next poll 45 seconds later undid it again.
+   */
+  const writtenRef = useRef(new Set<string>());
   /** Newest panel join, so a slower mint cannot put its stream on screen after a newer one. */
   const contextJoinRef = useRef(0);
   /** Newest runtime read per Companion, so a slower one cannot answer over it. */
@@ -283,6 +289,7 @@ export function CompanionsApp({
    * about what it just wrote and would otherwise blank the line the conversation list is showing.
    */
   const replaceCompanion = useCallback((next: Companion) => {
+    writtenRef.current.add(next.id);
     setCompanions((current) =>
       current.map((item) => item.id === next.id ? mergeCompanion(item, next) : item));
   }, []);
@@ -292,6 +299,7 @@ export function CompanionsApp({
    * belongs, so this is the only path that re-sorts, and it sorts the way the server does.
    */
   const resortCompanion = useCallback((next: Companion) => {
+    writtenRef.current.add(next.id);
     setCompanions((current) => {
       const previous = current.find((item) => item.id === next.id);
       const merged = previous ? mergeCompanion(previous, next) : next;
@@ -363,6 +371,13 @@ export function CompanionsApp({
 
   const openPlugins = () => {
     setPluginsOpen(true);
+    // Plugins is now reachable from the sidebar, so it can be asked for while a thread is open — and
+    // the thread wins the render. Leaving the thread open made the entry look dead.
+    threadRequestRef.current += 1;
+    setOpenedId(null);
+    setThread(null);
+    setThreadError(null);
+    setSettingsId(null);
     if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
     url.searchParams.delete("companion");
@@ -451,12 +466,16 @@ export function CompanionsApp({
    */
   useEffect(() => {
     const timer = setInterval(() => {
+      writtenRef.current.clear();
       void listCompanions(currentOrg.id)
         .then((latest) => setCompanions((current) => {
           const byId = new Map(current.map((item) => [item.id, item]));
           return latest.map((item) => {
             const previous = byId.get(item.id);
-            return previous ? mergeCompanion(previous, item) : item;
+            if (!previous) return item;
+            // A row written while this read was out is newer than the read; keep what the write said.
+            if (writtenRef.current.has(item.id)) return previous;
+            return mergeCompanion(previous, item);
           });
         }))
         // A list that could not be re-read keeps the rows it has; nothing on screen is wrong yet.
@@ -853,7 +872,9 @@ export function CompanionsApp({
               openedThroughOrdinal={openedThroughOrdinal}
               onBack={closeThread}
               onSend={onSend}
-              onSettings={() => router.push(`/companions/${opened.id}/settings`)}
+              onSettings={opened.access === "viewer"
+                ? null
+                : () => router.push(`/companions/${opened.id}/settings`)}
               onThread={setThread}
               onWake={() => void onWake()}
               onDesktop={() => void onDesktop()}

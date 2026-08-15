@@ -1692,6 +1692,7 @@ export function registerCompanionRoutes(
           : await getCompanion({ actor, orgId, companionId, withLastMessage: true, database });
         return { actor, orgId, companion };
       });
+      c.header("Cache-Control", "private, no-store");
       if (!live || !resolved.companion.runtime.box_id) {
         return c.json({ companion: resolved.companion, source: "control_plane" as const });
       }
@@ -1711,7 +1712,12 @@ export function registerCompanionRoutes(
           database,
         }),
       );
-      return c.json({ companion, source: "box" as const });
+      // The observation is a lifecycle write and answers without a preview; this read asked for one,
+      // so it keeps the one it already read rather than handing back a row with a blank line.
+      return c.json({
+        companion: { ...companion, last_message: resolved.companion.last_message },
+        source: "box" as const,
+      });
     } catch (error) {
       return jsonError(c, error, errorStatus(error));
     }

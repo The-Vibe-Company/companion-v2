@@ -69,7 +69,8 @@ export function CompanionThread({
   openedThroughOrdinal?: number | null;
   onBack: () => void;
   onSend: (content: string, clientMessageId: string) => Promise<boolean>;
-  onSettings: () => void;
+  /** Null for a Viewer: the settings page refuses them, so the header must not offer the door. */
+  onSettings: (() => void) | null;
   onThread: (thread: Thread) => void;
   onWake: () => void;
   onDesktop: () => void;
@@ -189,15 +190,17 @@ export function CompanionThread({
             <span className="chat-box__state">{status.label}</span>
           </span>
         )}
-        <button
-          type="button"
-          className="iconbtn chat-settings"
-          aria-label={`Settings for ${companion.name}`}
-          title="Settings"
-          onClick={onSettings}
-        >
-          <Icon name="settings" size={16} />
-        </button>
+        {onSettings && (
+          <button
+            type="button"
+            className="iconbtn chat-settings"
+            aria-label={`Settings for ${companion.name}`}
+            title="Settings"
+            onClick={onSettings}
+          >
+            <Icon name="settings" size={16} />
+          </button>
+        )}
         {canSend && (
           <button
             type="button"

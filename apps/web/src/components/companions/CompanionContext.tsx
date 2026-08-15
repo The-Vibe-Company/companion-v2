@@ -46,7 +46,8 @@ export function CompanionContext({
   onJoin: () => void;
   onDesktop: () => void;
   onWake: () => void;
-  onSettings: () => void;
+  /** Null for a Viewer, who cannot open Companion settings. */
+  onSettings: (() => void) | null;
   onClose: () => void;
 }) {
   const awake = companion.runtime.state === "running";
@@ -181,9 +182,11 @@ export function CompanionContext({
         <section className="chat-context__block">
           <div className="chat-context__titlerow">
             <h3 className="chat-context__title">Skills</h3>
-            <button type="button" className="chat-context__link" onClick={onSettings}>
-              Manage
-            </button>
+            {onSettings && (
+              <button type="button" className="chat-context__link" onClick={onSettings}>
+                Manage
+              </button>
+            )}
           </div>
           {companion.selected_skill_ids.length === 0 ? (
             <p className="chat-context__empty">No library skills are attached.</p>
