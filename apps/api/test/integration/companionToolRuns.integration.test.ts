@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   CompanionRuntimeForbiddenError,
   expireCompanionToolRuns,
+  listPendingCompanionMessages,
   recordCompanionPiProjectionWithEffects,
   sendCompanionMessage,
 } from "@companion/core";
@@ -139,5 +140,191 @@ describe("Companion tool-run settlement", () => {
       database,
     }))).rejects.toBeInstanceOf(CompanionRuntimeForbiddenError);
 
+  });
+
+  it("re-queues user messages watermarked after a timed-out tool so Pi can answer them", async () => {
+    const turn = await asOwner((database) => sendCompanionMessage({
+      actor: owner,
+      orgId: org,
+      companionId,
+      content: "Read the screenshot",
+      database,
+    }));
+    await asOwner((database) => recordCompanionPiProjectionWithEffects({
+      actor: owner,
+      orgId: org,
+      companionId,
+      entries: [],
+      deliveredOrdinal: turn.entry.ordinal,
+      database,
+    }));
+
+    const eventId = "pi:tool-stranded-tail";
+    const toolCreatedAt = new Date("2026-08-15T13:00:00.000Z");
+    await asOwner((database) => recordCompanionPiProjectionWithEffects({
+      actor: owner,
+      orgId: org,
+      companionId,
+      entries: [{
+        eventId,
+        role: "tool",
+        content: "/tmp/conductor-cli.png",
+        tool: {
+          call_id: "call-stranded-tail",
+          kind: "file",
+          name: "read",
+          title: "/tmp/conductor-cli.png",
+          status: "running",
+          detail: null,
+          screenshot: null,
+        },
+        createdAt: toolCreatedAt,
+      }],
+      database,
+    }));
+    const alors = await asOwner((database) => sendCompanionMessage({
+      actor: owner,
+      orgId: org,
+      companionId,
+      content: "Alors ?",
+      database,
+    }));
+    const caVa = await asOwner((database) => sendCompanionMessage({
+      actor: owner,
+      orgId: org,
+      companionId,
+      content: "Ca va ?",
+      database,
+    }));
+    await asOwner((database) => recordCompanionPiProjectionWithEffects({
+      actor: owner,
+      orgId: org,
+      companionId,
+      entries: [],
+      deliveredOrdinal: caVa.entry.ordinal,
+      database,
+    }));
+
+    const expired = await asViewer((database) => expireCompanionToolRuns({
+      actor: viewer,
+      orgId: org,
+      companionId,
+      now: new Date(toolCreatedAt.getTime() + 90_001),
+      database,
+    }));
+    const pending = await asOwner((database) => listPendingCompanionMessages({
+      actor: owner,
+      orgId: org,
+      companionId,
+      database,
+    }));
+
+    expect(expired.timedOut).toEqual([{ eventId, kind: "file" }]);
+    expect(expired.thread.entries.find((entry) => entry.event_id === eventId)?.tool?.status)
+      .toBe("timeout");
+    expect(pending.deliveredOrdinal).toBe(turn.entry.ordinal);
+    expect(pending.pending).toEqual([alors.entry, caVa.entry]);
+  });
+
+  it("recovers an already-settled timeout tail once for #305-era threads", async () => {
+    const turn = await asOwner((database) => sendCompanionMessage({
+      actor: owner,
+      orgId: org,
+      companionId,
+      content: "Try another image",
+      database,
+    }));
+    await asOwner((database) => recordCompanionPiProjectionWithEffects({
+      actor: owner,
+      orgId: org,
+      companionId,
+      entries: [],
+      deliveredOrdinal: turn.entry.ordinal,
+      database,
+    }));
+    const eventId = "pi:tool-already-timed-out";
+    await asOwner((database) => recordCompanionPiProjectionWithEffects({
+      actor: owner,
+      orgId: org,
+      companionId,
+      entries: [{
+        eventId,
+        role: "tool",
+        content: "/tmp/conductor-cli.png",
+        tool: {
+          call_id: "call-already-timed-out",
+          kind: "file",
+          name: "read",
+          title: "/tmp/conductor-cli.png",
+          status: "timeout",
+          detail: "Timed out after 90 seconds without a tool result.",
+          screenshot: null,
+        },
+        createdAt: new Date("2026-08-15T14:00:00.000Z"),
+      }],
+      database,
+    }));
+    const alors = await asOwner((database) => sendCompanionMessage({
+      actor: owner,
+      orgId: org,
+      companionId,
+      content: "Alors ?",
+      database,
+    }));
+    const caVa = await asOwner((database) => sendCompanionMessage({
+      actor: owner,
+      orgId: org,
+      companionId,
+      content: "Ca va ?",
+      database,
+    }));
+    await asOwner((database) => recordCompanionPiProjectionWithEffects({
+      actor: owner,
+      orgId: org,
+      companionId,
+      entries: [],
+      deliveredOrdinal: caVa.entry.ordinal,
+      database,
+    }));
+
+    const recovered = await asViewer((database) => expireCompanionToolRuns({
+      actor: viewer,
+      orgId: org,
+      companionId,
+      database,
+    }));
+    const pending = await asOwner((database) => listPendingCompanionMessages({
+      actor: owner,
+      orgId: org,
+      companionId,
+      database,
+    }));
+    expect(recovered.timedOut).toEqual([]);
+    expect(pending.deliveredOrdinal).toBe(turn.entry.ordinal);
+    expect(pending.pending).toEqual([alors.entry, caVa.entry]);
+
+    // Once Pi accepts the recovered tail, a later read/sync must not move the watermark back again.
+    await asOwner((database) => recordCompanionPiProjectionWithEffects({
+      actor: owner,
+      orgId: org,
+      companionId,
+      entries: [],
+      deliveredOrdinal: caVa.entry.ordinal,
+      database,
+    }));
+    await asViewer((database) => expireCompanionToolRuns({
+      actor: viewer,
+      orgId: org,
+      companionId,
+      database,
+    }));
+    const afterRetry = await asOwner((database) => listPendingCompanionMessages({
+      actor: owner,
+      orgId: org,
+      companionId,
+      database,
+    }));
+    expect(afterRetry.deliveredOrdinal).toBe(caVa.entry.ordinal);
+    expect(afterRetry.pending).toEqual([]);
   });
 });

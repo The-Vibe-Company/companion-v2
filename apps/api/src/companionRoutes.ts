@@ -1536,6 +1536,10 @@ export function registerCompanionRoutes(
           clientMessageId: body.client_message_id,
           database,
         });
+        // Settlement can put user messages accepted during the timed-out turn back on the delivery
+        // queue. Do that before reading the backlog so this send starts one normal turn with every
+        // stranded message, rather than prompting only the newest one.
+        const toolRuns = await expireCompanionToolRuns({ actor, orgId, companionId, database });
         // Anything a sleeping Box never received is still pending, so Pi receives the whole
         // backlog in order rather than this message alone. A resent send that was already
         // delivered is not pending, so it is never handed to Pi a second time either.
@@ -1552,6 +1556,7 @@ export function registerCompanionRoutes(
           provider,
           pending: state.pending,
           deliveredOrdinal: state.deliveredOrdinal,
+          toolRuns,
           ...result,
         };
       });
@@ -1607,15 +1612,6 @@ export function registerCompanionRoutes(
           return c.json({ thread: sent.thread, delivery: "pending" as const });
         }
       }
-      const toolRuns = await withTenantContext(
-        { orgId: sent.orgId, userId: sent.actor.id },
-        (database) => expireCompanionToolRuns({
-          actor: sent.actor,
-          orgId: sent.orgId,
-          companionId,
-          database,
-        }),
-      );
       const delivered = await deliverCompanionMessages({
         actor: sent.actor,
         orgId: sent.orgId,
@@ -1626,7 +1622,7 @@ export function registerCompanionRoutes(
       });
       const deliveredOrdinal = delivered?.deliveredOrdinal ?? sent.deliveredOrdinal;
       return c.json({
-        thread: delivered?.thread ?? toolRuns.thread,
+        thread: delivered?.thread ?? sent.toolRuns.thread,
         delivery: deliveredOrdinal !== null && deliveredOrdinal >= sent.entry.ordinal
           ? ("delivered" as const)
           : ("pending" as const),
@@ -1642,6 +1638,9 @@ export function registerCompanionRoutes(
       const body = startCompanionRuntimeInputSchema.parse(await c.req.json().catch(() => ({})));
       const resolved = await tenant(c, async ({ actor, orgId, database }) => {
         const companion = await getCompanionForRuntime({ actor, orgId, companionId, database });
+        // Re-queue an unanswered post-timeout user tail before taking the pending snapshot this
+        // sync will deliver. Settlement itself remains PostgreSQL-only and never wakes Box.
+        const toolRuns = await expireCompanionToolRuns({ actor, orgId, companionId, database });
         const state = await listPendingCompanionMessages({ actor, orgId, companionId, database });
         const mayNeedProviderRecovery = piIsReachable(companion)
           || (Boolean(companion.runtime.box_id) && companion.runtime.state === "error");
@@ -1650,22 +1649,14 @@ export function registerCompanionRoutes(
               actor, orgId, companionId, database,
             })
           : null;
-        return { actor, orgId, companion, provider, ...state };
+        return { actor, orgId, companion, provider, toolRuns, ...state };
       });
       const mayRecoverProvider = resolved.companion.runtime.state === "error"
         && !providerAuthIsCurrent(resolved.companion, resolved.provider);
       // Timeout settlement is control-plane work. Run it before every runtime gate so a stopped Box
       // or daemon cannot leave a durable chip spinning. The staged Pi extension owns cancellation
       // of the active operation; the control plane never sends an unscoped abort into Pi's FIFO.
-      const beforeRuntime = await withTenantContext(
-        { orgId: resolved.orgId, userId: resolved.actor.id },
-        (database) => expireCompanionToolRuns({
-          actor: resolved.actor,
-          orgId: resolved.orgId,
-          companionId,
-          database,
-        }),
-      );
+      const beforeRuntime = resolved.toolRuns;
       if (!piIsReachable(resolved.companion) && !mayRecoverProvider) {
         return c.json({ thread: beforeRuntime.thread, source: "control_plane" as const });
       }

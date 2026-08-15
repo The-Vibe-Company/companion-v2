@@ -253,11 +253,17 @@ two different messages are still two turns.
 It hands pending messages to the running Pi daemon in ordinal order through the owner-only
 `pi.rpc.in` FIFO, reads `pi.rpc.ndjson` from the recorded byte offset, and appends the projected
 entries. `delivered_ordinal` is claimed as soon as Pi accepts a prompt and before the log is read, so
-a failed read or projection cannot make a retry hand Pi the same message again. `pi_log_offset` then
-advances with the projection, and event ids derive from log byte offsets, so a retried sync appends
-nothing new. Both watermarks only move forward, except when Pi's log shrank: that read starts at the
-log's beginning and owns the offset outright. When the Box is asleep, sync degrades to the same
-read-model response as the thread read and reports `source: "control_plane"`.
+a failed read or projection cannot normally make a retry hand Pi the same message again.
+`pi_log_offset` then advances with the projection, and event ids derive from log byte offsets, so a
+retried sync appends nothing new. Timeout settlement is the delivery-watermark exception: if a tool
+times out with already-watermarked user messages after it and no assistant reply after the tool, the
+watermark moves behind that user tail. The next live sync or send prompts those stranded messages in
+order, including after Pi has been recycled. A per-thread timeout-recovery ordinal makes that rewind
+one-shot and also backfills timeout rows already settled by an older control plane. `pi_log_offset`
+only moves backward when Pi's log
+shrinks: that read starts at the log's beginning and owns the offset outright. When the Box is
+asleep, sync degrades to the same read-model response as the thread read and reports
+`source: "control_plane"`.
 
 One sync reads at most 256 KiB of that log, and the projection consumes whole lines only, so a busy
 thread arrives across consecutive syncs and a chunk cut mid-line leaves the remainder to the next
@@ -295,6 +301,11 @@ abort into Pi's FIFO: both live sync and the read-only thread fallback settle ov
 and a late result and the timeout update compare-and-set only a still-running chip, so whichever
 settles it first wins. This closes the chip and the browser's in-flight state without changing Box or
 daemon lifecycle, so a stalled tool never turns an Online Companion into Starting or exposes Wake.
+If user messages were watermarked after the tool call without a later assistant reply, the same
+settlement re-queues that tail in PostgreSQL. Re-queueing neither contacts nor wakes Box, and the
+normal live sync or next send delivers the messages before reply state resumes. A narrowly scoped
+database definer performs only this deadline CAS and one-shot watermark recovery, allowing a Viewer
+read to trigger safe housekeeping under forced RLS without granting Viewers transcript writes.
 The extension also refuses image paths before Pi's built-in `read` can enter its vision path;
 `ask_user` retains its separate five-minute interactive decision deadline.
 

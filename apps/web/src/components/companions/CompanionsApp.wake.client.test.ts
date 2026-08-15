@@ -300,7 +300,7 @@ describe("CompanionsApp wake on send", () => {
     await send(container, "Draft the launch note");
 
     expect(footer(container)).not.toContain("Wake Luna to deliver.");
-    expect(footer(container)).toContain("1 message waiting for a reply.");
+    expect(footer(container)).toContain("1 message waiting for delivery.");
     expect(chip(container)).toContain("Online");
     expect(api.runtimeReads()).toBeGreaterThan(0);
 

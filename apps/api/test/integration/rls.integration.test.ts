@@ -35,6 +35,8 @@ describe("Skills Hub PostgreSQL isolation", () => {
   const suffix = randomUUID().replaceAll("-", "").slice(0, 16);
   const apiRole = `companion_api_${suffix}`;
   const workerRole = `companion_worker_${suffix}`;
+  const migrationRole = `companion_migration_${suffix}`;
+  let functionOwner: string;
   let fixture: IntegrationFixture;
   let personalSlug: string;
   let orgSlug: string;
@@ -42,6 +44,8 @@ describe("Skills Hub PostgreSQL isolation", () => {
   const companionId = randomUUID();
 
   beforeAll(async () => {
+    const [ownerRow] = await integrationSql<Array<{ current_user: string }>>`select current_user`;
+    functionOwner = ownerRow!.current_user;
     fixture = await createIntegrationFixture();
     personalSlug = `private-${fixture.suffix}`;
     orgSlug = `org-${fixture.suffix}`;
@@ -55,6 +59,15 @@ describe("Skills Hub PostgreSQL isolation", () => {
     `;
     await integrationSql.unsafe(`create role ${apiRole} login nosuperuser nobypassrls noinherit`);
     await integrationSql.unsafe(`create role ${workerRole} login nosuperuser nobypassrls noinherit`);
+    await integrationSql.unsafe(`create role ${migrationRole} login nosuperuser nobypassrls noinherit`);
+    await integrationSql.unsafe(`
+      grant usage on schema public to ${migrationRole};
+      grant select on memberships, companions, companion_workspace_access,
+        companion_transcript_entries, companion_threads to ${migrationRole};
+      grant update on companion_transcript_entries, companion_threads to ${migrationRole};
+      alter function companion_expire_tool_runs(uuid, uuid, timestamp with time zone)
+        owner to ${migrationRole}
+    `);
     const grants = extractRuntimeRoleGrantBlock(await readFile(await resolveRuntimeRoleGrantsFile(), "utf8"));
     await integrationSql.begin(async (tx) => {
       await tx`select set_config('companion.api_role', ${apiRole}, true)`;
@@ -68,8 +81,11 @@ describe("Skills Hub PostgreSQL isolation", () => {
     await fixture.cleanup();
     await integrationSql.unsafe(`drop owned by ${apiRole}`);
     await integrationSql.unsafe(`drop owned by ${workerRole}`);
+    await integrationSql.unsafe(`alter function companion_expire_tool_runs(uuid, uuid, timestamp with time zone) owner to ${functionOwner}`);
+    await integrationSql.unsafe(`drop owned by ${migrationRole}`);
     await integrationSql.unsafe(`drop role ${apiRole}`);
     await integrationSql.unsafe(`drop role ${workerRole}`);
+    await integrationSql.unsafe(`drop role ${migrationRole}`);
   });
 
   async function visibleSlugs(orgId: string, userId: string): Promise<string[]> {
@@ -312,6 +328,90 @@ describe("Skills Hub PostgreSQL isolation", () => {
     await integrationSql`
       delete from companion_transcript_entries
       where companion_id = ${companionId} and event_id = 'pi:1:tool:0'
+    `;
+  });
+
+  it("lets a Viewer invoke only fail-closed timeout recovery under forced RLS", async () => {
+    const running = JSON.stringify({
+      call_id: "call-viewer-timeout",
+      kind: "file",
+      name: "read",
+      title: "/tmp/conductor-cli.png",
+      status: "running",
+      detail: null,
+      screenshot: null,
+    });
+    await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.owner.id}, true)`;
+      await tx`
+        insert into companion_workspace_access (
+          org_id, companion_id, owner_id, role, granted_by
+        ) values (
+          ${fixture.orgA}, ${companionId}, ${fixture.owner.id}, 'viewer', ${fixture.owner.id}
+        )
+      `;
+      await tx`
+        insert into companion_transcript_entries (
+          org_id, companion_id, event_id, ordinal, role, content, author_id, created_at, tool
+        ) values
+          (${fixture.orgA}, ${companionId}, 'viewer-timeout-user-1', 1, 'user', 'Read it', ${fixture.owner.id}, now() - interval '3 minutes', null),
+          (${fixture.orgA}, ${companionId}, 'viewer-timeout-tool', 2, 'tool', '/tmp/conductor-cli.png', null, now() - interval '2 minutes', ${running}::jsonb),
+          (${fixture.orgA}, ${companionId}, 'viewer-timeout-user-2', 3, 'user', 'Alors ?', ${fixture.owner.id}, now() - interval '1 minute', null),
+          (${fixture.orgA}, ${companionId}, 'viewer-timeout-user-3', 4, 'user', 'Ca va ?', ${fixture.owner.id}, now() - interval '30 seconds', null)
+      `;
+      await tx`
+        update companion_threads
+        set next_ordinal = 5, delivered_ordinal = 4
+        where companion_id = ${companionId}
+      `;
+    });
+
+    const viewerRecovery = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
+      const directWrite = await tx<Array<{ event_id: string }>>`
+        update companion_transcript_entries
+        set tool = jsonb_set(tool, '{status}', '"ok"')
+        where companion_id = ${companionId} and event_id = 'viewer-timeout-tool'
+        returning event_id
+      `;
+      const expired = await tx<Array<{ event_id: string; kind: string }>>`
+        select * from companion_expire_tool_runs(${fixture.orgA}, ${companionId}, now())
+      `;
+      const [state] = await tx<Array<{
+        status: string;
+        delivered_ordinal: number;
+        timeout_recovery_ordinal: number;
+      }>>`
+        select e.tool->>'status' as status, t.delivered_ordinal, t.timeout_recovery_ordinal
+        from companion_transcript_entries e
+        join companion_threads t on t.companion_id = e.companion_id
+        where e.companion_id = ${companionId} and e.event_id = 'viewer-timeout-tool'
+      `;
+      return { directWrite, expired, state };
+    });
+    expect(viewerRecovery.directWrite).toEqual([]);
+    expect(viewerRecovery.expired).toEqual([{ event_id: "viewer-timeout-tool", kind: "file" }]);
+    expect(viewerRecovery.state).toEqual({
+      status: "timeout",
+      delivered_ordinal: 1,
+      timeout_recovery_ordinal: 2,
+    });
+
+    const crossTenant = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`select set_config('app.org_id', ${fixture.orgB}, true), set_config('app.user_id', ${fixture.outsider.id}, true)`;
+      return tx<Array<{ event_id: string }>>`
+        select * from companion_expire_tool_runs(${fixture.orgA}, ${companionId}, now())
+      `;
+    });
+    expect(crossTenant).toEqual([]);
+
+    await integrationSql`delete from companion_workspace_access where companion_id = ${companionId}`;
+    await integrationSql`
+      delete from companion_transcript_entries
+      where companion_id = ${companionId} and event_id like 'viewer-timeout-%'
     `;
   });
 

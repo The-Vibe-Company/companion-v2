@@ -2054,17 +2054,23 @@ describe("Companions API feature gate", () => {
     expect(coreMocks.recordCompanionPiProjectionWithEffects).not.toHaveBeenCalled();
   });
 
-  it("delivers a follow-up after terminalizing the prior tool without a control-plane abort", async () => {
+  it("delivers the stranded tail and a new send after terminalizing the prior tool", async () => {
+    const stranded = { ...message, event_id: "msg:alors", content: "Alors ?", ordinal: 1 };
+    const newest = { ...message, event_id: "msg:ca-va", content: "Ca va ?", ordinal: 2 };
     const timedOutThread = {
       ...viewerThread,
       access: "owner" as const,
       read_only: false,
       can_send: true,
-      entries: [message],
+      entries: [stranded, newest],
     };
     coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.sendCompanionMessage.mockResolvedValue({
+      thread: timedOutThread,
+      entry: newest,
+    });
     coreMocks.listPendingCompanionMessages.mockResolvedValue({
-      pending: [message],
+      pending: [stranded, newest],
       piLogOffset: 0,
       deliveredOrdinal: null,
     });
@@ -2079,12 +2085,21 @@ describe("Companions API feature gate", () => {
     const response = await app.request(`/v1/companions/${companion.id}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: "Alors ?" }),
+      body: JSON.stringify({ content: "Ca va ?" }),
     });
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
-    expect(runtime.prompt).toHaveBeenCalledOnce();
+    expect(coreMocks.expireCompanionToolRuns.mock.invocationCallOrder[0])
+      .toBeLessThan(coreMocks.listPendingCompanionMessages.mock.invocationCallOrder[0]!);
+    expect(runtime.prompt).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      message: "Alors ?",
+      requestId: "msg:alors",
+    }));
+    expect(runtime.prompt).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      message: "Ca va ?",
+      requestId: "msg:ca-va",
+    }));
   });
 
   it("refreshes an already-running legacy Pi layout before delivering a message", async () => {
@@ -2517,9 +2532,16 @@ describe("Companions API feature gate", () => {
       { type: "message_end", message: { role: "toolResult", toolCallId: "call_1", content: [{ type: "text", text: "ok" }] } },
     ].map((event) => `${JSON.stringify(event)}\n`).join("");
 
-    function syncing(runtime: ReturnType<typeof boxRuntime>) {
+    function syncing(
+      runtime: ReturnType<typeof boxRuntime>,
+      pending: Array<typeof message> = [],
+    ) {
       coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
-      coreMocks.listPendingCompanionMessages.mockResolvedValue({ pending: [], piLogOffset: 512 });
+      coreMocks.listPendingCompanionMessages.mockResolvedValue({
+        pending,
+        piLogOffset: 512,
+        deliveredOrdinal: null,
+      });
       const app = new Hono<{ Variables: ApiVariables }>();
       registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
       return app.request(`/v1/companions/${companion.id}/thread/sync`, {
@@ -2661,6 +2683,38 @@ describe("Companions API feature gate", () => {
       expect(runtime.start).not.toHaveBeenCalled();
       expect(runtime.stop).not.toHaveBeenCalled();
       expect(runtime.captureDesktopFrame).not.toHaveBeenCalled();
+    });
+
+    it("prompts a user tail re-queued by timeout settlement on the same live sync", async () => {
+      const stranded = {
+        ...message,
+        event_id: "msg:ca-va",
+        ordinal: 3,
+        content: "Ca va ?",
+      };
+      coreMocks.expireCompanionToolRuns.mockResolvedValue({
+        thread: {
+          ...viewerThread,
+          access: "owner",
+          entries: [stranded],
+          pending_count: 1,
+        },
+        timedOut: [{ eventId: "pi:read:tool:0", kind: "file" }],
+      });
+      const runtime = boxRuntime({ readEvents: vi.fn(async () => ({ chunk: "", offset: 512 })) });
+
+      const response = await syncing(runtime, [stranded]);
+
+      expect(response.status).toBe(200);
+      expect(coreMocks.expireCompanionToolRuns.mock.invocationCallOrder[0])
+        .toBeLessThan(coreMocks.listPendingCompanionMessages.mock.invocationCallOrder[0]!);
+      expect(runtime.prompt).toHaveBeenCalledWith(expect.objectContaining({
+        message: "Ca va ?",
+        requestId: "msg:ca-va",
+      }));
+      expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+        expect.objectContaining({ deliveredOrdinal: 3 }),
+      );
     });
 
     it("leaves a run that touched no screen without a picture", async () => {

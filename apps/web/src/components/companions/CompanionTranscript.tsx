@@ -409,7 +409,11 @@ export function CompanionTranscript({
     event.preventDefault();
   }, []);
 
-  const replying = replyExpected({ entries: stableEntries, awake });
+  const replying = replyExpected({
+    entries: stableEntries,
+    awake,
+    pendingCount: thread?.pending_count,
+  });
   const loading = thread === null;
   const empty = thread !== null && messages.length === 0;
   const hint = composerHint({

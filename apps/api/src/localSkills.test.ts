@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.64.0");
+    expect(pkg.version).toBe("1.65.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -126,11 +126,16 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("accessible library listing");
-    expect(changelog).toContain("every org skill plus the caller's own personal skills");
+    expect(changelog).toContain("timed-out Companion turns gained stranded-message re-delivery");
+    expect(changelog).toContain("transcript recovery in the Companion control plane");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
+    const accessibleChanges = manifest.metadata?.changelog
+      ?.find((entry) => entry.version === "1.64.0")
+      ?.changes?.join("\n") ?? "";
+    expect(accessibleChanges).toContain("accessible library listing");
+    expect(accessibleChanges).toContain("every org skill plus the caller's own personal skills");
     const memberStateChanges = manifest.metadata?.changelog
       ?.find((entry) => entry.version === "1.59.0")
       ?.changes?.join("\n") ?? "";

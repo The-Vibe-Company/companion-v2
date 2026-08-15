@@ -386,7 +386,10 @@ happened. Reasoning sits behind a collapsed disclosure labelled as reasoning —
 run is a hairline card reading what ran and how it ended, with its arguments and its result folded away until asked for;
 a run that moved the Box desktop shows exactly one direct Box frame in place, without a Pi image
 read, bounded so it never widens the column. A tool that reports no result fails closed after 90
-seconds without changing Box lifecycle or leaving the thread in-flight. Pi runs shell and file
+seconds without changing Box lifecycle or leaving the thread in-flight. User messages stranded
+after that tool are pending until normal live sync or the next send prompts them again, including
+after a Pi recycle and for timeouts stored before the recovery behavior shipped. A one-shot
+control-plane recovery marker prevents repeated prompts. Pi runs shell and file
 tools without approval. An `ask_user` question card is the one thing in the thread a reader can act
 on: it states what Pi asked, offers an answer field or Deny to Owner and Editor only, and stays on
 the transcript once decided with who decided it. Historical Allow / Deny cards remain readable in

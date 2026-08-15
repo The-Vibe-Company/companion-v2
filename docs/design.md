@@ -139,7 +139,12 @@ paths before built-in `read` enters vision and gives every accepted execution to
 control-plane thread fallback close any chip whose result is still absent at that deadline, using
 compare-and-set settlement so a late result cannot overwrite the timeout. The control plane sends no
 unscoped Pi abort, touches no Box on the read fallback, never marks the Box Starting, and never
-exposes Wake. A settled `browse` or `computer` run receives
+exposes Wake. If user messages were accepted into the timed-out turn after its tool call but no
+assistant reply followed, settlement moves the delivery watermark behind that user tail. Those
+messages are pending rather than an in-flight reply until the next live sync or send prompts them
+again, so recycling Pi cannot strand already-watermarked follow-ups. A one-shot recovery watermark
+also covers timeouts persisted before recovery shipped; a narrow database definer lets Viewer reads
+trigger that housekeeping without granting general thread writes. A settled `browse` or `computer` run receives
 exactly one frame, attributed by the run id whose settlement won and captured directly from the
 existing Box desktop source, never through Pi `read`; the stored frame remains read-only for Viewers.
 

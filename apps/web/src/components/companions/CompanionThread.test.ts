@@ -265,13 +265,13 @@ describe("CompanionThread", () => {
     expect(markup).not.toContain(">Wake<");
   });
 
-  it("reports whether delivery is waiting for a reply or for startup", () => {
+  it("reports whether delivery is waiting on Pi or for startup", () => {
     // The footer reads the projected runtime the status chip reads, so a Companion a send has just
     // woken says what its messages are waiting for instead of asking to be woken again.
     const waiting = thread({ pending_count: 1 });
     const running = render({ thread: waiting });
 
-    expect(running).toContain("1 message waiting for a reply.");
+    expect(running).toContain("1 message waiting for delivery.");
     expect(running).not.toContain("retry delivery");
 
     const starting = render({
@@ -468,7 +468,7 @@ describe("CompanionThread", () => {
   it("says a running Box owes a reply while the transcript ends on a member's message", () => {
     const awaiting = thread({
       entries: [thread().entries[0]!],
-      pending_count: 1,
+      pending_count: 0,
     });
 
     expect(render({ thread: awaiting })).toContain("is replying...");

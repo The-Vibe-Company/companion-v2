@@ -332,6 +332,27 @@ describe("a tool run in the thread", () => {
     expect(container.textContent).not.toContain("Luna is replying...");
     expect(send.disabled).toBe(false);
   });
+
+  it("does not show a reply in flight for user messages re-queued after a timed-out run", () => {
+    const container = mount(thread([
+      entry({
+        event_id: "pi:read",
+        ordinal: 1,
+        role: "tool",
+        content: "/tmp/conductor-cli.png",
+        tool: run({
+          name: "read",
+          title: "/tmp/conductor-cli.png",
+          status: "timeout",
+          detail: "Timed out after 90 seconds without a tool result.",
+        }),
+      }),
+      entry({ event_id: "msg:2", ordinal: 2, role: "user", content: "Alors ?" }),
+      entry({ event_id: "msg:3", ordinal: 3, role: "user", content: "Ca va ?" }),
+    ], { pending_count: 2 }));
+
+    expect(container.textContent).not.toContain("Luna is replying...");
+  });
 });
 
 describe("a permission card in the thread", () => {

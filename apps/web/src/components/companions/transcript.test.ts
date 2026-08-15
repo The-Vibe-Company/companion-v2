@@ -181,6 +181,66 @@ describe("replyExpected", () => {
     })).toBe(false);
   });
 
+  it("does not treat user messages stranded after a timed-out tool as an active turn", () => {
+    const timeout = entry({
+      event_id: "pi:read",
+      ordinal: 1,
+      role: "tool",
+      tool: {
+        call_id: "call-read",
+        kind: "file",
+        name: "read",
+        title: "/tmp/conductor-cli.png",
+        status: "timeout",
+        detail: "Timed out after 90 seconds without a tool result.",
+        screenshot: null,
+      },
+    });
+    expect(replyExpected({
+      entries: [
+        entry(),
+        timeout,
+        entry({ event_id: "msg:2", ordinal: 2, content: "Alors ?" }),
+        entry({ event_id: "msg:3", ordinal: 3, content: "Ca va ?" }),
+      ],
+      awake: true,
+    })).toBe(false);
+  });
+
+  it("waits for a fresh user turn after an assistant reply", () => {
+    expect(replyExpected({
+      entries: [
+        entry(),
+        entry({ event_id: "pi:reply", ordinal: 1, role: "assistant" }),
+        entry({ event_id: "msg:2", ordinal: 2, content: "One more thing" }),
+      ],
+      awake: true,
+    })).toBe(true);
+  });
+
+  it("waits only after a stranded tail has actually been re-delivered", () => {
+    const entries = [
+      entry(),
+      entry({
+        event_id: "pi:read",
+        ordinal: 1,
+        role: "tool",
+        tool: {
+          call_id: "call-read",
+          kind: "file",
+          name: "read",
+          title: "/tmp/conductor-cli.png",
+          status: "timeout",
+          detail: "Timed out after 90 seconds without a tool result.",
+          screenshot: null,
+        },
+      }),
+      entry({ event_id: "msg:2", ordinal: 2, content: "Ca va ?" }),
+    ];
+    expect(replyExpected({ entries, awake: true, pendingCount: 1 })).toBe(false);
+    expect(replyExpected({ entries, awake: true, pendingCount: 0 })).toBe(true);
+  });
+
   it("never waits on a Box that is not running, because nothing has been delivered", () => {
     expect(replyExpected({ entries: [entry()], awake: false })).toBe(false);
     expect(replyExpected({ entries: [], awake: true })).toBe(false);
@@ -193,12 +253,12 @@ describe("composerHint", () => {
       .toBe("Enter sends. Shift + Enter starts a new line.");
   });
 
-  it("counts messages waiting on a reply and explains how to retry saved delivery", () => {
+  it("counts messages waiting on delivery and explains how to retry saved delivery", () => {
     expect(composerHint({
       thread: thread({ pending_count: 1 }),
       companionName: "Luna",
       state: "running",
-    })).toBe("1 message waiting for a reply.");
+    })).toBe("1 message waiting for delivery.");
     expect(composerHint({
       thread: thread({ pending_count: 2 }),
       companionName: "Luna",
