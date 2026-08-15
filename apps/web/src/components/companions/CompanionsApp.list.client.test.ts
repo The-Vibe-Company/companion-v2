@@ -369,6 +369,25 @@ describe("CompanionsApp conversation list", () => {
     expect(document.activeElement?.textContent).toBe("Hide");
   });
 
+  it("moves Tab from the portal menu to the next row instead of losing focus", async () => {
+    const nova = companion({
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "Nova",
+    });
+    const container = await render([companion(), nova]);
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Actions for Luna"]')!;
+
+    await act(async () => trigger.click());
+    const firstItem = document.activeElement as HTMLButtonElement;
+    await act(async () => {
+      firstItem.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    });
+
+    expect(document.activeElement?.getAttribute("aria-label")).toContain("Open Nova");
+    expect(document.body.querySelector('[role="menu"]')).toBeNull();
+  });
+
   it("routes member-state actions through the row menu and applies the server result", async () => {
     const container = await render([companion()]);
     const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Actions for Luna"]')!;

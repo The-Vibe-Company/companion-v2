@@ -237,7 +237,18 @@ function CompanionActionsMenu({
     else if (event.key === "Home") next = 0;
     else if (event.key === "End") next = items.length - 1;
     else if (event.key === "Tab") {
+      event.preventDefault();
       close();
+      window.requestAnimationFrame(() => {
+        const trigger = triggerRef.current;
+        if (!trigger) return;
+        const focusable = [...document.querySelectorAll<HTMLElement>(
+          'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+        )].filter((item) => !menuRef.current?.contains(item));
+        const triggerIndex = focusable.indexOf(trigger);
+        const destination = focusable[triggerIndex + (event.shiftKey ? -1 : 1)];
+        (destination ?? trigger).focus();
+      });
       return;
     } else return;
     event.preventDefault();

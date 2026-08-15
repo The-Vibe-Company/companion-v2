@@ -816,6 +816,14 @@
   flex: none;
 }
 
+@media (pointer: coarse) {
+  .companions-row-menu__trigger {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+  }
+}
+
 .companions-row-menu__panel {
   position: fixed;
   z-index: 100;

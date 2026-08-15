@@ -128,6 +128,7 @@ function declarationsFor(selector: string, at: string[] = []): string[] {
 const PHONE = ["@media (max-width: 560px)"];
 const COMPACT = ["@media (max-width: 860px)"];
 const NARROW = ["@media (max-width: 700px)"];
+const COARSE_POINTER = ["@media (pointer: coarse)"];
 
 describe("Companions mobile viewport", () => {
   it("keeps the Companion list in the same flat full-height frame as Skills", () => {
@@ -159,6 +160,12 @@ describe("Companions mobile viewport", () => {
     expect(phoneRow).toContain('"main status actions"');
     expect(declarationsFor(".companions-list .companions-list__head", PHONE)[0]).toContain("display: none;");
     expect(declarationsFor(".companions-row-menu__trigger", PHONE)[0]).toContain("width: 44px;");
+  });
+
+  it("keeps the sole row-action target touch-sized on coarse-pointer tablets", () => {
+    const trigger = declarationsFor(".companions-row-menu__trigger", COARSE_POINTER)[0];
+    expect(trigger).toContain("width: 44px;");
+    expect(trigger).toContain("height: 44px;");
   });
 
   it("sizes every dialog against its scrim instead of the viewport width", () => {
