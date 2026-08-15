@@ -368,10 +368,18 @@ table → rows → full-screen panel navigation rather than shrinking the grid o
 **Companion settings** is a separate page reached from each Companion row action in the
 Companions list. It has one direct form for name, instructions, and the same provider-then-model picker
 used during creation, on the same flat hairline surface as the list without stacking cards or adding
-navigation. Owner and Editor also see a hairline-separated Runtime section when the Companion is
-Online: `Pi only` is selected by default and restarts directly, while `Full Box` requires an explicit
-confirmation that all work on the Box will be interrupted. The control is disabled during another
-operation or while settings have unsaved changes, and Viewer does not see it. The Owner alone sees a
+navigation. Owner and Editor also see a hairline-separated Runtime section. When the Companion is
+Online, `Pi only` is selected by default and restarts directly, while `Full Box` requires an explicit
+confirmation that all work on the Box will be interrupted. Once the server accepts an asynchronous
+archive, the confirmation closes; the section uses a waiting message and retries the idempotent Full
+Box continuation until it can resume after the archive completes. If the page is reopened, Full Box
+remains retryable manually. Message wakes use the same dedicated wait marker, and a runner's open
+thread automatically syncs until it can continue; Viewer reads and explicit Stop never resume it.
+Pi-only and settings-apply races do not inherit that automatic Full Box continuation; they wait for
+an explicit Wake, and Owner deletion remains locked against every wake.
+This transient state is not a red Error. The
+control is disabled during another operation or while settings have unsaved changes, and Viewer does
+not see it. The Owner alone sees a
 separate delete action and an explicit irreversible confirmation; Editor can save but cannot delete,
 and Viewer sees disabled read-only fields. The thread, Box chip, Plugins, Lux, and top-level navigation
 remain unchanged.

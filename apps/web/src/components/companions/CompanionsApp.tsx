@@ -499,6 +499,10 @@ export function CompanionsApp({
   );
   const canRunOpened = opened !== null && opened.access !== "viewer";
   const openedAwake = opened?.runtime.state === "running";
+  const openedArchiveWait = opened?.runtime.state === "stopping"
+    && opened.runtime.daemon_state === "starting";
+  const openedStartRecovery = opened?.runtime.state === "provisioning"
+    && opened.runtime.daemon_state === "starting";
   // A lifecycle the control plane is still resolving. `error` is not one of these: it is where a
   // failed transition settles, and its reason is already on screen.
   const openedPending = opened?.runtime.state === "provisioning" || opened?.runtime.state === "stopping";
@@ -799,13 +803,16 @@ export function CompanionsApp({
 
   useEffect(() => {
     if (!openedId) return;
-    const live = canRunOpened && openedAwake;
+    // A runner's thread sync is also the automatic continuation for an accepted wake that is
+    // waiting on Box archival, and retries an abandoned provisioning claim after its stale window.
+    // Viewer reads and an explicit Stop (`stopping`/`stopped`) stay on the control-plane-only path.
+    const live = canRunOpened && (openedAwake || openedArchiveWait || openedStartRecovery);
     const timer = setInterval(
       () => void refreshThread(live),
       live ? LIVE_POLL_MS : READ_MODEL_POLL_MS,
     );
     return () => clearInterval(timer);
-  }, [canRunOpened, openedAwake, openedId, refreshThread]);
+  }, [canRunOpened, openedArchiveWait, openedAwake, openedId, openedStartRecovery, refreshThread]);
 
   /**
    * Re-read one Companion; a failed read leaves the current row alone. The control-plane read is the

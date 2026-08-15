@@ -112,8 +112,14 @@ describe("Companion provider contracts", () => {
   it("accepts only the two explicit runtime restart targets", () => {
     expect(restartCompanionRuntimeInputSchema.parse({ target: "pi" })).toEqual({ target: "pi" });
     expect(restartCompanionRuntimeInputSchema.parse({ target: "box" })).toEqual({ target: "box" });
+    expect(restartCompanionRuntimeInputSchema.parse({ target: "box", continuation: true })).toEqual({
+      target: "box",
+      continuation: true,
+    });
     expect(() => restartCompanionRuntimeInputSchema.parse({ target: "server" })).toThrow();
     expect(() => restartCompanionRuntimeInputSchema.parse({ target: "pi", wake: true })).toThrow();
+    expect(() => restartCompanionRuntimeInputSchema.parse({ target: "pi", continuation: true })).toThrow();
+    expect(() => restartCompanionRuntimeInputSchema.parse({ target: "box", continuation: false })).toThrow();
   });
 
   it("persists skill selection and write-on-behalf on update", () => {

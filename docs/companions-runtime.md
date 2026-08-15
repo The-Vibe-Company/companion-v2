@@ -222,12 +222,28 @@ budget, comfortably inside the raised proxy window.
 
 `POST /v1/companions/:id/runtime/restart` is an operator control, not a wake path. It authorizes an
 Owner or Editor before constructing a Box client, then observes Box and Pi without resuming either.
-It accepts only a fully online, settled Companion. The default `pi` target reinjects persisted
-configuration and recycles only Pi with Box wake disabled. The `box` target stops Pi, archives the
-Box, and resumes that same Box through the normal full start path; Settings requires an explicit
-confirmation because this interrupts all work on the Box. An asleep, errored, provisioning, or
-stopping Companion is refused without contact that could wake it, and lifecycle failures keep using
-the existing projected error state and sanitized reason.
+It accepts a fully online, settled Companion, a `stopping/starting` Companion to continue a Full Box
+restart already waiting on its archive, or the same restart's narrow `provisioning/starting`
+continuation so a stale owner can be reclaimed. The default `pi` target reinjects persisted configuration
+and recycles only Pi with Box wake disabled. The `box` target stops Pi, archives the Box, and resumes
+that same Box through the normal full start path; Settings requires an explicit confirmation because
+this interrupts all work on the Box. Because Box snapshots asynchronously, a start polls through
+`archiving` and resumes only after `archived`; if one bounded poll returns while the snapshot is still
+running, the control plane keeps `stopping` with daemon `starting` and no `last_error`. That composite
+state is the durable archive-resume intent; an explicit Stop and the Owner's deletion lock never gain
+it. Settings closes the confirmation, then retries with `continuation: true` until it can resume. A
+message wake or explicit Wake may write the same marker; the runner's open-thread sync and another
+Wake reclaim it immediately, so pending delivery resumes automatically when the archive is ready.
+If a no-wake settings apply or Pi-only restart meets the same race, it records `stopping/stopped`
+while the snapshot is in flight, or `stopped/stopped` when its bounded poll observes archival
+complete. Thread sync does not resume either state, but an explicit Wake may. Owner deletion uses a separate
+`stopping`/`unknown` lock that no wake can claim. Viewer reads and explicit Stop remain
+control-plane-only and never auto-resume a Box. A
+delayed continuation that finds the Companion already Online is an idempotent success rather than a
+second restart, and reopening Settings keeps Full Box available to continue the marked wait manually.
+An asleep, errored, or otherwise provisioning Companion is refused
+without contact that could wake it, and genuine lifecycle failures keep using the existing projected
+error state and sanitized reason.
 
 One send is one turn. The sender names the message it is creating with `client_message_id`, a UUID,
 and the control plane stores it as that entry's event id (`msg:<client_message_id>`), so the
