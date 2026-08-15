@@ -23,8 +23,8 @@ export interface CompanionContextPanel {
 }
 
 /**
- * One Companion, one thread. The header carries the identity, the Box status chip, settings, the
- * context toggle, and at most one lifecycle control; the conversation and the composer below it are
+ * One Companion, one thread. The header carries the identity, the Box status chip, settings, and the
+ * context toggle; the conversation and the composer below it are
  * the assistant-ui primitives. The transcript is the control-plane read model, so a Viewer sees the
  * conversation without any Box contact and gets no composer. Pi's tools and skills stay out of the
  * transcript by design.
@@ -40,7 +40,6 @@ export function CompanionThread({
   orgId,
   error,
   busy,
-  waking,
   openingDesktop,
   context,
   contextSkills,
@@ -50,7 +49,6 @@ export function CompanionThread({
   onSend,
   onSettings,
   onThread,
-  onWake,
   onDesktop,
 }: {
   companion: Companion;
@@ -58,7 +56,6 @@ export function CompanionThread({
   orgId: string;
   error: string | null;
   busy: boolean;
-  waking: boolean;
   openingDesktop: boolean;
   context: CompanionContextPanel;
   /** Selected skills this surface can name; the panel counts the ones it cannot. */
@@ -72,7 +69,6 @@ export function CompanionThread({
   /** Null for a Viewer: the settings page refuses them, so the header must not offer the door. */
   onSettings: (() => void) | null;
   onThread: (thread: Thread) => void;
-  onWake: () => void;
   onDesktop: () => void;
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -213,16 +209,6 @@ export function CompanionThread({
             <Icon name="panel-right" size={16} />
           </button>
         )}
-        {canSend && !awake && (
-          <button
-            type="button"
-            className="cds-btn cds-btn--secondary cds-btn--sm"
-            disabled={waking}
-            onClick={onWake}
-          >
-            {waking ? "Waking..." : "Wake"}
-          </button>
-        )}
       </header>
 
       {notice && <div className="companions-error" role="alert">{notice}</div>}
@@ -265,11 +251,9 @@ export function CompanionThread({
             joining={context.joining}
             error={context.error}
             openingDesktop={openingDesktop}
-            waking={waking}
             skills={contextSkills}
             onJoin={context.onJoin}
             onDesktop={onDesktop}
-            onWake={onWake}
             onSettings={onSettings}
             onClose={context.onToggle}
           />

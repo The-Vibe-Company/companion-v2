@@ -135,7 +135,7 @@ describe("composerHint", () => {
       .toBe("Enter sends. Shift + Enter starts a new line.");
   });
 
-  it("counts messages waiting on a reply and messages waiting on a wake", () => {
+  it("counts messages waiting on a reply and explains how to retry saved delivery", () => {
     expect(composerHint({
       thread: thread({ pending_count: 1 }),
       companionName: "Luna",
@@ -145,21 +145,19 @@ describe("composerHint", () => {
       thread: thread({ pending_count: 2 }),
       companionName: "Luna",
       state: "stopped",
-    })).toBe("2 messages saved. Wake Luna to deliver.");
+    })).toBe("2 messages saved. Send another message to retry delivery.");
   });
 
-  it("never asks for a wake that is already under way or already done", () => {
-    // The footer reads the same projected state as the status chip, so a Companion a send has woken
-    // cannot keep asking to be woken.
+  it("reports a start already under way without offering another lifecycle action", () => {
     expect(composerHint({
       thread: thread({ pending_count: 1 }),
       companionName: "Luna",
       state: "provisioning",
-    })).toBe("1 message saved. Luna is waking to deliver.");
+    })).toBe("1 message saved. Luna is starting to deliver.");
     expect(composerHint({
       thread: thread({ pending_count: 1 }),
       companionName: "Luna",
       state: "running",
-    })).not.toContain("Wake Luna");
+    })).not.toContain("retry delivery");
   });
 });

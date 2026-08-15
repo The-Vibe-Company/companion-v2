@@ -15,6 +15,7 @@ import type {
   SaveCompanionPluginInput,
   UpdateCompanionInput,
 } from "@companion/contracts";
+import type { RestartCompanionRuntimeInput } from "@companion/contracts/companion-runtime";
 import { apiFetch } from "./apiClient";
 
 function orgHeaders(orgId: string): HeadersInit {
@@ -352,6 +353,23 @@ export async function startCompanionRuntime(
       method: "POST",
       headers: orgHeaders(orgId),
       body: JSON.stringify({ client_surface: "web" }),
+    },
+  );
+  return result.companion;
+}
+
+/** Restart an already-online Companion without turning the control into an implicit wake. */
+export async function restartCompanionRuntime(
+  orgId: string,
+  companionId: string,
+  input: RestartCompanionRuntimeInput,
+): Promise<Companion> {
+  const result = await apiFetch<{ companion: Companion }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/runtime/restart`,
+    {
+      method: "POST",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify(input),
     },
   );
   return result.companion;

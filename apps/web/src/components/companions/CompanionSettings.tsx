@@ -1,8 +1,18 @@
 "use client";
 
-import { type FormEvent, useMemo, useState } from "react";
-import type { Companion, CompanionProvidersResponse } from "@companion/contracts";
-import { deleteCompanion, updateCompanion, updateCompanionMemberState } from "@/lib/companions";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
+import type {
+  Companion,
+  CompanionProvidersResponse,
+} from "@companion/contracts";
+import type { RestartCompanionRuntimeInput } from "@companion/contracts/companion-runtime";
+import {
+  deleteCompanion,
+  getCompanionRuntime,
+  restartCompanionRuntime,
+  updateCompanion,
+  updateCompanionMemberState,
+} from "@/lib/companions";
 import { Icon } from "../Icon";
 import { Dialog } from "../org/primitives";
 import {
@@ -41,11 +51,23 @@ export function CompanionSettings({
   );
   const [busy, setBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [confirmingBoxRestart, setConfirmingBoxRestart] = useState(false);
+  const [restartTarget, setRestartTarget] = useState<RestartCompanionRuntimeInput["target"]>("pi");
+  const [restarting, setRestarting] = useState<RestartCompanionRuntimeInput["target"] | null>(null);
+  const [runtimeSnapshot, setRuntimeSnapshot] = useState(companion.runtime);
+  const [runtimeNeedsRefresh, setRuntimeNeedsRefresh] = useState(false);
+  const [runtimeMessage, setRuntimeMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [hidden, setHidden] = useState(companion.hidden);
   const canEdit = companion.access === "owner" || companion.access === "editor";
   const canDelete = companion.access === "owner";
+  const online = runtimeSnapshot.state === "running" && runtimeSnapshot.daemon_state === "running";
+
+  useEffect(() => {
+    setRuntimeSnapshot(companion.runtime);
+    setRuntimeNeedsRefresh(false);
+  }, [companion.runtime]);
 
   const changed = useMemo(
     () =>
@@ -117,6 +139,42 @@ export function CompanionSettings({
     }
   };
 
+  const restart = async (target: RestartCompanionRuntimeInput["target"]) => {
+    if (!canEdit || !online || changed) return;
+    setBusy(true);
+    setRestarting(target);
+    setError(null);
+    setRuntimeMessage(null);
+    try {
+      const updated = await restartCompanionRuntime(orgId, companion.id, { target });
+      setRuntimeSnapshot(updated.runtime);
+      setRuntimeNeedsRefresh(false);
+      onSaved(updated);
+      setRuntimeMessage(target === "pi"
+        ? "Pi restarted. The Box stayed online."
+        : "The full Box restarted and is online.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "This Companion could not be restarted.");
+      setRuntimeNeedsRefresh(true);
+      try {
+        // Restart can persist a corrected stopped/error projection before returning a failure. Read
+        // that projection without live Box access so Settings never keeps advertising an action the
+        // control plane has just proved unavailable.
+        const latest = await getCompanionRuntime(orgId, companion.id);
+        setRuntimeSnapshot(latest.runtime);
+        setRuntimeNeedsRefresh(false);
+        onSaved(latest);
+      } catch {
+        // Keep restart disabled when the projection itself cannot be reconciled. Reopening Settings
+        // creates a fresh view from the roster instead of inviting repeated conflicts.
+      }
+    } finally {
+      setBusy(false);
+      setRestarting(null);
+      setConfirmingBoxRestart(false);
+    }
+  };
+
   return (
     <section className="companions-settings" aria-labelledby="companion-settings-title">
       <header className="companions-head companions-settings__head">
@@ -134,6 +192,9 @@ export function CompanionSettings({
       <div className="companions-content companions-settings__content">
         {error && <div className="companions-error" role="alert">{error}</div>}
         {saved && <div className="companions-settings__saved" role="status">Settings saved.</div>}
+        {runtimeMessage && (
+          <div className="companions-settings__saved" role="status">{runtimeMessage}</div>
+        )}
 
         <form className="companions-settings__form" onSubmit={submit}>
           <label>
@@ -225,6 +286,80 @@ export function CompanionSettings({
           )}
         </form>
 
+        {canEdit && (
+          <section className="companions-settings__runtime" aria-labelledby="restart-companion-title">
+            <div>
+              <h2 id="restart-companion-title">Restart Companion</h2>
+              <p>Restart Pi for a fresh agent process, or restart the full Box for server-level recovery.</p>
+            </div>
+
+            <fieldset
+              className="companions-settings__restart-options"
+              disabled={busy || changed || !online || runtimeNeedsRefresh}
+              aria-describedby="restart-companion-hint"
+            >
+              <legend className="sr-only">Restart scope</legend>
+              <label>
+                <input
+                  type="radio"
+                  name="restart-target"
+                  value="pi"
+                  checked={restartTarget === "pi"}
+                  onChange={() => setRestartTarget("pi")}
+                />
+                <span>
+                  <strong>Pi only</strong>
+                  <small>Restarts the agent process. The Box stays online.</small>
+                </span>
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="restart-target"
+                  value="box"
+                  checked={restartTarget === "box"}
+                  onChange={() => setRestartTarget("box")}
+                />
+                <span>
+                  <strong>Full Box</strong>
+                  <small>Archives and resumes the server, interrupting active work.</small>
+                </span>
+              </label>
+            </fieldset>
+
+            <div className="companions-settings__restart-action">
+              <p className="companions-settings__hint" id="restart-companion-hint">
+                {runtimeNeedsRefresh
+                  ? "Runtime status could not be refreshed. Reopen Settings before trying again."
+                  : !online
+                  ? "This Companion must be Online before it can restart. Send a message to start it."
+                  : changed
+                    ? "Save your changes before restarting."
+                    : restartTarget === "pi"
+                      ? "Pi restarts with the saved provider, model, skills, and plugins."
+                      : "Full Box restart requires confirmation."}
+              </p>
+              <button
+                type="button"
+                className="cds-btn cds-btn--secondary cds-btn--md"
+                disabled={busy || changed || !online || runtimeNeedsRefresh}
+                onClick={() => {
+                  if (restartTarget === "box") setConfirmingBoxRestart(true);
+                  else void restart("pi");
+                }}
+              >
+                {restarting === "pi"
+                  ? "Restarting Pi..."
+                  : restarting === "box"
+                    ? "Restarting Box..."
+                    : restartTarget === "pi"
+                      ? "Restart Pi"
+                      : "Restart full Box"}
+              </button>
+            </div>
+          </section>
+        )}
+
         {hidden && (
           <section className="companions-settings__danger" aria-labelledby="unhide-companion-title">
             <div>
@@ -299,6 +434,37 @@ export function CompanionSettings({
                 onClick={() => void remove()}
               >
                 {busy ? "Deleting..." : "Delete Companion"}
+              </button>
+            </>
+          )}
+        />
+      )}
+
+      {confirmingBoxRestart && (
+        <Dialog
+          icon="refresh-cw"
+          title={`Restart ${companion.name}'s full Box?`}
+          desc="This stops and archives the server before resuming it. Any active work is interrupted, but the Companion and its saved files remain."
+          onClose={() => setConfirmingBoxRestart(false)}
+          closeDisabled={busy}
+          className="og-dialog companions-restart-dialog"
+          foot={(
+            <>
+              <button
+                type="button"
+                className="cds-btn cds-btn--secondary cds-btn--md"
+                disabled={busy}
+                onClick={() => setConfirmingBoxRestart(false)}
+              >
+                Keep Box running
+              </button>
+              <button
+                type="button"
+                className="cds-btn cds-btn--primary cds-btn--md"
+                disabled={busy}
+                onClick={() => void restart("box")}
+              >
+                {restarting === "box" ? "Restarting Box..." : "Restart full Box"}
               </button>
             </>
           )}
