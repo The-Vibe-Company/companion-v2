@@ -381,12 +381,13 @@ right-aligned tinted bubble with `2xl` radius and no border; a Companion reply i
 unboxed, rendered as markdown with headings, lists, tables, links, and code blocks that carry their own copy control. A
 writer keeps the floor across consecutive messages, so the writer and the time appear once per passage and the messages
 under it are only the words. One Companion turn is one message however many parts it took: the reasoning behind the
-reply, the reply, and the tool runs and permission cards produced along the way all belong to it, in the order they
+reply, the reply, and the tool runs and question cards produced along the way all belong to it, in the order they
 happened. Reasoning sits behind a collapsed disclosure labelled as reasoning — it is never shown as the answer. A tool
 run is a hairline card reading what ran and how it ended, with its arguments and its result folded away until asked for;
-a run that moved the Box desktop shows one frame of it in place, bounded so it never widens the column. A permission card
-is the one thing in the thread a reader can act on: it states what Pi asked for, offers Allow / Deny or an answer field
-to Owner and Editor only, and stays on the transcript once decided with who decided it. A run note is one quiet muted
+a run that moved the Box desktop shows one frame of it in place, bounded so it never widens the column. Pi runs shell and
+file tools without approval. An `ask_user` question card is the one thing in the thread a reader can act on: it states
+what Pi asked, offers an answer field or Deny to Owner and Editor only, and stays on the transcript once decided with who
+decided it. Historical Allow / Deny cards remain readable in place. A run note is one quiet muted
 line. The transcript is parted by day, once per day it was written in, and a reader returning to a thread gets one `New`
 divider on the first message somebody else wrote past their own read watermark — the member-private one the list badge
 uses, not a per-device guess. Neither separator ever lands inside a turn, because a tool run is chrome the turn owns; the

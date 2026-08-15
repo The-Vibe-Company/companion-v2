@@ -85,7 +85,7 @@ an empty skill set. This is enforced by the API and again by the Box adapter bef
 | `GET` | `/v1/companions/:id/thread` | Never; authorized read-only control-plane projection |
 | `POST` | `/v1/companions/:id/messages` | Owner/editor only; persists first, starts when not already running, then delivers |
 | `POST` | `/v1/companions/:id/thread/sync` | Owner/editor only; delivers and projects without resuming Box |
-| `POST` | `/v1/companions/:id/decisions/:requestId` | Owner/editor only; Allow / Deny / answer a pending permission card |
+| `POST` | `/v1/companions/:id/decisions/:requestId` | Owner/editor only; answer a pending `ask_user` question or settle a legacy approval card |
 | `GET` | `/v1/companions/:id/runtime` | Never |
 | `GET` | `/v1/companions/:id/runtime?live=true` | Owner/editor only; observes without resuming |
 | `POST` | `/v1/companions/:id/runtime/start` | Creates or resumes Box, then starts Pi |
@@ -299,18 +299,19 @@ Frames are never uploaded to object storage and never minted as a desktop URL, s
 thread is not a second way to reach a live stream. Because capture happens on the Owner/Editor sync
 path, a Viewer reads chips and whatever frames were already stored without any of it touching a Box.
 
-Before a risky tool runs, the Companion permission-broker Pi extension emits an
-`extension_ui_request` (confirm for bash / write / edit, input for `ask_user`) and blocks until the
-control plane answers. Sync projects those requests as `decision` transcript entries carrying the
-request in `companion_transcript_entries.decision`, coupled to the `decision` role by a check
-constraint. Owner and Editor Allow / Deny / answer through
-`POST /v1/companions/:id/decisions/:requestId`, which persists who decided and writes an
-`extension_ui_response` to the same FIFO Pi reads for prompts — Allow resumes the tool, Deny and
-timeout never execute it. Timeout is fail-closed at five minutes on both sides: the extension passes
-that window to Pi's dialog, and sync expires any card still pending past `expires_at`. Viewers read
-resolved cards on the control-plane thread and cannot act. Fire-and-forget extension UI and prompts
-minted outside the Companion title grammar (`companion:<kind>:<name>`) are ignored so third-party
-extension chrome does not become Allow / Deny cards.
+Pi runs its built-in `bash`, `write`, and `edit` tools directly without asking for approval. The
+Companion interaction extension only adds `ask_user`: that tool emits an `extension_ui_request` and
+blocks until the control plane receives an answer. Sync projects the request as a `decision`
+transcript entry carrying the question in `companion_transcript_entries.decision`, coupled to the
+`decision` role by a check constraint. Owner and Editor answer or deny through
+`POST /v1/companions/:id/decisions/:requestId`, which persists who answered and writes an
+`extension_ui_response` to the same FIFO Pi reads for prompts. Timeout is fail-closed at five minutes
+on both sides: the extension passes that window to Pi's dialog, and sync expires any question still
+pending past `expires_at`. Viewers read resolved questions on the control-plane thread and cannot
+act. The contract continues to render and settle shell/file approval cards already stored by an
+older runtime, but the current extension never creates new ones. Fire-and-forget extension UI and
+prompts minted outside the Companion title grammar (`companion:<kind>:<name>`) are ignored so
+third-party extension chrome does not become interactive cards.
 
 Delivery reads the pending list before it claims the watermark, so two requests that overlap inside
 that window can hand Pi the same prompt twice. One client cannot do this: the web surface runs its
@@ -328,7 +329,7 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
 ├── pi/                    # isolated PI_CODING_AGENT_DIR
 │   ├── auth.json          # owner-only Pi API key or refreshable OAuth entry
 │   ├── mcp.json           # pi-mcp-adapter config; environment references only
-│   └── extensions/        # Companion permission-broker (Allow / Deny / ask_user)
+│   └── extensions/        # Companion interaction extension (ask_user)
 └── runtime/
     ├── skills/            # exact current packages exposed through Pi native Skills
     ├── sessions/          # Pi session tree files (`pi --session-dir`)
@@ -343,12 +344,16 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
         └── pi.stderr.log  # Pi's stderr and the daemon wrapper's own account of a failed start
 ```
 
-Layout version `9` is written to the control-plane row after a successful Skills/MCP-aware start and
+Layout version `10` is written to the control-plane row after a successful Skills/MCP-aware start and
 to an on-disk marker keyed by the adapter package. Starts repair older Box snapshots before resource
 injection. Runtime transcripts and files do not enter PostgreSQL. A systemd user unit supervises Pi
 while Box is active; the lifecycle API starts it after a Box resume. Each start also stages the
-permission-broker extension under `~/.companion/pi/extensions/` so Pi pauses shell, file edits, and
-`ask_user` behind control-plane Allow / Deny cards.
+interaction extension under the legacy `~/.companion/pi/extensions/companion-permission-broker.ts`
+path. Reusing that path overwrites older shell/file approval logic; the current extension leaves Pi's
+tools unrestricted and pauses only explicit `ask_user` questions for a control-plane answer. A warm
+Pi is never restarted just to activate a layout migration because that could interrupt an active
+turn or question. The replacement extension is staged before layout 10 is published, and the staged
+layout loads on Pi's next natural daemon start.
 
 MCP credential values are not part of that snapshotted tree. A start stages them through the
 owner-only Box file channel, moves the file into `%t/companion/providers.env` in the systemd user

@@ -724,21 +724,25 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(writtenPaths).not.toContain(".companion/pi/auth.json");
   });
 
-  it("refreshes an old layout with idempotent start when provider auth is still current", async () => {
+  it("refreshes an old layout without restarting Pi when provider auth is still current", async () => {
     const commands: string[] = [];
     const writtenPaths: string[] = [];
+    const stagingOrder: string[] = [];
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const method = init?.method ?? "GET";
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
       if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box });
       if (url.endsWith("/files") && method === "PUT") {
-        writtenPaths.push(String(body.path));
+        const path = String(body.path);
+        writtenPaths.push(path);
+        stagingOrder.push(`file:${path}`);
         return json({ ok: true });
       }
       if (url.endsWith("/commands") && method === "POST") {
         const command = String(body.command);
         commands.push(command);
+        stagingOrder.push(`command:${command}`);
         return json({
           success: true,
           exitCode: 0,
@@ -776,6 +780,13 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(commands.every((command) =>
       !command.includes("systemctl --user restart companion-pi-daemon.service"))).toBe(true);
     expect(writtenPaths).not.toContain(".companion/pi/auth.json");
+    const brokerIndex = stagingOrder.indexOf(
+      "file:.companion/pi/extensions/companion-permission-broker.ts",
+    );
+    const layoutIndex = stagingOrder.indexOf(`command:${LAYOUT_RUN_COMMAND}`);
+    expect(brokerIndex).toBeGreaterThan(-1);
+    expect(layoutIndex).toBeGreaterThan(-1);
+    expect(brokerIndex).toBeLessThan(layoutIndex);
   });
 
   /**
@@ -1753,10 +1764,10 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(markerIndex).toBeGreaterThan(-1);
     expect(piResolveIndex).toBeGreaterThan(-1);
     expect(markerIndex).toBeLessThan(piResolveIndex);
-    // Layout 8 replaces wrappers from layout 7 so existing Boxes gain the selected Pi model.
-    expect(COMPANION_PI_DISK_LAYOUT_VERSION).toBe(9);
+    // Layout 10 replaces the old approval broker so existing Boxes run shell and file tools freely.
+    expect(COMPANION_PI_DISK_LAYOUT_VERSION).toBe(10);
     expect(createdSetupScript)
-      .toContain("expected_layout='9:npm:pi-mcp-adapter@2.12.1'");
+      .toContain("expected_layout='10:npm:pi-mcp-adapter@2.12.1'");
     expect(createdSetupScript).toContain("--append-system-prompt");
     // The supervised daemon gets a minimal PATH from the systemd user manager, so Pi is resolved at
     // layout time and pinned both in the wrapper and on the unit.
@@ -4029,4 +4040,3 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
   });
 });
-
