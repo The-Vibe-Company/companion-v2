@@ -11,7 +11,6 @@ export * from "./featureFlags";
 export * from "./companions";
 export * from "./companionProviderCatalog";
 export * from "./companionProviderOAuth";
-export * from "./companionRegistry";
 export * from "./companionPluginOAuth";
 export * from "./companionPiEvents";
 export * from "./companionRuntimeErrors";

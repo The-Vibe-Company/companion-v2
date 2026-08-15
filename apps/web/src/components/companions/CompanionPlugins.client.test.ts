@@ -2,11 +2,7 @@
 
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type {
-  CompanionPluginAccount,
-  CompanionRegistryListResponse,
-  CompanionRegistryServer,
-} from "@companion/contracts";
+import type { CompanionPluginAccount } from "@companion/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CompanionPlugins } from "./CompanionPlugins";
 
@@ -14,22 +10,16 @@ const {
   deleteCompanionPlugin,
   saveCompanionPlugin,
   startCompanionPluginOAuth,
-  listCompanionRegistry,
-  getCompanionRegistryServer,
 } = vi.hoisted(() => ({
   deleteCompanionPlugin: vi.fn(),
   saveCompanionPlugin: vi.fn(),
   startCompanionPluginOAuth: vi.fn(),
-  listCompanionRegistry: vi.fn(),
-  getCompanionRegistryServer: vi.fn(),
 }));
 
 vi.mock("@/lib/companions", () => ({
   deleteCompanionPlugin,
   saveCompanionPlugin,
   startCompanionPluginOAuth,
-  listCompanionRegistry,
-  getCompanionRegistryServer,
 }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -43,29 +33,6 @@ const account: CompanionPluginAccount = {
   connected: true,
   created_at: "2026-08-13T00:00:00.000Z",
   updated_at: "2026-08-13T00:00:00.000Z",
-};
-
-const linearPin: CompanionRegistryServer = {
-  name: "app.linear/linear",
-  provider: "linear",
-  title: "Linear",
-  description: "Linear project management and issue tracking.",
-  version: "latest",
-  website_url: "https://linear.app",
-  repository_url: null,
-  pinned: true,
-  connect: {
-    transport: "http",
-    url: "https://mcp.linear.app/mcp",
-    credential: null,
-  },
-};
-
-const listResponse: CompanionRegistryListResponse = {
-  pins: [linearPin],
-  servers: [],
-  next_cursor: null,
-  source: "live",
 };
 
 const roots: Root[] = [];
@@ -121,8 +88,6 @@ async function openAndSubmit(container: HTMLElement) {
 describe("CompanionPlugins", () => {
   beforeEach(() => {
     window.location.href = "http://localhost/companions";
-    listCompanionRegistry.mockResolvedValue(listResponse);
-    getCompanionRegistryServer.mockResolvedValue({ server: linearPin, source: "live" });
   });
 
   afterEach(() => {
@@ -163,23 +128,32 @@ describe("CompanionPlugins", () => {
     expect(submit.disabled).toBe(false);
   });
 
-  it("starts OAuth for a curated pin with a required label and no token field", async () => {
+  it("renders only the internal catalog and starts OAuth with a required label", async () => {
     startCompanionPluginOAuth.mockResolvedValue(
       "https://mcp.linear.app/authorize?state=signed-state",
     );
     const container = await mount();
 
-    expect(container.textContent).toContain("Recommended");
+    const sectionTitles = Array.from(
+      container.querySelectorAll(".companions-plugin-section__title"),
+      (heading) => heading.textContent,
+    );
+    expect(sectionTitles).toEqual(["Connected", "Available plugins"]);
+    expect(container.textContent).toContain("No plugins connected yet.");
+    expect(container.textContent).toContain("Available plugins");
     expect(container.textContent).toContain("Linear");
+    expect(container.textContent).toContain("GitHub");
+    expect(container.textContent).toContain("Notion");
+    expect(container.textContent).not.toContain("Browse the registry");
+    expect(container.querySelector('input[type="search"]')).toBeNull();
+    expect(container.querySelectorAll(".companions-catalog-card")).toHaveLength(3);
 
     const connectButton = Array.from(
-      container.querySelectorAll<HTMLButtonElement>(".companions-registry-card button"),
+      container.querySelectorAll<HTMLButtonElement>(".companions-catalog-card button"),
     ).find((button) => button.textContent === "Connect");
     await act(async () => connectButton?.click());
-    // A pinned server uses its curated metadata; no detail read is needed.
-    expect(getCompanionRegistryServer).not.toHaveBeenCalled();
 
-    const dialog = container.querySelector("#companion-registry-connect") as HTMLFormElement;
+    const dialog = container.querySelector("#companion-catalog-connect") as HTMLFormElement;
     const label = dialog.querySelector("input") as HTMLInputElement;
     expect(dialog.querySelector('input[type="password"]')).toBeNull();
     expect(container.textContent).toContain("Continue with OAuth");
@@ -210,10 +184,10 @@ describe("CompanionPlugins", () => {
     startCompanionPluginOAuth.mockRejectedValue(new Error("OAuth service is unavailable."));
     const container = await mount();
     const connectButton = container.querySelector<HTMLButtonElement>(
-      ".companions-registry-card button",
+      ".companions-catalog-card button",
     );
     await act(async () => connectButton?.click());
-    const form = container.querySelector("#companion-registry-connect") as HTMLFormElement;
+    const form = container.querySelector("#companion-catalog-connect") as HTMLFormElement;
     await act(async () => setControlled(form.querySelector("input")!, "work"));
     await act(async () => {
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
@@ -222,7 +196,7 @@ describe("CompanionPlugins", () => {
     expect(container.querySelector('[role="alert"]')?.textContent)
       .toBe("OAuth service is unavailable.");
     expect((container.querySelector(
-      'button[form="companion-registry-connect"]',
+      'button[form="companion-catalog-connect"]',
     ) as HTMLButtonElement).disabled).toBe(false);
   });
 
@@ -230,10 +204,10 @@ describe("CompanionPlugins", () => {
     startCompanionPluginOAuth.mockReturnValue(new Promise(() => undefined));
     const container = await mount();
     const connectButton = container.querySelector<HTMLButtonElement>(
-      ".companions-registry-card button",
+      ".companions-catalog-card button",
     );
     await act(async () => connectButton?.click());
-    const form = container.querySelector("#companion-registry-connect") as HTMLFormElement;
+    const form = container.querySelector("#companion-catalog-connect") as HTMLFormElement;
     await act(async () => setControlled(form.querySelector("input")!, "work"));
     await act(async () => {
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
@@ -242,8 +216,25 @@ describe("CompanionPlugins", () => {
 
     expect(startCompanionPluginOAuth).toHaveBeenCalledTimes(1);
     expect((container.querySelector(
-      'button[form="companion-registry-connect"]',
+      'button[form="companion-catalog-connect"]',
     ) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("disconnects an existing labeled account without changing the catalog", async () => {
+    deleteCompanionPlugin.mockResolvedValue(undefined);
+    const container = await mount([account]);
+    const disconnect = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Disconnect Linear work"]',
+    );
+
+    await act(async () => disconnect?.click());
+
+    expect(deleteCompanionPlugin).toHaveBeenCalledWith("org-1", account.id);
+    expect(container.querySelector('.companions-plugin-label')).toBeNull();
+    expect(container.querySelector(
+      'button[aria-label="Disconnect Linear work"]',
+    )).toBeNull();
+    expect(container.querySelectorAll(".companions-catalog-card")).toHaveLength(3);
   });
 
   it("explains a duplicate-label callback and removes the error parameter", async () => {

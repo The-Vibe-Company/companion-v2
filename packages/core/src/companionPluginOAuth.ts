@@ -3,6 +3,16 @@ import type { CompanionPluginOAuthServerName } from "@companion/contracts";
 
 const OAUTH_TIMEOUT_MS = 10_000;
 
+interface CompanionPluginOAuthServerConfig {
+  provider: string;
+  remoteUrl: string;
+  resourceMetadataUrl: string;
+  authorizationServer: string;
+  scopes: readonly string[];
+  allowedOrigins: readonly string[];
+  dynamicRegistration: boolean;
+}
+
 export const COMPANION_PLUGIN_OAUTH_SERVERS = {
   "app.linear/linear": {
     provider: "linear",
@@ -31,7 +41,7 @@ export const COMPANION_PLUGIN_OAUTH_SERVERS = {
     allowedOrigins: ["https://mcp.notion.com"],
     dynamicRegistration: true,
   },
-} as const;
+} as const satisfies Record<CompanionPluginOAuthServerName, CompanionPluginOAuthServerConfig>;
 
 export interface CompanionPluginOAuthClient {
   clientId: string;
