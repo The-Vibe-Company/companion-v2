@@ -203,6 +203,7 @@ describe("CompanionsApp conversation list", () => {
         author_name: null,
         tool: null,
         decision: null,
+        reasoning: null,
         created_at: "2026-08-14T09:05:00.000Z",
       }],
     }));
@@ -248,6 +249,7 @@ describe("CompanionsApp conversation list", () => {
     author_name: null,
     tool: null,
     decision: null,
+    reasoning: null,
     created_at: `2026-08-14T09:0${ordinal}:00.000Z`,
   });
 
@@ -267,14 +269,14 @@ describe("CompanionsApp conversation list", () => {
     });
 
     const container = await render([companion()], companionId);
-    expect(container.querySelector(".chat-sep--new")).toBeNull();
+    expect(container.querySelector("[data-slot='chat-new-separator']")).toBeNull();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(9_000);
     });
 
     expect(reads).toBeGreaterThan(1);
-    expect(container.querySelector(".chat-sep--new")).toBeNull();
+    expect(container.querySelector("[data-slot='chat-new-separator']")).toBeNull();
   });
 
   it("takes it again when the sidebar moves to another thread", async () => {
@@ -292,7 +294,7 @@ describe("CompanionsApp conversation list", () => {
       companionId,
     );
 
-    expect(container.querySelector(".chat-sep--new")).toBeNull();
+    expect(container.querySelector("[data-slot='chat-new-separator']")).toBeNull();
 
     const nextRow = [...container.querySelectorAll(".cmprow")]
       .find((row) => row.querySelector(".cmprow__name")?.textContent === "Nova") as HTMLButtonElement;
@@ -300,7 +302,7 @@ describe("CompanionsApp conversation list", () => {
       nextRow.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    expect(container.querySelector(".chat-sep--new")).not.toBeNull();
+    expect(container.querySelector("[data-slot='chat-new-separator']")).not.toBeNull();
   });
 
   it("leaves the roster's order to the control plane when a read answers", async () => {

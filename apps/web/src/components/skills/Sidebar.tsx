@@ -514,6 +514,7 @@ export function Sidebar({
   onSelectCompanion = () => {},
   onOpenPlugins,
   pluginsActive = false,
+  onOpenProviders,
   viewer = null,
   navigationOnly = false,
   localActive,
@@ -574,6 +575,11 @@ export function Sidebar({
   /** Companions mode only: the Plugins surface, reachable without leaving an open thread. */
   onOpenPlugins?: () => void;
   pluginsActive?: boolean;
+  /**
+   * Companions mode only: workspace provider connections. Absent for a member who cannot manage
+   * them, which is the same rule the surface itself applies.
+   */
+  onOpenProviders?: () => void;
   /** Companions mode only: the signed-in reader, shown in the footer beside the settings action. */
   viewer?: SidebarViewer | null;
   /** Render the complete shared navigation without exposing label mutation affordances. */
@@ -938,19 +944,24 @@ export function Sidebar({
           </>
         )}
 
-        <button
-          className={"navitem navitem--bottom" + (secretsActive ? " navitem--active" : "")}
-          aria-current={secretsActive ? "page" : undefined}
-          onClick={() => runAndClose(onSelectSecrets)}
-          title="Secrets"
-        >
-          <span className="navitem__ico">
-            <Icon name="key-round" />
-          </span>
-          <span className="navitem__label">Secrets</span>
-        </button>
+        {/* ===== BOTTOM =====
+            Secrets and Archived belong to Skills; Providers and Plugins belong to Companions. The
+            foot of the sidebar holds whichever pair the current mode can actually reach, so a
+            Companion reader is not offered two archives of skills they are not looking at. */}
+        {!companionsMode && (
+          <button
+            className={"navitem navitem--bottom" + (secretsActive ? " navitem--active" : "")}
+            aria-current={secretsActive ? "page" : undefined}
+            onClick={() => runAndClose(onSelectSecrets)}
+            title="Secrets"
+          >
+            <span className="navitem__ico">
+              <Icon name="key-round" />
+            </span>
+            <span className="navitem__label">Secrets</span>
+          </button>
+        )}
 
-        {/* ===== BOTTOM ===== */}
         {!companionsMode && (
           <button
             className={"navitem" + (localActive ? " navitem--active" : "")}
@@ -969,32 +980,47 @@ export function Sidebar({
             )}
           </button>
         )}
-        <button
-          className={"navitem" + (archivedActive ? " navitem--active" : "")}
-          aria-current={archivedActive ? "page" : undefined}
-          onClick={() => runAndClose(onSelectArchived)}
-          title="Archived skills"
-        >
-          <span className="navitem__ico">
-            <Icon name="archive" />
-          </span>
-          <span className="navitem__label">Archived</span>
-          <span className="navitem__count tnum">{archivedCount}</span>
-        </button>
+        {!companionsMode && (
+          <button
+            className={"navitem" + (archivedActive ? " navitem--active" : "")}
+            aria-current={archivedActive ? "page" : undefined}
+            onClick={() => runAndClose(onSelectArchived)}
+            title="Archived skills"
+          >
+            <span className="navitem__ico">
+              <Icon name="archive" />
+            </span>
+            <span className="navitem__label">Archived</span>
+            <span className="navitem__count tnum">{archivedCount}</span>
+          </button>
+        )}
+
+        {companionsMode && onOpenProviders && (
+          <button
+            className="navitem navitem--bottom"
+            onClick={() => runAndClose(() => onOpenProviders())}
+            title="Providers"
+          >
+            <span className="navitem__ico">
+              <Icon name="plug" />
+            </span>
+            <span className="navitem__label">Providers</span>
+          </button>
+        )}
+        {companionsMode && onOpenPlugins && (
+          <button
+            className={"navitem" + (pluginsActive ? " navitem--active" : "")}
+            aria-current={pluginsActive ? "page" : undefined}
+            onClick={() => runAndClose(() => onOpenPlugins())}
+            title="Plugins"
+          >
+            <span className="navitem__ico">
+              <Icon name="plug-zap" />
+            </span>
+            <span className="navitem__label">Plugins</span>
+          </button>
+        )}
       </nav>
-      {companionsMode && onOpenPlugins && (
-        <button
-          className={"navitem side__plugins" + (pluginsActive ? " navitem--active" : "")}
-          aria-current={pluginsActive ? "page" : undefined}
-          onClick={() => runAndClose(() => onOpenPlugins())}
-          title="Plugins"
-        >
-          <span className="navitem__ico">
-            <Icon name="plug-zap" />
-          </span>
-          <span className="navitem__label">Plugins</span>
-        </button>
-      )}
       {companionsMode && viewer ? (
         // The reader's own row is the settings entry in Companions mode: one control, named for the
         // person it belongs to, rather than a face that does nothing beside a word that does.

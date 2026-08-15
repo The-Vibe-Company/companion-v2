@@ -5,32 +5,6 @@ import type {
 } from "@companion/contracts";
 
 /**
- * How long a writer keeps the floor. Consecutive turns from the same writer inside this window read
- * as one passage, so the transcript names the writer and the clock once per passage instead of
- * repeating both on every line.
- */
-const PASSAGE_WINDOW_MS = 15 * 60 * 1000;
-
-/** One transcript entry with everything the render needs that the entry itself does not carry. */
-export interface TranscriptTurn {
-  entry: CompanionTranscriptEntry;
-  /** Who wrote it, as it is shown: the reader is "You", Pi is the Companion, a note is neither. */
-  author: string | null;
-  /** True when this turn opens a passage, so it carries the writer and the time. */
-  lead: boolean;
-  /** True while the control plane has not confirmed this message yet. */
-  sending: boolean;
-  /**
-   * The day this turn opens, as `YYYY-MM-DD`, or null when it continues the day above it. Server
-   * markup keys it on the stored UTC day so both renders agree; once the client owns the clock the
-   * key is the reader's own day, so the separator and the times beneath it name the same date.
-   */
-  startsDay: string | null;
-  /** True on the first message this reader has not caught up on, which is where "New" is drawn. */
-  startsNew: boolean;
-}
-
-/**
  * Present a control-plane note in the Companion's product vocabulary. Historical notes store Pi's
  * runtime name, but the transcript speaks about the Companion the reader opened and follows its
  * current name after a rename. Only system notes cross this boundary: replies and tool output stay
@@ -74,89 +48,6 @@ export function localDay(iso: string): string {
   const month = `${at.getMonth() + 1}`.padStart(2, "0");
   const dayOfMonth = `${at.getDate()}`.padStart(2, "0");
   return `${at.getFullYear()}-${month}-${dayOfMonth}`;
-}
-
-function millis(iso: string): number {
-  const parsed = Date.parse(iso);
-  return Number.isNaN(parsed) ? 0 : parsed;
-}
-
-/**
- * Group a transcript into passages. A passage is a run of turns from one writer in one role inside
- * `PASSAGE_WINDOW_MS`; only its first turn is announced. System notes never join a passage, and they
- * never continue one either, so the writer is re-announced after an interruption.
- */
-export function transcriptTurns(
-  entries: readonly CompanionTranscriptEntry[],
-  context: {
-    viewerId: string;
-    companionName: string;
-    /** The message this composer is still sending, named by the event id it will be stored under. */
-    sendingEventId?: string | null;
-    /**
-     * This reader's own unread watermark as it stood when they opened the thread, from the
-     * control plane rather than this device. The first message past it that somebody else wrote is
-     * where "New" is drawn. Null leaves the thread undivided, which is what a first visit and a
-     * thread the reader has caught up on both look like.
-     */
-    lastReadOrdinal?: number | null;
-    /**
-     * How a stored timestamp becomes the day it belongs to. Server markup uses the stored UTC day so
-     * both renders agree; the client swaps in the reader's own calendar, because a separator that
-     * says one date above a clock that says another is worse than no separator at all.
-     */
-    dayOf?: (iso: string) => string;
-    /**
-     * The highest ordinal the thread held when it was opened. The divider never moves past it, so a
-     * reply arriving under the reader's eye does not get announced as something they missed.
-     */
-    openedThroughOrdinal?: number | null;
-  },
-): TranscriptTurn[] {
-  let previous: { author: string | null; role: string; at: number } | null = null;
-  // Day boundaries and the new-message divider are drawn on what was said, not on what ran: a tool
-  // chip is chrome between two turns, so a separator that landed on one would separate a reply from
-  // the machinery of its own turn.
-  let previousDay: string | null = null;
-  let newDrawn = false;
-  return entries.map((entry) => {
-    const author = transcriptAuthor(entry, context.viewerId, context.companionName);
-    const at = millis(entry.created_at);
-    const lead = author === null
-      || previous === null
-      || previous.author !== author
-      || previous.role !== entry.role
-      || at - previous.at > PASSAGE_WINDOW_MS;
-    previous = { author, role: entry.role, at };
-
-    const said = entry.role === "user" || entry.role === "assistant";
-    const day = (context.dayOf ?? utcDay)(entry.created_at);
-    const startsDay = said && day !== previousDay ? day : null;
-    if (said) previousDay = day;
-
-    const mine = entry.role === "user" && entry.author_id === context.viewerId;
-    // "New" marks where reading stopped, not what has arrived since. A message that lands while the
-    // reader is watching is not a backlog, so the divider is bounded to the transcript as it stood
-    // when the thread was opened; past that, `newAt` has already been drawn or was never needed.
-    const startsNew = said
-      && !mine
-      && !newDrawn
-      && context.lastReadOrdinal != null
-      && entry.ordinal > context.lastReadOrdinal
-      && (context.openedThroughOrdinal == null || entry.ordinal <= context.openedThroughOrdinal);
-    if (startsNew) newDrawn = true;
-
-    return {
-      entry,
-      author,
-      lead,
-      sending: context.sendingEventId !== undefined
-        && context.sendingEventId !== null
-        && entry.event_id === context.sendingEventId,
-      startsDay,
-      startsNew,
-    };
-  });
 }
 
 /**

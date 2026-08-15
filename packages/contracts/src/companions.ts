@@ -366,11 +366,25 @@ export const decideCompanionDecisionInputSchema = z.discriminatedUnion("action",
 ]);
 export type DecideCompanionDecisionInput = z.infer<typeof decideCompanionDecisionInputSchema>;
 
+/**
+ * How much of a turn's thinking a transcript will carry. Reasoning is disclosure, not the reply: it
+ * is kept long enough to read why Pi did something and short enough that a thread of them stays a
+ * cheap read for every poll.
+ */
+export const COMPANION_REASONING_MAX_CHARACTERS = 16_000;
+
 export const companionTranscriptEntrySchema = z.object({
   event_id: z.string().min(1).max(200),
   ordinal: z.number().int().nonnegative(),
   role: z.enum(["user", "assistant", "system", "tool", "decision"]),
   content: z.string(),
+  /**
+   * What Pi thought before it answered, shown behind a collapsed disclosure above the reply. It is a
+   * field on the reply rather than an entry of its own so the thinking cannot outlive, reorder ahead
+   * of, or be read without the turn it belongs to. Null on every entry that is not a reply, and on a
+   * reply whose thinking is already its content because the turn produced no text.
+   */
+  reasoning: z.string().max(COMPANION_REASONING_MAX_CHARACTERS).nullable().default(null),
   /**
    * Member who sent a user message. A shared thread has several writers, so the reader compares
    * this against `viewer_id` instead of assuming every user message is its own. Null for Pi.
@@ -395,6 +409,13 @@ export const companionTranscriptEntrySchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["decision"],
       message: "a decision entry carries a permission card and no other role may",
+    });
+  }
+  if (entry.reasoning !== null && entry.role !== "assistant") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["reasoning"],
+      message: "only a reply carries reasoning",
     });
   }
 });

@@ -57,6 +57,7 @@ function thread(overrides: Partial<Thread> = {}): Thread {
         author_name: "Ada",
         tool: null,
     decision: null,
+        reasoning: null,
         created_at: "2026-08-12T12:01:00.000Z",
       },
       {
@@ -68,6 +69,7 @@ function thread(overrides: Partial<Thread> = {}): Thread {
         author_name: null,
         tool: null,
     decision: null,
+        reasoning: null,
         created_at: "2026-08-12T12:01:20.000Z",
       },
     ],
@@ -126,6 +128,18 @@ function text(markup: string): string {
   return markup.replace(/<[^>]*>/g, "");
 }
 
+/**
+ * The markup with only the parts nobody can perceive taken out. Class names and data attributes are
+ * the component library talking to itself — one of them says `tooltip` — but an `aria-label`, an
+ * `alt`, or a `title` is something a screen-reader user is read out loud, so it stays in scope for
+ * any assertion about what this surface offers.
+ */
+function perceivable(markup: string): string {
+  return markup
+    .replace(/\s(?:class|style)="[^"]*"/g, "")
+    .replace(/\sdata-[\w-]+="[^"]*"/g, "");
+}
+
 /** What the chip reports about the compute, which is its accessible name rather than its text. */
 function chipLabel(markup: string): string {
   return markup.match(/aria-label="(Box · [^"]*)"/)?.[1] ?? "";
@@ -169,15 +183,20 @@ describe("CompanionThread", () => {
             author_name: null,
             tool: null,
     decision: null,
+            reasoning: null,
             created_at: "2026-08-12T12:02:00.000Z",
           },
         ],
       }),
     });
 
+    // A note speaks about the Companion whose thread this is, not about Pi's runtime name.
     expect(markup).toContain("The run stopped before Luna replied.");
     expect(markup).not.toContain("The run stopped before Pi replied.");
-    expect(markup).not.toMatch(/tool|skill|mcp/i);
+    // Read from everything a person can perceive — text and accessible names both. Only the class
+    // names and data attributes are dropped, because that is the component library talking to
+    // itself, and one of them says `tooltip` without offering anyone a Pi tool.
+    expect(perceivable(markup)).not.toMatch(/tool|skill|mcp/i);
     // Computer use is the Box desktop and nothing else, reached from the one status chip.
     expect(markup.match(/open the Box desktop/g)).toHaveLength(1);
   });
@@ -372,6 +391,7 @@ describe("CompanionThread", () => {
             author_name: "Ada",
             tool: null,
     decision: null,
+            reasoning: null,
             created_at: "2026-08-12T12:01:00.000Z",
           },
           {
@@ -383,6 +403,7 @@ describe("CompanionThread", () => {
             author_name: "Ada",
             tool: null,
     decision: null,
+            reasoning: null,
             created_at: "2026-08-12T12:01:30.000Z",
           },
         ],
@@ -408,6 +429,7 @@ describe("CompanionThread", () => {
             author_name: "Ada",
             tool: null,
     decision: null,
+            reasoning: null,
             created_at: "2026-08-12T12:40:00.000Z",
           },
         ],
@@ -431,6 +453,7 @@ describe("CompanionThread", () => {
             author_name: null,
             tool: null,
     decision: null,
+            reasoning: null,
             created_at: "2026-08-12T12:01:20.000Z",
           },
         ],
@@ -479,13 +502,14 @@ describe("CompanionThread", () => {
               decided_at: null,
               expires_at: "2026-08-12T12:10:00.000Z",
             },
+            reasoning: null,
             created_at: "2026-08-12T12:05:00.000Z",
           },
         ],
       }),
     });
 
-    expect(markup).toContain("chat-decision--pending");
+    expect(markup).toMatch(/data-slot="companion-decision"[^>]*aria-busy="true"/);
     expect(markup).toContain("Allow run a command");
     expect(markup).toContain("ls -la");
     expect(markup).toContain(">Allow<");
@@ -517,12 +541,14 @@ describe("CompanionThread", () => {
               decided_at: "2026-08-12T12:05:30.000Z",
               expires_at: "2026-08-12T12:10:00.000Z",
             },
+            reasoning: null,
             created_at: "2026-08-12T12:05:00.000Z",
           },
         ],
       }),
     });
-    expect(resolved).toContain("chat-decision--allowed");
+    expect(resolved).toContain('data-slot="companion-decision"');
+    expect(resolved).not.toContain('aria-busy="true"');
     expect(resolved).toContain("allowed by Ada");
     expect(resolved).not.toContain(">Allow<");
     expect(resolved).not.toContain(">Deny<");
@@ -555,6 +581,7 @@ describe("CompanionThread", () => {
               decided_at: null,
               expires_at: "2026-08-12T12:10:00.000Z",
             },
+            reasoning: null,
             created_at: "2026-08-12T12:05:00.000Z",
           },
         ],
@@ -582,6 +609,7 @@ describe("CompanionThread separators", () => {
             author_name: "Ada",
             tool: null,
             decision: null,
+            reasoning: null,
             created_at: "2026-08-12T12:00:00.000Z",
           },
           {
@@ -593,6 +621,7 @@ describe("CompanionThread separators", () => {
             author_name: null,
             tool: null,
             decision: null,
+            reasoning: null,
             created_at: "2026-08-14T09:00:00.000Z",
           },
         ],
@@ -602,7 +631,7 @@ describe("CompanionThread separators", () => {
     // Server markup carries the stable stored day; the reader's clock reformats it on the client.
     expect(markup).toContain('<time dateTime="2026-08-12">2026-08-12</time>');
     expect(markup).toContain('<time dateTime="2026-08-14">2026-08-14</time>');
-    expect(markup.match(/chat-sep/g)).toHaveLength(2);
+    expect(markup.match(/data-slot="chat-day-separator"/g)).toHaveLength(2);
   });
 
   it("marks where a returning reader left off, and leaves a caught-up thread whole", () => {
@@ -610,13 +639,14 @@ describe("CompanionThread separators", () => {
 
     // The reader had read up to their own message; the reply after it is where they left off.
     const returning = render({ lastReadOrdinal: 0, thread: thread({ entries }) });
-    expect(returning).toContain("chat-sep--new");
+    expect(returning).toContain('data-slot="chat-new-separator"');
     expect(returning).toContain(">New<");
 
     // Nothing has been said since this reader was last here, so there is nothing to divide.
     expect(render({ lastReadOrdinal: 1, thread: thread({ entries }) }))
-      .not.toContain("chat-sep--new");
+      .not.toContain('data-slot="chat-new-separator"');
     // Neither is a first visit, which has no watermark to return to.
-    expect(render({ thread: thread({ entries }) })).not.toContain("chat-sep--new");
+    expect(render({ thread: thread({ entries }) }))
+      .not.toContain('data-slot="chat-new-separator"');
   });
 });

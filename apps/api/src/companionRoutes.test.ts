@@ -197,6 +197,7 @@ const message = {
   author_name: "User",
   tool: null,
     decision: null,
+  reasoning: null,
   created_at: companion.created_at,
 };
 

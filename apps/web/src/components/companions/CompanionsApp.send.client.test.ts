@@ -153,6 +153,7 @@ function controlPlane(
           author_name: null,
           tool: null,
     decision: null,
+          reasoning: null,
           created_at: new Date().toISOString(),
         });
         delivered = ordinal - 1;
@@ -183,6 +184,7 @@ function controlPlane(
           author_name: null,
           tool: null,
     decision: null,
+          reasoning: null,
           created_at: new Date().toISOString(),
         });
       }
@@ -295,7 +297,7 @@ describe("CompanionsApp send", () => {
       await pressEnter(container);
       await poll(1);
 
-      expect(container.querySelector(".chat-hint")?.textContent)
+      expect(container.querySelector("[data-slot='composer-hint']")?.textContent)
         .toBe("Enter sends. Shift + Enter starts a new line.");
       expect(container.querySelector(".chat-box")?.textContent).toContain("Online");
     });
@@ -329,7 +331,7 @@ describe("CompanionsApp send", () => {
       });
 
       expect(api.posts()).toBe(1);
-      expect(container.querySelectorAll(".chat-turn--said")).toHaveLength(1);
+      expect(container.querySelectorAll("[data-role='user']")).toHaveLength(1);
 
       await act(async () => {
         api.releaseSend();
