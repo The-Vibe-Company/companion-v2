@@ -1,6 +1,12 @@
 import type { CompanionThread, CompanionTranscriptEntry } from "@companion/contracts";
 import { describe, expect, it } from "vitest";
-import { composerHint, replyExpected, transcriptAuthor, transcriptTurns } from "./transcript";
+import {
+  composerHint,
+  replyExpected,
+  transcriptAuthor,
+  transcriptDisplayContent,
+  transcriptTurns,
+} from "./transcript";
 
 function entry(overrides: Partial<CompanionTranscriptEntry> = {}): CompanionTranscriptEntry {
   return {
@@ -30,6 +36,40 @@ function thread(overrides: Partial<CompanionThread> = {}): CompanionThread {
     ...overrides,
   };
 }
+
+describe("transcriptDisplayContent", () => {
+  it.each([
+    ["Pi ended the turn without a visible reply.", "Luna ended the turn without a visible reply."],
+    ["Pi ended the turn without a reply (error).", "Luna ended the turn without a reply (error)."],
+    ["Pi ended the turn without a reply (aborted).", "Luna ended the turn without a reply (aborted)."],
+    ["Pi did not accept the message: unavailable", "Luna did not accept the message: unavailable"],
+  ])("names the Companion in a system note: %s", (content, expected) => {
+    expect(transcriptDisplayContent(entry({ role: "system", content }), "Luna")).toBe(expected);
+  });
+
+  it("only replaces Pi as a standalone name", () => {
+    expect(transcriptDisplayContent(
+      entry({
+        role: "system",
+        content: "Pi stopped; pi.dev, Pipedream, Piñata, and αPi stayed available.",
+      }),
+      "Luna",
+    )).toBe("Luna stopped; pi.dev, Pipedream, Piñata, and αPi stayed available.");
+  });
+
+  it.each(["user", "assistant", "tool", "decision"] as const)(
+    "keeps %s content literal",
+    (role) => {
+      expect(transcriptDisplayContent(entry({ role, content: "Pi stayed literal." }), "Luna"))
+        .toBe("Pi stayed literal.");
+    },
+  );
+
+  it("inserts a Companion name literally", () => {
+    expect(transcriptDisplayContent(entry({ role: "system", content: "Pi stopped." }), "$& Atlas"))
+      .toBe("$& Atlas stopped.");
+  });
+});
 
 describe("transcriptAuthor", () => {
   it("credits the reader's own message to them and a teammate's to its author", () => {

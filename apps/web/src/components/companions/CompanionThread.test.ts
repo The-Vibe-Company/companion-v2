@@ -146,7 +146,7 @@ describe("CompanionThread", () => {
     expect(text(markup)).toContain("Box · online");
   });
 
-  it("keeps Pi tools and Skills out of the thread surface", () => {
+  it("keeps runtime tools and Skills out of the thread surface", () => {
     const markup = render({
       thread: thread({
         entries: [
@@ -166,7 +166,8 @@ describe("CompanionThread", () => {
       }),
     });
 
-    expect(markup).toContain("The run stopped before Pi replied.");
+    expect(markup).toContain("The run stopped before Luna replied.");
+    expect(markup).not.toContain("The run stopped before Pi replied.");
     expect(markup).not.toMatch(/tool|skill|mcp/i);
     // Computer use is the Box desktop and nothing else, reached from the one status chip.
     expect(markup.match(/open the Box desktop/g)).toHaveLength(1);

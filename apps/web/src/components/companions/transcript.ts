@@ -23,6 +23,23 @@ export interface TranscriptTurn {
 }
 
 /**
+ * Present a control-plane note in the Companion's product vocabulary. Historical notes store Pi's
+ * runtime name, but the transcript speaks about the Companion the reader opened and follows its
+ * current name after a rename. Only system notes cross this boundary: replies and tool output stay
+ * literal, even when they mention Pi themselves.
+ */
+export function transcriptDisplayContent(
+  entry: CompanionTranscriptEntry,
+  companionName: string,
+): string {
+  if (entry.role !== "system") return entry.content;
+  return entry.content.replace(
+    /(^|[^\p{L}\p{M}\p{N}\p{Pc}])Pi(?=$|[^\p{L}\p{M}\p{N}\p{Pc}])/gu,
+    (_match, prefix: string) => `${prefix}${companionName}`,
+  );
+}
+
+/**
  * Who wrote this entry. A thread shared with Editors has several writers, so only the reader's own
  * messages say "You"; a teammate's message keeps their name. A system note and a tool run have no
  * writer: they report what happened to the run rather than something anyone said.
