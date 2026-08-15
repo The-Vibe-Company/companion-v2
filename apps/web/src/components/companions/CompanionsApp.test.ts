@@ -56,6 +56,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
     pinned: false,
     hidden: false,
     unread: false,
+    last_message: null,
     runtime: {
       state: "running",
       daemon_state: "running",
@@ -84,7 +85,9 @@ function render(
   return renderToStaticMarkup(React.createElement(CompanionsApp, {
     orgs: [org],
     currentOrg: org,
+    viewer: { id: "user-1", name: "Ada", email: "ada@example.test", initials: "A", avatarUrl: null },
     navigation,
+    skills: [],
     initialCompanions: companions,
     initialProviders: providers,
     initialPlugins: [{
@@ -208,7 +211,10 @@ describe("CompanionsApp", () => {
 
     const chat = render([companion()], companion().id);
     expect(chat).toContain("Chat with Luna");
-    expect(chat).not.toContain(">Plugins<");
+    // Plugins is sidebar navigation, reachable from an open thread; the thread itself carries no
+    // plugin chrome and no way to enter a connector credential.
+    const chatSurface = chat.slice(chat.indexOf("<main"));
+    expect(chatSurface).not.toContain(">Plugins<");
     expect(chat).not.toContain("Add MCP");
   });
 

@@ -5,6 +5,7 @@ import type {
   CompanionAccess,
   CompanionDaemonState,
   CompanionDecision,
+  CompanionLastMessage,
   CompanionMcpAccount,
   CompanionMcpCredential,
   CompanionPluginAccount,
@@ -22,6 +23,7 @@ import type {
   UpdateCompanionMemberStateInput,
 } from "@companion/contracts";
 import {
+  COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS,
   COMPANION_PROVIDER_CATALOG,
   companionProviderDefaultModel,
   companionMcpAccountSchema,
@@ -226,6 +228,75 @@ export function canWakeCompanion(access: CompanionAccess): boolean {
   return access === "owner" || access === "editor";
 }
 
+/**
+ * One line of a message, fit for a list row: the first line, whitespace collapsed, cut to the
+ * contract's width. The cut is on characters rather than words because the alternative is a preview
+ * that silently drops the end of a short message to keep a word whole.
+ */
+export function companionLastMessagePreview(content: string): string {
+  const firstLine = content.split("\n").find((line) => line.trim().length > 0) ?? "";
+  const collapsed = firstLine.replace(/\s+/g, " ").trim();
+  if (collapsed.length <= COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS) return collapsed;
+  // The bound is the contract's, and the contract counts what JavaScript counts, so the cut is on
+  // code units — but never through a surrogate pair, which would leave half a character and render
+  // as a replacement glyph at the end of every long preview containing an emoji.
+  const cut = collapsed.slice(0, COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS);
+  const last = cut.charCodeAt(cut.length - 1);
+  const strandedHighSurrogate = last >= 0xd800 && last <= 0xdbff;
+  return strandedHighSurrogate ? cut.slice(0, -1) : cut;
+}
+
+/**
+ * Newest chat line per Companion, for the conversation list. Every write answers without one — a
+ * mutation reports what it just wrote, not a scan of the thread — so a surface that keeps a list
+ * merges the field rather than replacing the row; `last_message: null` means "not answered here".
+ * `tool` and `decision` entries are
+ * excluded in the query rather than filtered afterwards, so a Companion whose last activity was a
+ * tool run still previews the last thing a person or Pi actually said — and no tool title or pending
+ * permission question can reach a surface outside the thread.
+ *
+ * Callers pass only Companion ids the actor may already read, so this adds no visibility of its own.
+ */
+export async function loadCompanionLastMessages(
+  database: Db,
+  orgId: string,
+  companionIds: string[],
+): Promise<Map<string, CompanionLastMessage>> {
+  if (companionIds.length === 0) return new Map();
+  const rows = await database
+    .selectDistinctOn([schema.companionTranscriptEntries.companionId], {
+      companionId: schema.companionTranscriptEntries.companionId,
+      role: schema.companionTranscriptEntries.role,
+      content: schema.companionTranscriptEntries.content,
+      authorId: schema.companionTranscriptEntries.authorId,
+      authorName: schema.profiles.name,
+      createdAt: schema.companionTranscriptEntries.createdAt,
+    })
+    .from(schema.companionTranscriptEntries)
+    .leftJoin(schema.profiles, eq(schema.profiles.id, schema.companionTranscriptEntries.authorId))
+    .where(and(
+      eq(schema.companionTranscriptEntries.orgId, orgId),
+      inArray(schema.companionTranscriptEntries.companionId, companionIds),
+      inArray(schema.companionTranscriptEntries.role, ["user", "assistant"]),
+    ))
+    .orderBy(
+      asc(schema.companionTranscriptEntries.companionId),
+      desc(schema.companionTranscriptEntries.ordinal),
+    );
+  const previews = new Map<string, CompanionLastMessage>();
+  for (const row of rows) {
+    if (row.role !== "user" && row.role !== "assistant") continue;
+    previews.set(row.companionId, {
+      preview: companionLastMessagePreview(row.content),
+      role: row.role,
+      author_id: row.authorId,
+      author_name: row.authorName,
+      created_at: row.createdAt.toISOString(),
+    });
+  }
+  return previews;
+}
+
 function toCompanion(
   row: CompanionRow,
   access: CompanionAccess,
@@ -234,6 +305,7 @@ function toCompanion(
     hidden: false,
     unread: false,
   },
+  lastMessage: CompanionLastMessage | null = null,
 ): Companion {
   const providerId = row.providerIds[0];
   const modelId = row.modelId ?? (providerId ? companionProviderDefaultModel(providerId) : undefined);
@@ -252,6 +324,7 @@ function toCompanion(
     pinned: member.pinned,
     hidden: member.hidden,
     unread: member.unread,
+    last_message: lastMessage,
     runtime: {
       state: row.runtimeState,
       daemon_state: row.daemonState,
@@ -392,21 +465,33 @@ async function companionWithMemberState(input: {
   orgId: string;
   row: CompanionRow;
   access: CompanionAccess;
+  /** Only a surface that draws a conversation row needs the preview; it is a scan of the thread. */
+  withLastMessage?: boolean;
 }): Promise<Companion> {
-  const [states, highest] = await Promise.all([
+  const [states, highest, previews] = await Promise.all([
     loadMemberStates(input.database, input.orgId, input.actorId, [input.row.id]),
     loadHighestTranscriptOrdinals(input.database, input.orgId, [input.row.id]),
+    input.withLastMessage
+      ? loadCompanionLastMessages(input.database, input.orgId, [input.row.id])
+      : Promise.resolve(new Map<string, CompanionLastMessage>()),
   ]);
   return toCompanion(
     input.row,
     input.access,
     memberFlags(states.get(input.row.id), highest.get(input.row.id) ?? null),
+    previews.get(input.row.id) ?? null,
   );
 }
 
 export async function listCompanions(input: {
   actor: ActorContext;
   orgId: string;
+  /**
+   * Project each thread's newest chat line. On by default, because the list is the conversation
+   * list. A caller that only needs names and attachments — the Skills page asking which Companions
+   * stage a skill — turns it off, so private chat text never reaches a surface that shows none.
+   */
+  withLastMessage?: boolean;
   database?: Db;
 }): Promise<Companion[]> {
   const database = input.database ?? db;
@@ -422,15 +507,25 @@ export async function listCompanions(input: {
     if (access) accessible.push({ row, access });
   }
   const companionIds = accessible.map((item) => item.row.id);
-  const [states, highest] = await Promise.all([
+  // Only the Companions this actor may already read are previewed, and in one query rather than one
+  // per row: the list is the surface that shows every thread's last word at once.
+  const [states, highest, previews] = await Promise.all([
     loadMemberStates(database, input.orgId, input.actor.id, companionIds),
     loadHighestTranscriptOrdinals(database, input.orgId, companionIds),
+    input.withLastMessage === false
+      ? Promise.resolve(new Map<string, CompanionLastMessage>())
+      : loadCompanionLastMessages(database, input.orgId, companionIds),
   ]);
   const pinnedAtById = new Map<string, Date>();
   const companions = accessible.map(({ row, access }) => {
     const state = states.get(row.id);
     if (state?.pinnedAt) pinnedAtById.set(row.id, state.pinnedAt);
-    return toCompanion(row, access, memberFlags(state, highest.get(row.id) ?? null));
+    return toCompanion(
+      row,
+      access,
+      memberFlags(state, highest.get(row.id) ?? null),
+      previews.get(row.id) ?? null,
+    );
   });
   return sortCompanionsForMember(companions, pinnedAtById);
 }
@@ -439,6 +534,12 @@ export async function getCompanion(input: {
   actor: ActorContext;
   orgId: string;
   companionId: string;
+  /**
+   * Project this thread's newest chat line. Off by default: it is a scan of the transcript, and
+   * `getCompanion` is the shared primitive behind sends, syncs, lifecycle claims, and the thread
+   * read, none of which render a conversation row. On for the reads a row is drawn from.
+   */
+  withLastMessage?: boolean;
   database?: Db;
 }): Promise<Companion> {
   const database = input.database ?? db;
@@ -457,6 +558,7 @@ export async function getCompanion(input: {
     orgId: input.orgId,
     row,
     access,
+    withLastMessage: input.withLastMessage,
   });
 }
 
@@ -1175,6 +1277,7 @@ function toThread(input: {
   companion: Companion;
   row: CompanionThreadRow | undefined;
   entries: CompanionTranscriptEntry[];
+  lastReadOrdinal?: number | null;
 }): CompanionThread {
   const deliveredOrdinal = input.row?.deliveredOrdinal ?? null;
   const pending = input.entries.filter((entry) =>
@@ -1190,6 +1293,7 @@ function toThread(input: {
     last_message_at: input.row?.lastMessageAt?.toISOString()
       ?? input.entries.at(-1)?.created_at
       ?? null,
+    last_read_ordinal: input.lastReadOrdinal ?? null,
   };
 }
 
@@ -1205,12 +1309,16 @@ export async function getCompanionThread(input: {
 }): Promise<CompanionThread> {
   const database = input.database ?? db;
   const companion = await getCompanion({ ...input, database });
-  const [row, entries] = await Promise.all([
+  const [row, entries, states] = await Promise.all([
     readCompanionThreadRow(database, input.orgId, input.companionId),
     readCompanionTranscript(database, input.orgId, input.companionId),
+    // Read where this member left off before the read below advances it: that watermark is the only
+    // thing that can say where their unread run starts, and opening the thread is what clears it.
+    loadMemberStates(database, input.orgId, input.actor.id, [input.companionId]),
   ]);
+  const lastReadOrdinal = states.get(input.companionId)?.lastReadOrdinal ?? null;
   await markCompanionThreadRead({ ...input, database });
-  return toThread({ actor: input.actor, companion, row, entries });
+  return toThread({ actor: input.actor, companion, row, entries, lastReadOrdinal });
 }
 
 /**
@@ -2181,7 +2289,7 @@ export async function setCompanionProvider(input: {
       "this Companion provider was already configured",
     );
   }
-  return toCompanion(row, "owner");
+  return toCompanion(row, "owner", memberFromCompanion(companion));
 }
 
 export async function saveCompanionProvider(input: {
@@ -2420,6 +2528,7 @@ export async function getCompanionForRuntime(input: {
   actor: ActorContext;
   orgId: string;
   companionId: string;
+  withLastMessage?: boolean;
   database?: Db;
 }): Promise<Companion> {
   const companion = await getCompanion(input);

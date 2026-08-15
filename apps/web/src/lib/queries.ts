@@ -181,9 +181,11 @@ export async function markSkillUninstalled(slug: string): Promise<SkillUninstall
 export async function fetchSkillVersionFiles(
   slug: string,
   version: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<SkillFilesResponse> {
   return apiFetch<SkillFilesResponse>(
     `/v1/skills/${slug}/versions/${encodeURIComponent(version)}/files`,
+    options.signal ? { signal: options.signal } : undefined,
   );
 }
 

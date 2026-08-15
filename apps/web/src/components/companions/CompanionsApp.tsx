@@ -14,6 +14,7 @@ import {
   duplicateCompanion,
   getCompanionRuntime,
   getCompanionThread,
+  listCompanions,
   openCompanionDesktop,
   sendCompanionMessage,
   setCompanionProvider,
@@ -22,13 +23,15 @@ import {
   updateCompanionMemberState,
 } from "@/lib/companions";
 import { Icon } from "../Icon";
+import { RelativeTime } from "./RelativeTime";
 import { CompanionProvidersDialog } from "./CompanionProvidersDialog";
 import { CompanionPlugins } from "./CompanionPlugins";
 import { CompanionSettings } from "./CompanionSettings";
+import type { CompanionContextSkill } from "./CompanionContext";
 import { CompanionThread } from "./CompanionThread";
 import { NewCompanionDialog } from "./NewCompanionDialog";
 import { ShareCompanionDialog } from "./ShareCompanionDialog";
-import { companionStatus, relativeTime } from "./status";
+import { companionStatus } from "./status";
 import { createThreadQueue } from "./threadQueue";
 import { Onboarding } from "../org/Onboarding";
 import { useOrgActions } from "../org/useOrgActions";
@@ -53,6 +56,12 @@ const BOX_STATUS_POLL_MS = 15_000;
  * sent. This is the control-plane projection, so it never resumes a Box and is safe for a Viewer.
  */
 const PENDING_POLL_MS = 3_000;
+/**
+ * How often the conversation list re-reads every thread's last line. It is slow on purpose: this is
+ * the sidebar, not the open thread, and it is the control-plane read model, so it never contacts or
+ * wakes a Box for any Companion — including the ones nobody has opened.
+ */
+const LIST_POLL_MS = 45_000;
 
 export interface CompanionNavigation {
   mineTreeRows: TreeRow[];
@@ -65,11 +74,42 @@ export interface CompanionNavigation {
   archivedCount: number;
 }
 
-/** Server markup keeps the stable ISO day; the relative form appears once the client owns the clock. */
-function UpdatedAt({ iso }: { iso: string }) {
-  const [text, setText] = useState(() => iso.slice(0, 10));
-  useEffect(() => setText(relativeTime(iso)), [iso]);
-  return <time className="companions-row__time" dateTime={iso}>{text}</time>;
+/**
+ * Keep a preview a response did not carry. Every mutation answers about the settings it just wrote
+ * and reports `last_message: null`, so replacing a row wholesale would blank the line the sidebar is
+ * showing until the next list poll. The projection only ever arrives from a read, so a null here
+ * means "not answered", never "the thread is empty".
+ */
+function mergeCompanion(previous: Companion, next: Companion): Companion {
+  return next.last_message === null && previous.last_message !== null
+    ? { ...next, last_message: previous.last_message }
+    : next;
+}
+
+const CONTEXT_OPEN_KEY = "companions:context-open";
+
+/**
+ * Whether the context panel starts open. A wide screen has room for it beside the conversation, so
+ * that is the default there; on a narrow one the panel comes over the thread, so it waits to be asked
+ * for. An explicit choice, once made, wins over both.
+ */
+function readContextOpen(): boolean {
+  try {
+    const stored = window.localStorage.getItem(CONTEXT_OPEN_KEY);
+    if (stored === "true") return true;
+    if (stored === "false") return false;
+    return window.matchMedia("(min-width: 1024px)").matches;
+  } catch {
+    return false;
+  }
+}
+
+function writeContextOpen(open: boolean): void {
+  try {
+    window.localStorage.setItem(CONTEXT_OPEN_KEY, open ? "true" : "false");
+  } catch {
+    // A device that cannot remember the preference simply asks again next time.
+  }
 }
 
 function threadUrl(companionId: string | null): void {
@@ -86,7 +126,9 @@ function threadUrl(companionId: string | null): void {
 export function CompanionsApp({
   orgs,
   currentOrg,
+  viewer,
   navigation,
+  skills,
   initialCompanions,
   initialProviders,
   initialPlugins,
@@ -96,7 +138,11 @@ export function CompanionsApp({
 }: {
   orgs: OrgVM[];
   currentOrg: OrgVM;
+  /** The signed-in reader: whose messages are their own, and whose face the footer row carries. */
+  viewer: { id: string; name: string; email: string; initials: string; avatarUrl: string | null };
   navigation: CompanionNavigation;
+  /** Every skill this reader can see, so the context panel can name the ones a Companion stages. */
+  skills: CompanionContextSkill[];
   initialCompanions: Companion[];
   initialProviders: CompanionProvidersResponse;
   initialPlugins: CompanionPluginAccount[];
@@ -130,6 +176,10 @@ export function CompanionsApp({
   );
   const [thread, setThread] = useState<Thread | null>(null);
   const [threadError, setThreadError] = useState<string | null>(null);
+  /** This reader's watermark when the open thread was opened; the "New" divider sits just past it. */
+  const [lastReadOrdinal, setLastReadOrdinal] = useState<number | null>(null);
+  /** How far the thread went when it was opened, so the divider marks reading rather than arrivals. */
+  const [openedThroughOrdinal, setOpenedThroughOrdinal] = useState<number | null>(null);
   /**
    * Why the last desktop handoff opened nothing. It is kept apart from `threadError` because the
    * live thread poll clears that one every couple of seconds, which would erase this answer before
@@ -140,11 +190,13 @@ export function CompanionsApp({
   const [waking, setWaking] = useState(false);
   const [openingDesktop, setOpeningDesktop] = useState(false);
   /**
-   * Whether a runner asked for the Computer panel. It is a preference rather than a property of one
-   * Companion, so it survives moving between threads: an operator who wants to watch the screen wants
-   * to watch the next Companion's too.
+   * Whether a runner keeps the context panel beside the conversation. It is a preference rather than
+   * a property of one Companion, so it survives moving between threads and reloads: an operator who
+   * wants the screen, the routines, and the skills in view wants them for the next Companion too. It
+   * starts closed so server markup and the first client paint agree, and the stored preference — open
+   * unless it was closed — arrives once the client owns the page.
    */
-  const [computerOpen, setComputerOpen] = useState(false);
+  const [contextOpen, setContextOpen] = useState(false);
   /**
    * The one join the open panel is showing, and the Companion it was minted for. Box rotates the
    * stream token on every state change, so a desktop is held for exactly as long as the join that
@@ -155,15 +207,23 @@ export function CompanionsApp({
    * thread. Without it, opening another Companion would frame the previous one's screen — and its
    * secret-bearing URL — under the new Companion's name until the next mint answered.
    */
-  const [computerJoin, setComputerJoin] = useState<{
+  const [contextJoin, setContextJoin] = useState<{
     companionId: string;
     desktop: CompanionDesktop | null;
     error: string | null;
     joining: boolean;
   } | null>(null);
   const threadRequestRef = useRef(0);
+  /** The Companion whose read watermark has already been captured for the open thread. */
+  const capturedReadRef = useRef<string | null>(null);
+  /**
+   * Companions written since the list poll now in flight went out. The poll's snapshot is older than
+   * those writes, so applying it would put a row back the way it was before a pin, a wake, or a
+   * settings save the reader just made, until the next poll 45 seconds later undid it again.
+   */
+  const writtenRef = useRef(new Set<string>());
   /** Newest panel join, so a slower mint cannot put its stream on screen after a newer one. */
-  const computerJoinRef = useRef(0);
+  const contextJoinRef = useRef(0);
   /** Newest runtime read per Companion, so a slower one cannot answer over it. */
   const companionReadRef = useRef(new Map<string, number>());
   const threadQueueRef = useRef(createThreadQueue());
@@ -193,9 +253,19 @@ export function CompanionsApp({
   const sidebarCompanions = useMemo(
     () => companions.map((companion) => {
       const status = companionStatus(companion.runtime.state);
-      return { id: companion.id, name: companion.name, status: status.label, tone: status.tone };
+      return {
+        id: companion.id,
+        name: companion.name,
+        status: status.label,
+        tone: status.tone,
+        preview: companion.last_message?.preview ?? null,
+        previewAt: companion.last_message?.created_at ?? null,
+        // The reader's own watermark, from the control plane. The thread on screen is being read
+        // right now, so it is never the one with a dot on it.
+        unread: companion.id !== openedId && companion.unread,
+      };
     }),
-    [companions],
+    [companions, openedId],
   );
 
   const visible = useMemo(() => {
@@ -212,15 +282,34 @@ export function CompanionsApp({
     [companions],
   );
 
-  const replaceCompanion = (next: Companion) => {
+  /**
+   * Put one Companion back where it already was. Reads run on a poll, and the roster's order is the
+   * server's — pin age, then recency, then name — so re-sorting here on every answer would fight the
+   * list poll and make rows jump under the cursor. The preview is merged because a mutation answers
+   * about what it just wrote and would otherwise blank the line the conversation list is showing.
+   */
+  const replaceCompanion = useCallback((next: Companion) => {
+    writtenRef.current.add(next.id);
+    setCompanions((current) =>
+      current.map((item) => item.id === next.id ? mergeCompanion(item, next) : item));
+  }, []);
+
+  /**
+   * Put one Companion back and let it move. Pin and hide are the writes that change where a row
+   * belongs, so this is the only path that re-sorts, and it sorts the way the server does.
+   */
+  const resortCompanion = useCallback((next: Companion) => {
+    writtenRef.current.add(next.id);
     setCompanions((current) => {
+      const previous = current.find((item) => item.id === next.id);
+      const merged = previous ? mergeCompanion(previous, next) : next;
       const without = current.filter((item) => item.id !== next.id);
-      return [next, ...without].sort((left, right) => {
+      return [merged, ...without].sort((left, right) => {
         if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
         return Date.parse(right.updated_at) - Date.parse(left.updated_at);
       });
     });
-  };
+  }, []);
 
   const applyMemberState = async (
     companion: Companion,
@@ -230,7 +319,7 @@ export function CompanionsApp({
     setError(null);
     try {
       const next = await updateCompanionMemberState(currentOrg.id, companion.id, patch);
-      replaceCompanion(next);
+      resortCompanion(next);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not update this Companion.");
     } finally {
@@ -282,6 +371,13 @@ export function CompanionsApp({
 
   const openPlugins = () => {
     setPluginsOpen(true);
+    // Plugins is now reachable from the sidebar, so it can be asked for while a thread is open — and
+    // the thread wins the render. Leaving the thread open made the entry look dead.
+    threadRequestRef.current += 1;
+    setOpenedId(null);
+    setThread(null);
+    setThreadError(null);
+    setSettingsId(null);
     if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
     url.searchParams.delete("companion");
@@ -305,17 +401,29 @@ export function CompanionsApp({
   /** One refresh of the open thread: Pi delivery plus projection when awake, read model otherwise. */
   const refreshThread = useCallback(async (live: boolean) => {
     if (!openedId) return;
-    const requestId = ++threadRequestRef.current;
+    // The request id is claimed by the call that actually goes out, not by the tick that asked for
+    // one. A tick the queue skips used to claim an id anyway, which invalidated the read already in
+    // flight and threw its answer away — including the one payload that carries where this reader
+    // left off, so a first read slower than one poll silently lost the divider for good.
+    let requestId = threadRequestRef.current;
     try {
       const next = await threadQueueRef.current.run(
-        () => live
-          ? syncCompanionThread(currentOrg.id, openedId)
-          : getCompanionThread(currentOrg.id, openedId),
+        () => {
+          requestId = ++threadRequestRef.current;
+          return live
+            ? syncCompanionThread(currentOrg.id, openedId)
+            : getCompanionThread(currentOrg.id, openedId);
+        },
         { skipWhenBusy: true },
       );
       if (next && requestId === threadRequestRef.current) {
         setThread(next);
         setThreadError(null);
+        // The control plane advances this member's watermark as it answers. Opening from the list
+        // already cleared the row optimistically; this covers the thread nobody clicked into — a
+        // deep link — which would otherwise keep a dot on a thread that is on screen.
+        setCompanions((current) => current.map((item) =>
+          item.id === openedId && item.unread ? { ...item, unread: false } : item));
       }
     } catch (cause) {
       if (requestId === threadRequestRef.current) {
@@ -323,6 +431,58 @@ export function CompanionsApp({
       }
     }
   }, [currentOrg.id, openedId]);
+
+  // The panel preference is per device, so it can only be read once the client owns the page.
+  useEffect(() => setContextOpen(readContextOpen()), []);
+
+  /**
+   * Where this reader left off, taken from the first thread payload after opening: the control plane
+   * reports the watermark as it stood before that read advanced it, and that read is also what
+   * advances it. So it is captured exactly once per Companion — keyed by id rather than by the value
+   * being null, because null is a real answer (a first visit) and a second poll would otherwise
+   * capture the watermark the first one had just moved, drawing a divider above a reply the reader
+   * is watching arrive. The same key is what re-captures when the sidebar moves to another thread.
+   */
+  useEffect(() => {
+    if (!openedId) {
+      capturedReadRef.current = null;
+      setLastReadOrdinal(null);
+      setOpenedThroughOrdinal(null);
+      return;
+    }
+    if (thread?.companion_id !== openedId || capturedReadRef.current === openedId) return;
+    capturedReadRef.current = openedId;
+    setLastReadOrdinal(thread.last_read_ordinal);
+    setOpenedThroughOrdinal(thread.entries.at(-1)?.ordinal ?? null);
+  }, [openedId, thread]);
+
+  /**
+   * The conversation list re-reads every thread's last line on a slow cadence. It is the
+   * control-plane read model — the same list the page was rendered from — so it never contacts a Box
+   * and never wakes one, whatever state the Companions in it are in.
+   *
+   * The open thread does not depend on this: sending re-reads its Companion, and a runner watching an
+   * awake Box re-reads it every few seconds, and both of those reads now carry the preview.
+   */
+  useEffect(() => {
+    const timer = setInterval(() => {
+      writtenRef.current.clear();
+      void listCompanions(currentOrg.id)
+        .then((latest) => setCompanions((current) => {
+          const byId = new Map(current.map((item) => [item.id, item]));
+          return latest.map((item) => {
+            const previous = byId.get(item.id);
+            if (!previous) return item;
+            // A row written while this read was out is newer than the read; keep what the write said.
+            if (writtenRef.current.has(item.id)) return previous;
+            return mergeCompanion(previous, item);
+          });
+        }))
+        // A list that could not be re-read keeps the rows it has; nothing on screen is wrong yet.
+        .catch(() => {});
+    }, LIST_POLL_MS);
+    return () => clearInterval(timer);
+  }, [currentOrg.id]);
 
   useEffect(() => {
     if (!openedId) return;
@@ -353,11 +513,11 @@ export function CompanionsApp({
     try {
       const latest = await getCompanionRuntime(currentOrg.id, companionId, { live });
       if (companionReadRef.current.get(companionId) !== readId) return;
-      setCompanions((current) => current.map((item) => item.id === latest.id ? latest : item));
+      replaceCompanion(latest);
     } catch {
       // The failure that prompted this read is already on screen; do not replace it with this one.
     }
-  }, [currentOrg.id]);
+  }, [currentOrg.id, replaceCompanion]);
 
   // Only a runner whose Box is already running observes it, so opening a thread never wakes a Box
   // and a Viewer's chip stays on the control-plane projection.
@@ -414,7 +574,7 @@ export function CompanionsApp({
     setThreadError(null);
     try {
       const updated = await startCompanionRuntime(currentOrg.id, companionId);
-      setCompanions((current) => current.map((item) => item.id === updated.id ? updated : item));
+      replaceCompanion(updated);
       await refreshThread(true);
     } catch (cause) {
       setThreadError(cause instanceof Error ? cause.message : "This Companion could not be woken.");
@@ -475,22 +635,22 @@ export function CompanionsApp({
   };
 
   /**
-   * One join of the Computer panel: mint this Companion's desktop and show it in the panel. It is the
-   * same authorized handoff the desktop tab uses, so it observes a Box that is already running and
-   * can never create or resume one — opening the panel is not a wake, and a Viewer never reaches it.
+   * One join of the context panel's screen: mint this Companion's desktop and show it in the panel.
+   * It is the same authorized handoff the desktop tab uses, so it observes a Box that is already
+   * running and can never create or resume one — the panel is not a wake, and a Viewer never sees it.
    *
    * The URL is minted for this join alone. It is held in state only while the panel shows it, so
    * nothing here can hand a later join a stream token Box has already rotated away.
    */
-  const joinComputer = useCallback(async () => {
+  const joinContext = useCallback(async () => {
     if (!openedId || !canRunOpened || !openedAwake) return;
     const companionId = openedId;
-    const joinId = ++computerJoinRef.current;
-    setComputerJoin({ companionId, desktop: null, error: null, joining: true });
+    const joinId = ++contextJoinRef.current;
+    setContextJoin({ companionId, desktop: null, error: null, joining: true });
     try {
       const minted = await openCompanionDesktop(currentOrg.id, companionId);
-      if (computerJoinRef.current !== joinId) return;
-      setComputerJoin({
+      if (contextJoinRef.current !== joinId) return;
+      setContextJoin({
         companionId,
         desktop: minted,
         error: minted.desktop_url
@@ -501,10 +661,10 @@ export function CompanionsApp({
         joining: false,
       });
     } catch (cause) {
-      if (computerJoinRef.current !== joinId) return;
+      if (contextJoinRef.current !== joinId) return;
       // The reason is kept on the panel rather than the thread: the live thread poll clears its own
       // notice every couple of seconds, which would erase this one before it could be read.
-      setComputerJoin({
+      setContextJoin({
         companionId,
         desktop: null,
         error: cause instanceof Error ? cause.message : "The Box desktop could not be reached.",
@@ -514,29 +674,29 @@ export function CompanionsApp({
   }, [canRunOpened, currentOrg.id, openedAwake, openedId]);
 
   /** Whether the panel has a running Box of a runner's to show, which is the only thing it streams. */
-  const computerLive = computerOpen && canRunOpened && openedAwake;
+  const contextLive = contextOpen && canRunOpened && openedAwake;
   /**
    * The join the panel may show right now, which is only ever the open Companion's. A join belonging
    * to the Companion an operator just left is not shown for the paint before its replacement is
    * minted: a panel that is live with nothing of this Companion's yet is a panel that is connecting.
    */
-  const openedComputer = computerJoin?.companionId === openedId ? computerJoin : null;
+  const openedContext = contextJoin?.companionId === openedId ? contextJoin : null;
 
   // Every join mints its own URL: opening the panel, moving to another Companion, and a Box that came
   // back up are each a fresh mint, because Box rotates the stream token on every state change and a
   // kept URL is one that has already stopped working.
   useEffect(() => {
-    if (!openedId || !computerLive) return;
-    void joinComputer();
-  }, [computerLive, joinComputer, openedId]);
+    if (!openedId || !contextLive) return;
+    void joinContext();
+  }, [contextLive, joinContext, openedId]);
 
   // A closed panel, a Companion left behind, and a Box that stopped under the stream all leave no
   // desktop: the URL goes with the join it belonged to, and an in-flight mint is disowned.
   useEffect(() => {
-    if (computerLive) return;
-    computerJoinRef.current += 1;
-    setComputerJoin(null);
-  }, [computerLive]);
+    if (contextLive) return;
+    contextJoinRef.current += 1;
+    setContextJoin(null);
+  }, [contextLive]);
 
   const onCreated = (companion: Companion) => {
     setCompanions((current) => [companion, ...current]);
@@ -554,7 +714,7 @@ export function CompanionsApp({
     setError(null);
     try {
       const updated = await setCompanionProvider(currentOrg.id, companion.id, fallbackProvider);
-      setCompanions((current) => current.map((item) => item.id === updated.id ? updated : item));
+      replaceCompanion(updated);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Provider could not be set.");
     } finally {
@@ -640,6 +800,9 @@ export function CompanionsApp({
           if (mode === "skills") router.push("/skills");
         }}
         companions={sidebarCompanions}
+        onOpenPlugins={openPlugins}
+        pluginsActive={pluginsOpen}
+        viewer={viewer}
         activeCompanionId={openedId ?? settingsId}
         onSelectCompanion={(companionId) => {
           const companion = companions.find((item) => item.id === companionId);
@@ -693,16 +856,25 @@ export function CompanionsApp({
               busy={sending}
               waking={waking}
               openingDesktop={openingDesktop}
-              computer={{
-                open: computerOpen,
-                desktop: openedComputer?.desktop ?? null,
-                joining: openedComputer?.joining ?? computerLive,
-                error: openedComputer?.error ?? null,
-                onToggle: () => setComputerOpen((open) => !open),
-                onJoin: () => void joinComputer(),
+              context={{
+                open: contextOpen,
+                desktop: openedContext?.desktop ?? null,
+                joining: openedContext?.joining ?? contextLive,
+                error: openedContext?.error ?? null,
+                onToggle: () => setContextOpen((open) => {
+                  writeContextOpen(!open);
+                  return !open;
+                }),
+                onJoin: () => void joinContext(),
               }}
+              contextSkills={skills}
+              lastReadOrdinal={lastReadOrdinal}
+              openedThroughOrdinal={openedThroughOrdinal}
               onBack={closeThread}
               onSend={onSend}
+              onSettings={opened.access === "viewer"
+                ? null
+                : () => router.push(`/companions/${opened.id}/settings`)}
               onThread={setThread}
               onWake={() => void onWake()}
               onDesktop={() => void onDesktop()}
@@ -715,8 +887,7 @@ export function CompanionsApp({
             providers={providers}
             onBack={closeSettings}
             onSaved={(updated) => {
-              setCompanions((current) =>
-                current.map((item) => item.id === updated.id ? updated : item));
+              replaceCompanion(updated);
             }}
             onDeleted={(companionId) => {
               setCompanions((current) => current.filter((item) => item.id !== companionId));
@@ -842,7 +1013,7 @@ export function CompanionsApp({
                             <i aria-hidden="true" />
                             {status.label}
                           </span>
-                          <UpdatedAt iso={companion.updated_at} />
+                          <RelativeTime className="companions-row__time" iso={companion.updated_at} />
                           <span className="companions-row-actions">
                             <span className="companions-role">{companion.access}</span>
                             <details className="companions-row-menu">

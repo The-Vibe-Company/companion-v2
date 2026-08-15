@@ -52,6 +52,7 @@ const companion: Companion = {
   pinned: false,
   hidden: false,
   unread: false,
+  last_message: null,
   runtime: {
     state: "running",
     daemon_state: "running",
@@ -79,6 +80,7 @@ function thread(entries: CompanionTranscriptEntry[], overrides: Partial<Thread> 
     entries,
     pending_count: 0,
     last_message_at: null,
+    last_read_ordinal: null,
     ...overrides,
   };
 }

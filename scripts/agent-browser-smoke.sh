@@ -505,33 +505,44 @@ assert_body_contains "engineering"
 assert_eval_true "!Array.from(document.querySelectorAll('a,button')).some((el) => ['Projects', 'Run skill'].includes((el.textContent || '').trim()))" \
   "removed Projects or Run skill affordance is still visible"
 
-log "Checking contextual row-action alignment"
+log "Checking dense table column alignment"
 for width in 1024 760; do
   agent-browser set viewport "$width" 800
   agent-browser wait 150
+  # The header and every row are the same grid, so the columns of a dense table line up whatever
+  # the viewport drops. Rows carry no controls of their own: the action lives in the panel.
   assert_eval_true "(() => {
-    const header = document.querySelector('.clist .chead span:last-child');
-    const cells = Array.from(document.querySelectorAll('.clist .crow > .crow__primary'));
-    if (!header || cells.length === 0) return false;
-    const expected = header.getBoundingClientRect();
-    const headerColumns = getComputedStyle(header.parentElement).gridTemplateColumns;
-    return cells.every((cell) => {
-      const rect = cell.getBoundingClientRect();
-      const button = cell.querySelector('.rowact--primary');
-      const rowColumns = getComputedStyle(cell.parentElement).gridTemplateColumns;
-      const aligned = Math.abs(rect.right - expected.right) < 1 && rowColumns === headerColumns;
-      const contained = !button || button.getBoundingClientRect().right <= rect.right + 0.5;
-      return aligned && contained;
-    });
-  })()" "contextual action columns are not aligned at ${width}px"
+    const head = document.querySelector('.clist .chead');
+    const rows = Array.from(document.querySelectorAll('.clist .crow'));
+    if (!head || rows.length === 0) return false;
+    const headerColumns = getComputedStyle(head).gridTemplateColumns;
+    return rows.every((row) => getComputedStyle(row).gridTemplateColumns === headerColumns);
+  })()" "the dense table columns are not aligned at ${width}px"
+  assert_eval_true "!document.querySelector('.clist .crow .rowact')" \
+    "a row action came back to the table at ${width}px"
   assert_eval_true "document.documentElement.scrollWidth <= document.documentElement.clientWidth" \
-    "contextual row actions introduced horizontal overflow at ${width}px"
+    "the dense table introduced horizontal overflow at ${width}px"
 done
-assert_eval_true "(() => {
-  const button = document.querySelector('.crow[data-skill-slug=\"$SMOKE_SKILL\"] .rowact--primary');
-  return button?.querySelector('.rowact__label')?.textContent?.trim() === 'Install';
-})()" "the compact Install row CTA includes the redundant word skill"
 agent-browser set viewport 1440 1000
+
+log "Checking the skill panel opens on a row click"
+assert_eval_true "(() => {
+  const row = document.querySelector('.crow[data-skill-slug=\"$SMOKE_SKILL\"] .crow__hit');
+  if (!row) return false;
+  row.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+  return true;
+})()" "the smoke skill row could not be selected"
+agent-browser wait 300
+assert_eval_true "!!document.querySelector('.skpanel')" "the skill panel did not open on a row click"
+assert_eval_true "(() => {
+  const panel = document.querySelector('.skpanel');
+  const open = Array.from(panel?.querySelectorAll('button') ?? [])
+    .some((button) => (button.textContent || '').trim() === 'Open');
+  return open && document.documentElement.scrollWidth <= document.documentElement.clientWidth;
+})()" "the skill panel has no Open action or overflows the viewport"
+agent-browser press Escape
+agent-browser wait 200
+assert_eval_true "!document.querySelector('.skpanel')" "Escape did not close the skill panel"
 
 log "Checking filter menu"
 agent-browser find role button click --name "Filter"
@@ -542,10 +553,11 @@ assert_body_contains "Has dependencies"
 agent-browser press Escape
 
 log "Checking detail view"
+# A click selects the row into the panel; the double click is what opens its page.
 assert_eval_true "(() => {
   const button = document.querySelector('.crow[data-skill-slug=\"$SMOKE_SKILL\"] .crow__hit');
   if (!button) return false;
-  button.click();
+  button.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
   return true;
 })()" "could not open the smoke skill by its stable slug"
 agent-browser wait 1000

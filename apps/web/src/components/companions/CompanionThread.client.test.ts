@@ -4,7 +4,7 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Companion, CompanionThread as Thread } from "@companion/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CompanionThread, type CompanionComputerPanel } from "./CompanionThread";
+import { CompanionThread, type CompanionContextPanel } from "./CompanionThread";
 import { CHAT_VIEWPORT_SETTLE_MS } from "./useVisualViewportPin";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -24,6 +24,7 @@ const companion: Companion = {
   pinned: false,
   hidden: false,
   unread: false,
+  last_message: null,
   runtime: {
     state: "running",
     daemon_state: "running",
@@ -50,12 +51,13 @@ const thread: Thread = {
   entries: [],
   pending_count: 0,
   last_message_at: null,
+  last_read_ordinal: null,
 };
 
 const roots: Root[] = [];
 
-/** A closed Computer panel: what a thread opens with, and what most of these cases render. */
-function computerPanel(overrides: Partial<CompanionComputerPanel> = {}): CompanionComputerPanel {
+/** A closed context panel: what these cases render unless one asks for it open. */
+function contextPanel(overrides: Partial<CompanionContextPanel> = {}): CompanionContextPanel {
   return {
     open: false,
     desktop: null,
@@ -74,7 +76,7 @@ async function mount(
     thread?: Thread;
     onDesktop?: () => void;
     onWake?: () => void;
-    computer?: Partial<CompanionComputerPanel>;
+    context?: Partial<CompanionContextPanel>;
   } = {},
 ) {
   const container = document.createElement("div");
@@ -89,10 +91,12 @@ async function mount(
       busy: false,
       waking: false,
       openingDesktop: false,
-      computer: computerPanel(overrides.computer),
+      context: contextPanel(overrides.context),
+      contextSkills: [],
       onBack: () => {},
       orgId: "org-1",
       onSend,
+      onSettings: () => {},
       onThread: () => {},
       onWake: overrides.onWake ?? (() => {}),
       onDesktop: overrides.onDesktop ?? (() => {}),
@@ -116,10 +120,12 @@ async function mountPolling(initial: Thread) {
         busy: false,
         waking: false,
         openingDesktop: false,
-        computer: computerPanel(),
+        context: contextPanel(),
+        contextSkills: [],
         onBack: () => {},
         orgId: "org-1",
         onSend: async () => true,
+        onSettings: () => {},
         onThread: () => {},
         onWake: () => {},
         onDesktop: () => {},
@@ -318,13 +324,15 @@ describe("CompanionThread composer", () => {
       busy: false,
       waking: false,
       openingDesktop: false,
-      computer: computerPanel(),
+      context: contextPanel(),
+      contextSkills: [],
       onBack: () => {},
       orgId: "org-1",
       onSend: (_content: string, clientMessageId: string) => {
         sentId = clientMessageId;
         return new Promise<boolean>((resolve) => { settle = resolve; });
       },
+      onSettings: () => {},
       onThread: () => {},
       onWake: () => {},
       onDesktop: () => {},
@@ -522,16 +530,18 @@ describe("CompanionThread Box chip", () => {
     document.body.innerHTML = "";
   });
 
-  it("carries the state word in its own element so a phone header can drop the prefix", async () => {
-    // THE-345: `Box · asleep` does not fit beside Back, the name, and Wake at 320px. The phone
-    // stylesheet hides the prefix, so the word has to be addressable on its own — and it has to stay,
-    // because the dot's colour is not allowed to be the only thing reporting status.
+  it("shows one state word and keeps the compute it reports in its accessible name", async () => {
+    // THE-345: `Box · asleep` does not fit beside Back, the name, the settings and panel toggles, and
+    // Wake at 320px. The visible chip is the dot and the word — the word has to stay, because the
+    // dot's colour is not allowed to be the only thing reporting status — and what the state is
+    // about rides in the accessible name and the tooltip instead.
     const container = await mount(async () => true);
     const chip = boxChip(container);
 
-    expect(chip.querySelector(".chat-box__prefix")?.textContent).toBe("Box ·");
-    expect(chip.querySelector(".chat-box__state")?.textContent).toBe("online");
-    expect(chip.textContent).toContain("Box · online");
+    expect(chip.querySelector(".chat-box__state")?.textContent).toBe("Online");
+    expect(chip.textContent).not.toContain("Box ·");
+    expect(chip.getAttribute("aria-label")).toContain("Box · online");
+    expect(chip.getAttribute("title")).toBe("Box · online");
   });
 
   it("hands a runner the Box desktop from the status chip", async () => {
@@ -552,8 +562,8 @@ describe("CompanionThread Box chip", () => {
     });
     const chip = boxChip(container);
 
-    expect(chip.querySelector(".chat-box__prefix")?.textContent).toBe("Box ·");
-    expect(chip.querySelector(".chat-box__state")?.textContent).toBe("online");
+    expect(chip.querySelector(".chat-box__state")?.textContent).toBe("Online");
+    expect(chip.getAttribute("aria-label")).toBe("Box · online");
   });
 
   it("leaves a Viewer's chip inert so reading a thread cannot reach Box", async () => {
@@ -585,22 +595,22 @@ describe("CompanionThread Box chip", () => {
  * beside the assistant-ui transcript rather than in place of it, and that the controls it carries are
  * exactly the ones the open Companion's access allows.
  */
-describe("CompanionThread Computer panel", () => {
+describe("CompanionThread context panel", () => {
   const asleep: Companion = {
     ...companion,
     runtime: { ...companion.runtime, state: "stopped", daemon_state: "stopped" },
   };
 
   function panel(container: HTMLElement) {
-    return container.querySelector(".chat-computer") as HTMLElement | null;
+    return container.querySelector(".chat-context") as HTMLElement | null;
   }
 
-  function computerToggle(container: HTMLElement) {
-    return container.querySelector(".chat-computer-toggle") as HTMLButtonElement | null;
+  function contextToggle(container: HTMLElement) {
+    return container.querySelector(".chat-context-toggle") as HTMLButtonElement | null;
   }
 
   function actionNamed(container: HTMLElement, label: string) {
-    return [...container.querySelectorAll(".chat-computer__actions button")]
+    return [...container.querySelectorAll(".chat-context button")]
       .find((button) => (button.textContent ?? "").includes(label)) as HTMLButtonElement | undefined;
   }
 
@@ -611,7 +621,7 @@ describe("CompanionThread Computer panel", () => {
 
   it("shows a runner the live desktop beside the conversation once the Box is running", async () => {
     const container = await mount(async () => true, {
-      computer: {
+      context: {
         open: true,
         desktop: {
           desktop_url: "https://box.ascii.dev/vnc/bx_23456789?token=opaque",
@@ -621,7 +631,7 @@ describe("CompanionThread Computer panel", () => {
         },
       },
     });
-    const frame = container.querySelector(".chat-computer__frame") as HTMLIFrameElement;
+    const frame = container.querySelector(".chat-context__frame") as HTMLIFrameElement;
 
     expect(panel(container)).not.toBeNull();
     expect(frame.getAttribute("src")).toBe("https://box.ascii.dev/vnc/bx_23456789?token=opaque");
@@ -634,14 +644,14 @@ describe("CompanionThread Computer panel", () => {
     expect(container.querySelector(".chat-thread")).not.toBeNull();
     expect(container.querySelector("textarea")).not.toBeNull();
     // The stream this join got is named rather than left for the picture to imply.
-    expect(container.querySelector(".chat-computer__transport")?.textContent).toBe("vnc");
+    expect(container.querySelector(".chat-context__transport")?.textContent).toBe("vnc");
   });
 
   it("keeps the desktop tab reachable from the panel", async () => {
     let opened = 0;
     const container = await mount(async () => true, {
       onDesktop: () => { opened += 1; },
-      computer: {
+      context: {
         open: true,
         desktop: {
           desktop_url: "https://box.ascii.dev/vnc/bx_23456789?token=opaque",
@@ -653,7 +663,7 @@ describe("CompanionThread Computer panel", () => {
     });
 
     await act(async () => {
-      actionNamed(container, "Open desktop")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      actionNamed(container, "open desktop")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
     expect(opened).toBe(1);
@@ -662,7 +672,7 @@ describe("CompanionThread Computer panel", () => {
   it("mints another desktop when the runner reconnects the panel", async () => {
     let joins = 0;
     const container = await mount(async () => true, {
-      computer: { open: true, onJoin: () => { joins += 1; } },
+      context: { open: true, onJoin: () => { joins += 1; } },
     });
 
     await act(async () => {
@@ -679,7 +689,7 @@ describe("CompanionThread Computer panel", () => {
     const container = await mount(async () => true, {
       companion: asleep,
       onWake: () => { woken += 1; },
-      computer: {
+      context: {
         open: true,
         // A stream minted before the Box stopped is not a stream: a sleeping Box has no desktop.
         desktop: {
@@ -691,7 +701,7 @@ describe("CompanionThread Computer panel", () => {
       },
     });
 
-    expect(container.querySelector(".chat-computer__frame")).toBeNull();
+    expect(container.querySelector(".chat-context__frame")).toBeNull();
     expect(container.innerHTML).not.toContain("token=stale");
     expect(panel(container)?.textContent).toContain("this Box is not running");
     // Waking is the same control the header offers, so the panel adds no second lifecycle path.
@@ -704,7 +714,7 @@ describe("CompanionThread Computer panel", () => {
 
   it("says why a join produced no screen without spelling out the URL", async () => {
     const container = await mount(async () => true, {
-      computer: {
+      context: {
         open: true,
         desktop: { desktop_url: null, provisioning: true, automation: "lux", transport: null },
         error: "The Box desktop is still starting. Reconnect in a moment.",
@@ -712,7 +722,7 @@ describe("CompanionThread Computer panel", () => {
     });
 
     expect(panel(container)?.textContent).toContain("The Box desktop is still starting");
-    expect(container.querySelector(".chat-computer__frame")).toBeNull();
+    expect(container.querySelector(".chat-context__frame")).toBeNull();
   });
 
   it("never offers a Viewer the panel or its toggle", async () => {
@@ -721,31 +731,45 @@ describe("CompanionThread Computer panel", () => {
       thread: { ...thread, access: "viewer", read_only: true, can_send: false },
       // Even asked for, the panel is not a Viewer's surface: they must never be handed a control that
       // looks as though it could start a Box.
-      computer: { open: true },
+      context: { open: true },
     });
 
-    expect(computerToggle(container)).toBeNull();
+    expect(contextToggle(container)).toBeNull();
     expect(panel(container)).toBeNull();
   });
 
   it("reports whether the panel is open on the control that opens it", async () => {
     let toggles = 0;
     const closed = await mount(async () => true, {
-      computer: { open: false, onToggle: () => { toggles += 1; } },
+      context: { open: false, onToggle: () => { toggles += 1; } },
     });
 
-    expect(computerToggle(closed)?.getAttribute("aria-pressed")).toBe("false");
+    expect(contextToggle(closed)?.getAttribute("aria-pressed")).toBe("false");
     expect(panel(closed)).toBeNull();
 
     await act(async () => {
-      computerToggle(closed)?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      contextToggle(closed)?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
     expect(toggles).toBe(1);
 
-    const open = await mount(async () => true, { computer: { open: true } });
+    const open = await mount(async () => true, { context: { open: true } });
 
-    expect(computerToggle(open)?.getAttribute("aria-pressed")).toBe("true");
+    expect(contextToggle(open)?.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("takes the conversation out of reach while the panel is over it", async () => {
+    // Below the two-pane width the panel covers the conversation. Left reachable, a keyboard walks
+    // through the scrim into a composer nobody can see; focus has to go in and come back out.
+    const narrow = { matches: true, addEventListener: () => {}, removeEventListener: () => {} };
+    vi.stubGlobal("matchMedia", () => narrow);
+    const container = await mount(async () => true, { context: { open: true } });
+
+    const conversation = container.querySelector(".chat-thread") as HTMLElement;
+    expect(conversation.inert).toBe(true);
+    expect(container.querySelector(".chat-context-scrim")).not.toBeNull();
+
+    vi.unstubAllGlobals();
   });
 });
 

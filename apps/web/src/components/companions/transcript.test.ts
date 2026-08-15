@@ -2,9 +2,11 @@ import type { CompanionThread, CompanionTranscriptEntry } from "@companion/contr
 import { describe, expect, it } from "vitest";
 import {
   composerHint,
+  localDay,
   replyExpected,
   transcriptAuthor,
   transcriptDisplayContent,
+  utcDay,
 } from "./transcript";
 
 function entry(overrides: Partial<CompanionTranscriptEntry> = {}): CompanionTranscriptEntry {
@@ -33,6 +35,7 @@ function thread(overrides: Partial<CompanionThread> = {}): CompanionThread {
     entries: [],
     pending_count: 0,
     last_message_at: null,
+    last_read_ordinal: null,
     ...overrides,
   };
 }
@@ -86,6 +89,15 @@ describe("transcriptAuthor", () => {
     expect(transcriptAuthor(entry({ role: "system" }), "user-1", "Luna")).toBeNull();
     expect(transcriptAuthor(entry({ role: "decision" }), "user-1", "Luna")).toBeNull();
   });
+});
+
+describe("transcript day keys", () => {
+  it("names a day the same way whatever clock produced the key", () => {
+    // Both keys are `YYYY-MM-DD`, so the separator's own label formats identically either way.
+    expect(utcDay("2026-08-14T23:30:00.000Z")).toBe("2026-08-14");
+    expect(localDay("2026-08-14T23:30:00.000Z")).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
 });
 
 describe("replyExpected", () => {

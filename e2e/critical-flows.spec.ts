@@ -191,7 +191,8 @@ test("a personal skill moves from its private folder to the organization only af
   await page.locator('button.lblrow__main[title="e2e"]').click();
   await page.locator(`button.lblrow__main[title="${folder}"]`).click();
   await expect(page.getByRole("button", { name: `Open skill ${slug}` })).toBeVisible();
-  await page.getByRole("button", { name: `Open skill ${slug}` }).click();
+  // A click selects the row into the panel beside the list; a double click opens its page.
+  await page.getByRole("button", { name: `Open skill ${slug}` }).dblclick();
 
   await expect(page.getByText("Personal skill", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Share to organization", exact: true }).click();

@@ -75,6 +75,7 @@ const asleep: Companion = {
   pinned: false,
   hidden: false,
   unread: false,
+  last_message: null,
   runtime: {
     state: "stopped",
     daemon_state: "stopped",
@@ -123,6 +124,7 @@ function controlPlane(options: { piAcceptsOnWake: boolean }) {
     pending_count: entries
       .filter((entry) => entry.role === "user" && entry.ordinal > delivered).length,
     last_message_at: entries.at(-1)?.created_at ?? null,
+    last_read_ordinal: null,
   });
 
   const wake = () => {
@@ -217,7 +219,9 @@ async function openThread() {
     root.render(React.createElement(CompanionsApp, {
       orgs: [org],
       currentOrg: org,
+      viewer: { id: "user-1", name: "Ada", email: "ada@example.test", initials: "A", avatarUrl: null },
       navigation,
+      skills: [],
       initialCompanions: [asleep],
       initialProviders: providers,
       initialPlugins: [],
@@ -274,13 +278,13 @@ describe("CompanionsApp wake on send", () => {
     const container = await openThread();
 
     expect(footer(container)).toContain("Enter sends");
-    expect(chip(container)).toContain("Box · asleep");
+    expect(chip(container)).toContain("Asleep");
 
     await send(container, "Draft the launch note");
 
     expect(footer(container)).not.toContain("Wake Luna to deliver.");
     expect(footer(container)).toContain("1 message waiting for a reply.");
-    expect(chip(container)).toContain("Box · online");
+    expect(chip(container)).toContain("Online");
     expect(api.runtimeReads()).toBeGreaterThan(0);
 
     // The woken thread now syncs, so the message Pi refused is delivered and answered without anyone
@@ -303,7 +307,7 @@ describe("CompanionsApp wake on send", () => {
     await send(container, "Draft the launch note");
 
     expect(wakeControls(container)).toHaveLength(0);
-    expect(chip(container)).toContain("Box · online");
+    expect(chip(container)).toContain("Online");
     expect(footer(container)).toContain("Enter sends");
 
     // A woken thread pulls Pi, so the reply arrives on the live cadence instead of on a reload.

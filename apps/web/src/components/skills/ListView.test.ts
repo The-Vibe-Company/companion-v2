@@ -63,6 +63,8 @@ type ListOverrides = {
   library?: "mine" | "org";
   activeLabel?: string | null;
   categoryOrder?: string[];
+  onSelect?: (skill: SkillVM | null) => void;
+  selectedUuid?: string | null;
 };
 
 function props(skills: SkillVM[], overrides: ListOverrides = {}) {
@@ -79,8 +81,8 @@ function props(skills: SkillVM[], overrides: ListOverrides = {}) {
     onGroupByChange: overrides.onGroupByChange ?? vi.fn(),
     onOpen: overrides.onOpen ?? vi.fn(),
     onUpload: vi.fn(),
-    actorId: "user-1",
-    onPrimaryAction: vi.fn(),
+    onSelect: overrides.onSelect ?? vi.fn(),
+    selectedUuid: overrides.selectedUuid ?? null,
     lastId: null,
     filters: [],
     onToggleFilter: vi.fn(),
@@ -135,9 +137,9 @@ describe("ListView names and discovery", () => {
     expect(html).toContain('<span class="crow__title">incident-summary</span>');
     expect(html).toContain('data-skill-slug="incident-summary"');
     expect(html).toContain('aria-label="Open skill incident-summary"');
-    expect(html).toContain('aria-label="Install skill incident-summary"');
     expect(html).not.toContain("Incident Summary");
-    expect(html).not.toContain("Unique description preview");
+    // One quiet line of what it is rides beside the slug; it is metadata, never the identity.
+    expect(html).toContain('<span class="crow__desc">Unique description preview</span>');
     expect(html).not.toContain("9.8.7");
     expect(html).not.toContain(">Version<");
     expect(html).not.toContain(">Deps<");
@@ -165,7 +167,7 @@ describe("ListView names and discovery", () => {
     expect(html).toContain('<span class="crow__title">incident-summary</span>');
     expect(html).toContain('<span class="crow__title">incident-summary-legacy</span>');
     expect(html).toContain('aria-label="Open skill incident-summary"');
-    expect(html).toContain('aria-label="Install skill incident-summary-legacy"');
+    expect(html).toContain('aria-label="Open skill incident-summary-legacy"');
     expect(html).not.toContain("Incident Summary");
   });
 
@@ -218,7 +220,9 @@ describe("ListView names and discovery", () => {
       "zulu-slug",
     ]);
 
-    act(() => (container.querySelector('button[aria-label="Open skill alpha-slug"]') as HTMLButtonElement).click());
+    // One click selects the row into the panel; the double click is what opens the skill.
+    const row = container.querySelector('button[aria-label="Open skill alpha-slug"]') as HTMLButtonElement;
+    act(() => row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
     expect(onOpen).toHaveBeenCalledWith("alpha-slug");
   });
 });
@@ -494,22 +498,69 @@ describe("ListView contributors", () => {
     expect(html).not.toContain("Install skill pending-skill");
   });
 
-  it("uses the contextual action matrix for compact row CTAs", () => {
-    const html = render([
+  it("keeps every row action off the table itself", async () => {
+    // The rows are facts, not controls: the one action a skill is for lives in the panel beside the
+    // list and on its own page, so a mis-aimed click can only ever select a row.
+    const container = await mount([
       skill({ id: "fresh" }),
       skill({ id: "current", installStatus: "installed", installedVersion: "1.0.0" }),
       skill({ id: "outdated", installStatus: "update", installedVersion: "0.9.0" }),
       skill({ id: "personal", scope: "personal", source: "authored" }),
     ]);
 
-    expect(html).toContain('aria-label="Install skill fresh"');
-    expect(html).toContain('<span class="rowact__label">Install</span>');
-    expect(html).not.toContain('<span class="rowact__label">Install skill</span>');
-    expect(html).not.toContain('aria-label="Install skill current"');
-    expect(html).toContain('aria-label="Update skill outdated"');
-    expect(html).toContain('title="Update skill"');
-    expect(html).toContain('<span class="rowact__label">Update</span>');
-    expect(html).not.toContain('<span class="rowact__label">Update skill</span>');
-    expect(html).toContain('aria-label="Share to organization personal"');
+    expect(container.innerHTML).not.toContain("rowact");
+    expect(container.querySelectorAll(".crow button")).toHaveLength(4);
+    for (const row of container.querySelectorAll(".crow")) {
+      expect(row.querySelector("button")?.className).toBe("crow__hit");
+    }
+  });
+
+  it("still selects a row that cannot be dragged when the pointer drifts", async () => {
+    // An installed skill in My Skills is never a drag source, so a few pixels of trackpad drift
+    // between press and release is an ordinary click and must not be spent on a drop that cannot
+    // happen. Left unguarded the row simply does nothing, which reads as broken.
+    const onSelect = vi.fn();
+    const container = await mount(
+      [skill({ id: "fresh", source: "installed" })],
+      { onSelect, library: "mine" },
+    );
+    const row = container.querySelector('button[aria-label="Open skill fresh"]') as HTMLButtonElement;
+
+    act(() => {
+      row.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: 0, clientY: 0 }));
+      row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, clientX: 12, clientY: 0 }));
+    });
+
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ id: "fresh" }));
+  });
+
+  it("opens the skill when a keyboard activates the row its name names", async () => {
+    const onSelect = vi.fn();
+    const onOpen = vi.fn();
+    const container = await mount([skill({ id: "fresh" })], { onSelect, onOpen });
+    const row = container.querySelector('button[aria-label="Open skill fresh"]') as HTMLButtonElement;
+
+    // A keyboard has no second click to open with, and the row's accessible name promises Open.
+    act(() => row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 0 })));
+
+    expect(onOpen).toHaveBeenCalledWith("fresh");
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("selects a row on a click and reports which one is in the panel", async () => {
+    const onSelect = vi.fn();
+    const onOpen = vi.fn();
+    const container = await mount(
+      [skill({ id: "fresh" })],
+      { onSelect, onOpen, selectedUuid: "skill-1" },
+    );
+    const row = container.querySelector('button[aria-label="Open skill fresh"]') as HTMLButtonElement;
+
+    act(() => row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 })));
+
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ id: "fresh" }));
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(row.getAttribute("aria-current")).toBe("true");
+    expect(row.closest(".crow")?.className).toContain("crow--selected");
   });
 });

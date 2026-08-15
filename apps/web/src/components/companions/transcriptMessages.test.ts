@@ -32,6 +32,7 @@ import type {
   CompanionTranscriptEntry,
 } from "@companion/contracts";
 import { afterEach, describe, expect, it } from "vitest";
+import { utcDay } from "./transcript";
 import {
   COMPANION_DECISION_TOOL_NAME,
   COMPANION_TOOL_NAME,
@@ -322,6 +323,113 @@ describe("converting a message for the thread", () => {
     const part = (typeof message.content === "string" ? [] : message.content)[0]!;
 
     expect(part.type === "tool-call" && part.argsText).toBe("");
+  });
+});
+
+describe("separating a transcript into days and unread", () => {
+  // Ported from `transcriptTurns` when grouping moved here: the promises are the same, but they are
+  // now drawn on messages rather than on entries, so a separator lands on a turn and never inside it.
+
+  it("opens each day the thread was written in, and only the first message of it", () => {
+    const groups = groupTranscriptEntries([
+      said("First", { created_at: "2026-08-12T12:00:00.000Z" }),
+      entry({ content: "Answered.", created_at: "2026-08-12T12:01:00.000Z" }),
+      said("Days later", { created_at: "2026-08-14T09:00:00.000Z" }),
+    ], context);
+
+    expect(groups.map((group) => group.startsDay)).toEqual(["2026-08-12", null, "2026-08-14"]);
+  });
+
+  it("groups by the reader's own day once the client has a clock", () => {
+    // The stored day and the reader's day are different days for most of the world, and a separator
+    // naming one date above timestamps that name another is worse than no separator at all.
+    const entries = [
+      entry({ content: "Late", created_at: "2026-08-14T23:30:00.000Z" }),
+      said("Just after", { created_at: "2026-08-15T00:30:00.000Z" }),
+    ];
+
+    expect(groupTranscriptEntries(entries, { ...context, dayOf: utcDay })
+      .map((group) => group.startsDay)).toEqual(["2026-08-14", "2026-08-15"]);
+
+    // A reader an hour ahead of UTC saw both of those arrive on the same evening.
+    const plusOneHour = (iso: string) =>
+      new Date(Date.parse(iso) + 3_600_000).toISOString().slice(0, 10);
+    expect(groupTranscriptEntries(entries, { ...context, dayOf: plusOneHour })
+      .map((group) => group.startsDay)).toEqual(["2026-08-15", null]);
+  });
+
+  it("keeps a day boundary off a tool run, which is chrome inside a turn", () => {
+    // A run belongs to the turn that performed it, so the day opens on the turn, not on the chip.
+    const groups = groupTranscriptEntries([
+      entry({ role: "tool", content: "npm test", tool: run({ status: "ok" }), created_at: "2026-08-14T00:00:10.000Z" }),
+      entry({ content: "Green.", created_at: "2026-08-14T00:00:20.000Z" }),
+    ], context);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.startsDay).toBe("2026-08-14");
+  });
+
+  it("draws the new-message divider once, on the first message past the reader's watermark", () => {
+    const groups = groupTranscriptEntries([
+      entry({ content: "One", ordinal: 0 }),
+      said("Two", { ordinal: 1, author_id: "user-9" }),
+      entry({ content: "Three", ordinal: 2 }),
+    ], { ...context, lastReadOrdinal: 0 });
+
+    expect(groups.map((group) => group.startsNew)).toEqual([false, true, false]);
+  });
+
+  it("never divides a thread at this reader's own message", () => {
+    const groups = groupTranscriptEntries([
+      said("Mine", { ordinal: 1 }),
+      entry({ content: "The reply", ordinal: 2 }),
+    ], { ...context, lastReadOrdinal: 0 });
+
+    expect(groups.map((group) => group.startsNew)).toEqual([false, true]);
+  });
+
+  it("marks where reading stopped, not what arrived while the reader watched", () => {
+    const entries = [
+      entry({ content: "Seen", ordinal: 1 }),
+      said("Newer", { ordinal: 2, author_id: "user-9" }),
+    ];
+
+    expect(groupTranscriptEntries(entries, {
+      ...context,
+      lastReadOrdinal: 1,
+      openedThroughOrdinal: 2,
+    }).map((group) => group.startsNew)).toEqual([false, true]);
+
+    // The same message, but it arrived after the thread was already open — not a backlog.
+    expect(groupTranscriptEntries(entries, {
+      ...context,
+      lastReadOrdinal: 1,
+      openedThroughOrdinal: 1,
+    }).some((group) => group.startsNew)).toBe(false);
+  });
+
+  it("keeps the divider on a turn the reader's watermark falls inside", () => {
+    // A turn is one message however many entries it took, so a watermark can land in the middle of
+    // one. Drawing on the turn that contains the boundary is what keeps the divider from vanishing
+    // exactly when a returning reader needs it.
+    const groups = groupTranscriptEntries([
+      entry({ content: "First", ordinal: 0 }),
+      entry({ role: "tool", content: "ls", tool: run(), ordinal: 1 }),
+      entry({ content: "Second", ordinal: 2 }),
+    ], { ...context, lastReadOrdinal: 1 });
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.startsNew).toBe(true);
+  });
+
+  it("leaves a thread undivided when the reader has caught up, or has never been here", () => {
+    const entries = [entry({ content: "Only", ordinal: 3 })];
+
+    expect(groupTranscriptEntries(entries, { ...context, lastReadOrdinal: 3 })
+      .some((group) => group.startsNew)).toBe(false);
+    // A first visit has no watermark to return to, so the whole thread is simply the thread.
+    expect(groupTranscriptEntries(entries, { ...context, lastReadOrdinal: null })
+      .some((group) => group.startsNew)).toBe(false);
   });
 });
 

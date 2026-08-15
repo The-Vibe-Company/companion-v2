@@ -5,7 +5,7 @@ import type {
   CompanionTranscriptEntry,
 } from "@companion/contracts";
 import type { ThreadMessageLike } from "@assistant-ui/react";
-import { transcriptAuthor, transcriptDisplayContent } from "./transcript";
+import { transcriptAuthor, transcriptDisplayContent, utcDay } from "./transcript";
 
 /**
  * The transcript is a flat log of entries — a message, a reply, a tool run, a permission card — and
@@ -55,6 +55,14 @@ export interface TranscriptMessage {
    * on everything else: a reply and a tool run stay literal even when they mention Pi themselves.
    */
   displayContent: string | null;
+  /**
+   * The day this message opens, as `YYYY-MM-DD`, or null when it continues the day above it. Server
+   * markup keys it on the stored UTC day so both renders agree; once the client owns the clock the
+   * key is the reader's own day, so the separator and the times beneath it name the same date.
+   */
+  startsDay: string | null;
+  /** True on the first message this reader has not caught up on, which is where "New" is drawn. */
+  startsNew: boolean;
   /** The entries this message was built from, in transcript order. */
   entries: readonly CompanionTranscriptEntry[];
 }
@@ -64,6 +72,24 @@ export interface TranscriptGroupingContext {
   companionName: string;
   /** The message this composer is still sending, named by the event id it will be stored under. */
   sendingEventId?: string | null;
+  /**
+   * This reader's own unread watermark as it stood when they opened the thread, from the control
+   * plane rather than this device. The first message past it that somebody else wrote is where "New"
+   * is drawn. Null leaves the thread undivided, which is what a first visit and a thread the reader
+   * has caught up on both look like.
+   */
+  lastReadOrdinal?: number | null;
+  /**
+   * The highest ordinal the thread held when it was opened. The divider never moves past it, so a
+   * reply arriving under the reader's eye does not get announced as something they missed.
+   */
+  openedThroughOrdinal?: number | null;
+  /**
+   * How a stored timestamp becomes the day it belongs to. Server markup uses the stored UTC day so
+   * both renders agree; the client swaps in the reader's own calendar, because a separator that says
+   * one date above a clock that says another is worse than no separator at all.
+   */
+  dayOf?: (iso: string) => string;
 }
 
 /** A tool run and a permission card ride into the thread as tool calls; this is what they carry. */
@@ -123,6 +149,9 @@ export function groupTranscriptEntries(
       displayContent: role === "system"
         ? transcriptDisplayContent(first, context.companionName)
         : null,
+      // Both filled in below, for the same reason `lead` is: they depend on the messages around it.
+      startsDay: null,
+      startsNew: false,
       entries: grouped,
     });
   };
@@ -142,6 +171,13 @@ export function groupTranscriptEntries(
   if (open) push("assistant", open);
 
   let previous: { author: string | null; role: string; at: number } | null = null;
+  // A day boundary and the new-message divider are drawn on what was said, not on what ran or on
+  // what the control plane reported: a note about the run is chrome between two turns, so a
+  // separator landing on one would cut a reply off from the turn it belongs to.
+  let previousDay: string | null = null;
+  let newDrawn = false;
+  const dayOf = context.dayOf ?? utcDay;
+
   for (const group of groups) {
     const at = millis(group.createdAt);
     // A note has no writer, so it neither opens nor continues a passage: the writer before it is
@@ -152,6 +188,31 @@ export function groupTranscriptEntries(
       || previous.role !== group.role
       || at - previous.at > PASSAGE_WINDOW_MS;
     previous = { author: group.author, role: group.role, at };
+
+    const said = group.role === "user" || group.role === "assistant";
+    if (!said) continue;
+
+    const day = dayOf(group.createdAt);
+    group.startsDay = day === previousDay ? null : day;
+    previousDay = day;
+
+    const first = group.entries[0]!;
+    const mine = group.role === "user" && first.author_id === context.viewerId;
+    // The first entry inside this message the reader has not seen — not the message's own first
+    // entry. A turn is one message however many entries it took, so a watermark can fall in the
+    // middle of one; drawing on the turn that contains the boundary keeps the divider rather than
+    // losing it, which is the whole point of coming back to a busy thread.
+    const unread = context.lastReadOrdinal == null
+      ? undefined
+      : group.entries.find((entry) => entry.ordinal > context.lastReadOrdinal!);
+    // "New" marks where reading stopped, not what has arrived since. A message that lands while the
+    // reader is watching is not a backlog, so the divider is bounded to the transcript as it stood
+    // when the thread was opened; past that it has already been drawn or was never needed.
+    group.startsNew = !mine
+      && !newDrawn
+      && unread !== undefined
+      && (context.openedThroughOrdinal == null || unread.ordinal <= context.openedThroughOrdinal);
+    if (group.startsNew) newDrawn = true;
   }
   return groups;
 }
@@ -272,6 +333,8 @@ function sameGroup(kept: TranscriptMessage, next: TranscriptMessage): boolean {
     && kept.sending === next.sending
     && kept.createdAt === next.createdAt
     && kept.displayContent === next.displayContent
+    && kept.startsDay === next.startsDay
+    && kept.startsNew === next.startsNew
     && kept.entries.length === next.entries.length
     && kept.entries.every((entry, index) => entry === next.entries[index]);
 }

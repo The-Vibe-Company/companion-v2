@@ -37,6 +37,19 @@ export function transcriptAuthor(
   return entry.author_name ?? "Member";
 }
 
+/** The stored day, which is the one both renders can agree on before the client has its clock. */
+export function utcDay(iso: string): string {
+  return iso.slice(0, 10);
+}
+
+/** The reader's own day, as the same `YYYY-MM-DD` key so the separator label formats identically. */
+export function localDay(iso: string): string {
+  const at = new Date(iso);
+  const month = `${at.getMonth() + 1}`.padStart(2, "0");
+  const dayOfMonth = `${at.getDate()}`.padStart(2, "0");
+  return `${at.getFullYear()}-${month}-${dayOfMonth}`;
+}
+
 /**
  * Whether Pi owes this thread a reply. A running Box whose transcript ends on a member's message is
  * working on one, and saying so is the difference between a live thread and one that looks stuck. A

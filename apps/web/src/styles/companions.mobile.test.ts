@@ -219,11 +219,28 @@ describe("Companions mobile viewport", () => {
     );
   });
 
-  it("shortens the Box chip on a phone rather than wrapping the header", () => {
-    expect(declarationsFor(".chat-box__prefix", PHONE)[0]).toContain("display: none;");
-    // The state word stays: status is never left to the colour of the dot alone.
+  it("keeps the Box chip's state word on a phone rather than wrapping the header", () => {
+    // The chip is a dot and one word at every width; what it is about rides in its accessible name,
+    // so a phone has nothing left to shorten. The word itself never gives way: status is never left
+    // to the colour of the dot alone.
     expect(declarationsFor(".chat-box__state", PHONE)).toHaveLength(0);
     expect(declarationsFor(".chat-head > *")[0]).toContain("flex: none;");
+  });
+
+  it("keeps the new-message divider readable in every theme", () => {
+    // `accent-edge` is an edge token: it is not lifted for the dark theme, and as small uppercase
+    // text on canvas it falls under the contrast floor on every accent preset. The accent stays on
+    // the hairlines; the word this divider exists for stays at full foreground contrast.
+    // The divider is written in utilities now, so the promise is read from the component that
+    // carries them: `text-foreground` bridges to `--color-fg`, and the accent reaches the hairlines
+    // through `--color-accent-line` only.
+    const divider = transcript.slice(transcript.indexOf("function NewSeparator"));
+    const classes = divider.slice(0, divider.indexOf("</p>"));
+    expect(classes).toContain("text-foreground");
+    expect(classes).not.toContain("text-primary");
+    expect(classes).not.toContain("accent-edge");
+    expect(classes).toContain("before:bg-(--color-accent-line)");
+    expect(classes).toContain("after:bg-(--color-accent-line)");
   });
 
   it("keeps the plugin row's named areas off the catalog card", () => {

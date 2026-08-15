@@ -33,7 +33,7 @@ import { decideCompanionDecision } from "../../lib/companions";
 import { DecisionActionsContext, type DecisionAction } from "./decisionActions";
 import { DecisionToolCard } from "./DecisionToolCard";
 import { ToolRunCard } from "./ToolRunCard";
-import { composerHint, replyExpected } from "./transcript";
+import { composerHint, localDay, replyExpected, utcDay } from "./transcript";
 import {
   COMPANION_DECISION_TOOL_NAME,
   COMPANION_TOOL_NAME,
@@ -124,10 +124,76 @@ function PassageLead({ message }: { message: TranscriptMessage | undefined }) {
   );
 }
 
+/**
+ * One day separator. The key is already the day this message belongs to — the stored one on the
+ * server, the reader's own once the client has a clock — and is read back at midday UTC so the round
+ * trip cannot shift it. Only the label gets friendlier after mount.
+ */
+function DaySeparator({ day }: { day: string }) {
+  const [text, setText] = useState(day);
+  useEffect(() => {
+    const at = new Date(`${day}T12:00:00.000Z`);
+    const today = new Date();
+    const daysApart = Math.round(
+      (Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())
+        - Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate())) / 86_400_000,
+    );
+    if (daysApart === 0) setText("Today");
+    else if (daysApart === 1) setText("Yesterday");
+    else {
+      setText(at.toLocaleDateString(undefined, {
+        month: "long",
+        day: "numeric",
+        ...(daysApart > 300 ? { year: "numeric" } : {}),
+        timeZone: "UTC",
+      }));
+    }
+  }, [day]);
+  return (
+    <p
+      data-slot="chat-day-separator"
+      className="text-muted-foreground my-1 flex items-center gap-3 text-xs before:h-px before:flex-1 before:bg-(--color-line) after:h-px after:flex-1 after:bg-(--color-line)"
+    >
+      <time dateTime={day}>{text}</time>
+    </p>
+  );
+}
+
+/**
+ * Where this reader left off. It is drawn once, on the first message somebody else wrote after the
+ * newest line they had already seen, so returning to a busy thread starts where reading stopped.
+ *
+ * The accent is on the hairlines and nowhere else. `accent-edge` is an edge token — it is not lifted
+ * for the dark theme — and this word is small, so at accent colour it falls under the contrast floor
+ * on every preset. The one word this divider exists for stays at full foreground contrast.
+ */
+function NewSeparator() {
+  return (
+    <p
+      data-slot="chat-new-separator"
+      className="text-foreground my-1 flex items-center gap-3 text-xs font-medium before:h-px before:flex-1 before:bg-(--color-accent-line) after:h-px after:flex-1 after:bg-(--color-accent-line)"
+    >
+      New
+    </p>
+  );
+}
+
+/** Both separators, above whichever message opens the day or the unread run. */
+function Separators({ message }: { message: TranscriptMessage | undefined }) {
+  if (!message) return null;
+  return (
+    <>
+      {message.startsDay && <DaySeparator day={message.startsDay} />}
+      {message.startsNew && <NewSeparator />}
+    </>
+  );
+}
+
 function AssistantFrame({ children }: { children: ReactNode }) {
   const message = useTranscriptMessage();
   return (
     <>
+      <Separators message={message} />
       <PassageLead message={message} />
       {children}
     </>
@@ -138,6 +204,9 @@ function UserFrame({ children }: { children: ReactNode }) {
   const message = useTranscriptMessage();
   return (
     <div className="flex w-full flex-col items-end" aria-busy={message?.sending || undefined}>
+      <div className="w-full">
+        <Separators message={message} />
+      </div>
       <PassageLead message={message} />
       {/* Full width on purpose: the bubble inside is capped as a percentage, and a fit-content
           wrapper would make that percentage resolve against the bubble's own text. */}
@@ -181,6 +250,8 @@ export function CompanionTranscript({
   thread,
   orgId,
   busy,
+  lastReadOrdinal,
+  openedThroughOrdinal,
   onSend,
   onThread,
 }: {
@@ -188,6 +259,10 @@ export function CompanionTranscript({
   thread: Thread | null;
   orgId: string;
   busy: boolean;
+  /** This reader's unread watermark as it stood when the thread was opened; null draws no divider. */
+  lastReadOrdinal?: number | null;
+  /** The newest ordinal the thread held when it was opened, so the divider cannot chase new arrivals. */
+  openedThroughOrdinal?: number | null;
   onSend: (content: string, clientMessageId: string) => Promise<boolean>;
   /** Replace the thread after a permission card is decided, without a full poll cycle. */
   onThread: (thread: Thread) => void;
@@ -222,13 +297,24 @@ export function CompanionTranscript({
   }, [outgoing, thread]);
   const stableEntries = useStableEntries(entries);
 
+  /**
+   * The server has no clock the browser agrees with, so both renders key the day on the stored one
+   * and the reader's own calendar takes over after mount. Swapping it later is what keeps a
+   * separator from naming a different date than the timestamps under it.
+   */
+  const [dayOf, setDayOf] = useState<(iso: string) => string>(() => utcDay);
+  useEffect(() => setDayOf(() => localDay), []);
+
   const grouped = useMemo(
     () => groupTranscriptEntries(stableEntries, {
       viewerId,
       companionName: companion.name,
       sendingEventId: outgoing?.event_id ?? null,
+      lastReadOrdinal: lastReadOrdinal ?? null,
+      openedThroughOrdinal: openedThroughOrdinal ?? null,
+      dayOf,
     }),
-    [companion.name, outgoing, stableEntries, viewerId],
+    [companion.name, dayOf, lastReadOrdinal, openedThroughOrdinal, outgoing, stableEntries, viewerId],
   );
   const messages = useStableGroups(grouped);
   const messagesById = useMemo(
