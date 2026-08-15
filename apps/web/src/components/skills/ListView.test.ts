@@ -515,6 +515,19 @@ describe("ListView contributors", () => {
     }
   });
 
+  it("opens the skill when a keyboard activates the row its name names", async () => {
+    const onSelect = vi.fn();
+    const onOpen = vi.fn();
+    const container = await mount([skill({ id: "fresh" })], { onSelect, onOpen });
+    const row = container.querySelector('button[aria-label="Open skill fresh"]') as HTMLButtonElement;
+
+    // A keyboard has no second click to open with, and the row's accessible name promises Open.
+    act(() => row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 0 })));
+
+    expect(onOpen).toHaveBeenCalledWith("fresh");
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
   it("selects a row on a click and reports which one is in the panel", async () => {
     const onSelect = vi.fn();
     const onOpen = vi.fn();

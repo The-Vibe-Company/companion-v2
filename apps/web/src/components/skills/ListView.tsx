@@ -280,9 +280,9 @@ function SkillRow({
       }}
     >
       {/*
-        One row, two intents: a click puts the skill in the panel beside the list, a double click
-        opens its full page. The accessible name stays the open action, because that is what the
-        row is for and what a keyboard reaches with Enter.
+        One row, two intents for a pointer: a click puts the skill in the panel beside the list, a
+        double click opens its full page. A keyboard has no second click, so Enter does what the
+        row's accessible name says and opens it — the panel holds nothing the page does not.
       */}
       <button
         type="button"
@@ -292,6 +292,12 @@ function SkillRow({
         onClick={(event) => {
           const from = pressRef.current;
           pressRef.current = null;
+          // `detail` counts the clicks a pointer made: zero is a keyboard activating the button,
+          // and anything past the first belongs to the double click that already opened the skill.
+          if (event.detail === 0) {
+            onOpen(skill.id);
+            return;
+          }
           if (from && exceedsThreshold(from, { x: event.clientX, y: event.clientY })) return;
           if (event.detail > 1) return;
           onSelect(skill);

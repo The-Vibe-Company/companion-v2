@@ -529,7 +529,7 @@ log "Checking the skill panel opens on a row click"
 assert_eval_true "(() => {
   const row = document.querySelector('.crow[data-skill-slug=\"$SMOKE_SKILL\"] .crow__hit');
   if (!row) return false;
-  row.click();
+  row.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
   return true;
 })()" "the smoke skill row could not be selected"
 agent-browser wait 300
