@@ -89,6 +89,7 @@ an empty skill set. This is enforced by the API and again by the Box adapter bef
 | `GET` | `/v1/companions/:id/runtime` | Never |
 | `GET` | `/v1/companions/:id/runtime?live=true` | Owner/editor only; observes without resuming |
 | `POST` | `/v1/companions/:id/runtime/start` | Creates or resumes Box, then starts Pi |
+| `POST` | `/v1/companions/:id/runtime/restart` | Owner/editor only; while fully online, recycles Pi or archives and resumes the same Box; never wakes an offline Companion |
 | `POST` | `/v1/companions/:id/runtime/stop` | Stops Pi, then snapshots/archives Box |
 | `POST` | `/v1/companions/:id/runtime/desktop` | Owner/editor only; never resumes Box |
 | `GET` | `/v1/companion-providers` | Never |
@@ -131,10 +132,12 @@ leave the handoff silently unmade. A still-provisioning Box, a blocked tab, or a
 closes that tab and states why on the thread without ever naming the secret-bearing URL. That reason is held apart from the thread's own load failure, so the
 two-second refresh of an awake thread cannot clear it and leave a failed handoff looking like nothing
 happened. The URL is used once and never stored by the browser surface either. A
-Companion that is asleep offers Wake instead, because a desktop request cannot resume a Box, and a
-Viewer reads the chip as text: their thread polls only the control-plane projection, while a runner's
-open thread refreshes `GET /v1/companions/:id/runtime?live=true` on a slow interval, so a stale chip
-is corrected by an observation rather than by a wake.
+Companion that is asleep tells its runner to send a message to start it, because a desktop request
+cannot resume a Box, and a Viewer reads the chip as text. Opening a thread and beginning a send both
+trigger an immediate status read. While a send is open or the projection is transitioning, the web
+polls every three seconds; once settled it returns to the slower cadence. An Owner or Editor may use
+`GET /v1/companions/:id/runtime?live=true` to observe a Box already projected online, while a Viewer
+uses only the control-plane projection. Neither path wakes a Box.
 
 Beside the conversation, the same runner can open a Computer panel that frames that desktop in the
 thread, so watching Pi work costs no context switch. The panel is a second pane rather than a change
@@ -145,29 +148,24 @@ route, so opening the panel, reconnecting it, and using `Open desktop` are three
 freshly minted URLs; none is held beyond the join that minted it, and closing the panel, moving to
 another Companion, or a Box that stops under the stream each drop it. The desktop is another origin's
 document, so it is framed with no top-level navigation and no popups, and the panel prints no part of
-the URL. A sleeping Box shows as asleep beside the header's own Wake control, because a desktop
-request cannot resume one. A Viewer is offered neither the panel nor its toggle, and the route refuses
+the URL. A sleeping Box shows as asleep with guidance to send a message, because a desktop request
+cannot resume one. A Viewer is offered neither the panel nor its toggle, and the route refuses
 them before a Box client exists, so the panel is not a wake path for anybody.
 
-A Companion the control plane is still resolving is watched more closely, and on the plain projection
-read: every few seconds while its state is `provisioning` or `stopping`. That window used to be the
-one nothing watched at all. The observation above begins only once the state is already `running`, and
-the request that starts a lifecycle reports it once — before it finishes, if the wake outlives the
-proxy in front of the API, and not at all if the browser has gone. Production spent about a minute
-reading `Box · starting`, still offering Wake, beside a reply Pi had already sent: the row had said
-`running` within a second of the Box coming up, and nothing had read it since. The chip, the wake
-control, and the composer footer all derive from that row, so they leave Starting together, and
-because this read is the projection it never resumes a Box and is as safe for a Viewer as their own.
-Watching stops as soon as the state settles, `error` included: that is where a failed lifecycle
-finishes, and its reason is already on screen. Watching that closely means these reads overlap, so each
-one is kept only while it is the newest for that Companion; an older read that answers late would
-otherwise put a state the Companion has already left back on a chip that had reached Online.
+A Companion the control plane is still resolving is watched more closely on the plain projection
+read: every three seconds while its state is `provisioning` or `stopping`, and for the full duration
+of an open send that may be starting it. The status chip and composer footer derive from that row, so
+they leave Starting together without waiting for the send request to finish or the page to reload.
+Watching closely stops as soon as the send and state transition have both settled, `error` included:
+that is where a failed lifecycle finishes, and its reason is already on screen. Because these reads
+can overlap, each response is kept only while it is the newest for that Companion; an older read that
+answers late cannot put a state the Companion has already left back on a chip that reached Online.
 
 ## Lifecycle failure reporting
 
 A failure is diagnosable without server logs. A failed start or stop records `runtime_state: error`
 together with one sanitized line in `companions.last_error`, and the failing start, stop, and sync
-responses carry that same line as `error`, so the operator who pressed Wake and the operator who
+responses carry that same line as `error`, so the operator who initiated the lifecycle and the operator who
 reloads later read the same reason.
 
 Only recognized failures explain themselves: Box configuration (`COMPANION_BOX_API_KEY` unset), Box
@@ -201,7 +199,7 @@ teammate's name. Pi output carries no author.
 `POST /v1/companions/:id/messages` is Owner/Editor only and persists first. When a lightweight
 runtime observation confirms both Box and Pi are running, it delivers directly without claiming a
 lifecycle transition or resolving injection resources. Otherwise it claims the
-same lifecycle start as Wake: an archived Box resumes and a stopped Pi starts. Delivery then hands
+same lifecycle start as `/runtime/start`: an archived Box resumes and a stopped Pi starts. Delivery then hands
 Pi every still-pending message oldest first, not just the new one, so a backlog a sleeping Box missed
 keeps its order and never skips the watermark. An undelivered message stays pending under its
 idempotency key; if automatic wake fails, the lifecycle records `last_error` and the response keeps
@@ -219,8 +217,17 @@ spends recording its reason) so the send outlives a normal wake and returns the 
 not an unbounded wait: every step of a wake already bounds itself against the budget, so a stalled
 upstream still returns well inside it. The send route itself never answers a wake with `500`/`504`
 within budget — it swallows a failed automatic start and returns the pending turn — so the proxy was
-the only 30s cliff on this path; explicit Wake (`/runtime/start`) still returns `504` on an exhausted
+the only 30s cliff on this path; an explicit `/runtime/start` still returns `504` on an exhausted
 budget, comfortably inside the raised proxy window.
+
+`POST /v1/companions/:id/runtime/restart` is an operator control, not a wake path. It authorizes an
+Owner or Editor before constructing a Box client, then observes Box and Pi without resuming either.
+It accepts only a fully online, settled Companion. The default `pi` target reinjects persisted
+configuration and recycles only Pi with Box wake disabled. The `box` target stops Pi, archives the
+Box, and resumes that same Box through the normal full start path; Settings requires an explicit
+confirmation because this interrupts all work on the Box. An asleep, errored, provisioning, or
+stopping Companion is refused without contact that could wake it, and lifecycle failures keep using
+the existing projected error state and sanitized reason.
 
 One send is one turn. The sender names the message it is creating with `client_message_id`, a UUID,
 and the control plane stores it as that entry's event id (`msg:<client_message_id>`), so the

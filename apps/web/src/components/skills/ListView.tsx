@@ -14,6 +14,13 @@ import {
 import { createPortal } from "react-dom";
 import type { LabelVM, SkillGroupBy } from "@companion/contracts";
 import { Icon } from "../Icon";
+import {
+  ResourceListColumns,
+  ResourceListEmpty,
+  ResourceListFrame,
+  ResourceListHeader,
+  ResourceListToolbar,
+} from "../ResourceList";
 import { UserAvatar } from "../UserAvatar";
 import type { SkillContributorVM, SkillVM } from "@/lib/types";
 import { InstallMark } from "./blocks";
@@ -497,23 +504,26 @@ export function ListView({
 
   return (
     <>
-      <header className="sh">
-        <nav className="sh__crumb" aria-label="Folder">
-          {breadcrumb.slice(0, -1).map((segment, index) => (
-            <span className="sh__crumbseg" key={index}>
-              {index > 0 ? <Icon name="chevron-right" size={12} /> : null}
-              <span className="sh__crumbpar">{segment}</span>
-            </span>
-          ))}
-        </nav>
-        <h2 className="sh__title">{title}</h2>
-        <span className="sh__count tnum">{skills.length}</span>
-        <span className="sh__spacer" />
-        <button className="btn-primary" onClick={onUpload}>
-          <Icon name="plus" size={14} />
-          Add skill
-        </button>
-      </header>
+      <ResourceListHeader
+        title={title}
+        count={skills.length}
+        beforeTitle={(
+          <nav className="sh__crumb" aria-label="Folder">
+            {breadcrumb.slice(0, -1).map((segment, index) => (
+              <span className="sh__crumbseg" key={index}>
+                {index > 0 ? <Icon name="chevron-right" size={12} /> : null}
+                <span className="sh__crumbpar">{segment}</span>
+              </span>
+            ))}
+          </nav>
+        )}
+        action={(
+          <button className="btn-primary" onClick={onUpload}>
+            <Icon name="plus" size={14} />
+            Add skill
+          </button>
+        )}
+      />
 
       {upgradeNotice ? (
         <div className="entitlement-bar" role="status">
@@ -523,19 +533,12 @@ export function ListView({
         </div>
       ) : null}
 
-      <div className="listbar">
-        <span className="listbar__search">
-          <Icon name="search" size={14} />
-          <input
-            className="listbar__input"
-            type="search"
-            placeholder="Search skills"
-            value={q}
-            onChange={(event) => setQ(event.target.value)}
-            aria-label="Search skills in this view"
-          />
-        </span>
-        <span className="listbar__spacer" />
+      <ResourceListToolbar
+        value={q}
+        onChange={setQ}
+        placeholder="Search skills"
+        ariaLabel="Search skills in this view"
+      >
         <span className="listbar__group" role="group" aria-label="Group skills">
           <button type="button" aria-pressed={groupBy === "folder"} onClick={() => onGroupByChange("folder")}>Grouped</button>
           <button type="button" aria-pressed={groupBy === "none"} onClick={() => onGroupByChange("none")}>Flat</button>
@@ -551,7 +554,7 @@ export function ListView({
             {SORT_OPTIONS.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}
           </select>
         </label>
-      </div>
+      </ResourceListToolbar>
 
       <div className="filterbar">
         <FilterAdd filters={filters} onToggle={onToggleFilter} />
@@ -581,14 +584,30 @@ export function ListView({
         ) : null}
       </div>
 
-      <div className="clistrow">
-      <div className={`clist${groupBy === "folder" ? " clist--grouped" : ""}`}>
-        <div className="chead">
+      <ResourceListFrame
+        className={groupBy === "folder" ? "clist--grouped" : undefined}
+        aside={(
+          <>
+            {/* Below the two-pane width the panel comes over the list, so it gets the same scrim the
+                Companions panel has: something to click out of, not just an Escape to remember. */}
+            {panel && (
+              <button
+                type="button"
+                className="skpanel-scrim"
+                aria-label="Close the skill panel"
+                onClick={() => onSelect(null)}
+              />
+            )}
+            {panel}
+          </>
+        )}
+      >
+        <ResourceListColumns>
           <span>Skill</span>
           <span>Labels</span>
           <span>People</span>
           <span className="r">Upd.</span>
-        </div>
+        </ResourceListColumns>
         {groupBy === "folder"
           ? groups.map((group) => {
               if (group.kind === "direct") {
@@ -636,33 +655,19 @@ export function ListView({
               />
             ))}
         {!shown.length ? (
-          <div className="empty">
-            <Icon name="search-x" size={22} style={{ color: "var(--color-faint)" }} />
-            <div className="empty__title">{q.trim() ? "No skills match" : "Nothing here yet"}</div>
-            <div className="empty__desc">
-              {q.trim()
-                ? "No skills match your search. Clear the search or filters to see this view in full."
-                : scopeKind === "installed"
-                  ? "You have not installed any organization skills yet. Open one in Organization to install it."
-                  : library === "mine"
-                    ? "No skills in My Skills yet. Add a skill, or install one from the organization library."
-                    : "No organization skills match this view. Clear the filters to see them all."}
-            </div>
-          </div>
+          <ResourceListEmpty
+            icon="search-x"
+            title={q.trim() ? "No skills match" : "Nothing here yet"}
+            description={q.trim()
+              ? "No skills match your search. Clear the search or filters to see this view in full."
+              : scopeKind === "installed"
+                ? "You have not installed any organization skills yet. Open one in Organization to install it."
+                : library === "mine"
+                  ? "No skills in My Skills yet. Add a skill, or install one from the organization library."
+                  : "No organization skills match this view. Clear the filters to see them all."}
+          />
         ) : null}
-      </div>
-      {/* Below the two-pane width the panel comes over the list, so it gets the same scrim the
-          Companions panel has: something to click out of, not just an Escape to remember. */}
-      {panel && (
-        <button
-          type="button"
-          className="skpanel-scrim"
-          aria-label="Close the skill panel"
-          onClick={() => onSelect(null)}
-        />
-      )}
-      {panel}
-      </div>
+      </ResourceListFrame>
     </>
   );
 }

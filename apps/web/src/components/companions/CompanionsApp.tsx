@@ -1,6 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import type {
   Companion,
@@ -20,11 +31,17 @@ import {
   openCompanionDesktop,
   sendCompanionMessage,
   setCompanionProvider,
-  startCompanionRuntime,
   syncCompanionThread,
   updateCompanionMemberState,
 } from "@/lib/companions";
 import { Icon } from "../Icon";
+import {
+  ResourceListColumns,
+  ResourceListEmpty,
+  ResourceListFrame,
+  ResourceListHeader,
+  ResourceListToolbar,
+} from "../ResourceList";
 import { RelativeTime } from "./RelativeTime";
 import { CompanionProvidersDialog } from "./CompanionProvidersDialog";
 import { CompanionPlugins } from "./CompanionPlugins";
@@ -55,7 +72,7 @@ const BOX_STATUS_POLL_MS = 15_000;
  * the Box-status poll below starts only once the state is already `running`, and the request that
  * began the transition answers once, before the lifecycle finishes when it outlives a proxy. That
  * left the chip reporting Starting against a Box that was already up, beside a reply Pi had already
- * sent. This is the control-plane projection, so it never resumes a Box and is safe for a Viewer.
+ * sent. The same fast cadence begins as soon as a send starts, before its long request can answer.
  */
 const PENDING_POLL_MS = 3_000;
 /**
@@ -125,6 +142,218 @@ function threadUrl(companionId: string | null): void {
   window.history.replaceState(null, "", `${url.pathname}${url.search}`);
 }
 
+function CompanionActionsMenu({
+  companion,
+  busy,
+  personalWorkspace,
+  hidden = false,
+  onSettings,
+  onShare,
+  onMemberState,
+  onDuplicate,
+}: {
+  companion: Companion;
+  busy: boolean;
+  personalWorkspace: boolean;
+  hidden?: boolean;
+  onSettings: () => void;
+  onShare: () => void;
+  onMemberState: (patch: { pinned?: boolean; hidden?: boolean; unread?: boolean }) => Promise<void>;
+  onDuplicate: () => Promise<void>;
+}) {
+  const menuId = useId();
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const openFocusRef = useRef<"first" | "last">("first");
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<CSSProperties>({ left: -9999, top: -9999 });
+
+  const positionMenu = useCallback(() => {
+    const trigger = triggerRef.current;
+    const menu = menuRef.current;
+    if (!trigger || !menu) return;
+    const anchor = trigger.getBoundingClientRect();
+    const box = menu.getBoundingClientRect();
+    const viewportPadding = 8;
+    const gap = 4;
+    let top = anchor.bottom + gap;
+    if (top + box.height > window.innerHeight - viewportPadding) {
+      top = Math.max(viewportPadding, anchor.top - box.height - gap);
+    }
+    const maxLeft = Math.max(viewportPadding, window.innerWidth - viewportPadding - box.width);
+    const left = Math.min(
+      Math.max(viewportPadding, anchor.right - box.width),
+      maxLeft,
+    );
+    setPosition({ left, top });
+  }, []);
+
+  const close = useCallback((returnFocus = false) => {
+    setOpen(false);
+    if (returnFocus) window.requestAnimationFrame(() => triggerRef.current?.focus());
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    positionMenu();
+    window.requestAnimationFrame(() => {
+      const items = menuRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
+      const item = openFocusRef.current === "last" ? items?.item((items?.length ?? 1) - 1) : items?.item(0);
+      item?.focus();
+    });
+  }, [open, positionMenu]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (triggerRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      close();
+    };
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      close(true);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onEscape);
+    window.addEventListener("resize", positionMenu);
+    window.addEventListener("scroll", positionMenu, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onEscape);
+      window.removeEventListener("resize", positionMenu);
+      window.removeEventListener("scroll", positionMenu, true);
+    };
+  }, [close, open, positionMenu]);
+
+  const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    let next = current;
+    if (event.key === "ArrowDown") next = current < items.length - 1 ? current + 1 : 0;
+    else if (event.key === "ArrowUp") next = current > 0 ? current - 1 : items.length - 1;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = items.length - 1;
+    else if (event.key === "Tab") {
+      event.preventDefault();
+      close();
+      window.requestAnimationFrame(() => {
+        const trigger = triggerRef.current;
+        if (!trigger) return;
+        const focusable = [...document.querySelectorAll<HTMLElement>(
+          'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+        )].filter((item) => !menuRef.current?.contains(item));
+        const triggerIndex = focusable.indexOf(trigger);
+        const destination = focusable[triggerIndex + (event.shiftKey ? -1 : 1)];
+        (destination ?? trigger).focus();
+      });
+      return;
+    } else return;
+    event.preventDefault();
+    items[next]?.focus();
+  };
+
+  const run = (action: () => void | Promise<void>, returnFocus = false) => {
+    close(returnFocus);
+    void action();
+  };
+
+  return (
+    <span className="companions-row-menu">
+      <button
+        ref={triggerRef}
+        type="button"
+        className="cds-btn cds-btn--ghost cds-btn--sm companions-row-menu__trigger"
+        aria-label={`Actions for ${companion.name}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        onClick={() => {
+          openFocusRef.current = "first";
+          setOpen((current) => !current);
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+          event.preventDefault();
+          openFocusRef.current = event.key === "ArrowUp" ? "last" : "first";
+          setOpen(true);
+        }}
+      >
+        <Icon name="more-horizontal" size={15} />
+      </button>
+      {open && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              ref={menuRef}
+              id={menuId}
+              className="companions-row-menu__panel"
+              role="menu"
+              aria-label={`Actions for ${companion.name}`}
+              style={position}
+              onKeyDown={onMenuKeyDown}
+            >
+              <button type="button" role="menuitem" onClick={() => run(onSettings)}>
+                Settings
+              </button>
+              {hidden ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={busy}
+                  onClick={() => run(() => onMemberState({ hidden: false }), true)}
+                >
+                  Unhide
+                </button>
+              ) : (
+                <>
+                  {companion.access === "owner" && !personalWorkspace ? (
+                    <button type="button" role="menuitem" onClick={() => run(onShare)}>
+                      Share
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={busy}
+                    onClick={() => run(
+                      () => onMemberState({ pinned: !companion.pinned }),
+                      true,
+                    )}
+                  >
+                    {companion.pinned ? "Unpin" : "Pin"}
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={busy || companion.unread}
+                    onClick={() => run(() => onMemberState({ unread: true }), true)}
+                  >
+                    Mark as unread
+                  </button>
+                  {companion.access === "owner" ? (
+                    <button type="button" role="menuitem" disabled={busy} onClick={() => run(onDuplicate, true)}>
+                      Duplicate
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={busy}
+                    onClick={() => run(() => onMemberState({ hidden: true }), true)}
+                  >
+                    Hide
+                  </button>
+                </>
+              )}
+            </div>,
+            document.body,
+          )
+        : null}
+    </span>
+  );
+}
+
 export function CompanionsApp({
   orgs,
   currentOrg,
@@ -189,8 +418,7 @@ export function CompanionsApp({
    * anyone could read it and leave a failed handoff looking like nothing happened at all.
    */
   const [desktopError, setDesktopError] = useState<string | null>(null);
-  const [sending, setSending] = useState(false);
-  const [waking, setWaking] = useState(false);
+  const [sendingCompanionId, setSendingCompanionId] = useState<string | null>(null);
   const [openingDesktop, setOpeningDesktop] = useState(false);
   /**
    * Whether a runner keeps the context panel beside the conversation. It is a preference rather than
@@ -217,6 +445,8 @@ export function CompanionsApp({
     joining: boolean;
   } | null>(null);
   const threadRequestRef = useRef(0);
+  /** The thread currently on screen, available to async completions without a stale render closure. */
+  const openedIdRef = useRef(openedId);
   const providerRequestRef = useRef(0);
   /** The Companion whose read watermark has already been captured for the open thread. */
   const capturedReadRef = useRef<string | null>(null);
@@ -232,7 +462,18 @@ export function CompanionsApp({
   const companionReadRef = useRef(new Map<string, number>());
   const threadQueueRef = useRef(createThreadQueue());
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
+  const searchRef = useRef<HTMLInputElement>(null);
+  const movedFocusRef = useRef<string | null>(null);
   const noop = () => {};
+
+  useLayoutEffect(() => {
+    const companionId = movedFocusRef.current;
+    if (!companionId) return;
+    movedFocusRef.current = null;
+    const row = rowRefs.current.get(companionId);
+    if (row?.isConnected) row.focus();
+    else searchRef.current?.focus();
+  }, [companions]);
 
   const opened = useMemo(
     () => companions.find((companion) => companion.id === openedId) ?? null,
@@ -247,6 +488,7 @@ export function CompanionsApp({
   // A lifecycle the control plane is still resolving. `error` is not one of these: it is where a
   // failed transition settles, and its reason is already on screen.
   const openedPending = opened?.runtime.state === "provisioning" || opened?.runtime.state === "stopping";
+  const sending = sendingCompanionId === openedId;
 
   const providerName = (providerId: string) =>
     (providers?.catalog ?? COMPANION_PROVIDER_CATALOG)
@@ -339,6 +581,7 @@ export function CompanionsApp({
     setError(null);
     try {
       const next = await updateCompanionMemberState(currentOrg.id, companion.id, patch);
+      if (patch.hidden !== undefined) movedFocusRef.current = companion.id;
       resortCompanion(next);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not update this Companion.");
@@ -362,6 +605,7 @@ export function CompanionsApp({
 
   const openCompanion = (companion: Companion) => {
     threadRequestRef.current += 1;
+    openedIdRef.current = companion.id;
     setOpenedId(companion.id);
     setThread(null);
     setThreadError(null);
@@ -378,6 +622,7 @@ export function CompanionsApp({
   const closeThread = () => {
     const wasOpen = openedId;
     threadRequestRef.current += 1;
+    openedIdRef.current = null;
     setOpenedId(null);
     setThread(null);
     setThreadError(null);
@@ -394,6 +639,7 @@ export function CompanionsApp({
     // Plugins is now reachable from the sidebar, so it can be asked for while a thread is open — and
     // the thread wins the render. Leaving the thread open made the entry look dead.
     threadRequestRef.current += 1;
+    openedIdRef.current = null;
     setOpenedId(null);
     setThread(null);
     setThreadError(null);
@@ -550,28 +796,30 @@ export function CompanionsApp({
     }
   }, [currentOrg.id, replaceCompanion]);
 
-  // Only a runner whose Box is already running observes it, so opening a thread never wakes a Box
-  // and a Viewer's chip stays on the control-plane projection.
+  // Keep the open thread's lifecycle current without requiring a reload. Sending and transitional
+  // states use the fast cadence because a wake is actively changing the projection; otherwise an
+  // asleep or Viewer thread follows the read model and an online runner occasionally observes the
+  // already-running Box. The immediate read is important when a send has just begun: its request can
+  // remain open for the whole wake, so waiting for that POST to settle would leave the chip stale.
+  // A Viewer always takes the control-plane path, and no status read can resume a Box.
   useEffect(() => {
-    if (!openedId || !canRunOpened || !openedAwake) return;
-    const timer = setInterval(() => void refreshCompanion(openedId, true), BOX_STATUS_POLL_MS);
+    if (!openedId) return;
+    const live = canRunOpened && openedAwake;
+    const interval = sending || openedPending
+      ? PENDING_POLL_MS
+      : live
+        ? BOX_STATUS_POLL_MS
+        : READ_MODEL_POLL_MS;
+    void refreshCompanion(openedId, live);
+    const timer = setInterval(() => void refreshCompanion(openedId, live), interval);
     return () => clearInterval(timer);
-  }, [canRunOpened, openedAwake, openedId, refreshCompanion]);
-
-  // A pending lifecycle is the one window where the projection is expected to change on its own, so
-  // it is the one window that has to be watched. The chip, the wake control, and the composer footer
-  // all read this row, so they leave Starting together as soon as the wake records that it finished.
-  useEffect(() => {
-    if (!openedId || !openedPending) return;
-    const timer = setInterval(() => void refreshCompanion(openedId), PENDING_POLL_MS);
-    return () => clearInterval(timer);
-  }, [openedId, openedPending, refreshCompanion]);
+  }, [canRunOpened, openedAwake, openedId, openedPending, refreshCompanion, sending]);
 
   /** Resolves false when the message never reached the control plane, so the composer keeps its text. */
   const onSend = async (content: string, clientMessageId: string): Promise<boolean> => {
     if (!openedId) return false;
     const companionId = openedId;
-    setSending(true);
+    setSendingCompanionId(companionId);
     setThreadError(null);
     try {
       // Sending also delivers the backlog, so it waits for an in-flight sync instead of racing it.
@@ -581,39 +829,24 @@ export function CompanionsApp({
         () => sendCompanionMessage(currentOrg.id, companionId, content, clientMessageId),
         { skipWhenBusy: false },
       );
-      threadRequestRef.current += 1;
-      if (next) setThread(next);
+      if (openedIdRef.current === companionId && next?.companion_id === companionId) {
+        threadRequestRef.current += 1;
+        setThread(next);
+      }
       return true;
     } catch (cause) {
-      setThreadError(cause instanceof Error ? cause.message : "The message could not be sent.");
+      if (openedIdRef.current === companionId) {
+        setThreadError(cause instanceof Error ? cause.message : "The message could not be sent.");
+      }
       return false;
     } finally {
-      setSending(false);
+      setSendingCompanionId((current) => current === companionId ? null : current);
       // A send can wake this Companion, and it can also fail and record why, so the lifecycle it
       // leaves behind is re-read from the projection the status chip already uses. Everything the
-      // thread derives from the runtime — the chip, the wake control, the composer footer, and the
+      // thread derives from the runtime — the chip, the composer footer, and the
       // live cadence that projects Pi's reply — then moves off the pre-send state together instead
       // of waiting for a reload. The read is the control-plane projection, so it never wakes a Box.
       await refreshCompanion(companionId);
-    }
-  };
-
-  const onWake = async () => {
-    if (!opened) return;
-    const companionId = opened.id;
-    setWaking(true);
-    setThreadError(null);
-    try {
-      const updated = await startCompanionRuntime(currentOrg.id, companionId);
-      replaceCompanion(updated);
-      await refreshThread(true);
-    } catch (cause) {
-      setThreadError(cause instanceof Error ? cause.message : "This Companion could not be woken.");
-      // A failed start records why on the Companion, so re-read it: the status pill must show Error
-      // rather than the state the wake started from, and the reason must survive a reload.
-      await refreshCompanion(companionId);
-    } finally {
-      setWaking(false);
     }
   };
 
@@ -858,7 +1091,9 @@ export function CompanionsApp({
       )}
 
       <main
-        className={"companions-main" + (opened ? " companions-main--chat" : "")}
+        className={"companions-main"
+          + (opened ? " companions-main--chat" : "")
+          + (!opened && !settingsCompanion && !pluginsOpen ? " companions-main--list" : "")}
         aria-hidden={mobileSidebarOpen || dialogOpen || undefined}
         inert={mobileSidebarOpen || dialogOpen ? true : undefined}
       >
@@ -895,7 +1130,6 @@ export function CompanionsApp({
               orgId={currentOrg.id}
               error={desktopError ?? threadError}
               busy={sending}
-              waking={waking}
               openingDesktop={openingDesktop}
               context={{
                 open: contextOpen,
@@ -917,7 +1151,6 @@ export function CompanionsApp({
                 ? null
                 : () => router.push(`/companions/${opened.id}/settings`)}
               onThread={setThread}
-              onWake={() => void onWake()}
               onDesktop={() => void onDesktop()}
             />
           </>
@@ -959,253 +1192,175 @@ export function CompanionsApp({
           />
         ) : (
           <>
-            <header className="companions-head">
-              <h1>
-                Companions
-                <span className="companions-count tnum">{companions.length}</span>
-              </h1>
-              <div className="companions-head-actions">
-                {/* Providers and Plugins are workspace destinations, not actions on this list, so
-                    they sit in the sidebar foot where Secrets and Archived sit for Skills. What is
-                    left here is the one control that makes something. */}
+            <ResourceListHeader
+              title="Companions"
+              count={companions.length}
+              headingLevel={1}
+              action={(
                 <button
                   type="button"
-                  className="cds-btn cds-btn--primary cds-btn--md"
+                  className="btn-primary"
                   disabled={!providers}
                   onClick={() => {
                     if (providers) setCreating(true);
                   }}
                   title={providers ? "New companion" : "Provider settings are loading"}
                 >
-                  <Icon name="plus" size={15} /> New companion
+                  <Icon name="plus" size={14} /> New companion
+                </button>
+              )}
+            />
+
+            {error ? <div className="companions-error companions-error--list" role="alert">{error}</div> : null}
+            {!providers && !providersError ? (
+              <div className="companions-list-notice" role="status">
+                Loading provider settings…
+              </div>
+            ) : null}
+            {providersError ? (
+              <div className="companions-error companions-error--list" role="alert">
+                <span>{providersError}</span>
+                <button type="button" className="cds-link" onClick={() => void loadProviderSettings()}>
+                  Retry
                 </button>
               </div>
-            </header>
+            ) : null}
 
-            <div className="companions-content">
-              {error && <div className="companions-error" role="alert">{error}</div>}
-              {!providers && !providersError && (
-                <p className="companions-list-empty" role="status">
-                  Loading provider settings…
-                </p>
-              )}
-              {providersError && (
-                <div className="companions-error" role="alert">
-                  {providersError}{" "}
-                  <button
-                    type="button"
-                    className="cds-link"
-                    onClick={() => void loadProviderSettings()}
+            <ResourceListToolbar
+              value={query}
+              onChange={setQuery}
+              placeholder="Search companions"
+              ariaLabel="Search companions"
+              inputRef={searchRef}
+            />
+
+            <ResourceListFrame className="companions-list">
+              <ResourceListColumns className="companions-list__head">
+                <span>Companion</span>
+                <span>Status</span>
+                <span>Updated</span>
+                <span>Access</span>
+              </ResourceListColumns>
+
+              {visible.map((companion) => {
+                const status = companionStatus(companion.runtime.state);
+                return (
+                  <div
+                    className={`companions-row${companion.pinned ? " companions-row--pinned" : ""}`}
+                    key={companion.id}
                   >
-                    Retry
-                  </button>
-                </div>
-              )}
+                    <button
+                      type="button"
+                      className="companions-row__main"
+                      aria-label={`Open ${companion.name}. ${status.label}. ${companion.access} access${companion.unread ? ". Unread" : ""}.`}
+                      ref={(node) => {
+                        if (node) rowRefs.current.set(companion.id, node);
+                        else rowRefs.current.delete(companion.id);
+                      }}
+                      onClick={() => openCompanion(companion)}
+                    >
+                      <span className="companions-avatar" aria-hidden="true">
+                        {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
+                        {companion.unread ? <i className="companions-unread" /> : null}
+                      </span>
+                      <span className="companions-row__text">
+                        <strong>
+                          {companion.pinned ? <Icon name="pin" size={12} /> : null}
+                          {companion.name}
+                        </strong>
+                        <span>
+                          {companion.persona
+                            ?? providerName(companion.runtime.provider_ids[0] ?? "No provider")}
+                        </span>
+                      </span>
+                    </button>
+                    <span
+                      className={`companions-state companions-state--${status.tone}`}
+                      title={companion.runtime.last_error ?? undefined}
+                    >
+                      <i aria-hidden="true" />
+                      {status.label}
+                    </span>
+                    <RelativeTime className="companions-row__time" iso={companion.updated_at} />
+                    <span className="companions-row-actions">
+                      <span className="companions-role">{companion.access}</span>
+                      <CompanionActionsMenu
+                        companion={companion}
+                        busy={busy}
+                        personalWorkspace={currentOrg.kind === "personal"}
+                        onSettings={() => router.push(`/companions/${companion.id}/settings`)}
+                        onShare={() => setSharing(companion)}
+                        onMemberState={(patch) => applyMemberState(companion, patch)}
+                        onDuplicate={() => onDuplicate(companion)}
+                      />
+                    </span>
+                  </div>
+                );
+              })}
 
-              {companions.length === 0 ? (
-                <div className="companions-empty">
-                  <Icon name="bot" size={22} />
-                  <strong>No Companions yet</strong>
-                  <p>A Companion is a name, one line of persona, and a model provider. It stays asleep until you open it.</p>
-                  <button
-                    type="button"
-                    className="cds-btn cds-btn--primary cds-btn--md"
-                    disabled={!providers}
-                    onClick={() => {
-                      if (providers) setCreating(true);
-                    }}
-                  >
-                    New companion
-                  </button>
-                </div>
-              ) : (
-                <>
-                  <label className="companions-search">
-                    <Icon name="search" size={15} />
-                    <input
-                      type="search"
-                      value={query}
-                      placeholder="Search companions"
-                      aria-label="Search companions"
-                      onChange={(event) => setQuery(event.target.value)}
-                    />
-                  </label>
+              {visible.length === 0 ? (
+                <ResourceListEmpty
+                  icon={companions.length === 0 ? "bot" : "search-x"}
+                  title={companions.length === 0
+                    ? "No Companions yet"
+                    : query.trim()
+                      ? "No Companions match"
+                      : "No visible Companions"}
+                  description={companions.length === 0
+                    ? "Create a Companion with a name, one line of persona, and a connected model provider."
+                    : query.trim()
+                      ? "No Companions match your search. Clear the search to see the workspace in full."
+                      : "Your Companions are hidden from the active list. Use the Hidden section below to restore one."}
+                />
+              ) : null}
 
-                  <div className="companions-list">
-                    <div className="companions-row companions-row--head">
-                      <span>Companion</span>
-                      <span>Status</span>
-                      <span>Updated</span>
-                      <span>Access</span>
-                    </div>
-                    {visible.map((companion) => {
-                      const status = companionStatus(companion.runtime.state);
-                      return (
-                        <div
-                          className={`companions-row${companion.pinned ? " companions-row--pinned" : ""}`}
-                          key={companion.id}
-                        >
-                          <button
-                            type="button"
-                            className="companions-row__main"
-                            ref={(node) => {
-                              if (node) rowRefs.current.set(companion.id, node);
-                              else rowRefs.current.delete(companion.id);
-                            }}
-                            onClick={() => openCompanion(companion)}
-                          >
-                            <span className="companions-avatar" aria-hidden="true">
-                              {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
-                              {companion.unread && (
-                                <i className="companions-unread" title="Unread" />
-                              )}
-                            </span>
-                            <span className="companions-row__text">
-                              <strong>
-                                {companion.pinned && (
-                                  <Icon name="pin" size={12} aria-hidden="true" />
-                                )}
-                                {companion.name}
-                              </strong>
-                              <span>
-                                {companion.persona
-                                  ?? providerName(companion.runtime.provider_ids[0] ?? "No provider")}
-                              </span>
-                            </span>
-                          </button>
-                          <span
-                            className={`companions-state companions-state--${status.tone}`}
-                            title={companion.runtime.last_error ?? undefined}
-                          >
-                            <i aria-hidden="true" />
-                            {status.label}
+              {hiddenCompanions.length > 0 && !query.trim() ? (
+                <section className="companions-hidden" aria-labelledby="companions-hidden-title">
+                  <h3 className="companions-hidden__heading" id="companions-hidden-title">
+                    <Icon name="eye-off" size={14} />
+                    <span>Hidden</span>
+                    <span className="companions-hidden__count tnum">{hiddenCompanions.length}</span>
+                  </h3>
+                  {hiddenCompanions.map((companion) => {
+                    const status = companionStatus(companion.runtime.state);
+                    return (
+                      <div className="companions-row companions-row--hidden" key={companion.id}>
+                        <div className="companions-row__main companions-row__main--static">
+                          <span className="companions-avatar" aria-hidden="true">
+                            {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
                           </span>
-                          <RelativeTime className="companions-row__time" iso={companion.updated_at} />
-                          <span className="companions-row-actions">
-                            <span className="companions-role">{companion.access}</span>
-                            <details className="companions-row-menu">
-                              <summary
-                                className="cds-btn cds-btn--ghost cds-btn--sm"
-                                aria-label={`Actions for ${companion.name}`}
-                              >
-                                <Icon name="more-horizontal" size={15} />
-                              </summary>
-                              <div className="companions-row-menu__panel" role="menu">
-                                <button
-                                  type="button"
-                                  role="menuitem"
-                                  disabled={busy}
-                                  onClick={(event) => {
-                                    event.currentTarget.closest("details")?.removeAttribute("open");
-                                    void applyMemberState(companion, { pinned: !companion.pinned });
-                                  }}
-                                >
-                                  {companion.pinned ? "Unpin" : "Pin"}
-                                </button>
-                                <button
-                                  type="button"
-                                  role="menuitem"
-                                  disabled={busy || companion.unread}
-                                  onClick={(event) => {
-                                    event.currentTarget.closest("details")?.removeAttribute("open");
-                                    void applyMemberState(companion, { unread: true });
-                                  }}
-                                >
-                                  Mark as unread
-                                </button>
-                                {companion.access === "owner" && (
-                                  <button
-                                    type="button"
-                                    role="menuitem"
-                                    disabled={busy}
-                                    onClick={(event) => {
-                                      event.currentTarget.closest("details")?.removeAttribute("open");
-                                      void onDuplicate(companion);
-                                    }}
-                                  >
-                                    Duplicate
-                                  </button>
-                                )}
-                                <button
-                                  type="button"
-                                  role="menuitem"
-                                  disabled={busy}
-                                  onClick={(event) => {
-                                    event.currentTarget.closest("details")?.removeAttribute("open");
-                                    void applyMemberState(companion, { hidden: true });
-                                  }}
-                                >
-                                  Hide
-                                </button>
-                              </div>
-                            </details>
-                            <button
-                              type="button"
-                              className="cds-btn cds-btn--ghost cds-btn--sm"
-                              aria-label={`Settings for ${companion.name}`}
-                              onClick={() => router.push(`/companions/${companion.id}/settings`)}
-                            >
-                              Settings
-                            </button>
-                            {companion.access === "owner" && currentOrg.kind !== "personal" && (
-                              <button
-                                type="button"
-                                className="cds-btn cds-btn--ghost cds-btn--sm"
-                                onClick={() => setSharing(companion)}
-                              >
-                                Share
-                              </button>
-                            )}
+                          <span className="companions-row__text">
+                            <strong>{companion.name}</strong>
+                            <span>{companion.persona ?? "Hidden from your list"}</span>
                           </span>
                         </div>
-                      );
-                    })}
-                    {visible.length === 0 && (
-                      <p className="companions-list-empty">No Companion matches this search.</p>
-                    )}
-                  </div>
-
-                  {hiddenCompanions.length > 0 && !query.trim() && (
-                    <section className="companions-hidden" aria-labelledby="companions-hidden-title">
-                      <h2 id="companions-hidden-title">Hidden</h2>
-                      <div className="companions-list">
-                        {hiddenCompanions.map((companion) => (
-                          <div className="companions-row" key={companion.id}>
-                            <div className="companions-row__main companions-row__main--static">
-                              <span className="companions-avatar" aria-hidden="true">
-                                {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
-                              </span>
-                              <span className="companions-row__text">
-                                <strong>{companion.name}</strong>
-                                <span>Hidden from your list</span>
-                              </span>
-                            </div>
-                            <span className="companions-row-actions">
-                              <button
-                                type="button"
-                                className="cds-btn cds-btn--ghost cds-btn--sm"
-                                disabled={busy}
-                                onClick={() => void applyMemberState(companion, { hidden: false })}
-                              >
-                                Unhide
-                              </button>
-                              <button
-                                type="button"
-                                className="cds-btn cds-btn--ghost cds-btn--sm"
-                                aria-label={`Settings for ${companion.name}`}
-                                onClick={() => router.push(`/companions/${companion.id}/settings`)}
-                              >
-                                Settings
-                              </button>
-                            </span>
-                          </div>
-                        ))}
+                        <span
+                          className={`companions-state companions-state--${status.tone}`}
+                          title={companion.runtime.last_error ?? undefined}
+                        >
+                          <i aria-hidden="true" />
+                          {status.label}
+                        </span>
+                        <RelativeTime className="companions-row__time" iso={companion.updated_at} />
+                        <span className="companions-row-actions">
+                          <span className="companions-role">{companion.access}</span>
+                          <CompanionActionsMenu
+                            companion={companion}
+                            busy={busy}
+                            hidden
+                            personalWorkspace={currentOrg.kind === "personal"}
+                            onSettings={() => router.push(`/companions/${companion.id}/settings`)}
+                            onShare={() => setSharing(companion)}
+                            onMemberState={(patch) => applyMemberState(companion, patch)}
+                            onDuplicate={() => onDuplicate(companion)}
+                          />
+                        </span>
                       </div>
-                    </section>
-                  )}
-                </>
-              )}
-            </div>
+                    );
+                  })}
+                </section>
+              ) : null}
+            </ResourceListFrame>
           </>
         )}
       </main>

@@ -990,6 +990,254 @@ describe("Companions API feature gate", () => {
     expect(runtimeFactory).not.toHaveBeenCalled();
   });
 
+  it("restarts only Pi inside an observably online Box", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const start = vi.fn(async () => ({
+      boxId: "bx_23456789",
+      runtimeState: "running" as const,
+      daemonState: "running" as const,
+      desktopAvailable: true,
+    }));
+    const stop = vi.fn();
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(runningCompanion);
+    coreMocks.updateCompanionObservation.mockResolvedValue(runningCompanion);
+    coreMocks.updateCompanionRuntime.mockResolvedValue(runningCompanion);
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      vi.fn(() => boxRuntime({ start, stop })),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "pi" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      boxId: "bx_23456789",
+      allowBoxWake: false,
+      restartPi: true,
+    }));
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  it("restarts the full Box by archiving it before resuming it", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const start = vi.fn(async () => ({
+      boxId: "bx_23456789",
+      runtimeState: "running" as const,
+      daemonState: "running" as const,
+      desktopAvailable: true,
+    }));
+    const stop = vi.fn(async () => ({
+      boxId: "bx_23456789",
+      runtimeState: "stopped" as const,
+      daemonState: "stopped" as const,
+      desktopAvailable: false,
+    }));
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStop.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue({
+      ...runningCompanion,
+      runtime: { ...runningCompanion.runtime, state: "stopped", daemon_state: "stopped" },
+    });
+    coreMocks.updateCompanionObservation.mockResolvedValue(runningCompanion);
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        state: input.patch.runtimeState ?? "running",
+        daemon_state: input.patch.daemonState ?? "running",
+      },
+    }));
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      vi.fn(() => boxRuntime({ start, stop })),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "box" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(start).toHaveBeenCalledOnce();
+    expect(stop.mock.invocationCallOrder[0]).toBeLessThan(start.mock.invocationCallOrder[0]!);
+  });
+
+  it("keeps the stop failure projected and never starts after a partial full-Box restart", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const start = vi.fn();
+    const stop = vi.fn(async () => {
+      throw new BoxRuntimeProviderError("Box archive failed", 502);
+    });
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStop.mockResolvedValue(runningCompanion);
+    coreMocks.updateCompanionObservation.mockResolvedValue(runningCompanion);
+    coreMocks.updateCompanionRuntime.mockResolvedValue({
+      ...runningCompanion,
+      runtime: { ...runningCompanion.runtime, state: "error", daemon_state: "error" },
+    });
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      vi.fn(() => boxRuntime({ start, stop })),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "box" }),
+    });
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({ error: "Box archive failed" });
+    expect(start).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({
+        runtimeState: "error",
+        daemonState: "error",
+        lastError: "Box archive failed",
+      }),
+    }));
+  });
+
+  it("projects an error when full-Box archive succeeds but resume fails", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const start = vi.fn(async () => {
+      throw new BoxRuntimeProviderError("Box resume failed", 502);
+    });
+    const stop = vi.fn(async () => ({
+      boxId: "bx_23456789",
+      runtimeState: "stopped" as const,
+      daemonState: "stopped" as const,
+      desktopAvailable: false,
+    }));
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStop.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue({
+      ...runningCompanion,
+      runtime: { ...runningCompanion.runtime, state: "stopped", daemon_state: "stopped" },
+    });
+    coreMocks.updateCompanionObservation.mockResolvedValue(runningCompanion);
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        state: input.patch.runtimeState ?? "running",
+        daemon_state: input.patch.daemonState ?? "running",
+      },
+    }));
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      vi.fn(() => boxRuntime({ start, stop })),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "box" }),
+    });
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({ error: "Box resume failed" });
+    expect(stop).toHaveBeenCalledOnce();
+    expect(start).toHaveBeenCalledOnce();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenLastCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({
+        runtimeState: "error",
+        daemonState: "error",
+        lastError: "Box resume failed",
+      }),
+    }));
+  });
+
+  it("rejects an unknown restart target before creating a Box client", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const runtimeFactory = vi.fn(() => {
+      throw new Error("Box client must not be created");
+    });
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "machine" }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(runtimeFactory).not.toHaveBeenCalled();
+    // Authorization still runs before body validation so an unauthorized caller cannot probe this
+    // operator-only contract, but no Box client or lifecycle claim is created for invalid input.
+    expect(coreMocks.getCompanionForRuntime).toHaveBeenCalledOnce();
+    expect(coreMocks.claimCompanionRuntimeStart).not.toHaveBeenCalled();
+    expect(coreMocks.claimCompanionRuntimeStop).not.toHaveBeenCalled();
+  });
+
+  it("refuses to restart an asleep Companion without creating a Box client", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const runtimeFactory = vi.fn(() => {
+      throw new Error("Box client must not be created");
+    });
+    coreMocks.getCompanionForRuntime.mockResolvedValue(companion);
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "pi" }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(runtimeFactory).not.toHaveBeenCalled();
+    expect(coreMocks.claimCompanionRuntimeStart).not.toHaveBeenCalled();
+  });
+
+  it("corrects a stale Online projection and refuses to wake the stopped Box", async () => {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    const start = vi.fn();
+    const stop = vi.fn();
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.updateCompanionObservation.mockResolvedValue({
+      ...runningCompanion,
+      runtime: { ...runningCompanion.runtime, state: "stopped", daemon_state: "stopped" },
+    });
+    registerCompanionRoutes(
+      app,
+      { COMPANION_COMPANIONS_ENABLED: "true" },
+      vi.fn(() => boxRuntime({
+        start,
+        stop,
+        status: vi.fn(async () => ({
+          boxId: "bx_23456789",
+          runtimeState: "stopped" as const,
+          daemonState: "stopped" as const,
+          desktopAvailable: false,
+        })),
+      })),
+    );
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "box" }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(coreMocks.updateCompanionObservation).toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({ runtimeState: "stopped", daemonState: "stopped" }),
+    }));
+    expect(start).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
+  });
+
   it("serves a viewer thread from the control plane without creating a Box client", async () => {
     const app = new Hono<{ Variables: ApiVariables }>();
     const runtimeFactory = vi.fn(() => {
@@ -2439,6 +2687,7 @@ describe("Companions API feature gate", () => {
 
   it.each([
     ["start", `/v1/companions/${companion.id}/runtime/start`],
+    ["restart", `/v1/companions/${companion.id}/runtime/restart`],
     ["stop", `/v1/companions/${companion.id}/runtime/stop`],
     ["desktop", `/v1/companions/${companion.id}/runtime/desktop`],
     // The Computer panel's join is this same route, so a Viewer who reached for one — by any means —

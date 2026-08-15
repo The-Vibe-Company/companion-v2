@@ -67,8 +67,7 @@ export default async function CompanionsPage({
   if (
     initialSettingsCompanionId
     && !companionsResponse.companions.some(
-      (companion) =>
-        companion.id === initialSettingsCompanionId && companion.access !== "viewer",
+      (companion) => companion.id === initialSettingsCompanionId,
     )
   ) {
     notFound();

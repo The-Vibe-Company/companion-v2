@@ -69,7 +69,7 @@ export function replyExpected(input: {
 /**
  * What the composer says under itself: delivery when messages are waiting, keys otherwise. Delivery
  * is read from the same projected runtime state as the Box status chip, so the footer of a Companion
- * a send has just woken never keeps offering the wake that already happened, and a Companion still
+ * a send has just started never suggests a second lifecycle action, and a Companion still
  * coming up is reported as coming up rather than as one nobody has woken yet.
  */
 export function composerHint(input: {
@@ -82,7 +82,7 @@ export function composerHint(input: {
   const count = `${pending} message${pending === 1 ? "" : "s"}`;
   if (input.state === "running") return `${count} waiting for a reply.`;
   if (input.state === "provisioning") {
-    return `${count} saved. ${input.companionName} is waking to deliver.`;
+    return `${count} saved. ${input.companionName} is starting to deliver.`;
   }
-  return `${count} saved. Wake ${input.companionName} to deliver.`;
+  return `${count} saved. Send another message to retry delivery.`;
 }
