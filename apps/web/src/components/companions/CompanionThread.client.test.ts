@@ -137,7 +137,7 @@ async function mountPolling(initial: Thread) {
 }
 
 function log(container: HTMLElement) {
-  return (container.querySelector(".chat-log") as HTMLElement).textContent ?? "";
+  return (container.querySelector("[role='log']") as HTMLElement).textContent ?? "";
 }
 
 function boxChip(container: HTMLElement) {
@@ -162,7 +162,7 @@ async function send(container: HTMLElement) {
 }
 
 function sendButton(container: HTMLElement) {
-  return container.querySelector(".chat-send") as HTMLButtonElement;
+  return container.querySelector("button[aria-label='Send message']") as HTMLButtonElement;
 }
 
 /** A finger landing on a control, which is the moment iOS starts resolving a tap. */
@@ -266,7 +266,7 @@ describe("CompanionThread composer", () => {
     });
 
     // Once the saved thread arrives it owns the message; the sent copy is dropped in the same update.
-    expect(container.querySelectorAll(".chat-turn--sending")).toHaveLength(0);
+    expect(container.querySelectorAll("[data-role='user'] [aria-busy='true']")).toHaveLength(0);
   });
 
   it("sends one message even when the composer is submitted twice", async () => {
@@ -355,18 +355,19 @@ describe("CompanionThread composer", () => {
           author_name: null,
           tool: null,
     decision: null,
+          reasoning: null,
           created_at: "2026-08-12T12:01:00.000Z",
         }],
       }));
     });
 
-    expect(container.querySelectorAll(".chat-turn--said")).toHaveLength(1);
+    expect(container.querySelectorAll("[data-role='user']")).toHaveLength(1);
 
     await act(async () => {
       settle(true);
     });
 
-    expect(container.querySelectorAll(".chat-turn--said")).toHaveLength(1);
+    expect(container.querySelectorAll("[data-role='user']")).toHaveLength(1);
   });
 
   it("hands the next Companion an empty composer instead of the previous draft", async () => {
@@ -408,6 +409,7 @@ describe("CompanionThread stream", () => {
     author_name: null,
     tool: null,
     decision: null,
+    reasoning: null,
     created_at: "2026-08-12T12:01:00.000Z",
   };
 
@@ -420,16 +422,17 @@ describe("CompanionThread stream", () => {
     author_name: null,
     tool: null,
     decision: null,
+    reasoning: null,
     created_at: "2026-08-12T12:01:20.000Z",
   });
 
   it("grows a streamed reply in place instead of appending a second one", async () => {
     const { container, poll } = await mountPolling({ ...thread, entries: [said, reply("Skills Hub")] });
-    const before = container.querySelector(".chat-turn--reply");
+    const before = container.querySelector("[data-role='assistant']");
 
     await poll({ ...thread, entries: [said, reply("Skills Hub 2.4 is out. The migration is idempotent.")] });
 
-    const after = container.querySelectorAll(".chat-turn--reply");
+    const after = container.querySelectorAll("[data-role='assistant']");
     expect(after).toHaveLength(1);
     // The same element carries the longer text: the reply is rewritten, never torn down and rebuilt,
     // which is what would make a streamed turn flicker.
@@ -437,7 +440,7 @@ describe("CompanionThread stream", () => {
     expect(after.item(0).textContent).toContain("The migration is idempotent.");
   });
 
-  it("announces Luna once when a turn arrives as more than one reply", async () => {
+  it("keeps a turn that arrives as more than one reply as one message", async () => {
     const { container, poll } = await mountPolling({
       ...thread,
       entries: [said, reply("Skills Hub 2.4 is out.")],
@@ -457,16 +460,18 @@ describe("CompanionThread stream", () => {
           author_name: null,
           tool: null,
     decision: null,
+          reasoning: null,
           created_at: "2026-08-12T12:01:24.000Z",
         },
       ],
     });
 
-    expect(container.querySelectorAll(".chat-turn--reply")).toHaveLength(2);
-    // Two entries, one passage: the second reply continues the first instead of restating who is
-    // talking and when.
+    // Two entries, one turn: the second reply is another part of the same message rather than a
+    // second message, so the turn is announced once and reads as one thing that happened.
+    expect(container.querySelectorAll("[data-role='assistant']")).toHaveLength(1);
     expect(log(container).match(/Luna/g)).toHaveLength(1);
-    expect(container.querySelectorAll(".chat-turn--reply.chat-turn--lead")).toHaveLength(1);
+    expect(container.querySelectorAll("[data-role='assistant'] time")).toHaveLength(1);
+    expect(log(container)).toContain("The migration is idempotent.");
   });
 
   it("shows a turn that only produced reasoning as Luna's reply", async () => {
@@ -477,8 +482,8 @@ describe("CompanionThread stream", () => {
       entries: [said, reply("The note is already accurate, so there is nothing to change.")],
     });
 
-    expect(container.querySelectorAll(".chat-turn--reply")).toHaveLength(1);
-    expect(container.querySelectorAll(".chat-note")).toHaveLength(0);
+    expect(container.querySelectorAll("[data-role='assistant']")).toHaveLength(1);
+    expect(container.querySelectorAll("[data-role='system']")).toHaveLength(0);
     expect(log(container)).toContain("The note is already accurate");
   });
 
@@ -496,18 +501,21 @@ describe("CompanionThread stream", () => {
           author_name: null,
           tool: null,
     decision: null,
+          reasoning: null,
           created_at: "2026-08-12T12:01:20.000Z",
         },
       ],
     };
     const { container, poll } = await mountPolling(settled);
 
-    expect(container.querySelectorAll(".chat-note")).toHaveLength(1);
+    expect(container.querySelectorAll("[data-role='system']")).toHaveLength(1);
+    // A note speaks about the Companion whose thread this is, not about Pi's runtime name.
     expect(log(container)).toContain("Luna ended the turn without a visible reply.");
     expect(log(container)).not.toContain("Pi ended the turn without a visible reply.");
     // The turn is closed, so nothing should still claim Luna is replying.
-    expect(container.querySelectorAll(".chat-replying")).toHaveLength(0);
+    expect(container.querySelectorAll("[data-slot='companion-replying']")).toHaveLength(0);
 
+    // And it follows a rename, because the name is read at render rather than stored on the row.
     const atlas: Companion = { ...companion, name: "Atlas" };
     await poll(settled, atlas);
 

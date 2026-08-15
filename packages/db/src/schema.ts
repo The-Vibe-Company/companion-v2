@@ -674,6 +674,13 @@ export const companionTranscriptEntries = pgTable(
     role: companionTranscriptRoleEnum("role").notNull(),
     content: text("content").notNull(),
     /**
+     * What Pi thought before the reply this row carries. It is a column on the reply rather than a
+     * row of its own so the thinking keeps that reply's ordinal, is read by exactly the readers who
+     * may read it, and is removed with the Companion. Null on every other role, and on a reply whose
+     * thinking is already its content because the turn produced no text.
+     */
+    reasoning: text("reasoning"),
+    /**
      * The tool run a `tool` entry reports: what Pi ran, how it ended, and — for a run that moved the
      * Box desktop — one frame of that desktop. It lives on the entry rather than in its own table so
      * a run keeps the transcript ordinal that places it between the turns it happened between, and is
@@ -721,6 +728,19 @@ export const companionTranscriptEntries = pgTable(
     decisionRoleOnly: check(
       "companion_transcript_entries_decision_role_check",
       sql`(${t.role}::text = 'decision') = (${t.decision} is not null)`,
+    ),
+    // Reasoning belongs to a reply and to nothing else, so no reader has to decide what thinking
+    // attached to a member's message or a tool run was supposed to mean.
+    reasoningRoleOnly: check(
+      "companion_transcript_entries_reasoning_role_check",
+      sql`${t.reasoning} is null or ${t.role}::text = 'assistant'`,
+    ),
+    // The contract caps reasoning at 16 000 UTF-16 units, which cannot encode to more than 48 000
+    // UTF-8 bytes. Bounding the column there is what makes it a real backstop: a projection that
+    // stopped truncating cannot quietly turn every poll into a large read.
+    boundedReasoning: check(
+      "companion_transcript_entries_reasoning_size_check",
+      sql`${t.reasoning} is null or octet_length(${t.reasoning}) <= 48000`,
     ),
     boundedDecision: check(
       "companion_transcript_entries_decision_size_check",

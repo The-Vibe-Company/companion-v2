@@ -1,9 +1,10 @@
-import type {
-  CompanionDecision,
-  CompanionDecisionKind,
-  CompanionToolRun,
-  CompanionToolRunKind,
-  CompanionTranscriptRole,
+import {
+  COMPANION_REASONING_MAX_CHARACTERS,
+  type CompanionDecision,
+  type CompanionDecisionKind,
+  type CompanionToolRun,
+  type CompanionToolRunKind,
+  type CompanionTranscriptRole,
 } from "@companion/contracts";
 
 /** One control-plane transcript entry projected from the Pi RPC log; ordinals are assigned later. */
@@ -12,6 +13,8 @@ export interface CompanionPiEntry {
   role: CompanionTranscriptRole;
   content: string;
   createdAt: Date;
+  /** Set on a reply whose turn also thought out loud; never on any other role. */
+  reasoning?: string;
   /** Set on exactly the `tool` entries, as the run looked when Pi started it. */
   tool?: CompanionToolRun;
   /** Set on exactly the `decision` entries, as the permission card looked when Pi asked. */
@@ -44,6 +47,8 @@ const TRUNCATION_SUFFIX = "\n[truncated]";
 const MAX_TOOL_ARGUMENT_CHARACTERS = 4_000;
 const MAX_TOOL_RESULT_CHARACTERS = 8_000;
 const MAX_TOOL_TITLE_CHARACTERS = 300;
+/** The contract caps the stored reasoning, and a truncated one still has to fit under that cap. */
+const MAX_REASONING_CHARACTERS = COMPANION_REASONING_MAX_CHARACTERS - TRUNCATION_SUFFIX.length;
 /** Same window the Box permission-broker extension passes to Pi's UI dialogs. */
 export const COMPANION_DECISION_TIMEOUT_MS = 5 * 60 * 1000;
 const COMPANION_DECISION_TITLE_PATTERN =
@@ -107,9 +112,9 @@ function blockType(block: PiContentBlock): string {
 }
 
 /**
- * Assistant text only. Thinking blocks are deliberately dropped, and so is the body of a tool call:
- * the call becomes its own chip entry instead of being rendered into the reply. A turn with no text
- * at all falls back to its thinking rather than showing nothing.
+ * Assistant text only. Thinking blocks are kept beside the reply rather than inside it, and the body
+ * of a tool call is dropped: the call becomes its own chip entry instead of being rendered into the
+ * reply. A turn with no text at all falls back to its thinking rather than showing nothing.
  */
 function assistantText(message: PiMessage): string {
   if (typeof message.content === "string") return message.content.trim();
@@ -121,10 +126,10 @@ function assistantText(message: PiMessage): string {
 }
 
 /**
- * The reasoning a turn produced, read only when it produced no text at all. Some models answer a
- * short question inside the thinking block and end the turn with no text part; showing that reasoning
- * is the difference between an answer and a thread that looks stuck. A turn that did produce text
- * keeps its thinking hidden.
+ * The reasoning a turn produced. A turn that also produced text keeps it beside the reply, behind a
+ * collapsed disclosure the reader opens when they want to know why. A turn that produced no text at
+ * all — some models answer a short question inside the thinking block and stop — shows it as the
+ * reply instead, which is the difference between an answer and a thread that looks stuck.
  */
 function assistantThinking(message: PiMessage): string {
   return blocksOf(message)
@@ -347,9 +352,18 @@ function entryFrom(event: PiEvent, now: Date): Omit<CompanionPiEntry, "eventId">
       ? event.message
       : {}) as PiMessage;
     if (message.role !== "assistant") return null;
-    const content = assistantText(message) || assistantThinking(message);
+    const text = assistantText(message);
+    const thinking = assistantThinking(message);
+    const content = text || thinking;
     if (content) {
-      return { role: "assistant", content: truncate(content), createdAt: messageTimestamp(message, now) };
+      return {
+        role: "assistant",
+        content: truncate(content),
+        // Only a turn that spoke has thinking to keep beside the reply. When the thinking already is
+        // the reply it stays there alone, so no reader is shown the same passage twice.
+        reasoning: text && thinking ? truncate(thinking, MAX_REASONING_CHARACTERS) : undefined,
+        createdAt: messageTimestamp(message, now),
+      };
     }
     if (message.stopReason === "error" || message.stopReason === "aborted") {
       return {

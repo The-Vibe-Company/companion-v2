@@ -126,8 +126,46 @@ describe("Sidebar Companions feature gate", () => {
     expect(markup).not.toContain("My Skills");
     expect(markup).not.toContain("Organization");
     expect(markup).not.toContain("Companion skills");
-    expect(markup).toContain("Secrets");
-    expect(markup).toContain("Archived");
+  });
+
+  it("puts the Companions destinations where the Skills ones sit, rather than beside them", () => {
+    // The foot of the sidebar holds whichever pair the current mode can actually reach. Secrets and
+    // Archived are Skills destinations, so offering them to a Companion reader is an archive of
+    // something they are not looking at.
+    const companionsMarkup = renderSidebar({
+      companionsEnabled: true,
+      mode: "companions",
+      companions,
+      onOpenPlugins: () => {},
+      onOpenProviders: () => {},
+    });
+
+    expect(companionsMarkup).toContain(">Providers</span>");
+    expect(companionsMarkup).toContain(">Plugins</span>");
+    expect(companionsMarkup).not.toContain(">Secrets</span>");
+    expect(companionsMarkup).not.toContain(">Archived</span>");
+
+    // Skills keeps its own pair, and is never offered the Companions ones.
+    const skillsMarkup = renderSidebar({ companionsEnabled: true, mode: "skills" });
+
+    expect(skillsMarkup).toContain(">Secrets</span>");
+    expect(skillsMarkup).toContain(">Archived</span>");
+    expect(skillsMarkup).not.toContain(">Providers</span>");
+    expect(skillsMarkup).not.toContain(">Plugins</span>");
+  });
+
+  it("offers Providers only to a member who can manage them", () => {
+    // The caller withholds the handler for a member the surface itself would refuse, so the entry
+    // is absent rather than present and then denied.
+    const markup = renderSidebar({
+      companionsEnabled: true,
+      mode: "companions",
+      companions,
+      onOpenPlugins: () => {},
+    });
+
+    expect(markup).not.toContain(">Providers</span>");
+    expect(markup).toContain(">Plugins</span>");
   });
 
   it("keeps the Companions mode list honest when the workspace has none", () => {

@@ -830,6 +830,7 @@ export function CompanionsApp({
         companions={sidebarCompanions}
         onOpenPlugins={openPlugins}
         pluginsActive={pluginsOpen}
+        onOpenProviders={providers && canManageProviders ? () => setManagingProviders(true) : undefined}
         viewer={viewer}
         activeCompanionId={openedId ?? settingsId}
         onSelectCompanion={(companionId) => {
@@ -952,26 +953,9 @@ export function CompanionsApp({
                 <span className="companions-count tnum">{companions.length}</span>
               </h1>
               <div className="companions-head-actions">
-                {canManageProviders && (
-                  <button
-                    type="button"
-                    className="cds-btn cds-btn--secondary cds-btn--md"
-                    disabled={!providers}
-                    onClick={() => {
-                      if (providers) setManagingProviders(true);
-                    }}
-                    title={providers ? "Providers" : "Provider settings are loading"}
-                  >
-                    Providers
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="cds-btn cds-btn--secondary cds-btn--md"
-                  onClick={openPlugins}
-                >
-                  <Icon name="plug-zap" size={15} /> Plugins
-                </button>
+                {/* Providers and Plugins are workspace destinations, not actions on this list, so
+                    they sit in the sidebar foot where Secrets and Archived sit for Skills. What is
+                    left here is the one control that makes something. */}
                 <button
                   type="button"
                   className="cds-btn cds-btn--primary cds-btn--md"

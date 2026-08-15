@@ -202,13 +202,20 @@ samp {
   font-family: var(--font-mono);
 }
 
-:focus-visible {
+/* The Companion thread is excluded from both of these because it draws its own, shaped to each
+   control — see `chat.css`. It has to be excluded here rather than overridden there: these rules are
+   unlayered, and unlayered author CSS beats every layered utility whatever its specificity, so a
+   `rounded-full` button would take this 2px radius and a markdown link would keep this colour
+   through its own hover. The exclusion is wrapped in `:where()` so it adds no specificity: a bare
+   `:not()` would take its argument's weight and start out-ranking `.cds-btn` on all fifteen other
+   pages, squaring every focused button in the app. */
+:focus-visible:where(:not(.aui-scope *)) {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
   border-radius: 2px;
 }
 
-a {
+a:where(:not(.aui-scope *)) {
   color: var(--color-accent);
   text-underline-offset: 2px;
 }
