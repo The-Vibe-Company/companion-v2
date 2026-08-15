@@ -2,10 +2,12 @@ import type { CompanionThread, CompanionTranscriptEntry } from "@companion/contr
 import { describe, expect, it } from "vitest";
 import {
   composerHint,
+  localDay,
   replyExpected,
   transcriptAuthor,
   transcriptDisplayContent,
   transcriptTurns,
+  utcDay,
 } from "./transcript";
 
 function entry(overrides: Partial<CompanionTranscriptEntry> = {}): CompanionTranscriptEntry {
@@ -168,6 +170,30 @@ describe("transcript separators", () => {
     ], context);
 
     expect(turns.map((turn) => turn.startsDay)).toEqual(["2026-08-12", null, "2026-08-14"]);
+  });
+
+  it("groups by the reader's own day once the client has a clock", () => {
+    // The stored day and the reader's day are different days for most of the world, and a separator
+    // that names one date above timestamps that name another is worse than no separator at all.
+    const entries = [
+      entry({ event_id: "pi:1", role: "assistant", author_id: null, created_at: "2026-08-14T23:30:00.000Z" }),
+      entry({ event_id: "pi:2", role: "assistant", author_id: null, created_at: "2026-08-15T00:30:00.000Z" }),
+    ];
+
+    // Server markup: the stored day, which both renders can agree on.
+    expect(transcriptTurns(entries, { ...context, dayOf: utcDay })
+      .map((turn) => turn.startsDay)).toEqual(["2026-08-14", "2026-08-15"]);
+
+    // A reader an hour ahead of UTC saw both of those arrive on the same evening.
+    const plusOneHour = (iso: string) => new Date(Date.parse(iso) + 3_600_000).toISOString().slice(0, 10);
+    expect(transcriptTurns(entries, { ...context, dayOf: plusOneHour })
+      .map((turn) => turn.startsDay)).toEqual(["2026-08-15", null]);
+  });
+
+  it("names a day the same way whatever clock produced the key", () => {
+    // Both keys are `YYYY-MM-DD`, so the separator's own label formats identically either way.
+    expect(utcDay("2026-08-14T23:30:00.000Z")).toBe("2026-08-14");
+    expect(localDay("2026-08-14T23:30:00.000Z")).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
   it("keeps a day boundary off a tool run, which is chrome inside a turn", () => {

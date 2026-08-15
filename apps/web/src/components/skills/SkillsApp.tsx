@@ -1296,16 +1296,28 @@ export function SkillsApp({
     if (selectedUuid !== null && selected === null) setSelectedUuid(null);
   }, [selected, selectedUuid]);
 
+  /**
+   * Put the panel away and hand focus back to the row it belongs to. Closing unmounts the subtree
+   * that held focus, so without this the next Tab restarts at the top of the document.
+   */
+  const closeSkillPanel = useCallback(() => {
+    const slug = selected?.id;
+    setSelectedUuid(null);
+    window.requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>(`button[aria-label="Open skill ${slug}"]`)?.focus();
+    });
+  }, [selected]);
+
   // Esc puts the panel away, the way it closes every other transient surface here.
   useEffect(() => {
     if (selectedUuid === null) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
-      setSelectedUuid(null);
+      closeSkillPanel();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedUuid]);
+  }, [closeSkillPanel, selectedUuid]);
 
   const activeLabel = selection.kind === "label" ? selection.label ?? null : null;
   const breadcrumb = useMemo(() => {
@@ -1807,7 +1819,7 @@ export function SkillsApp({
                     companionsEnabled={companionsEnabled}
                     onOpen={open}
                     onAction={executeSkillAction}
-                    onClose={() => setSelectedUuid(null)}
+                    onClose={closeSkillPanel}
                   />
                 ) : null
               }

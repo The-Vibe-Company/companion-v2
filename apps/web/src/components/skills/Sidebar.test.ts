@@ -112,7 +112,9 @@ describe("Sidebar Companions feature gate", () => {
     // screen reader reaches, beside the dot.
     expect(markup).toContain("cmprow__statusword sr-only");
     expect(markup).toContain("Online, Unread");
-    expect(markup).toContain('aria-label="Luna — Online"');
+    // The row carries no aria-label: one would override its content and hide the preview, the
+    // relative time, and the status and unread words from a screen reader.
+    expect(markup).not.toContain('aria-label="Luna — Online"');
     expect(markup).toContain("cmprow__dot--ok");
     // Each row reads as a conversation: the last line said, and when.
     expect(markup).toContain("Drafted the launch note.");

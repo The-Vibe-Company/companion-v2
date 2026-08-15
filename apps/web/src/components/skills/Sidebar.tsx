@@ -748,7 +748,9 @@ export function Sidebar({
                     type="button"
                     className={"cmprow" + (active ? " cmprow--active" : "")}
                     aria-current={active ? "page" : undefined}
-                    aria-label={`${companion.name} — ${companion.status}`}
+                    // No `aria-label`: it would override the row's own content, and the content is
+                    // the announcement — the name, when the thread last spoke, what it said, and the
+                    // status and unread words below. A label here silently hid all four.
                     onClick={() => runAndClose(() => onSelectCompanion(companion.id))}
                     title={`${companion.name} — ${companion.status}`}
                   >

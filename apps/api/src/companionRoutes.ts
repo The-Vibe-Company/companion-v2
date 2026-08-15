@@ -799,6 +799,9 @@ export function registerCompanionRoutes(
     try {
       const companions = await tenant(c, ({ actor, orgId, database }) =>
         listCompanions({ actor, orgId, database }));
+      // The list carries each thread's last line now, so it is chat text and must not sit in a disk
+      // cache after the session that read it, the way every other sensitive read here is treated.
+      c.header("Cache-Control", "private, no-store");
       return c.json({ companions });
     } catch (error) {
       return jsonError(c, error, errorStatus(error));

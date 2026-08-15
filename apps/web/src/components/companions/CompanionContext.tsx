@@ -73,12 +73,12 @@ export function CompanionContext({
 
       <div className="chat-context__body">
         <section className="chat-context__block">
-          <h3 className="chat-context__title">
-            Screen
+          <div className="chat-context__titlerow">
+            <h3 className="chat-context__title">Screen</h3>
             {streamUrl && desktop?.transport && (
               <span className="chat-context__transport">{desktop.transport}</span>
             )}
-          </h3>
+          </div>
           <div className="chat-context__screen">
             {streamUrl ? (
               /*
@@ -87,6 +87,11 @@ export function CompanionContext({
                 ours. `key` is the minted URL, so a fresh join replaces the frame rather than leaving
                 the previous stream on screen while the new one connects. Pointer events stop at the
                 card: this is the screen to watch, and the tab below it is the screen to drive.
+
+                Because it is only watched, it is granted nothing a driven desktop needs. The tab
+                keeps clipboard, forms, modals, and pointer lock; delegating those to another origin
+                for a frame nobody can click hands out capability for no reason, and this product's
+                clipboard routinely holds a pasted credential.
               */
               <iframe
                 key={streamUrl}
@@ -94,8 +99,10 @@ export function CompanionContext({
                 src={streamUrl}
                 title={`${companion.name}'s screen`}
                 referrerPolicy="no-referrer"
-                sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-pointer-lock"
-                allow="clipboard-read; clipboard-write; fullscreen"
+                sandbox="allow-scripts allow-same-origin"
+                // A mouse cannot reach it and neither should a Tab: focus inside a frame nobody can
+                // see a ring in, and cannot click out of, is a keyboard trap in all but name.
+                tabIndex={-1}
               />
             ) : (
               <div className="chat-context__tile">
@@ -154,10 +161,11 @@ export function CompanionContext({
         </section>
 
         <section className="chat-context__block">
-          <h3 className="chat-context__title">
-            Routines
-            {/* The control is here so the section is not a claim without a shape, and it is disabled
-                because nothing behind it exists yet. */}
+          {/* The control sits beside the heading, not inside it: a heading is what the section is
+              called, and heading navigation should not read out its buttons. It is here so the
+              section is not a claim without a shape, and disabled because nothing behind it exists. */}
+          <div className="chat-context__titlerow">
+            <h3 className="chat-context__title">Routines</h3>
             <button
               type="button"
               className="iconbtn chat-context__add"
@@ -166,17 +174,17 @@ export function CompanionContext({
             >
               <Icon name="plus" size={14} />
             </button>
-          </h3>
+          </div>
           <p className="chat-context__empty">Routines are coming soon.</p>
         </section>
 
         <section className="chat-context__block">
-          <h3 className="chat-context__title">
-            Skills
+          <div className="chat-context__titlerow">
+            <h3 className="chat-context__title">Skills</h3>
             <button type="button" className="chat-context__link" onClick={onSettings}>
               Manage
             </button>
-          </h3>
+          </div>
           {companion.selected_skill_ids.length === 0 ? (
             <p className="chat-context__empty">No library skills are attached.</p>
           ) : (

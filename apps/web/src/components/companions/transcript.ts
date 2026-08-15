@@ -21,9 +21,9 @@ export interface TranscriptTurn {
   /** True while the control plane has not confirmed this message yet. */
   sending: boolean;
   /**
-   * The day this turn opens, as `YYYY-MM-DD`, or null when it continues the day above it. The key is
-   * the stored UTC day rather than the reader's, so server and client agree on where a separator
-   * goes; the label itself is reformatted to the local clock once the client owns the page.
+   * The day this turn opens, as `YYYY-MM-DD`, or null when it continues the day above it. Server
+   * markup keys it on the stored UTC day so both renders agree; once the client owns the clock the
+   * key is the reader's own day, so the separator and the times beneath it name the same date.
    */
   startsDay: string | null;
   /** True on the first message this reader has not caught up on, which is where "New" is drawn. */
@@ -63,6 +63,19 @@ export function transcriptAuthor(
   return entry.author_name ?? "Member";
 }
 
+/** The stored day, which is the one both renders can agree on before the client has its clock. */
+export function utcDay(iso: string): string {
+  return iso.slice(0, 10);
+}
+
+/** The reader's own day, as the same `YYYY-MM-DD` key so the separator label formats identically. */
+export function localDay(iso: string): string {
+  const at = new Date(iso);
+  const month = `${at.getMonth() + 1}`.padStart(2, "0");
+  const dayOfMonth = `${at.getDate()}`.padStart(2, "0");
+  return `${at.getFullYear()}-${month}-${dayOfMonth}`;
+}
+
 function millis(iso: string): number {
   const parsed = Date.parse(iso);
   return Number.isNaN(parsed) ? 0 : parsed;
@@ -87,6 +100,12 @@ export function transcriptTurns(
      * thread the reader has caught up on both look like.
      */
     lastReadOrdinal?: number | null;
+    /**
+     * How a stored timestamp becomes the day it belongs to. Server markup uses the stored UTC day so
+     * both renders agree; the client swaps in the reader's own calendar, because a separator that
+     * says one date above a clock that says another is worse than no separator at all.
+     */
+    dayOf?: (iso: string) => string;
   },
 ): TranscriptTurn[] {
   let previous: { author: string | null; role: string; at: number } | null = null;
@@ -106,7 +125,7 @@ export function transcriptTurns(
     previous = { author, role: entry.role, at };
 
     const said = entry.role === "user" || entry.role === "assistant";
-    const day = entry.created_at.slice(0, 10);
+    const day = (context.dayOf ?? utcDay)(entry.created_at);
     const startsDay = said && day !== previousDay ? day : null;
     if (said) previousDay = day;
 

@@ -230,6 +230,99 @@ describe("CompanionsApp conversation list", () => {
     expect(row(container).textContent).toContain("Drafted the launch note.");
   });
 
+  const said = (ordinal: number) => ({
+    event_id: `pi:${ordinal}`,
+    ordinal,
+    role: "assistant" as const,
+    content: `Line ${ordinal}`,
+    author_id: null,
+    author_name: null,
+    tool: null,
+    decision: null,
+    created_at: `2026-08-14T09:0${ordinal}:00.000Z`,
+  });
+
+  it("takes the read watermark once per thread, however often the thread is re-read", async () => {
+    // The read that reports the watermark is also the read that advances it, so the next poll
+    // reports a newer one. Capturing that would draw a divider above a line this reader is watching
+    // arrive, seconds after they opened a thread they had never opened before.
+    vi.useFakeTimers();
+    let reads = 0;
+    companionsApi.getCompanionThread.mockImplementation(async () => {
+      reads += 1;
+      return thread({
+        entries: [said(0), said(1), said(2), said(3)],
+        // A first visit, and then the watermark that this reader's own first read just moved.
+        last_read_ordinal: reads === 1 ? null : 2,
+      });
+    });
+
+    const container = await render([companion()], companionId);
+    expect(container.querySelector(".chat-sep--new")).toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9_000);
+    });
+
+    expect(reads).toBeGreaterThan(1);
+    expect(container.querySelector(".chat-sep--new")).toBeNull();
+  });
+
+  it("takes it again when the sidebar moves to another thread", async () => {
+    // One thread's watermark must never judge another thread's transcript.
+    const nova = "22222222-2222-4222-8222-222222222222";
+    companionsApi.getCompanionThread.mockImplementation(async (_org: string, id: string) =>
+      thread({
+        companion_id: id,
+        entries: [said(0), said(1), said(2), said(3)],
+        // Luna is caught up; Nova has two lines this reader has not seen.
+        last_read_ordinal: id === companionId ? 3 : 1,
+      }));
+    const container = await render(
+      [companion(), companion({ id: nova, name: "Nova" })],
+      companionId,
+    );
+
+    expect(container.querySelector(".chat-sep--new")).toBeNull();
+
+    const nextRow = [...container.querySelectorAll(".cmprow")]
+      .find((row) => row.querySelector(".cmprow__name")?.textContent === "Nova") as HTMLButtonElement;
+    await act(async () => {
+      nextRow.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(container.querySelector(".chat-sep--new")).not.toBeNull();
+  });
+
+  it("leaves the roster's order to the control plane when a read answers", async () => {
+    // Pin order is the server's — pin age first, then recency — and the client does not know pin age.
+    // Re-sorting here on every answer would move rows under the cursor and then lose the argument to
+    // the next list poll, which puts them back.
+    const nova = "22222222-2222-4222-8222-222222222222";
+    const luna = companion({ pinned: true, updated_at: "2026-08-14T09:00:00.000Z" });
+    const rows = [
+      companion({ id: nova, name: "Nova", pinned: true, updated_at: "2026-08-10T09:00:00.000Z" }),
+      luna,
+    ];
+    companionsApi.startCompanionRuntime.mockResolvedValue({
+      ...luna,
+      runtime: { ...luna.runtime, state: "provisioning" },
+    });
+    const container = await render(rows, companionId);
+
+    const names = () => [...container.querySelectorAll(".cmprow__name")]
+      .map((row) => row.textContent);
+    expect(names()).toEqual(["Nova", "Luna"]);
+
+    const wake = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent?.includes("Wake")) as HTMLButtonElement;
+    await act(async () => {
+      wake.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(names()).toEqual(["Nova", "Luna"]);
+  });
+
   it("re-reads the list on a slow cadence without contacting a Box", async () => {
     vi.useFakeTimers();
     const container = await render([companion()]);

@@ -515,6 +515,25 @@ describe("ListView contributors", () => {
     }
   });
 
+  it("still selects a row that cannot be dragged when the pointer drifts", async () => {
+    // An installed skill in My Skills is never a drag source, so a few pixels of trackpad drift
+    // between press and release is an ordinary click and must not be spent on a drop that cannot
+    // happen. Left unguarded the row simply does nothing, which reads as broken.
+    const onSelect = vi.fn();
+    const container = await mount(
+      [skill({ id: "fresh", source: "installed" })],
+      { onSelect, library: "mine" },
+    );
+    const row = container.querySelector('button[aria-label="Open skill fresh"]') as HTMLButtonElement;
+
+    act(() => {
+      row.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: 0, clientY: 0 }));
+      row.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, clientX: 12, clientY: 0 }));
+    });
+
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ id: "fresh" }));
+  });
+
   it("opens the skill when a keyboard activates the row its name names", async () => {
     const onSelect = vi.fn();
     const onOpen = vi.fn();

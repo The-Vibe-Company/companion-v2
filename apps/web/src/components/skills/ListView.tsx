@@ -298,7 +298,11 @@ function SkillRow({
             onOpen(skill.id);
             return;
           }
-          if (from && exceedsThreshold(from, { x: event.clientX, y: event.clientY })) return;
+          // Only a row that can be dragged can have spent its click on a drop; on one that cannot,
+          // a few pixels of pointer drift is still an ordinary click and must still select.
+          if (canDrag && from && exceedsThreshold(from, { x: event.clientX, y: event.clientY })) {
+            return;
+          }
           if (event.detail > 1) return;
           onSelect(skill);
         }}

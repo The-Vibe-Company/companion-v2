@@ -72,6 +72,7 @@ export function CompanionThread({
   onDesktop: () => void;
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const [overlay, setOverlay] = useState(false);
   const status = companionStatus(companion.runtime.state);
   const canSend = thread ? thread.can_send : companion.access !== "viewer";
@@ -116,6 +117,27 @@ export function CompanionThread({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [context, overlay, showContext]);
+
+  /**
+   * An overlay covers the conversation, so the conversation stops being reachable: without this a
+   * keyboard walks straight through the scrim into a composer nobody can see. Focus moves into the
+   * panel on the way in and back to the toggle that opened it on the way out, the way every other
+   * transient surface here behaves.
+   */
+  useEffect(() => {
+    if (!showContext || !overlay) return;
+    const conversation = stageRef.current?.querySelector<HTMLElement>(".chat-thread");
+    const wasInert = conversation?.inert ?? false;
+    if (conversation) conversation.inert = true;
+    const returnTo = document.activeElement as HTMLElement | null;
+    window.requestAnimationFrame(() => {
+      stageRef.current?.querySelector<HTMLElement>(".chat-context__close")?.focus();
+    });
+    return () => {
+      if (conversation) conversation.inert = wasInert;
+      returnTo?.focus();
+    };
+  }, [overlay, showContext]);
 
   // A thread is the only Companions surface a phone keyboard opens over, so it is the only one that
   // has to follow the visual viewport.
@@ -204,7 +226,7 @@ export function CompanionThread({
         narrow screen has room for one of them, so there the panel comes over the conversation and
         the toggle in the header is how an operator moves between the two.
       */}
-      <div className={"chat-stage" + (showContext ? " chat-stage--context" : "")}>
+      <div ref={stageRef} className={"chat-stage" + (showContext ? " chat-stage--context" : "")}>
         {/*
           Keyed by Companion: the transcript owns the runtime and the composer, and a half-typed
           message belongs to the conversation it was meant for. Opening another Companion must hand

@@ -212,6 +212,8 @@ export function CompanionsApp({
     joining: boolean;
   } | null>(null);
   const threadRequestRef = useRef(0);
+  /** The Companion whose read watermark has already been captured for the open thread. */
+  const capturedReadRef = useRef<string | null>(null);
   /** Newest panel join, so a slower mint cannot put its stream on screen after a newer one. */
   const contextJoinRef = useRef(0);
   /** Newest runtime read per Companion, so a slower one cannot answer over it. */
@@ -273,11 +275,21 @@ export function CompanionsApp({
   );
 
   /**
-   * Put one Companion back into the roster. It re-sorts, because pin and recency decide the order and
-   * a member-state write can move a row, and it merges the preview, because a mutation answers about
-   * what it just wrote and would otherwise blank the line the conversation list is showing.
+   * Put one Companion back where it already was. Reads run on a poll, and the roster's order is the
+   * server's — pin age, then recency, then name — so re-sorting here on every answer would fight the
+   * list poll and make rows jump under the cursor. The preview is merged because a mutation answers
+   * about what it just wrote and would otherwise blank the line the conversation list is showing.
    */
   const replaceCompanion = useCallback((next: Companion) => {
+    setCompanions((current) =>
+      current.map((item) => item.id === next.id ? mergeCompanion(item, next) : item));
+  }, []);
+
+  /**
+   * Put one Companion back and let it move. Pin and hide are the writes that change where a row
+   * belongs, so this is the only path that re-sorts, and it sorts the way the server does.
+   */
+  const resortCompanion = useCallback((next: Companion) => {
     setCompanions((current) => {
       const previous = current.find((item) => item.id === next.id);
       const merged = previous ? mergeCompanion(previous, next) : next;
@@ -297,7 +309,7 @@ export function CompanionsApp({
     setError(null);
     try {
       const next = await updateCompanionMemberState(currentOrg.id, companion.id, patch);
-      replaceCompanion(next);
+      resortCompanion(next);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not update this Companion.");
     } finally {
@@ -401,17 +413,22 @@ export function CompanionsApp({
 
   /**
    * Where this reader left off, taken from the first thread payload after opening: the control plane
-   * reports the watermark as it stood before that read advanced it. It is captured once per thread so
-   * the divider does not walk down the transcript as new messages arrive.
+   * reports the watermark as it stood before that read advanced it, and that read is also what
+   * advances it. So it is captured exactly once per Companion — keyed by id rather than by the value
+   * being null, because null is a real answer (a first visit) and a second poll would otherwise
+   * capture the watermark the first one had just moved, drawing a divider above a reply the reader
+   * is watching arrive. The same key is what re-captures when the sidebar moves to another thread.
    */
   useEffect(() => {
     if (!openedId) {
+      capturedReadRef.current = null;
       setLastReadOrdinal(null);
       return;
     }
-    if (thread?.companion_id !== openedId || lastReadOrdinal !== null) return;
+    if (thread?.companion_id !== openedId || capturedReadRef.current === openedId) return;
+    capturedReadRef.current = openedId;
     setLastReadOrdinal(thread.last_read_ordinal);
-  }, [lastReadOrdinal, openedId, thread]);
+  }, [openedId, thread]);
 
   /**
    * The conversation list re-reads every thread's last line on a slow cadence. It is the

@@ -45,7 +45,9 @@ export function SkillPanel({
   const primary = resolveSkillActions(skill, skillActionPermissions(skill, actorId)).primary;
   const icon = resolveSkillListIcon(skill, labels);
   const [excerpt, setExcerpt] = useState<string | null>(null);
-  const [usedBy, setUsedBy] = useState<string[] | null>(null);
+  const [stagedBy, setStagedBy] = useState<
+    Pick<Companion, "name" | "selected_skill_ids">[] | null
+  >(null);
 
   /**
    * The opening of `SKILL.md`, read from the package the list already knows the version of. It is
@@ -70,29 +72,32 @@ export function SkillPanel({
   }, [skill.id, skill.version]);
 
   /**
-   * Which Companions stage this skill. It is one read of the same list the Companions surface uses,
-   * inverted here rather than asked for per skill, and a workspace without Companions simply never
-   * makes it.
+   * Which Companions stage which skills. It is one read of the same list the Companions surface uses,
+   * inverted here rather than asked for per skill, and a workspace without Companions never makes it.
+   *
+   * It is keyed on the workspace rather than on the selected skill: that payload carries every
+   * Companion's own last chat line, and re-fetching it for each row a reader glances at would move
+   * private conversation text into this page once per click for no gain.
    */
   useEffect(() => {
-    setUsedBy(null);
     if (!companionsEnabled) return;
     let active = true;
-    apiFetch<{ companions: Companion[] }>("/v1/companions", {
+    apiFetch<{ companions: Pick<Companion, "name" | "selected_skill_ids">[] }>("/v1/companions", {
       headers: { "x-companion-org": orgId },
     })
       .then((response) => {
-        if (!active) return;
-        setUsedBy(response.companions
-          .filter((companion) => companion.selected_skill_ids.includes(skill.uuid))
-          .map((companion) => companion.name));
+        if (active) setStagedBy(response.companions);
       })
       // Companions are a side note on a skill; a failed read hides the section rather than the panel.
       .catch(() => {});
     return () => {
       active = false;
     };
-  }, [companionsEnabled, orgId, skill.uuid]);
+  }, [companionsEnabled, orgId]);
+
+  const usedBy = stagedBy
+    ?.filter((companion) => companion.selected_skill_ids.includes(skill.uuid))
+    .map((companion) => companion.name) ?? null;
 
   const filedIn = [...skill.labels].sort((left, right) => left.localeCompare(right));
 

@@ -749,6 +749,20 @@ describe("CompanionThread context panel", () => {
 
     expect(contextToggle(open)?.getAttribute("aria-pressed")).toBe("true");
   });
+
+  it("takes the conversation out of reach while the panel is over it", async () => {
+    // Below the two-pane width the panel covers the conversation. Left reachable, a keyboard walks
+    // through the scrim into a composer nobody can see; focus has to go in and come back out.
+    const narrow = { matches: true, addEventListener: () => {}, removeEventListener: () => {} };
+    vi.stubGlobal("matchMedia", () => narrow);
+    const container = await mount(async () => true, { context: { open: true } });
+
+    const conversation = container.querySelector(".chat-thread") as HTMLElement;
+    expect(conversation.inert).toBe(true);
+    expect(container.querySelector(".chat-context-scrim")).not.toBeNull();
+
+    vi.unstubAllGlobals();
+  });
 });
 
 /**

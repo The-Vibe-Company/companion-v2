@@ -1329,11 +1329,15 @@ button.chat-box:focus-visible {
   gap: 8px;
 }
 
-.chat-context__title {
-  margin: 0;
+/* The heading names the section; anything beside it is a control, not part of the name. */
+.chat-context__titlerow {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.chat-context__title {
+  margin: 0;
   color: var(--color-faint);
   font-size: 10px;
   font-weight: 500;
@@ -1360,6 +1364,17 @@ button.chat-box:focus-visible {
   width: 22px;
   height: 22px;
   border-color: var(--color-line);
+}
+
+/* Nothing is behind it yet, so it must not answer the pointer as though something were. */
+.chat-context__add:disabled {
+  color: var(--color-faint);
+  cursor: not-allowed;
+}
+
+.chat-context__add:disabled:hover {
+  background: transparent;
+  color: var(--color-faint);
 }
 
 /* The screen as a card rather than a pane: a fixed 16:10 tile that keeps the panel's rhythm whatever
@@ -1591,10 +1606,12 @@ button.chat-box:focus-visible {
   background: var(--color-line);
 }
 
-/* Where reading stopped. It carries the accent because it is the one line in a long transcript a
-   returning reader is looking for. */
+/* Where reading stopped: the one line in a long transcript a returning reader is looking for. The
+   accent is carried by the hairlines rather than the word, because `accent-edge` is an edge token —
+   it is not lifted for the dark theme, and as small uppercase text on canvas it falls under the
+   contrast floor on every accent preset. The word stays at full foreground contrast. */
 .chat-sep--new {
-  color: var(--color-accent-edge);
+  color: var(--color-fg);
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-wide);
   text-transform: uppercase;

@@ -517,7 +517,7 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .crow__title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .crow__slug { flex: 0 0 auto; white-space: nowrap; font-family: var(--font-mono); font-size: var(--text-xs); font-weight: 400; color: var(--color-faint); }
 .crow__name .invalid { font-size: 10px; }
-.crow__labels { display: flex; flex: 1 1 auto; align-items: center; gap: 4px; min-width: 0; overflow: visible; }
+.crow__labels { display: flex; flex: 1 1 auto; align-items: center; gap: 4px; min-width: 0; max-width: 100%; overflow: visible; }
 .crow__labels--relative .crow__label { border-color: transparent; background: transparent; color: var(--color-faint); padding-inline: 2px; }
 .crow__label { display: inline-flex; flex: 0 1 auto; align-items: center; min-width: 0; max-width: 140px; height: 18px; padding: 0 6px;
   border: 1px solid var(--color-line); border-radius: var(--radius-sm); background: var(--color-surface-sunken);
@@ -940,15 +940,20 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .cpal__hint { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--color-faint); }
 .cpal__hint .k { font-family: var(--font-mono); border: 1px solid var(--color-line); border-radius: 3px; padding: 0 4px; min-width: 16px; text-align: center; }
 
-/* The dense table sheds its least load-bearing columns before it sheds its shape. */
+/* The dense table sheds its least load-bearing columns before it sheds its shape. Scoped to the
+   workspace list: the archived list reuses these class names with a grid of its own. */
 @media (max-width: 860px) {
-  .chead, .crow { grid-template-columns: minmax(150px, 1fr) minmax(0, 160px) 70px; }
-  .chead > .r, .crow > .when { display: none; }
+  .clist .chead, .clist .crow:not(.crow--archived) {
+    grid-template-columns: minmax(150px, 1fr) minmax(0, 160px) 70px;
+  }
+  .clist .chead > .r, .clist .crow:not(.crow--archived) > .when { display: none; }
 }
 
 @media (max-width: 700px) {
-  .chead, .crow { grid-template-columns: minmax(150px, 1fr) minmax(0, 140px); }
-  .chead > span:nth-child(3), .crow > .people { display: none; }
+  .clist .chead, .clist .crow:not(.crow--archived) {
+    grid-template-columns: minmax(150px, 1fr) minmax(0, 140px);
+  }
+  .clist .chead > span:nth-child(3), .clist .crow:not(.crow--archived) > .people { display: none; }
 }
 
 @media (max-width: 820px) {

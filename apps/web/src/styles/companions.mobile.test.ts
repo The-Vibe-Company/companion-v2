@@ -176,6 +176,17 @@ describe("Companions mobile viewport", () => {
     expect(declarationsFor(".chat-head > *")[0]).toContain("flex: none;");
   });
 
+  it("keeps the new-message divider readable in every theme", () => {
+    // `accent-edge` is an edge token: it is not lifted for the dark theme, and as small uppercase
+    // text on canvas it falls under the contrast floor on every accent preset. The accent stays on
+    // the hairlines; the word this divider exists for stays at full foreground contrast.
+    const [declarations] = declarationsFor(".chat-sep--new");
+    expect(declarations).toContain("color: var(--color-fg);");
+    expect(declarations).not.toContain("var(--color-accent-edge)");
+    expect(declarationsFor(".chat-sep--new::before")[0] ?? "")
+      .toContain("var(--color-accent-line)");
+  });
+
   it("keeps the plugin row's named areas off the catalog card", () => {
     // Both surfaces use `.companions-plugin-icon`. Unscoped, `grid-area: icon` placed the card's icon
     // in an implicit track of its own: the card grew two empty columns, the description was squeezed

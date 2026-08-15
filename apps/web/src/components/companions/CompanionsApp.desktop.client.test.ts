@@ -610,7 +610,7 @@ describe("CompanionsApp context panel", () => {
     // The sidebar moves between threads without closing the panel, so the panel has to follow the
     // Companion rather than keep the screen it was already showing.
     const row = [...container.querySelectorAll(".cmprow")]
-      .find((button) => (button.getAttribute("aria-label") ?? "").startsWith("Nova")) as HTMLButtonElement;
+      .find((button) => button.querySelector(".cmprow__name")?.textContent === "Nova") as HTMLButtonElement;
     await act(async () => {
       row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });

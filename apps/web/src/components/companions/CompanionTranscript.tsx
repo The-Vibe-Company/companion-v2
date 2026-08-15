@@ -38,9 +38,11 @@ import { Icon } from "../Icon";
 import { decideCompanionDecision } from "../../lib/companions";
 import {
   composerHint,
+  localDay,
   replyExpected,
   transcriptDisplayContent,
   transcriptTurns,
+  utcDay,
   type TranscriptTurn,
 } from "./transcript";
 
@@ -114,8 +116,9 @@ const TurnText: TextMessagePartComponent = ({ text }) => <p className="chat-turn
 const TEXT_ONLY = { Text: TurnText };
 
 /**
- * The stored UTC day, reformatted to the reader's clock. Server markup keeps the stable key so both
- * renders agree on where the separator goes; the friendly form arrives with the client's clock.
+ * One day separator. The key is already the day this turn belongs to — the stored one on the server,
+ * the reader's own once the client has a clock — and is read back at midday UTC so the round trip
+ * cannot shift it. Only the label gets friendlier after mount.
  */
 function DaySeparator({ day }: { day: string }) {
   const [text, setText] = useState(day);
@@ -554,14 +557,23 @@ export function CompanionTranscript({
     onThread(next);
   }, [companion.id, onThread, orgId]);
 
+  /**
+   * Which calendar the day separators belong to. Server markup has no reader clock, so it groups by
+   * the stored UTC day and both renders agree; the client then regroups by the reader's own day, so
+   * a separator never names a date the timestamps under it contradict.
+   */
+  const [dayOf, setDayOf] = useState<(iso: string) => string>(() => utcDay);
+  useEffect(() => setDayOf(() => localDay), []);
+
   const turns = useMemo(
     () => transcriptTurns(messages, {
       viewerId,
       companionName: companion.name,
       sendingEventId: outgoing?.event_id ?? null,
       lastReadOrdinal: lastReadOrdinal ?? null,
+      dayOf,
     }),
-    [companion.name, lastReadOrdinal, messages, outgoing, viewerId],
+    [companion.name, dayOf, lastReadOrdinal, messages, outgoing, viewerId],
   );
   const turnsById = useMemo(
     () => new Map(turns.map((turn) => [turn.entry.event_id, turn])),
