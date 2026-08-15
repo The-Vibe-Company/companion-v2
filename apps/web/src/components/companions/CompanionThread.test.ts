@@ -17,6 +17,9 @@ function companion(overrides: Partial<Companion> = {}): Companion {
     selected_mcp_account_ids: [],
     owner_id: "user-1",
     access: "owner",
+    pinned: false,
+    hidden: false,
+    unread: false,
     runtime: {
       state: "running",
       daemon_state: "running",
@@ -157,7 +160,7 @@ describe("CompanionThread", () => {
     expect(text(markup)).toContain("Box · online");
   });
 
-  it("keeps Pi tools and Skills out of the thread surface", () => {
+  it("keeps runtime tools and Skills out of the thread surface", () => {
     const markup = render({
       thread: thread({
         entries: [
@@ -178,7 +181,9 @@ describe("CompanionThread", () => {
       }),
     });
 
-    expect(markup).toContain("The run stopped before Pi replied.");
+    // A note speaks about the Companion whose thread this is, not about Pi's runtime name.
+    expect(markup).toContain("The run stopped before Luna replied.");
+    expect(markup).not.toContain("The run stopped before Pi replied.");
     // Read from everything a person can perceive — text and accessible names both. Only the class
     // names and data attributes are dropped, because that is the component library talking to
     // itself, and one of them says `tooltip` without offering anyone a Pi tool.
@@ -305,6 +310,9 @@ describe("CompanionThread", () => {
     const markup = render({
       companion: companion({
         access: "viewer",
+        pinned: false,
+        hidden: false,
+        unread: false,
         runtime: {
           ...companion().runtime,
           state: "error",

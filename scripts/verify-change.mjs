@@ -121,6 +121,17 @@ function requiresQuality(file) {
   return classifyFiles([file]).quality;
 }
 
+function requiresDevStackCheck(file) {
+  return [
+    ".conductor/settings.toml",
+    "docker-compose.yml",
+    "scripts/dev-conductor.sh",
+    "scripts/dev-stack-check.sh",
+    "scripts/dev-stack.sh",
+    "scripts/setup-conductor.sh",
+  ].includes(file);
+}
+
 export function affectedWorkspaceNames(files, scope, workspaces) {
   if (scope.full) return [];
   const names = new Set();
@@ -153,6 +164,9 @@ export function createVerificationPlan(files, { workspaces = [], env = process.e
 
   if (files.length > 0) {
     fastSteps.push(step("hygiene", "node", ["--test", ...HYGIENE_TESTS]));
+  }
+  if (files.some(requiresDevStackCheck)) {
+    fastSteps.push(step("dev-stack", "bash", ["scripts/dev-stack-check.sh"]));
   }
   if (scope.design) {
     fastSteps.push(step("design", "pnpm", ["design:lint"]));

@@ -5,7 +5,7 @@ import type {
   CompanionTranscriptEntry,
 } from "@companion/contracts";
 import type { ThreadMessageLike } from "@assistant-ui/react";
-import { transcriptAuthor } from "./transcript";
+import { transcriptAuthor, transcriptDisplayContent } from "./transcript";
 
 /**
  * The transcript is a flat log of entries — a message, a reply, a tool run, a permission card — and
@@ -49,6 +49,12 @@ export interface TranscriptMessage {
   sending: boolean;
   /** The first source entry's timestamp: when the passage this message may open began. */
   createdAt: string;
+  /**
+   * A note as the reader should see it. The control plane stores what Pi's runtime called itself,
+   * but the transcript speaks about the Companion whose thread this is, and follows a rename. Null
+   * on everything else: a reply and a tool run stay literal even when they mention Pi themselves.
+   */
+  displayContent: string | null;
   /** The entries this message was built from, in transcript order. */
   entries: readonly CompanionTranscriptEntry[];
 }
@@ -114,6 +120,9 @@ export function groupTranscriptEntries(
       sending: context.sendingEventId != null
         && grouped.some((entry) => entry.event_id === context.sendingEventId),
       createdAt: first.created_at,
+      displayContent: role === "system"
+        ? transcriptDisplayContent(first, context.companionName)
+        : null,
       entries: grouped,
     });
   };
@@ -197,7 +206,9 @@ function partsOf(entry: CompanionTranscriptEntry): MessagePart[] {
  * drops empty text again on its way in, and a turn with nothing to show cannot be projected anyway.
  */
 export function toThreadMessageLike(group: TranscriptMessage): ThreadMessageLike {
-  const content = group.entries.flatMap(partsOf);
+  const content = group.displayContent === null
+    ? group.entries.flatMap(partsOf)
+    : [{ type: "text" as const, text: group.displayContent }];
   return {
     id: group.id,
     role: group.role,
@@ -260,6 +271,7 @@ function sameGroup(kept: TranscriptMessage, next: TranscriptMessage): boolean {
     && kept.lead === next.lead
     && kept.sending === next.sending
     && kept.createdAt === next.createdAt
+    && kept.displayContent === next.displayContent
     && kept.entries.length === next.entries.length
     && kept.entries.every((entry, index) => entry === next.entries[index]);
 }

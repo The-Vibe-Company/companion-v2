@@ -307,7 +307,8 @@ describe("converting a message for the thread", () => {
     })]);
     const member = rendered([said("Ship it", { reasoning: "should never be shown" })]);
 
-    expect(note[0]?.parts).toEqual(["text:Pi ended the turn without a visible reply."]);
+    // Renamed on the way out, because a note speaks about the Companion rather than about Pi.
+    expect(note[0]?.parts).toEqual(["text:Luna ended the turn without a visible reply."]);
     expect(member[0]?.parts).toEqual(["text:Ship it"]);
   });
 

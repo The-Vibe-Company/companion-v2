@@ -190,6 +190,13 @@ export const companionSchema = z.object({
   selected_mcp_account_ids: companionSelectedMcpAccountIdsSchema,
   owner_id: z.string(),
   access: companionAccessSchema,
+  /**
+   * Member-private list flags (THE-351). Pin/hide/unread belong to the reader, so Viewer and Owner
+   * each keep their own roster order and badges. Hide never archives the Companion.
+   */
+  pinned: z.boolean(),
+  hidden: z.boolean(),
+  unread: z.boolean(),
   runtime: z.object({
     state: companionRuntimeStateSchema,
     daemon_state: companionDaemonStateSchema,
@@ -440,6 +447,20 @@ export const createCompanionInputSchema = z.object({
   selected_mcp_account_ids: companionSelectedMcpAccountIdsSchema.optional(),
 }).strict();
 export type CreateCompanionInput = z.infer<typeof createCompanionInputSchema>;
+
+/**
+ * Per-member Companions list preferences. Omitting a field leaves it unchanged. `unread: true`
+ * marks the thread unread; `unread: false` clears the badge the same way opening the thread does.
+ */
+export const updateCompanionMemberStateInputSchema = z.object({
+  pinned: z.boolean().optional(),
+  hidden: z.boolean().optional(),
+  unread: z.boolean().optional(),
+}).strict().refine(
+  (body) => body.pinned !== undefined || body.hidden !== undefined || body.unread !== undefined,
+  { message: "at least one of pinned, hidden, or unread is required" },
+);
+export type UpdateCompanionMemberStateInput = z.infer<typeof updateCompanionMemberStateInputSchema>;
 
 export const updateCompanionInputSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),

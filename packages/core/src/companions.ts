@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, inArray, lt, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lt, max, notInArray, or, sql } from "drizzle-orm";
 import type {
   Companion,
   CompanionAccess,
@@ -19,6 +19,7 @@ import type {
   CompanionShares,
   CompanionThread,
   CompanionTranscriptEntry,
+  UpdateCompanionMemberStateInput,
 } from "@companion/contracts";
 import {
   COMPANION_PROVIDER_CATALOG,
@@ -200,6 +201,13 @@ export class CompanionWriteSkillsForbiddenError extends Error {
   }
 }
 
+export class CompanionDuplicateForbiddenError extends Error {
+  constructor(message = "Only the Companion owner can duplicate this Companion") {
+    super(message);
+    this.name = "CompanionDuplicateForbiddenError";
+  }
+}
+
 /**
  * Access is the owner, otherwise the workspace-wide grant. Per-member grants were cut in THE-329, so
  * authorization ignores any that a not-yet-run migration left behind: a stale row can never open a
@@ -218,7 +226,15 @@ export function canWakeCompanion(access: CompanionAccess): boolean {
   return access === "owner" || access === "editor";
 }
 
-function toCompanion(row: CompanionRow, access: CompanionAccess): Companion {
+function toCompanion(
+  row: CompanionRow,
+  access: CompanionAccess,
+  member: { pinned: boolean; hidden: boolean; unread: boolean } = {
+    pinned: false,
+    hidden: false,
+    unread: false,
+  },
+): Companion {
   const providerId = row.providerIds[0];
   const modelId = row.modelId ?? (providerId ? companionProviderDefaultModel(providerId) : undefined);
   return {
@@ -233,6 +249,9 @@ function toCompanion(row: CompanionRow, access: CompanionAccess): Companion {
       : [],
     owner_id: row.ownerId,
     access,
+    pinned: member.pinned,
+    hidden: member.hidden,
+    unread: member.unread,
     runtime: {
       state: row.runtimeState,
       daemon_state: row.daemonState,
@@ -255,6 +274,105 @@ function toCompanion(row: CompanionRow, access: CompanionAccess): Companion {
   };
 }
 
+function memberFromCompanion(companion: Pick<Companion, "pinned" | "hidden" | "unread">): {
+  pinned: boolean;
+  hidden: boolean;
+  unread: boolean;
+} {
+  return {
+    pinned: companion.pinned,
+    hidden: companion.hidden,
+    unread: companion.unread,
+  };
+}
+
+type MemberStateRow = {
+  companionId: string;
+  pinnedAt: Date | null;
+  hidden: boolean;
+  lastReadOrdinal: number | null;
+};
+
+function memberFlags(
+  state: MemberStateRow | undefined,
+  highestOrdinal: number | null,
+): { pinned: boolean; hidden: boolean; unread: boolean } {
+  const lastRead = state?.lastReadOrdinal ?? -1;
+  const highest = highestOrdinal ?? -1;
+  return {
+    pinned: state?.pinnedAt != null,
+    hidden: state?.hidden === true,
+    unread: highest > lastRead,
+  };
+}
+
+function sortCompanionsForMember(
+  companions: Companion[],
+  pinnedAtById: Map<string, Date>,
+): Companion[] {
+  return [...companions].sort((left, right) => {
+    const leftPinned = left.pinned ? pinnedAtById.get(left.id)?.getTime() ?? 0 : null;
+    const rightPinned = right.pinned ? pinnedAtById.get(right.id)?.getTime() ?? 0 : null;
+    if (leftPinned !== null && rightPinned === null) return -1;
+    if (leftPinned === null && rightPinned !== null) return 1;
+    if (leftPinned !== null && rightPinned !== null && leftPinned !== rightPinned) {
+      return leftPinned - rightPinned;
+    }
+    const updated = Date.parse(right.updated_at) - Date.parse(left.updated_at);
+    if (updated !== 0) return updated;
+    return left.name.localeCompare(right.name, "en-US");
+  });
+}
+
+async function loadMemberStates(
+  database: Db,
+  orgId: string,
+  actorId: string,
+  companionIds: string[],
+): Promise<Map<string, MemberStateRow>> {
+  const states = new Map<string, MemberStateRow>();
+  if (!companionIds.length) return states;
+  const rows = await database
+    .select({
+      companionId: schema.companionMemberState.companionId,
+      pinnedAt: schema.companionMemberState.pinnedAt,
+      hidden: schema.companionMemberState.hidden,
+      lastReadOrdinal: schema.companionMemberState.lastReadOrdinal,
+    })
+    .from(schema.companionMemberState)
+    .where(and(
+      eq(schema.companionMemberState.orgId, orgId),
+      eq(schema.companionMemberState.userId, actorId),
+      inArray(schema.companionMemberState.companionId, companionIds),
+    ));
+  for (const row of rows) states.set(row.companionId, row);
+  return states;
+}
+
+async function loadHighestTranscriptOrdinals(
+  database: Db,
+  orgId: string,
+  companionIds: string[],
+): Promise<Map<string, number>> {
+  const highest = new Map<string, number>();
+  if (!companionIds.length) return highest;
+  const rows = await database
+    .select({
+      companionId: schema.companionTranscriptEntries.companionId,
+      highestOrdinal: max(schema.companionTranscriptEntries.ordinal),
+    })
+    .from(schema.companionTranscriptEntries)
+    .where(and(
+      eq(schema.companionTranscriptEntries.orgId, orgId),
+      inArray(schema.companionTranscriptEntries.companionId, companionIds),
+    ))
+    .groupBy(schema.companionTranscriptEntries.companionId);
+  for (const row of rows) {
+    if (row.highestOrdinal != null) highest.set(row.companionId, row.highestOrdinal);
+  }
+  return highest;
+}
+
 async function loadCompanionAccess(
   database: Db,
   row: Pick<CompanionRow, "id" | "ownerId">,
@@ -266,6 +384,24 @@ async function loadCompanionAccess(
     columns: { role: true },
   });
   return companionAccessForActor(row, actorId, workspaceGrant?.role ?? null);
+}
+
+async function companionWithMemberState(input: {
+  database: Db;
+  actorId: string;
+  orgId: string;
+  row: CompanionRow;
+  access: CompanionAccess;
+}): Promise<Companion> {
+  const [states, highest] = await Promise.all([
+    loadMemberStates(input.database, input.orgId, input.actorId, [input.row.id]),
+    loadHighestTranscriptOrdinals(input.database, input.orgId, [input.row.id]),
+  ]);
+  return toCompanion(
+    input.row,
+    input.access,
+    memberFlags(states.get(input.row.id), highest.get(input.row.id) ?? null),
+  );
 }
 
 export async function listCompanions(input: {
@@ -280,11 +416,23 @@ export async function listCompanions(input: {
     .from(schema.companions)
     .where(eq(schema.companions.orgId, input.orgId))
     .orderBy(desc(schema.companions.updatedAt));
-  const visible = await Promise.all(rows.map(async (row) => {
+  const accessible: Array<{ row: CompanionRow; access: CompanionAccess }> = [];
+  for (const row of rows) {
     const access = await loadCompanionAccess(database, row, input.actor.id);
-    return access ? toCompanion(row, access) : null;
-  }));
-  return visible.filter((item): item is Companion => item !== null);
+    if (access) accessible.push({ row, access });
+  }
+  const companionIds = accessible.map((item) => item.row.id);
+  const [states, highest] = await Promise.all([
+    loadMemberStates(database, input.orgId, input.actor.id, companionIds),
+    loadHighestTranscriptOrdinals(database, input.orgId, companionIds),
+  ]);
+  const pinnedAtById = new Map<string, Date>();
+  const companions = accessible.map(({ row, access }) => {
+    const state = states.get(row.id);
+    if (state?.pinnedAt) pinnedAtById.set(row.id, state.pinnedAt);
+    return toCompanion(row, access, memberFlags(state, highest.get(row.id) ?? null));
+  });
+  return sortCompanionsForMember(companions, pinnedAtById);
 }
 
 export async function getCompanion(input: {
@@ -303,7 +451,13 @@ export async function getCompanion(input: {
   if (!row) throw new CompanionNotFoundError();
   const access = await loadCompanionAccess(database, row, input.actor.id);
   if (!access) throw new CompanionNotFoundError();
-  return toCompanion(row, access);
+  return companionWithMemberState({
+    database,
+    actorId: input.actor.id,
+    orgId: input.orgId,
+    row,
+    access,
+  });
 }
 
 /**
@@ -486,6 +640,180 @@ export async function createCompanion(input: {
   return toCompanion(row, "owner");
 }
 
+function duplicateCompanionName(name: string): string {
+  const suffix = " (copy)";
+  if (name.length + suffix.length <= 120) return `${name}${suffix}`;
+  return `${name.slice(0, Math.max(1, 120 - suffix.length))}${suffix}`;
+}
+
+/**
+ * Owner-only clone of name / instructions / model / skill selection / plugin selection into a new
+ * Companion with a new Box. Workspace share is never copied (THE-329).
+ */
+export async function duplicateCompanion(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  providerCatalog?: CompanionProviderDefinition[];
+  database?: Db;
+}): Promise<Companion> {
+  const database = input.database ?? db;
+  const source = await getCompanion({ ...input, database });
+  if (source.access !== "owner") throw new CompanionDuplicateForbiddenError();
+  const providerId = source.runtime.provider_ids[0];
+  if (!providerId || !source.model_id) {
+    throw new CompanionProviderError(
+      "provider_not_configured",
+      "This Companion needs a connected provider and model before it can be duplicated.",
+      providerId ?? null,
+    );
+  }
+  const cloned = await createCompanion({
+    actor: input.actor,
+    orgId: input.orgId,
+    name: duplicateCompanionName(source.name),
+    persona: source.persona ?? undefined,
+    providerId,
+    modelId: source.model_id,
+    selectedSkillIds: source.selected_skill_ids,
+    canWriteSkills: source.can_write_skills,
+    selectedMcpAccountIds: source.selected_mcp_account_ids,
+    providerCatalog: input.providerCatalog,
+    database,
+  });
+  await database.insert(schema.auditLog).values({
+    orgId: input.orgId,
+    actorId: input.actor.id,
+    action: "companion.duplicated",
+    targetType: "companion",
+    targetId: cloned.id,
+    metadata: { source_companion_id: source.id },
+  });
+  return cloned;
+}
+
+async function upsertCompanionMemberState(input: {
+  database: Db;
+  orgId: string;
+  companionId: string;
+  userId: string;
+  pinnedAt?: Date | null;
+  hidden?: boolean;
+  lastReadOrdinal?: number | null;
+}): Promise<void> {
+  const existing = await input.database.query.companionMemberState.findFirst({
+    where: and(
+      eq(schema.companionMemberState.companionId, input.companionId),
+      eq(schema.companionMemberState.userId, input.userId),
+    ),
+    columns: {
+      pinnedAt: true,
+      hidden: true,
+      lastReadOrdinal: true,
+    },
+  });
+  const pinnedAt = input.pinnedAt !== undefined ? input.pinnedAt : (existing?.pinnedAt ?? null);
+  const hidden = input.hidden !== undefined ? input.hidden : (existing?.hidden ?? false);
+  const lastReadOrdinal = input.lastReadOrdinal !== undefined
+    ? input.lastReadOrdinal
+    : (existing?.lastReadOrdinal ?? null);
+  await input.database
+    .insert(schema.companionMemberState)
+    .values({
+      orgId: input.orgId,
+      companionId: input.companionId,
+      userId: input.userId,
+      pinnedAt,
+      hidden,
+      lastReadOrdinal,
+    })
+    .onConflictDoUpdate({
+      target: [
+        schema.companionMemberState.companionId,
+        schema.companionMemberState.userId,
+      ],
+      set: {
+        pinnedAt,
+        hidden,
+        lastReadOrdinal,
+        updatedAt: new Date(),
+      },
+    });
+}
+
+/**
+ * Advance this member's unread watermark to the thread's highest ordinal. Opening or syncing the
+ * thread clears the badge for Viewer and Owner alike.
+ */
+export async function markCompanionThreadRead(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  database?: Db;
+}): Promise<void> {
+  const database = input.database ?? db;
+  await getCompanion({ ...input, database });
+  const highest = await loadHighestTranscriptOrdinals(database, input.orgId, [input.companionId]);
+  const ordinal = highest.get(input.companionId);
+  if (ordinal == null) return;
+  await upsertCompanionMemberState({
+    database,
+    orgId: input.orgId,
+    companionId: input.companionId,
+    userId: input.actor.id,
+    lastReadOrdinal: ordinal,
+  });
+}
+
+/**
+ * Persist pin / hide / mark-unread for the current member. Any member who can see the Companion may
+ * change these preferences; they never alter the Companion row, Box, or workspace share.
+ */
+export async function updateCompanionMemberState(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  patch: UpdateCompanionMemberStateInput;
+  database?: Db;
+}): Promise<Companion> {
+  const database = input.database ?? db;
+  const companion = await getCompanion({ ...input, database });
+  const highest = await loadHighestTranscriptOrdinals(database, input.orgId, [input.companionId]);
+  const highestOrdinal = highest.get(input.companionId) ?? null;
+
+  let pinnedAt: Date | null | undefined;
+  if (input.patch.pinned === true) {
+    pinnedAt = companion.pinned
+      ? (await loadMemberStates(database, input.orgId, input.actor.id, [input.companionId]))
+        .get(input.companionId)?.pinnedAt ?? new Date()
+      : new Date();
+  } else if (input.patch.pinned === false) {
+    pinnedAt = null;
+  }
+
+  let lastReadOrdinal: number | null | undefined;
+  if (input.patch.unread === true) {
+    // Push the watermark behind the latest entry so the badge returns until the member opens again.
+    lastReadOrdinal = highestOrdinal == null || highestOrdinal === 0
+      ? null
+      : highestOrdinal - 1;
+  } else if (input.patch.unread === false) {
+    lastReadOrdinal = highestOrdinal;
+  }
+
+  await upsertCompanionMemberState({
+    database,
+    orgId: input.orgId,
+    companionId: input.companionId,
+    userId: input.actor.id,
+    ...(pinnedAt !== undefined ? { pinnedAt } : {}),
+    ...(input.patch.hidden !== undefined ? { hidden: input.patch.hidden } : {}),
+    ...(lastReadOrdinal !== undefined ? { lastReadOrdinal } : {}),
+  });
+
+  return getCompanion({ ...input, database });
+}
+
 export async function updateCompanion(input: {
   actor: ActorContext;
   orgId: string;
@@ -606,7 +934,7 @@ export async function updateCompanion(input: {
       selected_mcp_accounts: selectedMcpAccountIds !== undefined,
     },
   });
-  return toCompanion(row, companion.access);
+  return toCompanion(row, companion.access, memberFromCompanion(companion));
 }
 
 /**
@@ -881,6 +1209,7 @@ export async function getCompanionThread(input: {
     readCompanionThreadRow(database, input.orgId, input.companionId),
     readCompanionTranscript(database, input.orgId, input.companionId),
   ]);
+  await markCompanionThreadRead({ ...input, database });
   return toThread({ actor: input.actor, companion, row, entries });
 }
 
@@ -955,6 +1284,12 @@ export async function sendCompanionMessage(input: {
     readCompanionThreadRow(database, input.orgId, input.companionId),
     readCompanionTranscript(database, input.orgId, input.companionId),
   ]);
+  await markCompanionThreadRead({
+    actor: input.actor,
+    orgId: input.orgId,
+    companionId: input.companionId,
+    database,
+  });
   const thread = toThread({ actor: input.actor, companion, row, entries });
   const entry = entries.find((item) => item.event_id === eventId);
   if (!entry) throw new Error("failed to persist companion message");
@@ -2168,7 +2503,7 @@ export async function updateCompanionRuntime(input: {
     throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
   }
   if (!row) throw new CompanionNotFoundError();
-  return toCompanion(row, current.access);
+  return toCompanion(row, current.access, memberFromCompanion(current));
 }
 
 /**
@@ -2205,7 +2540,7 @@ export async function updateCompanionObservation(input: {
       notInArray(schema.companions.runtimeState, ["provisioning", "stopping"]),
     ))
     .returning();
-  if (row) return toCompanion(row, current.access);
+  if (row) return toCompanion(row, current.access, memberFromCompanion(current));
   return getCompanionForRuntime({ ...input, database });
 }
 
@@ -2231,7 +2566,7 @@ export async function claimCompanionRuntimeStart(input: {
       eq(schema.companions.runtimeState, "not_created"),
     ))
     .returning();
-  if (row) return toCompanion(row, currentAccess.access);
+  if (row) return toCompanion(row, currentAccess.access, memberFromCompanion(currentAccess));
 
   const current = await getCompanionForRuntime({ ...input, database });
   const transitional =
@@ -2258,7 +2593,7 @@ export async function claimCompanionRuntimeStart(input: {
     ))
     .returning();
   if (!claimed) throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
-  return toCompanion(claimed, current.access);
+  return toCompanion(claimed, current.access, memberFromCompanion(current));
 }
 
 export async function claimCompanionRuntimeStop(input: {
@@ -2289,6 +2624,6 @@ export async function claimCompanionRuntimeStop(input: {
     ))
     .returning();
   if (!claimed) throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
-  return toCompanion(claimed, current.access);
+  return toCompanion(claimed, current.access, memberFromCompanion(current));
 }
 

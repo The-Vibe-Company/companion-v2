@@ -120,6 +120,22 @@ if [ "${CONDUCTOR_IS_LOCAL:-}" = "0" ]; then
   CONDUCTOR_IS_CLOUD=true
 fi
 
+if [ "$CONDUCTOR_IS_CLOUD" = true ]; then
+  LSOF_INSTALL_HINT="sudo dnf install -y lsof"
+  POSTGRES_INSTALL_HINT="sudo dnf install -y postgresql17 postgresql17-server"
+  MINIO_MISSING_MESSAGE="minio not installed in this cloud setup — S3 storage disabled (skill uploads/downloads will fail)"
+  MAILPIT_MISSING_MESSAGE="mailpit not installed in this cloud setup — email falls back to console log (EMAIL_PROVIDER=log)"
+  MINIO_DISABLED_MESSAGE="disabled in this cloud setup — S3 uploads unavailable"
+  MAILPIT_DISABLED_MESSAGE="console log (Mailpit not installed in this cloud setup)"
+else
+  LSOF_INSTALL_HINT="brew install lsof"
+  POSTGRES_INSTALL_HINT="brew install postgresql@17"
+  MINIO_MISSING_MESSAGE="minio not installed — S3 storage disabled (skill uploads/downloads will fail). brew install minio"
+  MAILPIT_MISSING_MESSAGE="mailpit not installed — email falls back to console log (EMAIL_PROVIDER=log). brew install mailpit"
+  MINIO_DISABLED_MESSAGE="disabled (brew install minio) — S3 uploads unavailable"
+  MAILPIT_DISABLED_MESSAGE="console log (brew install mailpit for a mailbox)"
+fi
+
 if [ -n "$BASE_OVERRIDE" ]; then
   BASE="$BASE_OVERRIDE"
 elif [ -n "${CONDUCTOR_PORT:-}" ]; then
@@ -373,7 +389,7 @@ check_prerequisites() {
   step "Checking prerequisites"
   require_command node "install Node.js >= 20"
   require_command pnpm "corepack enable && corepack prepare pnpm@9 --activate"
-  require_command lsof "brew install lsof (macOS) / apt-get install lsof (Debian)"
+  require_command lsof "$LSOF_INSTALL_HINT"
   ok "node $(node -v)"
   ok "pnpm $(pnpm --version)"
 
@@ -388,21 +404,21 @@ check_prerequisites() {
   ok "Workspace dependencies ready"
 
   PG_BIN="$(detect_pg_bin || true)"
-  [ -n "$PG_BIN" ] || die "Postgres binaries not found. Install: brew install postgresql@17"
+  [ -n "$PG_BIN" ] || die "Postgres binaries not found. Install: $POSTGRES_INSTALL_HINT"
   ok "postgres $("$PG_BIN/postgres" --version | awk '{print $3}') (${PG_BIN})"
 
   if command -v minio >/dev/null 2>&1; then
     HAS_MINIO=true
     ok "minio"
   else
-    warn "minio not installed — S3 storage disabled (skill uploads/downloads will fail). brew install minio"
+    warn "$MINIO_MISSING_MESSAGE"
   fi
 
   if command -v mailpit >/dev/null 2>&1; then
     HAS_MAILPIT=true
     ok "mailpit"
   else
-    warn "mailpit not installed — email falls back to console log (EMAIL_PROVIDER=log). brew install mailpit"
+    warn "$MAILPIT_MISSING_MESSAGE"
   fi
 }
 
@@ -682,12 +698,12 @@ print_header() {
   if [ "$HAS_MINIO" = true ]; then
     printf '  %sMinIO%s      %s (console http://127.0.0.1:%s)\n' "$DIM" "$RESET" "$S3_ENDPOINT" "$MINIO_CONSOLE_PORT"
   else
-    printf '  %sMinIO%s      disabled (brew install minio) — S3 uploads unavailable\n' "$DIM" "$RESET"
+    printf '  %sMinIO%s      %s\n' "$DIM" "$RESET" "$MINIO_DISABLED_MESSAGE"
   fi
   if [ "$HAS_MAILPIT" = true ]; then
     printf '  %sMailpit%s    http://127.0.0.1:%s (smtp %s)\n' "$DIM" "$RESET" "$MAILPIT_UI_PORT" "$MAILPIT_SMTP_PORT"
   else
-    printf '  %sEmail%s      console log (brew install mailpit for a mailbox)\n' "$DIM" "$RESET"
+    printf '  %sEmail%s      %s\n' "$DIM" "$RESET" "$MAILPIT_DISABLED_MESSAGE"
   fi
   printf '  %sCtrl+C%s     stop everything (apps + native services)\n\n' "$DIM" "$RESET"
 }
@@ -736,7 +752,7 @@ launch_apps() {
 cmd_run() {
   # Acquire ownership before installing cleanup traps. A duplicate invocation
   # must never tear down the services owned by the already-running launcher.
-  require_command lsof "brew install lsof (macOS) / apt-get install lsof (Debian)"
+  require_command lsof "$LSOF_INSTALL_HINT"
   acquire_run_lock
   trap cleanup EXIT
   # Conductor stops run scripts with SIGHUP before its final SIGKILL. Exiting
