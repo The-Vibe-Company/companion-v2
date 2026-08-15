@@ -273,8 +273,15 @@ export const companionToolRunKindSchema = z.enum(["shell", "file", "browse", "co
 export type CompanionToolRunKind = z.infer<typeof companionToolRunKindSchema>;
 
 /** A run is `running` until Pi reports its result; the chip spins until then. */
-export const companionToolRunStatusSchema = z.enum(["running", "ok", "error"]);
+export const companionToolRunStatusSchema = z.enum(["running", "ok", "error", "timeout"]);
 export type CompanionToolRunStatus = z.infer<typeof companionToolRunStatusSchema>;
+
+/**
+ * The longest one Pi tool may leave its transcript chip open without reporting a result. This is
+ * deliberately shorter than the two-minute failure seen in production: the staged Pi extension
+ * aborts the active turn while the control plane closes the chip without changing Box lifecycle.
+ */
+export const COMPANION_TOOL_RUN_TIMEOUT_MS = 90_000;
 
 /**
  * How much of a Box frame a transcript will carry. One downscaled JPEG per visual run stays inside
@@ -809,4 +816,3 @@ export const companionDesktopSchema = z.object({
   transport: companionDesktopTransportSchema.nullable(),
 }).strict();
 export type CompanionDesktop = z.infer<typeof companionDesktopSchema>;
-

@@ -26,7 +26,9 @@ const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
 // append staged Companion instructions. Layout 8 passes the persisted model through `pi --model`.
 // Layout 9 staged the permission broker for shell, file, and question cards. Layout 10 overwrites
 // that legacy filename with the ask_user-only extension so shell and file tools run unrestricted.
-export const COMPANION_PI_DISK_LAYOUT_VERSION = 10;
+// Layout 11 refuses image reads and bounds every non-interactive execution tool so a Pi vision/tool
+// stall cannot hold a turn open indefinitely.
+export const COMPANION_PI_DISK_LAYOUT_VERSION = 11;
 /** Content bytes the provider's file API refuses in one `PUT /boxes/:id/files` body. */
 const BOX_FILE_WRITE_LIMIT_BYTES = 5 * 1024 * 1024;
 /**
@@ -1309,8 +1311,8 @@ exit 0`,
   }
 
   /**
-   * Replace the legacy approval broker before layout 10 is published. If Pi naturally restarts at
-   * any later point in the migration, it can only load the ask_user-only extension from disk.
+   * Replace the legacy approval broker and stage the bounded guard before layout 11 is published.
+   * If Pi restarts during migration, it can only load the current unrestricted extension from disk.
    */
   async #stageCompanionInteractionExtension(boxId: string): Promise<void> {
     await this.#command(

@@ -33,7 +33,7 @@ import {
 import { db, schema, type Db } from "@companion/db";
 import { canManageOrg } from "./authz";
 import type { CompanionPiEntry, CompanionPiToolCompletion } from "./companionPiEvents";
-import { matchCompanionToolCompletions } from "./companionPiEvents";
+import { matchCompanionToolCompletions, timeoutCompanionToolRun } from "./companionPiEvents";
 import {
   companionRuntimeErrorForAccess,
   sanitizeCompanionRuntimeError,
@@ -1484,16 +1484,22 @@ type CompanionStoredToolRun = NonNullable<
   typeof schema.companionTranscriptEntries.$inferSelect["tool"]
 >;
 
+export interface CompanionSettledToolRun {
+  eventId: string;
+  kind: CompanionStoredToolRun["kind"];
+}
+
 /** Tool entries whose chip is still spinning, oldest first: the queue a result is matched against. */
 async function readRunningCompanionToolRuns(
   database: Db,
   orgId: string,
   companionId: string,
-): Promise<Array<{ eventId: string; tool: CompanionStoredToolRun }>> {
+): Promise<Array<{ eventId: string; tool: CompanionStoredToolRun; createdAt: Date }>> {
   const rows = await database
     .select({
       eventId: schema.companionTranscriptEntries.eventId,
       tool: schema.companionTranscriptEntries.tool,
+      createdAt: schema.companionTranscriptEntries.createdAt,
     })
     .from(schema.companionTranscriptEntries)
     .where(and(
@@ -1503,7 +1509,9 @@ async function readRunningCompanionToolRuns(
       sql`${schema.companionTranscriptEntries.tool}->>'status' = 'running'`,
     ))
     .orderBy(asc(schema.companionTranscriptEntries.ordinal));
-  return rows.flatMap((row) => (row.tool ? [{ eventId: row.eventId, tool: row.tool }] : []));
+  return rows.flatMap((row) => (row.tool
+    ? [{ eventId: row.eventId, tool: row.tool, createdAt: row.createdAt }]
+    : []));
 }
 
 /** Write the results Pi reported onto the chips still running for them. */
@@ -1512,24 +1520,80 @@ async function completeCompanionToolRuns(input: {
   orgId: string;
   companionId: string;
   completions: CompanionPiToolCompletion[];
-}): Promise<void> {
-  if (!input.completions.length) return;
+}): Promise<CompanionSettledToolRun[]> {
+  if (!input.completions.length) return [];
   const open = await readRunningCompanionToolRuns(
     input.database,
     input.orgId,
     input.companionId,
   );
   const settled = matchCompanionToolCompletions(open, input.completions);
+  const completed: CompanionSettledToolRun[] = [];
   for (const run of settled) {
-    await input.database
+    const updated = await input.database
       .update(schema.companionTranscriptEntries)
       .set({ tool: run.tool })
       .where(and(
         eq(schema.companionTranscriptEntries.orgId, input.orgId),
         eq(schema.companionTranscriptEntries.companionId, input.companionId),
         eq(schema.companionTranscriptEntries.eventId, run.eventId),
-      ));
+        sql`${schema.companionTranscriptEntries.tool}->>'status' = 'running'`,
+      ))
+      .returning({ eventId: schema.companionTranscriptEntries.eventId });
+    if (updated.length) {
+      const source = open.find((entry) => entry.eventId === run.eventId);
+      if (source) completed.push({ eventId: run.eventId, kind: source.tool.kind });
+    }
   }
+  return completed;
+}
+
+/**
+ * Fail closed any tool result Pi has owed for too long. This changes only the durable transcript
+ * projection. The staged Pi extension owns cancellation of the active operation, so this operation
+ * never sends an unscoped FIFO abort and never changes Box lifecycle state.
+ */
+export async function expireCompanionToolRuns(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  now?: Date;
+  database?: Db;
+}): Promise<{
+  thread: CompanionThread;
+  timedOut: CompanionSettledToolRun[];
+}> {
+  const database = input.database ?? db;
+  // Settlement is transcript-only and is safe for read-only viewers to trigger. It must not inherit
+  // runtime authorization because the viewer fallback is precisely where a Box must not be touched.
+  const companion = await getCompanion({ ...input, database });
+  const now = input.now ?? new Date();
+  const open = await readRunningCompanionToolRuns(database, input.orgId, input.companionId);
+  const timedOut: CompanionSettledToolRun[] = [];
+  for (const run of open.flatMap((entry) => {
+    const expired = timeoutCompanionToolRun(entry, now);
+    return expired ? [{ ...expired, kind: entry.tool.kind }] : [];
+  })) {
+    const updated = await database
+      .update(schema.companionTranscriptEntries)
+      .set({ tool: run.tool })
+      .where(and(
+        eq(schema.companionTranscriptEntries.orgId, input.orgId),
+        eq(schema.companionTranscriptEntries.companionId, input.companionId),
+        eq(schema.companionTranscriptEntries.eventId, run.eventId),
+        sql`${schema.companionTranscriptEntries.tool}->>'status' = 'running'`,
+      ))
+      .returning({ eventId: schema.companionTranscriptEntries.eventId });
+    if (updated.length) timedOut.push({ eventId: run.eventId, kind: run.kind });
+  }
+  const [row, entries] = await Promise.all([
+    readCompanionThreadRow(database, input.orgId, input.companionId),
+    readCompanionTranscript(database, input.orgId, input.companionId),
+  ]);
+  return {
+    thread: toThread({ actor: input.actor, companion, row, entries }),
+    timedOut,
+  };
 }
 
 /**
@@ -1566,11 +1630,7 @@ export async function attachCompanionToolRunScreenshot(input: {
   return toThread({ actor: input.actor, companion, row, entries });
 }
 
-/**
- * Append entries projected from the Pi RPC log and advance both watermarks. Pi is authoritative
- * while it runs; this idempotent sink only mirrors what it already produced and never wakes Box.
- */
-export async function recordCompanionPiProjection(input: {
+interface RecordCompanionPiProjectionInput {
   actor: ActorContext;
   orgId: string;
   companionId: string;
@@ -1582,7 +1642,17 @@ export async function recordCompanionPiProjection(input: {
   piLogRewound?: boolean;
   deliveredOrdinal?: number;
   database?: Db;
-}): Promise<CompanionThread> {
+}
+
+export interface CompanionPiProjectionResult {
+  thread: CompanionThread;
+  /** Runs this call actually changed from running to a Pi-reported terminal result. */
+  settledToolRuns: CompanionSettledToolRun[];
+}
+
+async function recordCompanionPiProjectionResult(
+  input: RecordCompanionPiProjectionInput,
+): Promise<CompanionPiProjectionResult> {
   const database = input.database ?? db;
   const companion = await getCompanionForRuntime({ ...input, database });
   if (input.entries.length) {
@@ -1611,7 +1681,7 @@ export async function recordCompanionPiProjection(input: {
   }
   // Results are applied after the inserts above, so a call and its result arriving in one chunk
   // settle in that one sync instead of leaving a chip spinning until the next one.
-  await completeCompanionToolRuns({
+  const settledToolRuns = await completeCompanionToolRuns({
     database,
     orgId: input.orgId,
     companionId: input.companionId,
@@ -1648,7 +1718,27 @@ export async function recordCompanionPiProjection(input: {
     readCompanionThreadRow(database, input.orgId, input.companionId),
     readCompanionTranscript(database, input.orgId, input.companionId),
   ]);
-  return toThread({ actor: input.actor, companion, row, entries });
+  return {
+    thread: toThread({ actor: input.actor, companion, row, entries }),
+    settledToolRuns,
+  };
+}
+
+/**
+ * Append entries projected from the Pi RPC log and advance both watermarks. Pi is authoritative
+ * while it runs; this idempotent sink only mirrors what it already produced and never wakes Box.
+ */
+export async function recordCompanionPiProjection(
+  input: RecordCompanionPiProjectionInput,
+): Promise<CompanionThread> {
+  return (await recordCompanionPiProjectionResult(input)).thread;
+}
+
+/** The same projection plus the exact run ids this call settled, for run-local frame capture. */
+export async function recordCompanionPiProjectionWithEffects(
+  input: RecordCompanionPiProjectionInput,
+): Promise<CompanionPiProjectionResult> {
+  return recordCompanionPiProjectionResult(input);
 }
 
 /** What the Box FIFO must receive so Pi unblocks a pending extension UI dialog. */
@@ -2735,4 +2825,3 @@ export async function claimCompanionRuntimeStop(input: {
   if (!claimed) throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
   return toCompanion(claimed, current.access, memberFromCompanion(current));
 }
-

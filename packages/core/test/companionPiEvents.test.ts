@@ -7,6 +7,7 @@ import {
 import {
   matchCompanionToolCompletions,
   projectCompanionPiEvents,
+  timeoutCompanionToolRun,
 } from "../src/companionPiEvents";
 
 function line(event: unknown): string {
@@ -402,6 +403,38 @@ describe("Pi tool result matching", () => {
     expect(settled?.tool.detail).toBe('{ "command": "ls" }\n\nlogs');
     // Everything the call itself said about the run is untouched by its result.
     expect(settled?.tool).toMatchObject({ kind: "shell", name: "bash", title: "ls" });
+  });
+
+  it("fails a run closed at 90 seconds when Pi never writes its result", () => {
+    const timedOut = timeoutCompanionToolRun({
+      ...run("read-1", {
+        call_id: "call-read",
+        kind: "file",
+        name: "read",
+        title: "/tmp/conductor-cli.png",
+      }),
+      createdAt: new Date(now.getTime() - 90_000),
+    }, now);
+
+    expect(timedOut).toMatchObject({
+      eventId: "read-1",
+      tool: {
+        status: "timeout",
+        title: "/tmp/conductor-cli.png",
+        detail: expect.stringContaining("Timed out after 90 seconds without a tool result."),
+      },
+    });
+  });
+
+  it("keeps a recent or already-settled run unchanged", () => {
+    expect(timeoutCompanionToolRun({
+      ...run("read-1", { name: "read" }),
+      createdAt: new Date(now.getTime() - 89_999),
+    }, now)).toBeNull();
+    expect(timeoutCompanionToolRun({
+      ...run("read-2", { name: "read", status: "ok" }),
+      createdAt: new Date(now.getTime() - 120_000),
+    }, now)).toBeNull();
   });
 });
 

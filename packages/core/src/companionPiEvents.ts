@@ -1,5 +1,6 @@
 import {
   COMPANION_REASONING_MAX_CHARACTERS,
+  COMPANION_TOOL_RUN_TIMEOUT_MS,
   type CompanionDecision,
   type CompanionDecisionKind,
   type CompanionToolRun,
@@ -47,6 +48,8 @@ const TRUNCATION_SUFFIX = "\n[truncated]";
 const MAX_TOOL_ARGUMENT_CHARACTERS = 4_000;
 const MAX_TOOL_RESULT_CHARACTERS = 8_000;
 const MAX_TOOL_TITLE_CHARACTERS = 300;
+const TOOL_RUN_TIMEOUT_DETAIL =
+  `Timed out after ${COMPANION_TOOL_RUN_TIMEOUT_MS / 1000} seconds without a tool result.`;
 /** The contract caps the stored reasoning, and a truncated one still has to fit under that cap. */
 const MAX_REASONING_CHARACTERS = COMPANION_REASONING_MAX_CHARACTERS - TRUNCATION_SUFFIX.length;
 /** Same window the Box permission-broker extension passes to Pi's UI dialogs. */
@@ -428,6 +431,23 @@ export function matchCompanionToolCompletions(
     });
   }
   return settled;
+}
+
+/** Close one run whose result Pi has owed past the shared wall-clock deadline. */
+export function timeoutCompanionToolRun(
+  run: { eventId: string; tool: CompanionToolRun; createdAt: Date },
+  now: Date,
+): { eventId: string; tool: CompanionToolRun } | null {
+  if (run.tool.status !== "running") return null;
+  if (now.getTime() - run.createdAt.getTime() < COMPANION_TOOL_RUN_TIMEOUT_MS) return null;
+  return {
+    eventId: run.eventId,
+    tool: {
+      ...run.tool,
+      status: "timeout",
+      detail: [run.tool.detail, TOOL_RUN_TIMEOUT_DETAIL].filter(Boolean).join("\n\n"),
+    },
+  };
 }
 
 /**

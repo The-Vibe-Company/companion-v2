@@ -5,6 +5,8 @@
  * `$PI_CODING_AGENT_DIR/extensions/` and projects the `extension_ui_request` events it emits.
  */
 
+import { COMPANION_TOOL_RUN_TIMEOUT_MS } from "@companion/contracts";
+
 /** Fail closed with the Box extension's own question timeout (5 minutes). Timeout → cancelled. */
 export const COMPANION_DECISION_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -19,6 +21,22 @@ export const COMPANION_PERMISSION_BROKER_EXTENSION_FILE = "companion-permission-
 /** Title the extension puts on extension_ui_request events: `companion:<kind>:<tool>`. */
 export const COMPANION_DECISION_TITLE_PATTERN =
   /^companion:(shell|file|question):([A-Za-z0-9._-]{1,120})$/;
+
+const COMPANION_IMAGE_READ_PATH_PATTERN = /\.(?:avif|bmp|gif|jpe?g|png|webp)(?:[?#].*)?$/i;
+export const COMPANION_IMAGE_READ_REFUSAL =
+  "Image reads are disabled in Companion. Use browse or computer; the visual run receives one Box desktop frame automatically.";
+
+/** The same fail-closed decision the staged Pi extension makes before its built-in read executes. */
+export function companionImageReadRefusal(
+  toolName: string,
+  input: Record<string, unknown>,
+): string | null {
+  if (toolName !== "read") return null;
+  const path = input.path ?? input.file_path ?? input.filePath ?? input.file;
+  return typeof path === "string" && COMPANION_IMAGE_READ_PATH_PATTERN.test(path.trim())
+    ? COMPANION_IMAGE_READ_REFUSAL
+    : null;
+}
 
 export function parseCompanionDecisionTitle(title: string): {
   kind: "shell" | "file" | "question";
@@ -48,12 +66,65 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 const DECISION_TIMEOUT_MS = ${COMPANION_DECISION_TIMEOUT_MS};
+const TOOL_TIMEOUT_MS = ${COMPANION_TOOL_RUN_TIMEOUT_MS};
+
+const IMAGE_PATH_PATTERN = /${COMPANION_IMAGE_READ_PATH_PATTERN.source}/${COMPANION_IMAGE_READ_PATH_PATTERN.flags};
+const toolTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+
+function clearToolTimeouts() {
+  for (const timeout of toolTimeouts.values()) clearTimeout(timeout);
+  toolTimeouts.clear();
+}
+
+function startToolTimeout(toolCallId: string, ctx: { abort(): void }) {
+  const existing = toolTimeouts.get(toolCallId);
+  if (existing) clearTimeout(existing);
+  toolTimeouts.set(toolCallId, setTimeout(() => {
+    // Pi may run sibling tools in parallel. One overdue tool aborts this turn, and every sibling
+    // timer must disappear with it so none can abort a later queued turn.
+    clearToolTimeouts();
+    ctx.abort();
+  }, TOOL_TIMEOUT_MS));
+}
 
 function decisionTitle(name: string): string {
   return \`companion:question:\${name}\`;
 }
 
 export default function companionPermissionBroker(pi: ExtensionAPI) {
+  pi.on("tool_call", async (event, ctx) => {
+    if (event.toolName === "read") {
+      const input = (event.input ?? {}) as Record<string, unknown>;
+      const path = input.path ?? input.file_path ?? input.filePath ?? input.file;
+      if (typeof path === "string" && IMAGE_PATH_PATTERN.test(path.trim())) {
+        return {
+          block: true,
+          reason: ${JSON.stringify(COMPANION_IMAGE_READ_REFUSAL)},
+        };
+      }
+      startToolTimeout(event.toolCallId, ctx);
+      return undefined;
+    }
+    // ask_user is an interactive decision with its own five-minute fail-closed UI deadline. Its
+    // execute body does not perform external work, so the shorter execution timer must not abort a
+    // still-actionable question.
+    if (event.toolName === "ask_user") return undefined;
+    startToolTimeout(event.toolCallId, ctx);
+    return undefined;
+  });
+
+  pi.on("tool_result", (event) => {
+    const timeout = toolTimeouts.get(event.toolCallId);
+    if (timeout) clearTimeout(timeout);
+    toolTimeouts.delete(event.toolCallId);
+    return undefined;
+  });
+
+  pi.on("turn_end", () => {
+    clearToolTimeouts();
+    return undefined;
+  });
+
   pi.registerTool({
     name: "ask_user",
     label: "Ask user",
