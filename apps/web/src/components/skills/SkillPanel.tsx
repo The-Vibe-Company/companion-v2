@@ -173,7 +173,7 @@ export function SkillPanel({
             <dd>{skill.updated} by {skill.updaterName}</dd>
           </div>
           <div>
-            <dt>Files</dt>
+            <dt>Size</dt>
             <dd className="mono">{skill.size}</dd>
           </div>
         </dl>

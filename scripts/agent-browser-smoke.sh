@@ -553,10 +553,11 @@ assert_body_contains "Has dependencies"
 agent-browser press Escape
 
 log "Checking detail view"
+# A click selects the row into the panel; the double click is what opens its page.
 assert_eval_true "(() => {
   const button = document.querySelector('.crow[data-skill-slug=\"$SMOKE_SKILL\"] .crow__hit');
   if (!button) return false;
-  button.click();
+  button.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
   return true;
 })()" "could not open the smoke skill by its stable slug"
 agent-browser wait 1000
