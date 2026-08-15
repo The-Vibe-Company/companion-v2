@@ -274,8 +274,17 @@ a failed read or projection cannot normally make a retry hand Pi the same messag
 retried sync appends nothing new. Timeout settlement is the delivery-watermark exception: if a tool
 times out with already-watermarked user messages after it and no assistant reply after the tool, the
 watermark moves behind that user tail. The next live sync or send prompts those stranded messages in
-order, including after Pi has been recycled. A per-thread timeout-recovery ordinal makes that rewind
-one-shot and also backfills timeout rows already settled by an older control plane. `pi_log_offset`
+order. Because accepting a FIFO follow-up does not prove a blocked tool released Pi, that delivery
+recycles Pi first while preserving the running Box; timeout settlement and Viewer reads remain
+control-plane-only and never contact Box. A per-thread timeout-recovery ordinal makes that rewind
+one-shot and also backfills timeout rows already settled by an older control plane. A separate
+timeout-restart ordinal records that a fresh Pi process actually started for that timeout, while a
+timeout-delivery ordinal records how far that process successfully accepted the recovered tail.
+Post-timeout user entries remain in the recovery tail even if a concurrent or older writer advances
+the ordinary delivery watermark; a failed prompt therefore retries only the unaccepted suffix, and
+another send cannot recycle the recovered turn again. Restart eligibility is revalidated after the
+lifecycle claim, so a delayed request holding an older snapshot cannot recycle the same Pi twice.
+`pi_log_offset`
 only moves backward when Pi's log
 shrinks: that read starts at the log's beginning and owns the offset outright. When the Box is
 asleep, sync degrades to the same read-model response as the thread read and reports

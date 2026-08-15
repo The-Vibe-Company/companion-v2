@@ -218,7 +218,46 @@ describe("replyExpected", () => {
     })).toBe(true);
   });
 
-  it("waits only after a stranded tail has actually been re-delivered", () => {
+  it("waits once a later tool proves Pi started the recovered turn", () => {
+    expect(replyExpected({
+      entries: [
+        entry(),
+        entry({
+          event_id: "pi:timed-out-read",
+          ordinal: 1,
+          role: "tool",
+          tool: {
+            call_id: "call-timed-out-read",
+            kind: "file",
+            name: "read",
+            title: "/tmp/conductor-cli.png",
+            status: "timeout",
+            detail: "Timed out after 90 seconds without a tool result.",
+            screenshot: null,
+          },
+        }),
+        entry({
+          event_id: "pi:recovered-read",
+          ordinal: 2,
+          role: "tool",
+          tool: {
+            call_id: "call-recovered-read",
+            kind: "file",
+            name: "read",
+            title: "README.md",
+            status: "running",
+            detail: null,
+            screenshot: null,
+          },
+        }),
+        entry({ event_id: "msg:3", ordinal: 3, content: "One more thing" }),
+      ],
+      awake: true,
+      pendingCount: 0,
+    })).toBe(true);
+  });
+
+  it("does not revive an aborted turn when the live call reports its tail as delivered", () => {
     const entries = [
       entry(),
       entry({
@@ -238,7 +277,7 @@ describe("replyExpected", () => {
       entry({ event_id: "msg:2", ordinal: 2, content: "Ca va ?" }),
     ];
     expect(replyExpected({ entries, awake: true, pendingCount: 1 })).toBe(false);
-    expect(replyExpected({ entries, awake: true, pendingCount: 0 })).toBe(true);
+    expect(replyExpected({ entries, awake: true, pendingCount: 0 })).toBe(false);
   });
 
   it("never waits on a Box that is not running, because nothing has been delivered", () => {
