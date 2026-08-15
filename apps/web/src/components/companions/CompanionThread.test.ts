@@ -17,6 +17,9 @@ function companion(overrides: Partial<Companion> = {}): Companion {
     selected_mcp_account_ids: [],
     owner_id: "user-1",
     access: "owner",
+    pinned: false,
+    hidden: false,
+    unread: false,
     last_message: null,
     runtime: {
       state: "running",
@@ -70,6 +73,7 @@ function thread(overrides: Partial<Thread> = {}): Thread {
     ],
     pending_count: 0,
     last_message_at: "2026-08-12T12:01:20.000Z",
+    last_read_ordinal: null,
     ...overrides,
   };
 }
@@ -95,7 +99,7 @@ function render(props: {
   waking?: boolean;
   openingDesktop?: boolean;
   context?: Partial<CompanionContextPanel>;
-  newSince?: string | null;
+  lastReadOrdinal?: number | null;
 }) {
   return renderToStaticMarkup(React.createElement(CompanionThread, {
     companion: props.companion ?? companion(),
@@ -106,7 +110,7 @@ function render(props: {
     openingDesktop: props.openingDesktop ?? false,
     context: contextPanel(props.context),
     contextSkills: [],
-    newSince: props.newSince ?? null,
+    lastReadOrdinal: props.lastReadOrdinal ?? null,
     onBack: () => {},
     orgId: "org-1",
     onSend: async () => true,
@@ -151,7 +155,7 @@ describe("CompanionThread", () => {
     expect(chipLabel(markup)).toContain("Box · online");
   });
 
-  it("keeps Pi tools and Skills out of the thread surface", () => {
+  it("keeps runtime tools and Skills out of the thread surface", () => {
     const markup = render({
       thread: thread({
         entries: [
@@ -171,7 +175,8 @@ describe("CompanionThread", () => {
       }),
     });
 
-    expect(markup).toContain("The run stopped before Pi replied.");
+    expect(markup).toContain("The run stopped before Luna replied.");
+    expect(markup).not.toContain("The run stopped before Pi replied.");
     expect(markup).not.toMatch(/tool|skill|mcp/i);
     // Computer use is the Box desktop and nothing else, reached from the one status chip.
     expect(markup.match(/open the Box desktop/g)).toHaveLength(1);
@@ -298,6 +303,9 @@ describe("CompanionThread", () => {
     const markup = render({
       companion: companion({
         access: "viewer",
+        pinned: false,
+        hidden: false,
+        unread: false,
         runtime: {
           ...companion().runtime,
           state: "error",
@@ -600,14 +608,15 @@ describe("CompanionThread separators", () => {
   it("marks where a returning reader left off, and leaves a caught-up thread whole", () => {
     const entries = thread().entries;
 
-    const returning = render({ newSince: "2026-08-12T12:00:30.000Z", thread: thread({ entries }) });
+    // The reader had read up to their own message; the reply after it is where they left off.
+    const returning = render({ lastReadOrdinal: 0, thread: thread({ entries }) });
     expect(returning).toContain("chat-sep--new");
     expect(returning).toContain(">New<");
 
     // Nothing has been said since this reader was last here, so there is nothing to divide.
-    expect(render({ newSince: "2026-08-12T23:00:00.000Z", thread: thread({ entries }) }))
+    expect(render({ lastReadOrdinal: 1, thread: thread({ entries }) }))
       .not.toContain("chat-sep--new");
-    // Neither is a first visit, which has no line to return to.
+    // Neither is a first visit, which has no watermark to return to.
     expect(render({ thread: thread({ entries }) })).not.toContain("chat-sep--new");
   });
 });

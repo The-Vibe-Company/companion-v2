@@ -176,7 +176,7 @@ describe("Companions mobile viewport", () => {
     expect(declarationsFor(".chat-head > *")[0]).toContain("flex: none;");
   });
 
-  it("keeps the plugin row's named areas off the registry card", () => {
+  it("keeps the plugin row's named areas off the catalog card", () => {
     // Both surfaces use `.companions-plugin-icon`. Unscoped, `grid-area: icon` placed the card's icon
     // in an implicit track of its own: the card grew two empty columns, the description was squeezed
     // to 32px, and the icon dropped to the bottom-right corner.
@@ -185,12 +185,12 @@ describe("Companions mobile viewport", () => {
       .toContain("grid-area: icon;");
   });
 
-  it("puts the registry card's action under its text on a phone", () => {
-    const card = declarationsFor(".companions-registry-card", PHONE)[0];
+  it("puts the catalog card's action under its text on a phone", () => {
+    const card = declarationsFor(".companions-catalog-card", PHONE)[0];
 
     expect(card).toContain("grid-template-columns: 32px minmax(0, 1fr);");
     expect(card).toContain('"action action"');
-    expect(declarationsFor(".companions-registry-card > .cds-btn", PHONE)[0])
+    expect(declarationsFor(".companions-catalog-card > .cds-btn", PHONE)[0])
       .toContain("min-height: 40px;");
   });
 

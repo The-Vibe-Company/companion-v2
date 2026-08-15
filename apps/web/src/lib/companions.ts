@@ -8,8 +8,6 @@ import type {
   CompanionProviderConnection,
   CompanionProviderOAuthStartResponse,
   CompanionProvidersResponse,
-  CompanionRegistryDetailResponse,
-  CompanionRegistryListResponse,
   CompanionShareRole,
   CompanionShares,
   CompanionThread,
@@ -77,6 +75,36 @@ export async function deleteCompanion(orgId: string, companionId: string): Promi
   });
 }
 
+export async function updateCompanionMemberState(
+  orgId: string,
+  companionId: string,
+  input: { pinned?: boolean; hidden?: boolean; unread?: boolean },
+): Promise<Companion> {
+  const result = await apiFetch<{ companion: Companion }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/member-state`,
+    {
+      method: "PATCH",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify(input),
+    },
+  );
+  return result.companion;
+}
+
+export async function duplicateCompanion(
+  orgId: string,
+  companionId: string,
+): Promise<Companion> {
+  const result = await apiFetch<{ companion: Companion }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/duplicate`,
+    {
+      method: "POST",
+      headers: orgHeaders(orgId),
+    },
+  );
+  return result.companion;
+}
+
 export async function saveCompanionPlugin(
   orgId: string,
   input: SaveCompanionPluginInput,
@@ -106,38 +134,6 @@ export async function startCompanionPluginOAuth(
     },
   );
   return result.authorization_url;
-}
-
-/**
- * Browse/search the official MCP registry through the companion-v2 API proxy. The browser never
- * calls the registry itself; the proxy caches and falls back to pins when the registry is down.
- */
-export async function listCompanionRegistry(
-  orgId: string,
-  params: { search?: string; cursor?: string } = {},
-): Promise<CompanionRegistryListResponse> {
-  const query = new URLSearchParams();
-  if (params.search) query.set("search", params.search);
-  if (params.cursor) query.set("cursor", params.cursor);
-  const suffix = query.toString() ? `?${query.toString()}` : "";
-  return apiFetch<CompanionRegistryListResponse>(`/v1/companion-registry/servers${suffix}`, {
-    headers: orgHeaders(orgId),
-    signal: AbortSignal.timeout(12_000),
-  });
-}
-
-/** Fetch one registry server's latest connect metadata through the proxy. */
-export async function getCompanionRegistryServer(
-  orgId: string,
-  name: string,
-): Promise<CompanionRegistryDetailResponse> {
-  return apiFetch<CompanionRegistryDetailResponse>(
-    `/v1/companion-registry/server?name=${encodeURIComponent(name)}`,
-    {
-      headers: orgHeaders(orgId),
-      signal: AbortSignal.timeout(12_000),
-    },
-  );
 }
 
 export async function deleteCompanionPlugin(orgId: string, accountId: string): Promise<void> {

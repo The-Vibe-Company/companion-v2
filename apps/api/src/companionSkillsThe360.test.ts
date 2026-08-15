@@ -111,6 +111,9 @@ describe("Companion skill allow-list contracts", () => {
       selected_mcp_account_ids: [],
       owner_id: "user-1",
       access: "owner",
+      pinned: false,
+      hidden: false,
+      unread: false,
       runtime: {
         state: "not_created",
         daemon_state: "unknown",

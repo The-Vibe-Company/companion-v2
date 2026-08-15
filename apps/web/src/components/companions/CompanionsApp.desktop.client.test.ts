@@ -79,6 +79,9 @@ function companion(overrides: Partial<Companion> = {}): Companion {
     selected_mcp_account_ids: [],
     owner_id: "user-1",
     access: "owner",
+    pinned: false,
+    hidden: false,
+    unread: false,
     last_message: null,
     runtime: {
       state: "running",
@@ -109,6 +112,7 @@ function thread(overrides: Partial<Thread> = {}): Thread {
     entries: [],
     pending_count: 0,
     last_message_at: null,
+    last_read_ordinal: null,
     ...overrides,
   };
 }
@@ -626,6 +630,9 @@ describe("CompanionsApp context panel", () => {
     );
     const container = await open(companion({
       access: "viewer",
+      pinned: false,
+      hidden: false,
+      unread: false,
       runtime: { ...companion().runtime, box_id: null, desktop_available: false },
     }));
 

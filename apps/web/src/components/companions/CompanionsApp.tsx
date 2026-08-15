@@ -11,6 +11,7 @@ import type {
 } from "@companion/contracts";
 import type { OrgVM } from "@/lib/types";
 import {
+  duplicateCompanion,
   getCompanionRuntime,
   getCompanionThread,
   listCompanions,
@@ -19,10 +20,10 @@ import {
   setCompanionProvider,
   startCompanionRuntime,
   syncCompanionThread,
+  updateCompanionMemberState,
 } from "@/lib/companions";
 import { Icon } from "../Icon";
 import { RelativeTime } from "./RelativeTime";
-import { isUnread, markViewed, readViewed, type CompanionViewedMap } from "./unread";
 import { CompanionProvidersDialog } from "./CompanionProvidersDialog";
 import { CompanionPlugins } from "./CompanionPlugins";
 import { CompanionSettings } from "./CompanionSettings";
@@ -83,10 +84,6 @@ function mergeCompanion(previous: Companion, next: Companion): Companion {
   return next.last_message === null && previous.last_message !== null
     ? { ...next, last_message: previous.last_message }
     : next;
-}
-
-function replaceCompanion(current: Companion[], next: Companion): Companion[] {
-  return current.map((item) => item.id === next.id ? mergeCompanion(item, next) : item);
 }
 
 const CONTEXT_OPEN_KEY = "companions:context-open";
@@ -179,14 +176,8 @@ export function CompanionsApp({
   );
   const [thread, setThread] = useState<Thread | null>(null);
   const [threadError, setThreadError] = useState<string | null>(null);
-  /**
-   * When this reader last had each thread open. Server markup cannot know it — it is per device —
-   * so the map starts empty and the store is read once the client is mounted, which also keeps the
-   * first paint identical on both sides.
-   */
-  const [viewed, setViewed] = useState<CompanionViewedMap>({});
-  /** The newest line already seen when the open thread was opened; the "New" divider sits after it. */
-  const [newSince, setNewSince] = useState<string | null>(null);
+  /** This reader's watermark when the open thread was opened; the "New" divider sits just past it. */
+  const [lastReadOrdinal, setLastReadOrdinal] = useState<number | null>(null);
   /**
    * Why the last desktop handoff opened nothing. It is kept apart from `threadError` because the
    * live thread poll clears that one every couple of seconds, which would erase this answer before
@@ -259,20 +250,73 @@ export function CompanionsApp({
         tone: status.tone,
         preview: companion.last_message?.preview ?? null,
         previewAt: companion.last_message?.created_at ?? null,
-        // The thread on screen is being read right now, so it is never the one with a dot on it.
-        unread: companion.id !== openedId && isUnread(companion, viewer.id, viewed),
+        // The reader's own watermark, from the control plane. The thread on screen is being read
+        // right now, so it is never the one with a dot on it.
+        unread: companion.id !== openedId && companion.unread,
       };
     }),
-    [companions, openedId, viewed, viewer.id],
+    [companions, openedId],
   );
 
   const visible = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase("en-US");
-    if (!needle) return companions;
-    return companions.filter((companion) =>
+    const active = companions.filter((companion) => !companion.hidden);
+    if (!needle) return active;
+    return active.filter((companion) =>
       companion.name.toLocaleLowerCase("en-US").includes(needle)
       || (companion.persona ?? "").toLocaleLowerCase("en-US").includes(needle));
   }, [companions, query]);
+
+  const hiddenCompanions = useMemo(
+    () => companions.filter((companion) => companion.hidden),
+    [companions],
+  );
+
+  /**
+   * Put one Companion back into the roster. It re-sorts, because pin and recency decide the order and
+   * a member-state write can move a row, and it merges the preview, because a mutation answers about
+   * what it just wrote and would otherwise blank the line the conversation list is showing.
+   */
+  const replaceCompanion = useCallback((next: Companion) => {
+    setCompanions((current) => {
+      const previous = current.find((item) => item.id === next.id);
+      const merged = previous ? mergeCompanion(previous, next) : next;
+      const without = current.filter((item) => item.id !== next.id);
+      return [merged, ...without].sort((left, right) => {
+        if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+        return Date.parse(right.updated_at) - Date.parse(left.updated_at);
+      });
+    });
+  }, []);
+
+  const applyMemberState = async (
+    companion: Companion,
+    patch: { pinned?: boolean; hidden?: boolean; unread?: boolean },
+  ) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await updateCompanionMemberState(currentOrg.id, companion.id, patch);
+      replaceCompanion(next);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not update this Companion.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onDuplicate = async (companion: Companion) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const cloned = await duplicateCompanion(currentOrg.id, companion.id);
+      setCompanions((current) => [cloned, ...current]);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not duplicate this Companion.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const openCompanion = (companion: Companion) => {
     threadRequestRef.current += 1;
@@ -283,6 +327,10 @@ export function CompanionsApp({
     setPluginsOpen(false);
     setSettingsId(null);
     threadUrl(companion.id);
+    if (companion.unread) {
+      setCompanions((current) => current.map((item) =>
+        item.id === companion.id ? { ...item, unread: false } : item));
+    }
   };
 
   const closeThread = () => {
@@ -335,14 +383,11 @@ export function CompanionsApp({
       if (next && requestId === threadRequestRef.current) {
         setThread(next);
         setThreadError(null);
-        // Reading the thread is what marks it read, and it is marked up to the line that was
-        // actually on screen rather than to "now", so a message that lands a moment later still
-        // arrives as unread.
-        setViewed(markViewed(
-          currentOrg.id,
-          openedId,
-          next.entries.at(-1)?.created_at ?? new Date().toISOString(),
-        ));
+        // The control plane advances this member's watermark as it answers. Opening from the list
+        // already cleared the row optimistically; this covers the thread nobody clicked into — a
+        // deep link — which would otherwise keep a dot on a thread that is on screen.
+        setCompanions((current) => current.map((item) =>
+          item.id === openedId && item.unread ? { ...item, unread: false } : item));
       }
     } catch (cause) {
       if (requestId === threadRequestRef.current) {
@@ -351,20 +396,22 @@ export function CompanionsApp({
     }
   }, [currentOrg.id, openedId]);
 
-  // Both preferences are per device, so they can only be read once the client owns the page.
+  // The panel preference is per device, so it can only be read once the client owns the page.
   useEffect(() => setContextOpen(readContextOpen()), []);
 
-  // Read state is per device, so it can only be read once the client owns the page.
-  useEffect(() => setViewed(readViewed(currentOrg.id)), [currentOrg.id]);
-
   /**
-   * Where this reader left off, captured before opening the thread marks it read. It stays put while
-   * the thread is open, so the divider does not walk down the transcript as new messages arrive; it
-   * is re-read the next time a thread is opened.
+   * Where this reader left off, taken from the first thread payload after opening: the control plane
+   * reports the watermark as it stood before that read advanced it. It is captured once per thread so
+   * the divider does not walk down the transcript as new messages arrive.
    */
   useEffect(() => {
-    setNewSince(openedId ? readViewed(currentOrg.id)[openedId] ?? null : null);
-  }, [currentOrg.id, openedId]);
+    if (!openedId) {
+      setLastReadOrdinal(null);
+      return;
+    }
+    if (thread?.companion_id !== openedId || lastReadOrdinal !== null) return;
+    setLastReadOrdinal(thread.last_read_ordinal);
+  }, [lastReadOrdinal, openedId, thread]);
 
   /**
    * The conversation list re-reads every thread's last line on a slow cadence. It is the
@@ -419,11 +466,11 @@ export function CompanionsApp({
     try {
       const latest = await getCompanionRuntime(currentOrg.id, companionId, { live });
       if (companionReadRef.current.get(companionId) !== readId) return;
-      setCompanions((current) => replaceCompanion(current, latest));
+      replaceCompanion(latest);
     } catch {
       // The failure that prompted this read is already on screen; do not replace it with this one.
     }
-  }, [currentOrg.id]);
+  }, [currentOrg.id, replaceCompanion]);
 
   // Only a runner whose Box is already running observes it, so opening a thread never wakes a Box
   // and a Viewer's chip stays on the control-plane projection.
@@ -480,7 +527,7 @@ export function CompanionsApp({
     setThreadError(null);
     try {
       const updated = await startCompanionRuntime(currentOrg.id, companionId);
-      setCompanions((current) => replaceCompanion(current, updated));
+      replaceCompanion(updated);
       await refreshThread(true);
     } catch (cause) {
       setThreadError(cause instanceof Error ? cause.message : "This Companion could not be woken.");
@@ -620,7 +667,7 @@ export function CompanionsApp({
     setError(null);
     try {
       const updated = await setCompanionProvider(currentOrg.id, companion.id, fallbackProvider);
-      setCompanions((current) => replaceCompanion(current, updated));
+      replaceCompanion(updated);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Provider could not be set.");
     } finally {
@@ -774,7 +821,7 @@ export function CompanionsApp({
                 onJoin: () => void joinContext(),
               }}
               contextSkills={skills}
-              newSince={newSince}
+              lastReadOrdinal={lastReadOrdinal}
               onBack={closeThread}
               onSend={onSend}
               onSettings={() => router.push(`/companions/${opened.id}/settings`)}
@@ -790,7 +837,7 @@ export function CompanionsApp({
             providers={providers}
             onBack={closeSettings}
             onSaved={(updated) => {
-              setCompanions((current) => replaceCompanion(current, updated));
+              replaceCompanion(updated);
             }}
             onDeleted={(companionId) => {
               setCompanions((current) => current.filter((item) => item.id !== companionId));
@@ -877,7 +924,10 @@ export function CompanionsApp({
                     {visible.map((companion) => {
                       const status = companionStatus(companion.runtime.state);
                       return (
-                        <div className="companions-row" key={companion.id}>
+                        <div
+                          className={`companions-row${companion.pinned ? " companions-row--pinned" : ""}`}
+                          key={companion.id}
+                        >
                           <button
                             type="button"
                             className="companions-row__main"
@@ -889,9 +939,17 @@ export function CompanionsApp({
                           >
                             <span className="companions-avatar" aria-hidden="true">
                               {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
+                              {companion.unread && (
+                                <i className="companions-unread" title="Unread" />
+                              )}
                             </span>
                             <span className="companions-row__text">
-                              <strong>{companion.name}</strong>
+                              <strong>
+                                {companion.pinned && (
+                                  <Icon name="pin" size={12} aria-hidden="true" />
+                                )}
+                                {companion.name}
+                              </strong>
                               <span>
                                 {companion.persona
                                   ?? providerName(companion.runtime.provider_ids[0] ?? "No provider")}
@@ -908,6 +966,62 @@ export function CompanionsApp({
                           <RelativeTime className="companions-row__time" iso={companion.updated_at} />
                           <span className="companions-row-actions">
                             <span className="companions-role">{companion.access}</span>
+                            <details className="companions-row-menu">
+                              <summary
+                                className="cds-btn cds-btn--ghost cds-btn--sm"
+                                aria-label={`Actions for ${companion.name}`}
+                              >
+                                <Icon name="more-horizontal" size={15} />
+                              </summary>
+                              <div className="companions-row-menu__panel" role="menu">
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  disabled={busy}
+                                  onClick={(event) => {
+                                    event.currentTarget.closest("details")?.removeAttribute("open");
+                                    void applyMemberState(companion, { pinned: !companion.pinned });
+                                  }}
+                                >
+                                  {companion.pinned ? "Unpin" : "Pin"}
+                                </button>
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  disabled={busy || companion.unread}
+                                  onClick={(event) => {
+                                    event.currentTarget.closest("details")?.removeAttribute("open");
+                                    void applyMemberState(companion, { unread: true });
+                                  }}
+                                >
+                                  Mark as unread
+                                </button>
+                                {companion.access === "owner" && (
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    disabled={busy}
+                                    onClick={(event) => {
+                                      event.currentTarget.closest("details")?.removeAttribute("open");
+                                      void onDuplicate(companion);
+                                    }}
+                                  >
+                                    Duplicate
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  disabled={busy}
+                                  onClick={(event) => {
+                                    event.currentTarget.closest("details")?.removeAttribute("open");
+                                    void applyMemberState(companion, { hidden: true });
+                                  }}
+                                >
+                                  Hide
+                                </button>
+                              </div>
+                            </details>
                             <button
                               type="button"
                               className="cds-btn cds-btn--ghost cds-btn--sm"
@@ -933,6 +1047,45 @@ export function CompanionsApp({
                       <p className="companions-list-empty">No Companion matches this search.</p>
                     )}
                   </div>
+
+                  {hiddenCompanions.length > 0 && !query.trim() && (
+                    <section className="companions-hidden" aria-labelledby="companions-hidden-title">
+                      <h2 id="companions-hidden-title">Hidden</h2>
+                      <div className="companions-list">
+                        {hiddenCompanions.map((companion) => (
+                          <div className="companions-row" key={companion.id}>
+                            <div className="companions-row__main companions-row__main--static">
+                              <span className="companions-avatar" aria-hidden="true">
+                                {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
+                              </span>
+                              <span className="companions-row__text">
+                                <strong>{companion.name}</strong>
+                                <span>Hidden from your list</span>
+                              </span>
+                            </div>
+                            <span className="companions-row-actions">
+                              <button
+                                type="button"
+                                className="cds-btn cds-btn--ghost cds-btn--sm"
+                                disabled={busy}
+                                onClick={() => void applyMemberState(companion, { hidden: false })}
+                              >
+                                Unhide
+                              </button>
+                              <button
+                                type="button"
+                                className="cds-btn cds-btn--ghost cds-btn--sm"
+                                aria-label={`Settings for ${companion.name}`}
+                                onClick={() => router.push(`/companions/${companion.id}/settings`)}
+                              >
+                                Settings
+                              </button>
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  )}
                 </>
               )}
             </div>

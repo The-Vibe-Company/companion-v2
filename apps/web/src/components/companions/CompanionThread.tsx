@@ -44,7 +44,7 @@ export function CompanionThread({
   openingDesktop,
   context,
   contextSkills,
-  newSince,
+  lastReadOrdinal,
   onBack,
   onSend,
   onSettings,
@@ -62,8 +62,8 @@ export function CompanionThread({
   context: CompanionContextPanel;
   /** Selected skills this surface can name; the panel counts the ones it cannot. */
   contextSkills: CompanionContextSkill[];
-  /** The newest line this reader had already seen when the thread was opened. */
-  newSince?: string | null;
+  /** This reader's unread watermark when the thread was opened; the "New" divider sits past it. */
+  lastReadOrdinal?: number | null;
   onBack: () => void;
   onSend: (content: string, clientMessageId: string) => Promise<boolean>;
   onSettings: () => void;
@@ -217,7 +217,7 @@ export function CompanionThread({
           thread={thread}
           orgId={orgId}
           busy={busy}
-          newSince={newSince}
+          lastReadOrdinal={lastReadOrdinal}
           onSend={onSend}
           onThread={onThread}
         />

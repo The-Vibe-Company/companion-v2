@@ -90,6 +90,9 @@ function companion(overrides: Partial<Companion> = {}): Companion {
     selected_mcp_account_ids: [],
     owner_id: "user-1",
     access: "owner",
+    pinned: false,
+    hidden: false,
+    unread: false,
     last_message: {
       preview: "Drafted the launch note.",
       role: "assistant",
@@ -126,6 +129,7 @@ function thread(overrides: Partial<Thread> = {}): Thread {
     entries: [],
     pending_count: 0,
     last_message_at: null,
+    last_read_ordinal: null,
     ...overrides,
   };
 }
@@ -173,29 +177,22 @@ describe("CompanionsApp conversation list", () => {
     vi.useRealTimers();
   });
 
-  it("shows each thread's last line, and marks the ones this reader has not caught up on", async () => {
-    const container = await render([companion()]);
+  it("shows each thread's last line, and marks the ones the reader's own watermark is behind", async () => {
+    const container = await render([companion({ unread: true })]);
 
     expect(row(container).textContent).toContain("Drafted the launch note.");
     expect(row(container).querySelector(".cmprow__unread")).not.toBeNull();
   });
 
-  it("never marks this reader's own last word unread", async () => {
-    const container = await render([companion({
-      last_message: {
-        preview: "Ship it today",
-        role: "user",
-        author_id: viewer.id,
-        author_name: "Ada",
-        created_at: "2026-08-14T09:05:00.000Z",
-      },
-    })]);
+  it("leaves a caught-up thread unmarked, whatever it last said", async () => {
+    // Read state is the control plane's per-member watermark (THE-351), not this device's guess.
+    const container = await render([companion({ unread: false })]);
 
-    expect(row(container).textContent).toContain("Ship it today");
+    expect(row(container).textContent).toContain("Drafted the launch note.");
     expect(row(container).querySelector(".cmprow__unread")).toBeNull();
   });
 
-  it("clears the mark once the thread has been read, and remembers it", async () => {
+  it("clears the mark on the thread it opens, including one reached by a deep link", async () => {
     companionsApi.getCompanionThread.mockResolvedValue(thread({
       entries: [{
         event_id: "pi:1",
@@ -210,13 +207,10 @@ describe("CompanionsApp conversation list", () => {
       }],
     }));
 
-    const opened = await render([companion()], companionId);
+    // Nobody clicked this row, so the optimistic clear on open never ran; the read that answers is
+    // what the control plane already marked, and the row has to agree with it.
+    const opened = await render([companion({ unread: true })], companionId);
     expect(row(opened).querySelector(".cmprow__unread")).toBeNull();
-
-    // The mark is a per-device fact, so it must survive the next visit rather than the next paint.
-    act(() => roots.splice(0).forEach((root) => root.unmount()));
-    const returning = await render([companion()]);
-    expect(row(returning).querySelector(".cmprow__unread")).toBeNull();
   });
 
   it("keeps a preview a mutation did not answer with", async () => {

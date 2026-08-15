@@ -6,11 +6,11 @@ import {
   COMPANION_PLUGIN_OAUTH_SERVERS,
   CompanionNotFoundError,
   CompanionDeleteForbiddenError,
+  CompanionDuplicateForbiddenError,
   CompanionPluginConflictError,
   CompanionPluginOAuthError,
   CompanionProviderOAuthError,
   COMPANION_PROVIDER_OAUTH_TTL_MS,
-  CompanionRegistryUnavailableError,
   beginAnthropicProviderOAuth,
   beginOpenAICodexProviderOAuth,
   beginCompanionPluginOAuth,
@@ -44,11 +44,10 @@ import {
   deleteCompanion,
   deleteCompanionPlugin,
   deleteCompanionProvider,
+  duplicateCompanion,
   expireCompanionDecisions,
   getCompanion,
   getCompanionProviderCredentialGeneration,
-  getCompanionRegistryServer,
-  listCompanionRegistry,
   getCompanionForRuntime,
   getCompanionThread,
   listCompanionShares,
@@ -58,6 +57,7 @@ import {
   listCompanionPlugins,
   listOnlineCompanionsForSkillSync,
   listPendingCompanionMessages,
+  markCompanionThreadRead,
   projectCompanionPiEvents,
   pollOpenAICodexProviderOAuth,
   recordCompanionPiProjection,
@@ -72,6 +72,7 @@ import {
   setDefaultCompanionProvider,
   updateCompanionObservation,
   updateCompanion,
+  updateCompanionMemberState,
   updateCompanionRuntime,
 } from "@companion/core";
 import { issueApiToken } from "@companion/core/services";
@@ -82,8 +83,6 @@ import {
   companionProviderOAuthCompleteInputSchema,
   companionProviderOAuthStartInputSchema,
   companionPluginOAuthStartInputSchema,
-  companionRegistryQuerySchema,
-  companionRegistryServerNameSchema,
   decideCompanionDecisionInputSchema,
   saveCompanionProviderInputSchema,
   sendCompanionMessageInputSchema,
@@ -93,6 +92,7 @@ import {
   startCompanionRuntimeInputSchema,
   saveCompanionPluginInputSchema,
   updateCompanionInputSchema,
+  updateCompanionMemberStateInputSchema,
 } from "@companion/contracts";
 import type {
   Companion,
@@ -296,6 +296,7 @@ function errorStatus(error: unknown): number {
   if (error instanceof CompanionPluginSelectionError) return 400;
   if (error instanceof CompanionWriteSkillsForbiddenError) return 403;
   if (error instanceof CompanionDeleteForbiddenError) return 403;
+  if (error instanceof CompanionDuplicateForbiddenError) return 403;
   if (error instanceof CompanionProviderForbiddenError) return 403;
   if (error instanceof CompanionShareForbiddenError) return 403;
   if (error instanceof CompanionProviderError) return 422;
@@ -309,7 +310,6 @@ function errorStatus(error: unknown): number {
   if (error instanceof CompanionProviderOAuthError) {
     return error.code === "oauth_unavailable" ? 502 : 400;
   }
-  if (error instanceof CompanionRegistryUnavailableError) return 503;
   if (error instanceof CompanionRuntimeStartBudgetError) return 504;
   if (error instanceof BoxRuntimeConfigurationError) return 503;
   if (error instanceof BoxRuntimeProviderError) {
@@ -795,18 +795,6 @@ export function registerCompanionRoutes(
     }
   }
 
-  /**
-   * Registry browse is a read-only proxy of a public catalog, so it needs the same flag/allowlist
-   * gate as the rest of Companions but no tenant row: the pins and cache live in the control plane,
-   * not in PostgreSQL. Reject before any registry work when the caller is outside the allowlist.
-   */
-  function assertRegistryAccess(c: Context<{ Variables: ApiVariables }>): void {
-    const actor = actorFromContext(c);
-    if (!companionsAvailableToUser(actor.email, env)) {
-      throw new CompanionAccessForbiddenError();
-    }
-  }
-
   app.get("/v1/companions", async (c) => {
     try {
       const companions = await tenant(c, ({ actor, orgId, database }) =>
@@ -1165,35 +1153,6 @@ export function registerCompanionRoutes(
     }
   });
 
-  app.get("/v1/companion-registry/servers", async (c) => {
-    try {
-      assertRegistryAccess(c);
-      const query = companionRegistryQuerySchema.parse({
-        search: c.req.query("search"),
-        cursor: c.req.query("cursor"),
-      });
-      const result = await listCompanionRegistry({
-        search: query.search,
-        cursor: query.cursor,
-        env,
-      });
-      return c.json(result);
-    } catch (error) {
-      return routeError(c, error);
-    }
-  });
-
-  app.get("/v1/companion-registry/server", async (c) => {
-    try {
-      assertRegistryAccess(c);
-      const name = companionRegistryServerNameSchema.parse(c.req.query("name"));
-      const result = await getCompanionRegistryServer({ name, env });
-      return c.json(result);
-    } catch (error) {
-      return routeError(c, error);
-    }
-  });
-
   app.put("/v1/companion-providers/default", async (c) => {
     try {
       const body = setDefaultCompanionProviderInputSchema.parse(await c.req.json());
@@ -1248,6 +1207,43 @@ export function registerCompanionRoutes(
       return c.json({ companion });
     } catch (error) {
       return jsonError(c, error, errorStatus(error));
+    }
+  });
+
+  /**
+   * Pin / hide / mark-unread for the current member only (THE-351). Does not archive the Companion
+   * or its Box, and never reintroduces individual share.
+   */
+  app.patch("/v1/companions/:id/member-state", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const body = updateCompanionMemberStateInputSchema.parse(await c.req.json());
+      const companion = await tenant(c, ({ actor, orgId, database }) =>
+        updateCompanionMemberState({
+          actor,
+          orgId,
+          companionId,
+          patch: body,
+          database,
+        }));
+      return c.json({ companion });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  /**
+   * Owner-only clone into a new Companion with a new Box. Copies name, instructions, model, skill
+   * selection, and plugin selection; workspace share stays off.
+   */
+  app.post("/v1/companions/:id/duplicate", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const companion = await tenant(c, ({ actor, orgId, database }) =>
+        duplicateCompanion({ actor, orgId, companionId, database }));
+      return c.json({ companion }, 201);
+    } catch (error) {
+      return routeError(c, error);
     }
   });
 
@@ -1628,6 +1624,16 @@ export function registerCompanionRoutes(
             desktopAvailable: observed.desktopAvailable,
           })
         : null;
+      // Opening/syncing the thread clears unread for this member, including while Pi answers.
+      await withTenantContext(
+        { orgId: resolved.orgId, userId: resolved.actor.id },
+        (database) => markCompanionThreadRead({
+          actor: resolved.actor,
+          orgId: resolved.orgId,
+          companionId,
+          database,
+        }),
+      );
       return c.json({ thread: framed ?? thread, source: "box" as const });
     } catch (error) {
       return runtimeRouteError(c, error);

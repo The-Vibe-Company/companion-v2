@@ -74,6 +74,9 @@ const companion: Companion = {
   selected_mcp_account_ids: [],
   owner_id: "user-1",
   access: "owner",
+  pinned: false,
+  hidden: false,
+  unread: false,
   last_message: null,
   runtime: {
     state: "running",
@@ -126,6 +129,7 @@ function controlPlane(
     entries: entries.map((entry) => ({ ...entry })),
     pending_count: entries.filter((entry) => entry.role === "user" && entry.ordinal > delivered).length,
     last_message_at: entries.at(-1)?.created_at ?? null,
+    last_read_ordinal: null,
   });
 
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

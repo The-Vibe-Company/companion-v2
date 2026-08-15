@@ -31,6 +31,23 @@ export interface TranscriptTurn {
 }
 
 /**
+ * Present a control-plane note in the Companion's product vocabulary. Historical notes store Pi's
+ * runtime name, but the transcript speaks about the Companion the reader opened and follows its
+ * current name after a rename. Only system notes cross this boundary: replies and tool output stay
+ * literal, even when they mention Pi themselves.
+ */
+export function transcriptDisplayContent(
+  entry: CompanionTranscriptEntry,
+  companionName: string,
+): string {
+  if (entry.role !== "system") return entry.content;
+  return entry.content.replace(
+    /(^|[^\p{L}\p{M}\p{N}\p{Pc}])Pi(?=$|[^\p{L}\p{M}\p{N}\p{Pc}])/gu,
+    (_match, prefix: string) => `${prefix}${companionName}`,
+  );
+}
+
+/**
  * Who wrote this entry. A thread shared with Editors has several writers, so only the reader's own
  * messages say "You"; a teammate's message keeps their name. A system note and a tool run have no
  * writer: they report what happened to the run rather than something anyone said.
@@ -64,11 +81,12 @@ export function transcriptTurns(
     /** The message this composer is still sending, named by the event id it will be stored under. */
     sendingEventId?: string | null;
     /**
-     * The newest line this reader had already seen when they opened the thread. The first message
-     * after it that somebody else wrote is where "New" is drawn. Null leaves the thread undivided,
-     * which is what a first visit and a thread the reader has caught up on both look like.
+     * This reader's own unread watermark as it stood when they opened the thread, from the
+     * control plane rather than this device. The first message past it that somebody else wrote is
+     * where "New" is drawn. Null leaves the thread undivided, which is what a first visit and a
+     * thread the reader has caught up on both look like.
      */
-    newSince?: string | null;
+    lastReadOrdinal?: number | null;
   },
 ): TranscriptTurn[] {
   let previous: { author: string | null; role: string; at: number } | null = null;
@@ -96,8 +114,8 @@ export function transcriptTurns(
     const startsNew = said
       && !mine
       && !newDrawn
-      && Boolean(context.newSince)
-      && entry.created_at > context.newSince!;
+      && context.lastReadOrdinal != null
+      && entry.ordinal > context.lastReadOrdinal;
     if (startsNew) newDrawn = true;
 
     return {

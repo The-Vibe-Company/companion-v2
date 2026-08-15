@@ -193,8 +193,13 @@ function fakeListDb(input: {
   rows: ReturnType<typeof companionRow>[];
   workspaceRole?: string | null;
   previews: TranscriptRow[];
+  /** Highest transcript ordinal per Companion, which THE-351 reads to decide the unread badge. */
+  highest?: Array<{ companionId: string; highestOrdinal: number }>;
+  memberState?: Array<{ companionId: string; pinnedAt: Date | null; hidden: boolean; lastReadOrdinal: number | null }>;
 }) {
   const previewedIds: string[] = [];
+  // The list makes three reads besides the roster: member state, the highest ordinal per thread, and
+  // the preview projection. The first two ride along from THE-351 and are answered flatly here.
   const database = {
     query: {
       memberships: { findFirst: async () => ({ orgRole: "developer" }) },
@@ -202,8 +207,15 @@ function fakeListDb(input: {
         findFirst: async () => (input.workspaceRole ? { role: input.workspaceRole } : null),
       },
     },
-    select: () => ({
-      from: () => ({ where: () => ({ orderBy: async () => input.rows }) }),
+    select: (fields?: Record<string, unknown>) => ({
+      from: () => ({
+        where: () => ({
+          orderBy: async () => input.rows,
+          groupBy: async () => input.highest ?? [],
+          then: (resolve: (value: unknown) => unknown) =>
+            Promise.resolve(fields ? input.memberState ?? [] : input.rows).then(resolve),
+        }),
+      }),
     }),
     selectDistinctOn: () => {
       const builder = {

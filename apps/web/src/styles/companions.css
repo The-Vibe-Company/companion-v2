@@ -345,13 +345,13 @@
 
 /* A card is 280px wide until the column itself is narrower than that, at which point the track
    follows the column instead of pushing past its edge. */
-.companions-registry-grid {
+.companions-catalog-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
   gap: 12px;
 }
 
-.companions-registry-card {
+.companions-catalog-card {
   min-width: 0;
   padding: 14px 16px;
   display: grid;
@@ -363,11 +363,11 @@
   background: var(--color-surface);
 }
 
-.companions-registry-card__body {
+.companions-catalog-card__body {
   min-width: 0;
 }
 
-.companions-registry-card__body strong {
+.companions-catalog-card__body strong {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -376,7 +376,7 @@
   font-weight: 600;
 }
 
-.companions-registry-card__body p {
+.companions-catalog-card__body p {
   margin: 4px 0 0;
   overflow: hidden;
   color: var(--color-muted);
@@ -387,60 +387,10 @@
   -webkit-box-orient: vertical;
 }
 
-.companions-registry-pin {
-  padding: 1px 7px;
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-raised);
-  color: var(--color-muted);
-  font-size: var(--text-xs);
-  font-weight: 500;
-}
-
-.companions-registry-note {
+.companions-catalog-note {
   margin: 12px 0 0;
   color: var(--color-muted);
   font-size: var(--text-sm);
-}
-
-.companions-registry-more {
-  margin-top: 14px;
-}
-
-.companions-registry-meta {
-  margin: 0;
-  display: grid;
-  gap: 10px;
-}
-
-.companions-registry-meta > div {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-}
-
-.companions-registry-meta dt {
-  color: var(--color-muted);
-  font-size: var(--text-xs);
-  font-weight: 500;
-}
-
-.companions-registry-meta dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-  color: var(--color-fg);
-  font-size: var(--text-sm);
-}
-
-.companions-registry-meta__mono {
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: var(--text-xs);
-}
-
-.companions-registry-meta__hint {
-  color: var(--color-muted);
-  font-size: var(--text-xs);
-  font-weight: 400;
 }
 
 .companions-new-form {
@@ -845,6 +795,7 @@
 }
 
 .companions-avatar {
+  position: relative;
   flex: none;
   display: grid;
   place-items: center;
@@ -870,6 +821,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.companions-row__text strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .companions-row__time {
@@ -905,6 +862,83 @@
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.companions-unread {
+  position: absolute;
+  right: -1px;
+  top: -1px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--color-accent);
+  border: 1px solid var(--color-surface);
+}
+
+.companions-row-menu {
+  position: relative;
+}
+
+.companions-row-menu > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.companions-row-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.companions-row-menu__panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 5;
+  min-width: 160px;
+  padding: 4px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm, 0 8px 24px rgb(0 0 0 / 8%));
+  display: grid;
+}
+
+.companions-row-menu__panel > button {
+  border: 0;
+  background: transparent;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  color: var(--color-fg);
+  cursor: pointer;
+}
+
+.companions-row-menu__panel > button:hover:not(:disabled) {
+  background: var(--color-surface-sunken);
+}
+
+.companions-row-menu__panel > button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.companions-row__main--static {
+  cursor: default;
+}
+
+.companions-hidden {
+  margin-top: 24px;
+  display: grid;
+  gap: 8px;
+}
+
+.companions-hidden > h2 {
+  margin: 0;
+  color: var(--color-faint);
+  font-size: 10px;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  font-weight: 600;
 }
 
 .companions-provider-empty,
@@ -2187,7 +2221,7 @@ button.chat-box:focus-visible {
     gap: 9px 10px;
   }
 
-  /* Scoped to the row that declares these areas. The registry card reuses the same icon class in a
+  /* Scoped to the row that declares these areas. The catalog card reuses the same icon class in a
      grid that has no named areas, where `grid-area: icon` placed the icon in an implicit track of
      its own: the card grew two empty columns, the description was squeezed to about 32px, and the
      icon dropped to the bottom-right corner. */
@@ -2199,10 +2233,10 @@ button.chat-box:focus-visible {
     padding-top: 3px;
   }
 
-  /* A registry card on a phone has about 230px of inside to work with. Sharing that row with the
+  /* A catalog card on a phone has about 230px of inside to work with. Sharing that row with the
      Connect button left the name and description a sliver each, so the action moves under them and
      takes the width instead of taking it from the text. */
-  .companions-registry-card {
+  .companions-catalog-card {
     grid-template-columns: 32px minmax(0, 1fr);
     grid-template-areas:
       "icon body"
@@ -2210,15 +2244,15 @@ button.chat-box:focus-visible {
     gap: 10px 12px;
   }
 
-  .companions-registry-card > .companions-plugin-icon {
+  .companions-catalog-card > .companions-plugin-icon {
     grid-area: icon;
   }
 
-  .companions-registry-card__body {
+  .companions-catalog-card__body {
     grid-area: body;
   }
 
-  .companions-registry-card > .cds-btn {
+  .companions-catalog-card > .cds-btn {
     grid-area: action;
     justify-content: center;
     min-height: 40px;

@@ -214,6 +214,13 @@ export const companionSchema = z.object({
   owner_id: z.string(),
   access: companionAccessSchema,
   /**
+   * Member-private list flags (THE-351). Pin/hide/unread belong to the reader, so Viewer and Owner
+   * each keep their own roster order and badges. Hide never archives the Companion.
+   */
+  pinned: z.boolean(),
+  hidden: z.boolean(),
+  unread: z.boolean(),
+  /**
    * Newest chat line, or null when the thread is empty. Read paths project it; a mutation answers
    * about the settings it just wrote and carries null, so a surface that keeps a list merges this
    * field instead of replacing the row wholesale.
@@ -409,6 +416,13 @@ export const companionThreadSchema = z.object({
   entries: z.array(companionTranscriptEntrySchema),
   pending_count: z.number().int().nonnegative(),
   last_message_at: z.string().datetime().nullable(),
+  /**
+   * This reader's own unread watermark (THE-351) as it stood *before* opening advanced it, so the
+   * transcript can draw one divider where they left off. It is carried by the read that opens a
+   * thread; a send or a sync answers about what it just wrote and carries null, as does a reader who
+   * has never opened this thread. Null means "no divider", which is what a first visit looks like.
+   */
+  last_read_ordinal: z.number().int().nonnegative().nullable().default(null),
 });
 export type CompanionThread = z.infer<typeof companionThreadSchema>;
 
@@ -448,6 +462,20 @@ export const createCompanionInputSchema = z.object({
   selected_mcp_account_ids: companionSelectedMcpAccountIdsSchema.optional(),
 }).strict();
 export type CreateCompanionInput = z.infer<typeof createCompanionInputSchema>;
+
+/**
+ * Per-member Companions list preferences. Omitting a field leaves it unchanged. `unread: true`
+ * marks the thread unread; `unread: false` clears the badge the same way opening the thread does.
+ */
+export const updateCompanionMemberStateInputSchema = z.object({
+  pinned: z.boolean().optional(),
+  hidden: z.boolean().optional(),
+  unread: z.boolean().optional(),
+}).strict().refine(
+  (body) => body.pinned !== undefined || body.hidden !== undefined || body.unread !== undefined,
+  { message: "at least one of pinned, hidden, or unread is required" },
+);
+export type UpdateCompanionMemberStateInput = z.infer<typeof updateCompanionMemberStateInputSchema>;
 
 export const updateCompanionInputSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),

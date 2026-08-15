@@ -68,6 +68,9 @@ function companion(access: Companion["access"] = "owner"): Companion {
     selected_mcp_account_ids: [],
     owner_id: "user-1",
     access,
+    pinned: false,
+    hidden: false,
+    unread: false,
     last_message: null,
     runtime: {
       state: "stopped",

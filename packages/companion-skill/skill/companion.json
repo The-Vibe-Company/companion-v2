@@ -1,7 +1,7 @@
 {
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.59.0",
+  "version": "1.61.0",
   "icon": "boxes",
   "title": "Companion",
   "description": "Manage and safely install SKILL.md packages through delegated Agent Auth, including pinned public releases, publishing, updates, dependencies, secrets, hosted Skill Databases, local install tracking, and Companion self-update.",
@@ -29,11 +29,29 @@
     ],
     "changelog": [
       {
-        "version": "1.59.0",
-        "date": "2026-08-14",
+        "version": "1.61.0",
+        "date": "2026-08-15",
         "changes": [
           "Refreshes the bundled Agent Auth client after Companion reads gained a projected last chat line for the conversation list.",
           "Keeps the projection to member messages and Pi replies, so no tool run or pending permission question reaches a list preview.",
+          "No change to Companion skill commands, permissions, or installation behavior."
+        ]
+      },
+      {
+        "version": "1.60.0",
+        "date": "2026-08-14",
+        "changes": [
+          "Refreshes the bundled Agent Auth client after Companion Plugins replaced the external MCP registry contract with the product-owned Linear, GitHub, and Notion catalog.",
+          "Keeps plugin discovery, OAuth credentials, custom MCP setup, and runtime injection outside delegated Skills Hub Agent Auth.",
+          "No change to Companion skill commands, permissions, or installation behavior."
+        ]
+      },
+      {
+        "version": "1.59.0",
+        "date": "2026-08-14",
+        "changes": [
+          "Refreshes the bundled Agent Auth client after Companions gained per-member pin, unread, hide, and Owner-only duplicate list actions.",
+          "Keeps Companion roster preferences and duplicate Box creation outside delegated Skills Hub Agent Auth.",
           "No change to Companion skill commands, permissions, or installation behavior."
         ]
       },

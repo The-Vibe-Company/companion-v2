@@ -8,7 +8,7 @@ archive = "bash scripts/dev-conductor.sh archive"
 run_mode = "concurrent"
 
 [scripts.run.dev]
-command = "bash scripts/dev-conductor.sh"
+command = "COMPANION_COMPANIONS_ENABLED=true COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=thevibecompany.co bash scripts/dev-conductor.sh"
 default = true
 icon = "play"
 

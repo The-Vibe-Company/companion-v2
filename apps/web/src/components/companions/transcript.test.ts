@@ -1,6 +1,12 @@
 import type { CompanionThread, CompanionTranscriptEntry } from "@companion/contracts";
 import { describe, expect, it } from "vitest";
-import { composerHint, replyExpected, transcriptAuthor, transcriptTurns } from "./transcript";
+import {
+  composerHint,
+  replyExpected,
+  transcriptAuthor,
+  transcriptDisplayContent,
+  transcriptTurns,
+} from "./transcript";
 
 function entry(overrides: Partial<CompanionTranscriptEntry> = {}): CompanionTranscriptEntry {
   return {
@@ -27,9 +33,44 @@ function thread(overrides: Partial<CompanionThread> = {}): CompanionThread {
     entries: [],
     pending_count: 0,
     last_message_at: null,
+    last_read_ordinal: null,
     ...overrides,
   };
 }
+
+describe("transcriptDisplayContent", () => {
+  it.each([
+    ["Pi ended the turn without a visible reply.", "Luna ended the turn without a visible reply."],
+    ["Pi ended the turn without a reply (error).", "Luna ended the turn without a reply (error)."],
+    ["Pi ended the turn without a reply (aborted).", "Luna ended the turn without a reply (aborted)."],
+    ["Pi did not accept the message: unavailable", "Luna did not accept the message: unavailable"],
+  ])("names the Companion in a system note: %s", (content, expected) => {
+    expect(transcriptDisplayContent(entry({ role: "system", content }), "Luna")).toBe(expected);
+  });
+
+  it("only replaces Pi as a standalone name", () => {
+    expect(transcriptDisplayContent(
+      entry({
+        role: "system",
+        content: "Pi stopped; pi.dev, Pipedream, Piñata, and αPi stayed available.",
+      }),
+      "Luna",
+    )).toBe("Luna stopped; pi.dev, Pipedream, Piñata, and αPi stayed available.");
+  });
+
+  it.each(["user", "assistant", "tool", "decision"] as const)(
+    "keeps %s content literal",
+    (role) => {
+      expect(transcriptDisplayContent(entry({ role, content: "Pi stayed literal." }), "Luna"))
+        .toBe("Pi stayed literal.");
+    },
+  );
+
+  it("inserts a Companion name literally", () => {
+    expect(transcriptDisplayContent(entry({ role: "system", content: "Pi stopped." }), "$& Atlas"))
+      .toBe("$& Atlas stopped.");
+  });
+});
 
 describe("transcriptAuthor", () => {
   it("credits the reader's own message to them and a teammate's to its author", () => {
@@ -153,34 +194,32 @@ describe("transcript separators", () => {
     expect(turns.map((turn) => turn.startsDay)).toEqual([null, "2026-08-14"]);
   });
 
-  it("draws the new-message divider once, on the first line somebody else wrote", () => {
+  it("draws the new-message divider once, on the first line past the reader's watermark", () => {
     const turns = transcriptTurns([
-      entry({ event_id: "pi:1", role: "assistant", author_id: null, created_at: "2026-08-14T09:00:00.000Z" }),
-      entry({ event_id: "pi:2", role: "assistant", author_id: null, created_at: "2026-08-14T09:05:00.000Z" }),
-      entry({ event_id: "pi:3", role: "assistant", author_id: null, created_at: "2026-08-14T09:06:00.000Z" }),
-    ], { ...context, newSince: "2026-08-14T09:01:00.000Z" });
+      entry({ event_id: "pi:1", ordinal: 0, role: "assistant", author_id: null }),
+      entry({ event_id: "pi:2", ordinal: 1, role: "assistant", author_id: null }),
+      entry({ event_id: "pi:3", ordinal: 2, role: "assistant", author_id: null }),
+    ], { ...context, lastReadOrdinal: 0 });
 
     expect(turns.map((turn) => turn.startsNew)).toEqual([false, true, false]);
   });
 
   it("never divides a thread at this reader's own message", () => {
     const turns = transcriptTurns([
-      entry({ event_id: "msg:1", created_at: "2026-08-14T09:05:00.000Z" }),
-      entry({ event_id: "pi:1", role: "assistant", author_id: null, created_at: "2026-08-14T09:06:00.000Z" }),
-    ], { ...context, newSince: "2026-08-14T09:00:00.000Z" });
+      entry({ event_id: "msg:1", ordinal: 1 }),
+      entry({ event_id: "pi:1", ordinal: 2, role: "assistant", author_id: null }),
+    ], { ...context, lastReadOrdinal: 0 });
 
     expect(turns.map((turn) => turn.startsNew)).toEqual([false, true]);
   });
 
   it("leaves a thread undivided when the reader has caught up, or has never been here", () => {
-    const entries = [
-      entry({ event_id: "pi:1", role: "assistant", author_id: null, created_at: "2026-08-14T09:00:00.000Z" }),
-    ];
+    const entries = [entry({ event_id: "pi:1", ordinal: 3, role: "assistant", author_id: null })];
 
-    expect(transcriptTurns(entries, { ...context, newSince: "2026-08-14T09:30:00.000Z" })
+    expect(transcriptTurns(entries, { ...context, lastReadOrdinal: 3 })
       .some((turn) => turn.startsNew)).toBe(false);
-    // A first visit has nothing to return to, so the whole thread is simply the thread.
-    expect(transcriptTurns(entries, { ...context, newSince: null })
+    // A first visit has no watermark to return to, so the whole thread is simply the thread.
+    expect(transcriptTurns(entries, { ...context, lastReadOrdinal: null })
       .some((turn) => turn.startsNew)).toBe(false);
   });
 });

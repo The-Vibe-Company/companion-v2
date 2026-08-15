@@ -20,6 +20,7 @@ import {
   setCompanionWorkspaceShareInputSchema,
   startCompanionRuntimeInputSchema,
   updateCompanionInputSchema,
+  updateCompanionMemberStateInputSchema,
 } from "../src/companions";
 
 describe("Companion provider contracts", () => {
@@ -120,6 +121,16 @@ describe("Companion provider contracts", () => {
       selected_mcp_account_ids: [],
     })).toEqual({ selected_mcp_account_ids: [] });
     expect(() => updateCompanionInputSchema.parse({})).toThrow();
+  });
+
+  it("accepts member-state patches for pin, hide, and unread", () => {
+    expect(updateCompanionMemberStateInputSchema.parse({ pinned: true })).toEqual({ pinned: true });
+    expect(updateCompanionMemberStateInputSchema.parse({
+      hidden: true,
+      unread: false,
+    })).toEqual({ hidden: true, unread: false });
+    expect(() => updateCompanionMemberStateInputSchema.parse({})).toThrow();
+    expect(() => updateCompanionMemberStateInputSchema.parse({ pinned: true, share: "no" })).toThrow();
   });
 
   it("accepts MCP plugin selection on create", () => {
@@ -543,6 +554,9 @@ describe("Companion conversation-list contracts", () => {
     selected_mcp_account_ids: [],
     owner_id: "user-1",
     access: "owner",
+    pinned: false,
+    hidden: false,
+    unread: false,
     runtime: {
       state: "running",
       daemon_state: "running",
