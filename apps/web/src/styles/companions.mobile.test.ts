@@ -138,6 +138,16 @@ describe("Companions mobile viewport", () => {
     expect(declarations).toContain("background: var(--color-surface);");
   });
 
+  it("lets the shared header wrap before its primary action can be clipped", () => {
+    const header = declarationsFor(".companions-main--list .sh", PHONE)[0];
+    expect(header).toContain("height: auto;");
+    expect(header).toContain("flex-wrap: wrap;");
+    expect(declarationsFor(".companions-main--list .sh__spacer", PHONE)[0])
+      .toContain("display: none;");
+    expect(declarationsFor(".companions-main--list .sh .btn-primary", PHONE)[0])
+      .toContain("margin-left: auto;");
+  });
+
   it("sheds Updated then Access without losing the row menu", () => {
     expect(declarationsFor(".companions-list .companions-row", COMPACT)[0])
       .toContain("grid-template-columns: minmax(160px, 1fr) 104px minmax(88px, auto);");

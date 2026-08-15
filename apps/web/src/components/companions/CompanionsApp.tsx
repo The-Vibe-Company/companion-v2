@@ -159,8 +159,8 @@ function CompanionActionsMenu({
   hidden?: boolean;
   onSettings: () => void;
   onShare: () => void;
-  onMemberState: (patch: { pinned?: boolean; hidden?: boolean; unread?: boolean }) => void;
-  onDuplicate: () => void;
+  onMemberState: (patch: { pinned?: boolean; hidden?: boolean; unread?: boolean }) => Promise<void>;
+  onDuplicate: () => Promise<void>;
 }) {
   const menuId = useId();
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -244,9 +244,9 @@ function CompanionActionsMenu({
     items[next]?.focus();
   };
 
-  const run = (action: () => void) => {
-    close();
-    action();
+  const run = (action: () => void | Promise<void>, returnFocus = false) => {
+    close(returnFocus);
+    void action();
   };
 
   return (
@@ -283,11 +283,9 @@ function CompanionActionsMenu({
               style={position}
               onKeyDown={onMenuKeyDown}
             >
-              {companion.access !== "viewer" ? (
-                <button type="button" role="menuitem" onClick={() => run(onSettings)}>
-                  Settings
-                </button>
-              ) : null}
+              <button type="button" role="menuitem" onClick={() => run(onSettings)}>
+                Settings
+              </button>
               {hidden ? (
                 <button
                   type="button"
@@ -308,7 +306,10 @@ function CompanionActionsMenu({
                     type="button"
                     role="menuitem"
                     disabled={busy}
-                    onClick={() => run(() => onMemberState({ pinned: !companion.pinned }))}
+                    onClick={() => run(
+                      () => onMemberState({ pinned: !companion.pinned }),
+                      true,
+                    )}
                   >
                     {companion.pinned ? "Unpin" : "Pin"}
                   </button>
@@ -316,12 +317,12 @@ function CompanionActionsMenu({
                     type="button"
                     role="menuitem"
                     disabled={busy || companion.unread}
-                    onClick={() => run(() => onMemberState({ unread: true }))}
+                    onClick={() => run(() => onMemberState({ unread: true }), true)}
                   >
                     Mark as unread
                   </button>
                   {companion.access === "owner" ? (
-                    <button type="button" role="menuitem" disabled={busy} onClick={() => run(onDuplicate)}>
+                    <button type="button" role="menuitem" disabled={busy} onClick={() => run(onDuplicate, true)}>
                       Duplicate
                     </button>
                   ) : null}
@@ -450,6 +451,7 @@ export function CompanionsApp({
   const companionReadRef = useRef(new Map<string, number>());
   const threadQueueRef = useRef(createThreadQueue());
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
+  const searchRef = useRef<HTMLInputElement>(null);
   const noop = () => {};
 
   const opened = useMemo(
@@ -562,6 +564,11 @@ export function CompanionsApp({
       setError(cause instanceof Error ? cause.message : "Could not update this Companion.");
     } finally {
       setBusy(false);
+      if (patch.hidden !== undefined) {
+        window.requestAnimationFrame(() => {
+          (rowRefs.current.get(companion.id) ?? searchRef.current)?.focus();
+        });
+      }
     }
   };
 
@@ -1218,6 +1225,7 @@ export function CompanionsApp({
               onChange={setQuery}
               placeholder="Search companions"
               ariaLabel="Search companions"
+              inputRef={searchRef}
             />
 
             <ResourceListFrame className="companions-list">
@@ -1276,8 +1284,8 @@ export function CompanionsApp({
                         personalWorkspace={currentOrg.kind === "personal"}
                         onSettings={() => router.push(`/companions/${companion.id}/settings`)}
                         onShare={() => setSharing(companion)}
-                        onMemberState={(patch) => void applyMemberState(companion, patch)}
-                        onDuplicate={() => void onDuplicate(companion)}
+                        onMemberState={(patch) => applyMemberState(companion, patch)}
+                        onDuplicate={() => onDuplicate(companion)}
                       />
                     </span>
                   </div>
@@ -1337,8 +1345,8 @@ export function CompanionsApp({
                             personalWorkspace={currentOrg.kind === "personal"}
                             onSettings={() => router.push(`/companions/${companion.id}/settings`)}
                             onShare={() => setSharing(companion)}
-                            onMemberState={(patch) => void applyMemberState(companion, patch)}
-                            onDuplicate={() => void onDuplicate(companion)}
+                            onMemberState={(patch) => applyMemberState(companion, patch)}
+                            onDuplicate={() => onDuplicate(companion)}
                           />
                         </span>
                       </div>

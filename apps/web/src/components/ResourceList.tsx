@@ -1,6 +1,6 @@
 "use client";
 
-import type { CSSProperties, ReactNode } from "react";
+import type { CSSProperties, ReactNode, Ref } from "react";
 import { Icon } from "./Icon";
 
 function classes(...values: Array<string | null | undefined | false>): string {
@@ -41,6 +41,7 @@ export function ResourceListToolbar({
   onChange,
   placeholder,
   ariaLabel,
+  inputRef,
   children,
   className,
 }: {
@@ -48,6 +49,7 @@ export function ResourceListToolbar({
   onChange: (value: string) => void;
   placeholder: string;
   ariaLabel: string;
+  inputRef?: Ref<HTMLInputElement>;
   children?: ReactNode;
   className?: string;
 }) {
@@ -56,6 +58,7 @@ export function ResourceListToolbar({
       <span className="listbar__search">
         <Icon name="search" size={14} />
         <input
+          ref={inputRef}
           className="listbar__input"
           type="search"
           placeholder={placeholder}

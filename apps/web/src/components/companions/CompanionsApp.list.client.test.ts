@@ -348,7 +348,7 @@ describe("CompanionsApp conversation list", () => {
     await act(async () => trigger.click());
 
     const menu = document.body.querySelector<HTMLElement>('[role="menu"][aria-label="Actions for Luna"]');
-    expect(menu?.textContent).not.toContain("Settings");
+    expect(menu?.textContent).toContain("Settings");
     expect(menu?.textContent).toContain("Pin");
     expect(menu?.textContent).toContain("Mark as unread");
     expect(menu?.textContent).toContain("Hide");
@@ -377,6 +377,9 @@ describe("CompanionsApp conversation list", () => {
     const pin = [...document.body.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
       .find((item) => item.textContent === "Pin")!;
     await act(async () => pin.click());
+    await act(async () => {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    });
 
     expect(companionsApi.updateCompanionMemberState).toHaveBeenCalledWith(
       "org-1",
@@ -384,6 +387,26 @@ describe("CompanionsApp conversation list", () => {
       { pinned: true },
     );
     expect(container.querySelector(".companions-row--pinned")).not.toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("moves focus to search after hiding removes the active row", async () => {
+    companionsApi.updateCompanionMemberState.mockResolvedValue(companion({ hidden: true }));
+    const container = await render([companion()]);
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Actions for Luna"]')!;
+
+    await act(async () => trigger.click());
+    const hide = [...document.body.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((item) => item.textContent === "Hide")!;
+    await act(async () => hide.click());
+    await act(async () => {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    });
+
+    expect(document.activeElement).toBe(
+      container.querySelector<HTMLInputElement>('input[aria-label="Search companions"]'),
+    );
+    expect(container.querySelector(".companions-hidden")?.textContent).toContain("Luna");
   });
 
   it("duplicates from the row menu and renders the returned Companion", async () => {

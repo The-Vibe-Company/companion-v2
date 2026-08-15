@@ -1565,6 +1565,23 @@ button.chat-box:focus-visible {
 }
 
 @media (max-width: 560px) {
+  .companions-main--list .sh {
+    height: auto;
+    min-height: var(--topbar-height);
+    flex-wrap: wrap;
+    row-gap: 8px;
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+
+  .companions-main--list .sh__spacer {
+    display: none;
+  }
+
+  .companions-main--list .sh .btn-primary {
+    margin-left: auto;
+  }
+
   .companions-main {
     padding: 22px 14px 32px;
   }

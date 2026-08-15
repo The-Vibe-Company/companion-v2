@@ -46,7 +46,7 @@ export function CompanionContext({
   onJoin: () => void;
   onDesktop: () => void;
   onWake: () => void;
-  /** Null for a Viewer, who cannot open Companion settings. */
+  /** Null for a Viewer, who does not receive the runner-only context panel. */
   onSettings: (() => void) | null;
   onClose: () => void;
 }) {
