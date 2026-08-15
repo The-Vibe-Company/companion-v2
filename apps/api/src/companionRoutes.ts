@@ -438,7 +438,12 @@ export function registerCompanionRoutes(
     c: Context<{ Variables: ApiVariables }>,
     companionId: string,
     body: StartCompanionRuntimeInput,
-    options: { allowBoxWake?: boolean; restartPi?: boolean; allowArchiveResume?: boolean } = {},
+    options: {
+      allowBoxWake?: boolean;
+      restartPi?: boolean;
+      timeoutRestartOrdinal?: number | null;
+      allowArchiveResume?: boolean;
+    } = {},
   ): Promise<{ companion: Companion; runtime: CompanionBoxRuntime; ready: boolean }> {
     return startCompanionRuntime(await lifecycleContext(c), companionId, body, options);
   }
@@ -454,6 +459,8 @@ export function registerCompanionRoutes(
     boxId: string;
     messages: CompanionTranscriptEntry[];
     runtime: CompanionBoxRuntime;
+    /** This delivery is protected by an unanswered timeout until each accepted ordinal is recorded. */
+    timeoutRecoveryPending?: boolean;
   }): Promise<{ thread: CompanionThread; deliveredOrdinal: number } | null> {
     return deliverCompanionMessagesViaRuntime({
       actor: input.actor,
@@ -465,6 +472,7 @@ export function registerCompanionRoutes(
       boxId: input.boxId,
       messages: input.messages,
       runtime: input.runtime,
+      timeoutRecoveryPending: input.timeoutRecoveryPending,
     });
   }
 
@@ -1145,6 +1153,9 @@ export function registerCompanionRoutes(
           provider,
           pending: state.pending,
           deliveredOrdinal: state.deliveredOrdinal,
+          timeoutRecoveryPending: state.timeoutRecoveryPending,
+          timeoutRestartPending: state.timeoutRestartPending,
+          timeoutRecoveryOrdinal: state.timeoutRecoveryOrdinal,
           toolRuns,
           decisionResponses,
           ...result,
@@ -1169,6 +1180,7 @@ export function registerCompanionRoutes(
       let boxId: string | undefined;
       if (
         piIsReachable(sent.companion)
+        && !sent.timeoutRestartPending
         && providerAuthIsCurrent(sent.companion, sent.provider)
         && sent.companion.runtime.disk_layout_version === COMPANION_PI_DISK_LAYOUT_VERSION
       ) {
@@ -1190,7 +1202,15 @@ export function registerCompanionRoutes(
             c,
             companionId,
             startCompanionRuntimeInputSchema.parse({ client_surface: body.client_surface }),
-            { allowArchiveResume: true },
+            {
+              allowArchiveResume: true,
+              // A timed-out execution may still be holding Pi even after the scoped abort fired.
+              // Recycle Pi, never the Box, before handing it the tail that follows that dead turn.
+              restartPi: sent.timeoutRestartPending,
+              timeoutRestartOrdinal: sent.timeoutRestartPending
+                ? sent.timeoutRecoveryOrdinal
+                : null,
+            },
           );
           if (!started.companion.runtime.box_id) {
             throw new CompanionRuntimeTransitionError("companion start completed without a Box");
@@ -1222,6 +1242,7 @@ export function registerCompanionRoutes(
         boxId,
         messages: sent.pending,
         runtime,
+        timeoutRecoveryPending: sent.timeoutRecoveryPending,
       });
       const deliveredOrdinal = delivered?.deliveredOrdinal ?? sent.deliveredOrdinal;
       return c.json({
@@ -1294,7 +1315,15 @@ export function registerCompanionRoutes(
         // its stale window. Explicit Stop and Owner deletion remain read-only here.
         let started;
         try {
-          started = await startRuntime(c, companionId, body, { allowArchiveResume: true });
+          started = await startRuntime(c, companionId, body, {
+            allowArchiveResume: true,
+            // A stale lifecycle claim does not prove its owner reached the timeout recycle. Carry
+            // the same recovery requirement through takeover before the pending tail is delivered.
+            restartPi: resolved.timeoutRestartPending,
+            timeoutRestartOrdinal: resolved.timeoutRestartPending
+              ? resolved.timeoutRecoveryOrdinal
+              : null,
+          });
         } catch (error) {
           if (error instanceof CompanionRuntimeTransitionError) {
             return c.json({ thread: beforeRuntime.thread, source: "control_plane" as const });
@@ -1322,8 +1351,15 @@ export function registerCompanionRoutes(
         if (
           !providerAuthIsCurrent(resolved.companion, resolved.provider)
           || resolved.companion.runtime.disk_layout_version !== COMPANION_PI_DISK_LAYOUT_VERSION
+          || resolved.timeoutRestartPending
         ) {
-          const started = await startRuntime(c, companionId, body, { allowBoxWake: false });
+          const started = await startRuntime(c, companionId, body, {
+            allowBoxWake: false,
+            restartPi: resolved.timeoutRestartPending,
+            timeoutRestartOrdinal: resolved.timeoutRestartPending
+              ? resolved.timeoutRecoveryOrdinal
+              : null,
+          });
           if (!started.companion.runtime.box_id) {
             throw new CompanionRuntimeTransitionError("companion start completed without a Box");
           }
@@ -1348,6 +1384,9 @@ export function registerCompanionRoutes(
             companionId,
             entries: [],
             deliveredOrdinal,
+            timeoutDeliveryOrdinal: resolved.timeoutRecoveryPending
+              ? deliveredOrdinal
+              : undefined,
           }).then(() => true, () => false);
           if (recorded) await runtime.refreshTtl({ boxId }).catch(() => undefined);
         }

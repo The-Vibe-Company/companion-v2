@@ -7,6 +7,7 @@ import {
   CompanionRuntimeTransitionError,
   CompanionSettingsForbiddenError,
 } from "@companion/core";
+import type { Companion } from "@companion/contracts";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthenticationRequiredError, type ApiVariables } from "./context";
@@ -56,6 +57,7 @@ const coreMocks = vi.hoisted(() => ({
   markCompanionThreadRead: vi.fn(),
   sendCompanionMessage: vi.fn(),
   listPendingCompanionMessages: vi.fn(),
+  recordCompanionTimeoutRestart: vi.fn(),
   recordCompanionPiProjectionWithEffects: vi.fn(),
   attachCompanionToolRunScreenshot: vi.fn(),
   decideCompanionDecision: vi.fn(),
@@ -402,6 +404,9 @@ describe("Companions API feature gate", () => {
       pending: [],
       piLogOffset: 0,
       deliveredOrdinal: null,
+      timeoutRecoveryPending: false,
+      timeoutRestartPending: false,
+      timeoutRecoveryOrdinal: null,
     });
     coreMocks.recordCompanionPiProjectionWithEffects.mockResolvedValue({
       thread: {
@@ -413,6 +418,7 @@ describe("Companions API feature gate", () => {
       settledToolRuns: [],
     });
     coreMocks.settleExpiredCompanionDecisions.mockResolvedValue([]);
+    coreMocks.recordCompanionTimeoutRestart.mockResolvedValue(undefined);
     coreMocks.expireCompanionDecisions.mockImplementation(async () => {
       const last = coreMocks.recordCompanionPiProjectionWithEffects.mock.results.at(-1);
       const thread = last?.type === "return"
@@ -2570,14 +2576,34 @@ describe("Companions API feature gate", () => {
   it("delivers the stranded tail and a new send after terminalizing the prior tool", async () => {
     const stranded = { ...message, event_id: "msg:alors", content: "Alors ?", ordinal: 1 };
     const newest = { ...message, event_id: "msg:ca-va", content: "Ca va ?", ordinal: 2 };
+    const timedOut = {
+      ...message,
+      event_id: "pi:read:tool:0",
+      ordinal: 0,
+      role: "tool" as const,
+      content: "/tmp/conductor-cli.png",
+      author_id: null,
+      author_name: null,
+      tool: {
+        call_id: "call-read",
+        kind: "file" as const,
+        name: "read",
+        title: "/tmp/conductor-cli.png",
+        status: "timeout" as const,
+        detail: "Timed out after 90 seconds without a tool result.",
+        screenshot: null,
+      },
+    };
     const timedOutThread = {
       ...viewerThread,
       access: "owner" as const,
       read_only: false,
       can_send: true,
-      entries: [stranded, newest],
+      entries: [timedOut, stranded, newest],
+      pending_count: 0,
     };
     coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(runningCompanion);
     coreMocks.sendCompanionMessage.mockResolvedValue({
       thread: timedOutThread,
       entry: newest,
@@ -2586,6 +2612,9 @@ describe("Companions API feature gate", () => {
       pending: [stranded, newest],
       piLogOffset: 0,
       deliveredOrdinal: null,
+      timeoutRecoveryPending: true,
+      timeoutRestartPending: true,
+      timeoutRecoveryOrdinal: 0,
     });
     coreMocks.expireCompanionToolRuns.mockResolvedValue({
       thread: timedOutThread,
@@ -2605,6 +2634,13 @@ describe("Companions API feature gate", () => {
     await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
     expect(coreMocks.expireCompanionToolRuns.mock.invocationCallOrder[0])
       .toBeLessThan(coreMocks.listPendingCompanionMessages.mock.invocationCallOrder[0]!);
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ restartPi: true }));
+    expect(coreMocks.recordCompanionTimeoutRestart).toHaveBeenCalledWith(expect.objectContaining({
+      timeoutOrdinal: 0,
+    }));
+    expect(runtime.start.mock.invocationCallOrder[0]!)
+      .toBeLessThan(runtime.prompt.mock.invocationCallOrder[0]!);
+    expect(runtime.stop).not.toHaveBeenCalled();
     expect(runtime.prompt).toHaveBeenNthCalledWith(1, expect.objectContaining({
       message: "Alors ?",
       requestId: "msg:alors",
@@ -2612,6 +2648,45 @@ describe("Companions API feature gate", () => {
     expect(runtime.prompt).toHaveBeenNthCalledWith(2, expect.objectContaining({
       message: "Ca va ?",
       requestId: "msg:ca-va",
+    }));
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+      expect.objectContaining({ deliveredOrdinal: 2, timeoutDeliveryOrdinal: 2 }),
+    );
+  });
+
+  it("revalidates a delayed timeout recovery after another request already recycled Pi", async () => {
+    const pendingState = {
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+      timeoutRecoveryPending: true,
+      timeoutRestartPending: true,
+      timeoutRecoveryOrdinal: 0,
+    };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(runningCompanion);
+    coreMocks.sendCompanionMessage.mockResolvedValue({
+      thread: { ...viewerThread, access: "owner", read_only: false, can_send: true },
+      entry: message,
+    });
+    coreMocks.listPendingCompanionMessages
+      .mockResolvedValueOnce(pendingState)
+      .mockResolvedValueOnce({ ...pendingState, timeoutRestartPending: false });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: message.content }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ restartPi: false }));
+    expect(coreMocks.recordCompanionTimeoutRestart).not.toHaveBeenCalled();
+    expect(runtime.prompt).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: message.event_id,
     }));
   });
 
@@ -3239,12 +3314,17 @@ describe("Companions API feature gate", () => {
     function syncing(
       runtime: ReturnType<typeof boxRuntime>,
       pending: Array<typeof message> = [],
+      timeoutRecoveryPending = false,
+      projectedCompanion: Companion = runningCompanion,
     ) {
-      coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+      coreMocks.getCompanionForRuntime.mockResolvedValue(projectedCompanion);
       coreMocks.listPendingCompanionMessages.mockResolvedValue({
         pending,
         piLogOffset: 512,
         deliveredOrdinal: null,
+        timeoutRecoveryPending,
+        timeoutRestartPending: timeoutRecoveryPending,
+        timeoutRecoveryOrdinal: timeoutRecoveryPending ? 1 : null,
       });
       const app = new Hono<{ Variables: ApiVariables }>();
       registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
@@ -3407,17 +3487,61 @@ describe("Companions API feature gate", () => {
       });
       const runtime = boxRuntime({ readEvents: vi.fn(async () => ({ chunk: "", offset: 512 })) });
 
-      const response = await syncing(runtime, [stranded]);
+      coreMocks.claimCompanionRuntimeStart.mockResolvedValue(runningCompanion);
+
+      const response = await syncing(runtime, [stranded], true);
 
       expect(response.status).toBe(200);
       expect(coreMocks.expireCompanionToolRuns.mock.invocationCallOrder[0])
         .toBeLessThan(coreMocks.listPendingCompanionMessages.mock.invocationCallOrder[0]!);
+      expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ restartPi: true }));
+      expect(coreMocks.recordCompanionTimeoutRestart).toHaveBeenCalledWith(expect.objectContaining({
+        timeoutOrdinal: 1,
+      }));
+      expect(runtime.start.mock.invocationCallOrder[0]!)
+        .toBeLessThan(runtime.prompt.mock.invocationCallOrder[0]!);
       expect(runtime.prompt).toHaveBeenCalledWith(expect.objectContaining({
         message: "Ca va ?",
         requestId: "msg:ca-va",
       }));
       expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
-        expect.objectContaining({ deliveredOrdinal: 3 }),
+        expect.objectContaining({ deliveredOrdinal: 3, timeoutDeliveryOrdinal: 3 }),
+      );
+    });
+
+    it("preserves the timeout recycle while reclaiming a stale provisioning start", async () => {
+      const stranded = {
+        ...message,
+        event_id: "msg:after-stale-start",
+        ordinal: 3,
+        content: "Still there?",
+      };
+      const staleStart = {
+        ...runningCompanion,
+        runtime: {
+          ...runningCompanion.runtime,
+          state: "provisioning" as const,
+          daemon_state: "starting" as const,
+        },
+      };
+      const runtime = boxRuntime({ readEvents: vi.fn(async () => ({ chunk: "", offset: 512 })) });
+      coreMocks.claimCompanionRuntimeStart.mockResolvedValue(runningCompanion);
+
+      const response = await syncing(runtime, [stranded], true, staleStart);
+
+      expect(response.status).toBe(200);
+      expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ restartPi: true }));
+      expect(coreMocks.recordCompanionTimeoutRestart).toHaveBeenCalledWith(expect.objectContaining({
+        timeoutOrdinal: 1,
+      }));
+      expect(runtime.start.mock.invocationCallOrder[0]!)
+        .toBeLessThan(runtime.prompt.mock.invocationCallOrder[0]!);
+      expect(runtime.prompt).toHaveBeenCalledWith(expect.objectContaining({
+        message: "Still there?",
+        requestId: "msg:after-stale-start",
+      }));
+      expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+        expect.objectContaining({ deliveredOrdinal: 3, timeoutDeliveryOrdinal: 3 }),
       );
     });
 

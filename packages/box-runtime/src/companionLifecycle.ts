@@ -6,7 +6,9 @@ import {
   claimCompanionRuntimeStop,
   getCompanionForRuntime,
   listCompanionRuntimeSkillPackages,
+  listPendingCompanionMessages,
   recordCompanionPiProjectionWithEffects,
+  recordCompanionTimeoutRestart,
   resolveCompanionProviderAuth,
   resolveCompanionPluginInjection,
   updateCompanionRuntime,
@@ -102,6 +104,7 @@ export function recordProjection(input: {
   piLogOffset?: number;
   piLogRewound?: boolean;
   deliveredOrdinal?: number;
+  timeoutDeliveryOrdinal?: number;
 }): Promise<CompanionPiProjectionResult> {
   return withTenantContext(
     { orgId: input.orgId, userId: input.actor.id },
@@ -121,6 +124,8 @@ export async function deliverCompanionMessages(
     boxId: string;
     messages: CompanionTranscriptEntry[];
     runtime: CompanionBoxRuntime;
+    /** This delivery is protected by an unanswered timeout until each accepted ordinal is recorded. */
+    timeoutRecoveryPending?: boolean;
   },
 ): Promise<{ thread: CompanionThread; deliveredOrdinal: number } | null> {
   let deliveredOrdinal: number | undefined;
@@ -143,6 +148,7 @@ export async function deliverCompanionMessages(
     companionId: input.companionId,
     entries: [],
     deliveredOrdinal,
+    timeoutDeliveryOrdinal: input.timeoutRecoveryPending ? deliveredOrdinal : undefined,
   });
   // Move the Box idle clock only after Pi accepted at least one durable message. A failed prompt
   // remains pending and therefore cannot lengthen the machine's lifetime.
@@ -164,7 +170,12 @@ export async function startCompanionRuntime(
   ctx: CompanionLifecycleContext,
   companionId: string,
   body: StartCompanionRuntimeInput,
-  options: { allowBoxWake?: boolean; restartPi?: boolean; allowArchiveResume?: boolean } = {},
+  options: {
+    allowBoxWake?: boolean;
+    restartPi?: boolean;
+    timeoutRestartOrdinal?: number | null;
+    allowArchiveResume?: boolean;
+  } = {},
 ): Promise<{ companion: Companion; runtime: CompanionBoxRuntime; ready: boolean }> {
   let failureContext:
     | {
@@ -181,6 +192,8 @@ export async function startCompanionRuntime(
         plugins: Awaited<ReturnType<typeof resolveCompanionPluginInjection>>;
         skillPackages: Awaited<ReturnType<typeof listCompanionRuntimeSkillPackages>>;
         hubEnv: Record<string, string>;
+        /** Revalidated after the lifecycle claim so a delayed request cannot recycle Pi twice. */
+        timeoutRestartPending: boolean;
       }
     | undefined;
   /**
@@ -211,6 +224,12 @@ export async function startCompanionRuntime(
           allowArchiveResume: options.allowArchiveResume,
           database,
         });
+        const timeoutRestartPending = options.timeoutRestartOrdinal !== null
+          && options.timeoutRestartOrdinal !== undefined
+          ? await listPendingCompanionMessages({ actor, orgId, companionId, database })
+            .then((state) => state.timeoutRestartPending
+              && state.timeoutRecoveryOrdinal === options.timeoutRestartOrdinal)
+          : false;
         const skillPackages = body.client_surface === "native_mobile"
           ? []
           : await listCompanionRuntimeSkillPackages({ actor, orgId, companionId, database });
@@ -256,7 +275,16 @@ export async function startCompanionRuntime(
             hubEnv.COMPANION_DELEGATION_TOKEN = issued.token;
           }
         }
-        return { actor, orgId, companion, provider, plugins, skillPackages, hubEnv };
+        return {
+          actor,
+          orgId,
+          companion,
+          provider,
+          plugins,
+          skillPackages,
+          hubEnv,
+          timeoutRestartPending,
+        };
       }),
       budget.signal,
     );
@@ -343,7 +371,10 @@ export async function startCompanionRuntime(
       // is not enough: recycle that daemon once so every live Box actually gains the new guard.
       // A pending skill revision recycles too — a warm shortcut would keep the Box's staged
       // skills stale while settings promise "reapplies on next start".
-      restartPi: options.restartPi === true || refreshRuntimeLayout || skillsPending,
+      restartPi: (
+        options.restartPi === true
+        && (options.timeoutRestartOrdinal == null || mutation.timeoutRestartPending)
+      ) || refreshRuntimeLayout || skillsPending,
       refreshRuntimeLayout,
       allowBoxWake: options.allowBoxWake,
       mcpCredentials: body.client_surface === "native_mobile"
@@ -427,34 +458,48 @@ export async function startCompanionRuntime(
     const companion = await withinBudget(
       withTenantContext(
         { orgId: mutation.orgId, userId: mutation.actor.id },
-        (database) => updateCompanionRuntime({
-          actor: mutation!.actor,
-          orgId: mutation!.orgId,
-          companionId,
-          patch: {
-            boxId: observed.boxId,
-            runtimeState: observed.runtimeState,
-            daemonState: observed.daemonState,
-            providerIds: [mutation!.provider.providerId],
-            providerCredentialGeneration: mutation!.provider.credentialGeneration,
-            diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
-            desktopAvailable: observed.desktopAvailable,
-            // The staged set matches the revision read in the claim transaction. Recorded only
-            // when this start actually staged: native_mobile stages no library skills, and a
-            // warm shortcut (`staged: false`) left the Box running whatever was staged before —
-            // writing "applied" for either would show "up to date" for packages the Box never
-            // received.
-            ...(body.client_surface !== "native_mobile" && observed.staged !== false
-              ? {
-                  skillsAppliedRevision: mutation!.companion.runtime.skills_revision,
-                  skillsLastError: null,
-                }
-              : {}),
-            observedAt: new Date(),
-            startedAt: new Date(),
-          },
-          database,
-        }),
+        async (database) => {
+          const companion = await updateCompanionRuntime({
+            actor: mutation!.actor,
+            orgId: mutation!.orgId,
+            companionId,
+            patch: {
+              boxId: observed.boxId,
+              runtimeState: observed.runtimeState,
+              daemonState: observed.daemonState,
+              providerIds: [mutation!.provider.providerId],
+              providerCredentialGeneration: mutation!.provider.credentialGeneration,
+              diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
+              desktopAvailable: observed.desktopAvailable,
+              // The staged set matches the revision read in the claim transaction. Recorded only
+              // when this start actually staged: native_mobile stages no library skills, and a
+              // warm shortcut (`staged: false`) left the Box running whatever was staged before —
+              // writing "applied" for either would show "up to date" for packages the Box never
+              // received.
+              ...(body.client_surface !== "native_mobile" && observed.staged !== false
+                ? {
+                    skillsAppliedRevision: mutation!.companion.runtime.skills_revision,
+                    skillsLastError: null,
+                  }
+                : {}),
+              observedAt: new Date(),
+              startedAt: new Date(),
+            },
+            database,
+          });
+          if (mutation!.timeoutRestartPending
+            && options.timeoutRestartOrdinal !== null
+            && options.timeoutRestartOrdinal !== undefined) {
+            await recordCompanionTimeoutRestart({
+              actor: mutation!.actor,
+              orgId: mutation!.orgId,
+              companionId,
+              timeoutOrdinal: options.timeoutRestartOrdinal,
+              database,
+            });
+          }
+          return companion;
+        },
       ),
       budget.signal,
     );

@@ -1521,6 +1521,17 @@ export async function listPendingCompanionMessages(input: {
   piLogOffset: number;
   /** How far delivery already reached, so a caller can tell a delivered message from a waiting one. */
   deliveredOrdinal: number | null;
+  /**
+   * The pending tail follows a timed-out tool with no evidence that Pi began a later turn. Pi may
+   * still be blocked inside the aborted tool even though its FIFO accepts more follow-ups, so
+   * delivery must begin on a fresh Pi process rather than watermarking another command behind the
+   * dead turn.
+   */
+  timeoutRecoveryPending: boolean;
+  /** The unresolved timeout still needs its one Pi-only recycle before delivery. */
+  timeoutRestartPending: boolean;
+  /** Timed-out tool ordinal whose one-shot Pi recycle is still required. */
+  timeoutRecoveryOrdinal: number | null;
 }> {
   const database = input.database ?? db;
   await getCompanionForRuntime({ ...input, database });
@@ -1529,12 +1540,73 @@ export async function listPendingCompanionMessages(input: {
     readCompanionTranscript(database, input.orgId, input.companionId),
   ]);
   const deliveredOrdinal = row?.deliveredOrdinal ?? null;
+  const latestStartedTurnOrdinal = entries.reduce((latest, entry) => {
+    const provesTurnStarted = entry.role === "assistant"
+      || entry.role === "decision"
+      || (entry.role === "tool" && entry.tool?.status !== "timeout");
+    return provesTurnStarted ? Math.max(latest, entry.ordinal) : latest;
+  }, -1);
+  const latestTimeoutOrdinal = entries.reduce((latest, entry) =>
+    entry.role === "tool" && entry.tool?.status === "timeout"
+      ? Math.max(latest, entry.ordinal)
+      : latest, -1);
+  const timeoutRestartOrdinal = row?.timeoutRestartOrdinal ?? -1;
+  const timeoutDeliveryOrdinal = row?.timeoutDeliveryOrdinal ?? -1;
+  const protectedTailStart = Math.max(latestTimeoutOrdinal, timeoutDeliveryOrdinal);
+  const timeoutRecoveryOrdinal = latestTimeoutOrdinal > latestStartedTurnOrdinal
+    && entries.some((entry) => entry.role === "user" && entry.ordinal > protectedTailStart)
+    ? latestTimeoutOrdinal
+    : null;
+  // Until the fresh Pi process records its own delivery progress, its post-timeout tail stays
+  // pending regardless of the ordinary delivery watermark. A concurrent or pre-deploy writer can
+  // advance that watermark after settlement rewinds it; treating the watermark as proof here would
+  // silently lose the same tail this recovery boundary exists to protect.
+  const pending = entries.filter((entry) => entry.role === "user" && (
+    deliveredOrdinal === null
+    || entry.ordinal > deliveredOrdinal
+    || (timeoutRecoveryOrdinal !== null && entry.ordinal > protectedTailStart)
+  ));
   return {
-    pending: entries.filter((entry) =>
-      entry.role === "user" && (deliveredOrdinal === null || entry.ordinal > deliveredOrdinal)),
+    pending,
     piLogOffset: row?.piLogOffset ?? 0,
     deliveredOrdinal,
+    timeoutRecoveryPending: timeoutRecoveryOrdinal !== null,
+    timeoutRestartPending: timeoutRecoveryOrdinal !== null
+      && latestTimeoutOrdinal > timeoutRestartOrdinal,
+    timeoutRecoveryOrdinal,
   };
+}
+
+/**
+ * Remember that delivery after one timed-out tool reached a fresh Pi process. This is written only
+ * after the Pi-only restart returned running, before its pending tail is handed over. If delivery
+ * later fails, retrying on that same fresh process remains safe; a newer timeout can still advance
+ * the marker and require its own recycle.
+ */
+export async function recordCompanionTimeoutRestart(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  timeoutOrdinal: number;
+  database?: Db;
+}): Promise<void> {
+  const database = input.database ?? db;
+  await getCompanionForRuntime({ ...input, database });
+  const [updated] = await database
+    .update(schema.companionThreads)
+    .set({
+      timeoutRestartOrdinal: sql`greatest(
+        coalesce(${schema.companionThreads.timeoutRestartOrdinal}, -1),
+        ${input.timeoutOrdinal}
+      )`,
+      updatedAt: new Date(),
+    })
+    .where(and(
+      eq(schema.companionThreads.orgId, input.orgId),
+      eq(schema.companionThreads.companionId, input.companionId),
+    ))
+    .returning({ companionId: schema.companionThreads.companionId });
+  if (!updated) throw new CompanionNotFoundError();
 }
 
 type CompanionStoredToolRun = NonNullable<
@@ -1722,6 +1794,8 @@ interface RecordCompanionPiProjectionInput {
   /** Set when the caller reread a shrunken log from its start, so the offset may move backwards. */
   piLogRewound?: boolean;
   deliveredOrdinal?: number;
+  /** Highest post-timeout user message this fresh Pi process actually accepted. */
+  timeoutDeliveryOrdinal?: number;
   database?: Db;
 }
 
@@ -1770,7 +1844,9 @@ async function recordCompanionPiProjectionResult(
     companionId: input.companionId,
     completions: input.toolCompletions ?? [],
   });
-  if (input.piLogOffset !== undefined || input.deliveredOrdinal !== undefined) {
+  if (input.piLogOffset !== undefined
+    || input.deliveredOrdinal !== undefined
+    || input.timeoutDeliveryOrdinal !== undefined) {
     await database
       .insert(schema.companionThreads)
       .values({ orgId: input.orgId, companionId: input.companionId })
@@ -1789,6 +1865,9 @@ async function recordCompanionPiProjectionResult(
           : {}),
         ...(input.deliveredOrdinal !== undefined
           ? { deliveredOrdinal: sql`greatest(coalesce(${schema.companionThreads.deliveredOrdinal}, -1), ${input.deliveredOrdinal})` }
+          : {}),
+        ...(input.timeoutDeliveryOrdinal !== undefined
+          ? { timeoutDeliveryOrdinal: sql`greatest(coalesce(${schema.companionThreads.timeoutDeliveryOrdinal}, -1), ${input.timeoutDeliveryOrdinal})` }
           : {}),
         updatedAt: new Date(),
       })

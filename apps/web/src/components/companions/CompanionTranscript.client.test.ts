@@ -349,7 +349,8 @@ describe("a tool run in the thread", () => {
       }),
       entry({ event_id: "msg:2", ordinal: 2, role: "user", content: "Alors ?" }),
       entry({ event_id: "msg:3", ordinal: 3, role: "user", content: "Ca va ?" }),
-    ], { pending_count: 2 }));
+      entry({ event_id: "msg:4", ordinal: 4, role: "user", content: "ping THE-369" }),
+    ], { pending_count: 0 }));
 
     expect(container.textContent).not.toContain("Luna is replying...");
   });

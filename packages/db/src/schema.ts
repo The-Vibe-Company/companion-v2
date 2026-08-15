@@ -627,6 +627,10 @@ export const companionThreads = pgTable(
     deliveredOrdinal: integer("delivered_ordinal"),
     /** Highest timed-out tool whose unanswered tail has been assessed for one-time re-delivery. */
     timeoutRecoveryOrdinal: integer("timeout_recovery_ordinal"),
+    /** Highest timed-out tool after which delivery started a fresh Pi process. */
+    timeoutRestartOrdinal: integer("timeout_restart_ordinal"),
+    /** Highest post-timeout user message accepted by that fresh Pi process. */
+    timeoutDeliveryOrdinal: integer("timeout_delivery_ordinal"),
     /** Bytes of `~/.companion/runtime/logs/pi.rpc.ndjson` already projected into the transcript. */
     piLogOffset: bigint("pi_log_offset", { mode: "number" }).notNull().default(0),
     lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
@@ -647,6 +651,14 @@ export const companionThreads = pgTable(
     nonnegativeTimeoutRecoveryOrdinal: check(
       "companion_threads_timeout_recovery_ordinal_check",
       sql`${t.timeoutRecoveryOrdinal} is null or ${t.timeoutRecoveryOrdinal} >= 0`,
+    ),
+    nonnegativeTimeoutRestartOrdinal: check(
+      "companion_threads_timeout_restart_ordinal_check",
+      sql`${t.timeoutRestartOrdinal} is null or ${t.timeoutRestartOrdinal} >= 0`,
+    ),
+    nonnegativeTimeoutDeliveryOrdinal: check(
+      "companion_threads_timeout_delivery_ordinal_check",
+      sql`${t.timeoutDeliveryOrdinal} is null or ${t.timeoutDeliveryOrdinal} >= 0`,
     ),
     nonnegativeLogOffset: check("companion_threads_pi_log_offset_check", sql`${t.piLogOffset} >= 0`),
   }),

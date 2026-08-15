@@ -601,14 +601,21 @@
       "idx": 85,
       "version": "7",
       "when": 1787504800000,
-      "tag": "0085_companion_tool_timeout_v2",
+      "tag": "0085_companion_timeout_restart",
       "breakpoints": true
     },
     {
       "idx": 86,
       "version": "7",
       "when": 1787591200000,
-      "tag": "0086_companion_reconciler",
+      "tag": "0086_companion_tool_timeout_v2",
+      "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1787677600000,
+      "tag": "0087_companion_reconciler",
       "breakpoints": true
     }
   ]

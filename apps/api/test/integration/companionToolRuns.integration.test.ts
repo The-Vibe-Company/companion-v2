@@ -4,6 +4,7 @@ import {
   CompanionRuntimeForbiddenError,
   expireCompanionToolRuns,
   listPendingCompanionMessages,
+  recordCompanionTimeoutRestart,
   recordCompanionPiProjectionWithEffects,
   sendCompanionMessage,
 } from "@companion/core";
@@ -236,6 +237,8 @@ describe("Companion tool-run settlement", () => {
       .toBe("timeout");
     expect(pending.deliveredOrdinal).toBe(turn.entry.ordinal);
     expect(pending.pending).toEqual([alors.entry, caVa.entry]);
+    expect(pending.timeoutRecoveryPending).toBe(true);
+    expect(pending.timeoutRestartPending).toBe(true);
   });
 
   it("gives shell runs the longer execution deadline and names it in the detail", async () => {
@@ -432,8 +435,11 @@ describe("Companion tool-run settlement", () => {
     expect(recovered.timedOut).toEqual([]);
     expect(pending.deliveredOrdinal).toBe(turn.entry.ordinal);
     expect(pending.pending).toEqual([alors.entry, caVa.entry]);
+    expect(pending.timeoutRecoveryPending).toBe(true);
+    expect(pending.timeoutRestartPending).toBe(true);
 
-    // Once Pi accepts the recovered tail, a later read/sync must not move the watermark back again.
+    // #307 could watermark the recovered tail without proving the blocked Pi process had released.
+    // A later new send must still request the one Pi-only recycle THE-369 adds.
     await asOwner((database) => recordCompanionPiProjectionWithEffects({
       actor: owner,
       orgId: org,
@@ -455,6 +461,66 @@ describe("Companion tool-run settlement", () => {
       database,
     }));
     expect(afterRetry.deliveredOrdinal).toBe(caVa.entry.ordinal);
-    expect(afterRetry.pending).toEqual([]);
+    expect(afterRetry.pending).toEqual([alors.entry, caVa.entry]);
+    expect(afterRetry.timeoutRecoveryPending).toBe(true);
+    expect(afterRetry.timeoutRestartPending).toBe(true);
+
+    // A new send after the old writer's watermark is still after the unanswered timeout. Recycle Pi
+    // and retain the whole tail; a zero pending count did not prove the dead turn released it.
+    const ping = await asOwner((database) => sendCompanionMessage({
+      actor: owner,
+      orgId: org,
+      companionId,
+      content: "ping THE-369",
+      database,
+    }));
+    const afterNewSend = await asOwner((database) => listPendingCompanionMessages({
+      actor: owner,
+      orgId: org,
+      companionId,
+      database,
+    }));
+    expect(afterNewSend.pending).toEqual([alors.entry, caVa.entry, ping.entry]);
+    expect(afterNewSend.timeoutRecoveryPending).toBe(true);
+    expect(afterNewSend.timeoutRestartPending).toBe(true);
+
+    const timeoutOrdinal = recovered.thread.entries
+      .find((entry) => entry.event_id === eventId)?.ordinal;
+    expect(timeoutOrdinal).toBeTypeOf("number");
+    await asOwner((database) => recordCompanionTimeoutRestart({
+      actor: owner,
+      orgId: org,
+      companionId,
+      timeoutOrdinal: timeoutOrdinal!,
+      database,
+    }));
+    const afterRestart = await asOwner((database) => listPendingCompanionMessages({
+      actor: owner,
+      orgId: org,
+      companionId,
+      database,
+    }));
+    expect(afterRestart.pending).toEqual([alors.entry, caVa.entry, ping.entry]);
+    expect(afterRestart.timeoutRecoveryPending).toBe(true);
+    expect(afterRestart.timeoutRestartPending).toBe(false);
+
+    await asOwner((database) => recordCompanionPiProjectionWithEffects({
+      actor: owner,
+      orgId: org,
+      companionId,
+      entries: [],
+      deliveredOrdinal: ping.entry.ordinal,
+      timeoutDeliveryOrdinal: ping.entry.ordinal,
+      database,
+    }));
+    const afterDelivery = await asOwner((database) => listPendingCompanionMessages({
+      actor: owner,
+      orgId: org,
+      companionId,
+      database,
+    }));
+    expect(afterDelivery.pending).toEqual([]);
+    expect(afterDelivery.timeoutRecoveryPending).toBe(false);
+    expect(afterDelivery.timeoutRestartPending).toBe(false);
   });
 });
