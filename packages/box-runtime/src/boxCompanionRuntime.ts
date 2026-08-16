@@ -490,7 +490,9 @@ if [ "$pi_install_status" -ne 0 ]; then
   exit "$pi_install_status"
 fi
 if [ -s "$pi_install_path_file" ]; then
-  PATH="$(cat "$pi_install_path_file")"
+  # Keep the Box's system tools reachable even when an installer exports only its own prefix.
+  # The installed prefix stays first so a newly installed Pi wins over an older image copy.
+  PATH="$(cat "$pi_install_path_file"):$PATH"
   export PATH
 fi
 companion_pi_install_cleanup
