@@ -121,6 +121,10 @@ describe("Skills Hub PostgreSQL isolation", () => {
   });
 
   it("replaces only untouched migration seeds during post-commit delivery refinement", async () => {
+    await expect(integrationSql`
+      select companion_refresh_delivery_compat_backfill(NULL)
+    `).rejects.toThrow("batch size must be between 1 and 1000");
+
     await integrationSql`
       insert into companion_reconcile_leases (
         org_id, companion_id, reason, delivery_compat_expires_at,
@@ -130,7 +134,10 @@ describe("Skills Hub PostgreSQL isolation", () => {
         statement_timestamp() + interval '10 minutes', 0, true
       )
     `;
-    await integrationSql`select companion_refresh_delivery_compat_backfill()`;
+    const refined = await integrationSql<Array<{ processed: number }>>`
+      select companion_refresh_delivery_compat_backfill(1) as processed
+    `;
+    expect(refined).toEqual([{ processed: 1 }]);
     const [refinedSeed] = await integrationSql<Array<{
       delivery_compat_expires_at: string;
       delivery_compat_seeded: boolean;
@@ -150,7 +157,10 @@ describe("Skills Hub PostgreSQL isolation", () => {
       set delivery_compat_expires_at = statement_timestamp() + interval '11 minutes'
       where companion_id = ${companionId}
     `;
-    await integrationSql`select companion_refresh_delivery_compat_backfill()`;
+    const retried = await integrationSql<Array<{ processed: number }>>`
+      select companion_refresh_delivery_compat_backfill(1) as processed
+    `;
+    expect(retried).toEqual([{ processed: 0 }]);
     const [preservedLegacyFence] = await integrationSql<Array<{
       delivery_compat_expires_at: string;
       delivery_compat_seeded: boolean;
@@ -332,8 +342,9 @@ describe("Skills Hub PostgreSQL isolation", () => {
     `;
     await integrationSql`
       update companion_reconcile_leases
-      set delivery_compat_expires_at = NULL,
-          delivery_compat_next_ordinal = NULL
+      set delivery_compat_expires_at = statement_timestamp() + interval '20 minutes',
+          delivery_compat_next_ordinal = 0,
+          delivery_compat_seeded = false
       where companion_id = ${deliveryFenceCompanionId}
     `;
 
@@ -350,6 +361,37 @@ describe("Skills Hub PostgreSQL isolation", () => {
     });
     expect(legacyRows).toHaveLength(6);
     expect(legacyRows.map((row) => row.event_id)).toContain("delivery-fence-user");
+
+    // This read observed a larger next ordinal and recalculated a shorter work estimate. It must
+    // not shorten the fence established by an earlier legacy snapshot that may still be draining.
+    const [preservedEarlierRead] = await integrationSql<Array<{
+      delivery_compat_expires_at: string | null;
+    }>>`
+      select delivery_compat_expires_at
+      from companion_reconcile_leases
+      where companion_id = ${deliveryFenceCompanionId}
+    `;
+    expect(Date.parse(preservedEarlierRead?.delivery_compat_expires_at ?? ""))
+      .toBeGreaterThan(Date.now() + 19 * 60_000);
+
+    // Establish a fresh exact fence for the remaining claim assertions below.
+    await integrationSql`
+      update companion_reconcile_leases
+      set delivery_compat_expires_at = NULL,
+          delivery_compat_next_ordinal = NULL
+      where companion_id = ${deliveryFenceCompanionId}
+    `;
+    await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`
+        select set_config('app.org_id', ${fixture.orgA}, true),
+               set_config('app.user_id', ${fixture.owner.id}, true)
+      `;
+      await tx`
+        select event_id from companion_transcript_entries
+        where companion_id = ${deliveryFenceCompanionId}
+      `;
+    });
 
     const secondClaim = randomUUID();
     const blocked = await integrationSql.begin(async (tx) => {

@@ -328,8 +328,17 @@ BEGIN
     v_now
   )
   ON CONFLICT ON CONSTRAINT companion_reconcile_leases_pkey DO UPDATE
-    SET delivery_compat_expires_at = excluded.delivery_compat_expires_at,
-        delivery_compat_next_ordinal = excluded.delivery_compat_next_ordinal,
+    SET delivery_compat_expires_at = CASE
+          WHEN l.delivery_compat_seeded THEN excluded.delivery_compat_expires_at
+          ELSE GREATEST(l.delivery_compat_expires_at, excluded.delivery_compat_expires_at)
+        END,
+        delivery_compat_next_ordinal = CASE
+          WHEN l.delivery_compat_seeded THEN excluded.delivery_compat_next_ordinal
+          ELSE GREATEST(
+            COALESCE(l.delivery_compat_next_ordinal, -1),
+            excluded.delivery_compat_next_ordinal
+          )
+        END,
         delivery_compat_seeded = false,
         updated_at = excluded.updated_at
     WHERE l.claimed_by IS NULL
@@ -357,45 +366,55 @@ CREATE POLICY "companion_transcript_entries_delivery_fence_rls"
 --> statement-breakpoint
 
 -- The migration transaction must not scan every Companion's history while its preceding ALTERs
--- hold table locks. Install a conservative ten-minute fence with a cheap table join here; the API
--- migration runner refines it with the exact bounded-work calculation immediately after this DDL
--- transaction commits. The function comment is a durable one-shot marker if that runner crashes.
-CREATE FUNCTION public.companion_refresh_delivery_compat_backfill()
-RETURNS void
+-- hold table locks. Install a conservative ten-minute fence with a cheap table join here; after
+-- commit, the API migration runner refines only a bounded batch of untouched seeds at a time. The
+-- seeded bit is durable progress if that runner stops, and the function comment records whether a
+-- later runner still has refinement work to resume.
+CREATE FUNCTION public.companion_refresh_delivery_compat_backfill(p_batch_size integer DEFAULT 100)
+RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, public
 AS $$
+DECLARE
+  v_processed integer := 0;
 BEGIN
-  INSERT INTO public.companion_reconcile_leases AS l (
-    org_id, companion_id, reason, delivery_compat_expires_at,
-    delivery_compat_next_ordinal, delivery_compat_seeded, updated_at
-  )
-  SELECT c.org_id, c.id, 'delivery_compat',
-         public.companion_delivery_compat_deadline(c.org_id, c.id, statement_timestamp()),
-         COALESCE(t.next_ordinal, 0), false, statement_timestamp()
-  FROM public.companions c
-  LEFT JOIN public.companion_threads t
-    ON t.org_id = c.org_id
-   AND t.companion_id = c.id
-  ON CONFLICT ON CONSTRAINT companion_reconcile_leases_pkey DO UPDATE
-    SET delivery_compat_expires_at = CASE
-          WHEN l.delivery_compat_seeded THEN excluded.delivery_compat_expires_at
-          ELSE GREATEST(l.delivery_compat_expires_at, excluded.delivery_compat_expires_at)
-        END,
-        delivery_compat_next_ordinal = CASE
-          WHEN l.delivery_compat_seeded THEN excluded.delivery_compat_next_ordinal
-          ELSE GREATEST(
-            COALESCE(l.delivery_compat_next_ordinal, -1),
-            excluded.delivery_compat_next_ordinal
-          )
-        END,
+  IF p_batch_size IS NULL OR p_batch_size < 1 OR p_batch_size > 1000 THEN
+    RAISE EXCEPTION 'Companion delivery compatibility batch size must be between 1 and 1000';
+  END IF;
+
+  WITH batch AS MATERIALIZED (
+    SELECT l.org_id, l.companion_id
+    FROM public.companion_reconcile_leases l
+    WHERE l.delivery_compat_seeded
+    ORDER BY l.org_id, l.companion_id
+    FOR UPDATE SKIP LOCKED
+    LIMIT p_batch_size
+  ), refined AS (
+    UPDATE public.companion_reconcile_leases AS l
+    SET delivery_compat_expires_at = public.companion_delivery_compat_deadline(
+          l.org_id, l.companion_id, statement_timestamp()
+        ),
+        delivery_compat_next_ordinal = COALESCE(t.next_ordinal, 0),
         delivery_compat_seeded = false,
-        updated_at = excluded.updated_at;
+        updated_at = statement_timestamp()
+    FROM batch b
+    LEFT JOIN public.companion_threads t
+      ON t.org_id = b.org_id
+     AND t.companion_id = b.companion_id
+    WHERE l.org_id = b.org_id
+      AND l.companion_id = b.companion_id
+      -- A legacy read that won before this batch replaces the seed with a real monotonic fence.
+      AND l.delivery_compat_seeded
+    RETURNING 1
+  )
+  SELECT COUNT(*)::integer INTO v_processed FROM refined;
+
+  RETURN v_processed;
 END
 $$;
 --> statement-breakpoint
-COMMENT ON FUNCTION public.companion_refresh_delivery_compat_backfill() IS
+COMMENT ON FUNCTION public.companion_refresh_delivery_compat_backfill(integer) IS
   'companion-delivery-compat-backfill:pending';
 --> statement-breakpoint
 
@@ -661,7 +680,7 @@ REVOKE ALL ON FUNCTION public.companion_delivery_compat_deadline(
   uuid, uuid, timestamp with time zone
 ) FROM PUBLIC;
 --> statement-breakpoint
-REVOKE ALL ON FUNCTION public.companion_refresh_delivery_compat_backfill()
+REVOKE ALL ON FUNCTION public.companion_refresh_delivery_compat_backfill(integer)
   FROM PUBLIC;
 --> statement-breakpoint
 -- Keep the RLS fence callable through the migration-first handoff. The function validates tenant
