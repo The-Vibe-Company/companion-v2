@@ -1897,6 +1897,9 @@ describe("AsciiBoxCompanionRuntime", () => {
     const home = await mkdtemp(join(tmpdir(), "companion-pi-install-warning-success-"));
     const outerBin = await mkdtemp(join(tmpdir(), "companion-pi-install-outer-bin-"));
     const installBin = await mkdtemp(join(tmpdir(), "companion-pi-install-exported-bin-"));
+    const oldPi = join(outerBin, "pi");
+    await writeFile(oldPi, "#!/bin/sh\nprintf '0.84.1\\n'\n");
+    await chmod(oldPi, 0o755);
     const scriptSource = await stagedPiLayoutScript(
       [
         `install_bin=${JSON.stringify(installBin)}`,
@@ -1904,7 +1907,9 @@ describe("AsciiBoxCompanionRuntime", () => {
         + " 'if [ \"$1\" = --version ]; then printf \"0.84.2\\\\n\"; fi'"
         + " 'exit 0' > \"$install_bin/pi\"",
         "chmod 700 \"$install_bin/pi\"",
-        "export PATH=\"$install_bin:$PATH\"",
+        // Prefix-only PATH exports are common in installer snippets. The parent layout still needs
+        // its original system PATH for cleanup, mkdir, node, and the remainder of setup.
+        "export PATH=\"$install_bin\"",
         "trap 'printf \"installer cleanup ran\\n\"' EXIT",
         "printf 'npm WARN deprecated transitive package\\n' >&2 # warning, not failure",
       ].join("\n"),
