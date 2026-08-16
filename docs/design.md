@@ -97,8 +97,19 @@ Box I/O, so overlapping replicas cannot execute one turn twice. A timeout tail f
 post-wake snapshot takes a second Pi-only lifecycle claim before delivery. Online readiness requires
 an active Pi systemd unit whose current invocation
 id matches the marker written after opening its RPC FIFO; a post-wake FIFO refusal records a visible
-Error. If that wake finds a Box still archiving, it keeps a dedicated wait marker and the runner's
-open-thread sync reclaims it until the archive can resume; Viewer reads and explicit Stop never do.
+Error. If that wake finds a Box snapshot still in flight, it waits through any transient `idle`
+observation, keeps a durable `provisioning/stopped` wait marker across stale owner takeover, and lets
+the runner's open-thread sync reclaim it until the Box is actually archived. Before resume it moves
+to `provisioning/starting`, so a crash after provider acceptance cannot strand recovery waiting for
+the now-awake Box to archive again; Viewer reads and explicit Stop never do.
+An explicit Stop uses `stopping/running` until Box accepts the stop, so a crashed pre-provider claim
+stays distinguishable from an accepted archive. A later send atomically takes that claim,
+idempotently reasserts Stop, persists `provisioning/stopped`, and waits for `archived`; this also
+preserves send intent when the live Stop owner would otherwise finalize after the send. Once an
+uncontested Stop is accepted, the provider observation replaces its claim with the normal
+non-auto-resuming stop projection. Automatic thread sync compares durable message and lifecycle
+timestamps before that handoff, so a Stop created after an older pending tail remains authoritative;
+a new send or explicit Wake is a later user action and may still take ownership immediately.
 Pi-only and settings-apply races keep a non-auto-resuming wait that only an explicit Wake can claim,
 and Owner deletion has a distinct lock no wake can claim.
 One send is one turn: the sender names the message it is creating with a

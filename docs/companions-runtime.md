@@ -272,17 +272,34 @@ budget, comfortably inside the raised proxy window.
 `POST /v1/companions/:id/runtime/restart` is an operator control, not a wake path. It authorizes an
 Owner or Editor before constructing a Box client, then observes Box and Pi without resuming either.
 It accepts a fully online, settled Companion, a `stopping/starting` Companion to continue a Full Box
-restart already waiting on its archive, or the same restart's narrow `provisioning/starting`
-continuation so a stale owner can be reclaimed. The default `pi` target reinjects persisted configuration
+restart already waiting on its archive, or the same restart's narrow `provisioning/stopped`
+archive-wait claim (`provisioning/starting` after resume begins) so a stale owner can be reclaimed.
+The default `pi` target reinjects persisted configuration
 and recycles only Pi with Box wake disabled. The `box` target stops Pi, archives the Box, and resumes
 that same Box through the normal full start path; Settings requires an explicit confirmation because
 this interrupts all work on the Box. Because Box snapshots asynchronously, a start polls through
-`archiving` and resumes only after `archived`; if one bounded poll returns while the snapshot is still
-running, the control plane keeps `stopping` with daemon `starting` and no `last_error`. That composite
-state is the durable archive-resume intent; an explicit Stop and the Owner's deletion lock never gain
-it. Settings closes the confirmation, then retries with `continuation: true` until it can resume. A
-message wake or explicit Wake may write the same marker; the runner's open-thread sync and another
-Wake reclaim it immediately, so pending delivery resumes automatically when the archive is ready.
+`archiving`, including a transient provider `idle` observation, and resumes only after `archived`; if
+one bounded poll returns while the snapshot is still running, the control plane keeps `stopping` with
+daemon `starting` and no `last_error`. A claimant waiting on that archive persists
+`provisioning/stopped`, preserving the archive-resume intent if its API process dies; it switches to
+`provisioning/starting` after observing `archived` and before asking the provider to resume. A crash
+on either side of that request can therefore retry an ordinary start without waiting for the
+already-resumed Box to archive again. An explicit Stop and the
+Owner's deletion lock never gain these markers. Settings closes the confirmation, then retries with
+`continuation: true` until it can resume. A message wake or explicit Wake may write the same marker;
+the runner's open-thread sync and another Wake reclaim it after the stale-claim window, so pending
+delivery resumes automatically when the archive is ready.
+An explicit Stop first holds `stopping/running` while the provider has not yet accepted archival.
+An Owner/Editor send that arrives later atomically hands that claim to the wake path, reissues the
+provider Stop idempotently, persists `provisioning/stopped`, and waits through transient `idle` until
+`archived`. The same `provisioning/running` marker makes a crash before the archive checkpoint retry
+Stop after its stale window. This prevents either an unissued Stop or an accepted-but-unrecorded Stop
+from becoming an early Pi start, and prevents the original Stop finalizer from discarding the later
+send's delivery intent. An uncontested provider acceptance replaces the pre-acceptance marker with
+the ordinary non-auto-resuming stop projection. Open-thread sync initiates this handoff only when a
+pending message's durable `created_at` follows the Stop claim's `updated_at`; an older tail therefore
+cannot cancel a newer explicit Stop. A new send or explicit Wake remains a later user action and may
+take the claim directly.
 If a no-wake settings apply or Pi-only restart meets the same race, it records `stopping/stopped`
 while the snapshot is in flight, or `stopped/stopped` when its bounded poll observes archival
 complete. Thread sync does not resume either state, but an explicit Wake may. Owner deletion uses a separate
