@@ -30,6 +30,14 @@ const RUNTIME_PROVIDER_FILE = '"/run/user/$(id -u)/companion/providers.env"';
 const LAYOUT_SCRIPT_PATH = ".companion/bin/ensure-pi-layout.sh";
 const LAYOUT_RUN_COMMAND = `bash "$HOME/${LAYOUT_SCRIPT_PATH}"`;
 
+/** Recover the isolated configured-installer script embedded in one generated layout script. */
+function decodedPiInstallScript(layoutScript: string): string {
+  const encoded = /printf '%s' '([A-Za-z0-9+/=]+)' \| base64 --decode > "\$pi_install_script"/
+    .exec(layoutScript)?.[1];
+  if (!encoded) throw new Error("layout script did not carry a configured Pi installer");
+  return Buffer.from(encoded, "base64").toString("utf8");
+}
+
 function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
 }
@@ -134,7 +142,9 @@ async function captureFrameOnBoxDisk(input: {
  * The layout script the adapter stages on a Box, captured from one wake. It is the same text the
  * create `setupScript` carries, and running it is the only way to get the daemon wrapper it writes.
  */
-async function stagedPiLayoutScript(): Promise<string> {
+async function stagedPiLayoutScript(
+  installCommand = "printf 'pi is preinstalled\\n'",
+): Promise<string> {
   let script = "";
   vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
     const url = String(rawUrl);
@@ -157,7 +167,7 @@ async function stagedPiLayoutScript(): Promise<string> {
   }));
   const runtime = new AsciiBoxCompanionRuntime({
     COMPANION_BOX_API_KEY: "box_test",
-    COMPANION_PI_INSTALL_COMMAND: "printf 'pi is preinstalled\\n'",
+    COMPANION_PI_INSTALL_COMMAND: installCommand,
     COMPANION_BOX_POLL_INTERVAL_MS: "1",
   });
   await runtime.start({
@@ -1785,7 +1795,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       .toContain("expected_layout='13:npm:pi-mcp-adapter@2.12.1:pi>=0.84.2'");
     expect(createdSetupScript).toContain("or newer is required for bounded image reads");
     // A layout migration reruns a configured pin even when the template already has some `pi`.
-    expect(createdSetupScript).toContain(
+    expect(decodedPiInstallScript(createdSetupScript)).toContain(
       "npm install --global @earendil-works/pi-coding-agent@1.2.3",
     );
     expect(createdSetupScript).toContain("--append-system-prompt");
@@ -1811,6 +1821,106 @@ describe("AsciiBoxCompanionRuntime", () => {
 
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr).toContain("0.84.2 or newer is required for bounded image reads");
+  });
+
+  it("keeps a successful installer warning from masking the failing Pi version gate", async () => {
+    const scriptSource = await stagedPiLayoutScript(
+      "printf 'npm WARN deprecated transitive package\\n' >&2",
+    );
+    const home = await mkdtemp(join(tmpdir(), "companion-old-pi-warning-"));
+    const bin = await mkdtemp(join(tmpdir(), "companion-old-pi-warning-bin-"));
+    const pi = join(bin, "pi");
+    await writeFile(pi, "#!/bin/sh\nprintf '0.84.1\\n'\n");
+    await chmod(pi, 0o755);
+    const script = join(home, LAYOUT_SCRIPT_PATH);
+    await mkdir(join(home, ".companion", "bin"), { recursive: true });
+    await writeFile(script, scriptSource);
+
+    const result = await runOnBoxDisk(`bash ${JSON.stringify(script)}`, home, bin);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toContain("npm WARN deprecated transitive package");
+    expect(result.stderr).not.toContain("npm WARN");
+    expect(result.stderr.trim()).toBe(
+      "Pi 0.84.2 or newer is required for bounded image reads; found 0.84.1",
+    );
+  });
+
+  it("reports an installer failure instead of its warning prefix", async () => {
+    const scriptSource = await stagedPiLayoutScript(
+      "printf 'npm WARN deprecated transitive package\\n' >&2; "
+      + "printf 'npm ERR! unable to install Pi\\n' >&2; exit 42",
+    );
+    const home = await mkdtemp(join(tmpdir(), "companion-pi-install-failure-"));
+    const bin = await mkdtemp(join(tmpdir(), "companion-pi-install-failure-bin-"));
+    const pi = join(bin, "pi");
+    await writeFile(pi, "#!/bin/sh\nprintf '0.84.2\\n'\n");
+    await chmod(pi, 0o755);
+    const script = join(home, LAYOUT_SCRIPT_PATH);
+    await mkdir(join(home, ".companion", "bin"), { recursive: true });
+    await writeFile(script, scriptSource);
+
+    const result = await runOnBoxDisk(`bash ${JSON.stringify(script)}`, home, bin);
+
+    expect(result.exitCode).toBe(42);
+    expect(result.stdout).toContain("npm WARN deprecated transitive package");
+    expect(result.stdout).toContain("npm ERR! unable to install Pi");
+    expect(result.stderr.trim()).toBe(
+      "Pi install command failed (exit 42): npm ERR! unable to install Pi",
+    );
+  });
+
+  it("preserves installer fail-fast behavior before a later successful command", async () => {
+    const scriptSource = await stagedPiLayoutScript(
+      "printf 'npm WARN retrying download\\n' >&2; false; printf 'cleanup hid failure\\n'",
+    );
+    const home = await mkdtemp(join(tmpdir(), "companion-pi-install-errexit-"));
+    const bin = await mkdtemp(join(tmpdir(), "companion-pi-install-errexit-bin-"));
+    const pi = join(bin, "pi");
+    await writeFile(pi, "#!/bin/sh\nprintf '0.84.2\\n'\n");
+    await chmod(pi, 0o755);
+    const script = join(home, LAYOUT_SCRIPT_PATH);
+    await mkdir(join(home, ".companion", "bin"), { recursive: true });
+    await writeFile(script, scriptSource);
+
+    const result = await runOnBoxDisk(`bash ${JSON.stringify(script)}`, home, bin);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain("npm WARN retrying download");
+    expect(result.stdout).not.toContain("cleanup hid failure");
+    expect(result.stderr.trim()).toBe(
+      "Pi install command failed (exit 1): npm WARN retrying download",
+    );
+  });
+
+  it("keeps successful installer warnings out of setupError through a complete layout", async () => {
+    const home = await mkdtemp(join(tmpdir(), "companion-pi-install-warning-success-"));
+    const outerBin = await mkdtemp(join(tmpdir(), "companion-pi-install-outer-bin-"));
+    const installBin = await mkdtemp(join(tmpdir(), "companion-pi-install-exported-bin-"));
+    const scriptSource = await stagedPiLayoutScript(
+      [
+        `install_bin=${JSON.stringify(installBin)}`,
+        "printf '%s\\n' '#!/bin/sh'"
+        + " 'if [ \"$1\" = --version ]; then printf \"0.84.2\\\\n\"; fi'"
+        + " 'exit 0' > \"$install_bin/pi\"",
+        "chmod 700 \"$install_bin/pi\"",
+        "export PATH=\"$install_bin:$PATH\"",
+        "trap 'printf \"installer cleanup ran\\n\"' EXIT",
+        "printf 'npm WARN deprecated transitive package\\n' >&2 # warning, not failure",
+      ].join("\n"),
+    );
+    const script = join(home, LAYOUT_SCRIPT_PATH);
+    await mkdir(join(home, ".companion", "bin"), { recursive: true });
+    await writeFile(script, scriptSource);
+
+    const result = await runOnBoxDisk(`bash ${JSON.stringify(script)}`, home, outerBin);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("npm WARN deprecated transitive package");
+    expect(result.stdout).toContain("installer cleanup ran");
+    expect(result.stderr).toBe("");
+    expect(await readFile(join(home, ".companion", "bin", "pi-daemon"), "utf8"))
+      .toContain(`PI_BIN=${installBin}/pi`);
   });
 
   it("keeps systemctl out of setup and leaves MCP credentials in tmpfs for auto-restart", async () => {
@@ -1866,7 +1976,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(createdSetupScript).not.toMatch(/systemctl/);
     expect(createdSetupScript).not.toMatch(/loginctl/);
     expect(createdSetupScript).toContain("/.config/systemd/user/companion-pi-daemon.service");
-    expect(createdSetupScript).toContain("npm install --global @earendil-works/pi-coding-agent@1.2.3");
+    expect(decodedPiInstallScript(createdSetupScript))
+      .toContain("npm install --global @earendil-works/pi-coding-agent@1.2.3");
     // EnvironmentFile is read for every ExecStart, including Restart=on-failure. Keeping its source
     // in %t (the user runtime tmpfs) makes credentials available to that restart without putting
     // them on the snapshotted Box disk.
