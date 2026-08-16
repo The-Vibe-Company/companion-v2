@@ -1,7 +1,7 @@
 ---
 version: beta
 name: Companion
-description: Operator-grade light design system for Companion v2, a self-hostable Skills Hub for organizations and coding agents.
+description: Operator-grade design system for Companion v2, a self-hostable Skills Hub with optional hosted Companions.
 colors:
   primary: "oklch(0.27 0.021 265)"
   canvas: "oklch(0.975 0.004 265)"
@@ -178,7 +178,7 @@ components:
 
 ## Overview
 
-Companion v2 is an operator-grade, self-hostable Skills Hub for organizations and coding agents. The visual job is to make skill scope, ownership, validation, versions, dependencies, labels, secrets, databases, and publication state legible at a glance.
+Companion v2 is an operator-grade, self-hostable Skills Hub with optional hosted Companions. The visual job is to make skill scope, ownership, validation, versions, dependencies, labels, secrets, databases, publication state, and durable Companion work legible at a glance. Skills remain the core workspace; a Companion is one named teammate with one thread, one Box, and one Pi daemon.
 
 The interface is product software, not marketing. It should feel calm, dense, precise, trustworthy, and engineering-grade. Reference quality is Linear, Stripe, and Raycast: familiar controls, compact hierarchy, real data shown plainly, and no decorative drama. Healthy state should be quiet. Broken state should be unmistakable without alarm theater.
 
@@ -259,7 +259,7 @@ Use a dense product layout. The primary shell is a fixed sidebar (244px) plus co
 main content constrained enough to scan but not padded into a landing page. Layout tokens:
 `sidebar-width` 244px, `topbar-height` 56px, `content-max` 1120px, `drawer-width` 460px.
 
-The sidebar presents the Skills libraries directly: My Skills, Organization, Installed, Companion skills, Archived, and Secrets. When `COMPANION_COMPANIONS_ENABLED=true` and the required email-domain allowlist is non-empty, a two-option Skills | Companions mode segment sits directly under the workspace switcher for authenticated users allowed by that list; the segment is absent by default, when the allowlist is empty, and for users outside the allowlist, and there is no separate top-level or bottom Companions entry. Skills mode keeps the libraries unchanged. Companions mode replaces them with the workspace Companion list as a conversation list: each row carries a round tinted initial, the name, when the thread last spoke, one truncated line of the last thing a member or the Companion said, and an accent dot while the reader's own unread watermark is behind the thread. Presence is a dot on the corner of that initial, and it is never colour alone: the status word stays in the row's accessible name and as text a screen reader reaches. Tool runs and permission cards are never previewed, so no command, path, or unanswered question appears on a row outside the thread it belongs to. Read state is member-private, so a shared thread one member opens stays unread for everyone else. Companions mode keeps Secrets, Archived, Plugins, and Settings reachable, with Plugins and a footer row naming the signed-in reader — the settings entry — below the list. The Companions surface is a list plus a workspace count, one search field, a Plugins action, and a New companion action. Plugins is a separate web and mobile-web surface that groups each MCP provider's member-private accounts into short labels such as `work` and `personal`; it offers the product-owned Linear, GitHub, and Notion catalog plus manual custom MCP connection, and credentials are entered there and never in chat. Creating a Companion asks for a name, one line of persona, one connected provider, then one model from that provider's live pi.dev list; provider credentials and sharing stay in focused dialogs. Opening a Companion replaces the list with its single chat thread: a back control, the Companion identity, its Box status chip, a settings action, a context-panel toggle for a runner, the conversation, and one composer. Nothing else belongs there — no Pi tools, no Skills, no plugins, no run chrome. The status chip is a dot plus one state word — `Online`, `Starting`, `Asleep`, or `Error` — and what it reports on, `Box · online` and its siblings, is its accessible name and tooltip rather than visible text, so the word itself never has to give way on a narrow header. It refreshes immediately on thread open and send, every three seconds while a send or lifecycle transition is active, then at the slower settled cadence; stale responses cannot move a newer state backward, and Viewer polling never contacts Box. For a runner whose Box is already running the same chip opens the Box desktop Lux drives in a new tab. Computer use has exactly two places and no third: that tab, and the screen preview in the context panel beside the conversation. The preview is the live Box desktop framed as a 16:10 card with pointer events stopped at it, so it is the screen to watch and the tab is the screen to drive; its caption carries the handoff, a Reconnect for a join that produced nothing, and guidance to send a message when the Box is asleep. Both are the same Lux desktop over the same route, each join mints its own stream and keeps none, and neither can start a Box; there is no settings page for computer use and no third surface for it. The rest of the context panel is what this Companion has rather than what it is doing: a Routines section, which is a placeholder with a disabled add control until routines exist, and the library skills it stages on its Box as monospace chips with a Manage link into its settings. The panel is a runner surface, never a Viewer's; it is a sibling of the conversation on a wide screen and comes over it, dismissible by Esc and its scrim, below 1024px. A runner whose Box is asleep gets no lifecycle control in the header; sending a message is the normal way to start it. a Viewer gets the same transcript with the composer replaced by a read-only note and the same chip as text only, because reading a Companion must never start a Box. It must not render the Box/Pi harness, a full provider catalog, a creation wizard, or raw runtime chrome. Native mobile has no Plugins surface or MCP injection. External coding-agent access lives in Settings and is described explicitly as delegated Skills Hub access.
+The sidebar presents the Skills libraries directly: My Skills, Organization, Installed, Companion skills, Archived, and Secrets. When `COMPANION_COMPANIONS_ENABLED=true` and the required email-domain allowlist is non-empty, a two-option Skills | Companions mode segment sits directly under the workspace switcher for authenticated users allowed by that list; the segment is absent by default, when the allowlist is empty, and for users outside the allowlist, and there is no separate top-level or bottom Companions entry. Skills mode keeps the libraries unchanged. Companions mode replaces them with the workspace Companion list as a conversation list: each row carries a round tinted initial, the name, when the thread last spoke, one truncated line of the last thing a member or the Companion said, and an accent dot while the reader's own unread watermark is behind the thread. Presence is a dot on the corner of that initial, and it is never colour alone: the status word stays in the row's accessible name and as text a screen reader reaches. Tool runs and permission cards are never previewed, so no command, path, or unanswered question appears on a row outside the thread it belongs to. Read state is member-private, so a shared thread one member opens stays unread for everyone else. Companions mode keeps Secrets, Archived, Plugins, and Settings reachable, with Plugins and a footer row naming the signed-in reader — the settings entry — below the list. The Companions surface is a list plus a workspace count, one search field, a Plugins action, and a New companion action. Plugins is a separate web and mobile-web surface that groups each MCP provider's member-private accounts into short labels such as `work` and `personal`; it offers the product-owned Linear, GitHub, and Notion catalog plus manual custom MCP connection, and credentials are entered there and never in chat. Creating a Companion asks for a name, one line of persona, one connected provider, then one model from that provider's live pi.dev list; provider credentials and sharing stay in focused dialogs. Opening a Companion replaces the list with its single chat thread: a back control, the Companion identity, its Box status chip, a settings action, a context-panel toggle for a runner, the conversation, and one composer. Nothing else belongs there — no Pi tools, no Skills, no plugins, no run chrome. The status chip is a dot plus one state word — `Online`, `Starting`, `Asleep`, or `Error` — and what it reports on, `Box · online` and its siblings, is its accessible name and tooltip rather than visible text, so the word itself never has to give way on a narrow header. It refreshes immediately on thread open and send, every three seconds while a send or lifecycle transition is active, then at the slower settled cadence; stale responses cannot move a newer state backward, and Viewer polling never contacts Box. For a runner whose Box is already running the same chip opens the Box desktop Lux drives in a new tab. Computer use has exactly two places and no third: that tab, and the screen preview in the context panel beside the conversation. The preview is the live Box desktop framed as a 16:10 card with pointer events stopped at it, so it is the screen to watch and the tab is the screen to drive; its caption carries the handoff, a Reconnect for a join that produced nothing, and guidance to send a message when the Box is asleep. Both are the same Lux desktop over the same route, each join mints its own stream and keeps none, and neither can start a Box; there is no settings page for computer use and no third surface for it. The rest of the context panel shows the library Skills this Companion stages on its Box as monospace chips with a Manage link into settings. Routines and schedules do not appear, even as placeholders. The panel is a runner surface, never a Viewer's; it is a sibling of the conversation on a wide screen and comes over it, dismissible by Esc and its scrim, below 1024px. A runner whose Box is asleep gets no lifecycle control in the header; sending a message is the normal way to start it, and typing alone never prewarms it. A Viewer gets the same transcript with the composer replaced by a read-only note and the same chip as text only, because reading a Companion must never start a Box. It must not render the Box/Pi harness, a full provider catalog, multi-Bot controls, or raw runtime chrome. Native mobile has no Plugins surface or MCP injection. External coding-agent access lives in Settings and is described explicitly as delegated Skills Hub access.
 
 The focused model-provider dialog keeps API-key connection to one write-only field. Claude
 subscription connection uses a browser authorization code and Codex uses a device code; neither
@@ -294,7 +294,7 @@ changes, and short copy confirmation. Do not animate layout properties such as w
 `prefers-reduced-motion` by removing drawer slide and scrim fade.
 
 The Companion thread is the one surface where motion also reports state, because a conversation is the one place where
-waiting is the message. It may animate a typing indicator while a reply is owed, a spinner on a tool run that is still
+waiting is the message. It may animate a typing indicator only after Pi acknowledged the active attempt, a spinner on a tool run that is still
 open, a short rise as a message arrives, and the height of a disclosure it opens. Nothing else in the thread moves: a
 status dot stays static there as everywhere else, and every one of these stops under `prefers-reduced-motion`.
 
@@ -320,7 +320,7 @@ Selection uses a tinted row background plus an inset accent edge via box-shadow.
 
 **Sidebar** contains the Companion brand mark, wordmark, workspace context, primary navigation, counts where useful, and a quiet environment/footer indicator. Active nav uses `surface-raised` with foreground text; unread counts may use the accent fill. The brand mark tile uses the official transparent Companion mark on a tokenized `surface` tile with a `line` border, so it works across light, dark, and accent presets.
 
-**Skills workspace** is the single product workspace. The shell opens directly on the skill library. Skill detail uses Overview, Dependencies, Files, Database, History, and Activity only when those sections apply. Upload, browser creation, publishing, installation, public release management, comments, labels, secrets, and hosted database workflows stay close to the selected skill. No control may imply that Companion can run a skill or launch an agent.
+**Skills workspace** is the product core. The shell opens directly on the skill library. Skill detail uses Overview, Dependencies, Files, Database, History, and Activity only when those sections apply. Upload, browser creation, publishing, installation, public release management, comments, labels, secrets, and hosted database workflows stay close to the selected skill. The Skills surface never executes package scripts or launches generic agents; only the gated Companions surface may stage selected Skills for its one Pi runtime.
 
 **External agent access** is an account setting for delegated clients that consume the Skills Hub. Describe capabilities such as skill read/write, database read/write, and secret read/write. Never present a connected external client as a Companion-hosted or Companion-launched agent.
 
@@ -368,54 +368,47 @@ table → rows → full-screen panel navigation rather than shrinking the grid o
 **Companion settings** is a separate page reached from each Companion row action in the
 Companions list. It has one direct form for name, instructions, and the same provider-then-model picker
 used during creation, on the same flat hairline surface as the list without stacking cards or adding
-navigation. Owner and Editor also see a hairline-separated Runtime section. When the Companion is
-Online, `Pi only` is selected by default and restarts directly, while `Full Box` requires an explicit
-confirmation that all work on the Box will be interrupted. Once the server accepts an asynchronous
-archive, the confirmation closes; the section uses a waiting message and retries the idempotent Full
-Box continuation until it can resume after the archive completes. If the page is reopened, Full Box
-remains retryable manually. Message wakes use the same dedicated wait marker, and a runner's open
-thread automatically syncs until it can continue; Viewer reads and explicit Stop never resume it.
-Pi-only and settings-apply races do not inherit that automatic Full Box continuation; they wait for
-an explicit Wake, and Owner deletion remains locked against every wake.
-This transient state is not a red Error. The
-control is disabled during another operation or while settings have unsaved changes, and Viewer does
-not see it. The Owner alone sees a
-separate delete action and an explicit irreversible confirmation; Editor can save but cannot delete,
-and Viewer sees disabled read-only fields. The thread, Box chip, Plugins, Lux, and top-level navigation
-remain unchanged.
+navigation. Owner and Editor also see a hairline-separated Runtime section. `Pi only` is the normal
+repair and submits an asynchronous restart operation. `Full Box` requires an explicit confirmation
+that all work on the Box will be interrupted and is never selected or triggered automatically.
+Accepted operations show their durable pending/running state and survive navigation or reload; the
+client does not retry provider calls itself. Controls are disabled during an incompatible operation
+or while settings have unsaved changes, and Viewer sees none of them. The Owner alone sees a separate
+permanent-delete action and an explicit irreversible confirmation; Editor can save but cannot delete,
+and Viewer sees disabled read-only fields. Sending a message remains the only normal wake path: there
+is no Wake button and saving settings never wakes an asleep Box. The thread, Box chip, Plugins, Lux,
+and top-level navigation remain unchanged.
 
-**Companion thread** is a two-sided conversation in one reading column narrower than the page. A member's message is a
-right-aligned tinted bubble with `2xl` radius and no border; a Companion reply is rich text on the page, left-aligned and
-unboxed, rendered as markdown with headings, lists, tables, links, and code blocks that carry their own copy control. A
-writer keeps the floor across consecutive messages, so the writer and the time appear once per passage and the messages
-under it are only the words. One Companion turn is one message however many parts it took: the reasoning behind the
-reply, the reply, and the tool runs and question cards produced along the way all belong to it, in the order they
-happened. Reasoning sits behind a collapsed disclosure labelled as reasoning — it is never shown as the answer. A tool
-run is a hairline card reading what ran and how it ended, with its arguments and its result folded away until asked for;
-a run that moved the Box desktop shows exactly one direct Box frame in place, without a Pi image
-read, bounded so it never widens the column. A tool that reports no result fails closed after 90
-seconds without changing Box lifecycle or leaving the thread in-flight. User messages stranded
-after that tool are pending until normal live sync or the next send recycles Pi and prompts them
-again, including for timeouts stored before the recovery behavior shipped. Settlement alone and
-Viewer reads never contact Box. Separate one-shot recovery and Pi-recycle markers prevent repeated
-restarts, while fresh-Pi delivery progress preserves the exact unaccepted suffix without trusting an
-older writer's watermark as proof of recovery. Pi runs shell and file
-tools without approval. An `ask_user` question card is the one thing in the thread a reader can act
-on: it states what Pi asked, offers an answer field or Deny to Owner and Editor only, and stays on
-the transcript once decided with who decided it. Historical Allow / Deny cards remain readable in
-place. A run note is one quiet muted
-line. The transcript is parted by day, once per day it was written in, and a reader returning to a thread gets one `New`
-divider on the first message somebody else wrote past their own read watermark — the member-private one the list badge
-uses, not a per-device guess. Neither separator ever lands inside a turn, because a tool run is chrome the turn owns; the
-accent stays on the divider's hairlines and its one word stays at full foreground contrast. Loading uses static skeleton
-lines; a running Box that owes a reply says so with the typing indicator described under Motion, always paired with the
-same sentence in text. A reply carries one action, Copy, sitting under it rather than appearing on hover — an action that
-exists only for a mouse exists for almost nobody — and no edit, regenerate, or branch controls, because none of those
-exist here. The composer is one field with its send control inside it, one hint line underneath, and no toolbar: no
-attachments, dictation, slash commands, mentions, model picker, or tool controls belong in the thread. A Viewer gets the
-same transcript with a read-only note in place of the composer. Empty threads state what happens next instead of greeting
-the reader, and there is no centered welcome panel and no thread list inside the thread; the workspace sidebar is where
-conversations are listed.
+**Companion thread** is a two-sided conversation in one reading column narrower than the page. A
+member's message is a right-aligned tinted bubble with `2xl` radius and no border; a Companion reply
+is left-aligned, unboxed rich text with copyable markdown and code. One logical turn remains one
+message however many reasoning, reply, tool, and question parts it produced. Reasoning is collapsed
+and never substitutes for the answer. A tool run is a hairline card with arguments and result folded
+until asked; a visual run may carry exactly one bounded stored Box frame. Pi runs shell and file
+tools without approval. `ask_user` is the one interactive card: Owner/Editor may answer or deny it,
+Viewer may only read its durable result.
+
+The durable turn state, not browser inference, owns waiting UI. `queued`, `starting`, and
+`dispatching` may show quiet operational copy but never the typing indicator. Only a Pi-acknowledged
+`running` attempt says “Companion is replying…”; `needs_input` and every terminal state stop it. A
+small queue count explains why later accepted messages have not started. Ten minutes without
+correlated activity, or the two-hour absolute ceiling, always becomes a visible terminal outcome.
+
+An `interrupted` card explains that delivery became ambiguous and that previous external effects may
+have succeeded. Owner/Editor gets **Retry** and **Cancel**: Retry creates a new attempt on the same
+turn; Cancel settles it and releases the ordered queue. Neither action is disguised as regenerate,
+and the client never retries automatically. Stable, expurgated errors may offer only their allowed
+action, such as Retry, Restart Pi, or Switch model. Full Box never appears as an automatic repair in
+the thread.
+
+The transcript keeps day boundaries and one member-private `New` divider, neither inside a turn.
+Loading uses static skeleton lines. A reply keeps Copy as its one ordinary action, always reachable
+without hover. The composer is one field with its send control and one hint line, with no toolbar:
+attachments, dictation/voice, slash commands, mentions, model picker, tool controls, routines,
+schedules, and multi-Bot handoffs do not belong here. Sending is the only normal wake action; typing
+does not prewarm. A Viewer gets the same PostgreSQL-backed transcript with a read-only note in place
+of the composer. Empty threads state what happens next instead of greeting the reader, and the
+workspace sidebar remains the conversation list.
 
 **Status dot plus label** is mandatory for health and lifecycle state. Dots are static 6px to 8px circles. No pulse, no glow, no animation.
 
@@ -455,6 +448,8 @@ Do:
 - Use slide-over drawers for resource detail.
 - Keep focus states obvious and accessible.
 - Keep motion short, functional, and reduceable.
+- Derive Companion waiting state from durable turns and show Retry/Cancel only for an explicit
+  interruption.
 
 Don't:
 
@@ -470,3 +465,5 @@ Don't:
 - Do not build generic AI SaaS visuals: purple gradient cards, sparkle icons, oversized rounded panels, or identical icon-heading-text card grids.
 - Do not prettify ids, states, roles, scopes, env vars, hostnames, resource addresses, or model names.
 - Do not let healthy state shout. Do not let broken state hide.
+- Do not show a Wake action, keystroke prewarm, multi-Bot handoff, routine, schedule, voice,
+  attachment, harness picker, or deployment control.

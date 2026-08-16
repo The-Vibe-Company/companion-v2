@@ -1,78 +1,127 @@
 # Contributor guidance
 
-Companion v2 is a self-hostable, multi-tenant **Skills Hub only**. Read `docs/vision.md`, `docs/product.md`, `docs/design.md`, `docs/PRD.md`, `docs/testing.md`, and root `DESIGN.md` before non-trivial changes.
+Companion v2 is a self-hostable, multi-tenant **Skills Hub at its core**, with an optional
+Companions control plane. When Companions are enabled, each Companion is one named teammate with
+one persistent box.ascii.dev Box, one Pi daemon, and one durable chat thread. Read
+`docs/vision.md`, `docs/product.md`, `docs/design.md`, `docs/PRD.md`, `docs/testing.md`, root
+`DESIGN.md`, and `docs/companions-runtime.md` before non-trivial Companion or runtime changes.
 
 ## Domain vocabulary
 
-- Hierarchy: **Organization → User**; roles: **Owner, Admin, Developer**.
-- Skills use `scope: personal | org`. Personal skills are creator-only with no admin override. Organization skills are manageable by every member.
+- Tenant hierarchy: **Organization → User**; organization roles: **Owner, Admin, Developer**.
+- Skills use `scope: personal | org`. Personal skills are creator-only with no admin override.
+  Organization skills are manageable by every member.
 - Share is the sole owner-only, one-way `personal → org` transition.
 - Organization and personal label trees organize skills without changing access.
-- External coding agents are delegated clients of the Skills Hub. Companion never launches or executes them.
+- External coding agents are delegated Skills Hub clients. They are not hosted Companions and
+  Companion never launches them through Agent Auth.
+- A hosted Companion has an immutable Companion **Owner** and optional workspace-wide **Editor** or
+  **Viewer** access. Owner/Editor may send and operate it; Viewer reads control-plane projections
+  only and never contacts Box.
+- A **turn** is the durable result of one accepted `client_message_id`; a **turn attempt** is one
+  explicit dispatch try; an **operation** is durable lifecycle intent such as start, stop, restart,
+  settings apply, or delete.
 
-Do not introduce Projects, runs, sessions, prompts, transcripts, launch actions, sandboxes, model/provider connections, containers, deployments, runtime supervisors, or feature flags that can enable them.
+Do not introduce generic Projects or skill runs, multi-Bot orchestration, agent-to-agent handoffs,
+routines, schedules, voice, thread attachments/artifacts, another agent harness, another Box
+provider, or a deployment platform. Pi remains the only harness and box.ascii.dev the only runtime
+provider. Keep the existing Companions feature flag and email-domain allowlist; do not add flags
+that can enable an excluded product surface.
 
 ## Architecture anchors
 
-- `packages/db/src/schema.ts`: tenant data source of truth.
-- `packages/core/src/authz.ts`: membership, RBAC, personal-skill privacy.
+- `packages/db/src/schema.ts`: tenant and runtime data source of truth.
+- `packages/core/src/authz.ts`: membership, RBAC, personal-skill privacy, and Companion ACLs.
 - `packages/core/src/services.ts`: shared skill domain services.
 - `packages/skills`: package parsing, validation, versioning.
 - `packages/skilldb`: hosted declared SQLite state.
-- `packages/db/runtime-role-grants.sql`: split API/worker grants.
+- `packages/box-runtime`: ascii.dev transport, Box disk layout, and the Pi broker integration.
+- `packages/companion-runtime`: Runtime v2 state machine and durable execution engine.
+- `apps/runtime`: the only process allowed to claim runtime work or contact Box/Pi.
+- `packages/db/runtime-role-grants.sql`: split API, worker, and runtime grants.
 - `apps/worker/src/supervisors.ts`: GitHub, billing, and Skill Database cleanup only.
 - `apps/api/src/agentAuthRoutes.ts`: skill-facing delegated client approval.
 
 ## Invariants
 
-- TypeScript, pnpm workspaces, Turborepo, Drizzle, and tRPC plus REST. Authentication uses Better Auth;
-  object storage is S3-compatible.
+- TypeScript, pnpm workspaces, Turborepo, Drizzle, and tRPC plus REST. Authentication uses Better
+  Auth; object storage is S3-compatible.
 - `packages/core` has no Next.js dependency. Shared contracts belong in `packages/contracts`.
 - Every tenant row/query is scoped by `org_id`; RLS is defense in depth.
-- Secrets are envelope-encrypted, write-only, referenced by id, and never logged or returned as plaintext.
-- The control plane never executes package scripts. Archives and transfer tickets remain fail-closed.
+- Secrets are envelope-encrypted, write-only, referenced by id, and never logged or returned as
+  plaintext.
+- The control plane never executes skill package scripts. Archives and transfer tickets remain
+  fail-closed.
 - Public releases pin an exact immutable version and checksum.
 - Desired GitHub mirrors and Skill Database cleanup are idempotent.
 - Frontend work follows root `DESIGN.md`.
+- The API authorizes and persists runtime intent, then returns. It never calls Box or Pi and never
+  owns a runtime lease.
+- `apps/runtime` is the sole lifecycle owner. The API and worker have no Box credential; runtime
+  receives the Box key and only narrow `SECURITY DEFINER` claim/renew/checkpoint/settle access.
+- One `(companion_id, client_message_id)` creates exactly one turn. Only one attempt may be active
+  per Companion; later turns remain ordered in PostgreSQL.
+- An ambiguous dispatch is never replayed automatically. It becomes `interrupted` and blocks the
+  queue until an Owner/Editor explicitly retries with a new `retry_id` or cancels it.
+- Full Box restart is an explicit user action only. Automatic repair may recycle Pi but never
+  restart, replace, archive, or delete a healthy Box as healing.
+- Runtime errors persist only a stable code, an expurgated message of at most 500 characters, and an
+  allowed action. Never persist provider payloads, tokens, signed URLs, or raw Pi lines.
 
 ## Conductor
 
-Use `.conductor/settings.toml`. Setup installs PostgreSQL 17 plus `lsof` with `dnf` in cloud workspaces, or PostgreSQL 17 plus optional MinIO/Mailpit with Homebrew locally, then runs `corepack enable && pnpm install`. Run executes `bash scripts/dev-conductor.sh`; archive executes `bash scripts/dev-conductor.sh archive`.
+Use `.conductor/settings.toml`. Setup installs PostgreSQL 17 plus `lsof` with `dnf` in cloud
+workspaces, or PostgreSQL 17 plus optional MinIO/Mailpit with Homebrew locally, then runs
+`corepack enable && pnpm install`. Run executes `bash scripts/dev-conductor.sh`; archive executes
+`bash scripts/dev-conductor.sh archive`.
 
-The native Conductor stack starts per-workspace PostgreSQL plus optional MinIO and Mailpit under `.conductor-pg/`, then API, worker, and web. Ports derive from `CONDUCTOR_PORT`: web `+0`, API `+1`, PostgreSQL `+2`, MinIO API `+3`, console `+4`, SMTP `+5`, Mailpit UI `+6`. Cloud workspaces use base `3000`. Internal services bind loopback; cloud web binds `0.0.0.0`. Cookies use a workspace-specific prefix. Missing MinIO disables uploads; missing Mailpit falls back to logged email.
+The current native Conductor stack starts per-workspace PostgreSQL plus optional MinIO and Mailpit
+under `.conductor-pg/`, then API, worker, and web. Ports derive from `CONDUCTOR_PORT`: web `+0`, API
+`+1`, PostgreSQL `+2`, MinIO API `+3`, console `+4`, SMTP `+5`, Mailpit UI `+6`. Cloud workspaces use
+base `3000`. Internal services bind loopback; cloud web binds `0.0.0.0`. Cookies use a
+workspace-specific prefix. Missing MinIO disables uploads; missing Mailpit falls back to logged
+email. The Runtime v2 rollout must add `apps/runtime` as a fourth private process without changing
+the published web/API port contract.
 
-## Legacy Companions wake-on-send playbook
+## Companions Runtime v2 contract
 
-- An Owner/Editor send to a new or Asleep Companion persists first, reports Starting while one
-  lifecycle owner wakes it, reaches Online only after Pi's current systemd invocation marks its RPC
-  FIFO ready, and then produces an
-  assistant reply or a visible Error. Starting → Asleep → Online → Asleep with no reply is a
-  lifecycle failure. A first-keystroke prewarm carries delivery intent and must drain a send that
-  loses the concurrent provisioning claim to it. Viewer reads remain control-plane-only.
-- “Companion is replying…” means Pi accepted the current, non-timeout turn and is generating. Do
-  not show it for a durable message whose `pending_count` is nonzero, an Asleep/Error runtime, a
-  timed-out tool tail, or a post-timeout user tail until a fresh Pi event proves recovery.
-- Do not use Full Box, archive, delete, or replacement as a wake-on-send repair. Use the normal
-  start/resume path and Pi-only recycle for daemon, layout, provider, skill, or timed-out-turn
-  recovery. Full Box remains an explicit operator action for a Box-level reset after narrower
-  recovery is ruled out; deletion is lifecycle cleanup, never healing.
-- The local and production happy-path suite is the same: create a fresh disposable Companion; send
-  and require an assistant reply; ask it to `read` an image such as `conductor-cli.png` and require
-  a settled result rather than an unbounded hang; stop/sleep the Box through the runtime stop API;
-  send again and require Starting → Online plus another assistant reply with no intervening Asleep;
-  then clean up the disposable fixture. Never run this suite against a named incident Companion.
-- A timed-out-tail fixture is a separate regression suite: seed or preserve a settled `timeout`
-  tool chip with user messages behind it; verify control-plane and Viewer reads keep that chip
-  timed out and do not wake Box or show stale replying; then an Owner/Editor send may recycle Pi
-  only, deliver the exact pending suffix once, and receive a reply. Do not convert this fixture into
-  the fresh-Companion suite, and do not Full Box it to make the test pass.
+- An Owner/Editor send persists the message and turn atomically and returns `202` in under one
+  second outside load. Sending is the only normal wake action; there is no Wake button and no
+  first-keystroke prewarm.
+- Turn states are
+  `queued → starting → dispatching → running ↔ needs_input → succeeded|failed|interrupted|cancelled`.
+  “Companion is replying…” is true only after Pi acknowledges the current attempt and before its
+  terminal settlement.
+- The runtime re-evaluates membership, Companion ACL, selected Skills, plugins, and provider access
+  immediately before Box contact. Revoked authority fails closed.
+- Pi must be idle with no queued messages before prompt dispatch. The layout-14 broker correlates
+  the single active attempt through `agent_settled`; unknown events are counted and ignored, while
+  only supported terminal shapes settle a turn.
+- A turn stalls after ten minutes without correlated activity and has a two-hour absolute deadline.
+  A timed-out or ambiguous turn becomes visible and actionable; it never appears to reply forever.
+- Retry creates a new attempt and warns that earlier external effects may have succeeded. Cancel
+  terminates the interrupted turn and releases the ordered queue.
+- Box stays warm for six hours after successful Pi acceptance. Reads, lists, ordinary status, and
+  Viewer access are PostgreSQL-only and never wake or observe Box directly.
+- Disabling the Companions flag stops new runtime claims. Active work reaches a safe checkpoint and
+  becomes interrupted. Re-enabling is the operational rollback; old executors must never process v2
+  rows.
+- Legacy Companions, transcripts, runtime state, and Boxes are purged fail-closed before v2 cutover;
+  they are not migrated. Encrypted provider connections and member MCP accounts survive.
 
 ## Tests and completion
 
 - Follow `docs/testing.md`; prefer behavior-level coverage.
-- Authorization matrices must cover non-members, cross-tenant access, and no-admin-override privacy.
-- Frontend changes require `APP_URL=http://127.0.0.1:<port> pnpm browser:smoke` plus manual `agent-browser` checks for changed paths.
-- Changes under `packages/companion-skill/skill/` require a version bump, top changelog entry, and `pnpm --filter @companion/companion-skill update:integrity`.
+- Authorization matrices must cover non-members, cross-tenant access, actor revocation, and
+  no-admin-override privacy.
+- Runtime work requires deterministic Box/Pi simulation, real PostgreSQL lease/fencing tests, and
+  fault injection before and after every external side effect and durable checkpoint.
+- Frontend changes require `APP_URL=http://127.0.0.1:<port> pnpm browser:smoke` plus manual
+  `agent-browser` checks for changed paths.
+- Changes under `packages/companion-skill/skill/` require a version bump, top changelog entry, and
+  `pnpm --filter @companion/companion-skill update:integrity`.
 - Run `pnpm verify:change`; exit 2 means printed follow-up gates are still required.
-- Architecture/data/auth/API changes must keep `docs/design.md` and the bundled Companion skill aligned.
-- PR titles use Commitizen style, for example `feat(skills): simplify Companion to Skills Hub`.
+- Architecture/data/auth/API/runtime changes must keep `docs/design.md`,
+  `docs/companions-runtime.md`, and the bundled Companion skill aligned.
+- PR titles use Commitizen style, for example
+  `feat(runtime): add the dedicated Companion runtime service`.

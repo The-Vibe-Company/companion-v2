@@ -13,9 +13,18 @@ workspace: validate a skill, publish it, push an update, manage its pinned publi
 whether everything is current. Agent Auth is the default programmatic identity.
 Run the mandatory Companion self-update check once at the first Companion invocation in a
 conversation, and always confirm a change with the user before anything is published.
-Companion runtime provider/model settings, provider credentials, and Companion Owner/Editor/Viewer
-sharing are browser-session workspace administration. This delegated skill never requests, reads,
-stores, forwards, or manages those settings, credentials, or runtime ACLs.
+
+Companion the product is a Skills Hub with an optional hosted Companions surface. A hosted Companion
+is one named teammate with one durable thread, one persistent box.ascii.dev Box, and one Pi daemon;
+its dedicated runtime service may stage selected Skills for Pi. Keep that hosted runtime separate
+from this delegated skill. Agent Auth authorizes external clients to use Skills Hub APIs only; it
+does not authorize Companion chat, turns, decisions, desktop, provider settings, or Box/Pi lifecycle.
+
+Treat runtime provider/model settings, provider credentials, MCP accounts, and Companion
+Owner/Editor/Viewer sharing as browser-session workspace administration. Never request, read, store,
+forward, or manage them through this skill or its Agent Auth client. Never use a skill command to
+wake, retry, cancel, restart, stop, or delete a hosted Companion. The control plane never executes
+package scripts; Pi may consume the selected skill instructions inside its isolated Box runtime.
 
 ## Configuration
 
@@ -1334,7 +1343,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.66.1","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.67.0","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 

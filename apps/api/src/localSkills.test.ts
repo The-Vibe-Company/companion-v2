@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.66.1");
+    expect(pkg.version).toBe("1.67.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -126,11 +126,16 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("anonymous pipe is reported as mode 0660");
-    expect(changelog).toContain("named FIFO created at 0600");
+    expect(changelog).toContain("optional hosted Box/Pi teammate runtime");
+    expect(changelog).toContain("Agent Auth never grants hosted Companion chat");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
+    const fifoChanges = manifest.metadata?.changelog
+      ?.find((entry) => entry.version === "1.66.1")
+      ?.changes?.join("\n") ?? "";
+    expect(fifoChanges).toContain("anonymous pipe is reported as mode 0660");
+    expect(fifoChanges).toContain("named FIFO created at 0600");
     const accessibleChanges = manifest.metadata?.changelog
       ?.find((entry) => entry.version === "1.64.0")
       ?.changes?.join("\n") ?? "";
