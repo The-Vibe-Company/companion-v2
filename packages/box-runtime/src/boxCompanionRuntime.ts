@@ -456,8 +456,45 @@ const PI_LAYOUT_SCRIPT_PATH = ".companion/bin/ensure-pi-layout.sh";
 
 function setupScript(installCommand: string | undefined, mcpAdapterPackage: string): string {
   const configuredInstall = installCommand?.trim();
+  const encodedInstallScript = configuredInstall
+    ? Buffer.from(`#!/usr/bin/env bash
+set -euo pipefail
+${configuredInstall}
+printf '%s' "$PATH" > "$COMPANION_PI_INSTALL_PATH_FILE"
+`).toString("base64")
+    : undefined;
   const ensureInstalled = configuredInstall
-    ? configuredInstall
+    ? `pi_install_log="$(mktemp)"
+pi_install_script="$(mktemp)"
+pi_install_path_file="$(mktemp)"
+companion_pi_install_cleanup() {
+  rm -f "$pi_install_log" "$pi_install_script" "$pi_install_path_file"
+}
+trap companion_pi_install_cleanup EXIT
+printf '%s' ${shellQuote(encodedInstallScript!)} | base64 --decode > "$pi_install_script"
+chmod 700 "$pi_install_script"
+set +e
+COMPANION_PI_INSTALL_PATH_FILE="$pi_install_path_file" bash "$pi_install_script" >"$pi_install_log" 2>&1
+pi_install_status=$?
+set -e
+# Box promotes setup stderr to setupError even when the command succeeds. Keep warnings in the
+# setup log without letting one become the reason a later version gate reports for the failure.
+cat "$pi_install_log"
+if [ "$pi_install_status" -ne 0 ]; then
+  pi_install_detail="$(awk 'NF { line=$0 } END { print line }' "$pi_install_log")"
+  if [ -n "$pi_install_detail" ]; then
+    printf 'Pi install command failed (exit %s): %s\\n' "$pi_install_status" "$pi_install_detail" >&2
+  else
+    printf 'Pi install command failed (exit %s)\\n' "$pi_install_status" >&2
+  fi
+  exit "$pi_install_status"
+fi
+if [ -s "$pi_install_path_file" ]; then
+  PATH="$(cat "$pi_install_path_file")"
+  export PATH
+fi
+companion_pi_install_cleanup
+trap - EXIT`
     : `if ! command -v pi >/dev/null 2>&1; then
   echo 'Pi is not installed; configure COMPANION_PI_INSTALL_COMMAND or preinstall pi in the Box image' >&2
   exit 1

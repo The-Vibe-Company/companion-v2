@@ -468,7 +468,13 @@ because extensions load at daemon start; layout 11 added the fail-closed executi
 gave shell runs their longer deadline, and layout 13 restores image reads under the 90-second file
 tool guard only after setup verifies Pi 0.84.2 or newer. A configured Pi installer runs during that
 upgrade even when a binary already exists; a template-only Box with an older or unreadable version
-fails visibly before the permissive extension is staged. The daemon wrapper repeats the minimum-version
+fails visibly before the permissive extension is staged. Successful installer output, including
+warnings, stays in the Box setup log on stdout; an installer nonzero exit gets one explicit stderr
+summary, so a warning cannot replace that failing step or a later version-gate failure in
+`companions.last_error`. The configured command runs in an isolated fail-fast Bash script; its final
+`PATH` is imported so a custom install prefix remains discoverable without letting the command
+replace setup's cleanup/error traps. Other setup steps retain their own stderr diagnostics.
+The daemon wrapper repeats the minimum-version
 proof on every systemd invocation, so replacing or downgrading the mutable Pi binary after the layout
 marker was written fails before the current invocation can publish FIFO readiness.
 
@@ -775,4 +781,6 @@ Optional settings:
 Boxes are always created/resumed with `noEnv: true` and receive only tenant/Companion identifiers.
 Preinstall pinned Pi and MCP adapter versions in the Box environment/template when possible.
 Otherwise set a pinned, operator-controlled Pi install command; the setup installs the configured
-adapter package and fails closed if either dependency is unavailable.
+adapter package and fails closed if either dependency is unavailable. The pin must satisfy the Pi
+minimum named by the current disk layout (`0.84.2` for layout 13); setup reports the found version
+when it does not.
