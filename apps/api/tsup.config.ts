@@ -1,7 +1,7 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: ["src/index.ts", "src/migrate.ts", "src/cutover.ts"],
+  entry: ["src/index.ts", "src/migrate.ts", "src/cutover.ts", "src/companionPurge.ts"],
   // Each entry is invoked directly as `node dist/<name>.js`. Code splitting would turn them into
   // re-export shims whose `import.meta.url` no longer matches `process.argv[1]`, so the CLI body
   // would never run and the Railway pre-deploy step would exit 0 without applying migrations.

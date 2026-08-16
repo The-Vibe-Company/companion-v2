@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { AsciiBoxMaintenanceClient } from "@companion/box-runtime";
 
 import {
   createBoxSimServer,
@@ -389,6 +390,43 @@ describe("Box simulator HTTP server", () => {
       .toMatchObject({ operation: { status: "processing" } });
     expect(await (await provider(handle, `/deletion-operations/${operation.operation.id}`)).json())
       .toMatchObject({ operation: { status: "completed" } });
+  });
+
+  it("serves the maintenance client's list, permanent-delete, and completed-operation contract", async () => {
+    const handle = await start();
+    const created = await (await provider(handle, "/boxes", {
+      method: "POST",
+      body: "{}",
+    })).json() as { box: { id: string } };
+    await provider(handle, `/boxes/${created.box.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name: "Companion maintenance contract" }),
+    });
+    const maintenance = new AsciiBoxMaintenanceClient({
+      COMPANION_BOX_API_KEY: API_KEY,
+      COMPANION_BOX_API_BASE: handle.baseUrl,
+    });
+
+    await expect(maintenance.listAllBoxes()).resolves.toContainEqual({
+      id: created.box.id,
+      name: "Companion maintenance contract",
+    });
+    const deletion = await maintenance.requestPermanentDeletion({ boxId: created.box.id });
+    expect(deletion.outcome).toBe("accepted");
+    if (deletion.outcome !== "accepted") throw new Error("simulator did not accept deletion");
+
+    let operation = deletion.operation;
+    for (let poll = 0; poll < 4 && operation.status !== "completed"; poll += 1) {
+      operation = await maintenance.getDeletionOperation({
+        operationId: operation.id,
+        boxId: created.box.id,
+      });
+    }
+    expect(operation).toMatchObject({
+      id: deletion.operation.id,
+      targetId: created.box.id,
+      status: "completed",
+    });
   });
 
   it("supports an explicit transient idle state before archive completion", async () => {

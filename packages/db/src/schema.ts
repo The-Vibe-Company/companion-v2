@@ -46,6 +46,18 @@ export const companionRuntimePoolScopeEnum = pgEnum("companion_runtime_pool_scop
   "personal",
   "org",
 ]);
+export type CompanionLegacyPurgePhase =
+  | "deleting_external"
+  | "external_complete"
+  | "database_complete";
+export type CompanionLegacyPurgeTargetState =
+  | "discovered"
+  | "requesting"
+  | "pending"
+  | "processing"
+  | "blocked"
+  | "completed"
+  | "absent";
 export const companionProviderAuthMethodEnum = pgEnum("companion_provider_auth_method", [
   "api_key",
   "subscription",
@@ -525,6 +537,107 @@ export const companionRuntimePools = pgTable(
     lastErrorLength: check(
       "companion_runtime_pools_last_error_check",
       sql`${t.lastError} is null or char_length(${t.lastError}) <= 500`,
+    ),
+  }),
+);
+
+/**
+ * Global one-shot maintenance ledger for the Runtime v2 cutover. These rows intentionally have no
+ * tenant or Companion foreign key: they are inaccessible to application roles and must outlive the
+ * legacy ownership rows so a partial provider purge can resume and PR4 can prove completion.
+ */
+export const companionLegacyPurgeRuns = pgTable(
+  "companion_legacy_purge_runs",
+  {
+    id: text("id").primaryKey().notNull().default("legacy-companion-purge"),
+    phase: text("phase").$type<CompanionLegacyPurgePhase>().notNull().default("deleting_external"),
+    inventoryHash: text("inventory_hash").notNull(),
+    inventory: jsonb("inventory").$type<Record<string, unknown>>().notNull().default({}),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: updatedAt(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => ({
+    singleton: check(
+      "companion_legacy_purge_runs_singleton_check",
+      sql`${t.id} = 'legacy-companion-purge'`,
+    ),
+    phaseCheck: check(
+      "companion_legacy_purge_runs_phase_check",
+      sql`${t.phase} in ('deleting_external', 'external_complete', 'database_complete')`,
+    ),
+    inventoryHashShape: check(
+      "companion_legacy_purge_runs_inventory_hash_check",
+      sql`${t.inventoryHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    inventoryObject: check(
+      "companion_legacy_purge_runs_inventory_check",
+      sql`jsonb_typeof(${t.inventory}) = 'object'`,
+    ),
+    completedState: check(
+      "companion_legacy_purge_runs_completed_check",
+      sql`(${t.phase} = 'database_complete') = (${t.completedAt} is not null)`,
+    ),
+  }),
+);
+
+export const companionLegacyPurgeTargets = pgTable(
+  "companion_legacy_purge_targets",
+  {
+    boxId: text("box_id").primaryKey(),
+    observedName: text("observed_name"),
+    evidence: jsonb("evidence").$type<string[]>().notNull().default([]),
+    state: text("state").$type<CompanionLegacyPurgeTargetState>().notNull().default("discovered"),
+    operationId: text("operation_id"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    requestedAt: timestamp("requested_at", { withTimezone: true }),
+    lastPolledAt: timestamp("last_polled_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    operationIdUnique: uniqueIndex("companion_legacy_purge_targets_operation_id_uq")
+      .on(t.operationId)
+      .where(sql`${t.operationId} is not null`),
+    boxIdShape: check(
+      "companion_legacy_purge_targets_box_id_check",
+      sql`${t.boxId} ~ '^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$'`,
+    ),
+    evidenceArray: check(
+      "companion_legacy_purge_targets_evidence_check",
+      sql`jsonb_typeof(${t.evidence}) = 'array'`,
+    ),
+    stateCheck: check(
+      "companion_legacy_purge_targets_state_check",
+      sql`${t.state} in ('discovered', 'requesting', 'pending', 'processing', 'blocked', 'completed', 'absent')`,
+    ),
+    operationIdShape: check(
+      "companion_legacy_purge_targets_operation_id_check",
+      sql`${t.operationId} is null or ${t.operationId} ~ '^bdop_[0-9a-f]{32}$'`,
+    ),
+    operationState: check(
+      "companion_legacy_purge_targets_operation_state_check",
+      sql`(
+        ${t.state} in ('pending', 'processing', 'blocked', 'completed')
+        and ${t.operationId} is not null
+      ) or (
+        ${t.state} in ('discovered', 'requesting', 'absent')
+        and ${t.operationId} is null
+      )`,
+    ),
+    attemptCountBounds: check(
+      "companion_legacy_purge_targets_attempt_count_check",
+      sql`${t.attemptCount} >= 0`,
+    ),
+    lastErrorShape: check(
+      "companion_legacy_purge_targets_last_error_check",
+      sql`${t.lastError} is null or (char_length(${t.lastError}) <= 500 and ${t.lastError} !~ E'[\\n\\r]')`,
+    ),
+    completedState: check(
+      "companion_legacy_purge_targets_completed_check",
+      sql`(${t.state} in ('completed', 'absent')) = (${t.completedAt} is not null)`,
     ),
   }),
 );
