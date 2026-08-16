@@ -9,6 +9,7 @@ import {
   bumpCompanionSkillsRevisionForSkill,
   claimCompanionDeletion,
   claimCompanionRuntimeStart,
+  claimCompanionRuntimeStartWithMetadata,
   claimCompanionRuntimeStop,
   deleteCompanion,
   getCompanion,
@@ -419,6 +420,68 @@ describe("Companion settings persistence and roles", () => {
     })).rejects.toBeInstanceOf(CompanionNotFoundError);
   });
 
+  it("hands a live Stop claim to its later wake and preserves recovery across owner death", async () => {
+    const stopClaim = await claimCompanionRuntimeStop({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      database: integrationDb,
+    });
+    expect(stopClaim.runtime).toMatchObject({ state: "stopping", daemon_state: "running" });
+
+    await expect(claimCompanionRuntimeStartWithMetadata({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      allowArchiveResume: true,
+      deliveryIntentCreatedAt: new Date(new Date(stopClaim.updated_at).getTime() - 1),
+      database: integrationDb,
+    })).rejects.toThrow("companion was stopped after pending delivery");
+
+    const handedOff = await claimCompanionRuntimeStartWithMetadata({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      allowArchiveResume: true,
+      database: integrationDb,
+    });
+    expect(handedOff).toMatchObject({ archiveResume: false, stopRecovery: true });
+    expect(handedOff.companion.runtime).toMatchObject({
+      state: "provisioning",
+      daemon_state: "running",
+    });
+
+    await expect(claimCompanionRuntimeStartWithMetadata({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      allowArchiveResume: true,
+      database: integrationDb,
+    })).rejects.toThrow("companion runtime is already provisioning");
+
+    await integrationDb
+      .update(schema.companions)
+      .set({ updatedAt: new Date("2020-01-01T00:00:00.000Z") })
+      .where(and(
+        eq(schema.companions.orgId, fixture.orgA),
+        eq(schema.companions.id, companionId),
+      ));
+
+    const recovered = await claimCompanionRuntimeStartWithMetadata({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      allowArchiveResume: true,
+      database: integrationDb,
+    });
+    expect(recovered.archiveResume).toBe(false);
+    expect(recovered.stopRecovery).toBe(true);
+    expect(recovered.companion.runtime).toMatchObject({
+      state: "provisioning",
+      daemon_state: "running",
+    });
+  });
+
   it("claims archive waits once and never mistakes the Owner-deletion lock for one", async () => {
     await updateCompanionRuntime({
       actor: fixture.developer,
@@ -467,7 +530,7 @@ describe("Companion settings persistence and roles", () => {
       companionId,
       database: integrationDb,
     });
-    expect(current.runtime).toMatchObject({ state: "provisioning", daemon_state: "starting" });
+    expect(current.runtime).toMatchObject({ state: "provisioning", daemon_state: "stopped" });
   });
 
   it("lets an explicit Wake reclaim a no-wake archive wait", async () => {
@@ -479,7 +542,7 @@ describe("Companion settings persistence and roles", () => {
       database: integrationDb,
     });
 
-    const claimed = await claimCompanionRuntimeStart({
+    const claimed = await claimCompanionRuntimeStartWithMetadata({
       actor: fixture.developer,
       orgId: fixture.orgA,
       companionId,
@@ -487,7 +550,68 @@ describe("Companion settings persistence and roles", () => {
       database: integrationDb,
     });
 
-    expect(claimed.runtime).toMatchObject({ state: "provisioning", daemon_state: "starting" });
+    expect(claimed.archiveResume).toBe(true);
+    expect(claimed.companion.runtime).toMatchObject({
+      state: "provisioning",
+      daemon_state: "stopped",
+    });
+
+    await expect(claimCompanionRuntimeStartWithMetadata({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      allowArchiveResume: true,
+      database: integrationDb,
+    })).rejects.toThrow("companion runtime is already provisioning");
+
+    await integrationDb
+      .update(schema.companions)
+      .set({ updatedAt: new Date("2020-01-01T00:00:00.000Z") })
+      .where(and(
+        eq(schema.companions.orgId, fixture.orgA),
+        eq(schema.companions.id, companionId),
+      ));
+
+    const reclaimed = await claimCompanionRuntimeStartWithMetadata({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      allowArchiveResume: true,
+      database: integrationDb,
+    });
+    expect(reclaimed.archiveResume).toBe(true);
+    expect(reclaimed.companion.runtime).toMatchObject({
+      state: "provisioning",
+      daemon_state: "stopped",
+    });
+
+    await updateCompanionRuntime({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      patch: { runtimeState: "provisioning", daemonState: "starting" },
+      database: integrationDb,
+    });
+    await integrationDb
+      .update(schema.companions)
+      .set({ updatedAt: new Date("2020-01-01T00:00:00.000Z") })
+      .where(and(
+        eq(schema.companions.orgId, fixture.orgA),
+        eq(schema.companions.id, companionId),
+      ));
+
+    const resumeReclaimed = await claimCompanionRuntimeStartWithMetadata({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      companionId,
+      allowArchiveResume: true,
+      database: integrationDb,
+    });
+    expect(resumeReclaimed.archiveResume).toBe(false);
+    expect(resumeReclaimed.companion.runtime).toMatchObject({
+      state: "provisioning",
+      daemon_state: "starting",
+    });
   });
 
   it("never lets a stale Owner-deletion lock become a Wake or Stop takeover", async () => {

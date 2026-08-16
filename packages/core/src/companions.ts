@@ -3064,14 +3064,25 @@ export async function updateCompanionObservation(input: {
   return getCompanionForRuntime({ ...input, database });
 }
 
-export async function claimCompanionRuntimeStart(input: {
+interface ClaimCompanionRuntimeStartInput {
   actor: ActorContext;
   orgId: string;
   companionId: string;
   /** Resume an archive wait, except the `stopping`/`unknown` Owner-deletion lock. */
   allowArchiveResume?: boolean;
+  /** Durable pending-message time used only by automatic sync to respect a newer explicit Stop. */
+  deliveryIntentCreatedAt?: Date;
   database?: Db;
-}): Promise<Companion> {
+}
+
+/**
+ * Claim a lifecycle start and report whether it took over an accepted archive continuation. The
+ * provider can briefly expose `idle` before the snapshot reaches `archived`, so the Box adapter
+ * needs this control-plane fact rather than trying to infer archival solely from its first read.
+ */
+export async function claimCompanionRuntimeStartWithMetadata(
+  input: ClaimCompanionRuntimeStartInput,
+): Promise<{ companion: Companion; archiveResume: boolean; stopRecovery: boolean }> {
   const database = input.database ?? db;
   const currentAccess = await getCompanionForRuntime({ ...input, database });
   const [row] = await database
@@ -3088,15 +3099,43 @@ export async function claimCompanionRuntimeStart(input: {
       eq(schema.companions.runtimeState, "not_created"),
     ))
     .returning();
-  if (row) return toCompanion(row, currentAccess.access, memberFromCompanion(currentAccess));
+  if (row) {
+    return {
+      companion: toCompanion(row, currentAccess.access, memberFromCompanion(currentAccess)),
+      archiveResume: false,
+      stopRecovery: false,
+    };
+  }
 
   const current = await getCompanionForRuntime({ ...input, database });
-  const archiveResume = input.allowArchiveResume === true
+  const waitingArchive = input.allowArchiveResume === true
     && current.runtime.state === "stopping"
     && (
       current.runtime.daemon_state === "starting"
       || current.runtime.daemon_state === "stopped"
     );
+  // Keep an archive-aware claim distinguishable from an ordinary lifecycle start. If its API
+  // owner dies while the provider is still snapshotting, the stale owner can be reclaimed without
+  // trying to infer that intent from a transient provider `idle` observation.
+  const staleArchiveClaim = input.allowArchiveResume === true
+    && current.runtime.state === "provisioning"
+    && current.runtime.daemon_state === "stopped";
+  const archiveResume = waitingArchive || staleArchiveClaim;
+  const newerStopBlocksAutomaticDelivery = input.deliveryIntentCreatedAt !== undefined
+    && current.runtime.state === "stopping"
+    && current.runtime.daemon_state === "running"
+    && input.deliveryIntentCreatedAt <= new Date(current.updated_at);
+  // `stopping/running` is the pre-provider Stop claim. A later send is itself durable wake intent,
+  // so it atomically takes that live claim and idempotently finishes Stop before waiting for the
+  // archive. If that wake owner dies, `provisioning/running` preserves the same recovery contract.
+  const liveStopHandoff = input.allowArchiveResume === true
+    && current.runtime.state === "stopping"
+    && current.runtime.daemon_state === "running"
+    && !newerStopBlocksAutomaticDelivery;
+  const staleStopRecovery = input.allowArchiveResume === true
+    && current.runtime.state === "provisioning"
+    && current.runtime.daemon_state === "running";
+  const stopRecovery = liveStopHandoff || staleStopRecovery;
   const deletionLocked = current.runtime.state === "stopping"
     && current.runtime.daemon_state === "unknown";
   const transitional =
@@ -3105,7 +3144,15 @@ export async function claimCompanionRuntimeStart(input: {
   if (deletionLocked) {
     throw new CompanionRuntimeTransitionError("companion is being deleted");
   }
-  if (!archiveResume && transitional && new Date(current.updated_at) >= staleBefore) {
+  if (newerStopBlocksAutomaticDelivery) {
+    throw new CompanionRuntimeTransitionError("companion was stopped after pending delivery");
+  }
+  if (
+    !waitingArchive
+    && !liveStopHandoff
+    && transitional
+    && new Date(current.updated_at) >= staleBefore
+  ) {
     throw new CompanionRuntimeTransitionError(
       `companion runtime is already ${current.runtime.state}`,
     );
@@ -3114,12 +3161,12 @@ export async function claimCompanionRuntimeStart(input: {
     .update(schema.companions)
     .set({
       runtimeState: "provisioning",
-      daemonState: "starting",
+      daemonState: stopRecovery ? "running" : archiveResume ? "stopped" : "starting",
       lastError: null,
       // An archive continuation uses this write as its atomic handoff. Advance the timestamp even
       // when two requests land inside the same driver millisecond so a later guarded finalizer cannot
       // mistake the winner's claim for the older waiting projection.
-      updatedAt: archiveResume
+      updatedAt: waitingArchive || liveStopHandoff
         ? sql<Date>`greatest(
             clock_timestamp(),
             ${schema.companions.updatedAt} + interval '1 millisecond'
@@ -3130,14 +3177,26 @@ export async function claimCompanionRuntimeStart(input: {
       eq(schema.companions.orgId, input.orgId),
       eq(schema.companions.id, input.companionId),
       eq(schema.companions.runtimeState, current.runtime.state),
-      archiveResume ? eq(schema.companions.daemonState, current.runtime.daemon_state) : undefined,
-      archiveResume
+      archiveResume || stopRecovery
+        ? eq(schema.companions.daemonState, current.runtime.daemon_state)
+        : undefined,
+      waitingArchive || liveStopHandoff
         ? eq(schema.companions.updatedAt, new Date(current.updated_at))
         : transitional ? lt(schema.companions.updatedAt, staleBefore) : undefined,
     ))
     .returning();
   if (!claimed) throw new CompanionRuntimeTransitionError("companion runtime state changed; retry");
-  return toCompanion(claimed, current.access, memberFromCompanion(current));
+  return {
+    companion: toCompanion(claimed, current.access, memberFromCompanion(current)),
+    archiveResume,
+    stopRecovery,
+  };
+}
+
+export async function claimCompanionRuntimeStart(
+  input: ClaimCompanionRuntimeStartInput,
+): Promise<Companion> {
+  return (await claimCompanionRuntimeStartWithMetadata(input)).companion;
 }
 
 export async function claimCompanionRuntimeStop(input: {
@@ -3166,8 +3225,10 @@ export async function claimCompanionRuntimeStop(input: {
     .update(schema.companions)
     .set({
       runtimeState: "stopping",
-      // An explicit Stop cancels any stale auto-resume intent before contacting Box.
-      daemonState: "stopped",
+      // Keep the pre-provider claim distinct from an accepted archive. If this owner dies before
+      // Box receives Stop, a later wake can idempotently reassert Stop instead of trusting a
+      // transient provider observation or waiting for an archive operation that never began.
+      daemonState: "running",
       lastError: null,
       updatedAt: new Date(),
     })

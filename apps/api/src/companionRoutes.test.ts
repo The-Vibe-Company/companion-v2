@@ -73,6 +73,7 @@ const coreMocks = vi.hoisted(() => ({
   setCompanionWorkspaceShare: vi.fn(),
   listCompanionRuntimeSkillPackages: vi.fn(),
   claimCompanionRuntimeStart: vi.fn(),
+  claimCompanionRuntimeStartWithMetadata: vi.fn(),
   claimCompanionRuntimeStop: vi.fn(),
   updateCompanionObservation: vi.fn(),
   updateCompanionRuntime: vi.fn(),
@@ -475,6 +476,11 @@ describe("Companions API feature gate", () => {
     coreMocks.setCompanionWorkspaceShare.mockResolvedValue(shares);
     coreMocks.listCompanionRuntimeSkillPackages.mockResolvedValue([]);
     coreMocks.claimCompanionRuntimeStart.mockResolvedValue(companion);
+    coreMocks.claimCompanionRuntimeStartWithMetadata.mockImplementation(async (input) => ({
+      companion: await coreMocks.claimCompanionRuntimeStart(input),
+      archiveResume: false,
+      stopRecovery: false,
+    }));
     coreMocks.claimCompanionRuntimeStop.mockResolvedValue(companion);
     coreMocks.updateCompanionObservation.mockResolvedValue(companion);
     coreMocks.updateCompanionRuntime.mockResolvedValue(companion);
@@ -1371,19 +1377,19 @@ describe("Companions API feature gate", () => {
     });
     expect(stop).not.toHaveBeenCalled();
     expect(start).toHaveBeenCalledOnce();
-    expect(coreMocks.claimCompanionRuntimeStart).toHaveBeenCalledWith(expect.objectContaining({
+    expect(coreMocks.claimCompanionRuntimeStartWithMetadata).toHaveBeenCalledWith(expect.objectContaining({
       allowArchiveResume: true,
     }));
   });
 
-  it("lets a continuation reclaim a provisioning start instead of restarting the Box", async () => {
+  it("lets a continuation reclaim a stale archive-aware start", async () => {
     const app = new Hono<{ Variables: ApiVariables }>();
     const claimed = {
       ...runningCompanion,
       runtime: {
         ...runningCompanion.runtime,
         state: "provisioning" as const,
-        daemon_state: "starting" as const,
+        daemon_state: "stopped" as const,
       },
     };
     const start = vi.fn(async () => ({
@@ -1395,6 +1401,11 @@ describe("Companions API feature gate", () => {
     const stop = vi.fn();
     coreMocks.getCompanionForRuntime.mockResolvedValue(claimed);
     coreMocks.claimCompanionRuntimeStart.mockResolvedValue(claimed);
+    coreMocks.claimCompanionRuntimeStartWithMetadata.mockResolvedValue({
+      companion: claimed,
+      archiveResume: true,
+      stopRecovery: false,
+    });
     coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
       ...claimed,
       runtime: {
@@ -1427,7 +1438,8 @@ describe("Companions API feature gate", () => {
     expect(response.status).toBe(200);
     expect(stop).not.toHaveBeenCalled();
     expect(start).toHaveBeenCalledOnce();
-    expect(coreMocks.claimCompanionRuntimeStart).toHaveBeenCalledWith(expect.objectContaining({
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ waitForArchive: true }));
+    expect(coreMocks.claimCompanionRuntimeStartWithMetadata).toHaveBeenCalledWith(expect.objectContaining({
       allowArchiveResume: true,
     }));
   });
@@ -1963,19 +1975,35 @@ describe("Companions API feature gate", () => {
     }));
   });
 
-  it("keeps a wake pending without stamping Error while the Box is archiving", async () => {
+  it("keeps an archive wake pending without Error, then delivers it once after archival", async () => {
     coreMocks.listPendingCompanionMessages.mockResolvedValue({
       pending: [message],
       piLogOffset: 0,
       deliveredOrdinal: null,
     });
+    coreMocks.claimCompanionRuntimeStartWithMetadata.mockImplementation(async (input) => ({
+      companion: await coreMocks.claimCompanionRuntimeStart(input),
+      archiveResume: true,
+      stopRecovery: false,
+    }));
     const runtime = boxRuntime({
-      start: vi.fn(async () => ({
-        boxId: "bx_23456789",
-        runtimeState: "stopping" as const,
-        daemonState: "stopped" as const,
-        desktopAvailable: false,
-      })),
+      start: vi.fn()
+        .mockResolvedValueOnce({
+          boxId: "bx_23456789",
+          runtimeState: "stopping" as const,
+          daemonState: "stopped" as const,
+          desktopAvailable: false,
+        })
+        .mockImplementationOnce(async (input) => {
+          expect(input.onArchiveReady).toBeTypeOf("function");
+          await input.onArchiveReady?.("bx_23456789");
+          return {
+            boxId: "bx_23456789",
+            runtimeState: "running" as const,
+            daemonState: "running" as const,
+            desktopAvailable: true,
+          };
+        }),
     });
     coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
       ...companion,
@@ -1992,12 +2020,17 @@ describe("Companions API feature gate", () => {
     const response = await app.request(`/v1/companions/${companion.id}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: "Summarize the incident" }),
+      body: JSON.stringify({
+        content: "Summarize the incident",
+        client_message_id: "33333333-3333-4333-8333-333333333333",
+      }),
     });
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
     expect(runtime.prompt).not.toHaveBeenCalled();
+    expect(runtime.start).toHaveBeenCalledTimes(1);
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ waitForArchive: true }));
     expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
       patch: expect.objectContaining({
         runtimeState: "stopping",
@@ -2009,6 +2042,34 @@ describe("Companions API feature gate", () => {
     }));
     expect(coreMocks.claimCompanionRuntimeStart).toHaveBeenCalledWith(expect.objectContaining({
       allowArchiveResume: true,
+    }));
+
+    const retried = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: "Summarize the incident",
+        client_message_id: "33333333-3333-4333-8333-333333333333",
+      }),
+    });
+
+    expect(retried.status).toBe(200);
+    await expect(retried.json()).resolves.toMatchObject({ delivery: "delivered" });
+    expect(runtime.start).toHaveBeenCalledTimes(2);
+    expect(runtime.start).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ waitForArchive: true }),
+    );
+    expect(runtime.prompt).toHaveBeenCalledOnce();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({
+        boxId: "bx_23456789",
+        runtimeState: "provisioning",
+        daemonState: "starting",
+      }),
+    }));
+    expect(coreMocks.updateCompanionRuntime).not.toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({ runtimeState: "error" }),
     }));
   });
 
@@ -3788,19 +3849,24 @@ describe("Companions API feature gate", () => {
     }));
   });
 
-  it("keeps syncing until an abandoned provisioning wake can be reclaimed", async () => {
+  it("keeps syncing until an abandoned archive-aware wake can be reclaimed", async () => {
     const provisioning = {
       ...companion,
       runtime: {
         ...companion.runtime,
         state: "provisioning" as const,
-        daemon_state: "starting" as const,
+        daemon_state: "stopped" as const,
       },
     };
     coreMocks.getCompanionForRuntime.mockResolvedValue(provisioning);
     coreMocks.claimCompanionRuntimeStart
       .mockRejectedValueOnce(new CompanionRuntimeTransitionError("companion runtime is already provisioning"))
       .mockResolvedValueOnce(provisioning);
+    coreMocks.claimCompanionRuntimeStartWithMetadata.mockImplementation(async (input) => ({
+      companion: await coreMocks.claimCompanionRuntimeStart(input),
+      archiveResume: true,
+      stopRecovery: false,
+    }));
     coreMocks.listPendingCompanionMessages.mockResolvedValue({
       pending: [message],
       piLogOffset: 0,
@@ -3842,9 +3908,163 @@ describe("Companions API feature gate", () => {
     expect(second.status).toBe(200);
     await expect(second.json()).resolves.toMatchObject({ source: "box" });
     expect(runtime.start).toHaveBeenCalledOnce();
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ waitForArchive: true }));
     expect(runtime.prompt).toHaveBeenCalledWith(expect.objectContaining({
       boxId: "bx_23456789",
       requestId: message.event_id,
+    }));
+  });
+
+  it("hands a pending send from a live Stop owner into archive recovery", async () => {
+    const afterStopMessage = { ...message, created_at: "2026-08-12T12:00:01.000Z" };
+    const stopping = {
+      ...companion,
+      runtime: {
+        ...companion.runtime,
+        state: "stopping" as const,
+        daemon_state: "running" as const,
+      },
+    };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(stopping);
+    coreMocks.claimCompanionRuntimeStartWithMetadata.mockResolvedValue({
+      companion: stopping,
+      archiveResume: false,
+      stopRecovery: true,
+    });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [afterStopMessage],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...stopping,
+      runtime: {
+        ...stopping.runtime,
+        state: input.patch.runtimeState ?? stopping.runtime.state,
+        daemon_state: input.patch.daemonState ?? stopping.runtime.daemon_state,
+      },
+    }));
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ source: "box" });
+    expect(runtime.stop).toHaveBeenCalledWith({
+      boxId: "bx_23456789",
+      recoverArchive: true,
+    });
+    expect(coreMocks.claimCompanionRuntimeStartWithMetadata).toHaveBeenCalledWith(
+      expect.objectContaining({
+        deliveryIntentCreatedAt: new Date(afterStopMessage.created_at),
+      }),
+    );
+    expect(runtime.start).toHaveBeenCalledOnce();
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ waitForArchive: true }));
+    expect(runtime.stop.mock.invocationCallOrder[0]).toBeLessThan(
+      runtime.start.mock.invocationCallOrder[0]!,
+    );
+    expect(runtime.prompt).toHaveBeenCalledWith(expect.objectContaining({
+      boxId: "bx_23456789",
+      requestId: afterStopMessage.event_id,
+    }));
+  });
+
+  it("keeps a newer explicit Stop authoritative over an older pending tail", async () => {
+    const stopping = {
+      ...companion,
+      runtime: {
+        ...companion.runtime,
+        state: "stopping" as const,
+        daemon_state: "running" as const,
+      },
+    };
+    const beforeStopMessage = { ...message, created_at: "2026-08-12T11:59:59.000Z" };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(stopping);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [beforeStopMessage],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ source: "control_plane" });
+    expect(coreMocks.claimCompanionRuntimeStartWithMetadata).not.toHaveBeenCalled();
+    expect(runtime.stop).not.toHaveBeenCalled();
+    expect(runtime.start).not.toHaveBeenCalled();
+    expect(runtime.prompt).not.toHaveBeenCalled();
+  });
+
+  it("drops Stop recovery when its exact Box vanished before replacement lookup", async () => {
+    const afterStopMessage = { ...message, created_at: "2026-08-12T12:00:01.000Z" };
+    const stopping = {
+      ...companion,
+      runtime: {
+        ...companion.runtime,
+        state: "stopping" as const,
+        daemon_state: "running" as const,
+      },
+    };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(stopping);
+    coreMocks.claimCompanionRuntimeStartWithMetadata.mockResolvedValue({
+      companion: stopping,
+      archiveResume: false,
+      stopRecovery: true,
+    });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [afterStopMessage],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+    });
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...stopping,
+      runtime: {
+        ...stopping.runtime,
+        state: input.patch.runtimeState ?? stopping.runtime.state,
+        daemon_state: input.patch.daemonState ?? stopping.runtime.daemon_state,
+      },
+    }));
+    const runtime = boxRuntime({
+      stop: vi.fn(async () => {
+        throw new BoxRuntimeProviderError("Box not found", 404);
+      }),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ source: "box" });
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ waitForArchive: false }));
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({
+        boxId: "bx_23456789",
+        runtimeState: "provisioning",
+        daemonState: "starting",
+      }),
+    }));
+    expect(runtime.prompt).toHaveBeenCalledWith(expect.objectContaining({
+      boxId: "bx_23456789",
+      requestId: afterStopMessage.event_id,
     }));
   });
 

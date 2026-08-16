@@ -3020,6 +3020,190 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(result).toMatchObject({ runtimeState: "running", daemonState: "running" });
   });
 
+  it("waits through a stop's transient idle state before waking and delivering", async () => {
+    const operations: string[] = [];
+    let stopped = false;
+    let resumed = false;
+    let archiveReads = 0;
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        if (!stopped || resumed) return json({ box });
+        archiveReads += 1;
+        const state = archiveReads < 3 ? "idle" : "archived";
+        operations.push(`read:${state}`);
+        return json({ box: { ...box, state, desktopAvailable: false } });
+      }
+      if (url.endsWith("/boxes/bx_23456789/stop") && method === "POST") {
+        stopped = true;
+        operations.push("stop");
+        return json({ box: { ...box, state: "archiving", desktopAvailable: false } }, 202);
+      }
+      if (url.endsWith("/boxes/bx_23456789/resume") && method === "POST") {
+        resumed = true;
+        operations.push("resume");
+        expect(body).toEqual({ noEnv: true, ttlSeconds: 21_600 });
+        return json({ box: { ...box, state: "provisioning" } }, 202);
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        if (!stopped) {
+          operations.push("stop-pi");
+          return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+        }
+        if (command.includes("companion-pi-warm-ready")) {
+          operations.push("wake-pi");
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: "companion-pi-warm-ready\n",
+            stderr: "",
+          });
+        }
+        operations.push("prompt");
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: '{"type":"response","command":"prompt","success":true,"id":"msg:stop-wake"}\n',
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      COMPANION_BOX_READY_TIMEOUT_MS: "200",
+    });
+
+    const stoppedRuntime = await runtime.stop({ boxId: "bx_23456789" });
+    expect(stoppedRuntime).toMatchObject({ runtimeState: "stopping", daemonState: "stopped" });
+
+    const started = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: {},
+      replaceProviderAuth: false,
+      waitForArchive: true,
+      modelId: "claude-opus-4-8",
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onArchiveReady: async () => {
+        operations.push("archive-ready");
+      },
+      onBoxAssigned: async () => undefined,
+    });
+    await runtime.prompt({
+      boxId: started.boxId,
+      message: "Wake after the stop",
+      requestId: "msg:stop-wake",
+    });
+
+    expect(started).toMatchObject({ runtimeState: "running", daemonState: "running" });
+    expect(operations).toEqual([
+      "stop-pi",
+      "stop",
+      "read:idle",
+      "read:idle",
+      "read:archived",
+      "archive-ready",
+      "resume",
+      "wake-pi",
+      "prompt",
+    ]);
+  });
+
+  it("recovers accepted Stop after owner death even when Box first reports idle", async () => {
+    const operations: string[] = [];
+    let resumed = false;
+    let reads = 0;
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        if (resumed) return json({ box });
+        reads += 1;
+        const state = reads < 5 ? "idle" : "archived";
+        operations.push(`read:${state}`);
+        return json({ box: { ...box, state, desktopAvailable: false } });
+      }
+      if (url.endsWith("/boxes/bx_23456789/stop") && method === "POST") {
+        operations.push("retry-stop");
+        return json({ message: "this Box is not running" }, 409);
+      }
+      if (url.endsWith("/boxes/bx_23456789/resume") && method === "POST") {
+        resumed = true;
+        operations.push("resume");
+        expect(body).toEqual({ noEnv: true, ttlSeconds: 21_600 });
+        return json({ box: { ...box, state: "provisioning" } }, 202);
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        if (!resumed) {
+          operations.push("retry-stop-pi");
+          return json({ message: "this Box is not running" }, 409);
+        }
+        if (command.includes("companion-pi-warm-ready")) {
+          operations.push("wake-pi");
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: "companion-pi-warm-ready\n",
+            stderr: "",
+          });
+        }
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      COMPANION_BOX_READY_TIMEOUT_MS: "200",
+    });
+
+    const recoveredStop = await runtime.stop({
+      boxId: "bx_23456789",
+      recoverArchive: true,
+    });
+    expect(recoveredStop).toMatchObject({ boxId: "bx_23456789", daemonState: "stopped" });
+
+    const started = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: {},
+      replaceProviderAuth: false,
+      waitForArchive: true,
+      modelId: "claude-opus-4-8",
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onArchiveReady: async () => {
+        operations.push("archive-ready");
+      },
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(started).toMatchObject({ runtimeState: "running", daemonState: "running" });
+    expect(operations.slice(0, 4)).toEqual([
+      "read:idle",
+      "retry-stop-pi",
+      "retry-stop",
+      "read:idle",
+    ]);
+    expect(operations.indexOf("archive-ready")).toBeGreaterThan(operations.lastIndexOf("read:idle"));
+    expect(operations.indexOf("resume")).toBeGreaterThan(operations.indexOf("archive-ready"));
+  });
+
   it("returns stopped when an apply-only start observes archival complete", async () => {
     let reads = 0;
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
@@ -3092,6 +3276,47 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: {},
       replaceProviderAuth: false,
+      modelId: "claude-opus-4-8",
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    });
+
+    expect(result).toEqual({
+      boxId: "bx_23456789",
+      runtimeState: "stopping",
+      daemonState: "stopped",
+      desktopAvailable: false,
+    });
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/resume"))).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/commands"))).toBe(false);
+  });
+
+  it("keeps the waiting observation when an archive poll ends on transient idle", async () => {
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        return json({ box: { ...box, state: "idle", desktopAvailable: false } });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      COMPANION_BOX_READY_TIMEOUT_MS: "5",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: {},
+      replaceProviderAuth: false,
+      waitForArchive: true,
       modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
@@ -3453,6 +3678,7 @@ describe("AsciiBoxCompanionRuntime", () => {
   it("replaces an assigned Box the provider no longer knows about", async () => {
     let listed = 0;
     let createdBox = false;
+    const archiveReady = vi.fn();
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const method = init?.method ?? "GET";
@@ -3494,16 +3720,88 @@ describe("AsciiBoxCompanionRuntime", () => {
       clientSurface: "web",
       providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
       replaceProviderAuth: true,
+      waitForArchive: true,
       modelId: "claude-opus-4-8",
       mcpCredentials: [],
       mcpAccounts: [],
       skills: [],
+      onArchiveReady: archiveReady,
       onBoxAssigned: async () => undefined,
     });
 
     expect(listed).toBe(1);
     expect(createdBox).toBe(true);
     expect(result.boxId).toBe("bx_23456789");
+    expect(result.runtimeState).toBe("running");
+    expect(archiveReady).not.toHaveBeenCalled();
+  });
+
+  it("does not carry a vanished Box's archive wait onto a ready Box recovered by name", async () => {
+    const recovered = {
+      ...box,
+      name: "Companion 11111111-1111-4111-8111-111111111111",
+      state: "idle",
+    };
+    const assignments: Array<string | null> = [];
+    const archiveReady = vi.fn();
+    let createdBox = false;
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_deleted0") && method === "GET") {
+        return json({ code: "not_found", message: "box not found" }, 404);
+      }
+      if (url.includes("/boxes?limit=200") && method === "GET") {
+        return json({ boxes: [recovered] });
+      }
+      if (url.endsWith("/boxes") && method === "POST") {
+        createdBox = true;
+        return json({ box: { ...box, state: "provisioning" } }, 202);
+      }
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        return json({ box: recovered });
+      }
+      if (url.endsWith("/files") && method === "PUT") return json({ ok: true });
+      if (url.endsWith("/boxes/bx_23456789/commands") && method === "POST") {
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: String(body.command).includes("is-active") ? "active\n" : "",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      COMPANION_BOX_READY_TIMEOUT_MS: "5",
+    });
+
+    const result = await runtime.start({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_deleted0",
+      clientSurface: "web",
+      providerAuth: { anthropic: { type: "api_key", key: "provider-secret" } },
+      replaceProviderAuth: true,
+      waitForArchive: true,
+      modelId: "claude-opus-4-8",
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onArchiveReady: archiveReady,
+      onBoxAssigned: async (boxId) => {
+        assignments.push(boxId);
+      },
+    });
+
+    expect(result).toMatchObject({ boxId: "bx_23456789", runtimeState: "running" });
+    expect(createdBox).toBe(false);
+    expect(assignments).toEqual(["bx_23456789"]);
+    expect(archiveReady).not.toHaveBeenCalled();
   });
 
   /**

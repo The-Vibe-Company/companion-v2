@@ -442,6 +442,7 @@ export function registerCompanionRoutes(
       restartPi?: boolean;
       timeoutRestartOrdinal?: number | null;
       allowArchiveResume?: boolean;
+      deliveryIntentCreatedAt?: Date;
     } = {},
   ): Promise<{ companion: Companion; runtime: CompanionBoxRuntime; ready: boolean }> {
     return startCompanionRuntime(await lifecycleContext(c), companionId, body, options);
@@ -1279,9 +1280,24 @@ export function registerCompanionRoutes(
         const state = await listPendingCompanionMessages({ actor, orgId, companionId, database });
         const archiveResumePending = companion.runtime.state === "stopping"
           && companion.runtime.daemon_state === "starting";
+        const pendingAfterRuntimeClaim = state.pending.some((entry) =>
+          new Date(entry.created_at) > new Date(companion.updated_at));
         const startRecoveryPending = state.pending.length > 0
-          && companion.runtime.state === "provisioning"
-          && companion.runtime.daemon_state === "starting";
+          && (
+            (
+              companion.runtime.state === "provisioning"
+              && (
+                companion.runtime.daemon_state === "starting"
+                || companion.runtime.daemon_state === "stopped"
+                || companion.runtime.daemon_state === "running"
+              )
+            )
+            || (
+              companion.runtime.state === "stopping"
+              && companion.runtime.daemon_state === "running"
+              && pendingAfterRuntimeClaim
+            )
+          );
         const mayNeedProviderRecovery = piIsReachable(companion)
           || archiveResumePending
           || startRecoveryPending
@@ -1335,6 +1351,11 @@ export function registerCompanionRoutes(
             timeoutRestartOrdinal: resolved.timeoutRestartPending
               ? resolved.timeoutRecoveryOrdinal
               : null,
+            // A thread poll is automatic, unlike a new send or explicit Wake. Carry durable message
+            // ordering into the claim so an older undelivered tail cannot cancel a newer Stop.
+            deliveryIntentCreatedAt: resolved.pending.length > 0
+              ? new Date(resolved.pending.at(-1)!.created_at)
+              : undefined,
           });
         } catch (error) {
           if (error instanceof CompanionRuntimeTransitionError) {
@@ -1650,7 +1671,10 @@ export function registerCompanionRoutes(
       const continuingBoxStart = continuationRequested
         && boxId !== null
         && resolved.companion.runtime.state === "provisioning"
-        && resolved.companion.runtime.daemon_state === "starting";
+        && (
+          resolved.companion.runtime.daemon_state === "starting"
+          || resolved.companion.runtime.daemon_state === "stopped"
+        );
       const completedBoxArchive = continuationRequested
         && boxId !== null
         && resolved.companion.runtime.state === "running"

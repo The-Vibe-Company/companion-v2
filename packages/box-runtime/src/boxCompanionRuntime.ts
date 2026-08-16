@@ -262,6 +262,8 @@ export interface CompanionBoxRuntime {
     refreshRuntimeLayout?: boolean;
     /** Refuse creation or resume when a caller may touch only an already-runnable Box. */
     allowBoxWake?: boolean;
+    /** This start claimed an archive continuation even if the provider's first read says idle. */
+    waitForArchive?: boolean;
     /** Operator instructions applied when Pi next starts; changing them never restarts a warm Box. */
     instructions?: string | null;
     /** Pi model id selected from the provider's pinned catalog. */
@@ -274,6 +276,8 @@ export interface CompanionBoxRuntime {
      * Lives only in the volatile providers.env file alongside MCP credentials.
      */
     hubEnv?: Record<string, string>;
+    /** Persist that archival completed before this adapter asks the provider to resume the Box. */
+    onArchiveReady?: (boxId: string) => Promise<void>;
     /** Record which Box backs this Companion, or `null` when the recorded one is not its own. */
     onBoxAssigned: (boxId: string | null) => Promise<void>;
     /**
@@ -282,7 +286,11 @@ export interface CompanionBoxRuntime {
      */
     signal?: AbortSignal;
   }): Promise<CompanionRuntimeStartObservation>;
-  stop(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
+  stop(input: {
+    boxId: string;
+    /** Retry an in-flight Stop handoff; provider 409s are safe once wake waits for archival. */
+    recoverArchive?: boolean;
+  }): Promise<CompanionRuntimeObservation>;
   status(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
   /** Mint one fresh desktop URL for a Box that is already running; never creates or resumes one. */
   desktop(input: { boxId: string }): Promise<CompanionDesktopMint>;
@@ -1123,13 +1131,20 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
   /**
    * A graceful Box stop snapshots the disk asynchronously. Starting during that window must wait
    * for the snapshot rather than turning the provider's ordinary `archiving` response into a
-   * lifecycle failure. The bounded fallback returns the latest observation so the control plane can
-   * keep projecting `stopping`; a later restart or wake can continue the same wait safely.
+   * lifecycle failure. Box can briefly report `idle` while the snapshot is still settling, so only
+   * `archived` proves the stop completed; treating that intermediate state as runnable lets the
+   * archive finish underneath the newly started Pi. The bounded fallback returns the latest
+   * observation so the control plane can keep projecting `stopping`; a later restart or wake can
+   * continue the same wait safely.
    */
   async #waitWhileArchiving(box: BoxInfo): Promise<BoxInfo> {
     const deadline = Date.now() + this.#readyTimeoutMs;
     let current = box;
-    while (current.state === "archiving" && Date.now() < deadline) {
+    while (
+      current.state !== "archived"
+      && !isBeyondRecovery(current)
+      && Date.now() < deadline
+    ) {
       await this.#pause();
       current = await this.#get(box.id);
     }
@@ -1747,12 +1762,15 @@ exit 0`,
     restartPi?: boolean;
     refreshRuntimeLayout?: boolean;
     allowBoxWake?: boolean;
+    /** This start claimed a control-plane archive continuation even if Box's first read says idle. */
+    waitForArchive?: boolean;
     instructions?: string | null;
     modelId: string;
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
     hubEnv?: Record<string, string>;
+    onArchiveReady?: (boxId: string) => Promise<void>;
     onBoxAssigned: (boxId: string | null) => Promise<void>;
     signal?: AbortSignal;
   }): Promise<CompanionRuntimeStartObservation> {
@@ -1775,12 +1793,14 @@ exit 0`,
     restartPi?: boolean;
     refreshRuntimeLayout?: boolean;
     allowBoxWake?: boolean;
+    waitForArchive?: boolean;
     instructions?: string | null;
     modelId: string;
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
     hubEnv?: Record<string, string>;
+    onArchiveReady?: (boxId: string) => Promise<void>;
     onBoxAssigned: (boxId: string | null) => Promise<void>;
   }): Promise<CompanionRuntimeStartObservation> {
     const allowBoxWake = input.allowBoxWake !== false;
@@ -1814,12 +1834,27 @@ exit 0`,
       // control plane recorded for the Box this start replaced.
       replaceProviderAuth = true;
     }
-    const waitedForArchive = box.state === "archiving";
+    // `waitForArchive` describes the exact Box id whose lifecycle claim was persisted. If that Box
+    // vanished, a different Box recovered by deterministic name (or a fresh one created here) has
+    // no old snapshot to finish and must proceed. A provider-observed `archiving` state remains
+    // authoritative even when the control-plane assignment was absent or stale.
+    const retainedArchiveTarget = input.waitForArchive === true
+      && input.boxId !== null
+      && box.id === input.boxId;
+    const waitedForArchive = !boxIdPersisted
+      && (retainedArchiveTarget || box.state === "archiving");
     if (waitedForArchive) {
       box = await this.#waitWhileArchiving(box);
       // Archival can outlast one request budget. Keep the truthful, retryable projection instead of
-      // throwing the transient state through startRuntime's durable Error path.
-      if (box.state === "archiving") return observation(box, "stopped");
+      // throwing the transient state through startRuntime's durable Error path. `idle` is not proof
+      // of completion here: Box can expose it between `archiving` and the terminal `archived` state.
+      if (box.state !== "archived" && !isBeyondRecovery(box)) {
+        return {
+          ...observation(box, "stopped"),
+          runtimeState: "stopping",
+          daemonState: "stopped",
+        };
+      }
     }
     if (box.state === "archived") {
       if (!allowBoxWake) {
@@ -1828,6 +1863,11 @@ exit 0`,
         if (waitedForArchive) return observation(box, "stopped");
         throw new BoxRuntimeProviderError("Box is asleep; apply on the next wake", 409);
       }
+      // Move the durable claim out of its archive-wait marker before resume. If this process dies
+      // on either side of the provider call, a stale owner sees an ordinary start: before resume it
+      // will observe `archived` and retry it; after resume it will accept the runnable Box instead
+      // of waiting for that Box to archive again.
+      if (waitedForArchive) await input.onArchiveReady?.(box.id);
       box = await this.#resume(box.id);
     } else if (!READY_STATES.has(box.state) && !STARTING_STATES.has(box.state)) {
       throw new BoxRuntimeProviderError(`Box cannot start from state ${box.state}`, 409);
@@ -1936,14 +1976,18 @@ trap - EXIT`,
     return { ...observation(await this.#get(box.id), daemonState), staged: true };
   }
 
-  async stop(input: { boxId: string }): Promise<CompanionRuntimeObservation> {
+  async stop(input: {
+    boxId: string;
+    recoverArchive?: boolean;
+  }): Promise<CompanionRuntimeObservation> {
     let box = await this.#get(input.boxId);
     if (READY_STATES.has(box.state)) {
-      const stopped = await this.#command(
-        input.boxId,
-        // The unit is loaded by the first start, so a Box that never started Pi has nothing to stop.
-        // Only a daemon still active after the stop attempt is a failure worth reporting.
-        `${USER_BUS_ENVIRONMENT}
+      try {
+        const stopped = await this.#command(
+          input.boxId,
+          // The unit is loaded by the first start, so a Box that never started Pi has nothing to stop.
+          // Only a daemon still active after the stop attempt is a failure worth reporting.
+          `${USER_BUS_ENVIRONMENT}
 if systemctl --user show-environment >/dev/null 2>&1; then
   systemctl --user stop companion-pi-daemon.service >/dev/null 2>&1 || true
   if systemctl --user is-active --quiet companion-pi-daemon.service; then
@@ -1955,15 +1999,38 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
   "$HOME/.companion/runtime/state/pi.rpc.in" \
   "$HOME/.companion/runtime/state/pi.rpc.ready" \
   "$HOME/.companion/runtime/state/pi.rpc.start"`,
-      );
-      if (!stopped.success) throw new BoxRuntimeProviderError("Pi daemon failed to stop", 502);
+        );
+        if (!stopped.success) throw new BoxRuntimeProviderError("Pi daemon failed to stop", 502);
+      } catch (error) {
+        // A Stop owner can die after Box accepted archival but before PostgreSQL recorded it. During
+        // the provider's transient idle projection, command execution can answer "not running".
+        // The recovering wake must still reassert Stop and wait for `archived`; an ordinary explicit
+        // Stop keeps surfacing every command failure.
+        if (
+          input.recoverArchive !== true
+          || !(error instanceof BoxRuntimeProviderError)
+          || error.status !== 409
+        ) throw error;
+      }
     }
     if (box.state !== "archived" && box.state !== "archiving") {
-      const response = await this.#request<BoxEnvelope>(
-        `/boxes/${encodeURIComponent(input.boxId)}/stop`,
-        { method: "POST", body: JSON.stringify({ force: false }) },
-      );
-      box = response.box;
+      try {
+        const response = await this.#request<BoxEnvelope>(
+          `/boxes/${encodeURIComponent(input.boxId)}/stop`,
+          { method: "POST", body: JSON.stringify({ force: false }) },
+        );
+        box = response.box;
+      } catch (error) {
+        // Stop is idempotent at the lifecycle layer. Box can reject the duplicate request while its
+        // snapshot is already in flight and still expose `idle`; retain that exact Box and let the
+        // archive-aware start poll through to the terminal `archived` state.
+        if (
+          input.recoverArchive !== true
+          || !(error instanceof BoxRuntimeProviderError)
+          || error.status !== 409
+        ) throw error;
+        box = await this.#get(input.boxId);
+      }
     }
     return observation(box, "stopped");
   }

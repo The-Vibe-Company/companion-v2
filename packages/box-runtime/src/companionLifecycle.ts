@@ -5,7 +5,7 @@ import {
   CompanionRuntimeTransitionError,
   COMPANION_RUNTIME_START_BUDGET_MS,
   claimCompanionDelivery,
-  claimCompanionRuntimeStart,
+  claimCompanionRuntimeStartWithMetadata,
   claimCompanionRuntimeStop,
   getCompanionForRuntime,
   listCompanionRuntimeSkillPackages,
@@ -318,6 +318,8 @@ export async function startCompanionRuntime(
     restartPi?: boolean;
     timeoutRestartOrdinal?: number | null;
     allowArchiveResume?: boolean;
+    /** Automatic sync's newest pending message; omitted for an explicit send or Wake action. */
+    deliveryIntentCreatedAt?: Date;
   } = {},
 ): Promise<{ companion: Companion; runtime: CompanionBoxRuntime; ready: boolean }> {
   let failureContext:
@@ -335,16 +337,20 @@ export async function startCompanionRuntime(
         plugins: Awaited<ReturnType<typeof resolveCompanionPluginInjection>>;
         skillPackages: Awaited<ReturnType<typeof listCompanionRuntimeSkillPackages>>;
         hubEnv: Record<string, string>;
+        /** The lifecycle claim this start took over was waiting for Box archival to complete. */
+        archiveResume: boolean;
+        /** This wake took ownership of a Stop whose provider acceptance was not yet durable. */
+        stopRecovery: boolean;
         /** Revalidated after the lifecycle claim so a delayed request cannot recycle Pi twice. */
         timeoutRestartPending: boolean;
       }
     | undefined;
   /**
-   * The Box-assignment write, while it is in flight. A start abandoned at its deadline can already
-   * be inside this write, and what it writes is `provisioning`, so the failure path waits for it
-   * before recording its own state: the reason a wake failed has to be the last word on the row.
+   * The latest Box-assignment or archive-ready write while it is in flight. A start abandoned at
+   * its deadline can already be inside one of these writes, and both write `provisioning`, so the
+   * failure path waits before recording its reason as the last word on the row.
    */
-  let boxAssignment: Promise<unknown> | undefined;
+  let lifecycleProgress: Promise<unknown> | undefined;
   const budget = startBudget();
   try {
     mutation = await withinBudget(
@@ -360,13 +366,15 @@ export async function startCompanionRuntime(
           : await resolveCompanionPluginInjection({
               actor, orgId, companionId, database,
             });
-        const companion = await claimCompanionRuntimeStart({
+        const claimed = await claimCompanionRuntimeStartWithMetadata({
           actor,
           orgId,
           companionId,
           allowArchiveResume: options.allowArchiveResume,
+          deliveryIntentCreatedAt: options.deliveryIntentCreatedAt,
           database,
         });
+        const companion = claimed.companion;
         const timeoutRestartPending = options.timeoutRestartOrdinal !== null
           && options.timeoutRestartOrdinal !== undefined
           ? await listPendingCompanionMessages({ actor, orgId, companionId, database })
@@ -426,6 +434,8 @@ export async function startCompanionRuntime(
           plugins,
           skillPackages,
           hubEnv,
+          archiveResume: claimed.archiveResume,
+          stopRecovery: claimed.stopRecovery,
           timeoutRestartPending,
         };
       }),
@@ -492,6 +502,50 @@ export async function startCompanionRuntime(
     const runtime = ctx.runtimeFactory();
     const refreshRuntimeLayout =
       mutation.companion.runtime.disk_layout_version !== COMPANION_PI_DISK_LAYOUT_VERSION;
+    const persistLifecycleProgress = async (
+      boxId: string | null,
+      daemonState: "starting" | "stopped",
+    ) => {
+      // A start abandoned at the deadline may still reach this point, and the reason for that
+      // failure is already on the row. Re-claiming `provisioning` here would erase it and put the
+      // Companion back into the state this budget exists to end. Refusing rather than returning is
+      // what says so: the adapter reads a rejected new assignment as a Box no row points at and
+      // puts that Box back to sleep.
+      if (budget.signal.aborted) throw budget.signal.reason;
+      const write = withTenantContext(
+        { orgId: mutation!.orgId, userId: mutation!.actor.id },
+        (database) => updateCompanionRuntime({
+          actor: mutation!.actor,
+          orgId: mutation!.orgId,
+          companionId,
+          patch: { boxId, runtimeState: "provisioning", daemonState },
+          database,
+        }),
+      );
+      lifecycleProgress = write.catch(() => undefined);
+      await write;
+    };
+    const persistStartProgress = (boxId: string | null) =>
+      persistLifecycleProgress(boxId, "starting");
+    let waitForArchive = mutation.archiveResume;
+    if (mutation.stopRecovery) {
+      const boxId = mutation.companion.runtime.box_id;
+      if (!boxId) throw new CompanionRuntimeTransitionError("companion has no Box to recover");
+      // Reassert the provider Stop before trusting any first observation. A provider may expose
+      // transient `idle` after accepting Stop, and a crashed owner may not have contacted it at all.
+      try {
+        await withinBudget(runtime.stop({ boxId, recoverArchive: true }), budget.signal);
+        waitForArchive = true;
+        // Preserve the accepted/reasserted archive wait before `start` polls or resumes. A crash
+        // after this write is reclaimed as an archive continuation; a crash before it retries Stop.
+        await withinBudget(persistLifecycleProgress(boxId, "stopped"), budget.signal);
+      } catch (error) {
+        if (!(error instanceof BoxRuntimeProviderError) || error.status !== 404) throw error;
+        // The exact Stop target no longer exists, so it has no snapshot to wait for. Clear the
+        // recovery marker before normal start resolves a replacement by name or creates one.
+        await withinBudget(persistStartProgress(boxId), budget.signal);
+      }
+    }
     const observed = await withinBudget(runtime.start({
       signal: budget.signal,
       companionId,
@@ -520,6 +574,7 @@ export async function startCompanionRuntime(
       ) || refreshRuntimeLayout || skillsPending,
       refreshRuntimeLayout,
       allowBoxWake: options.allowBoxWake,
+      waitForArchive,
       mcpCredentials: body.client_surface === "native_mobile"
         ? []
         : [...mutation.plugins.credentials, ...body.mcp_credentials],
@@ -528,28 +583,10 @@ export async function startCompanionRuntime(
         : [...mutation.plugins.accounts, ...body.mcp_accounts],
       skills,
       hubEnv: mutation.hubEnv,
+      onArchiveReady: persistStartProgress,
       // `null` clears the recorded Box: the adapter found that the id this row carried names a
       // machine this Companion does not own, so no other path may reach it either.
-      onBoxAssigned: async (boxId) => {
-        // A start abandoned at the deadline may still reach this point, and the reason for that
-        // failure is already on the row. Re-claiming `provisioning` here would erase it and put the
-        // Companion back into the state this budget exists to end. Refusing rather than returning is
-        // what says so: the adapter reads a rejected assignment as a Box no row points at and puts
-        // that Box back to sleep, which returning as if the id were recorded would skip.
-        if (budget.signal.aborted) throw budget.signal.reason;
-        const write = withTenantContext(
-          { orgId: mutation!.orgId, userId: mutation!.actor.id },
-          (database) => updateCompanionRuntime({
-            actor: mutation!.actor,
-            orgId: mutation!.orgId,
-            companionId,
-            patch: { boxId, runtimeState: "provisioning", daemonState: "starting" },
-            database,
-          }),
-        );
-        boxAssignment = write.catch(() => undefined);
-        await write;
-      },
+      onBoxAssigned: persistStartProgress,
     }), budget.signal);
     // A graceful Box archive may still be snapshotting after the adapter's bounded poll. That is
     // a truthful waiting state, not a failed start: preserve it without last_error so the same
@@ -653,7 +690,7 @@ export async function startCompanionRuntime(
     const error = budget.signal.aborted ? budget.signal.reason : raised;
     // Cancellation does not wait for the call it interrupted, so a Box assignment still in flight
     // would otherwise write `provisioning` over the failure recorded here.
-    await boxAssignment;
+    await lifecycleProgress;
     // A pre-claim transition conflict means another request owns the wake. Preserve its
     // provisioning lock; all other authorized failures remain visible through last_error.
     const context = mutation
