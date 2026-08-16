@@ -121,6 +121,10 @@ describe("Skills Hub PostgreSQL isolation", () => {
   });
 
   it("replaces only untouched migration seeds during post-commit delivery refinement", async () => {
+    await expect(integrationSql`
+      select companion_refresh_delivery_compat_backfill(NULL)
+    `).rejects.toThrow("batch size must be between 1 and 1000");
+
     await integrationSql`
       insert into companion_reconcile_leases (
         org_id, companion_id, reason, delivery_compat_expires_at,

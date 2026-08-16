@@ -379,7 +379,7 @@ AS $$
 DECLARE
   v_processed integer := 0;
 BEGIN
-  IF p_batch_size < 1 OR p_batch_size > 1000 THEN
+  IF p_batch_size IS NULL OR p_batch_size < 1 OR p_batch_size > 1000 THEN
     RAISE EXCEPTION 'Companion delivery compatibility batch size must be between 1 and 1000';
   END IF;
 
