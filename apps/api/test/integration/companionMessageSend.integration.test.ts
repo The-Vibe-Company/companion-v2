@@ -153,10 +153,16 @@ describe("Companion message send idempotence", () => {
       database,
     }));
 
-    expect(await claim(firstClaimId)).toBe(true);
-    expect(await claim(secondClaimId)).toBe(false);
-    expect(await release(firstClaimId)).toBe(true);
-    expect(await claim(secondClaimId)).toBe(true);
-    expect(await release(secondClaimId)).toBe(true);
+    const [firstClaimed, secondClaimed] = await Promise.all([
+      claim(firstClaimId),
+      claim(secondClaimId),
+    ]);
+    expect([firstClaimed, secondClaimed].filter(Boolean)).toHaveLength(1);
+
+    const winner = firstClaimed ? firstClaimId : secondClaimId;
+    const loser = firstClaimed ? secondClaimId : firstClaimId;
+    expect(await release(winner)).toBe(true);
+    expect(await claim(loser)).toBe(true);
+    expect(await release(loser)).toBe(true);
   });
 });

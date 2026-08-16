@@ -455,11 +455,12 @@ older runtime, but the current extension never creates new ones. Fire-and-forget
 prompts minted outside the Companion title grammar (`companion:<kind>:<name>`) are ignored so
 third-party extension chrome does not become interactive cards.
 
-Delivery reads the pending list before it claims the watermark, so two requests that overlap inside
-that window can hand Pi the same prompt twice. One client cannot do this: the web surface runs its
-sends and syncs one at a time, skipping a poll that an in-flight request already covers. Two clients
-syncing the same thread in the same instant still can, and V1 accepts that: the transcript stays
-correct because projection is keyed by log byte offset, and the visible cost is a repeated prompt.
+Delivery first wins the per-Companion lease and then re-reads the pending list and timeout state.
+Overlapping sends, sync polls, and reconciler passes therefore cannot hand Pi the same pending suffix
+at once, even when they originate from different clients. The web surface still runs its own sends
+and syncs one at a time to avoid redundant requests, while the database lease is the cross-client
+correctness boundary. Pi acceptance advances the delivery ordinal; an unacknowledged attempt stays
+pending and visible instead of relying on transcript projection to hide a repeated prompt.
 
 ## Box disk layout
 

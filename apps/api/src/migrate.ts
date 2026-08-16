@@ -10,6 +10,9 @@ import postgres from "postgres";
 export const MIGRATION_LOCK_CLASS_ID = 72_401;
 export const MIGRATION_LOCK_OBJECT_ID = 20_260_608;
 const DEFAULT_MIGRATION_LOCK_TIMEOUT_MS = 60_000;
+const DELIVERY_COMPAT_BACKFILL_BATCH_SIZE = 100;
+const DELIVERY_COMPAT_BACKFILL_BUDGET_MS = 5_000;
+const DELIVERY_COMPAT_BACKFILL_LOCK_OBJECT_ID = 20_260_609;
 const RUNTIME_GRANTS_BEGIN = "-- companion-runtime-grants-begin";
 const RUNTIME_GRANTS_END = "-- companion-runtime-grants-end";
 const DATABASE_ROLE_PATTERN = /^[a-z_][a-z0-9_]{0,62}$/;
@@ -212,6 +215,62 @@ async function applyRuntimeRoleGrants(
   }
 }
 
+async function refineDeliveryCompatBackfill(client: ReturnType<typeof postgres>): Promise<void> {
+  const [backfillLock] = await client<Array<{ locked: boolean }>>`
+    select pg_try_advisory_lock(
+      ${MIGRATION_LOCK_CLASS_ID}, ${DELIVERY_COMPAT_BACKFILL_LOCK_OBJECT_ID}
+    ) as locked
+  `;
+  if (!backfillLock?.locked) {
+    console.log("Another migration runner is refining Companion delivery compatibility fences");
+    return;
+  }
+
+  try {
+    const [deliveryBackfill] = await client<[{ marker: string | null }]>`
+      select obj_description(
+        to_regprocedure('public.companion_refresh_delivery_compat_backfill(integer)')::oid,
+        'pg_proc'
+      ) as marker
+    `;
+    if (deliveryBackfill?.marker !== "companion-delivery-compat-backfill:pending") return;
+
+    console.log("Refining Companion delivery compatibility fences in bounded batches");
+    const deadline = Date.now() + DELIVERY_COMPAT_BACKFILL_BUDGET_MS;
+    for (;;) {
+      const [batch] = await client<Array<{ processed: number }>>`
+        select public.companion_refresh_delivery_compat_backfill(
+          ${DELIVERY_COMPAT_BACKFILL_BATCH_SIZE}
+        ) as processed
+      `;
+      const processed = Number(batch?.processed ?? 0);
+      const [backfillState] = await client<Array<{ remaining: boolean }>>`
+        select exists (
+          select 1
+          from public.companion_reconcile_leases
+          where delivery_compat_seeded
+        ) as remaining
+      `;
+      if (!backfillState?.remaining) {
+        await client.unsafe(`comment on function public.companion_refresh_delivery_compat_backfill(integer)
+          is 'companion-delivery-compat-backfill:complete'`);
+        console.log("Companion delivery compatibility fences refined");
+        return;
+      }
+      if (processed < DELIVERY_COMPAT_BACKFILL_BATCH_SIZE || Date.now() >= deadline) {
+        console.log("Companion delivery compatibility refinement remains resumable for the next migration run");
+        return;
+      }
+    }
+  } finally {
+    await client`
+      select pg_advisory_unlock(
+        ${MIGRATION_LOCK_CLASS_ID}, ${DELIVERY_COMPAT_BACKFILL_LOCK_OBJECT_ID}
+      )
+    `.catch(() => undefined);
+  }
+}
+
 export async function run(): Promise<void> {
   const migrationsFolder = await resolveMigrationsFolder();
   const runtimeRoles = databaseRuntimeRoles();
@@ -228,18 +287,6 @@ export async function run(): Promise<void> {
     lockAcquired = true;
     await migrate(database, { migrationsFolder });
     console.log("Drizzle migrations applied");
-    const [deliveryBackfill] = await client<[{ marker: string | null }]>`
-      select obj_description(
-        to_regprocedure('public.companion_refresh_delivery_compat_backfill()')::oid,
-        'pg_proc'
-      ) as marker
-    `;
-    if (deliveryBackfill?.marker === "companion-delivery-compat-backfill:pending") {
-      console.log("Refining Companion delivery compatibility fences");
-      await client`select public.companion_refresh_delivery_compat_backfill()`;
-      await client.unsafe(`comment on function public.companion_refresh_delivery_compat_backfill()
-        is 'companion-delivery-compat-backfill:complete'`);
-    }
     if (runtimeRoles && grantsFile) {
       await applyRuntimeRoleGrants(client, runtimeRoles, grantsFile);
       const roleSummary = runtimeRoles.legacySingleRole
@@ -247,6 +294,9 @@ export async function run(): Promise<void> {
         : `API ${runtimeRoles.apiRole} and worker ${runtimeRoles.workerRole}`;
       console.log(`Runtime database grants applied to ${roleSummary}`);
     }
+    await client`select pg_advisory_unlock(${MIGRATION_LOCK_CLASS_ID}, ${MIGRATION_LOCK_OBJECT_ID})`;
+    lockAcquired = false;
+    await refineDeliveryCompatBackfill(client);
   } finally {
     if (lockAcquired) {
       await client`select pg_advisory_unlock(${MIGRATION_LOCK_CLASS_ID}, ${MIGRATION_LOCK_OBJECT_ID})`.catch(
