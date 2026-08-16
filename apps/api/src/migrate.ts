@@ -228,6 +228,18 @@ export async function run(): Promise<void> {
     lockAcquired = true;
     await migrate(database, { migrationsFolder });
     console.log("Drizzle migrations applied");
+    const [deliveryBackfill] = await client<[{ marker: string | null }]>`
+      select obj_description(
+        to_regprocedure('public.companion_refresh_delivery_compat_backfill()')::oid,
+        'pg_proc'
+      ) as marker
+    `;
+    if (deliveryBackfill?.marker === "companion-delivery-compat-backfill:pending") {
+      console.log("Refining Companion delivery compatibility fences");
+      await client`select public.companion_refresh_delivery_compat_backfill()`;
+      await client.unsafe(`comment on function public.companion_refresh_delivery_compat_backfill()
+        is 'companion-delivery-compat-backfill:complete'`);
+    }
     if (runtimeRoles && grantsFile) {
       await applyRuntimeRoleGrants(client, runtimeRoles, grantsFile);
       const roleSummary = runtimeRoles.legacySingleRole

@@ -469,6 +469,7 @@ describe("CompanionThread", () => {
     const awaiting = thread({
       entries: [thread().entries[0]!],
       pending_count: 0,
+      accepted_delivery_ordinal: 0,
     });
 
     expect(render({ thread: awaiting })).toContain("is replying...");

@@ -90,11 +90,10 @@ directly when Box and Pi are already running; otherwise it starts the Companion 
 archived Box resumes and a stopped Pi starts without making the common online path claim or inject
 anything. The first-keystroke prewarm is marked as delivery intent: once it commits Online it drains
 a newly persisted pending tail, so the send that lost the provisioning claim to that prewarm cannot
-be stranded behind it. Send, sync, and prewarm drains serialize through a tenant-scoped PostgreSQL
-advisory lock on a small pool isolated from request queries and re-read the pending watermark before
-writing Pi, so overlapping API replicas cannot execute one turn twice or let degraded Box I/O starve
-the API database pool; same-key waiters release their reserved session between non-blocking attempts,
-so they cannot convoy unrelated Companions behind one slow FIFO. A timeout tail first exposed by the
+be stranded behind it. Send, sync, prewarm, and reconciler drains serialize through a tenant-scoped
+renewable delivery lease and re-read the pending watermark after claiming it. The lease spans Pi's
+correlated acknowledgement and the durable watermark without holding a request-pool session across
+Box I/O, so overlapping replicas cannot execute one turn twice. A timeout tail first exposed by the
 post-wake snapshot takes a second Pi-only lifecycle claim before delivery. Online readiness requires
 an active Pi systemd unit whose current invocation
 id matches the marker written after opening its RPC FIFO; a post-wake FIFO refusal records a visible
@@ -164,7 +163,32 @@ recovery watermark also covers timeouts persisted before recovery shipped, and a
 watermark prevents a later send from recycling the recovered turn again. A delivery-progress
 watermark keeps the exact unaccepted suffix recoverable from an older writer's ordinary watermark
 until the fresh Pi has accepted it. The lifecycle claim revalidates restart eligibility so a delayed
-concurrent request cannot recycle that Pi twice. A narrow database definer lets Viewer reads trigger
+concurrent request cannot recycle that Pi twice. Prompt acceptance is the correlated Pi RPC response,
+not merely a successful write to the wrapper-held FIFO. Before a timeout-recovery tail is delivered,
+`get_state` must show an idle Pi with no queued messages, since prompt success can also mean queued
+behind the dead turn. A busy or unresponsive Pi daemon alone is recycled, and its replacement must
+answer an idle health probe before that durable prompt is attempted. A missing acknowledgement is
+ambiguous and is never replayed inside the same request: delivery stays visibly pending and Error is
+projected. A later explicit send first reuses any correlated response with the same request id from
+the current Pi invocation; an inherited layout-13 invocation without the new byte marker persists a
+whole-log boundary once because durable request ids are unique. A response that crossed the
+transport timeout therefore cannot execute the turn twice. A per-Companion delivery lease shared
+with the reconciler serializes sends/syncs and
+revalidates the timeout tail after the claim, so a stale concurrent request cannot recycle the valid
+turn its predecessor just started. Each correlated acceptance advances the delivery, acceptance, and
+timeout-provenance watermarks in one database function while holding the exact live lease row; an
+expired producer therefore cannot commit after a replacement has claimed and resent the turn. The
+exact-token lease is renewed around each bounded Pi operation and message, and losing it stops
+further delivery. A restrictive transcript-read fence gives old API
+replicas an independent compatibility deadline during migration-first rollout, while protocol-2
+tenant transactions use the exact claim; an initial fence survives an already-active worker claim,
+and a successful legacy read renews a drain deadline derived from actual pending work rather than
+total transcript history. Migration installs a cheap conservative fence while DDL locks are held,
+then the migration runner refines existing Companions from transcript history after that transaction
+commits. Backfill also retains unresolved and still-draining recent
+assistant-delimited batches independently of a post-snapshot watermark, without letting one old
+watermark release another old request's snapshot.
+A narrow database definer lets Viewer reads trigger
 settlement housekeeping without granting general thread writes. A settled
 `browse` or `computer` run receives
 exactly one frame, attributed by the run id whose settlement won and captured directly from the

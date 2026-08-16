@@ -58,6 +58,10 @@ const coreMocks = vi.hoisted(() => ({
   markCompanionThreadRead: vi.fn(),
   sendCompanionMessage: vi.fn(),
   listPendingCompanionMessages: vi.fn(),
+  claimCompanionDelivery: vi.fn(),
+  acceptCompanionDelivery: vi.fn(),
+  releaseCompanionDelivery: vi.fn(),
+  renewCompanionDelivery: vi.fn(),
   recordCompanionTimeoutRestart: vi.fn(),
   recordCompanionPiProjectionWithEffects: vi.fn(),
   attachCompanionToolRunScreenshot: vi.fn(),
@@ -76,12 +80,6 @@ const coreMocks = vi.hoisted(() => ({
 
 const storageMocks = vi.hoisted(() => ({
   getSkillArchive: vi.fn(),
-}));
-
-const dbMocks = vi.hoisted(() => ({
-  withDatabaseAdvisoryLock: vi.fn(
-    async (_input: unknown, fn: () => Promise<unknown>) => fn(),
-  ),
 }));
 
 const skillsMocks = vi.hoisted(() => ({
@@ -141,7 +139,6 @@ vi.mock("@companion/core", async (importOriginal) => ({
 
 vi.mock("@companion/db", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@companion/db")>()),
-  ...dbMocks,
   withTenantContext: vi.fn(
     async (
       _input: unknown,
@@ -416,6 +413,16 @@ describe("Companions API feature gate", () => {
       timeoutRestartPending: false,
       timeoutRecoveryOrdinal: null,
     });
+    coreMocks.claimCompanionDelivery.mockResolvedValue(true);
+    coreMocks.acceptCompanionDelivery.mockResolvedValue({
+      ...viewerThread,
+      access: "owner",
+      read_only: false,
+      can_send: true,
+      accepted_delivery_ordinal: message.ordinal,
+    });
+    coreMocks.releaseCompanionDelivery.mockResolvedValue(true);
+    coreMocks.renewCompanionDelivery.mockResolvedValue(true);
     coreMocks.recordCompanionPiProjectionWithEffects.mockResolvedValue({
       thread: {
         ...viewerThread,
@@ -2334,7 +2341,7 @@ describe("Companions API feature gate", () => {
       .mockResolvedValueOnce(savedPending)
       // The winning prewarm must take a new snapshot after it commits Online.
       .mockResolvedValueOnce(savedPending)
-      // Delivery revalidates under the cross-replica advisory lock.
+      // Delivery revalidates after winning the cross-replica lease.
       .mockResolvedValueOnce(savedPending);
     coreMocks.claimCompanionRuntimeStart
       .mockResolvedValueOnce(companion)
@@ -2405,7 +2412,7 @@ describe("Companions API feature gate", () => {
       message: message.content,
       requestId: message.event_id,
     });
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(
       expect.objectContaining({ deliveredOrdinal: message.ordinal }),
     );
     expect(runtime.refreshTtl).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
@@ -2552,7 +2559,7 @@ describe("Companions API feature gate", () => {
     );
   });
 
-  it("revalidates a stale overlapping send under the delivery lock instead of prompting twice", async () => {
+  it("revalidates a stale overlapping send under the delivery lease instead of prompting twice", async () => {
     const emptyPending = {
       pending: [],
       piLogOffset: 0,
@@ -2567,7 +2574,7 @@ describe("Companions API feature gate", () => {
       .mockResolvedValueOnce(emptyPending)
       .mockResolvedValueOnce(stalePending)
       .mockResolvedValueOnce(stalePending)
-      // An overlapping send captured the same stale tail, then waited for the delivery lock. Its
+      // An overlapping send captured the same stale tail, then waited for the delivery lease. Its
       // revalidation observes the first producer's committed watermark.
       .mockResolvedValueOnce(stalePending)
       .mockResolvedValueOnce(emptyPending);
@@ -2593,7 +2600,8 @@ describe("Companions API feature gate", () => {
 
     expect(overlappingSend.status).toBe(200);
     expect(runtime.prompt).toHaveBeenCalledOnce();
-    expect(dbMocks.withDatabaseAdvisoryLock).toHaveBeenCalledTimes(2);
+    expect(coreMocks.claimCompanionDelivery).toHaveBeenCalledTimes(2);
+    expect(coreMocks.releaseCompanionDelivery).toHaveBeenCalledTimes(2);
     expect(coreMocks.listPendingCompanionMessages).toHaveBeenCalledTimes(5);
   });
 
@@ -2671,7 +2679,7 @@ describe("Companions API feature gate", () => {
     );
 
     expect(response.status).toBe(409);
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(
       expect.objectContaining({ deliveredOrdinal: backlog.ordinal }),
     );
     expect(coreMocks.updateCompanionRuntime).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -2762,7 +2770,7 @@ describe("Companions API feature gate", () => {
     });
 
     expect(runtime.prompt).toHaveBeenCalledOnce();
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(
       expect.objectContaining({ deliveredOrdinal: message.ordinal }),
     );
     expect(coreMocks.updateCompanionRuntime).not.toHaveBeenCalled();
@@ -2834,7 +2842,7 @@ describe("Companions API feature gate", () => {
       .mockResolvedValueOnce(timedOutState)
       .mockResolvedValueOnce(timedOutState)
       .mockResolvedValueOnce({ ...timedOutState, timeoutRestartPending: false })
-      // The delivery lock owns one final pending/timeout revalidation.
+      // The delivery lease owns one final pending/timeout revalidation.
       .mockResolvedValueOnce({ ...timedOutState, timeoutRestartPending: false });
     const runtime = boxRuntime();
     const app = new Hono<{ Variables: ApiVariables }>();
@@ -2855,7 +2863,7 @@ describe("Companions API feature gate", () => {
       message: stranded.content,
       requestId: stranded.event_id,
     }));
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenLastCalledWith(
       expect.objectContaining({ deliveredOrdinal: 1, timeoutDeliveryOrdinal: 1 }),
     );
     expect(runtime.stop).not.toHaveBeenCalled();
@@ -2885,9 +2893,8 @@ describe("Companions API feature gate", () => {
       message: message.content,
       requestId: message.event_id,
     });
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: 0,
-      entries: [],
     }));
     expect(runtime.refreshTtl).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
     expect(runtime.start).not.toHaveBeenCalled();
@@ -2982,7 +2989,7 @@ describe("Companions API feature gate", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: message.ordinal,
     }));
   });
@@ -3017,7 +3024,7 @@ describe("Companions API feature gate", () => {
       "Earlier ask",
       "Summarize the incident",
     ]);
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: 1,
     }));
   });
@@ -3132,7 +3139,7 @@ describe("Companions API feature gate", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
     // The watermark stops at what Pi accepted, so the refused message is retried instead of lost.
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: 0,
     }));
   });
@@ -3161,6 +3168,89 @@ describe("Companions API feature gate", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
     expect(coreMocks.recordCompanionPiProjectionWithEffects).not.toHaveBeenCalled();
+    expect(coreMocks.acceptCompanionDelivery).not.toHaveBeenCalled();
+    expect(runtime.healPiDaemon).not.toHaveBeenCalled();
+    expect(runtime.prompt).toHaveBeenCalledOnce();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({ runtimeState: "error", daemonState: "error" }),
+    }));
+  });
+
+  it("leaves an overlapping delivery pending without probing or recycling Pi", async () => {
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+      timeoutRecoveryPending: true,
+      timeoutRestartPending: false,
+      timeoutRecoveryOrdinal: 0,
+    });
+    coreMocks.claimCompanionDelivery.mockResolvedValue(false);
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "ping THE-370" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
+    expect(runtime.healPiDaemon).not.toHaveBeenCalled();
+    expect(runtime.prompt).not.toHaveBeenCalled();
+    expect(coreMocks.releaseCompanionDelivery).not.toHaveBeenCalled();
+  });
+
+  it("does not replay a prompt whose correlated acknowledgement is ambiguous", async () => {
+    const newest = { ...message, event_id: "msg:the-370", ordinal: 5, content: "ping THE-370" };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.sendCompanionMessage.mockResolvedValue({
+      thread: { ...viewerThread, access: "owner", read_only: false, can_send: true },
+      entry: newest,
+    });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [newest],
+      piLogOffset: 0,
+      deliveredOrdinal: 4,
+      // Reproduce the post-#312 production row: timeout recycle was already marked complete, so
+      // the send reaches the warm path and must heal based on failed RPC acceptance itself.
+      timeoutRecoveryPending: true,
+      timeoutRestartPending: false,
+      timeoutRecoveryOrdinal: 0,
+    });
+    const order: string[] = [];
+    const prompt = vi.fn(async () => {
+      order.push("prompt-ambiguous");
+      throw new Error("FIFO write completed without a Pi response");
+    });
+    const runtime = boxRuntime({
+      prompt,
+      healPiDaemon: vi.fn(async (input: { requireIdle?: boolean }) => {
+        order.push(input.requireIdle ? "heal-idle" : "heal");
+        return { daemonState: "running" as const, detail: null };
+      }),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "ping THE-370" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
+    expect(order).toEqual(["heal-idle", "prompt-ambiguous"]);
+    expect(runtime.start).not.toHaveBeenCalled();
+    expect(runtime.stop).not.toHaveBeenCalled();
+    expect(coreMocks.acceptCompanionDelivery).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({ runtimeState: "error", daemonState: "error" }),
+    }));
   });
 
   it("projects Error when a send-owned wake cannot hand its saved turn to Pi", async () => {
@@ -3278,7 +3368,7 @@ describe("Companions API feature gate", () => {
       message: "Ca va ?",
       requestId: "msg:ca-va",
     }));
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenLastCalledWith(
       expect.objectContaining({ deliveredOrdinal: 2, timeoutDeliveryOrdinal: 2 }),
     );
   });
@@ -3300,8 +3390,7 @@ describe("Companions API feature gate", () => {
     });
     coreMocks.listPendingCompanionMessages
       .mockResolvedValueOnce(pendingState)
-      .mockResolvedValueOnce({ ...pendingState, timeoutRestartPending: false })
-      .mockResolvedValueOnce({ ...pendingState, timeoutRestartPending: false });
+      .mockResolvedValue({ ...pendingState, timeoutRestartPending: false });
     const runtime = boxRuntime();
     const app = new Hono<{ Variables: ApiVariables }>();
     registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
@@ -3498,11 +3587,10 @@ describe("Companions API feature gate", () => {
       offset: 512,
     });
     // Delivery is claimed before the log is read, so the prompt cannot be repeated by a retry.
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenNthCalledWith(1, expect.objectContaining({
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: 0,
-      entries: [],
     }));
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenNthCalledWith(2, expect.objectContaining({
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
       piLogOffset: 512 + Buffer.byteLength(reply, "utf8"),
       piLogRewound: false,
       entries: [expect.objectContaining({ role: "assistant", content: "Two services timed out." })],
@@ -3888,7 +3976,7 @@ describe("Companions API feature gate", () => {
     });
 
     expect(response.status).toBe(200);
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenNthCalledWith(2, expect.objectContaining({
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
       entries: [expect.objectContaining({ role: "assistant", content: "2025" })],
     }));
   });
@@ -3912,9 +4000,8 @@ describe("Companions API feature gate", () => {
 
     expect(response.status).toBe(400);
     // The failed read must not cost Pi a second copy of the same message on the next sync.
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: 0,
-      entries: [],
     }));
   });
 
@@ -4188,7 +4275,7 @@ describe("Companions API feature gate", () => {
         message: "Ca va ?",
         requestId: "msg:ca-va",
       }));
-      expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+      expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(
         expect.objectContaining({ deliveredOrdinal: 3, timeoutDeliveryOrdinal: 3 }),
       );
     });
@@ -4224,7 +4311,7 @@ describe("Companions API feature gate", () => {
         message: "Still there?",
         requestId: "msg:after-stale-start",
       }));
-      expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+      expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(
         expect.objectContaining({ deliveredOrdinal: 3, timeoutDeliveryOrdinal: 3 }),
       );
     });

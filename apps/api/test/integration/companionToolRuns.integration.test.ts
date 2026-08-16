@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { deliverCompanionMessages, type CompanionBoxRuntime } from "@companion/box-runtime";
 import {
   CompanionRuntimeForbiddenError,
+  claimCompanionDelivery,
   expireCompanionToolRuns,
   listPendingCompanionMessages,
   recordCompanionTimeoutRestart,
+  releaseCompanionDelivery,
   recordCompanionPiProjectionWithEffects,
   sendCompanionMessage,
 } from "@companion/core";
@@ -359,7 +362,7 @@ describe("Companion tool-run settlement", () => {
     expect(pending.pending).toEqual([alors.entry]);
   });
 
-  it("recovers an already-settled timeout tail once for #305-era threads", async () => {
+  it("recovers and delivers an already-settled timeout tail once for #305-era threads", async () => {
     const turn = await asOwner((database) => sendCompanionMessage({
       actor: owner,
       orgId: org,
@@ -522,5 +525,220 @@ describe("Companion tool-run settlement", () => {
     expect(afterDelivery.pending).toEqual([]);
     expect(afterDelivery.timeoutRecoveryPending).toBe(false);
     expect(afterDelivery.timeoutRestartPending).toBe(false);
+
+    // THE-370 production state had both markers advanced by a FIFO write Pi never consumed. A
+    // later send must still become pending even though the old timeout is no longer eligible for
+    // its one-shot restart; delivery will use RPC acceptance and heal the live daemon if required.
+    const ping370 = await asOwner((database) => sendCompanionMessage({
+      actor: owner,
+      orgId: org,
+      companionId,
+      content: "ping THE-370",
+      database,
+    }));
+    const afterWatermarkedTail = await asOwner((database) => listPendingCompanionMessages({
+      actor: owner,
+      orgId: org,
+      companionId,
+      database,
+    }));
+    expect(afterWatermarkedTail.pending).toEqual([ping370.entry]);
+    expect(afterWatermarkedTail.timeoutRecoveryPending).toBe(true);
+    expect(afterWatermarkedTail.timeoutRestartPending).toBe(false);
+
+    // Run the actual shared delivery boundary over that PostgreSQL state. The controllable runtime
+    // represents the live Box seam: timeout recovery must demand idle Pi health even though the
+    // one-shot restart marker is already set, and only an accepted prompt may move the watermark.
+    const deliveryOrder: string[] = [];
+    const runtime = {
+      healPiDaemon: async (input: { requireIdle?: boolean }) => {
+        deliveryOrder.push(input.requireIdle ? "heal-idle" : "heal");
+        return { daemonState: "running" as const, detail: null };
+      },
+      prompt: async (input: { requestId: string }) => {
+        deliveryOrder.push(`prompt:${input.requestId}`);
+      },
+      refreshTtl: async () => undefined,
+    } as unknown as CompanionBoxRuntime;
+    await expect(asViewer((database) => claimCompanionDelivery({
+      actor: viewer,
+      orgId: org,
+      companionId,
+      claimId: randomUUID(),
+      database,
+    }))).rejects.toBeInstanceOf(CompanionRuntimeForbiddenError);
+    const blocker = randomUUID();
+    await expect(asOwner((database) => claimCompanionDelivery({
+      actor: owner,
+      orgId: org,
+      companionId,
+      claimId: blocker,
+      database,
+    }))).resolves.toBe(true);
+    const overlapped = await deliverCompanionMessages({
+      actor: owner,
+      orgId: org,
+      env: {},
+      runtimeFactory: () => runtime,
+    }, {
+      companionId,
+      boxId: "box-the-370",
+      runtime,
+    });
+    expect(overlapped).toBeNull();
+    expect(deliveryOrder).toEqual([]);
+    await expect(asOwner((database) => releaseCompanionDelivery({
+      actor: owner,
+      orgId: org,
+      companionId,
+      claimId: blocker,
+      database,
+    }))).resolves.toBe(true);
+
+    const delivered = await deliverCompanionMessages({
+      actor: owner,
+      orgId: org,
+      env: {},
+      runtimeFactory: () => runtime,
+    }, {
+      companionId,
+      boxId: "box-the-370",
+      runtime,
+    });
+    expect(deliveryOrder).toEqual(["heal-idle", `prompt:${ping370.entry.event_id}`]);
+    expect(delivered?.deliveredOrdinal).toBe(ping370.entry.ordinal);
+    expect(delivered?.thread.accepted_delivery_ordinal).toBe(ping370.entry.ordinal);
+
+    const afterAcceptedPrompt = await asOwner((database) => listPendingCompanionMessages({
+      actor: owner,
+      orgId: org,
+      companionId,
+      database,
+    }));
+    expect(afterAcceptedPrompt.pending).toEqual([]);
+    expect(afterAcceptedPrompt.timeoutRecoveryPending).toBe(false);
+
+    // Correlated acceptance retires this timeout boundary even before Pi projects the reply. A
+    // concurrent follow-up is ordinary delivery and must not recycle the valid busy recovery turn.
+    const whileRecoveredTurnIsBusy = await asOwner((database) => sendCompanionMessage({
+      actor: owner,
+      orgId: org,
+      companionId,
+      content: "One more thing while you answer",
+      database,
+    }));
+    const ordinaryFollowUp = await asOwner((database) => listPendingCompanionMessages({
+      actor: owner,
+      orgId: org,
+      companionId,
+      database,
+    }));
+    expect(ordinaryFollowUp.pending).toEqual([whileRecoveredTurnIsBusy.entry]);
+    expect(ordinaryFollowUp.timeoutRecoveryPending).toBe(false);
+    expect(ordinaryFollowUp.timeoutRestartPending).toBe(false);
+    deliveryOrder.length = 0;
+    const followUpDelivery = await deliverCompanionMessages({
+      actor: owner,
+      orgId: org,
+      env: {},
+      runtimeFactory: () => runtime,
+    }, {
+      companionId,
+      boxId: "box-the-370",
+      runtime,
+    });
+    expect(deliveryOrder).toEqual([
+      `prompt:${whileRecoveredTurnIsBusy.entry.event_id}`,
+    ]);
+    expect(followUpDelivery?.deliveredOrdinal).toBe(whileRecoveredTurnIsBusy.entry.ordinal);
+
+    // Generic acceptance cannot pre-authorize a tool that is still running. Pi can accept a queued
+    // follow-up after the tool call, then the tool can time out; that later timeout still creates a
+    // fresh recovery boundary because no timeout-correlated acceptance exists for it.
+    const laterToolEventId = "pi:tool-after-accepted-follow-up";
+    await asOwner((database) => recordCompanionPiProjectionWithEffects({
+      actor: owner,
+      orgId: org,
+      companionId,
+      entries: [{
+        eventId: laterToolEventId,
+        role: "tool",
+        content: "/tmp/later.png",
+        tool: {
+          call_id: "call-after-accepted-follow-up",
+          kind: "file",
+          name: "read",
+          title: "/tmp/later.png",
+          status: "running",
+          detail: null,
+          screenshot: null,
+        },
+        createdAt,
+      }],
+      database,
+    }));
+    const queuedBehindRunningTool = await asOwner((database) => sendCompanionMessage({
+      actor: owner,
+      orgId: org,
+      companionId,
+      content: "Queued while the later read runs",
+      database,
+    }));
+    deliveryOrder.length = 0;
+    await deliverCompanionMessages({
+      actor: owner,
+      orgId: org,
+      env: {},
+      runtimeFactory: () => runtime,
+    }, {
+      companionId,
+      boxId: "box-the-370",
+      runtime,
+    });
+    expect(deliveryOrder).toEqual([`prompt:${queuedBehindRunningTool.entry.event_id}`]);
+    await backdateToolRun(laterToolEventId, 91);
+    await asViewer((database) => expireCompanionToolRuns({
+      actor: viewer,
+      orgId: org,
+      companionId,
+      database,
+    }));
+    const afterLaterTimeout = await asOwner((database) => sendCompanionMessage({
+      actor: owner,
+      orgId: org,
+      companionId,
+      content: "Recover after the later timeout",
+      database,
+    }));
+    const laterRecovery = await asOwner((database) => listPendingCompanionMessages({
+      actor: owner,
+      orgId: org,
+      companionId,
+      database,
+    }));
+    expect(laterRecovery.pending).toEqual([
+      queuedBehindRunningTool.entry,
+      afterLaterTimeout.entry,
+    ]);
+    expect(laterRecovery.timeoutRecoveryPending).toBe(true);
+
+    const answered = await asOwner((database) => recordCompanionPiProjectionWithEffects({
+      actor: owner,
+      orgId: org,
+      companionId,
+      entries: [{
+        eventId: "pi:assistant-the-370",
+        role: "assistant",
+        content: "Pong THE-370",
+        createdAt: new Date("2026-08-15T18:30:00.000Z"),
+      }],
+      database,
+    }));
+    expect(answered.thread.entries.at(-1)).toMatchObject({
+      role: "assistant",
+      content: "Pong THE-370",
+    });
+    expect(answered.thread.entries.find((entry) => entry.event_id === eventId)?.tool?.status)
+      .toBe("timeout");
   });
 });

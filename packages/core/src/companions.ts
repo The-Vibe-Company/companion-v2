@@ -1347,6 +1347,7 @@ function toThread(input: {
     can_send: canWakeCompanion(input.companion.access),
     entries: input.entries,
     pending_count: pending.length,
+    accepted_delivery_ordinal: input.row?.acceptedDeliveryOrdinal ?? null,
     last_message_at: input.row?.lastMessageAt?.toISOString()
       ?? input.entries.at(-1)?.created_at
       ?? null,
@@ -1552,8 +1553,15 @@ export async function listPendingCompanionMessages(input: {
       : latest, -1);
   const timeoutRestartOrdinal = row?.timeoutRestartOrdinal ?? -1;
   const timeoutDeliveryOrdinal = row?.timeoutDeliveryOrdinal ?? -1;
+  const acceptedDeliveryOrdinal = row?.acceptedDeliveryOrdinal ?? -1;
   const protectedTailStart = Math.max(latestTimeoutOrdinal, timeoutDeliveryOrdinal);
+  // Only the correlated acceptance that was recorded together with this timeout boundary retires
+  // recovery. An ordinary accepted follow-up can precede a still-running tool that later times out;
+  // using that generic acceptance would misclassify the newly abandoned turn as healthy.
+  const timeoutRecoveryAccepted = timeoutDeliveryOrdinal > latestTimeoutOrdinal
+    && acceptedDeliveryOrdinal >= timeoutDeliveryOrdinal;
   const timeoutRecoveryOrdinal = latestTimeoutOrdinal > latestStartedTurnOrdinal
+    && !timeoutRecoveryAccepted
     && entries.some((entry) => entry.role === "user" && entry.ordinal > protectedTailStart)
     ? latestTimeoutOrdinal
     : null;
@@ -1607,6 +1615,109 @@ export async function recordCompanionTimeoutRestart(input: {
     ))
     .returning({ companionId: schema.companionThreads.companionId });
   if (!updated) throw new CompanionNotFoundError();
+}
+
+/**
+ * Claim the one per-Companion delivery lease shared with the reconciler. The caller already passed
+ * runtime authorization; the database function repeats that tenant/editor boundary and performs the
+ * conditional upsert that makes overlapping sends and syncs mutually exclusive.
+ */
+export async function claimCompanionDelivery(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  claimId: string;
+  leaseSeconds?: number;
+  database?: Db;
+}): Promise<boolean> {
+  const database = input.database ?? db;
+  await getCompanionForRuntime({ ...input, database });
+  const result = await database.execute(sql`
+    select public.companion_claim_delivery_lease(
+      ${input.orgId}::uuid,
+      ${input.companionId}::uuid,
+      ${input.claimId}::uuid,
+      ${input.leaseSeconds ?? 600}::integer
+    ) as claimed
+  `);
+  const [row] = Array.from(result as unknown as Iterable<{ claimed: boolean }>);
+  return row?.claimed ?? false;
+}
+
+/** Release only the delivery lease carrying this request's unguessable claim id. */
+export async function releaseCompanionDelivery(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  claimId: string;
+  database?: Db;
+}): Promise<boolean> {
+  const database = input.database ?? db;
+  const result = await database.execute(sql`
+    select public.companion_release_delivery_lease(
+      ${input.orgId}::uuid,
+      ${input.companionId}::uuid,
+      ${input.claimId}::uuid
+    ) as released
+  `);
+  const [row] = Array.from(result as unknown as Iterable<{ released: boolean }>);
+  return row?.released ?? false;
+}
+
+/** Extend only an unexpired delivery lease still carrying this request's exact claim id. */
+export async function renewCompanionDelivery(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  claimId: string;
+  leaseSeconds?: number;
+  database?: Db;
+}): Promise<boolean> {
+  const database = input.database ?? db;
+  const result = await database.execute(sql`
+    select public.companion_renew_delivery_lease(
+      ${input.orgId}::uuid,
+      ${input.companionId}::uuid,
+      ${input.claimId}::uuid,
+      ${input.leaseSeconds ?? 600}::integer
+    ) as renewed
+  `);
+  const [row] = Array.from(result as unknown as Iterable<{ renewed: boolean }>);
+  return row?.renewed ?? false;
+}
+
+/**
+ * Advance delivery only while the exact live lease still owns this turn. The database locks the
+ * lease through the watermark update, so an expired producer cannot commit after its replacement
+ * has claimed and resent the same durable message.
+ */
+export async function acceptCompanionDelivery(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  claimId: string;
+  deliveredOrdinal: number;
+  timeoutDeliveryOrdinal?: number;
+  database?: Db;
+}): Promise<CompanionThread | null> {
+  const database = input.database ?? db;
+  const result = await database.execute(sql`
+    select public.companion_accept_delivery_lease(
+      ${input.orgId}::uuid,
+      ${input.companionId}::uuid,
+      ${input.claimId}::uuid,
+      ${input.deliveredOrdinal}::integer,
+      ${input.timeoutDeliveryOrdinal ?? null}::integer
+    ) as accepted
+  `);
+  const [accepted] = Array.from(result as unknown as Iterable<{ accepted: boolean }>);
+  if (!accepted?.accepted) return null;
+  const companion = await getCompanionForRuntime({ ...input, database });
+  const [row, entries] = await Promise.all([
+    readCompanionThreadRow(database, input.orgId, input.companionId),
+    readCompanionTranscript(database, input.orgId, input.companionId),
+  ]);
+  return toThread({ actor: input.actor, companion, row, entries });
 }
 
 type CompanionStoredToolRun = NonNullable<
@@ -1794,6 +1905,8 @@ interface RecordCompanionPiProjectionInput {
   /** Set when the caller reread a shrunken log from its start, so the offset may move backwards. */
   piLogRewound?: boolean;
   deliveredOrdinal?: number;
+  /** Highest user message whose correlated protocol-2 prompt response was successful. */
+  acceptedDeliveryOrdinal?: number;
   /** Highest post-timeout user message this fresh Pi process actually accepted. */
   timeoutDeliveryOrdinal?: number;
   database?: Db;
@@ -1846,6 +1959,7 @@ async function recordCompanionPiProjectionResult(
   });
   if (input.piLogOffset !== undefined
     || input.deliveredOrdinal !== undefined
+    || input.acceptedDeliveryOrdinal !== undefined
     || input.timeoutDeliveryOrdinal !== undefined) {
     await database
       .insert(schema.companionThreads)
@@ -1865,6 +1979,9 @@ async function recordCompanionPiProjectionResult(
           : {}),
         ...(input.deliveredOrdinal !== undefined
           ? { deliveredOrdinal: sql`greatest(coalesce(${schema.companionThreads.deliveredOrdinal}, -1), ${input.deliveredOrdinal})` }
+          : {}),
+        ...(input.acceptedDeliveryOrdinal !== undefined
+          ? { acceptedDeliveryOrdinal: sql`greatest(coalesce(${schema.companionThreads.acceptedDeliveryOrdinal}, -1), ${input.acceptedDeliveryOrdinal})` }
           : {}),
         ...(input.timeoutDeliveryOrdinal !== undefined
           ? { timeoutDeliveryOrdinal: sql`greatest(coalesce(${schema.companionThreads.timeoutDeliveryOrdinal}, -1), ${input.timeoutDeliveryOrdinal})` }

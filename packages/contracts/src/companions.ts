@@ -460,6 +460,8 @@ export const companionThreadSchema = z.object({
   can_send: z.boolean(),
   entries: z.array(companionTranscriptEntrySchema),
   pending_count: z.number().int().nonnegative(),
+  /** Correlated protocol-2 acceptance; absent while an older API replica serves the read. */
+  accepted_delivery_ordinal: z.number().int().nonnegative().nullable().optional(),
   last_message_at: z.string().datetime().nullable(),
   /**
    * This reader's own unread watermark (THE-351) as it stood *before* opening advanced it, so the

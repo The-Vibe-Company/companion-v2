@@ -625,6 +625,8 @@ export const companionThreads = pgTable(
      * an unanswered post-tool tail so a recycled Pi receives those stranded messages again.
      */
     deliveredOrdinal: integer("delivered_ordinal"),
+    /** Highest user message whose correlated prompt response proved Pi accepted protocol 2. */
+    acceptedDeliveryOrdinal: integer("accepted_delivery_ordinal"),
     /** Highest timed-out tool whose unanswered tail has been assessed for one-time re-delivery. */
     timeoutRecoveryOrdinal: integer("timeout_recovery_ordinal"),
     /** Highest timed-out tool after which delivery started a fresh Pi process. */
@@ -647,6 +649,10 @@ export const companionThreads = pgTable(
     nonnegativeDeliveredOrdinal: check(
       "companion_threads_delivered_ordinal_check",
       sql`${t.deliveredOrdinal} is null or ${t.deliveredOrdinal} >= 0`,
+    ),
+    nonnegativeAcceptedDeliveryOrdinal: check(
+      "companion_threads_accepted_delivery_ordinal_check",
+      sql`${t.acceptedDeliveryOrdinal} is null or ${t.acceptedDeliveryOrdinal} >= 0`,
     ),
     nonnegativeTimeoutRecoveryOrdinal: check(
       "companion_threads_timeout_recovery_ordinal_check",
@@ -847,6 +853,12 @@ export const companionReconcileLeases = pgTable(
     /** Worker instance currently holding the lease; null when free. */
     claimedBy: text("claimed_by"),
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    /** Migration-first fence for protocol-1 transcript snapshots; independent of active claims. */
+    deliveryCompatExpiresAt: timestamp("delivery_compat_expires_at", { withTimezone: true }),
+    /** Monotonic transcript bound used to cache the compatibility deadline safely. */
+    deliveryCompatNextOrdinal: integer("delivery_compat_next_ordinal"),
+    /** True only for the cheap migration seed until exact post-commit refinement or a legacy read. */
+    deliveryCompatSeeded: boolean("delivery_compat_seeded").notNull().default(false),
     /** Why the reconciler last claimed this Companion. */
     reason: text("reason").notNull(),
     /** Consecutive failed attempts for the current condition; reset by a successful settle. */
@@ -866,6 +878,10 @@ export const companionReconcileLeases = pgTable(
     nonnegativeAttempts: check(
       "companion_reconcile_leases_attempts_check",
       sql`${t.attempts} >= 0`,
+    ),
+    nonnegativeDeliveryCompatNextOrdinal: check(
+      "companion_reconcile_leases_delivery_compat_next_ordinal_check",
+      sql`${t.deliveryCompatNextOrdinal} is null or ${t.deliveryCompatNextOrdinal} >= 0`,
     ),
   }),
 );

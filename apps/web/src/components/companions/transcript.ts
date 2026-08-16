@@ -63,23 +63,19 @@ export function replyExpected(input: {
   awake: boolean;
   /** Messages waiting for Pi rather than a reply. Omit only when judging transcript history alone. */
   pendingCount?: number;
+  /** Highest prompt proven accepted by Pi's correlated protocol-2 response. */
+  acceptedDeliveryOrdinal?: number | null;
 }): boolean {
   if (!input.awake) return false;
   const tail = input.entries[input.entries.length - 1];
   if (tail?.role === "user") {
-    // A durable tail still waiting for Pi is delivery work, not generation. This is the state the
-    // prewarm/send handoff closes; never turn it into a stale “replying…” promise while it waits.
-    if ((input.pendingCount ?? 0) > 0) return false;
-    for (let index = input.entries.length - 2; index >= 0; index -= 1) {
-      const entry = input.entries[index];
-      if (entry?.role === "assistant") return true;
-      if (entry?.role === "tool") return entry.tool?.status !== "timeout";
-      if (entry?.role === "decision") return true;
-    }
-    // A delivered first turn has no earlier Pi event as proof, so the zero pending watermark is its
-    // generation signal. It still cannot revive a timed-out turn because that boundary returns
-    // false above as soon as the scan reaches it.
-    return true;
+    // A user tail is generation only after the correlated protocol-2 response proves Pi accepted
+    // that exact turn. This also keeps an optimistic local entry quiet while its POST is held or
+    // refused: the preceding thread's zero pending count and older acceptance cannot speak for it.
+    return input.pendingCount === 0
+      && input.acceptedDeliveryOrdinal !== undefined
+      && input.acceptedDeliveryOrdinal !== null
+      && input.acceptedDeliveryOrdinal >= tail.ordinal;
   }
   if (tail?.role === "tool") return tail.tool?.status !== "timeout";
   if (tail?.role === "decision") return true;
