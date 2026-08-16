@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import type {
   CompanionClientSurface,
@@ -64,6 +65,12 @@ const DESKTOP_FRAME_PATTERN = /^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/]+={
  * seconds. Reading a single probe as the verdict is what turned healthy starts into wake failures.
  */
 const PI_DAEMON_ACTIVE_TIMEOUT_MS = 20_000;
+/**
+ * Pi acknowledges an RPC command as soon as it accepts or queues it. A FIFO write alone cannot
+ * prove that: the daemon wrapper deliberately keeps the FIFO open read/write so its own startup
+ * cannot deadlock, which also lets a write finish while a wedged Pi process consumes nothing.
+ */
+const PI_RPC_ACCEPT_TIMEOUT_SECONDS = 8;
 /** Labels the diagnostic command prints so each fragment can be recovered from one stdout. */
 const PI_DAEMON_DIAGNOSTIC_LABELS = {
   state: "companion-pi-state",
@@ -279,7 +286,7 @@ export interface CompanionBoxRuntime {
   status(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
   /** Mint one fresh desktop URL for a Box that is already running; never creates or resumes one. */
   desktop(input: { boxId: string }): Promise<CompanionDesktopMint>;
-  /** Hand one chat message to the already running Pi daemon; never creates or resumes a Box. */
+  /** Hand one chat message to Pi and wait for its correlated acceptance; never wakes the Box. */
   prompt(input: { boxId: string; message: string; requestId: string }): Promise<void>;
   /**
    * Unblock a Pi extension UI dialog (Allow / Deny / answer). Writes one `extension_ui_response`
@@ -292,11 +299,10 @@ export interface CompanionBoxRuntime {
   /** Reset the provider's idle clock after Pi accepts a durable message. */
   refreshTtl(input: { boxId: string }): Promise<void>;
   /**
-   * Restart a Pi daemon that systemd has latched as failed or that stopped: reset-failed, start the
-   * unit, and wait for it to report active within the daemon-active budget. Never touches a healthy
-   * daemon (an `is-active` daemon returns immediately) and never resumes or creates a Box.
+   * Repair a stopped or RPC-unresponsive Pi daemon. A healthy active daemon acknowledges get_state
+   * and stays untouched; an unresponsive active daemon is restarted. Never resumes or creates a Box.
    */
-  healPiDaemon(input: { boxId: string }): Promise<{
+  healPiDaemon(input: { boxId: string; requireIdle?: boolean }): Promise<{
     daemonState: "running" | "stopped" | "error";
     detail: string | null;
   }>;
@@ -1253,6 +1259,104 @@ fi`,
   }
 
   /**
+   * Write one command to Pi and wait for its correlated RPC response in the append-only event log.
+   * The response is Pi's acceptance boundary; successfully writing into the wrapper-held FIFO is
+   * only transport progress and must never advance the durable delivery watermark on its own.
+   */
+  async #rpcCommandResponse(input: {
+    boxId: string;
+    command: Record<string, unknown> & { id: string };
+    responseCommand: string;
+  }): Promise<Record<string, unknown> | null> {
+    const serialized = JSON.stringify(input.command);
+    const result = await this.#command(
+      input.boxId,
+      `set -euo pipefail
+${USER_BUS_ENVIRONMENT}
+fifo="$HOME/.companion/runtime/state/pi.rpc.in"
+rpc_log="$HOME/.companion/runtime/logs/pi.rpc.ndjson"
+ready="$HOME/.companion/runtime/state/pi.rpc.ready"
+systemctl --user is-active --quiet companion-pi-daemon.service
+test -p "$fifo"
+companion_pi_invocation="$(systemctl --user show companion-pi-daemon.service -p InvocationID --value 2>/dev/null || true)"
+[ -n "$companion_pi_invocation" ]
+[ "$(cat "$ready" 2>/dev/null || true)" = "$companion_pi_invocation" ]
+before_size=0
+if [ -f "$rpc_log" ]; then
+  before_size="$(wc -c < "$rpc_log")"
+fi
+printf '%s\\n' ${shellQuote(serialized)} > "$fifo"
+deadline=$((SECONDS + ${PI_RPC_ACCEPT_TIMEOUT_SECONDS}))
+while (( SECONDS < deadline )); do
+  response="$(
+    tail -c "+$((before_size + 1))" "$rpc_log" 2>/dev/null \
+      | grep -F ${shellQuote('"type":"response"')} \
+      | grep -F ${shellQuote(`"command":"${input.responseCommand}"`)} \
+      | grep -F ${shellQuote(`"id":"${input.command.id}"`)} \
+      | tail -n 1 \
+      || true
+  )"
+  if [ -n "$response" ]; then
+    printf '%s\\n' "$response"
+    exit 0
+  fi
+  systemctl --user is-active --quiet companion-pi-daemon.service
+  sleep 0.1
+done
+printf '%s\\n' ${shellQuote(`Pi RPC did not acknowledge ${input.responseCommand}`)} >&2
+exit 1`,
+      PI_RPC_ACCEPT_TIMEOUT_SECONDS + 5,
+    );
+    if (!result.success) return null;
+    for (const line of result.stdout.trim().split(/[\r\n]+/).reverse()) {
+      try {
+        const response = JSON.parse(line) as Record<string, unknown>;
+        if (
+          response.type === "response"
+          && response.command === input.responseCommand
+          && response.id === input.command.id
+        ) return response;
+      } catch {
+        // Provider command output may include harmless shell noise; only correlated JSON counts.
+      }
+    }
+    return null;
+  }
+
+  async #rpcCommandAccepted(input: {
+    boxId: string;
+    command: Record<string, unknown> & { id: string };
+    responseCommand: string;
+  }): Promise<boolean> {
+    return (await this.#rpcCommandResponse(input))?.success === true;
+  }
+
+  /** Probe both RPC liveness and, when recovering a timed-out turn, its queue boundary. */
+  async #piRpcHealth(boxId: string): Promise<"idle" | "busy" | null> {
+    const response = await this.#rpcCommandResponse({
+      boxId,
+      responseCommand: "get_state",
+      command: { id: `companion-health:${randomUUID()}`, type: "get_state" },
+    });
+    if (response?.success !== true) return null;
+    const data = response.data;
+    if (!data || typeof data !== "object") return null;
+    const state = data as Record<string, unknown>;
+    return state.isStreaming === false && state.pendingMessageCount === 0 ? "idle" : "busy";
+  }
+
+  /** Systemd active is intermediate; wait until the replacement Pi answers RPC while idle. */
+  async #waitPiRpcReady(boxId: string): Promise<boolean> {
+    const deadline = Date.now() + this.#daemonActiveTimeoutMs;
+    do {
+      if (await this.#piRpcHealth(boxId) === "idle") return true;
+      if (Date.now() >= deadline) break;
+      await this.#pause();
+    } while (Date.now() < deadline);
+    return false;
+  }
+
+  /**
    * Say why Pi is not running. A daemon that never reached `active` is either still starting, dead,
    * or restarting on failure, and the generic sentence cannot tell those apart, so systemd's verdict,
    * the exit status it recorded, and how many times it has already restarted the unit travel with
@@ -1822,27 +1926,17 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
   }
 
   async prompt(input: { boxId: string; message: string; requestId: string }): Promise<void> {
-    const command = JSON.stringify({
-      id: input.requestId,
-      type: "prompt",
-      message: input.message,
-      streamingBehavior: "followUp",
+    const accepted = await this.#rpcCommandAccepted({
+      boxId: input.boxId,
+      responseCommand: "prompt",
+      command: {
+        id: input.requestId,
+        type: "prompt",
+        message: input.message,
+        streamingBehavior: "followUp",
+      },
     });
-    const result = await this.#command(
-      input.boxId,
-      `set -euo pipefail
-${USER_BUS_ENVIRONMENT}
-fifo="$HOME/.companion/runtime/state/pi.rpc.in"
-ready="$HOME/.companion/runtime/state/pi.rpc.ready"
-companion_pi_invocation="$(systemctl --user show companion-pi-daemon.service -p InvocationID --value 2>/dev/null || true)"
-systemctl --user is-active --quiet companion-pi-daemon.service
-test -p "$fifo"
-[ -n "$companion_pi_invocation" ]
-[ "$(cat "$ready" 2>/dev/null || true)" = "$companion_pi_invocation" ]
-printf '%s\\n' ${shellQuote(command)} > "$fifo"`,
-      20,
-    );
-    if (!result.success) {
+    if (!accepted) {
       throw new BoxRuntimeProviderError("Pi did not accept the message; wake the Companion and retry", 409);
     }
   }
@@ -1878,19 +1972,23 @@ printf '%s\\n' ${shellQuote(command)} > "$fifo"`,
   }
 
   /**
-   * Restart a Pi daemon that systemd has latched as failed or that stopped. The unit is already
-   * provisioned, so nothing is staged and no credential is rewritten: the latched failure is
-   * cleared, the unit is started, and the daemon gets the same active window a wake gives it. A
-   * healthy daemon returns on the first probe untouched, and a daemon that stays down is an answer
-   * with its reason rather than a thrown failure — only transport-level errors the other methods
-   * would also throw for travel out of here.
+   * Heal a Pi daemon that stopped or is active without consuming RPC. The unit is already
+   * provisioned, so nothing is staged and no credential is rewritten: a healthy daemon proves it
+   * can acknowledge `get_state` and stays untouched; a stopped daemon is started; an active but
+   * unresponsive daemon is restarted. A daemon that stays down is an answer with its reason rather
+   * than a thrown failure — only transport-level errors the other methods would also throw for
+   * travel out of here.
    */
-  async healPiDaemon(input: { boxId: string }): Promise<{
+  async healPiDaemon(input: { boxId: string; requireIdle?: boolean }): Promise<{
     daemonState: "running" | "stopped" | "error";
     detail: string | null;
   }> {
-    if (await this.#daemonState(input.boxId) === "running") {
-      return { daemonState: "running", detail: null };
+    const initialState = await this.#daemonState(input.boxId);
+    if (initialState === "running") {
+      const health = await this.#piRpcHealth(input.boxId);
+      if (health && (!input.requireIdle || health === "idle")) {
+        return { daemonState: "running", detail: null };
+      }
     }
     const started = await this.#command(
       input.boxId,
@@ -1899,7 +1997,7 @@ ${PREPARE_USER_BUS}
 # A unit that crash-looped past systemd's start limit refuses every later start until its failure is
 # cleared, so the latched failure is cleared first; a unit with nothing latched is unaffected.
 systemctl --user reset-failed companion-pi-daemon.service >/dev/null 2>&1 || true
-systemctl --user start companion-pi-daemon.service`,
+systemctl --user ${initialState === "running" ? "restart" : "start"} companion-pi-daemon.service`,
       120,
     );
     if (!started.success) {
@@ -1909,7 +2007,15 @@ systemctl --user start companion-pi-daemon.service`,
       };
     }
     const daemonState = await this.#waitDaemonActive(input.boxId);
-    if (daemonState === "running") return { daemonState: "running", detail: null };
+    if (daemonState === "running" && await this.#waitPiRpcReady(input.boxId)) {
+      return { daemonState: "running", detail: null };
+    }
+    if (daemonState === "running") {
+      return {
+        daemonState: "error",
+        detail: "Pi daemon became active but did not become ready to accept messages",
+      };
+    }
     return {
       daemonState: "error",
       detail: `${PI_DAEMON_FAILURE_MESSAGE}${await this.#daemonFailureDetail(input.boxId)}`,

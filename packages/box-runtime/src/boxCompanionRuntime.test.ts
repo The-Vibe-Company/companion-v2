@@ -3911,8 +3911,14 @@ describe("AsciiBoxCompanionRuntime", () => {
       const url = String(rawUrl);
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
       if (url.endsWith("/commands") && init?.method === "POST") {
-        commands.push(String(body.command));
-        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+        const command = String(body.command);
+        commands.push(command);
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: '{"type":"response","command":"prompt","success":true,"id":"msg:1"}\n',
+          stderr: "",
+        });
       }
       throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
     });
@@ -3933,9 +3939,12 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(commands[0]).toContain("state/pi.rpc.in");
     expect(commands[0]).toContain("state/pi.rpc.ready");
     expect(commands[0]).toContain("-p InvocationID --value");
+    expect(commands[0]).toContain("logs/pi.rpc.ndjson");
     expect(commands[0]).toContain(
       '{"id":"msg:1","type":"prompt","message":"Summarize the incident","streamingBehavior":"followUp"}',
     );
+    expect(commands[0]).toContain('"command":"prompt"');
+    expect(commands[0]).toContain('"id":"msg:1"');
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
@@ -3968,14 +3977,30 @@ describe("AsciiBoxCompanionRuntime", () => {
     })).rejects.toMatchObject({ status: 409 });
   });
 
-  it("leaves a healthy daemon untouched when asked to heal it", async () => {
+  it("leaves a daemon untouched only after Pi acknowledges an RPC health probe", async () => {
     const commands: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const method = init?.method ?? "GET";
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
       if (url.endsWith("/commands") && method === "POST") {
-        commands.push(String(body.command));
+        const command = String(body.command);
+        commands.push(command);
+        if (command.includes('"type":"get_state"')) {
+          const id = command.match(/"id":"([^"]+)"/)?.[1];
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: JSON.stringify({
+              type: "response",
+              command: "get_state",
+              success: true,
+              id,
+              data: { isStreaming: false, pendingMessageCount: 0 },
+            }) + "\n",
+            stderr: "",
+          });
+        }
         return json({ success: true, exitCode: 0, stdout: "active\n", stderr: "" });
       }
       throw new Error(`unexpected Box request: ${method} ${url}`);
@@ -3985,12 +4010,121 @@ describe("AsciiBoxCompanionRuntime", () => {
     const healed = await runtime.healPiDaemon({ boxId: "bx_23456789" });
 
     expect(healed).toEqual({ daemonState: "running", detail: null });
-    // An `is-active` daemon is the whole answer: nothing is reset and nothing is started.
-    expect(commands).toHaveLength(1);
+    // `active` is process state, not proof that Pi consumes its FIFO. The correlated get_state
+    // response is the acceptance proof, and a daemon that supplies it stays untouched.
+    expect(commands).toHaveLength(2);
     expect(commands[0]).toContain("is-active companion-pi-daemon.service");
+    expect(commands[1]).toContain('"type":"get_state"');
+    expect(commands[1]).toContain('"command":"get_state"');
     expect(commands.some((command) => command.includes("reset-failed"))).toBe(false);
     expect(commands.some((command) =>
       command.includes("start companion-pi-daemon.service"))).toBe(false);
+  });
+
+  it("restarts a systemd-active daemon that does not consume its RPC FIFO", async () => {
+    const commands: string[] = [];
+    let healthProbes = 0;
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        if (command.includes('"type":"get_state"')) {
+          healthProbes += 1;
+          // Reproduce THE-370: the wrapper-held FIFO takes the bytes, but Pi never emits the
+          // correlated response that says it accepted the command. The replacement then proves
+          // readiness before healing returns and delivery retries its prompt.
+          if (healthProbes === 1) {
+            return json({ success: false, exitCode: 1, stdout: "", stderr: "not acknowledged" });
+          }
+          const id = command.match(/"id":"([^"]+)"/)?.[1];
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: JSON.stringify({
+              type: "response",
+              command: "get_state",
+              success: true,
+              id,
+              data: { isStreaming: false, pendingMessageCount: 0 },
+            }) + "\n",
+            stderr: "",
+          });
+        }
+        if (command.includes("is-active companion-pi-daemon.service")) {
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: "active\n",
+            stderr: "",
+          });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const healed = await runtime.healPiDaemon({ boxId: "bx_23456789" });
+
+    expect(healed).toEqual({ daemonState: "running", detail: null });
+    const restart = commands.find((command) =>
+      command.includes("restart companion-pi-daemon.service")) ?? "";
+    expect(restart).toContain("reset-failed companion-pi-daemon.service");
+    expect(healthProbes).toBe(2);
+  });
+
+  it("restarts a responsive daemon whose timed-out turn is still streaming", async () => {
+    const commands: string[] = [];
+    let healthProbes = 0;
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        if (command.includes('"type":"get_state"')) {
+          healthProbes += 1;
+          const id = command.match(/"id":"([^"]+)"/)?.[1];
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: JSON.stringify({
+              type: "response",
+              command: "get_state",
+              success: true,
+              id,
+              data: healthProbes === 1
+                ? { isStreaming: true, pendingMessageCount: 1 }
+                : { isStreaming: false, pendingMessageCount: 0 },
+            }) + "\n",
+            stderr: "",
+          });
+        }
+        if (command.includes("is-active companion-pi-daemon.service")) {
+          return json({ success: true, exitCode: 0, stdout: "active\n", stderr: "" });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+    });
+
+    const healed = await runtime.healPiDaemon({ boxId: "bx_23456789", requireIdle: true });
+
+    expect(healed).toEqual({ daemonState: "running", detail: null });
+    expect(commands.some((command) => command.includes("restart companion-pi-daemon.service")))
+      .toBe(true);
+    expect(healthProbes).toBe(2);
   });
 
   it("clears a latched failure and starts a stopped daemon back to running", async () => {
@@ -4003,6 +4137,21 @@ describe("AsciiBoxCompanionRuntime", () => {
       if (url.endsWith("/commands") && method === "POST") {
         const command = String(body.command);
         commands.push(command);
+        if (command.includes('"type":"get_state"')) {
+          const id = command.match(/"id":"([^"]+)"/)?.[1];
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: JSON.stringify({
+              type: "response",
+              command: "get_state",
+              success: true,
+              id,
+              data: { isStreaming: false, pendingMessageCount: 0 },
+            }) + "\n",
+            stderr: "",
+          });
+        }
         if (command.includes("is-active")) {
           probes += 1;
           // Stopped before the start, active on the first probe after it.
@@ -4033,6 +4182,47 @@ describe("AsciiBoxCompanionRuntime", () => {
       .toBeLessThan(start.indexOf("start companion-pi-daemon.service"));
     expect(start).not.toContain("restart companion-pi-daemon.service");
     expect(start).not.toContain("providers.env");
+  });
+
+  it("does not call an active replacement healed until it answers RPC", async () => {
+    const commands: string[] = [];
+    let stateProbes = 0;
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = String(body.command);
+        commands.push(command);
+        if (command.includes('"type":"get_state"')) {
+          return json({ success: false, exitCode: 1, stdout: "", stderr: "FIFO not ready" });
+        }
+        if (command.includes("is-active")) {
+          stateProbes += 1;
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: stateProbes === 1 ? "failed\n" : "active\n",
+            stderr: "",
+          });
+        }
+        return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS: "20",
+    });
+
+    const healed = await runtime.healPiDaemon({ boxId: "bx_23456789" });
+
+    expect(healed).toEqual({
+      daemonState: "error",
+      detail: "Pi daemon became active but did not become ready to accept messages",
+    });
+    expect(commands.some((command) => command.includes('"type":"get_state"'))).toBe(true);
   });
 
   it("answers with the daemon's own failure detail when it stays down after the heal", async () => {

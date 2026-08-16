@@ -269,7 +269,7 @@ describe("replyExpected", () => {
     })).toBe(true);
   });
 
-  it("does not revive an aborted turn when the live call reports its tail as delivered", () => {
+  it("shows only the accepted recovery turn after an aborted tool", () => {
     const entries = [
       entry(),
       entry({
@@ -289,7 +289,12 @@ describe("replyExpected", () => {
       entry({ event_id: "msg:2", ordinal: 2, content: "Ca va ?" }),
     ];
     expect(replyExpected({ entries, awake: true, pendingCount: 1 })).toBe(false);
-    expect(replyExpected({ entries, awake: true, pendingCount: 0 })).toBe(false);
+    expect(replyExpected({
+      entries,
+      awake: true,
+      pendingCount: 0,
+      acceptedDeliveryOrdinal: 2,
+    })).toBe(true);
   });
 
   it("never waits on a Box that is not running, because nothing has been delivered", () => {

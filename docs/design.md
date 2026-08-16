@@ -164,7 +164,23 @@ recovery watermark also covers timeouts persisted before recovery shipped, and a
 watermark prevents a later send from recycling the recovered turn again. A delivery-progress
 watermark keeps the exact unaccepted suffix recoverable from an older writer's ordinary watermark
 until the fresh Pi has accepted it. The lifecycle claim revalidates restart eligibility so a delayed
-concurrent request cannot recycle that Pi twice. A narrow database definer lets Viewer reads trigger
+concurrent request cannot recycle that Pi twice. Prompt acceptance is the correlated Pi RPC response,
+not merely a successful write to the wrapper-held FIFO. Before a timeout-recovery tail is delivered,
+`get_state` must show an idle Pi with no queued messages, since prompt success can also mean queued
+behind the dead turn. A busy or unresponsive Pi daemon alone is recycled, and its replacement must
+answer an idle health probe before that durable prompt is attempted. A later prompt refusal gets one
+health repair and retry; another refusal leaves delivery visibly pending without touching Box
+lifecycle. A per-Companion delivery lease shared with the reconciler serializes sends/syncs and
+revalidates the timeout tail after the claim, so a stale concurrent request cannot recycle the valid
+turn its predecessor just started. The exact-token lease is renewed around each bounded Pi operation
+and message, and losing it stops further delivery. A restrictive transcript-read fence gives old API
+replicas an independent compatibility deadline during migration-first rollout, while protocol-2
+tenant transactions use the exact claim; an initial fence survives an already-active worker claim,
+and a successful legacy read renews a drain deadline derived from actual pending work rather than
+total transcript history. Migration backfill also retains unresolved and still-draining recent
+assistant-delimited batches independently of a post-snapshot watermark, without letting one old
+watermark release another old request's snapshot.
+A narrow database definer lets Viewer reads trigger
 settlement housekeeping without granting general thread writes. A settled
 `browse` or `computer` run receives
 exactly one frame, attributed by the run id whose settlement won and captured directly from the

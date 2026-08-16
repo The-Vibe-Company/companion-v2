@@ -418,6 +418,7 @@ export function CompanionTranscript({
     entries: stableEntries,
     awake,
     pendingCount: thread?.pending_count,
+    acceptedDeliveryOrdinal: thread?.accepted_delivery_ordinal,
   });
   const loading = thread === null;
   const empty = thread !== null && messages.length === 0;

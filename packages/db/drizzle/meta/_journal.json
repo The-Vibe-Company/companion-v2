@@ -617,6 +617,13 @@
       "when": 1787677600000,
       "tag": "0087_companion_reconciler",
       "breakpoints": true
+    },
+    {
+      "idx": 88,
+      "version": "7",
+      "when": 1787764000000,
+      "tag": "0088_companion_delivery_lease",
+      "breakpoints": true
     }
   ]
 }

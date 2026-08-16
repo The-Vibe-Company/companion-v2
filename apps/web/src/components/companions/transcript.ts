@@ -63,6 +63,8 @@ export function replyExpected(input: {
   awake: boolean;
   /** Messages waiting for Pi rather than a reply. Omit only when judging transcript history alone. */
   pendingCount?: number;
+  /** Highest prompt proven accepted by Pi's correlated protocol-2 response. */
+  acceptedDeliveryOrdinal?: number | null;
 }): boolean {
   if (!input.awake) return false;
   const tail = input.entries[input.entries.length - 1];
@@ -73,7 +75,16 @@ export function replyExpected(input: {
     for (let index = input.entries.length - 2; index >= 0; index -= 1) {
       const entry = input.entries[index];
       if (entry?.role === "assistant") return true;
-      if (entry?.role === "tool") return entry.tool?.status !== "timeout";
+      if (entry?.role === "tool") {
+        if (entry.tool?.status !== "timeout") return true;
+        // A timeout ended the old turn, but a later user message whose delivery watermark has
+        // cleared is a new turn Pi actually accepted. Keep waiting messages quiet; only the
+        // accepted recovery turn may restore the honest generation indicator.
+        return input.pendingCount === 0
+          && input.acceptedDeliveryOrdinal !== undefined
+          && input.acceptedDeliveryOrdinal !== null
+          && input.acceptedDeliveryOrdinal >= tail.ordinal;
+      }
       if (entry?.role === "decision") return true;
     }
     // A delivered first turn has no earlier Pi event as proof, so the zero pending watermark is its

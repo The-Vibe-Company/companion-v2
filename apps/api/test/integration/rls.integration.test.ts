@@ -42,6 +42,7 @@ describe("Skills Hub PostgreSQL isolation", () => {
   let orgSlug: string;
   let otherOrgSlug: string;
   const companionId = randomUUID();
+  const deliveryFenceCompanionId = randomUUID();
 
   beforeAll(async () => {
     const [ownerRow] = await integrationSql<Array<{ current_user: string }>>`select current_user`;
@@ -55,7 +56,21 @@ describe("Skills Hub PostgreSQL isolation", () => {
     await seedSkill({ orgId: fixture.orgB, creator: fixture.outsider, slug: otherOrgSlug, scope: "org" });
     await integrationSql`
       insert into companions (id, org_id, owner_id, name)
-      values (${companionId}, ${fixture.orgA}, ${fixture.owner.id}, 'RLS companion')
+      values
+        (${companionId}, ${fixture.orgA}, ${fixture.owner.id}, 'RLS companion'),
+        (${deliveryFenceCompanionId}, ${fixture.orgA}, ${fixture.owner.id}, 'Delivery fence companion')
+    `;
+    await integrationSql`
+      insert into companion_transcript_entries (
+        org_id, companion_id, event_id, ordinal, role, content, author_id
+      ) values (
+        ${fixture.orgA}, ${deliveryFenceCompanionId}, 'delivery-fence-user', 0, 'user',
+        'rollout-safe prompt', ${fixture.owner.id}
+      )
+    `;
+    await integrationSql`
+      insert into companion_threads (org_id, companion_id, next_ordinal)
+      values (${fixture.orgA}, ${deliveryFenceCompanionId}, 1)
     `;
     await integrationSql.unsafe(`create role ${apiRole} login nosuperuser nobypassrls noinherit`);
     await integrationSql.unsafe(`create role ${workerRole} login nosuperuser nobypassrls noinherit`);
@@ -65,6 +80,7 @@ describe("Skills Hub PostgreSQL isolation", () => {
       grant select on memberships, companions, companion_workspace_access,
         companion_transcript_entries, companion_threads to ${migrationRole};
       grant update on companion_transcript_entries, companion_threads to ${migrationRole};
+      grant execute on function companion_delivery_read_fence(uuid, uuid, text) to ${migrationRole};
       alter function companion_expire_tool_runs(uuid, uuid, timestamp with time zone, integer, integer)
         owner to ${migrationRole}
     `);
@@ -77,7 +93,9 @@ describe("Skills Hub PostgreSQL isolation", () => {
   });
 
   afterAll(async () => {
-    await integrationSql`delete from companions where id = ${companionId}`;
+    await integrationSql`
+      delete from companions where id in (${companionId}, ${deliveryFenceCompanionId})
+    `;
     await fixture.cleanup();
     await integrationSql.unsafe(`drop owned by ${apiRole}`);
     await integrationSql.unsafe(`drop owned by ${workerRole}`);
@@ -100,6 +118,245 @@ describe("Skills Hub PostgreSQL isolation", () => {
   it("shows an owner their personal and org skills but hides both from other tenants", async () => {
     expect(await visibleSlugs(fixture.orgA, fixture.owner.id)).toEqual([orgSlug, personalSlug].sort());
     expect(await visibleSlugs(fixture.orgB, fixture.outsider.id)).toEqual([otherOrgSlug]);
+  });
+
+  it("fences legacy transcript delivery against protocol-2 claims during rollout", async () => {
+    const firstClaim = randomUUID();
+    const claimed = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`
+        select set_config('app.org_id', ${fixture.orgA}, true),
+               set_config('app.user_id', ${fixture.owner.id}, true),
+               set_config('app.companion_delivery_protocol', '2', true)
+      `;
+      return tx<Array<{ claimed: boolean }>>`
+        select companion_claim_delivery_lease(
+          ${fixture.orgA}, ${deliveryFenceCompanionId}, ${firstClaim}, 600
+        ) as claimed
+      `;
+    });
+    expect(claimed).toEqual([{ claimed: true }]);
+
+    // An old replica has no protocol marker. The restrictive transcript policy must fail its read
+    // before it can take the prompt snapshot while a new delivery owns the exact lease.
+    await expect(integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`
+        select set_config('app.org_id', ${fixture.orgA}, true),
+               set_config('app.user_id', ${fixture.owner.id}, true)
+      `;
+      await tx`
+        select event_id from companion_transcript_entries
+        where companion_id = ${deliveryFenceCompanionId}
+      `;
+    })).rejects.toThrow("Companion delivery protocol is upgrading");
+
+    // Migration backfill owns compatibility state independently of an already-active worker/API
+    // lease. Model that overlap directly: releasing the exact owner below must not erase the fence.
+    await integrationSql`
+      update companion_reconcile_leases
+      set delivery_compat_expires_at = statement_timestamp() + interval '11 minutes',
+          delivery_compat_next_ordinal = 1
+      where companion_id = ${deliveryFenceCompanionId}
+    `;
+
+    await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`
+        select set_config('app.org_id', ${fixture.orgA}, true),
+               set_config('app.user_id', ${fixture.owner.id}, true),
+               set_config('app.companion_delivery_protocol', '2', true)
+      `;
+      await tx`
+        select companion_release_delivery_lease(
+          ${fixture.orgA}, ${deliveryFenceCompanionId}, ${firstClaim}
+        )
+      `;
+    });
+
+    const backfillBlockedClaim = randomUUID();
+    const blockedAfterRelease = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`
+        select set_config('app.org_id', ${fixture.orgA}, true),
+               set_config('app.user_id', ${fixture.owner.id}, true),
+               set_config('app.companion_delivery_protocol', '2', true)
+      `;
+      return tx<Array<{ claimed: boolean }>>`
+        select companion_claim_delivery_lease(
+          ${fixture.orgA}, ${deliveryFenceCompanionId}, ${backfillBlockedClaim}, 600
+        ) as claimed
+      `;
+    });
+    expect(blockedAfterRelease).toEqual([{ claimed: false }]);
+
+    // A legacy snapshot is finite but its prompt loop scales with its actual durable tail, not the
+    // full historical ordinal. Six pending prompts on a 1,000-ordinal thread need sixteen minutes,
+    // not the roughly seventeen-hour outage a total-history deadline would create.
+    await integrationSql`
+      insert into companion_transcript_entries (
+        org_id, companion_id, event_id, ordinal, role, content, author_id
+      )
+      select ${fixture.orgA}, ${deliveryFenceCompanionId}, 'delivery-fence-user-' || n,
+             n, 'user', 'queued prompt ' || n, ${fixture.owner.id}
+      from generate_series(1, 5) as n
+    `;
+    await integrationSql`
+      update companion_threads
+      set next_ordinal = 1000
+      where companion_id = ${deliveryFenceCompanionId}
+    `;
+    await integrationSql`
+      update companion_threads
+      set delivered_ordinal = 5
+      where companion_id = ${deliveryFenceCompanionId}
+    `;
+    const [deliveredHistory] = await integrationSql<Array<{ deadline: string }>>`
+      select companion_delivery_compat_deadline(
+        ${fixture.orgA}, ${deliveryFenceCompanionId}, statement_timestamp()
+      ) as deadline
+    `;
+    // A post-snapshot watermark is not completion evidence: a slower old request may still hold
+    // these six unanswered prompts, so migration backfill must retain their full drain window.
+    expect(Date.parse(deliveredHistory!.deadline)).toBeGreaterThan(Date.now() + 15 * 60_000);
+    await integrationSql`
+      insert into companion_transcript_entries (
+        org_id, companion_id, event_id, ordinal, role, content
+      ) values (
+        ${fixture.orgA}, ${deliveryFenceCompanionId}, 'delivery-fence-assistant', 6,
+        'assistant', 'All queued prompts answered.'
+      )
+    `;
+    const [recentlyCompleted] = await integrationSql<Array<{ deadline: string }>>`
+      select companion_delivery_compat_deadline(
+        ${fixture.orgA}, ${deliveryFenceCompanionId}, statement_timestamp()
+      ) as deadline
+    `;
+    // Even a just-written assistant can belong to the faster request; retain the completed batch
+    // until its own size-derived drain window proves a slower pre-policy snapshot has ended.
+    expect(Date.parse(recentlyCompleted!.deadline)).toBeGreaterThan(Date.now() + 15 * 60_000);
+    await integrationSql`
+      update companion_transcript_entries
+      set created_at = statement_timestamp() - interval '1 day'
+      where companion_id = ${deliveryFenceCompanionId}
+        and event_id = 'delivery-fence-assistant'
+    `;
+    const [completedHistory] = await integrationSql<Array<{ deadline: string }>>`
+      select companion_delivery_compat_deadline(
+        ${fixture.orgA}, ${deliveryFenceCompanionId}, statement_timestamp()
+      ) as deadline
+    `;
+    // Once an assistant closes that tail, the 1,000-ordinal historical bound adds no outage.
+    expect(Date.parse(completedHistory!.deadline)).toBeLessThan(Date.now() + 60_000);
+    await integrationSql`
+      delete from companion_transcript_entries
+      where companion_id = ${deliveryFenceCompanionId}
+        and event_id = 'delivery-fence-assistant'
+    `;
+    await integrationSql`
+      update companion_threads
+      set delivered_ordinal = NULL
+      where companion_id = ${deliveryFenceCompanionId}
+    `;
+    await integrationSql`
+      update companion_reconcile_leases
+      set delivery_compat_expires_at = NULL,
+          delivery_compat_next_ordinal = NULL
+      where companion_id = ${deliveryFenceCompanionId}
+    `;
+
+    const legacyRows = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`
+        select set_config('app.org_id', ${fixture.orgA}, true),
+               set_config('app.user_id', ${fixture.owner.id}, true)
+      `;
+      return tx<Array<{ event_id: string }>>`
+        select event_id from companion_transcript_entries
+        where companion_id = ${deliveryFenceCompanionId}
+      `;
+    });
+    expect(legacyRows).toHaveLength(6);
+    expect(legacyRows.map((row) => row.event_id)).toContain("delivery-fence-user");
+
+    const secondClaim = randomUUID();
+    const blocked = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`
+        select set_config('app.org_id', ${fixture.orgA}, true),
+               set_config('app.user_id', ${fixture.owner.id}, true),
+               set_config('app.companion_delivery_protocol', '2', true)
+      `;
+      return tx<Array<{ claimed: boolean }>>`
+        select companion_claim_delivery_lease(
+          ${fixture.orgA}, ${deliveryFenceCompanionId}, ${secondClaim}, 600
+        ) as claimed
+      `;
+    });
+    expect(blocked).toEqual([{ claimed: false }]);
+
+    // Protocol-1 workers know only claimed_by/lease_expires_at. The table guard must reject that
+    // ordinary claim too, otherwise the old reconciler could prompt beside protocol 2 during rollout.
+    const legacyWorkerClaim = await integrationSql<Array<{ claimed_by: string }>>`
+      update companion_reconcile_leases
+      set claimed_by = 'legacy-worker',
+          lease_expires_at = statement_timestamp() + interval '5 minutes'
+      where companion_id = ${deliveryFenceCompanionId}
+      returning claimed_by
+    `;
+    expect(legacyWorkerClaim).toEqual([]);
+
+    // One old watermark cannot prove that every other old request has finished the prompt snapshot
+    // it already read. The shared fence therefore survives delivery and only an expired full drain
+    // window lets protocol 2 take over.
+    const watermark = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`
+        select set_config('app.org_id', ${fixture.orgA}, true),
+               set_config('app.user_id', ${fixture.owner.id}, true),
+               set_config('app.companion_delivery_protocol', '2', true)
+      `;
+      return tx<Array<{ delivered_ordinal: number }>>`
+        update companion_threads set delivered_ordinal = 0
+        where companion_id = ${deliveryFenceCompanionId}
+        returning delivered_ordinal
+      `;
+    });
+    expect(watermark).toEqual([{ delivered_ordinal: 0 }]);
+    const [liveFence] = await integrationSql<Array<{
+      delivery_compat_expires_at: string | null;
+      delivery_compat_next_ordinal: number | null;
+    }>>`
+      select delivery_compat_expires_at, delivery_compat_next_ordinal
+      from companion_reconcile_leases
+      where companion_id = ${deliveryFenceCompanionId}
+    `;
+    expect(liveFence?.delivery_compat_next_ordinal).toBe(1000);
+    expect(Date.parse(liveFence?.delivery_compat_expires_at ?? "")).toBeGreaterThan(
+      Date.now() + 15 * 60_000,
+    );
+    expect(Date.parse(liveFence?.delivery_compat_expires_at ?? "")).toBeLessThan(
+      Date.now() + 17 * 60_000,
+    );
+    await integrationSql`
+      update companion_reconcile_leases
+      set delivery_compat_expires_at = statement_timestamp() - interval '1 second'
+      where companion_id = ${deliveryFenceCompanionId}
+    `;
+    const reclaimed = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`
+        select set_config('app.org_id', ${fixture.orgA}, true),
+               set_config('app.user_id', ${fixture.owner.id}, true),
+               set_config('app.companion_delivery_protocol', '2', true)
+      `;
+      return tx<Array<{ claimed: boolean }>>`
+        select companion_claim_delivery_lease(
+          ${fixture.orgA}, ${deliveryFenceCompanionId}, ${secondClaim}, 600
+        ) as claimed
+      `;
+    });
+    expect(reclaimed).toEqual([{ claimed: true }]);
   });
 
   it("enforces the workspace-only Companion ACL in PostgreSQL (no per-member overrides)", async () => {

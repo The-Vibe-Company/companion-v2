@@ -320,6 +320,36 @@ It hands pending messages to the running Pi daemon in ordinal order through the 
 `pi.rpc.in` FIFO, reads `pi.rpc.ndjson` from the recorded byte offset, and appends the projected
 entries. `delivered_ordinal` is claimed as soon as Pi accepts a prompt and before the log is read, so
 a failed read or projection cannot normally make a retry hand Pi the same message again.
+Acceptance is the correlated `response` Pi appends for that prompt id, not completion of the FIFO
+write: the daemon wrapper keeps the FIFO open read/write to avoid a startup deadlock, so the pipe can
+take bytes while an active-but-wedged Pi consumes nothing. A prompt without that response remains
+pending. A timeout-recovery tail first asks `healPiDaemon` for a correlated `get_state`: only a
+responsive, idle Pi with no queued messages is safe to keep, because a prompt response can also mean
+the follow-up was queued behind the timed-out turn. A busy or unresponsive active daemon is restarted
+without stopping or archiving its Box, and the replacement must answer an idle health probe before
+delivery continues. A later unacknowledged prompt gets the same health repair and one retry. If that
+retry is still unacknowledged, the watermark does not advance and the thread keeps its visible
+waiting-for-delivery state.
+Delivery holds the same per-Companion PostgreSQL lease used to exclude the reconciler, then re-reads
+the pending/timeout state after winning it. Overlapping sends and sync polls therefore do not both
+prompt Pi, and a request carrying a stale timeout snapshot cannot mistake the first request's newly
+generating recovery turn for the abandoned turn and recycle it. A crashed holder expires after the
+bounded lease; a live holder renews its exact claim before and after each bounded Pi operation and
+each queued message, failing closed if ownership changes. Until a crashed claim expires, the durable
+message remains visibly pending.
+Migration-first releases fence the previous API protocol at the database boundary as well. A
+transcript read from an old replica takes an independent compatibility deadline through restrictive RLS before
+that replica can build a prompt snapshot; a protocol-2 claim either waits behind it or makes the old
+read fail closed. The migration seeds that fence even behind an already-active worker lease, so the
+worker cannot erase it when it settles, and every later legacy read renews a drain deadline derived
+from actual pending prompts and decisions rather than total transcript history. Backfill ignores a
+post-snapshot delivery watermark for the unanswered tail and retains each recently completed batch
+only through that batch's own size-derived drain deadline, so a faster old request cannot expose a
+slower request while old historical batches add no delay. The deadline covers
+protocol 1's start budget plus every bounded FIFO operation even for a large tail; it expires only
+after that finite snapshot can have drained, never on one old request's watermark. A table guard also
+makes the protocol-1 reconciler honor it. New and old delivery paths therefore cannot both treat the
+same durable tail as theirs during rollout.
 `pi_log_offset` then advances with the projection, and event ids derive from log byte offsets, so a
 retried sync appends nothing new. Timeout settlement is the delivery-watermark exception: if a tool
 times out with already-watermarked user messages after it and no assistant reply after the tool, the
@@ -333,7 +363,9 @@ timeout-delivery ordinal records how far that process successfully accepted the 
 Post-timeout user entries remain in the recovery tail even if a concurrent or older writer advances
 the ordinary delivery watermark; a failed prompt therefore retries only the unaccepted suffix, and
 another send cannot recycle the recovered turn again. Restart eligibility is revalidated after the
-lifecycle claim, so a delayed request holding an older snapshot cannot recycle the same Pi twice.
+lifecycle claim, so a delayed request holding an older snapshot cannot recycle the same Pi twice;
+an already-marked timeout can still trigger the RPC health repair above when its apparent delivery
+was only a FIFO consume miss.
 `pi_log_offset`
 only moves backward when Pi's log
 shrinks: that read starts at the log's beginning and owns the offset outright. When the Box is
