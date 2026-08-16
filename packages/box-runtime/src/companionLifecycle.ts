@@ -22,10 +22,9 @@ import type {
 import type {
   Companion,
   CompanionThread,
-  CompanionTranscriptEntry,
   StartCompanionRuntimeInput,
 } from "@companion/contracts";
-import { withTenantContext, schema } from "@companion/db";
+import { withDatabaseAdvisoryLock, withTenantContext, schema } from "@companion/db";
 import { packDir, skillChecksum, toTar } from "@companion/skills";
 import { COMPANION_SKILL_KEY, companionSkillDir } from "@companion/companion-skill";
 import { getSkillArchive } from "@companion/storage";
@@ -113,47 +112,124 @@ export function recordProjection(input: {
 }
 
 /**
- * Hand persisted messages to Pi in order and record how far delivery reached. A refusal is not an
- * error for the caller: the message is already durable, so the next sync retries it. The watermark
- * only ever advances to a message Pi accepted, so an undelivered tail stays pending.
+ * Hand persisted messages to Pi in order and record how far delivery reached. The tenant-scoped
+ * advisory lock spans the FIFO write and watermark update: another API replica re-reads pending
+ * state after the first commits instead of sending the same turn twice. The lock uses a small,
+ * isolated database pool so slow Box I/O cannot exhaust request connections. A refusal is normally
+ * not an error for the caller because the durable tail remains retryable.
  */
 export async function deliverCompanionMessages(
   ctx: CompanionLifecycleContext,
   input: {
     companionId: string;
     boxId: string;
-    messages: CompanionTranscriptEntry[];
     runtime: CompanionBoxRuntime;
-    /** This delivery is protected by an unanswered timeout until each accepted ordinal is recorded. */
-    timeoutRecoveryPending?: boolean;
+    /** A completed wake must surface any Pi refusal instead of silently stranding its current turn. */
+    throwOnRefusal?: boolean;
   },
 ): Promise<{ thread: CompanionThread; deliveredOrdinal: number } | null> {
-  let deliveredOrdinal: number | undefined;
-  try {
-    for (const message of input.messages) {
-      await input.runtime.prompt({
-        boxId: input.boxId,
-        message: message.content,
-        requestId: message.event_id,
-      });
-      deliveredOrdinal = message.ordinal;
+  const outcome = await withDatabaseAdvisoryLock({
+    key: `${ctx.orgId}:${input.companionId}`,
+    namespace: 371,
+  }, async () => {
+    // The caller's snapshot can be stale by the time it owns delivery. Re-read only after the
+    // lock so a prior producer's committed watermark removes prompts it already wrote to Pi.
+    const state = await withTenantContext(
+      { orgId: ctx.orgId, userId: ctx.actor.id },
+      (database) => listPendingCompanionMessages({
+        actor: ctx.actor,
+        orgId: ctx.orgId,
+        companionId: input.companionId,
+        database,
+      }),
+    );
+    let deliveredOrdinal: number | undefined;
+    let refusal: unknown;
+    try {
+      for (const message of state.pending) {
+        await input.runtime.prompt({
+          boxId: input.boxId,
+          message: message.content,
+          requestId: message.event_id,
+        });
+        deliveredOrdinal = message.ordinal;
+      }
+    } catch (error) {
+      refusal = error;
+      // Record the accepted prefix before reporting a refused tail. Throwing before its watermark
+      // commits would make that prefix execute again on the next delivery attempt.
     }
-  } catch {
-    // Leave the undelivered tail pending instead of losing it or failing the persisted send.
-  }
-  if (deliveredOrdinal === undefined) return null;
-  const { thread } = await recordProjection({
-    actor: ctx.actor,
-    orgId: ctx.orgId,
-    companionId: input.companionId,
-    entries: [],
-    deliveredOrdinal,
-    timeoutDeliveryOrdinal: input.timeoutRecoveryPending ? deliveredOrdinal : undefined,
+    const result = deliveredOrdinal === undefined
+      ? null
+      : await withTenantContext(
+          { orgId: ctx.orgId, userId: ctx.actor.id },
+          async (database) => {
+            const { thread } = await recordCompanionPiProjectionWithEffects({
+              actor: ctx.actor,
+              orgId: ctx.orgId,
+              companionId: input.companionId,
+              entries: [],
+              deliveredOrdinal,
+              timeoutDeliveryOrdinal: state.timeoutRecoveryPending ? deliveredOrdinal : undefined,
+              database,
+            });
+            return { thread, deliveredOrdinal };
+          },
+        );
+
+    // Record delivery health before releasing the same ordering lock. If a refused prewarm is
+    // immediately followed by a successful send, the later success clears the earlier Error;
+    // the earlier request can never overwrite a Pi process that is already generating.
+    if ((input.throwOnRefusal && refusal !== undefined) || (result && refusal === undefined)) {
+      await withTenantContext(
+        { orgId: ctx.orgId, userId: ctx.actor.id },
+        async (database) => {
+          const current = await getCompanionForRuntime({
+            actor: ctx.actor,
+            orgId: ctx.orgId,
+            companionId: input.companionId,
+            database,
+          });
+          // Delivery began from a running projection, but Stop/Start owns the row once it claims a
+          // transition. The Box id deliberately survives Stop, so it is not enough as a guard: a
+          // late prompt result must never erase `stopping` or `provisioning` with delivery health.
+          if (
+            current.runtime.box_id !== input.boxId
+            || current.runtime.state !== "running"
+          ) return;
+          await updateCompanionRuntime({
+            actor: ctx.actor,
+            orgId: ctx.orgId,
+            companionId: input.companionId,
+            expectedUpdatedAt: new Date(current.updated_at),
+            patch: refusal === undefined
+              ? {
+                  runtimeState: "running",
+                  daemonState: "running",
+                  observedAt: new Date(),
+                }
+              : {
+                  runtimeState: "error",
+                  daemonState: "error",
+                  lastError: companionRuntimeErrorMessage(refusal),
+                  observedAt: new Date(),
+                },
+            database,
+          }).catch((error) => {
+            if (!(error instanceof CompanionRuntimeTransitionError)) throw error;
+          });
+        },
+      );
+    }
+    return { result, refusal };
   });
   // Move the Box idle clock only after Pi accepted at least one durable message. A failed prompt
   // remains pending and therefore cannot lengthen the machine's lifetime.
-  await input.runtime.refreshTtl({ boxId: input.boxId }).catch(() => undefined);
-  return { thread, deliveredOrdinal };
+  if (outcome.result) {
+    await input.runtime.refreshTtl({ boxId: input.boxId }).catch(() => undefined);
+  }
+  if (input.throwOnRefusal && outcome.refusal !== undefined) throw outcome.refusal;
+  return outcome.result;
 }
 
 /**

@@ -16,6 +16,7 @@ import {
   BoxRuntimeProviderError,
   COMPANION_PI_DISK_LAYOUT_VERSION,
   COMPANION_RUNTIME_UNKNOWN_ERROR,
+  deliverCompanionMessages,
 } from "@companion/box-runtime";
 import { registerCompanionRoutes as registerCompanionRoutesImpl } from "./companionRoutes";
 
@@ -77,6 +78,12 @@ const storageMocks = vi.hoisted(() => ({
   getSkillArchive: vi.fn(),
 }));
 
+const dbMocks = vi.hoisted(() => ({
+  withDatabaseAdvisoryLock: vi.fn(
+    async (_input: unknown, fn: () => Promise<unknown>) => fn(),
+  ),
+}));
+
 const skillsMocks = vi.hoisted(() => ({
   skillChecksum: vi.fn(),
   toTar: vi.fn((archive) => archive),
@@ -134,6 +141,7 @@ vi.mock("@companion/core", async (importOriginal) => ({
 
 vi.mock("@companion/db", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@companion/db")>()),
+  ...dbMocks,
   withTenantContext: vi.fn(
     async (
       _input: unknown,
@@ -2309,6 +2317,550 @@ describe("Companions API feature gate", () => {
     expect(coreMocks.updateCompanionRuntime).not.toHaveBeenCalled();
   });
 
+  it("lets the first-keystroke wake deliver a send that loses its provisioning claim", async () => {
+    const emptyPending = {
+      pending: [],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+      timeoutRecoveryPending: false,
+      timeoutRestartPending: false,
+      timeoutRecoveryOrdinal: null,
+    };
+    const savedPending = { ...emptyPending, pending: [message] };
+    coreMocks.listPendingCompanionMessages
+      // The prewarm begins before Send has persisted anything.
+      .mockResolvedValueOnce(emptyPending)
+      // Send persists, snapshots its durable tail, then loses the lifecycle claim.
+      .mockResolvedValueOnce(savedPending)
+      // The winning prewarm must take a new snapshot after it commits Online.
+      .mockResolvedValueOnce(savedPending)
+      // Delivery revalidates under the cross-replica advisory lock.
+      .mockResolvedValueOnce(savedPending);
+    coreMocks.claimCompanionRuntimeStart
+      .mockResolvedValueOnce(companion)
+      .mockRejectedValueOnce(
+        new CompanionRuntimeTransitionError("companion runtime is already provisioning"),
+      );
+    let releaseStart: (() => void) | undefined;
+    let startReached: (() => void) | undefined;
+    const atStart = new Promise<void>((resolve) => { startReached = resolve; });
+    const heldStart = new Promise<void>((resolve) => { releaseStart = resolve; });
+    const runtime = boxRuntime({
+      start: vi.fn(async () => {
+        startReached?.();
+        await heldStart;
+        return {
+          boxId: companion.runtime.box_id,
+          runtimeState: "running" as const,
+          daemonState: "running" as const,
+          desktopAvailable: true,
+        };
+      }),
+      stop: vi.fn(async () => ({
+        boxId: companion.runtime.box_id,
+        runtimeState: "stopped" as const,
+        daemonState: "stopped" as const,
+        desktopAvailable: false,
+      })),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    // Step 1: the suite always owns a fresh fixture. Production uses the same create route and must
+    // never borrow a historic timed-out or incident Companion.
+    const created = await app.request("/v1/companions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "THE-371 local e2e",
+        persona: "Exercise wake-on-send",
+        provider_id: "anthropic",
+        model_id: "claude-opus-4-8",
+      }),
+    });
+    expect(created.status).toBe(201);
+
+    const prewarm = app.request(`/v1/companions/${companion.id}/runtime/start?intent=message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_surface: "web" }),
+    });
+    await atStart;
+    const sent = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: message.content }),
+    });
+
+    expect(sent.status).toBe(200);
+    await expect(sent.json()).resolves.toMatchObject({ delivery: "pending" });
+    expect(runtime.prompt).not.toHaveBeenCalled();
+
+    releaseStart?.();
+    const woke = await prewarm;
+    expect(woke.status).toBe(200);
+    expect(runtime.prompt).toHaveBeenCalledOnce();
+    expect(runtime.prompt).toHaveBeenCalledWith({
+      boxId: companion.runtime.box_id,
+      message: message.content,
+      requestId: message.event_id,
+    });
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+      expect.objectContaining({ deliveredOrdinal: message.ordinal }),
+    );
+    expect(runtime.refreshTtl).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
+    expect(runtime.stop).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({ runtimeState: "running", daemonState: "running" }),
+    }));
+    expect(coreMocks.updateCompanionRuntime.mock.calls.some(
+      ([input]) => input.patch.runtimeState === "stopped",
+    )).toBe(false);
+
+    // Steps 2-3: project the answer plus a successful image read. The image tool is allowed to run
+    // and settles by call id; it is not an open/timed-out chip and the assistant reply follows it.
+    const imageReply = [
+      JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            id: "call-image-read",
+            name: "read",
+            arguments: { path: "/tmp/conductor-cli.png" },
+          }],
+          stopReason: "toolUse",
+        },
+      }),
+      JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "toolResult",
+          toolCallId: "call-image-read",
+          content: [{ type: "text", text: "Read image file [image/png]" }],
+        },
+      }),
+      JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "The image is readable." }],
+          stopReason: "stop",
+        },
+      }),
+      JSON.stringify({ type: "agent_settled" }),
+      "",
+    ].join("\n");
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      ...emptyPending,
+      piLogOffset: 0,
+    });
+    runtime.readEvents.mockResolvedValueOnce({ chunk: imageReply, offset: 0 });
+    const firstReply = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(firstReply.status).toBe(200);
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entries: expect.arrayContaining([
+          expect.objectContaining({ role: "tool", tool: expect.objectContaining({
+            name: "read",
+            title: "/tmp/conductor-cli.png",
+            status: "running",
+          }) }),
+          expect.objectContaining({ role: "assistant", content: "The image is readable." }),
+        ]),
+        toolCompletions: [expect.objectContaining({
+          callId: "call-image-read",
+          status: "ok",
+        })],
+      }),
+    );
+
+    // Step 4: sleep only through the public stop lifecycle. The test never archives, deletes, or
+    // invokes Full Box restart as a substitute for a reliable warm wake.
+    coreMocks.claimCompanionRuntimeStop.mockResolvedValue(runningCompanion);
+    const slept = await app.request(`/v1/companions/${companion.id}/runtime/stop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(slept.status).toBe(200);
+    expect(runtime.stop).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
+
+    // Step 5: a second saved turn from Asleep owns a normal wake and reaches Pi without another
+    // stop in the middle. A following sync projects the second assistant answer.
+    const secondMessage = {
+      ...message,
+      event_id: "msg:44444444-4444-4444-8444-444444444444",
+      ordinal: 1,
+      content: "Wake and answer again",
+    };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(companion);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(companion);
+    coreMocks.sendCompanionMessage.mockResolvedValue({
+      thread: { ...viewerThread, access: "owner", read_only: false, can_send: true },
+      entry: secondMessage,
+    });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      ...emptyPending,
+      pending: [secondMessage],
+    });
+    const stopCallsBeforeSecondWake = runtime.stop.mock.calls.length;
+    const sentAgain = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: secondMessage.content }),
+    });
+    expect(sentAgain.status).toBe(200);
+    await expect(sentAgain.json()).resolves.toMatchObject({ delivery: "delivered" });
+    expect(runtime.prompt).toHaveBeenLastCalledWith({
+      boxId: companion.runtime.box_id,
+      message: secondMessage.content,
+      requestId: secondMessage.event_id,
+    });
+    expect(runtime.stop).toHaveBeenCalledTimes(stopCallsBeforeSecondWake);
+
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue(emptyPending);
+    const secondReply = `${JSON.stringify({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "Awake and answering again." }],
+        stopReason: "stop",
+      },
+    })}\n${JSON.stringify({ type: "agent_settled" })}\n`;
+    runtime.readEvents.mockResolvedValueOnce({ chunk: secondReply, offset: imageReply.length });
+    const repliedAgain = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(repliedAgain.status).toBe(200);
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entries: [expect.objectContaining({
+          role: "assistant",
+          content: "Awake and answering again.",
+        })],
+      }),
+    );
+  });
+
+  it("revalidates a stale overlapping send under the delivery lock instead of prompting twice", async () => {
+    const emptyPending = {
+      pending: [],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+      timeoutRecoveryPending: false,
+      timeoutRestartPending: false,
+      timeoutRecoveryOrdinal: null,
+    };
+    const stalePending = { ...emptyPending, pending: [message] };
+    coreMocks.listPendingCompanionMessages
+      // Prewarm before-start, post-Online handoff, and its locked delivery snapshot.
+      .mockResolvedValueOnce(emptyPending)
+      .mockResolvedValueOnce(stalePending)
+      .mockResolvedValueOnce(stalePending)
+      // An overlapping send captured the same stale tail, then waited for the delivery lock. Its
+      // revalidation observes the first producer's committed watermark.
+      .mockResolvedValueOnce(stalePending)
+      .mockResolvedValueOnce(emptyPending);
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const prewarm = await app.request(
+      `/v1/companions/${companion.id}/runtime/start?intent=message`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_surface: "web" }),
+      },
+    );
+    expect(prewarm.status).toBe(200);
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    const overlappingSend = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: message.content }),
+    });
+
+    expect(overlappingSend.status).toBe(200);
+    expect(runtime.prompt).toHaveBeenCalledOnce();
+    expect(dbMocks.withDatabaseAdvisoryLock).toHaveBeenCalledTimes(2);
+    expect(coreMocks.listPendingCompanionMessages).toHaveBeenCalledTimes(5);
+  });
+
+  it("makes a post-wake Pi refusal visible instead of leaving a saved turn silently pending", async () => {
+    const emptyPending = {
+      pending: [],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+      timeoutRecoveryPending: false,
+      timeoutRestartPending: false,
+      timeoutRecoveryOrdinal: null,
+    };
+    coreMocks.listPendingCompanionMessages
+      .mockResolvedValueOnce(emptyPending)
+      .mockResolvedValueOnce({ ...emptyPending, pending: [message] })
+      .mockResolvedValueOnce({ ...emptyPending, pending: [message] });
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    const runtime = boxRuntime({
+      prompt: vi.fn(async () => {
+        throw new BoxRuntimeProviderError("Pi RPC input is not ready", 409);
+      }),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/start?intent=message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_surface: "web" }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenLastCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({
+        runtimeState: "error",
+        daemonState: "error",
+        lastError: expect.stringContaining("Pi RPC input is not ready"),
+      }),
+    }));
+  });
+
+  it("records an accepted backlog prefix and still exposes refusal of the current wake turn", async () => {
+    const backlog = { ...message, event_id: "msg:backlog", ordinal: 0, content: "Earlier" };
+    const current = { ...message, event_id: "msg:current", ordinal: 1, content: "Current" };
+    const emptyPending = {
+      pending: [],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+      timeoutRecoveryPending: false,
+      timeoutRestartPending: false,
+      timeoutRecoveryOrdinal: null,
+    };
+    const pending = { ...emptyPending, pending: [backlog, current] };
+    coreMocks.listPendingCompanionMessages
+      .mockResolvedValueOnce(emptyPending)
+      .mockResolvedValueOnce(pending)
+      .mockResolvedValueOnce(pending);
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    const runtime = boxRuntime({
+      prompt: vi.fn()
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new BoxRuntimeProviderError("Pi refused the current turn", 409)),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(
+      `/v1/companions/${companion.id}/runtime/start?intent=message`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_surface: "web" }),
+      },
+    );
+
+    expect(response.status).toBe(409);
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+      expect.objectContaining({ deliveredOrdinal: backlog.ordinal }),
+    );
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenLastCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({
+        runtimeState: "error",
+        daemonState: "error",
+        lastError: expect.stringContaining("Pi refused the current turn"),
+      }),
+    }));
+  });
+
+  it("lets a successful retry clear an earlier prewarm refusal in delivery order", async () => {
+    const pending = {
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+      timeoutRecoveryPending: false,
+      timeoutRestartPending: false,
+      timeoutRecoveryOrdinal: null,
+    };
+    coreMocks.listPendingCompanionMessages
+      .mockResolvedValueOnce(pending)
+      .mockResolvedValueOnce(pending);
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    const runtime = boxRuntime({
+      prompt: vi.fn()
+        .mockRejectedValueOnce(new BoxRuntimeProviderError("Pi input raced its wake", 409))
+        .mockResolvedValueOnce(undefined),
+    });
+    const context = {
+      actor: { id: "user-1", email: "user@example.test", name: "User" },
+      orgId: "org-1",
+      env: {},
+      runtimeFactory: () => runtime,
+    };
+
+    await expect(deliverCompanionMessages(context, {
+      companionId: companion.id,
+      boxId: companion.runtime.box_id!,
+      runtime,
+      throwOnRefusal: true,
+    })).rejects.toThrow("Pi input raced its wake");
+    await deliverCompanionMessages(context, {
+      companionId: companion.id,
+      boxId: companion.runtime.box_id!,
+      runtime,
+    });
+
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      patch: expect.objectContaining({ runtimeState: "error", daemonState: "error" }),
+    }));
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      patch: expect.objectContaining({ runtimeState: "running", daemonState: "running" }),
+    }));
+  });
+
+  it("does not let delivery health overwrite a concurrent Stop claim", async () => {
+    const pending = {
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+      timeoutRecoveryPending: false,
+      timeoutRestartPending: false,
+      timeoutRecoveryOrdinal: null,
+    };
+    const stopping = {
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        state: "stopping" as const,
+        daemon_state: "stopped" as const,
+      },
+    };
+    coreMocks.listPendingCompanionMessages.mockResolvedValue(pending);
+    coreMocks.getCompanionForRuntime.mockResolvedValue(stopping);
+    const runtime = boxRuntime();
+    const context = {
+      actor: { id: "user-1", email: "user@example.test", name: "User" },
+      orgId: "org-1",
+      env: {},
+      runtimeFactory: () => runtime,
+    };
+
+    await deliverCompanionMessages(context, {
+      companionId: companion.id,
+      boxId: companion.runtime.box_id!,
+      runtime,
+    });
+
+    expect(runtime.prompt).toHaveBeenCalledOnce();
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+      expect.objectContaining({ deliveredOrdinal: message.ordinal }),
+    );
+    expect(coreMocks.updateCompanionRuntime).not.toHaveBeenCalled();
+  });
+
+  it("recycles Pi when timeout settlement exposes a tail only after prewarm", async () => {
+    const stranded = { ...message, event_id: "msg:late-timeout", ordinal: 1, content: "Continue" };
+    const beforeTimeout = {
+      pending: [],
+      piLogOffset: 256,
+      deliveredOrdinal: null,
+      timeoutRecoveryPending: false,
+      timeoutRestartPending: false,
+      timeoutRecoveryOrdinal: null,
+    };
+    const afterTimeout = {
+      ...beforeTimeout,
+      pending: [stranded],
+      timeoutRecoveryPending: true,
+      timeoutRestartPending: true,
+      timeoutRecoveryOrdinal: 0,
+    };
+    coreMocks.listPendingCompanionMessages
+      // The first snapshot still sees an open tool, then post-wake settlement exposes its tail.
+      .mockResolvedValueOnce(beforeTimeout)
+      .mockResolvedValueOnce(afterTimeout)
+      // The second lifecycle claim revalidates the one-shot restart, then delivery re-reads it.
+      .mockResolvedValueOnce(afterTimeout)
+      .mockResolvedValueOnce(afterTimeout);
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(runningCompanion);
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/start?intent=message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_surface: "web" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtime.start).toHaveBeenCalledTimes(2);
+    expect(runtime.start).toHaveBeenNthCalledWith(1, expect.objectContaining({ restartPi: false }));
+    expect(runtime.start).toHaveBeenNthCalledWith(2, expect.objectContaining({ restartPi: true }));
+    expect(coreMocks.recordCompanionTimeoutRestart).toHaveBeenCalledWith(expect.objectContaining({
+      timeoutOrdinal: 0,
+    }));
+    expect(runtime.prompt.mock.invocationCallOrder[0]!)
+      .toBeGreaterThan(runtime.start.mock.invocationCallOrder[1]!);
+    expect(runtime.prompt).toHaveBeenCalledWith(expect.objectContaining({
+      message: stranded.content,
+      requestId: stranded.event_id,
+    }));
+  });
+
+  it("keeps timeout recovery one-shot when a delivery-intent prewarm owns the wake", async () => {
+    const stranded = { ...message, event_id: "msg:after-timeout", ordinal: 1, content: "Continue" };
+    const timedOutState = {
+      pending: [stranded],
+      piLogOffset: 256,
+      deliveredOrdinal: null,
+      timeoutRecoveryPending: true,
+      timeoutRestartPending: true,
+      timeoutRecoveryOrdinal: 0,
+    };
+    coreMocks.listPendingCompanionMessages
+      // Pre-start settlement, lifecycle revalidation, then the post-Online delivery snapshot.
+      .mockResolvedValueOnce(timedOutState)
+      .mockResolvedValueOnce(timedOutState)
+      .mockResolvedValueOnce({ ...timedOutState, timeoutRestartPending: false })
+      // The delivery lock owns one final pending/timeout revalidation.
+      .mockResolvedValueOnce({ ...timedOutState, timeoutRestartPending: false });
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/runtime/start?intent=message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_surface: "web" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ restartPi: true }));
+    expect(coreMocks.recordCompanionTimeoutRestart).toHaveBeenCalledWith(expect.objectContaining({
+      timeoutOrdinal: 0,
+    }));
+    expect(runtime.prompt).toHaveBeenCalledWith(expect.objectContaining({
+      message: stranded.content,
+      requestId: stranded.event_id,
+    }));
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+      expect.objectContaining({ deliveredOrdinal: 1, timeoutDeliveryOrdinal: 1 }),
+    );
+    expect(runtime.stop).not.toHaveBeenCalled();
+  });
+
   it("hands a message to a running Pi daemon and records the delivery watermark", async () => {
     coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
     coreMocks.listPendingCompanionMessages.mockResolvedValue({
@@ -2611,6 +3163,45 @@ describe("Companions API feature gate", () => {
     expect(coreMocks.recordCompanionPiProjectionWithEffects).not.toHaveBeenCalled();
   });
 
+  it("projects Error when a send-owned wake cannot hand its saved turn to Pi", async () => {
+    coreMocks.getCompanionForRuntime
+      .mockResolvedValueOnce(companion)
+      .mockResolvedValue(runningCompanion);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+      timeoutRecoveryPending: false,
+      timeoutRestartPending: false,
+      timeoutRecoveryOrdinal: null,
+    });
+    const runtime = boxRuntime({
+      prompt: vi.fn(async () => {
+        throw new BoxRuntimeProviderError("Pi refused the completed wake", 409);
+      }),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "Summarize the incident" }),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: expect.stringContaining("Pi refused the completed wake"),
+    });
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenLastCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({
+        runtimeState: "error",
+        daemonState: "error",
+        lastError: expect.stringContaining("Pi refused the completed wake"),
+      }),
+    }));
+  });
+
   it("delivers the stranded tail and a new send after terminalizing the prior tool", async () => {
     const stranded = { ...message, event_id: "msg:alors", content: "Alors ?", ordinal: 1 };
     const newest = { ...message, event_id: "msg:ca-va", content: "Ca va ?", ordinal: 2 };
@@ -2709,6 +3300,7 @@ describe("Companions API feature gate", () => {
     });
     coreMocks.listPendingCompanionMessages
       .mockResolvedValueOnce(pendingState)
+      .mockResolvedValueOnce({ ...pendingState, timeoutRestartPending: false })
       .mockResolvedValueOnce({ ...pendingState, timeoutRestartPending: false });
     const runtime = boxRuntime();
     const app = new Hono<{ Variables: ApiVariables }>();
@@ -3052,6 +3644,60 @@ describe("Companions API feature gate", () => {
       requestId: message.event_id,
     }));
     expect(runtime.readEvents).toHaveBeenCalledOnce();
+  });
+
+  it("projects Error when a recovery sync wake cannot hand its pending turn to Pi", async () => {
+    const waiting = {
+      ...companion,
+      runtime: {
+        ...companion.runtime,
+        state: "stopping" as const,
+        daemon_state: "starting" as const,
+      },
+    };
+    coreMocks.getCompanionForRuntime
+      .mockResolvedValueOnce(waiting)
+      .mockResolvedValue(runningCompanion);
+    coreMocks.claimCompanionRuntimeStart.mockResolvedValue(waiting);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+      timeoutRecoveryPending: false,
+      timeoutRestartPending: false,
+      timeoutRecoveryOrdinal: null,
+    });
+    coreMocks.updateCompanionRuntime.mockImplementation(async (input) => ({
+      ...runningCompanion,
+      runtime: {
+        ...runningCompanion.runtime,
+        state: input.patch.runtimeState ?? runningCompanion.runtime.state,
+        daemon_state: input.patch.daemonState ?? runningCompanion.runtime.daemon_state,
+      },
+    }));
+    const runtime = boxRuntime({
+      prompt: vi.fn(async () => {
+        throw new BoxRuntimeProviderError("Pi refused the recovered wake", 409);
+      }),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/thread/sync`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(response.status).toBe(409);
+    expect(runtime.readEvents).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenLastCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({
+        runtimeState: "error",
+        daemonState: "error",
+        lastError: expect.stringContaining("Pi refused the recovered wake"),
+      }),
+    }));
   });
 
   it("keeps syncing until an abandoned provisioning wake can be reclaimed", async () => {

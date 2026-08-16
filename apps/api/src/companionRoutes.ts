@@ -92,7 +92,6 @@ import type {
   Companion,
   CompanionDesktop,
   CompanionThread,
-  CompanionTranscriptEntry,
   StartCompanionRuntimeInput,
 } from "@companion/contracts";
 import { withTenantContext, type Db } from "@companion/db";
@@ -457,10 +456,9 @@ export function registerCompanionRoutes(
     orgId: string;
     companionId: string;
     boxId: string;
-    messages: CompanionTranscriptEntry[];
     runtime: CompanionBoxRuntime;
-    /** This delivery is protected by an unanswered timeout until each accepted ordinal is recorded. */
-    timeoutRecoveryPending?: boolean;
+    /** A completed wake must surface any Pi refusal instead of silently stranding its current turn. */
+    throwOnRefusal?: boolean;
   }): Promise<{ thread: CompanionThread; deliveredOrdinal: number } | null> {
     return deliverCompanionMessagesViaRuntime({
       actor: input.actor,
@@ -470,9 +468,8 @@ export function registerCompanionRoutes(
     }, {
       companionId: input.companionId,
       boxId: input.boxId,
-      messages: input.messages,
       runtime: input.runtime,
-      timeoutRecoveryPending: input.timeoutRecoveryPending,
+      throwOnRefusal: input.throwOnRefusal,
     });
   }
 
@@ -1191,6 +1188,7 @@ export function registerCompanionRoutes(
       }
       let runtime: CompanionBoxRuntime | undefined;
       let boxId: string | undefined;
+      let completedWake = false;
       if (
         piIsReachable(sent.companion)
         && !sent.timeoutRestartPending
@@ -1236,6 +1234,7 @@ export function registerCompanionRoutes(
           }
           runtime = started.runtime;
           boxId = started.companion.runtime.box_id;
+          completedWake = true;
         } catch {
           // Persistence happened first and startRuntime recorded last_error. Returning the durable
           // pending turn keeps the composer from creating a second id for the same user action.
@@ -1253,9 +1252,8 @@ export function registerCompanionRoutes(
         orgId: sent.orgId,
         companionId,
         boxId,
-        messages: sent.pending,
         runtime,
-        timeoutRecoveryPending: sent.timeoutRecoveryPending,
+        throwOnRefusal: completedWake,
       });
       const deliveredOrdinal = delivered?.deliveredOrdinal ?? sent.deliveredOrdinal;
       return c.json({
@@ -1321,6 +1319,7 @@ export function registerCompanionRoutes(
       let boxId = resolved.companion.runtime.box_id!;
       let desktopAvailable = resolved.companion.runtime.desktop_available;
       let runtime = runtimeFactory();
+      let completedWake = false;
       if (resolved.archiveResumePending || resolved.startRecoveryPending) {
         // The open thread is the automatic continuation for a wake that outlasted the adapter's
         // bounded archive poll. It also keeps retrying a provisioning claim whose owning API process
@@ -1352,6 +1351,7 @@ export function registerCompanionRoutes(
         runtime = started.runtime;
         boxId = started.companion.runtime.box_id;
         desktopAvailable = started.companion.runtime.desktop_available;
+        completedWake = true;
       } else {
         const observed = await runtime.status({ boxId }).catch(() => null);
         if (!observed) {
@@ -1381,29 +1381,17 @@ export function registerCompanionRoutes(
           }
           runtime = started.runtime;
           boxId = started.companion.runtime.box_id;
+          completedWake = true;
         }
       }
-      let deliveredOrdinal: number | undefined;
-      try {
-        for (const message of resolved.pending) {
-          await runtime.prompt({ boxId, message: message.content, requestId: message.event_id });
-          deliveredOrdinal = message.ordinal;
-        }
-      } finally {
-        if (deliveredOrdinal !== undefined) {
-          const recorded = await recordProjection({
-            actor: resolved.actor,
-            orgId: resolved.orgId,
-            companionId,
-            entries: [],
-            deliveredOrdinal,
-            timeoutDeliveryOrdinal: resolved.timeoutRecoveryPending
-              ? deliveredOrdinal
-              : undefined,
-          }).then(() => true, () => false);
-          if (recorded) await runtime.refreshTtl({ boxId }).catch(() => undefined);
-        }
-      }
+      await deliverCompanionMessages({
+        actor: resolved.actor,
+        orgId: resolved.orgId,
+        companionId,
+        boxId,
+        runtime,
+        throwOnRefusal: completedWake,
+      });
       const events = await runtime.readEvents({ boxId, offset: resolved.piLogOffset });
       const projection = projectCompanionPiEvents({ chunk: events.chunk, offset: events.offset });
       const projected = await recordProjection({
@@ -1555,8 +1543,82 @@ export function registerCompanionRoutes(
     const companionId = c.req.param("id");
     try {
       companionIdSchema.parse(companionId);
+      const deliveryIntent = c.req.query("intent") === "message";
       const body = startCompanionRuntimeInputSchema.parse(await c.req.json().catch(() => ({})));
-      const started = await startRuntime(c, companionId, body, { allowArchiveResume: true });
+      // The first-keystroke wake and the actual send are deliberately concurrent. Snapshot timeout
+      // recovery before claiming the lifecycle so the winning prewarm performs the same Pi-only
+      // recycle a winning send would have performed. A plain explicit wake remains start-only.
+      const beforeWake = deliveryIntent
+        ? await tenant(c, async ({ actor, orgId, database }) => {
+            await expireCompanionToolRuns({ actor, orgId, companionId, database });
+            const decisionResponses = await settleExpiredCompanionDecisions({
+              actor, orgId, companionId, database,
+            });
+            const pending = await listPendingCompanionMessages({
+              actor, orgId, companionId, database,
+            });
+            return { actor, orgId, decisionResponses, ...pending };
+          })
+        : null;
+      let started = await startRuntime(c, companionId, body, {
+        allowArchiveResume: true,
+        restartPi: beforeWake?.timeoutRestartPending ?? false,
+        timeoutRestartOrdinal: beforeWake?.timeoutRestartPending
+          ? beforeWake.timeoutRecoveryOrdinal
+          : null,
+      });
+      if (deliveryIntent && started.ready && started.companion.runtime.box_id) {
+        // Query after the running projection is committed. This is the handoff that closes the
+        // prewarm/send race: a send that persisted before losing the fresh provisioning claim is
+        // now visible here; a send that persists later sees a running lifecycle and delivers itself.
+        const afterWake = await tenant(c, async ({ actor, orgId, database }) => {
+          await expireCompanionToolRuns({ actor, orgId, companionId, database });
+          const decisionResponses = await settleExpiredCompanionDecisions({
+            actor, orgId, companionId, database,
+          });
+          const pending = await listPendingCompanionMessages({
+            actor, orgId, companionId, database,
+          });
+          return { actor, orgId, decisionResponses, ...pending };
+        });
+        // Tool settlement can expose a timeout-protected tail only after the first wake has already
+        // chosen its restart policy. Recycle Pi now, before handing that tail to the FIFO, and let
+        // the lifecycle claim arbitrate with a concurrent Send that discovered the same recovery.
+        if (afterWake.timeoutRestartPending) {
+          started = await startRuntime(c, companionId, body, {
+            allowBoxWake: false,
+            restartPi: true,
+            timeoutRestartOrdinal: afterWake.timeoutRecoveryOrdinal,
+          });
+          if (!started.ready || !started.companion.runtime.box_id) {
+            return c.json({ companion: started.companion }, started.ready ? 200 : 202);
+          }
+        }
+        const boxId = started.companion.runtime.box_id;
+        for (const response of [
+          ...(beforeWake?.decisionResponses ?? []),
+          ...afterWake.decisionResponses,
+        ]) {
+          await started.runtime.respondExtensionUi({ boxId, response }).catch(() => undefined);
+        }
+        if (afterWake.pending.length > 0) {
+          try {
+            await deliverCompanionMessages({
+              actor: afterWake.actor,
+              orgId: afterWake.orgId,
+              companionId,
+              boxId,
+              runtime: started.runtime,
+              throwOnRefusal: true,
+            });
+          } catch (error) {
+            // Delivery recorded this refusal while it still owned the cross-replica ordering lock.
+            // A later successful retry therefore clears Error instead of being overwritten by this
+            // older prewarm request after Pi has begun generating.
+            throw error;
+          }
+        }
+      }
       return c.json({ companion: started.companion }, started.ready ? 200 : 202);
     } catch (error) {
       return runtimeRouteError(c, error);

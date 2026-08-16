@@ -5,7 +5,7 @@ import {
   listPendingCompanionMessages,
   sendCompanionMessage,
 } from "@companion/core";
-import { withTenantContext } from "@companion/db";
+import { withDatabaseAdvisoryLock, withTenantContext } from "@companion/db";
 import { integrationSql, type TestActor } from "./testDatabase";
 
 /**
@@ -130,5 +130,37 @@ describe("Companion message send idempotence", () => {
     expect(pending.pending.filter((entry) => entry.content === "Never delivered"))
       .toEqual([sent.entry]);
     expect(pending.deliveredOrdinal).toBeNull();
+  });
+
+  it("serializes delivery for one Companion across database connections", async () => {
+    let releaseFirst: (() => void) | undefined;
+    let firstLocked: (() => void) | undefined;
+    const holdFirst = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const firstHasLock = new Promise<void>((resolve) => { firstLocked = resolve; });
+    const lockInput = { key: `${org}:${companionId}`, namespace: 371 };
+    const first = withDatabaseAdvisoryLock(lockInput, async () => {
+      firstLocked?.();
+      await holdFirst;
+    });
+    await firstHasLock;
+
+    let secondAcquired = false;
+    const second = withDatabaseAdvisoryLock(lockInput, async () => {
+      secondAcquired = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(secondAcquired).toBe(false);
+
+    // The same-key waiter releases its reserved session between non-blocking attempts, so the
+    // second coordination connection remains available to an unrelated Companion.
+    let unrelatedAcquired = false;
+    await withDatabaseAdvisoryLock({ key: `${org}:other-companion`, namespace: 371 }, async () => {
+      unrelatedAcquired = true;
+    });
+    expect(unrelatedAcquired).toBe(true);
+
+    releaseFirst?.();
+    await Promise.all([first, second]);
+    expect(secondAcquired).toBe(true);
   });
 });

@@ -88,7 +88,17 @@ the control plane before any Box contact and an undelivered message stays pendin
 idempotent send to retry. An Owner/Editor send uses a lightweight runtime observation to deliver
 directly when Box and Pi are already running; otherwise it starts the Companion through the same lifecycle path as `/runtime/start`, so an
 archived Box resumes and a stopped Pi starts without making the common online path claim or inject
-anything. If that wake finds a Box still archiving, it keeps a dedicated wait marker and the runner's
+anything. The first-keystroke prewarm is marked as delivery intent: once it commits Online it drains
+a newly persisted pending tail, so the send that lost the provisioning claim to that prewarm cannot
+be stranded behind it. Send, sync, and prewarm drains serialize through a tenant-scoped PostgreSQL
+advisory lock on a small pool isolated from request queries and re-read the pending watermark before
+writing Pi, so overlapping API replicas cannot execute one turn twice or let degraded Box I/O starve
+the API database pool; same-key waiters release their reserved session between non-blocking attempts,
+so they cannot convoy unrelated Companions behind one slow FIFO. A timeout tail first exposed by the
+post-wake snapshot takes a second Pi-only lifecycle claim before delivery. Online readiness requires
+an active Pi systemd unit whose current invocation
+id matches the marker written after opening its RPC FIFO; a post-wake FIFO refusal records a visible
+Error. If that wake finds a Box still archiving, it keeps a dedicated wait marker and the runner's
 open-thread sync reclaims it until the archive can resume; Viewer reads and explicit Stop never do.
 Pi-only and settings-apply races keep a non-auto-resuming wait that only an explicit Wake can claim,
 and Owner deletion has a distinct lock no wake can claim.
@@ -138,9 +148,9 @@ runtime tmpfs: systemd can reread it when Pi auto-restarts, while Box stop/reboo
 cannot snapshot it. Empty attachment stages no member MCP pins. Native mobile receives no MCP accounts. Viewer
 authorization completes before skill storage, connector decryption, or Box is contacted.
 
-Tool execution is bounded independently of Box lifecycle. The staged Pi extension refuses image
-paths before built-in `read` enters vision and gives every accepted execution tool a scoped
-90-second deadline, clearing sibling timers before it aborts the active turn; interactive
+Tool execution is bounded independently of Box lifecycle. The staged Pi extension gives every
+accepted execution tool, including image `read`, a scoped 90-second deadline, clearing sibling
+timers before it aborts the active turn; interactive
 `ask_user` keeps the decision system's five-minute deadline. Live sync and the read-only
 control-plane thread fallback close any chip whose result is still absent at that deadline, using
 compare-and-set settlement so a late result cannot overwrite the timeout. The control plane sends no
@@ -158,7 +168,8 @@ concurrent request cannot recycle that Pi twice. A narrow database definer lets 
 settlement housekeeping without granting general thread writes. A settled
 `browse` or `computer` run receives
 exactly one frame, attributed by the run id whose settlement won and captured directly from the
-existing Box desktop source, never through Pi `read`; the stored frame remains read-only for Viewers.
+existing Box desktop source. Pi's own image `read` remains available under the bounded file-tool
+deadline; the stored frame remains read-only for Viewers.
 
 The web has no `/projects` route and no Run/Session state in the Skills URL grammar. Old query parameters are ignored and canonical navigation returns to the Skills detail. By default the only product workspace navigation is Skills. The `COMPANION_COMPANIONS_ENABLED` server-side flag plus a non-empty email-domain allowlist expose an authenticated `/companions` list/create shell, the 1:1 chat thread it opens into, plus the Skills | Companions sidebar mode segment that reaches it; without either setting neither the route nor the segment exists. The route and segment are also absent for authenticated users without a matching email. Opening a Companion replaces the list with its thread and deep-links through a `companion` search parameter. The web and mobile-web list also opens a separate Plugins surface for member-private labeled MCP accounts; native mobile has no Plugins surface. That surface exposes a product-owned catalog shipped with Companion containing Linear, GitHub, and Notion; neither the browser nor the API queries an external MCP registry. Those three entries use an authorization-code + PKCE broker: Linear and Notion dynamically register the deployment callback, GitHub uses the deployment's configured OAuth App, and callback state plus the pending client credential stay signed and envelope-encrypted until the provider grant is saved. The resulting access/refresh grant reuses THE-321's member-private `saveCompanionPlugin` row and encrypted credential column, refreshes before runtime injection, and is never returned to the browser. Custom servers retain THE-321's explicit token/header form. Both paths require an account label, so the same server can be connected under several labels and a duplicate label still fails closed. The Plugins surface and OAuth remain gated by the same flag and email-domain allowlist as the rest of Companions.
 

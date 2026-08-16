@@ -21,15 +21,19 @@ import {
 
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
 const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
+/** First Pi release whose image resize runs outside the RPC event loop. */
+const MINIMUM_IMAGE_SAFE_PI_VERSION = "0.84.2";
 // Layout 5 made the daemon wrapper report its own failures. Layout 6 moves MCP credentials off the
 // snapshotted Box disk and into the user runtime directory. Layout 7 teaches the daemon wrapper to
 // append staged Companion instructions. Layout 8 passes the persisted model through `pi --model`.
 // Layout 9 staged the permission broker for shell, file, and question cards. Layout 10 overwrites
 // that legacy filename with the ask_user-only extension so shell and file tools run unrestricted.
-// Layout 11 refuses image reads and bounds every non-interactive execution tool so a Pi vision/tool
-// stall cannot hold a turn open indefinitely. Layout 12 gives shell runs their own longer execution
-// deadline so a legitimate build or test sweep is no longer aborted at the 90-second default.
-export const COMPANION_PI_DISK_LAYOUT_VERSION = 12;
+// Layout 11 bounded every non-interactive execution tool and temporarily refused image reads while
+// Pi image decoding could block the event loop. Layout 12 gave shell runs a longer deadline. Layout
+// 13 restores image reads only after verifying Pi includes worker-isolated resizing, and binds RPC
+// readiness to the current systemd invocation; the same 90-second guard aborts a read that does not
+// settle.
+export const COMPANION_PI_DISK_LAYOUT_VERSION = 13;
 /** Content bytes the provider's file API refuses in one `PUT /boxes/:id/files` body. */
 const BOX_FILE_WRITE_LIMIT_BYTES = 5 * 1024 * 1024;
 /**
@@ -451,32 +455,58 @@ function parsePiEventChunk(stdout: string): CompanionPiEventChunk | null {
 const PI_LAYOUT_SCRIPT_PATH = ".companion/bin/ensure-pi-layout.sh";
 
 function setupScript(installCommand: string | undefined, mcpAdapterPackage: string): string {
-  const install = installCommand?.trim()
-    ? installCommand
-    : "echo 'Pi is not installed; configure COMPANION_PI_INSTALL_COMMAND or preinstall pi in the Box image' >&2; exit 1";
+  const configuredInstall = installCommand?.trim();
+  const ensureInstalled = configuredInstall
+    ? configuredInstall
+    : `if ! command -v pi >/dev/null 2>&1; then
+  echo 'Pi is not installed; configure COMPANION_PI_INSTALL_COMMAND or preinstall pi in the Box image' >&2
+  exit 1
+fi`;
   return `#!/usr/bin/env bash
 set -euo pipefail
 # An already-laid-out disk short-circuits before anything else, so repairing the layout on a Box that
 # is already correct costs one file read and cannot fail on a dependency it does not need.
 layout_marker="$HOME/.companion/runtime/state/pi-layout.version"
-expected_layout=${shellQuote(`${COMPANION_PI_DISK_LAYOUT_VERSION}:${mcpAdapterPackage}`)}
+expected_layout=${shellQuote(`${COMPANION_PI_DISK_LAYOUT_VERSION}:${mcpAdapterPackage}:pi>=${MINIMUM_IMAGE_SAFE_PI_VERSION}`)}
 if [ -f "$layout_marker" ] && [ "$(cat "$layout_marker")" = "$expected_layout" ]; then
   exit 0
 fi
-if ! command -v pi >/dev/null 2>&1; then
-  ${install}
-fi
+${ensureInstalled}
 command -v pi >/dev/null 2>&1
 mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/pi/extensions" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.config/systemd/user"
 # Resolve Pi's absolute path now so the daemon does not depend on a login-shell PATH it will never
 # have under the minimal systemd user manager environment.
 pi_bin="$(command -v pi)"
+pi_version="$($pi_bin --version 2>/dev/null || true)"
+node - "$pi_version" ${shellQuote(MINIMUM_IMAGE_SAFE_PI_VERSION)} <<'COMPANION_PI_VERSION'
+const actualText = process.argv[2] ?? "";
+const minimumText = process.argv[3] ?? "";
+const parse = (value) => {
+  const match = value.match(/(\\d+)\\.(\\d+)\\.(\\d+)/);
+  return match ? match.slice(1).map(Number) : null;
+};
+const actual = parse(actualText);
+const minimum = parse(minimumText);
+const currentEnough = actual && minimum && (
+  actual.every((part, index) => part === minimum[index])
+  || actual.some((part, index) =>
+    part > minimum[index]
+    && actual.slice(0, index).every((prior, priorIndex) => prior === minimum[priorIndex]))
+);
+if (!currentEnough) {
+  console.error(
+    \`Pi \${minimumText} or newer is required for bounded image reads; found \${actualText || "an unknown version"}\`,
+  );
+  process.exit(1);
+}
+COMPANION_PI_VERSION
 pi_bin_dir="$(dirname "$pi_bin")"
 PI_CODING_AGENT_DIR="$HOME/.companion/pi" "$pi_bin" install ${shellQuote(mcpAdapterPackage)}
 {
   printf '%s\n' '#!/usr/bin/env bash'
   printf '%s\n' 'set -euo pipefail'
   printf 'PI_BIN=%q\n' "$pi_bin"
+  printf 'MINIMUM_IMAGE_SAFE_PI_VERSION=%q\n' ${shellQuote(MINIMUM_IMAGE_SAFE_PI_VERSION)}
   printf 'PATH=%q:"$PATH"\n' "$pi_bin_dir"
   printf '%s\n' 'export PATH'
   cat <<'COMPANION_PI_DAEMON'
@@ -496,9 +526,39 @@ exec 2>>"$stderr_log"
 trap 'companion_status=$?; printf "pi-daemon: line %s: %s failed with status %s\\n" "$LINENO" "$BASH_COMMAND" "$companion_status" >&2' ERR
 export PI_CODING_AGENT_DIR="$HOME/.companion/pi"
 fifo="$root/state/pi.rpc.in"
-rm -f "$fifo"
+ready="$root/state/pi.rpc.ready"
+rm -f "$fifo" "$ready"
+pi_version="$("$PI_BIN" --version 2>/dev/null || true)"
+node - "$pi_version" "$MINIMUM_IMAGE_SAFE_PI_VERSION" <<'COMPANION_PI_DAEMON_VERSION'
+const actualText = process.argv[2] ?? "";
+const minimumText = process.argv[3] ?? "";
+const parse = (value) => {
+  const match = value.match(/(\\d+)\\.(\\d+)\\.(\\d+)/);
+  return match ? match.slice(1).map(Number) : null;
+};
+const actual = parse(actualText);
+const minimum = parse(minimumText);
+const currentEnough = actual && minimum && (
+  actual.every((part, index) => part === minimum[index])
+  || actual.some((part, index) =>
+    part > minimum[index]
+    && actual.slice(0, index).every((prior, priorIndex) => prior === minimum[priorIndex]))
+);
+if (!currentEnough) {
+  console.error(
+    "Pi " + minimumText + " or newer is required for bounded image reads; found "
+      + (actualText || "an unknown version"),
+  );
+  process.exit(1);
+}
+COMPANION_PI_DAEMON_VERSION
 mkfifo -m 600 "$fifo"
 exec 3<>"$fifo"
+if [ -z "\${INVOCATION_ID:-}" ]; then
+  echo 'pi-daemon: systemd invocation id is missing' >&2
+  exit 1
+fi
+printf '%s\n' "$INVOCATION_ID" > "$ready"
 skill_args=(--no-skills)
 model_args=()
 if [ -s "$root/state/model.txt" ]; then
@@ -613,8 +673,12 @@ const BOX_RUNNABLE_COMMAND = `printf '%s\\n' ${shellQuote(BOX_RUNNABLE_MARKER)}`
  * exits 0 either way and its exit status carries the same reachability proof as the cold probe.
  */
 const WARM_DAEMON_READY_COMMAND = `${USER_BUS_ENVIRONMENT}
+companion_pi_invocation="$(systemctl --user show companion-pi-daemon.service -p InvocationID --value 2>/dev/null || true)"
 if systemctl --user show-environment >/dev/null 2>&1 &&
   systemctl --user is-active --quiet companion-pi-daemon.service &&
+  [ -n "$companion_pi_invocation" ] &&
+  [ -p "$HOME/.companion/runtime/state/pi.rpc.in" ] &&
+  [ "$(cat "$HOME/.companion/runtime/state/pi.rpc.ready" 2>/dev/null || true)" = "$companion_pi_invocation" ] &&
   [ -f "$XDG_RUNTIME_DIR/companion/providers.env" ]; then
   printf '%s\\n' ${shellQuote(WARM_DAEMON_READY_MARKER)}
 fi`;
@@ -1113,15 +1177,31 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
     const result = await this.#command(
       boxId,
       `${USER_BUS_ENVIRONMENT}
-systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true`,
+companion_pi_state="$(systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true)"
+printf '%s\n' "$companion_pi_state"
+companion_pi_invocation="$(systemctl --user show companion-pi-daemon.service -p InvocationID --value 2>/dev/null || true)"
+if [ "$companion_pi_state" = active ] &&
+  [ -n "$companion_pi_invocation" ] &&
+  [ -p "$HOME/.companion/runtime/state/pi.rpc.in" ] &&
+  [ "$(cat "$HOME/.companion/runtime/state/pi.rpc.ready" 2>/dev/null || true)" = "$companion_pi_invocation" ]; then
+  printf '%s\n' companion-pi-rpc-ready
+else
+  printf '%s\n' companion-pi-rpc-unready
+fi`,
     );
-    return result.stdout.trim() === "active" ? "running" : "stopped";
+    const lines = result.stdout.trim().split(/\r?\n/);
+    // Exact `active` remains accepted for older Box command fakes. The real probe always prints an
+    // RPC marker, and an explicit unready marker prevents systemd Type=simple from becoming Online
+    // before the daemon wrapper has created the FIFO Pi actually consumes.
+    return lines[0] === "active" && !lines.includes("companion-pi-rpc-unready")
+      ? "running"
+      : "stopped";
   }
 
   /**
-   * Wait for the started unit to actually be running. A successful `start` only means systemd
-   * accepted the job, so the daemon is given the whole window to reach `active` and the wait ends
-   * on the first probe that says it did.
+   * Wait for the started unit and its RPC input to actually be ready. A successful `start` only
+   * means systemd accepted the job, and Type=simple becomes active before the wrapper creates its
+   * FIFO, so the wait ends only when both signals say Pi can consume a prompt.
    */
   async #waitDaemonActive(boxId: string): Promise<CompanionDaemonState> {
     const deadline = Date.now() + this.#daemonActiveTimeoutMs;
@@ -1590,10 +1670,11 @@ exit 0`,
     // A warm shortcut staged nothing: the Box keeps whatever resources the previous injection
     // left. `staged: false` is what stops the caller from recording a skills apply for it.
     if (first.warm) return { ...observation(await this.#get(box.id), "running"), staged: false };
-    // Publish the approval-free extension before the layout marker. A daemon that happens to
-    // restart while the rest of the migration is staged must never reload the legacy broker.
-    await this.#stageCompanionInteractionExtension(box.id);
+    // The permissive extension may expose image reads only after setup proves this Box has the Pi
+    // release whose resize worker keeps the RPC loop bounded. A daemon that restarts during an
+    // older layout repair keeps its prior fail-closed extension until this proof succeeds.
     await this.#ensurePiLayout(box.id);
+    await this.#stageCompanionInteractionExtension(box.id);
     await this.#injectPiResources({
       boxId: box.id,
       clientSurface: input.clientSurface,
@@ -1679,7 +1760,9 @@ if systemctl --user show-environment >/dev/null 2>&1; then
     exit 1
   fi
 fi
-rm -f "/run/user/$(id -u)/companion/providers.env"`,
+rm -f "/run/user/$(id -u)/companion/providers.env" \
+  "$HOME/.companion/runtime/state/pi.rpc.in" \
+  "$HOME/.companion/runtime/state/pi.rpc.ready"`,
       );
       if (!stopped.success) throw new BoxRuntimeProviderError("Pi daemon failed to stop", 502);
     }
@@ -1711,8 +1794,12 @@ rm -f "/run/user/$(id -u)/companion/providers.env"`,
       `set -euo pipefail
 ${USER_BUS_ENVIRONMENT}
 fifo="$HOME/.companion/runtime/state/pi.rpc.in"
+ready="$HOME/.companion/runtime/state/pi.rpc.ready"
+companion_pi_invocation="$(systemctl --user show companion-pi-daemon.service -p InvocationID --value 2>/dev/null || true)"
 systemctl --user is-active --quiet companion-pi-daemon.service
 test -p "$fifo"
+[ -n "$companion_pi_invocation" ]
+[ "$(cat "$ready" 2>/dev/null || true)" = "$companion_pi_invocation" ]
 printf '%s\\n' ${shellQuote(command)} > "$fifo"`,
       20,
     );

@@ -371,10 +371,12 @@ export async function startCompanionRuntime(
   companionId: string,
 ): Promise<Companion> {
   const result = await apiFetch<{ companion: Companion }>(
-    `/v1/companions/${encodeURIComponent(companionId)}/runtime/start`,
+    `/v1/companions/${encodeURIComponent(companionId)}/runtime/start?intent=message`,
     {
       method: "POST",
       headers: orgHeaders(orgId),
+      // This is the composer's first-keystroke prewarm. It must drain a durable send that loses the
+      // concurrent lifecycle claim to this request, rather than merely leaving Pi online and idle.
       body: JSON.stringify({ client_surface: "web" }),
     },
     { timeoutMs: RUNTIME_WAKE_TIMEOUT_MS },

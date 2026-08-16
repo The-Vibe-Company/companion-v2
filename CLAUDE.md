@@ -41,6 +41,32 @@ Use `.conductor/settings.toml`. Setup installs PostgreSQL 17 plus `lsof` with `d
 
 The native Conductor stack starts per-workspace PostgreSQL plus optional MinIO and Mailpit under `.conductor-pg/`, then API, worker, and web. Ports derive from `CONDUCTOR_PORT`: web `+0`, API `+1`, PostgreSQL `+2`, MinIO API `+3`, console `+4`, SMTP `+5`, Mailpit UI `+6`. Cloud workspaces use base `3000`. Internal services bind loopback; cloud web binds `0.0.0.0`. Cookies use a workspace-specific prefix. Missing MinIO disables uploads; missing Mailpit falls back to logged email.
 
+## Legacy Companions wake-on-send playbook
+
+- An Owner/Editor send to a new or Asleep Companion persists first, reports Starting while one
+  lifecycle owner wakes it, reaches Online only after Pi's current systemd invocation marks its RPC
+  FIFO ready, and then produces an
+  assistant reply or a visible Error. Starting → Asleep → Online → Asleep with no reply is a
+  lifecycle failure. A first-keystroke prewarm carries delivery intent and must drain a send that
+  loses the concurrent provisioning claim to it. Viewer reads remain control-plane-only.
+- “Companion is replying…” means Pi accepted the current, non-timeout turn and is generating. Do
+  not show it for a durable message whose `pending_count` is nonzero, an Asleep/Error runtime, a
+  timed-out tool tail, or a post-timeout user tail until a fresh Pi event proves recovery.
+- Do not use Full Box, archive, delete, or replacement as a wake-on-send repair. Use the normal
+  start/resume path and Pi-only recycle for daemon, layout, provider, skill, or timed-out-turn
+  recovery. Full Box remains an explicit operator action for a Box-level reset after narrower
+  recovery is ruled out; deletion is lifecycle cleanup, never healing.
+- The local and production happy-path suite is the same: create a fresh disposable Companion; send
+  and require an assistant reply; ask it to `read` an image such as `conductor-cli.png` and require
+  a settled result rather than an unbounded hang; stop/sleep the Box through the runtime stop API;
+  send again and require Starting → Online plus another assistant reply with no intervening Asleep;
+  then clean up the disposable fixture. Never run this suite against a named incident Companion.
+- A timed-out-tail fixture is a separate regression suite: seed or preserve a settled `timeout`
+  tool chip with user messages behind it; verify control-plane and Viewer reads keep that chip
+  timed out and do not wake Box or show stale replying; then an Owner/Editor send may recycle Pi
+  only, deliver the exact pending suffix once, and receive a reply. Do not convert this fixture into
+  the fresh-Companion suite, and do not Full Box it to make the test pass.
+
 ## Tests and completion
 
 - Follow `docs/testing.md`; prefer behavior-level coverage.

@@ -67,15 +67,19 @@ export function replyExpected(input: {
   if (!input.awake) return false;
   const tail = input.entries[input.entries.length - 1];
   if (tail?.role === "user") {
+    // A durable tail still waiting for Pi is delivery work, not generation. This is the state the
+    // prewarm/send handoff closes; never turn it into a stale “replying…” promise while it waits.
+    if ((input.pendingCount ?? 0) > 0) return false;
     for (let index = input.entries.length - 2; index >= 0; index -= 1) {
       const entry = input.entries[index];
       if (entry?.role === "assistant") return true;
       if (entry?.role === "tool") return entry.tool?.status !== "timeout";
       if (entry?.role === "decision") return true;
     }
-    // `pending_count` says only that Pi's FIFO accepted the message. It cannot revive the turn a
-    // timed-out tool aborted, so transcript history remains authoritative for that boundary.
-    return input.pendingCount === undefined || input.pendingCount === 0;
+    // A delivered first turn has no earlier Pi event as proof, so the zero pending watermark is its
+    // generation signal. It still cannot revive a timed-out turn because that boundary returns
+    // false above as soon as the scan reaches it.
+    return true;
   }
   if (tail?.role === "tool") return tail.tool?.status !== "timeout";
   if (tail?.role === "decision") return true;
