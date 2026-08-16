@@ -3,6 +3,8 @@ import {
   AsciiBoxMaintenanceClient,
   type BoxDeletionOperation,
   type BoxDeletionStatus,
+  BoxRuntimeAdapterError,
+  companionGenerationBoxName,
 } from "./boxMaintenanceClient";
 import {
   BoxRuntimeConfigurationError,
@@ -12,6 +14,8 @@ import {
 const BOX_ID = "bx_23456789";
 const OTHER_BOX_ID = "bx_abcdefgh";
 const OPERATION_ID = "bdop_00000000000000000000000000000001";
+const COMPANION_ID = "11111111-1111-4111-8111-111111111111";
+const GENERATION_NAME = `Companion ${COMPANION_ID} g14`;
 
 function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
@@ -228,6 +232,20 @@ describe("AsciiBoxMaintenanceClient", () => {
     },
   );
 
+  it("accepts the documented box.deleting discriminator while polling a Box deletion", async () => {
+    const current = operation("processing");
+    vi.stubGlobal("fetch", vi.fn(async () => json({
+      ok: true,
+      type: "box.deleting",
+      operation: current,
+    })));
+
+    await expect(client().getDeletionOperation({
+      operationId: OPERATION_ID,
+      boxId: BOX_ID,
+    })).resolves.toEqual(current);
+  });
+
   it.each([
     ["unknown status", operation("pending", { status: "unknown" as BoxDeletionStatus })],
     ["malformed operation id", operation("pending", { id: "operation-1" })],
@@ -326,5 +344,367 @@ describe("AsciiBoxMaintenanceClient", () => {
       status: 502,
       code: "invalid_provider_response",
     });
+  });
+
+  it("builds and validates one exact generation-qualified Box name", () => {
+    expect(companionGenerationBoxName({ companionId: COMPANION_ID, generation: 14 }))
+      .toBe(GENERATION_NAME);
+    expect(() => companionGenerationBoxName({ companionId: "../other", generation: 14 }))
+      .toThrow(BoxRuntimeConfigurationError);
+    expect(() => companionGenerationBoxName({ companionId: COMPANION_ID, generation: 0 }))
+      .toThrow(BoxRuntimeConfigurationError);
+  });
+
+  it("selects a canonical Box by id and reports only exact-name duplicates", async () => {
+    const laterId = "bx_abcdefgh";
+    const canonicalId = "bx_23456789";
+    vi.stubGlobal("fetch", vi.fn(async () => json({
+      ok: true,
+      type: "box.list",
+      boxes: [
+        { id: laterId, name: GENERATION_NAME },
+        { id: "bx_jkmnpqrs", name: `${GENERATION_NAME} ` },
+        { id: canonicalId, name: GENERATION_NAME },
+        { id: "bx_tuvwxyz2", name: `${GENERATION_NAME} shadow` },
+      ],
+      pageInfo: { nextCursor: null, hasMore: false },
+    })));
+
+    await expect(client().findGenerationBoxes({
+      companionId: COMPANION_ID,
+      generation: 14,
+      deadlineAt: Date.now() + 1_000,
+    })).resolves.toEqual({
+      name: GENERATION_NAME,
+      canonical: { id: canonicalId, name: GENERATION_NAME },
+      duplicates: [{ id: laterId, name: GENERATION_NAME }],
+    });
+  });
+
+  it("recovers the exact-name canonical and duplicates without issuing create", async () => {
+    const fetchMock = vi.fn(async () => json({
+      ok: true,
+      type: "box.list",
+      boxes: [
+        { id: OTHER_BOX_ID, name: GENERATION_NAME },
+        { id: "bx_jkmnpqrs", name: `${GENERATION_NAME} ` },
+        { id: BOX_ID, name: GENERATION_NAME },
+      ],
+      pageInfo: { nextCursor: null, hasMore: false },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(client().createOrRecoverGenerationBox({
+      companionId: COMPANION_ID,
+      generation: 14,
+      ttlSeconds: 21_600,
+      deadlineAt: Date.now() + 1_000,
+    })).resolves.toEqual({
+      outcome: "recovered",
+      boxId: BOX_ID,
+      name: GENERATION_NAME,
+      canonical: { id: BOX_ID, name: GENERATION_NAME },
+      duplicates: [{ id: OTHER_BOX_ID, name: GENERATION_NAME }],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts one documented 202 create and exposes its Box id before rename", async () => {
+    const createdId = OTHER_BOX_ID;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "box.list",
+        boxes: [],
+        pageInfo: { nextCursor: null, hasMore: false },
+      }))
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "box.created",
+        status: "provisioning",
+        ttlSeconds: 21_600,
+        box: { id: createdId, name: "Box 2026-08-16 21:00" },
+      }, 202));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(client().createOrRecoverGenerationBox({
+      companionId: COMPANION_ID,
+      generation: 14,
+      ttlSeconds: 21_600,
+      setupScript: "install-layout-14",
+      environment: "prod",
+      env: { COMPANION_ID },
+      deadlineAt: Date.now() + 1_000,
+    })).resolves.toEqual({
+      outcome: "created",
+      boxId: createdId,
+      name: GENERATION_NAME,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const createInit = fetchMock.mock.calls[1]?.[1] as RequestInit;
+    expect(createInit.method).toBe("POST");
+    expect(JSON.parse(String(createInit.body))).toEqual({
+      ttlSeconds: 21_600,
+      noEnv: true,
+      setupScript: "install-layout-14",
+      environment: "prod",
+      env: { COMPANION_ID },
+    });
+  });
+
+  it("leaves a lost create POST outcome unknown without name reconciliation or replay", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "box.list",
+        boxes: [],
+        pageInfo: { nextCursor: null, hasMore: false },
+      }))
+      .mockRejectedValueOnce(new TypeError(
+        "fetch failed for https://box.test/?token=provider-secret-417",
+      ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const failure = await client().createOrRecoverGenerationBox({
+      companionId: COMPANION_ID,
+      generation: 14,
+      ttlSeconds: 21_600,
+      deadlineAt: Date.now() + 1_000,
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(BoxRuntimeAdapterError);
+    expect(failure).toMatchObject({
+      stableCode: "box_network_error",
+      retryable: true,
+      outcomeUnknown: true,
+    });
+    expect(String((failure as Error).message)).not.toMatch(/provider-secret|token=|https?:/);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+
+  it("rejects HTTP 201 as an outcome-unknown create contract violation", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "box.list",
+        boxes: [],
+        pageInfo: { nextCursor: null, hasMore: false },
+      }))
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "box.created",
+        status: "provisioning",
+        ttlSeconds: 21_600,
+        box: { id: BOX_ID, name: "provider default" },
+      }, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(client().createOrRecoverGenerationBox({
+      companionId: COMPANION_ID,
+      generation: 14,
+      ttlSeconds: 21_600,
+      deadlineAt: Date.now() + 1_000,
+    })).rejects.toMatchObject({
+      stableCode: "invalid_provider_response",
+      outcomeUnknown: true,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+
+  it("applies deterministic naming and TTL in one idempotent PATCH", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (_input, _init) => json({
+      ok: true,
+      type: "box.info",
+      box: { id: BOX_ID, name: GENERATION_NAME },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(client().applyGenerationBoxSettings({
+      boxId: BOX_ID,
+      companionId: COMPANION_ID,
+      generation: 14,
+      ttlSeconds: 21_600,
+      deadlineAt: Date.now() + 1_000,
+    })).resolves.toEqual({
+      boxId: BOX_ID,
+      name: GENERATION_NAME,
+      ttlSeconds: 21_600,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`https://box.test/v1/boxes/${BOX_ID}`);
+    const patchInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(patchInit.method).toBe("PATCH");
+    expect(JSON.parse(String(patchInit.body))).toEqual({
+      name: GENERATION_NAME,
+      ttlSeconds: 21_600,
+    });
+  });
+
+  it("leaves a lost settings PATCH outcome unknown without retrying", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError("token=provider-secret-417");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const failure = await client().applyGenerationBoxSettings({
+      boxId: BOX_ID,
+      companionId: COMPANION_ID,
+      generation: 14,
+      ttlSeconds: 21_600,
+      deadlineAt: Date.now() + 1_000,
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(BoxRuntimeAdapterError);
+    expect(failure).toMatchObject({
+      stableCode: "box_network_error",
+      retryable: true,
+      outcomeUnknown: true,
+    });
+    expect(String((failure as Error).message)).not.toMatch(/provider-secret|token=|https?:/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [429, "box_rate_limited", "rate_limit_secret"],
+    [503, "box_provider_unavailable", "provider_dump_secret"],
+  ] as const)(
+    "maps HTTP %s to a retryable stable error without provider diagnostics",
+    async (status, stableCode, secret) => {
+      vi.stubGlobal("fetch", vi.fn(async () => json({
+        ok: false,
+        code: status === 429 ? "rate_limited" : "providersecret417",
+        message: `request failed token=${secret} https://signed.test/?secret=${secret}`,
+      }, status)));
+
+      const failure = await client().listAllBoxes({
+        deadlineAt: Date.now() + 1_000,
+      }).catch((error: unknown) => error);
+      expect(failure).toMatchObject({
+        stableCode,
+        retryable: true,
+        outcomeUnknown: false,
+      });
+      expect(String((failure as Error).message)).not.toContain(secret);
+      expect(String((failure as Error).message)).not.toMatch(/token=|https?:/);
+      if (status === 503) {
+        expect(failure).toMatchObject({
+          code: "box_provider_unavailable",
+          providerCode: undefined,
+        });
+      }
+    },
+  );
+
+  it("refuses an elapsed absolute deadline before contacting Box", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(client().listAllBoxes({ deadlineAt: Date.now() - 1 }))
+      .rejects.toMatchObject({
+        stableCode: "box_request_deadline_exceeded",
+        retryable: true,
+        outcomeUnknown: false,
+      });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("bounds a hung request by the absolute deadline", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: RequestInit) =>
+      await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      })));
+
+    await expect(client().listAllBoxes({ deadlineAt: Date.now() + 20 }))
+      .rejects.toMatchObject({
+        stableCode: "box_request_deadline_exceeded",
+        retryable: true,
+        outcomeUnknown: false,
+      });
+  });
+
+  it("waits through asynchronous deletion and returns the retained terminal operation", async () => {
+    const pending = operation("pending");
+    const completed = operation("completed");
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "box.deleting",
+        operation: pending,
+      }, 202))
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "deletion.operation",
+        operation: completed,
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(client().deletePermanentlyAndWait({
+      boxId: BOX_ID,
+      deadlineAt: Date.now() + 1_000,
+      pollIntervalMs: 1,
+    })).resolves.toEqual({ outcome: "deleted", operation: completed });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("maps delete 404 to already_deleted and does not invent an operation", async () => {
+    const fetchMock = vi.fn(async () => json({
+      ok: false,
+      code: "box_not_found",
+      message: "not found",
+    }, 404));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(client().deletePermanentlyAndWait({
+      boxId: BOX_ID,
+      deadlineAt: Date.now() + 1_000,
+      pollIntervalMs: 1,
+    })).resolves.toEqual({ outcome: "already_deleted", boxId: BOX_ID });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a blocked deletion as a terminal provider result", async () => {
+    const blocked = operation("blocked");
+    vi.stubGlobal("fetch", vi.fn(async () => json({
+      ok: true,
+      type: "deletion.operation",
+      operation: blocked,
+    })));
+
+    await expect(client().deletePermanentlyAndWait({
+      boxId: BOX_ID,
+      operationId: OPERATION_ID,
+      deadlineAt: Date.now() + 1_000,
+      pollIntervalMs: 1,
+    })).resolves.toEqual({ outcome: "blocked", operation: blocked });
+  });
+
+  it("bounds pending deletion polling by its shared absolute deadline", async () => {
+    const pending = operation("pending");
+    vi.stubGlobal("fetch", vi.fn(async () => json({
+      ok: true,
+      type: "deletion.operation",
+      operation: pending,
+    })));
+
+    await expect(client().deletePermanentlyAndWait({
+      boxId: BOX_ID,
+      operationId: OPERATION_ID,
+      deadlineAt: Date.now() + 20,
+      pollIntervalMs: 100,
+    })).rejects.toMatchObject({
+      stableCode: "box_deletion_deadline_exceeded",
+      retryable: true,
+      outcomeUnknown: false,
+    });
+  });
+
+  it("requires an absolute deadline before starting deletion polling", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    // @ts-expect-error Runtime validation also protects untyped callers.
+    await expect(client().deletePermanentlyAndWait({ boxId: BOX_ID }))
+      .rejects.toThrow(/absolute deadline/);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

@@ -1,5 +1,6 @@
 import {
   appendPiEvent,
+  appendPiProcessExit,
   createBoxSimCommandMachine,
   executeBoxCommand,
   normalizeBoxPath,
@@ -43,9 +44,7 @@ export interface BoxSimulatorOptions {
 }
 
 export interface CreateBoxInput {
-  name?: string;
   ttlSeconds?: number;
-  desktopAvailable?: boolean;
   setupScript?: string;
   /** Accepted for provider fidelity, intentionally not retained in simulator state. */
   env?: Record<string, unknown>;
@@ -270,9 +269,9 @@ export class BoxSimulator {
     const record: BoxRecord = {
       box: {
         id,
-        ...(input.name?.trim() ? { name: input.name.trim() } : {}),
+        name: `box-sim-${id.slice(3)}`,
         state: "provisioning",
-        desktopAvailable: input.desktopAvailable ?? this.#defaults.desktopAvailable,
+        desktopAvailable: this.#defaults.desktopAvailable,
         setupStatus: "running",
         setupError: null,
         ttlSeconds: input.ttlSeconds === undefined
@@ -544,6 +543,7 @@ export class BoxSimulator {
   async crashPi(boxId: string): Promise<void> {
     const record = this.#record(boxId);
     await record.machine.piController?.crash();
+    appendPiProcessExit(record.machine);
     record.machine.daemon.status = "failed";
     record.machine.daemon.rpcReady = false;
     record.machine.daemon.stderrLog += "simulated Pi process crashed\n";
@@ -667,6 +667,10 @@ export class BoxSimulator {
             status: record.machine.daemon.status,
             invocationId: record.machine.daemon.invocationId,
             rpcReady: record.machine.daemon.rpcReady,
+            activeAttemptId: record.machine.daemon.activeAttemptId,
+            tailCursor: record.machine.daemon.brokerJournal.at(-1)?.sequence ?? 0,
+            acknowledgedCursor: record.machine.daemon.brokerAcknowledgedCursor,
+            counters: { ...record.machine.daemon.brokerCounters },
             restartCount: record.machine.daemon.restartCount,
             scenario: record.machine.daemon.scenario,
             rpcLogBytes: Buffer.byteLength(record.machine.daemon.rpcLog, "utf8"),

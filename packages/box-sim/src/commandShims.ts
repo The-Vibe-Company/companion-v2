@@ -24,11 +24,40 @@ export type BoxSimCommandKind =
   | "capture-desktop-frame"
   | "unsupported";
 
+export interface BoxSimBrokerCounters {
+  malformedLines: number;
+  oversizedLines: number;
+  unterminatedLines: number;
+  unknownEvents: number;
+  unboundEvents: number;
+  orphanResponses: number;
+}
+
+export type BoxSimBrokerJournalRecord =
+  | {
+      sequence: number;
+      invocationId: string;
+      attemptId: string;
+      kind: "pi_event";
+      event: Record<string, unknown>;
+    }
+  | {
+      sequence: number;
+      invocationId: string;
+      attemptId: string;
+      kind: "pi_process_exit";
+      exit: { code: number | null; signal: string | null };
+    };
+
 export interface BoxSimDaemonMachine {
   status: "inactive" | "active" | "failed";
   invocationId: string | null;
   invocationCounter: number;
   rpcReady: boolean;
+  activeAttemptId: string | null;
+  brokerJournal: BoxSimBrokerJournalRecord[];
+  brokerAcknowledgedCursor: number;
+  brokerCounters: BoxSimBrokerCounters;
   restartCount: number;
   scenario: string;
   rpcLog: string;
@@ -61,6 +90,10 @@ export function createBoxSimCommandMachine(input: {
       invocationId: null,
       invocationCounter: 0,
       rpcReady: false,
+      activeAttemptId: null,
+      brokerJournal: [],
+      brokerAcknowledgedCursor: 0,
+      brokerCounters: emptyBrokerCounters(),
       restartCount: 0,
       scenario: input.scenario,
       rpcLog: "",
@@ -109,8 +142,118 @@ export function appendPiEvent(
   machine: BoxSimCommandMachine,
   event: Record<string, unknown> | string,
 ): void {
-  const line = typeof event === "string" ? event : JSON.stringify(event);
-  machine.daemon.rpcLog += line.endsWith("\n") ? line : `${line}\n`;
+  if (typeof event === "string") {
+    incrementBrokerCounter(
+      machine,
+      Buffer.byteLength(event, "utf8") > BROKER_MAX_LINE_BYTES ? "oversizedLines" : "malformedLines",
+    );
+    return;
+  }
+  const serialized = JSON.stringify(event);
+  if (Buffer.byteLength(serialized, "utf8") > BROKER_MAX_LINE_BYTES) {
+    incrementBrokerCounter(machine, "oversizedLines");
+    return;
+  }
+  if (event.type === "response") {
+    incrementBrokerCounter(machine, "orphanResponses");
+    return;
+  }
+  const eventType = typeof event.type === "string" ? event.type : null;
+  if (
+    !eventType
+    || !BROKER_SUPPORTED_EVENT_TYPES.has(eventType)
+    || (eventType === "agent_settled" && Object.keys(event).length !== 1)
+  ) {
+    incrementBrokerCounter(machine, "unknownEvents");
+    return;
+  }
+  const { activeAttemptId, invocationId } = machine.daemon;
+  if (!activeAttemptId || !invocationId) {
+    incrementBrokerCounter(machine, "unboundEvents");
+    return;
+  }
+  machine.daemon.brokerJournal.push({
+    sequence: brokerTailCursor(machine) + 1,
+    invocationId,
+    attemptId: activeAttemptId,
+    kind: "pi_event",
+    event: structuredClone(event),
+  });
+  // Layout 14 keeps this canonical projection only for the legacy byte-offset reader.
+  machine.daemon.rpcLog += `${serialized}\n`;
+  if (eventType === "agent_settled" && machine.daemon.activeAttemptId === activeAttemptId) {
+    machine.daemon.activeAttemptId = null;
+  }
+}
+
+const BROKER_MAX_LINE_BYTES = 64 * 1024;
+const BROKER_READ_LIMIT = 256;
+const BROKER_SUPPORTED_EVENT_TYPES = new Set([
+  "agent_start",
+  "agent_end",
+  "agent_settled",
+  "turn_start",
+  "turn_end",
+  "message_start",
+  "message_update",
+  "message_end",
+  "tool_execution_start",
+  "tool_execution_update",
+  "tool_execution_end",
+  "extension_ui_request",
+  "extension_error",
+  "auto_retry_start",
+  "auto_retry_end",
+  "queue_update",
+  "compaction_start",
+  "compaction_update",
+  "compaction_end",
+]);
+
+function emptyBrokerCounters(): BoxSimBrokerCounters {
+  return {
+    malformedLines: 0,
+    oversizedLines: 0,
+    unterminatedLines: 0,
+    unknownEvents: 0,
+    unboundEvents: 0,
+    orphanResponses: 0,
+  };
+}
+
+function incrementBrokerCounter(
+  machine: BoxSimCommandMachine,
+  counter: keyof BoxSimBrokerCounters,
+): void {
+  const current = machine.daemon.brokerCounters[counter];
+  machine.daemon.brokerCounters[counter] = current >= Number.MAX_SAFE_INTEGER
+    ? current
+    : current + 1;
+}
+
+function brokerTailCursor(machine: BoxSimCommandMachine): number {
+  return machine.daemon.brokerJournal.at(-1)?.sequence ?? 0;
+}
+
+export function appendPiProcessExit(
+  machine: BoxSimCommandMachine,
+  exit: { code: number | null; signal: string | null } = { code: null, signal: null },
+): void {
+  const invocationId = machine.daemon.invocationId;
+  const attemptId = machine.daemon.activeAttemptId;
+  if (!invocationId || !attemptId) {
+    incrementBrokerCounter(machine, "unboundEvents");
+    machine.daemon.activeAttemptId = null;
+    return;
+  }
+  machine.daemon.brokerJournal.push({
+    sequence: brokerTailCursor(machine) + 1,
+    invocationId,
+    attemptId,
+    kind: "pi_process_exit",
+    exit,
+  });
+  machine.daemon.activeAttemptId = null;
 }
 
 /** Classify only known adapter commands. Unknown strings are never delegated to a host shell. */
@@ -121,6 +264,10 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
   if (command.includes("mktemp -t companion-frame") && command.includes("data:%s;base64")) {
     return "capture-desktop-frame";
   }
+  const brokerCommand = extractBrokerJson(command);
+  if (brokerCommand?.type === "extension_ui_response") return "extension-ui-response";
+  if (brokerCommand) return "rpc-command";
+  // Layouts 13 and earlier remain recognized so the simulator can replay captured legacy commands.
   if (command.includes("Pi RPC did not acknowledge") && command.includes("rpc_start_size")) {
     return "rpc-command";
   }
@@ -129,6 +276,12 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
   }
   if (command.includes("companion-pi-journal") && command.includes("companion-pi-restarts")) {
     return "daemon-diagnostics";
+  }
+  if (
+    command.includes("companion-pi-broker-ready")
+    && command.includes("companion-pi-broker-unready")
+  ) {
+    return "daemon-state";
   }
   if (command.includes("companion-pi-rpc-ready") && command.includes("companion-pi-rpc-unready")) {
     return "daemon-state";
@@ -201,29 +354,58 @@ export function extractFifoJson(command: string): Record<string, unknown> | null
   }
 }
 
+/** Pull the base64-encoded JSON command from layout 14's owner-only socket client. */
+export function extractBrokerJson(command: string): Record<string, unknown> | null {
+  const match = /\bCOMPANION_PI_BROKER_COMMAND=('(?:[^']|'"'"')*')/.exec(command);
+  const encoded = match?.[1] ? decodeShellQuoted(match[1]) : null;
+  if (!encoded) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as unknown;
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function nextInvocationId(machine: BoxSimCommandMachine): string {
   machine.daemon.invocationCounter += 1;
   return machine.daemon.invocationCounter.toString(16).padStart(32, "0");
 }
 
 async function startDaemon(machine: BoxSimCommandMachine, restart: boolean): Promise<BoxSimCommandResult> {
-  if (!machine.persistentFiles.has(".companion/runtime/state/providers.env")) {
+  const stagedPath = ".companion/runtime/state/providers.env";
+  const runtimePath = "run/user/1000/companion/providers.env";
+  const staged = machine.persistentFiles.get(stagedPath);
+  if (!staged && !machine.volatileFiles.has(runtimePath)) {
     return failed("Companion runtime credentials were not staged");
   }
   if (!machine.persistentFiles.has(".companion/pi/auth.json")) {
     return failed("Companion provider auth file is missing");
   }
-  const staged = machine.persistentFiles.get(".companion/runtime/state/providers.env")!;
-  machine.persistentFiles.delete(".companion/runtime/state/providers.env");
-  machine.volatileFiles.set("run/user/1000/companion/providers.env", Buffer.from(staged));
-  if (restart || machine.daemon.status === "active") machine.daemon.restartCount += 1;
+  if (staged) {
+    machine.persistentFiles.delete(stagedPath);
+    machine.volatileFiles.set(runtimePath, Buffer.from(staged));
+  }
+  if (!restart && machine.daemon.status === "active") {
+    // `systemctl start` is idempotent for an already active unit. In particular it does not create
+    // a new Pi invocation; configuration changes use the explicit restart path.
+    return ok();
+  }
+  if (restart) {
+    machine.daemon.restartCount += 1;
+    appendPiProcessExit(machine);
+  }
   machine.daemon.status = "active";
   machine.daemon.invocationId = nextInvocationId(machine);
   machine.daemon.rpcReady = true;
+  machine.daemon.activeAttemptId = null;
   try {
     if (restart) await machine.piController?.restart();
     else await machine.piController?.start();
   } catch {
+    appendPiProcessExit(machine);
     machine.daemon.status = "failed";
     machine.daemon.rpcReady = false;
     machine.daemon.stderrLog += "simulated Pi controller failed to start\n";
@@ -244,6 +426,87 @@ function responseFor(command: Record<string, unknown>, data?: Record<string, unk
   return response;
 }
 
+function brokerFailureFor(
+  command: Record<string, unknown>,
+  code: string,
+  message: string,
+): Record<string, unknown> {
+  return {
+    ...responseFor(command),
+    success: false,
+    error: { code, message, ambiguous: false },
+  };
+}
+
+function brokerNonNegativeInteger(value: unknown): number | null {
+  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : null;
+}
+
+function executeBrokerControl(
+  machine: BoxSimCommandMachine,
+  command: Record<string, unknown>,
+): BoxSimCommandResult | null {
+  const tailCursor = brokerTailCursor(machine);
+  switch (command.type) {
+    case "broker_state":
+      return ok(`${JSON.stringify(responseFor(command, {
+        invocationId: machine.daemon.invocationId,
+        activeAttemptId: machine.daemon.activeAttemptId,
+        tailCursor,
+        acknowledgedCursor: machine.daemon.brokerAcknowledgedCursor,
+        counters: { ...machine.daemon.brokerCounters },
+      }))}\n`);
+    case "read_events": {
+      const after = brokerNonNegativeInteger(command.after);
+      const limit = command.limit === undefined ? BROKER_READ_LIMIT : brokerNonNegativeInteger(command.limit);
+      if (
+        after === null
+        || limit === null
+        || limit < 1
+        || limit > BROKER_READ_LIMIT
+        || after > tailCursor
+      ) {
+        return ok(`${JSON.stringify(brokerFailureFor(
+          command,
+          "invalid_command",
+          "event journal cursor or limit is invalid",
+        ))}\n`);
+      }
+      const effectiveAfter = Math.max(after, machine.daemon.brokerAcknowledgedCursor);
+      const events = machine.daemon.brokerJournal
+        .filter((event) => event.sequence > effectiveAfter)
+        .slice(0, limit)
+        .map((event) => structuredClone(event));
+      const nextCursor = events.at(-1)?.sequence ?? effectiveAfter;
+      return ok(`${JSON.stringify(responseFor(command, {
+        events,
+        nextCursor,
+        acknowledgedCursor: machine.daemon.brokerAcknowledgedCursor,
+        hasMore: nextCursor < tailCursor,
+      }))}\n`);
+    }
+    case "ack_events": {
+      const through = brokerNonNegativeInteger(command.through);
+      if (through === null || through > tailCursor) {
+        return ok(`${JSON.stringify(brokerFailureFor(
+          command,
+          "invalid_command",
+          "event acknowledgement cursor is invalid",
+        ))}\n`);
+      }
+      machine.daemon.brokerAcknowledgedCursor = Math.max(
+        machine.daemon.brokerAcknowledgedCursor,
+        through,
+      );
+      return ok(`${JSON.stringify(responseFor(command, {
+        acknowledgedCursor: machine.daemon.brokerAcknowledgedCursor,
+      }))}\n`);
+    }
+    default:
+      return null;
+  }
+}
+
 async function executeRpc(
   machine: BoxSimCommandMachine,
   commandText: string,
@@ -251,25 +514,64 @@ async function executeRpc(
   if (machine.daemon.status !== "active" || !machine.daemon.rpcReady) {
     return failed("Pi RPC is not ready");
   }
-  const command = extractFifoJson(commandText);
-  if (!command) return failed("Pi RPC command was not valid JSON");
+  const brokerCommand = extractBrokerJson(commandText);
+  if (!brokerCommand) return failed("Pi broker command was not valid JSON");
+  const brokerControl = executeBrokerControl(machine, brokerCommand);
+  if (brokerControl) return brokerControl;
+  if (brokerCommand.type === "prompt" && machine.daemon.activeAttemptId) {
+    return ok(`${JSON.stringify(brokerFailureFor(
+      brokerCommand,
+      "attempt_active",
+      "another Pi attempt is already active",
+    ))}\n`);
+  }
+  const promptAttemptId = brokerCommand.type === "prompt"
+    && typeof brokerCommand.attemptId === "string"
+    ? brokerCommand.attemptId
+    : null;
+  // The production broker binds before writing to Pi: Pi may emit an event before its correlated
+  // command response arrives. Roll this provisional binding back only when Pi proves rejection.
+  if (promptAttemptId) machine.daemon.activeAttemptId = promptAttemptId;
   let response: Record<string, unknown> | null;
   try {
-    response = await machine.piController?.handleRpc(command) ?? null;
+    response = await machine.piController?.handleRpc(brokerCommand) ?? null;
   } catch {
+    appendPiProcessExit(machine);
     machine.daemon.status = "failed";
     machine.daemon.rpcReady = false;
     machine.daemon.stderrLog += "simulated Pi RPC controller failed\n";
     return failed("simulated Pi RPC controller failed");
   }
   if (!response) {
-    response = command.type === "get_state"
-      ? responseFor(command, { isStreaming: false, pendingMessageCount: 0 })
-      : responseFor(command);
+    response = brokerCommand.type === "get_state"
+      ? responseFor(brokerCommand, { isStreaming: false, pendingMessageCount: 0 })
+      : responseFor(brokerCommand);
   } else if (response.type !== "response") {
-    response = responseFor(command, response);
+    response = responseFor(brokerCommand, response);
   }
-  appendPiEvent(machine, response);
+  if (brokerCommand.type === "prompt") {
+    response = response.success === true
+      ? responseFor(brokerCommand, {
+          attemptId: brokerCommand.attemptId,
+          piAcknowledged: true,
+        })
+      : {
+          ...responseFor(brokerCommand),
+          success: false,
+          error: {
+            code: "pi_prompt_refused",
+            message: "Pi refused the prompt",
+            ambiguous: false,
+          },
+        };
+    if (
+      response.success !== true
+      && promptAttemptId
+      && machine.daemon.activeAttemptId === promptAttemptId
+    ) {
+      machine.daemon.activeAttemptId = null;
+    }
+  }
   return ok(`${JSON.stringify(response)}\n`);
 }
 
@@ -280,14 +582,44 @@ async function executeExtensionResponse(
   if (machine.daemon.status !== "active" || !machine.daemon.rpcReady) {
     return failed("Pi RPC is not ready");
   }
-  const response = extractFifoJson(commandText);
+  const brokerCommand = extractBrokerJson(commandText);
+  const requestedAttemptId = typeof brokerCommand?.attemptId === "string"
+    ? brokerCommand.attemptId
+    : machine.daemon.activeAttemptId;
+  if (
+    brokerCommand
+    && (
+      !requestedAttemptId
+      || (
+        brokerCommand.attemptId !== undefined
+        && brokerCommand.attemptId !== machine.daemon.activeAttemptId
+      )
+    )
+  ) {
+    const code = machine.daemon.activeAttemptId ? "attempt_mismatch" : "no_active_attempt";
+    return ok(`${JSON.stringify({
+      ...responseFor(brokerCommand),
+      success: false,
+      error: { code, message: "decision does not match an active Pi attempt", ambiguous: false },
+    })}\n`);
+  }
+  const response = brokerCommand?.type === "extension_ui_response"
+    && brokerCommand.response !== null
+    && typeof brokerCommand.response === "object"
+    && !Array.isArray(brokerCommand.response)
+    ? brokerCommand.response as Record<string, unknown>
+    : null;
   if (!response) return failed("Pi extension response was not valid JSON");
   try {
     await machine.piController?.respondExtensionUi(response);
   } catch {
     return failed("simulated Pi extension response failed");
   }
-  return ok();
+  return ok(`${JSON.stringify(responseFor(brokerCommand!, {
+    attemptId: requestedAttemptId!,
+    invocationId: machine.daemon.invocationId,
+    delivered: true,
+  }))}\n`);
 }
 
 function joinedFileCommand(machine: BoxSimCommandMachine, command: string): BoxSimCommandResult {
@@ -330,6 +662,7 @@ export async function executeBoxCommand(
     machine.daemon.status === "active"
     && machine.piController?.running === false
   ) {
+    appendPiProcessExit(machine);
     machine.daemon.status = "failed";
     machine.daemon.rpcReady = false;
     machine.daemon.stderrLog += "simulated Pi process exited\n";
@@ -378,7 +711,10 @@ export async function executeBoxCommand(
     case "start-or-restart-daemon":
       return startDaemon(machine, command.includes("systemctl --user restart"));
     case "daemon-state": {
-      const marker = machine.daemon.rpcReady ? "companion-pi-rpc-ready" : "companion-pi-rpc-unready";
+      const layout14 = command.includes("companion-pi-broker-ready");
+      const marker = layout14
+        ? machine.daemon.rpcReady ? "companion-pi-broker-ready" : "companion-pi-broker-unready"
+        : machine.daemon.rpcReady ? "companion-pi-rpc-ready" : "companion-pi-rpc-unready";
       return ok(`${machine.daemon.status === "active" ? "active" : machine.daemon.status}\n${marker}\n`);
     }
     case "rpc-command":
@@ -408,9 +744,11 @@ export async function executeBoxCommand(
       } catch {
         return failed("simulated Pi controller failed to stop");
       }
+      appendPiProcessExit(machine);
       machine.daemon.status = "inactive";
       machine.daemon.invocationId = null;
       machine.daemon.rpcReady = false;
+      machine.daemon.activeAttemptId = null;
       machine.volatileFiles.clear();
       return ok();
     case "read-events": {
