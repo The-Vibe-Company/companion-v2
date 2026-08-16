@@ -24,7 +24,10 @@ export async function withTenantContext<T>(
 ): Promise<T> {
   return db.transaction(async (tx) => {
     await tx.execute(
-      drizzleSql`select set_config('app.org_id', ${input.orgId}, true), set_config('app.user_id', ${input.userId}, true)`,
+      drizzleSql`select
+        set_config('app.org_id', ${input.orgId}, true),
+        set_config('app.user_id', ${input.userId}, true),
+        set_config('app.companion_delivery_protocol', '2', true)`,
     );
     return fn(tx as unknown as Db);
   });

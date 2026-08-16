@@ -112,15 +112,60 @@ const otherCompanion: Companion = {
  * as a second turn.
  */
 function controlPlane(
-  options: { holdSend?: boolean; dropFirstSend?: boolean; companion?: Companion } = {},
+  options: {
+    holdSend?: boolean;
+    dropFirstSend?: boolean;
+    companion?: Companion;
+    watermarkedPostTimeoutTail?: boolean;
+    refuseDelivery?: boolean;
+    holdReply?: boolean;
+  } = {},
 ) {
   const runtime = options.companion ?? companion;
-  const entries: CompanionTranscriptEntry[] = [];
+  const entries: CompanionTranscriptEntry[] = options.watermarkedPostTimeoutTail
+    ? [
+        {
+          event_id: "pi:read:tool:0",
+          ordinal: 0,
+          role: "tool",
+          content: "/tmp/conductor-cli.png",
+          author_id: null,
+          author_name: null,
+          tool: {
+            call_id: "call-read",
+            kind: "file",
+            name: "read",
+            title: "read /tmp/conductor-cli.png",
+            status: "timeout",
+            detail: "Timed out after 90 seconds without a tool result.",
+            screenshot: null,
+          },
+          decision: null,
+          reasoning: null,
+          created_at: "2026-08-15T18:00:00.000Z",
+        },
+        ...["Alors?", "Ca va?"].map((content, index): CompanionTranscriptEntry => ({
+          event_id: `msg:watermarked:${index}`,
+          ordinal: index + 1,
+          role: "user",
+          content,
+          author_id: "user-1",
+          author_name: null,
+          tool: null,
+          decision: null,
+          reasoning: null,
+          created_at: `2026-08-15T18:0${index + 1}:00.000Z`,
+        })),
+      ]
+    : [];
   const sends: { content: string; clientMessageId: string | undefined }[] = [];
   const requests: string[] = [];
-  let ordinal = 0;
-  let delivered = -1;
+  let ordinal = entries.length;
+  // THE-370 starts with the post-timeout tail already watermarked even though Pi never answered it.
+  let delivered = options.watermarkedPostTimeoutTail ? ordinal - 1 : -1;
+  let accepted: number | null = null;
   let owed = 0;
+  let replyReleased = !options.holdReply;
   let dropped = 0;
   let release = () => {};
   const held = new Promise<void>((resolve) => { release = resolve; });
@@ -140,6 +185,7 @@ function controlPlane(
     can_send: true,
     entries: threadEntries.map((entry) => ({ ...entry })),
     pending_count: threadEntries.filter((entry) => entry.role === "user" && entry.ordinal > delivered).length,
+    accepted_delivery_ordinal: accepted,
     last_message_at: threadEntries.at(-1)?.created_at ?? null,
     last_read_ordinal: null,
   };
@@ -170,8 +216,11 @@ function controlPlane(
           reasoning: null,
           created_at: new Date().toISOString(),
         });
-        delivered = ordinal - 1;
-        owed += 1;
+        if (!options.refuseDelivery) {
+          delivered = ordinal - 1;
+          accepted = delivered;
+          owed += 1;
+        }
       }
       // THE-341: the turn is durable the moment it is stored, before the wake the request then waits
       // on. A proxy that gives up mid-wake returns 500 over an already-persisted turn; model that by
@@ -184,10 +233,13 @@ function controlPlane(
         });
       }
       if (options.holdSend) await held;
-      return json({ thread: thread(requestedCompanionId), delivery: "delivered" });
+      return json({
+        thread: thread(requestedCompanionId),
+        delivery: options.refuseDelivery ? "pending" : "delivered",
+      });
     }
     if (method === "POST" && url.endsWith("/thread/sync")) {
-      while (owed > 0) {
+      while (replyReleased && owed > 0) {
         owed -= 1;
         entries.push({
           event_id: `pi:${entries.length}`,
@@ -216,6 +268,8 @@ function controlPlane(
     /** Answer the send this control plane is holding open. */
     releaseSend: () => release(),
     posts: () => requests.filter((request) => request.endsWith("/messages")).length,
+    accepted: () => accepted,
+    releaseReply: () => { replyReleased = true; },
   };
 }
 
@@ -324,6 +378,54 @@ describe("CompanionsApp send", () => {
 
       expect(api.sends).toHaveLength(1);
       expect(api.sends[0]?.clientMessageId).toMatch(UUID);
+    });
+
+    it("keeps a refused post-timeout send visibly pending without reopening its chip or replying", async () => {
+      api = controlPlane({ watermarkedPostTimeoutTail: true, refuseDelivery: true });
+      vi.stubGlobal("fetch", api.fetchMock);
+      const container = await openThread();
+
+      expect(container.textContent).toContain("read /tmp/conductor-cli.png");
+      expect(container.textContent).toContain("timed out");
+      expect(container.querySelector("[data-slot='companion-replying']")).toBeNull();
+
+      type(container, "ping THE-370");
+      await pressEnter(container);
+      // A timed-out turn never revives the old typing indicator while delivery/heal completes.
+      expect(container.querySelector("[data-slot='companion-replying']")).toBeNull();
+      await poll(1);
+
+      expect(container.querySelector("[data-slot='composer-hint']")?.textContent)
+        .toBe("1 message waiting for delivery.");
+      expect(api.entries.some((entry) => entry.role === "assistant")).toBe(false);
+      expect(container.textContent).toContain("read /tmp/conductor-cli.png");
+      expect(container.textContent).toContain("timed out");
+      expect(container.querySelector("[data-slot='companion-replying']")).toBeNull();
+    });
+
+    it("shows replying only after Pi accepts the recovered post-timeout turn", async () => {
+      api = controlPlane({ watermarkedPostTimeoutTail: true, holdReply: true });
+      vi.stubGlobal("fetch", api.fetchMock);
+      const container = await openThread();
+
+      type(container, "ping THE-370");
+      await pressEnter(container);
+      await poll(1);
+
+      expect(api.accepted()).toBe(api.entries.at(-1)?.ordinal);
+      // Re-open from the persisted send response so no optimistic composer state can supply the
+      // signal: only the correlated protocol-2 acceptance marker may make this recovered turn live.
+      const confirmed = await openThread();
+      expect(confirmed.querySelector("[data-slot='companion-replying']")).not.toBeNull();
+      expect(confirmed.textContent).toContain("read /tmp/conductor-cli.png");
+      expect(confirmed.textContent).toContain("timed out");
+
+      api.releaseReply();
+      await poll(1);
+
+      expect(api.entries.at(-1)).toMatchObject({ role: "assistant", content: "It's 2026." });
+      expect(confirmed.querySelector("[data-slot='companion-replying']")).toBeNull();
+      expect(confirmed.textContent).toContain("timed out");
     });
   });
 

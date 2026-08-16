@@ -57,6 +57,9 @@ const coreMocks = vi.hoisted(() => ({
   markCompanionThreadRead: vi.fn(),
   sendCompanionMessage: vi.fn(),
   listPendingCompanionMessages: vi.fn(),
+  claimCompanionDelivery: vi.fn(),
+  releaseCompanionDelivery: vi.fn(),
+  renewCompanionDelivery: vi.fn(),
   recordCompanionTimeoutRestart: vi.fn(),
   recordCompanionPiProjectionWithEffects: vi.fn(),
   attachCompanionToolRunScreenshot: vi.fn(),
@@ -408,6 +411,9 @@ describe("Companions API feature gate", () => {
       timeoutRestartPending: false,
       timeoutRecoveryOrdinal: null,
     });
+    coreMocks.claimCompanionDelivery.mockResolvedValue(true);
+    coreMocks.releaseCompanionDelivery.mockResolvedValue(true);
+    coreMocks.renewCompanionDelivery.mockResolvedValue(true);
     coreMocks.recordCompanionPiProjectionWithEffects.mockResolvedValue({
       thread: {
         ...viewerThread,
@@ -2609,6 +2615,92 @@ describe("Companions API feature gate", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
     expect(coreMocks.recordCompanionPiProjectionWithEffects).not.toHaveBeenCalled();
+    expect(runtime.healPiDaemon).toHaveBeenCalledOnce();
+    expect(runtime.prompt).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves an overlapping delivery pending without probing or recycling Pi", async () => {
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [message],
+      piLogOffset: 0,
+      deliveredOrdinal: null,
+      timeoutRecoveryPending: true,
+      timeoutRestartPending: false,
+      timeoutRecoveryOrdinal: 0,
+    });
+    coreMocks.claimCompanionDelivery.mockResolvedValue(false);
+    const runtime = boxRuntime();
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "ping THE-370" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
+    expect(runtime.healPiDaemon).not.toHaveBeenCalled();
+    expect(runtime.prompt).not.toHaveBeenCalled();
+    expect(coreMocks.releaseCompanionDelivery).not.toHaveBeenCalled();
+  });
+
+  it("heals a FIFO consume miss and records delivery only after Pi accepts the retry", async () => {
+    const newest = { ...message, event_id: "msg:the-370", ordinal: 5, content: "ping THE-370" };
+    coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
+    coreMocks.sendCompanionMessage.mockResolvedValue({
+      thread: { ...viewerThread, access: "owner", read_only: false, can_send: true },
+      entry: newest,
+    });
+    coreMocks.listPendingCompanionMessages.mockResolvedValue({
+      pending: [newest],
+      piLogOffset: 0,
+      deliveredOrdinal: 4,
+      // Reproduce the post-#312 production row: timeout recycle was already marked complete, so
+      // the send reaches the warm path and must heal based on failed RPC acceptance itself.
+      timeoutRecoveryPending: true,
+      timeoutRestartPending: false,
+      timeoutRecoveryOrdinal: 0,
+    });
+    const order: string[] = [];
+    const prompt = vi.fn()
+      .mockImplementationOnce(async () => {
+        order.push("prompt-refused");
+        throw new Error("FIFO write completed without a Pi response");
+      })
+      .mockImplementationOnce(async () => {
+        order.push("prompt-accepted");
+      });
+    const runtime = boxRuntime({
+      prompt,
+      healPiDaemon: vi.fn(async (input: { requireIdle?: boolean }) => {
+        order.push(input.requireIdle ? "heal-idle" : "heal");
+        return { daemonState: "running" as const, detail: null };
+      }),
+    });
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);
+
+    const response = await app.request(`/v1/companions/${companion.id}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "ping THE-370" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
+    expect(order).toEqual(["heal-idle", "prompt-refused", "heal-idle", "prompt-accepted"]);
+    expect(runtime.start).not.toHaveBeenCalled();
+    expect(runtime.stop).not.toHaveBeenCalled();
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+      expect.objectContaining({
+        deliveredOrdinal: newest.ordinal,
+        acceptedDeliveryOrdinal: newest.ordinal,
+        timeoutDeliveryOrdinal: newest.ordinal,
+      }),
+    );
   });
 
   it("delivers the stranded tail and a new send after terminalizing the prior tool", async () => {
@@ -2709,7 +2801,8 @@ describe("Companions API feature gate", () => {
     });
     coreMocks.listPendingCompanionMessages
       .mockResolvedValueOnce(pendingState)
-      .mockResolvedValueOnce({ ...pendingState, timeoutRestartPending: false });
+      .mockResolvedValueOnce({ ...pendingState, timeoutRestartPending: false })
+      .mockResolvedValue({ ...pendingState, timeoutRestartPending: false });
     const runtime = boxRuntime();
     const app = new Hono<{ Variables: ApiVariables }>();
     registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, () => runtime);

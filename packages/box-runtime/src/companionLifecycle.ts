@@ -1,7 +1,9 @@
+import { randomUUID } from "node:crypto";
 import {
   CompanionProviderError,
   CompanionRuntimeTransitionError,
   COMPANION_RUNTIME_START_BUDGET_MS,
+  claimCompanionDelivery,
   claimCompanionRuntimeStart,
   claimCompanionRuntimeStop,
   getCompanionForRuntime,
@@ -9,6 +11,8 @@ import {
   listPendingCompanionMessages,
   recordCompanionPiProjectionWithEffects,
   recordCompanionTimeoutRestart,
+  releaseCompanionDelivery,
+  renewCompanionDelivery,
   resolveCompanionProviderAuth,
   resolveCompanionPluginInjection,
   updateCompanionRuntime,
@@ -22,7 +26,6 @@ import type {
 import type {
   Companion,
   CompanionThread,
-  CompanionTranscriptEntry,
   StartCompanionRuntimeInput,
 } from "@companion/contracts";
 import { withTenantContext, schema } from "@companion/db";
@@ -104,6 +107,7 @@ export function recordProjection(input: {
   piLogOffset?: number;
   piLogRewound?: boolean;
   deliveredOrdinal?: number;
+  acceptedDeliveryOrdinal?: number;
   timeoutDeliveryOrdinal?: number;
 }): Promise<CompanionPiProjectionResult> {
   return withTenantContext(
@@ -122,38 +126,120 @@ export async function deliverCompanionMessages(
   input: {
     companionId: string;
     boxId: string;
-    messages: CompanionTranscriptEntry[];
     runtime: CompanionBoxRuntime;
-    /** This delivery is protected by an unanswered timeout until each accepted ordinal is recorded. */
-    timeoutRecoveryPending?: boolean;
   },
 ): Promise<{ thread: CompanionThread; deliveredOrdinal: number } | null> {
-  let deliveredOrdinal: number | undefined;
+  const claimId = randomUUID();
+  const claimed = await withTenantContext(
+    { orgId: ctx.orgId, userId: ctx.actor.id },
+    (database) => claimCompanionDelivery({
+      actor: ctx.actor,
+      orgId: ctx.orgId,
+      companionId: input.companionId,
+      claimId,
+      leaseSeconds: 600,
+      database,
+    }),
+  ).catch(() => false);
+  if (!claimed) return null;
+  const renewLease = () => withTenantContext(
+    { orgId: ctx.orgId, userId: ctx.actor.id },
+    (database) => renewCompanionDelivery({
+      actor: ctx.actor,
+      orgId: ctx.orgId,
+      companionId: input.companionId,
+      claimId,
+      leaseSeconds: 600,
+      database,
+    }),
+  ).catch(() => false);
   try {
-    for (const message of input.messages) {
-      await input.runtime.prompt({
-        boxId: input.boxId,
-        message: message.content,
-        requestId: message.event_id,
-      });
-      deliveredOrdinal = message.ordinal;
+    // The caller's pending/timeout fields preceded the lease. Re-read after winning it so an
+    // overlapping request that already accepted this tail turns this call into a no-op rather than
+    // a busy-Pi restart of the valid turn it just began.
+    const current = await withTenantContext(
+      { orgId: ctx.orgId, userId: ctx.actor.id },
+      (database) => listPendingCompanionMessages({
+        actor: ctx.actor,
+        orgId: ctx.orgId,
+        companionId: input.companionId,
+        database,
+      }),
+    );
+    if (current.pending.length === 0) return null;
+
+    let deliveredOrdinal: number | undefined;
+    try {
+      if (current.timeoutRecoveryPending) {
+        // A prompt acknowledgement also covers a follow-up queued behind an old streaming turn.
+        // The lease makes this idle check authoritative: no competing delivery can start a valid
+        // turn between this probe/recycle and the watermark recorded below.
+        if (!await renewLease()) return null;
+        const ready = await input.runtime.healPiDaemon({ boxId: input.boxId, requireIdle: true });
+        if (ready.daemonState !== "running") return null;
+        if (!await renewLease()) return null;
+      }
+      for (const message of current.pending) {
+        if (!await renewLease()) break;
+        const prompt = () => input.runtime.prompt({
+          boxId: input.boxId,
+          message: message.content,
+          requestId: message.event_id,
+        });
+        try {
+          await prompt();
+        } catch {
+          // Missing acknowledgement leaves the original prompt's state ambiguous. Require idle
+          // while holding the lease; a busy process may have accepted it after our read boundary,
+          // so recycling it before the one retry avoids queuing a duplicate behind that turn.
+          if (!await renewLease()) break;
+          const healed = await input.runtime.healPiDaemon({
+            boxId: input.boxId,
+            requireIdle: true,
+          });
+          if (healed.daemonState !== "running") break;
+          if (!await renewLease()) break;
+          await prompt();
+        }
+        deliveredOrdinal = message.ordinal;
+        if (!await renewLease()) break;
+      }
+    } catch {
+      // Leave the undelivered tail pending instead of losing it or failing the persisted send.
     }
+    if (deliveredOrdinal === undefined) return null;
+    // A lost lease stops every further Pi action, but an acknowledgement already received is still
+    // safe to watermark monotonically so the next owner does not duplicate that accepted prefix.
+    await renewLease();
+    const { thread } = await recordProjection({
+      actor: ctx.actor,
+      orgId: ctx.orgId,
+      companionId: input.companionId,
+      entries: [],
+      deliveredOrdinal,
+      acceptedDeliveryOrdinal: deliveredOrdinal,
+      timeoutDeliveryOrdinal: current.timeoutRecoveryPending ? deliveredOrdinal : undefined,
+    });
+    // Move the Box idle clock only after Pi accepted at least one durable message. A failed prompt
+    // remains pending and therefore cannot lengthen the machine's lifetime.
+    await input.runtime.refreshTtl({ boxId: input.boxId }).catch(() => undefined);
+    return { thread, deliveredOrdinal };
   } catch {
-    // Leave the undelivered tail pending instead of losing it or failing the persisted send.
+    // The send is already durable. A lease/read/watermark failure must leave it visibly pending,
+    // never turn that persisted action into a 500 that invites a second client-generated id.
+    return null;
+  } finally {
+    await withTenantContext(
+      { orgId: ctx.orgId, userId: ctx.actor.id },
+      (database) => releaseCompanionDelivery({
+        actor: ctx.actor,
+        orgId: ctx.orgId,
+        companionId: input.companionId,
+        claimId,
+        database,
+      }),
+    ).catch(() => undefined);
   }
-  if (deliveredOrdinal === undefined) return null;
-  const { thread } = await recordProjection({
-    actor: ctx.actor,
-    orgId: ctx.orgId,
-    companionId: input.companionId,
-    entries: [],
-    deliveredOrdinal,
-    timeoutDeliveryOrdinal: input.timeoutRecoveryPending ? deliveredOrdinal : undefined,
-  });
-  // Move the Box idle clock only after Pi accepted at least one durable message. A failed prompt
-  // remains pending and therefore cannot lengthen the machine's lifetime.
-  await input.runtime.refreshTtl({ boxId: input.boxId }).catch(() => undefined);
-  return { thread, deliveredOrdinal };
 }
 
 /**

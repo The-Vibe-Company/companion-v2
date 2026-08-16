@@ -92,7 +92,6 @@ import type {
   Companion,
   CompanionDesktop,
   CompanionThread,
-  CompanionTranscriptEntry,
   StartCompanionRuntimeInput,
 } from "@companion/contracts";
 import { withTenantContext, type Db } from "@companion/db";
@@ -457,10 +456,7 @@ export function registerCompanionRoutes(
     orgId: string;
     companionId: string;
     boxId: string;
-    messages: CompanionTranscriptEntry[];
     runtime: CompanionBoxRuntime;
-    /** This delivery is protected by an unanswered timeout until each accepted ordinal is recorded. */
-    timeoutRecoveryPending?: boolean;
   }): Promise<{ thread: CompanionThread; deliveredOrdinal: number } | null> {
     return deliverCompanionMessagesViaRuntime({
       actor: input.actor,
@@ -470,9 +466,7 @@ export function registerCompanionRoutes(
     }, {
       companionId: input.companionId,
       boxId: input.boxId,
-      messages: input.messages,
       runtime: input.runtime,
-      timeoutRecoveryPending: input.timeoutRecoveryPending,
     });
   }
 
@@ -1253,9 +1247,7 @@ export function registerCompanionRoutes(
         orgId: sent.orgId,
         companionId,
         boxId,
-        messages: sent.pending,
         runtime,
-        timeoutRecoveryPending: sent.timeoutRecoveryPending,
       });
       const deliveredOrdinal = delivered?.deliveredOrdinal ?? sent.deliveredOrdinal;
       return c.json({
@@ -1383,27 +1375,13 @@ export function registerCompanionRoutes(
           boxId = started.companion.runtime.box_id;
         }
       }
-      let deliveredOrdinal: number | undefined;
-      try {
-        for (const message of resolved.pending) {
-          await runtime.prompt({ boxId, message: message.content, requestId: message.event_id });
-          deliveredOrdinal = message.ordinal;
-        }
-      } finally {
-        if (deliveredOrdinal !== undefined) {
-          const recorded = await recordProjection({
-            actor: resolved.actor,
-            orgId: resolved.orgId,
-            companionId,
-            entries: [],
-            deliveredOrdinal,
-            timeoutDeliveryOrdinal: resolved.timeoutRecoveryPending
-              ? deliveredOrdinal
-              : undefined,
-          }).then(() => true, () => false);
-          if (recorded) await runtime.refreshTtl({ boxId }).catch(() => undefined);
-        }
-      }
+      await deliverCompanionMessages({
+        actor: resolved.actor,
+        orgId: resolved.orgId,
+        companionId,
+        boxId,
+        runtime,
+      });
       const events = await runtime.readEvents({ boxId, offset: resolved.piLogOffset });
       const projection = projectCompanionPiEvents({ chunk: events.chunk, offset: events.offset });
       const projected = await recordProjection({
