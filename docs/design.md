@@ -90,11 +90,10 @@ directly when Box and Pi are already running; otherwise it starts the Companion 
 archived Box resumes and a stopped Pi starts without making the common online path claim or inject
 anything. The first-keystroke prewarm is marked as delivery intent: once it commits Online it drains
 a newly persisted pending tail, so the send that lost the provisioning claim to that prewarm cannot
-be stranded behind it. Send, sync, and prewarm drains serialize through a tenant-scoped PostgreSQL
-advisory lock on a small pool isolated from request queries and re-read the pending watermark before
-writing Pi, so overlapping API replicas cannot execute one turn twice or let degraded Box I/O starve
-the API database pool; same-key waiters release their reserved session between non-blocking attempts,
-so they cannot convoy unrelated Companions behind one slow FIFO. A timeout tail first exposed by the
+be stranded behind it. Send, sync, prewarm, and reconciler drains serialize through a tenant-scoped
+renewable delivery lease and re-read the pending watermark after claiming it. The lease spans Pi's
+correlated acknowledgement and the durable watermark without holding a request-pool session across
+Box I/O, so overlapping replicas cannot execute one turn twice. A timeout tail first exposed by the
 post-wake snapshot takes a second Pi-only lifecycle claim before delivery. Online readiness requires
 an active Pi systemd unit whose current invocation
 id matches the marker written after opening its RPC FIFO; a post-wake FIFO refusal records a visible

@@ -4186,6 +4186,7 @@ describe("AsciiBoxCompanionRuntime", () => {
 
   it("does not call an active replacement healed until it answers RPC", async () => {
     const commands: string[] = [];
+    const rpcTimeouts: number[] = [];
     let stateProbes = 0;
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
@@ -4195,6 +4196,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         const command = String(body.command);
         commands.push(command);
         if (command.includes('"type":"get_state"')) {
+          rpcTimeouts.push(Number(body.timeoutSeconds));
           return json({ success: false, exitCode: 1, stdout: "", stderr: "FIFO not ready" });
         }
         if (command.includes("is-active")) {
@@ -4223,6 +4225,10 @@ describe("AsciiBoxCompanionRuntime", () => {
       detail: "Pi daemon became active but did not become ready to accept messages",
     });
     expect(commands.some((command) => command.includes('"type":"get_state"'))).toBe(true);
+    // The missing acknowledgement is bounded by the replacement-readiness time left, rather than
+    // spending the normal eight-second acceptance window after the 20ms test deadline expired.
+    expect(rpcTimeouts.length).toBeGreaterThan(0);
+    expect(rpcTimeouts.every((timeout) => timeout <= 6)).toBe(true);
   });
 
   it("answers with the daemon's own failure detail when it stays down after the heal", async () => {

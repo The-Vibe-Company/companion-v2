@@ -198,6 +198,14 @@ export async function deliverCompanionMessages(
         try {
           await prompt();
         } catch (error) {
+          // A wake that just committed Online owns the handoff promised by #314. Surface its first
+          // refusal and project Error instead of hiding it behind an in-request recycle; the saved
+          // tail stays pending for the next explicit send. Ordinary online delivery may still use
+          // THE-370's Pi-only heal and one acknowledged retry below.
+          if (input.throwOnRefusal) {
+            refusal = error;
+            break;
+          }
           // Missing acknowledgement leaves the original prompt's state ambiguous. Require idle
           // while holding the lease; a busy process may have accepted it after our read boundary,
           // so recycling it before the one retry avoids queuing a duplicate behind that turn.

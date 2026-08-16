@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  claimCompanionDelivery,
   getCompanionThread,
   listPendingCompanionMessages,
+  releaseCompanionDelivery,
   sendCompanionMessage,
 } from "@companion/core";
-import { withDatabaseAdvisoryLock, withTenantContext } from "@companion/db";
+import { withTenantContext } from "@companion/db";
 import { integrationSql, type TestActor } from "./testDatabase";
 
 /**
@@ -133,34 +135,28 @@ describe("Companion message send idempotence", () => {
   });
 
   it("serializes delivery for one Companion across database connections", async () => {
-    let releaseFirst: (() => void) | undefined;
-    let firstLocked: (() => void) | undefined;
-    const holdFirst = new Promise<void>((resolve) => { releaseFirst = resolve; });
-    const firstHasLock = new Promise<void>((resolve) => { firstLocked = resolve; });
-    const lockInput = { key: `${org}:${companionId}`, namespace: 371 };
-    const first = withDatabaseAdvisoryLock(lockInput, async () => {
-      firstLocked?.();
-      await holdFirst;
-    });
-    await firstHasLock;
+    const firstClaimId = randomUUID();
+    const secondClaimId = randomUUID();
+    const claim = (claimId: string) => asOwner((database) => claimCompanionDelivery({
+      actor: owner,
+      orgId: org,
+      companionId,
+      claimId,
+      leaseSeconds: 60,
+      database,
+    }));
+    const release = (claimId: string) => asOwner((database) => releaseCompanionDelivery({
+      actor: owner,
+      orgId: org,
+      companionId,
+      claimId,
+      database,
+    }));
 
-    let secondAcquired = false;
-    const second = withDatabaseAdvisoryLock(lockInput, async () => {
-      secondAcquired = true;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(secondAcquired).toBe(false);
-
-    // The same-key waiter releases its reserved session between non-blocking attempts, so the
-    // second coordination connection remains available to an unrelated Companion.
-    let unrelatedAcquired = false;
-    await withDatabaseAdvisoryLock({ key: `${org}:other-companion`, namespace: 371 }, async () => {
-      unrelatedAcquired = true;
-    });
-    expect(unrelatedAcquired).toBe(true);
-
-    releaseFirst?.();
-    await Promise.all([first, second]);
-    expect(secondAcquired).toBe(true);
+    expect(await claim(firstClaimId)).toBe(true);
+    expect(await claim(secondClaimId)).toBe(false);
+    expect(await release(firstClaimId)).toBe(true);
+    expect(await claim(secondClaimId)).toBe(true);
+    expect(await release(secondClaimId)).toBe(true);
   });
 });

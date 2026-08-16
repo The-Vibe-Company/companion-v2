@@ -167,11 +167,10 @@ thread, and the server-side lifecycle claim still refuses anything the surface g
 state — a mid-transition Companion, an explicit-stop marker, and a deletion lock are never prewarmed.
 The request carries the internal `?intent=message` marker: after it commits a running Pi, it takes a fresh pending
 snapshot and drains any durable send that lost the concurrent lifecycle claim to this prewarm. That
-post-start snapshot is the handoff. Send, sync, and prewarm drains take the same tenant-scoped
-PostgreSQL advisory lock from a small pool isolated from request queries and re-read pending state
-after they own it, so a message in two stale snapshots is written only once without slow Box I/O
-exhausting the API pool. A same-key waiter releases its reserved coordination session between
-non-blocking attempts, leaving unrelated Companion keys free to proceed. A message committed before the snapshot is included; a message
+post-start snapshot is the handoff. Send, sync, prewarm, and reconciler drains claim the same
+tenant-scoped renewable delivery lease and re-read pending state after they own it, so a message in
+two stale snapshots is offered only once. The lease spans Pi acknowledgement and the durable
+watermark without holding a request-pool session across Box I/O. A message committed before the snapshot is included; a message
 committed after it sees the running lifecycle and delivers itself. Timeout settlement runs before
 the start so a timed-out tail still receives its one-shot Pi-only recycle; if settlement first exposes
 that tail in the post-wake snapshot, delivery takes a second lifecycle claim and recycles Pi before

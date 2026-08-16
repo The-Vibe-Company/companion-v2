@@ -81,12 +81,6 @@ const storageMocks = vi.hoisted(() => ({
   getSkillArchive: vi.fn(),
 }));
 
-const dbMocks = vi.hoisted(() => ({
-  withDatabaseAdvisoryLock: vi.fn(
-    async (_input: unknown, fn: () => Promise<unknown>) => fn(),
-  ),
-}));
-
 const skillsMocks = vi.hoisted(() => ({
   skillChecksum: vi.fn(),
   toTar: vi.fn((archive) => archive),
@@ -144,7 +138,6 @@ vi.mock("@companion/core", async (importOriginal) => ({
 
 vi.mock("@companion/db", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@companion/db")>()),
-  ...dbMocks,
   withTenantContext: vi.fn(
     async (
       _input: unknown,
@@ -2340,7 +2333,7 @@ describe("Companions API feature gate", () => {
       .mockResolvedValueOnce(savedPending)
       // The winning prewarm must take a new snapshot after it commits Online.
       .mockResolvedValueOnce(savedPending)
-      // Delivery revalidates under the cross-replica advisory lock.
+      // Delivery revalidates after winning the cross-replica lease.
       .mockResolvedValueOnce(savedPending);
     coreMocks.claimCompanionRuntimeStart
       .mockResolvedValueOnce(companion)
@@ -2558,7 +2551,7 @@ describe("Companions API feature gate", () => {
     );
   });
 
-  it("revalidates a stale overlapping send under the delivery lock instead of prompting twice", async () => {
+  it("revalidates a stale overlapping send under the delivery lease instead of prompting twice", async () => {
     const emptyPending = {
       pending: [],
       piLogOffset: 0,
@@ -2573,7 +2566,7 @@ describe("Companions API feature gate", () => {
       .mockResolvedValueOnce(emptyPending)
       .mockResolvedValueOnce(stalePending)
       .mockResolvedValueOnce(stalePending)
-      // An overlapping send captured the same stale tail, then waited for the delivery lock. Its
+      // An overlapping send captured the same stale tail, then waited for the delivery lease. Its
       // revalidation observes the first producer's committed watermark.
       .mockResolvedValueOnce(stalePending)
       .mockResolvedValueOnce(emptyPending);
@@ -2599,7 +2592,8 @@ describe("Companions API feature gate", () => {
 
     expect(overlappingSend.status).toBe(200);
     expect(runtime.prompt).toHaveBeenCalledOnce();
-    expect(dbMocks.withDatabaseAdvisoryLock).toHaveBeenCalledTimes(2);
+    expect(coreMocks.claimCompanionDelivery).toHaveBeenCalledTimes(2);
+    expect(coreMocks.releaseCompanionDelivery).toHaveBeenCalledTimes(2);
     expect(coreMocks.listPendingCompanionMessages).toHaveBeenCalledTimes(5);
   });
 
@@ -2840,7 +2834,7 @@ describe("Companions API feature gate", () => {
       .mockResolvedValueOnce(timedOutState)
       .mockResolvedValueOnce(timedOutState)
       .mockResolvedValueOnce({ ...timedOutState, timeoutRestartPending: false })
-      // The delivery lock owns one final pending/timeout revalidation.
+      // The delivery lease owns one final pending/timeout revalidation.
       .mockResolvedValueOnce({ ...timedOutState, timeoutRestartPending: false });
     const runtime = boxRuntime();
     const app = new Hono<{ Variables: ApiVariables }>();

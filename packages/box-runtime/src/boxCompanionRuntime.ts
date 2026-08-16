@@ -1267,8 +1267,16 @@ fi`,
     boxId: string;
     command: Record<string, unknown> & { id: string };
     responseCommand: string;
+    acceptTimeoutSeconds?: number;
   }): Promise<Record<string, unknown> | null> {
     const serialized = JSON.stringify(input.command);
+    const acceptTimeoutSeconds = Math.max(
+      1,
+      Math.min(
+        PI_RPC_ACCEPT_TIMEOUT_SECONDS,
+        Math.ceil(input.acceptTimeoutSeconds ?? PI_RPC_ACCEPT_TIMEOUT_SECONDS),
+      ),
+    );
     const result = await this.#command(
       input.boxId,
       `set -euo pipefail
@@ -1286,7 +1294,7 @@ if [ -f "$rpc_log" ]; then
   before_size="$(wc -c < "$rpc_log")"
 fi
 printf '%s\\n' ${shellQuote(serialized)} > "$fifo"
-deadline=$((SECONDS + ${PI_RPC_ACCEPT_TIMEOUT_SECONDS}))
+deadline=$((SECONDS + ${acceptTimeoutSeconds}))
 while (( SECONDS < deadline )); do
   response="$(
     tail -c "+$((before_size + 1))" "$rpc_log" 2>/dev/null \
@@ -1305,7 +1313,7 @@ while (( SECONDS < deadline )); do
 done
 printf '%s\\n' ${shellQuote(`Pi RPC did not acknowledge ${input.responseCommand}`)} >&2
 exit 1`,
-      PI_RPC_ACCEPT_TIMEOUT_SECONDS + 5,
+      acceptTimeoutSeconds + 5,
     );
     if (!result.success) return null;
     for (const line of result.stdout.trim().split(/[\r\n]+/).reverse()) {
@@ -1332,9 +1340,13 @@ exit 1`,
   }
 
   /** Probe both RPC liveness and, when recovering a timed-out turn, its queue boundary. */
-  async #piRpcHealth(boxId: string): Promise<"idle" | "busy" | null> {
+  async #piRpcHealth(
+    boxId: string,
+    acceptTimeoutSeconds?: number,
+  ): Promise<"idle" | "busy" | null> {
     const response = await this.#rpcCommandResponse({
       boxId,
+      acceptTimeoutSeconds,
       responseCommand: "get_state",
       command: { id: `companion-health:${randomUUID()}`, type: "get_state" },
     });
@@ -1349,7 +1361,10 @@ exit 1`,
   async #waitPiRpcReady(boxId: string): Promise<boolean> {
     const deadline = Date.now() + this.#daemonActiveTimeoutMs;
     do {
-      if (await this.#piRpcHealth(boxId) === "idle") return true;
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) break;
+      // A single missing RPC response must not outlive the whole replacement-readiness budget.
+      if (await this.#piRpcHealth(boxId, remainingMs / 1_000) === "idle") return true;
       if (Date.now() >= deadline) break;
       await this.#pause();
     } while (Date.now() < deadline);
