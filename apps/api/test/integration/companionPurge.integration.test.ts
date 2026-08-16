@@ -18,14 +18,49 @@
  * predicate makes one of the refusal, drain, preservation, or role-boundary assertions fail.
  */
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   extractRuntimeRoleGrantBlock,
   resolveRuntimeRoleGrantsFile,
 } from "../../src/migrate";
-import { integrationSql } from "./testDatabase";
+
+const databaseUrl = process.env.DATABASE_MIGRATION_URL ?? process.env.DATABASE_URL;
+if (!databaseUrl?.trim()) {
+  throw new Error("legacy Companion purge integration tests require a disposable DATABASE_URL");
+}
+const migrationsDir = fileURLToPath(new URL("../../../../packages/db/drizzle/", import.meta.url));
+const databaseSuffix = randomUUID().replaceAll("-", "").slice(0, 16);
+const purgeDatabaseName = `companion_purge_${databaseSuffix}`;
+const purgeUrl = new URL(databaseUrl);
+purgeUrl.pathname = `/${purgeDatabaseName}`;
+purgeUrl.search = "";
+const adminSql = postgres(databaseUrl, { max: 1 });
+let integrationSql: ReturnType<typeof postgres>;
+let purgeDatabaseCreated = false;
+
+async function applyMigrationFile(
+  client: ReturnType<typeof postgres>,
+  name: string,
+): Promise<void> {
+  const source = await readFile(`${migrationsDir}/${name}`, "utf8");
+  const statements = source
+    .split("--> statement-breakpoint")
+    .map((statement) => statement.trim())
+    .filter(Boolean);
+  await client.begin(async (tx) => {
+    for (const statement of statements) await tx.unsafe(statement);
+  });
+}
+
+async function replayThroughLegacyPurge(client: ReturnType<typeof postgres>): Promise<void> {
+  const migrations = (await readdir(migrationsDir))
+    .filter((name) => /^\d{4}_.+\.sql$/.test(name) && name < "0090_companion_runtime_v2.sql")
+    .sort();
+  for (const migration of migrations) await applyMigrationFile(client, migration);
+}
 
 const FINALIZER_TABLES = [
   "companion_legacy_purge_runs",
@@ -339,7 +374,7 @@ async function insertRun(tx: postgres.TransactionSql, ids: FixtureIds): Promise<
     values (
       'legacy-companion-purge',
       ${"a".repeat(64)},
-      ${JSON.stringify({ boxIds: [ids.companionBoxId, ids.poolBoxId] })}::jsonb
+      ${tx.json({ boxIds: [ids.companionBoxId, ids.poolBoxId] })}::jsonb
     )
   `;
 }
@@ -360,7 +395,7 @@ async function insertTarget(
     ) values (
       ${input.boxId},
       ${input.observedName},
-      ${JSON.stringify([input.evidence])}::jsonb,
+      ${tx.json([input.evidence])}::jsonb,
       ${input.state},
       ${input.operationId ?? null},
       clock_timestamp(),
@@ -478,6 +513,11 @@ describe("0089 legacy Companion database purge", () => {
   let rolesCreated = false;
 
   beforeAll(async () => {
+    await adminSql.unsafe(`create database "${purgeDatabaseName}"`);
+    purgeDatabaseCreated = true;
+    integrationSql = postgres(purgeUrl.toString(), { max: 10 });
+    await replayThroughLegacyPurge(integrationSql);
+
     const [functionRow] = await integrationSql<Array<{ owner: string }>>`
       select pg_get_userbyid(p.proowner) as owner
       from pg_proc p
@@ -549,26 +589,35 @@ describe("0089 legacy Companion database purge", () => {
       await tx`select set_config('companion.worker_role', ${workerRole}, true)`;
       await tx.unsafe(grants);
     });
-  });
+  }, 120_000);
 
   afterAll(async () => {
-    if (!rolesCreated) return;
-    await integrationSql`
-      alter function public.companion_finalize_legacy_purge()
-      owner to ${integrationSql(originalFunctionOwner)}
-    `;
-    for (const table of FINALIZER_TABLES) {
-      const owner = originalTableOwners.get(table);
-      if (!owner) continue;
-      await integrationSql`
-        alter table ${integrationSql(table)} owner to ${integrationSql(owner)}
-      `;
+    try {
+      if (rolesCreated) {
+        await integrationSql`
+          alter function public.companion_finalize_legacy_purge()
+          owner to ${integrationSql(originalFunctionOwner)}
+        `;
+        for (const table of FINALIZER_TABLES) {
+          const owner = originalTableOwners.get(table);
+          if (!owner) continue;
+          await integrationSql`
+            alter table ${integrationSql(table)} owner to ${integrationSql(owner)}
+          `;
+        }
+        for (const role of [apiRole, workerRole, publicRole, migrationRole]) {
+          await integrationSql`drop owned by ${integrationSql(role)}`;
+          await integrationSql`drop role ${integrationSql(role)}`;
+        }
+      }
+    } finally {
+      await integrationSql?.end({ timeout: 1 });
+      if (purgeDatabaseCreated) {
+        await adminSql.unsafe(`drop database if exists "${purgeDatabaseName}" with (force)`);
+      }
+      await adminSql.end({ timeout: 1 });
     }
-    for (const role of [apiRole, workerRole, publicRole, migrationRole]) {
-      await integrationSql`drop owned by ${integrationSql(role)}`;
-      await integrationSql`drop role ${integrationSql(role)}`;
-    }
-  });
+  }, 30_000);
 
   it("keeps the finalizer and ledger behind a forced-RLS maintenance boundary", async () => {
     const rlsRows = await integrationSql<Array<{

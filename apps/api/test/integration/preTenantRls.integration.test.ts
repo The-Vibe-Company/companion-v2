@@ -46,6 +46,11 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
     email: `outsider-${suffix}@other.test`,
   };
   const rlsRole = `companion_pretenant_${suffix.replaceAll("-", "").slice(0, 20)}`;
+  const rlsPassword = `pretenant-${suffix}`;
+  const rlsUrl = new URL(databaseUrl);
+  rlsUrl.username = rlsRole;
+  rlsUrl.password = rlsPassword;
+  let runtimeRoleSql: ReturnType<typeof postgres> | undefined;
   const invitationToken = `invite-${suffix}`;
   const apiTokenHash = `hash-${suffix}`;
   const expiredRefreshHash = `expired-refresh-${suffix}`;
@@ -54,10 +59,8 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
   const shareToken = `share-${suffix}`;
 
   async function withRuntimeRole<T>(fn: (tx: postgres.TransactionSql) => Promise<T>): Promise<T> {
-    const result = await sql.begin(async (tx) => {
-      await tx.unsafe(`set local role ${rlsRole}`);
-      return fn(tx);
-    });
+    if (!runtimeRoleSql) throw new Error("pre-tenant runtime role is not initialized");
+    const result = await runtimeRoleSql.begin(fn);
     return result as T;
   }
 
@@ -214,21 +217,24 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
           ${JSON.stringify({ workspaceId: { eq: orgA } })}
         )
     `;
-    await sql.unsafe(`create role ${rlsRole} login nosuperuser nobypassrls noinherit`);
-    await sql.unsafe(`grant ${rlsRole} to current_user with inherit true, set true`);
+    await sql.unsafe(`
+      create role ${rlsRole}
+      login password '${rlsPassword}' nosuperuser nobypassrls noinherit
+    `);
     const grantsFile = await resolveRuntimeRoleGrantsFile();
     const grantBlock = extractRuntimeRoleGrantBlock(await readFile(grantsFile, "utf8"));
     await sql.begin(async (tx) => {
       await tx`select set_config('companion.runtime_role', ${rlsRole}, true)`;
       await tx.unsafe(grantBlock);
     });
+    runtimeRoleSql = postgres(rlsUrl.toString(), { max: 4 });
   });
 
   afterAll(async () => {
+    await runtimeRoleSql?.end({ timeout: 1 });
     await sql`delete from organizations where id in (${orgA}::uuid, ${orgB}::uuid)`;
     await sql`delete from "user" where id in (${owner.id}, ${colleague.id}, ${outsider.id})`;
     await sql.unsafe(`drop owned by ${rlsRole}`);
-    await sql.unsafe(`revoke ${rlsRole} from current_user`);
     await sql.unsafe(`drop role ${rlsRole}`);
     await sql.end();
   });

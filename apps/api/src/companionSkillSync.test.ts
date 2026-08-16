@@ -1,8 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const coreMocks = vi.hoisted(() => ({
   bumpCompanionSkillsRevisionForSkill: vi.fn(async () => undefined),
   claimCompanionRuntimeStart: vi.fn(),
+  companionsEnabled: vi.fn((env: NodeJS.ProcessEnv) =>
+    env.COMPANION_COMPANIONS_ENABLED === "true"
+      && env.COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS === "example.test"),
   listCompanionRuntimeSkillPackages: vi.fn(async () => []),
   listOnlineCompanionsForSkillSync: vi.fn(async () => [] as Array<{ id: string; ownerId: string; boxId: string }>),
   resolveCompanionPluginInjection: vi.fn(async () => ({ accounts: [], credentials: [] })),
@@ -87,7 +90,24 @@ function runtimeFactory(start: () => Promise<ObservedState> = async () => ({
 describe("syncPublishedSkillToOnlineCompanions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubEnv("COMPANION_COMPANIONS_ENABLED", "true");
+    vi.stubEnv("COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS", "example.test");
     dbMocks.withTenantContext.mockImplementation(async (_ctx, fn) => fn({ tenant: true }));
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("does nothing before touching PostgreSQL or Box when Companions are disabled", async () => {
+    vi.stubEnv("COMPANION_COMPANIONS_ENABLED", "false");
+    const factory = vi.fn(() => ({ start: vi.fn() } as never));
+
+    await syncPublishedSkillToOnlineCompanions({ orgId, skillId, actor, runtimeFactory: factory });
+
+    expect(dbMocks.withTenantContext).not.toHaveBeenCalled();
+    expect(coreMocks.bumpCompanionSkillsRevisionForSkill).not.toHaveBeenCalled();
+    expect(factory).not.toHaveBeenCalled();
   });
 
   it("bumps the desired revision for every selector even when no Box is Online", async () => {

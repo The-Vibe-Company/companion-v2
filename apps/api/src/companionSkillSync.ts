@@ -1,6 +1,7 @@
 import {
   bumpCompanionSkillsRevisionForSkill,
   claimCompanionRuntimeStart,
+  companionsEnabled,
   listCompanionRuntimeSkillPackages,
   listOnlineCompanionsForSkillSync,
   resolveCompanionPluginInjection,
@@ -31,6 +32,7 @@ export async function syncPublishedSkillToOnlineCompanions(input: {
   runtimeFactory?: () => CompanionBoxRuntime;
 }): Promise<void> {
   const env = input.env ?? process.env;
+  if (!companionsEnabled(env)) return;
   // Every selector — Online or asleep — now needs a restage; the desired-revision bump is what
   // makes the settings UI read "pending" until the package actually lands (on this push for Online
   // Boxes, on the next wake for asleep ones). If the bump itself fails, stop: the publish already

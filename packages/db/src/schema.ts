@@ -46,6 +46,52 @@ export const companionRuntimePoolScopeEnum = pgEnum("companion_runtime_pool_scop
   "personal",
   "org",
 ]);
+export const companionBoxObservedStateEnum = pgEnum("companion_box_observed_state", [
+  "absent", "initializing", "provisioning", "ready", "idle", "running",
+  "archiving", "archived", "error", "unknown",
+]);
+export const companionPiObservedStateEnum = pgEnum("companion_pi_observed_state", [
+  "absent", "starting", "idle", "running", "stopped", "error", "unknown",
+]);
+export const companionRuntimeRetirementStateEnum = pgEnum("companion_runtime_retirement_state", [
+  "active", "requested", "pending", "blocked", "retired",
+]);
+export const companionClientSurfaceEnum = pgEnum("companion_client_surface", [
+  "web", "mobile_web", "native_mobile",
+]);
+export const companionTurnStatusEnum = pgEnum("companion_turn_status", [
+  "queued", "starting", "dispatching", "running", "needs_input",
+  "succeeded", "failed", "interrupted", "cancelled",
+]);
+export const companionAttemptStatusEnum = pgEnum("companion_attempt_status", [
+  "starting", "dispatching", "running", "needs_input",
+  "succeeded", "failed", "interrupted", "cancelled",
+]);
+export const companionDispatchStateEnum = pgEnum("companion_dispatch_state", [
+  "pending", "write_intent", "accepted", "rejected", "ambiguous",
+]);
+export const companionOperationKindEnum = pgEnum("companion_operation_kind", [
+  "delete", "stop", "restart_pi", "restart_box", "start", "apply_settings",
+]);
+export const companionOperationStatusEnum = pgEnum("companion_operation_status", [
+  "pending", "running", "succeeded", "failed", "interrupted", "cancelled",
+]);
+export const companionOperationTriggerEnum = pgEnum("companion_operation_trigger", [
+  "turn", "user", "settings", "recovery", "kill_switch",
+]);
+export const companionRuntimeErrorActionEnum = pgEnum("companion_runtime_error_action", [
+  "retry", "cancel", "restart_pi", "restart_box", "switch_model",
+  "reconnect_provider", "none",
+]);
+export const companionRuntimeWorkKindEnum = pgEnum("companion_runtime_work_kind", [
+  "operation", "decision", "attempt", "settings", "health",
+]);
+export const companionDecisionStatusEnum = pgEnum("companion_decision_status", [
+  "pending", "allowed", "denied", "answered", "expired", "cancelled",
+]);
+export const companionDecisionDeliveryStateEnum = pgEnum("companion_decision_delivery_state", [
+  "pending", "write_intent", "delivered", "ambiguous", "cancelled",
+]);
 export type CompanionLegacyPurgePhase =
   | "deleting_external"
   | "external_complete"
@@ -639,6 +685,385 @@ export const companionLegacyPurgeTargets = pgTable(
       "companion_legacy_purge_targets_completed_check",
       sql`(${t.state} in ('completed', 'absent')) = (${t.completedAt} is not null)`,
     ),
+  }),
+);
+
+/** Authoritative singleton kill switch for the isolated Runtime v2 role. */
+export const companionRuntimeControl = pgTable(
+  "companion_runtime_control",
+  {
+    id: text("id").primaryKey().notNull().default("runtime-v2"),
+    enabled: boolean("enabled").notNull().default(false),
+    gateEpoch: bigint("gate_epoch", { mode: "number" }).notNull().default(1),
+    enabledAt: timestamp("enabled_at", { withTimezone: true }),
+    disabledAt: timestamp("disabled_at", { withTimezone: true }).defaultNow(),
+    changedBy: text("changed_by"),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    singleton: check("companion_runtime_control_singleton_check", sql`${t.id} = 'runtime-v2'`),
+    epoch: check("companion_runtime_control_epoch_check", sql`${t.gateEpoch} >= 1`),
+    state: check(
+      "companion_runtime_control_state_check",
+      sql`(${t.enabled} and ${t.enabledAt} is not null and ${t.disabledAt} is null)
+        or (not ${t.enabled} and ${t.disabledAt} is not null)`,
+    ),
+    actor: check(
+      "companion_runtime_control_actor_check",
+      sql`${t.changedBy} is null or (char_length(${t.changedBy}) between 1 and 200 and ${t.changedBy} !~ E'[\\n\\r]')`,
+    ),
+  }),
+);
+
+// Drizzle resolves table extra-config callbacks after module initialization. The explicit return
+// type breaks the deliberate Runtime instance <-> turn inference cycle while keeping both
+// composite tenant FKs represented in this schema.
+function companionTurnCompositeKeyColumns(): [AnyPgColumn, AnyPgColumn, AnyPgColumn] {
+  return [companionTurns.orgId, companionTurns.companionId, companionTurns.id];
+}
+
+/** Identifier-only one-Companion/one-Box/one-Pi Runtime v2 projection. */
+export const companionRuntimeInstances = pgTable(
+  "companion_runtime_instances",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "restrict" }),
+    companionId: uuid("companion_id").primaryKey().notNull(),
+    generation: bigint("generation", { mode: "number" }).notNull().default(1),
+    boxId: text("box_id"),
+    boxState: companionBoxObservedStateEnum("box_state").notNull().default("absent"),
+    piState: companionPiObservedStateEnum("pi_state").notNull().default("absent"),
+    piInvocationId: text("pi_invocation_id"),
+    diskLayoutVersion: integer("disk_layout_version").notNull().default(0),
+    desiredSettingsRevision: bigint("desired_settings_revision", { mode: "number" }).notNull().default(1),
+    appliedSettingsRevision: bigint("applied_settings_revision", { mode: "number" }).notNull().default(0),
+    appliedSkillsRevision: integer("applied_skills_revision").notNull().default(0),
+    appliedClientSurface: companionClientSurfaceEnum("applied_client_surface"),
+    settingsActorId: text("settings_actor_id"),
+    settingsCheckpoint: text("settings_checkpoint").notNull().default("pending"),
+    settingsCheckpointSequence: bigint("settings_checkpoint_sequence", { mode: "number" }).notNull().default(0),
+    settingsClaimEpoch: bigint("settings_claim_epoch", { mode: "number" }),
+    settingsClaimActorId: text("settings_claim_actor_id"),
+    settingsClaimClientSurface: companionClientSurfaceEnum("settings_claim_client_surface"),
+    settingsClaimTurnId: uuid("settings_claim_turn_id"),
+    settingsClaimColdStartDeadlineAt: timestamp("settings_claim_cold_start_deadline_at", { withTimezone: true }),
+    settingsClaimRevision: bigint("settings_claim_revision", { mode: "number" }),
+    settingsClaimSkillsRevision: integer("settings_claim_skills_revision"),
+    settingsClaimModelId: text("settings_claim_model_id"),
+    settingsClaimPersona: text("settings_claim_persona"),
+    settingsClaimCanWriteSkills: boolean("settings_claim_can_write_skills"),
+    settingsClaimProviderIds: jsonb("settings_claim_provider_ids").$type<string[]>(),
+    settingsClaimSelectedSkillIds: jsonb("settings_claim_selected_skill_ids").$type<string[]>(),
+    settingsClaimSkillRefs: jsonb("settings_claim_skill_refs").$type<Array<{ skill_id: string; current_version_id: string | null }>>(),
+    settingsClaimSelectedMcpAccountIds: jsonb("settings_claim_selected_mcp_account_ids").$type<string[]>(),
+    settingsAvailableAt: timestamp("settings_available_at", { withTimezone: true }).notNull().defaultNow(),
+    settingsAttemptCount: integer("settings_attempt_count").notNull().default(0),
+    healthCheckpoint: text("health_checkpoint").notNull().default("pending"),
+    healthCheckpointSequence: bigint("health_checkpoint_sequence", { mode: "number" }).notNull().default(0),
+    healthClaimEpoch: bigint("health_claim_epoch", { mode: "number" }),
+    healthDueAt: timestamp("health_due_at", { withTimezone: true }).notNull().defaultNow(),
+    nextTurnSequence: bigint("next_turn_sequence", { mode: "number" }).notNull().default(1),
+    nextOperationSequence: bigint("next_operation_sequence", { mode: "number" }).notNull().default(1),
+    lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
+    boxObservedAt: timestamp("box_observed_at", { withTimezone: true }),
+    piObservedAt: timestamp("pi_observed_at", { withTimezone: true }),
+    lastObservedAt: timestamp("last_observed_at", { withTimezone: true }),
+    retirementState: companionRuntimeRetirementStateEnum("retirement_state").notNull().default("active"),
+    retirementRequestedAt: timestamp("retirement_requested_at", { withTimezone: true }),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    lastWriteEpoch: bigint("last_write_epoch", { mode: "number" }).notNull().default(0),
+    lastErrorCode: text("last_error_code"),
+    lastErrorMessage: text("last_error_message"),
+    lastErrorAction: companionRuntimeErrorActionEnum("last_error_action"),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgCompanion: unique("companion_runtime_instances_org_companion_uq").on(t.orgId, t.companionId),
+    boxIdUnique: uniqueIndex("companion_runtime_instances_box_id_uq").on(t.boxId).where(sql`${t.boxId} is not null`),
+    healthDue: index("companion_runtime_instances_health_due_idx")
+      .on(t.healthDueAt, t.companionId).where(sql`${t.retirementState} <> 'retired'`),
+    companionFk: foreignKey({
+      columns: [t.orgId, t.companionId], foreignColumns: [companions.orgId, companions.id],
+      name: "companion_runtime_instances_companion_fk",
+    }).onDelete("cascade"),
+    settingsClaimTurnFk: foreignKey({
+      columns: [t.orgId, t.companionId, t.settingsClaimTurnId],
+      foreignColumns: companionTurnCompositeKeyColumns(),
+      name: "companion_runtime_instances_settings_claim_turn_fk",
+    }).onDelete("restrict"),
+    generationCheck: check("companion_runtime_instances_generation_check", sql`${t.generation} >= 1`),
+    boxIdCheck: check("companion_runtime_instances_box_id_check", sql`${t.boxId} is null or ${t.boxId} ~ '^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$'`),
+    invocationCheck: check("companion_runtime_instances_pi_invocation_check", sql`${t.piInvocationId} is null or (char_length(${t.piInvocationId}) between 1 and 200 and ${t.piInvocationId} !~ E'[\\n\\r]')`),
+    revisionCheck: check("companion_runtime_instances_revision_check", sql`${t.diskLayoutVersion} >= 0 and ${t.desiredSettingsRevision} >= 1 and ${t.appliedSettingsRevision} >= 0 and ${t.appliedSettingsRevision} <= ${t.desiredSettingsRevision} and ${t.appliedSkillsRevision} >= 0 and ((${t.appliedSettingsRevision} = 0) = (${t.appliedClientSurface} is null)) and ${t.nextTurnSequence} >= 1 and ${t.nextOperationSequence} >= 1 and ${t.lastWriteEpoch} >= 0`),
+    settingsActorCheck: check("companion_runtime_instances_settings_actor_check", sql`
+      (${t.settingsActorId} is null or (char_length(${t.settingsActorId}) between 1 and 200 and ${t.settingsActorId} !~ E'[\\n\\r]'))
+      and (${t.settingsClaimActorId} is null or (char_length(${t.settingsClaimActorId}) between 1 and 200 and ${t.settingsClaimActorId} !~ E'[\\n\\r]'))
+      and ((${t.settingsClaimEpoch} is null) = (${t.settingsClaimActorId} is null))
+      and ((${t.settingsClaimEpoch} is null) = (${t.settingsClaimClientSurface} is null))
+      and (${t.settingsClaimEpoch} is not null or ${t.settingsClaimTurnId} is null)
+      and (${t.settingsClaimTurnId} is not null or ${t.settingsClaimColdStartDeadlineAt} is null)
+      and ((${t.settingsClaimEpoch} is null) = (${t.settingsClaimRevision} is null))
+      and ((${t.settingsClaimEpoch} is null) = (${t.settingsClaimSkillsRevision} is null))
+      and ((${t.settingsClaimEpoch} is null) = (${t.settingsClaimCanWriteSkills} is null))
+      and ((${t.settingsClaimEpoch} is null) = (${t.settingsClaimProviderIds} is null))
+      and ((${t.settingsClaimEpoch} is null) = (${t.settingsClaimSelectedSkillIds} is null))
+      and ((${t.settingsClaimEpoch} is null) = (${t.settingsClaimSkillRefs} is null))
+      and ((${t.settingsClaimEpoch} is null) = (${t.settingsClaimSelectedMcpAccountIds} is null))
+      and (${t.settingsClaimRevision} is null or ${t.settingsClaimRevision} >= 1)
+      and (${t.settingsClaimSkillsRevision} is null or ${t.settingsClaimSkillsRevision} >= 0)
+      and (${t.settingsClaimModelId} is null or (${t.settingsClaimEpoch} is not null and char_length(${t.settingsClaimModelId}) between 1 and 200 and ${t.settingsClaimModelId} !~ E'[\\n\\r]'))
+      and (${t.settingsClaimPersona} is null or (${t.settingsClaimEpoch} is not null and char_length(${t.settingsClaimPersona}) <= 280))
+      and (${t.settingsClaimProviderIds} is null or jsonb_typeof(${t.settingsClaimProviderIds}) = 'array')
+      and (${t.settingsClaimSelectedSkillIds} is null or jsonb_typeof(${t.settingsClaimSelectedSkillIds}) = 'array')
+      and (${t.settingsClaimSkillRefs} is null or jsonb_typeof(${t.settingsClaimSkillRefs}) = 'array')
+      and (${t.settingsClaimSelectedMcpAccountIds} is null or jsonb_typeof(${t.settingsClaimSelectedMcpAccountIds}) = 'array')
+    `),
+    settingsCheckpointCheck: check("companion_runtime_instances_settings_checkpoint_check", sql`${t.settingsCheckpoint} in ('pending','applying','applied') and ${t.settingsCheckpointSequence} >= 0 and ${t.settingsAttemptCount} >= 0`),
+    healthCheckpointCheck: check("companion_runtime_instances_health_checkpoint_check", sql`${t.healthCheckpoint} in ('pending','observing','observed') and ${t.healthCheckpointSequence} >= 0`),
+    retirementCheck: check("companion_runtime_instances_retirement_check", sql`(${t.retirementState} = 'active' and ${t.retirementRequestedAt} is null and ${t.retiredAt} is null) or (${t.retirementState} in ('requested','pending','blocked') and ${t.retirementRequestedAt} is not null and ${t.retiredAt} is null) or (${t.retirementState} = 'retired' and ${t.retirementRequestedAt} is not null and ${t.retiredAt} is not null)`),
+    errorCheck: check("companion_runtime_instances_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAction} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]'))`),
+  }),
+);
+
+export const companionTurns = pgTable(
+  "companion_turns",
+  {
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "restrict" }),
+    companionId: uuid("companion_id").notNull(),
+    clientMessageId: uuid("client_message_id").notNull(),
+    messageEventId: text("message_event_id").notNull(),
+    queueSequence: bigint("queue_sequence", { mode: "number" }).notNull(),
+    actorId: text("actor_id").notNull(),
+    clientSurface: companionClientSurfaceEnum("client_surface").notNull(),
+    status: companionTurnStatusEnum("status").notNull().default("queued"),
+    coldStartDeadlineAt: timestamp("cold_start_deadline_at", { withTimezone: true }),
+    inactivityDeadlineAt: timestamp("inactivity_deadline_at", { withTimezone: true }),
+    absoluteDeadlineAt: timestamp("absolute_deadline_at", { withTimezone: true }),
+    stateChangedAt: timestamp("state_changed_at", { withTimezone: true }).notNull().defaultNow(),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+    lastErrorMessage: text("last_error_message"),
+    lastErrorAction: companionRuntimeErrorActionEnum("last_error_action"),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgCompanionId: unique("companion_turns_org_companion_id_uq").on(t.orgId, t.companionId, t.id),
+    clientMessageUnique: unique("companion_turns_client_message_uq").on(t.companionId, t.clientMessageId),
+    queueSequenceUnique: unique("companion_turns_queue_sequence_uq").on(t.companionId, t.queueSequence),
+    oneActive: uniqueIndex("companion_turns_one_active_uq").on(t.companionId).where(sql`${t.status} in ('starting','dispatching','running','needs_input')`),
+    queued: index("companion_turns_queue_idx").on(t.companionId, t.queueSequence).where(sql`${t.status} = 'queued'`),
+    deadline: index("companion_turns_deadline_idx").on(t.coldStartDeadlineAt, t.inactivityDeadlineAt, t.absoluteDeadlineAt).where(sql`${t.status} in ('starting','dispatching','running','needs_input')`),
+    runtimeInstanceFk: foreignKey({ columns: [t.orgId, t.companionId], foreignColumns: [companionRuntimeInstances.orgId, companionRuntimeInstances.companionId], name: "companion_turns_runtime_instance_fk" }).onDelete("cascade"),
+    queueSequenceCheck: check("companion_turns_queue_sequence_check", sql`${t.queueSequence} >= 1`),
+    messageEventCheck: check("companion_turns_message_event_check", sql`${t.messageEventId} = 'msg:' || ${t.clientMessageId}::text`),
+    actorCheck: check("companion_turns_actor_check", sql`char_length(${t.actorId}) between 1 and 200 and ${t.actorId} !~ E'[\\n\\r]'`),
+    deadlineCheck: check("companion_turns_deadline_check", sql`(${t.coldStartDeadlineAt} is null or ${t.coldStartDeadlineAt} >= ${t.createdAt}) and ((${t.status} in ('queued','cancelled') and ${t.inactivityDeadlineAt} is null and ${t.absoluteDeadlineAt} is null) or (${t.status} <> 'queued' and ${t.absoluteDeadlineAt} is not null and (${t.inactivityDeadlineAt} is null or ${t.absoluteDeadlineAt} >= ${t.inactivityDeadlineAt})))`),
+    terminalCheck: check("companion_turns_terminal_check", sql`(${t.status} in ('succeeded','failed','interrupted','cancelled')) = (${t.settledAt} is not null)`),
+    errorCheck: check("companion_turns_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAction} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]')) and (${t.status} not in ('failed','interrupted') or ${t.lastErrorCode} is not null) and (${t.status} not in ('succeeded','cancelled') or ${t.lastErrorCode} is null)`),
+  }),
+);
+
+export const companionTurnAttempts = pgTable(
+  "companion_turn_attempts",
+  {
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "restrict" }),
+    companionId: uuid("companion_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    attemptNumber: integer("attempt_number").notNull(),
+    retryId: uuid("retry_id"),
+    actorId: text("actor_id").notNull(),
+    runtimeGeneration: bigint("runtime_generation", { mode: "number" }).notNull(),
+    settingsRevision: bigint("settings_revision", { mode: "number" }).notNull(),
+    skillsRevision: integer("skills_revision").notNull(),
+    modelId: text("model_id"),
+    persona: text("persona"),
+    canWriteSkills: boolean("can_write_skills").notNull().default(false),
+    providerIds: jsonb("provider_ids").$type<string[]>().notNull(),
+    selectedSkillIds: jsonb("selected_skill_ids").$type<string[]>().notNull(),
+    skillRefs: jsonb("skill_refs")
+      .$type<Array<{ skill_id: string; current_version_id: string | null }>>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
+    selectedMcpAccountIds: jsonb("selected_mcp_account_ids").$type<string[]>().notNull(),
+    claimEpoch: bigint("claim_epoch", { mode: "number" }),
+    status: companionAttemptStatusEnum("status").notNull().default("starting"),
+    checkpoint: text("checkpoint").notNull().default("starting"),
+    checkpointSequence: bigint("checkpoint_sequence", { mode: "number" }).notNull().default(0),
+    dispatchState: companionDispatchStateEnum("dispatch_state").notNull().default("pending"),
+    dispatchCount: integer("dispatch_count").notNull().default(0),
+    commandId: uuid("command_id"),
+    dispatchStartedAt: timestamp("dispatch_started_at", { withTimezone: true }),
+    dispatchAcceptedAt: timestamp("dispatch_accepted_at", { withTimezone: true }),
+    piInvocationId: text("pi_invocation_id"),
+    eventCursor: bigint("event_cursor", { mode: "bigint" }).notNull().default(0n),
+    lastActivityAt: timestamp("last_activity_at", { withTimezone: true }),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
+    unknownEventCount: integer("unknown_event_count").notNull().default(0),
+    malformedEventCount: integer("malformed_event_count").notNull().default(0),
+    oversizedEventCount: integer("oversized_event_count").notNull().default(0),
+    lastErrorCode: text("last_error_code"),
+    lastErrorMessage: text("last_error_message"),
+    lastErrorAction: companionRuntimeErrorActionEnum("last_error_action"),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgCompanionId: unique("companion_turn_attempts_org_companion_id_uq").on(t.orgId, t.companionId, t.id),
+    uniqueOrgTurnId: unique("companion_turn_attempts_org_companion_turn_id_uq").on(t.orgId, t.companionId, t.turnId, t.id),
+    attemptNumberUnique: unique("companion_turn_attempts_number_uq").on(t.turnId, t.attemptNumber),
+    retryUnique: uniqueIndex("companion_turn_attempts_retry_uq").on(t.companionId, t.retryId).where(sql`${t.retryId} is not null`),
+    oneActive: uniqueIndex("companion_turn_attempts_one_active_uq").on(t.companionId).where(sql`${t.status} in ('starting','dispatching','running','needs_input')`),
+    invocation: index("companion_turn_attempts_invocation_idx").on(t.companionId, t.piInvocationId).where(sql`${t.piInvocationId} is not null`),
+    runtimeInstanceFk: foreignKey({ columns: [t.orgId, t.companionId], foreignColumns: [companionRuntimeInstances.orgId, companionRuntimeInstances.companionId], name: "companion_turn_attempts_runtime_instance_fk" }).onDelete("cascade"),
+    turnFk: foreignKey({ columns: [t.orgId, t.companionId, t.turnId], foreignColumns: [companionTurns.orgId, companionTurns.companionId, companionTurns.id], name: "companion_turn_attempts_turn_fk" }).onDelete("cascade"),
+    numberCheck: check("companion_turn_attempts_number_check", sql`${t.attemptNumber} >= 1`),
+    actorCheck: check("companion_turn_attempts_actor_check", sql`char_length(${t.actorId}) between 1 and 200 and ${t.actorId} !~ E'[\\n\\r]'`),
+    runtimeCheck: check("companion_turn_attempts_runtime_check", sql`${t.runtimeGeneration} >= 1 and ${t.settingsRevision} >= 1 and ${t.skillsRevision} >= 1 and (${t.claimEpoch} is null or ${t.claimEpoch} >= 1)`),
+    resourceSnapshotCheck: check("companion_turn_attempts_resource_snapshot_check", sql`(${t.modelId} is null or (char_length(${t.modelId}) between 1 and 200 and ${t.modelId} !~ E'[\\n\\r]')) and (${t.persona} is null or char_length(${t.persona}) <= 280) and jsonb_typeof(${t.providerIds}) = 'array' and jsonb_typeof(${t.selectedSkillIds}) = 'array' and jsonb_typeof(${t.skillRefs}) = 'array' and jsonb_typeof(${t.selectedMcpAccountIds}) = 'array'`),
+    checkpointCheck: check("companion_turn_attempts_checkpoint_check", sql`${t.checkpoint} in ('starting','dispatch_write_intent','dispatch_accepted','dispatch_ambiguous','dispatch_rejected','running','needs_input','event_projected','agent_settled') and ${t.checkpointSequence} >= 0`),
+    dispatchCheck: check("companion_turn_attempts_dispatch_check", sql`${t.dispatchCount} >= 0 and ((${t.dispatchState} = 'pending' and ${t.commandId} is null) or (${t.dispatchState} <> 'pending' and ${t.commandId} is not null)) and (${t.dispatchAcceptedAt} is null or ${t.dispatchState} = 'accepted')`),
+    invocationCheck: check("companion_turn_attempts_pi_invocation_check", sql`${t.piInvocationId} is null or (char_length(${t.piInvocationId}) between 1 and 200 and ${t.piInvocationId} !~ E'[\\n\\r]')`),
+    progressCheck: check("companion_turn_attempts_progress_check", sql`${t.eventCursor} >= 0 and ${t.unknownEventCount} >= 0 and ${t.malformedEventCount} >= 0 and ${t.oversizedEventCount} >= 0`),
+    terminalCheck: check("companion_turn_attempts_terminal_check", sql`(${t.status} in ('succeeded','failed','interrupted','cancelled')) = (${t.settledAt} is not null)`),
+    terminalProofCheck: check("companion_turn_attempts_terminal_proof_check", sql`(${t.status} <> 'succeeded' or (${t.checkpoint} = 'agent_settled' and ${t.dispatchState} = 'accepted' and ${t.piInvocationId} is not null)) and (${t.dispatchState} <> 'ambiguous' or ${t.status} not in ('succeeded','failed','cancelled')) and (${t.dispatchState} <> 'rejected' or ${t.status} not in ('succeeded','cancelled'))`),
+    errorCheck: check("companion_turn_attempts_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAction} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]')) and (${t.status} not in ('failed','interrupted') or ${t.lastErrorCode} is not null) and (${t.status} not in ('succeeded','cancelled') or ${t.lastErrorCode} is null)`),
+  }),
+);
+
+export const companionOperations = pgTable(
+  "companion_operations",
+  {
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "restrict" }),
+    companionId: uuid("companion_id").notNull(),
+    requestId: uuid("request_id"),
+    kind: companionOperationKindEnum("kind").notNull(),
+    trigger: companionOperationTriggerEnum("trigger").notNull(),
+    status: companionOperationStatusEnum("status").notNull().default("pending"),
+    actorId: text("actor_id").notNull(),
+    sourceTurnId: uuid("source_turn_id"),
+    queueSequence: bigint("queue_sequence", { mode: "number" }).notNull(),
+    turnQueueCutoff: bigint("turn_queue_cutoff", { mode: "number" }).notNull(),
+    runtimeGeneration: bigint("runtime_generation", { mode: "number" }).notNull(),
+    clientSurface: companionClientSurfaceEnum("client_surface"),
+    claimEpoch: bigint("claim_epoch", { mode: "number" }),
+    checkpoint: text("checkpoint").notNull().default("pending"),
+    checkpointSequence: bigint("checkpoint_sequence", { mode: "number" }).notNull().default(0),
+    availableAt: timestamp("available_at", { withTimezone: true }).notNull().defaultNow(),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    targetSettingsRevision: bigint("target_settings_revision", { mode: "number" }),
+    targetSkillsRevision: integer("target_skills_revision"),
+    modelId: text("model_id"),
+    persona: text("persona"),
+    canWriteSkills: boolean("can_write_skills"),
+    providerIds: jsonb("provider_ids").$type<string[]>(),
+    selectedSkillIds: jsonb("selected_skill_ids").$type<string[]>(),
+    skillRefs: jsonb("skill_refs").$type<Array<{ skill_id: string; current_version_id: string | null }>>(),
+    selectedMcpAccountIds: jsonb("selected_mcp_account_ids").$type<string[]>(),
+    providerOperationId: text("provider_operation_id"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+    lastErrorMessage: text("last_error_message"),
+    lastErrorAction: companionRuntimeErrorActionEnum("last_error_action"),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgCompanionId: unique("companion_operations_org_companion_id_uq").on(t.orgId, t.companionId, t.id),
+    requestUnique: unique("companion_operations_request_uq").on(t.companionId, t.requestId),
+    queueSequenceUnique: unique("companion_operations_queue_sequence_uq").on(t.companionId, t.queueSequence),
+    oneRunning: uniqueIndex("companion_operations_one_running_uq").on(t.companionId).where(sql`${t.status} = 'running'`),
+    pending: index("companion_operations_pending_idx").on(t.availableAt, t.queueSequence, t.companionId).where(sql`${t.status} in ('pending','running')`),
+    providerOperationUnique: uniqueIndex("companion_operations_provider_operation_uq").on(t.providerOperationId).where(sql`${t.providerOperationId} is not null`),
+    runtimeInstanceFk: foreignKey({ columns: [t.orgId, t.companionId], foreignColumns: [companionRuntimeInstances.orgId, companionRuntimeInstances.companionId], name: "companion_operations_runtime_instance_fk" }).onDelete("cascade"),
+    sourceTurnFk: foreignKey({ columns: [t.orgId, t.companionId, t.sourceTurnId], foreignColumns: [companionTurns.orgId, companionTurns.companionId, companionTurns.id], name: "companion_operations_source_turn_fk" }).onDelete("restrict"),
+    queueSequenceCheck: check("companion_operations_queue_sequence_check", sql`${t.queueSequence} >= 1 and ${t.turnQueueCutoff} >= 0`),
+    actorCheck: check("companion_operations_actor_check", sql`char_length(${t.actorId}) between 1 and 200 and ${t.actorId} !~ E'[\\n\\r]'`),
+    runtimeCheck: check("companion_operations_runtime_check", sql`${t.runtimeGeneration} >= 1 and (${t.claimEpoch} is null or ${t.claimEpoch} >= 1)`),
+    checkpointCheck: check("companion_operations_checkpoint_check", sql`${t.checkpoint} in ('pending','resolving_box','box_resolved','box_absence_observed','creating_box','box_created','waiting_ready','box_ready_observed','installing_layout','starting_pi','pi_observed','pi_ready','stopping_pi','provider_stop_requested','waiting_archived','box_archived','restarting_pi','restarting_box','applying_settings','settings_applied','provider_delete_requested','waiting_deleted','provider_deleted','box_absent','completed') and ${t.checkpointSequence} >= 0 and ${t.attemptCount} >= 0`),
+    targetRevisionCheck: check("companion_operations_target_revision_check", sql`(${t.targetSettingsRevision} is null or ${t.targetSettingsRevision} >= 1) and (${t.targetSkillsRevision} is null or ${t.targetSkillsRevision} >= 1) and ((${t.kind} in ('start','restart_pi','restart_box','apply_settings') and ${t.targetSettingsRevision} is not null and ${t.targetSkillsRevision} is not null) or (${t.kind} not in ('start','restart_pi','restart_box','apply_settings') and ${t.targetSettingsRevision} is null and ${t.targetSkillsRevision} is null))`),
+    resourceSnapshotCheck: check("companion_operations_resource_snapshot_check", sql`((${t.kind} in ('start','restart_pi','restart_box','apply_settings') and ${t.clientSurface} is not null and (${t.modelId} is null or (char_length(${t.modelId}) between 1 and 200 and ${t.modelId} !~ E'[\n\r]')) and (${t.persona} is null or char_length(${t.persona}) <= 280) and ${t.canWriteSkills} is not null and jsonb_typeof(${t.providerIds}) = 'array' and jsonb_typeof(${t.selectedSkillIds}) = 'array' and jsonb_typeof(${t.skillRefs}) = 'array' and jsonb_typeof(${t.selectedMcpAccountIds}) = 'array') or (${t.kind} not in ('start','restart_pi','restart_box','apply_settings') and ${t.clientSurface} is null and ${t.modelId} is null and ${t.persona} is null and ${t.canWriteSkills} is null and ${t.providerIds} is null and ${t.selectedSkillIds} is null and ${t.skillRefs} is null and ${t.selectedMcpAccountIds} is null))`),
+    providerOperationCheck: check("companion_operations_provider_operation_check", sql`${t.providerOperationId} is null or (char_length(${t.providerOperationId}) between 1 and 200 and ${t.providerOperationId} !~ E'[\\n\\r]')`),
+    terminalCheck: check("companion_operations_terminal_check", sql`(${t.status} in ('succeeded','failed','interrupted','cancelled')) = (${t.settledAt} is not null)`),
+    terminalProofCheck: check("companion_operations_terminal_proof_check", sql`${t.status} <> 'succeeded' or ((${t.kind} in ('start','restart_pi','restart_box') and ${t.checkpoint} = 'pi_ready') or (${t.kind} = 'stop' and ${t.checkpoint} = 'box_archived') or (${t.kind} = 'apply_settings' and ${t.checkpoint} = 'settings_applied') or (${t.kind} = 'delete' and ${t.checkpoint} in ('provider_deleted','box_absent')))`),
+    explicitDestructiveTriggerCheck: check("companion_operations_explicit_destructive_trigger_check", sql`${t.kind} not in ('restart_box','delete') or ${t.trigger} = 'user'`),
+    errorCheck: check("companion_operations_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAction} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]')) and (${t.status} not in ('failed','interrupted') or ${t.lastErrorCode} is not null) and (${t.status} not in ('succeeded','cancelled') or ${t.lastErrorCode} is null)`),
+  }),
+);
+
+export const companionDecisionDeliveries = pgTable(
+  "companion_decision_deliveries",
+  {
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "restrict" }),
+    companionId: uuid("companion_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    requestKey: text("request_key").notNull(),
+    decisionStatus: companionDecisionStatusEnum("decision_status").notNull().default("pending"),
+    actorId: text("actor_id"),
+    responseText: text("response_text"),
+    respondedAt: timestamp("responded_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    deliveryState: companionDecisionDeliveryStateEnum("delivery_state").notNull().default("pending"),
+    deliveryCheckpoint: text("delivery_checkpoint").notNull().default("pending"),
+    deliveryCheckpointSequence: bigint("delivery_checkpoint_sequence", { mode: "number" }).notNull().default(0),
+    deliveryAttemptCount: integer("delivery_attempt_count").notNull().default(0),
+    claimEpoch: bigint("claim_epoch", { mode: "number" }),
+    commandId: uuid("command_id"),
+    deliveryStartedAt: timestamp("delivery_started_at", { withTimezone: true }),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+    lastErrorMessage: text("last_error_message"),
+    lastErrorAction: companionRuntimeErrorActionEnum("last_error_action"),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgCompanionId: unique("companion_decision_deliveries_org_companion_id_uq").on(t.orgId, t.companionId, t.id),
+    requestUnique: unique("companion_decision_deliveries_request_uq").on(t.attemptId, t.requestKey),
+    pending: index("companion_decision_deliveries_pending_idx").on(t.createdAt, t.companionId).where(sql`${t.decisionStatus} <> 'pending' and ${t.deliveryState} not in ('delivered','cancelled')`),
+    expiry: index("companion_decision_deliveries_expiry_idx").on(t.expiresAt, t.companionId).where(sql`${t.decisionStatus} = 'pending'`),
+    runtimeInstanceFk: foreignKey({ columns: [t.orgId, t.companionId], foreignColumns: [companionRuntimeInstances.orgId, companionRuntimeInstances.companionId], name: "companion_decision_deliveries_runtime_instance_fk" }).onDelete("cascade"),
+    turnFk: foreignKey({ columns: [t.orgId, t.companionId, t.turnId], foreignColumns: [companionTurns.orgId, companionTurns.companionId, companionTurns.id], name: "companion_decision_deliveries_turn_fk" }).onDelete("cascade"),
+    attemptFk: foreignKey({ columns: [t.orgId, t.companionId, t.turnId, t.attemptId], foreignColumns: [companionTurnAttempts.orgId, companionTurnAttempts.companionId, companionTurnAttempts.turnId, companionTurnAttempts.id], name: "companion_decision_deliveries_attempt_fk" }).onDelete("cascade"),
+    requestKeyCheck: check("companion_decision_deliveries_request_key_check", sql`char_length(${t.requestKey}) between 1 and 200 and ${t.requestKey} !~ E'[\\n\\r]'`),
+    actorCheck: check("companion_decision_deliveries_actor_check", sql`${t.actorId} is null or (char_length(${t.actorId}) between 1 and 200 and ${t.actorId} !~ E'[\\n\\r]')`),
+    responseCheck: check("companion_decision_deliveries_response_check", sql`(${t.responseText} is null or octet_length(${t.responseText}) <= 16384) and ((${t.decisionStatus} = 'pending' and ${t.actorId} is null and ${t.responseText} is null and ${t.respondedAt} is null) or (${t.decisionStatus} in ('allowed','denied') and ${t.actorId} is not null and ${t.responseText} is null and ${t.respondedAt} is not null) or (${t.decisionStatus} = 'answered' and ${t.actorId} is not null and ${t.responseText} is not null and ${t.respondedAt} is not null) or (${t.decisionStatus} in ('expired','cancelled') and ${t.responseText} is null and ${t.respondedAt} is not null))`),
+    deliveryCheck: check("companion_decision_deliveries_delivery_check", sql`${t.deliveryCheckpoint} in ('pending','write_intent','delivered','ambiguous','cancelled') and ${t.deliveryCheckpointSequence} >= 0 and ${t.deliveryAttemptCount} >= 0 and (${t.claimEpoch} is null or ${t.claimEpoch} >= 1) and ((${t.deliveryState} in ('pending','cancelled') and ${t.commandId} is null) or (${t.deliveryState} in ('write_intent','delivered','ambiguous') and ${t.commandId} is not null)) and ((${t.deliveryState} = 'delivered') = (${t.deliveredAt} is not null))`),
+    errorCheck: check("companion_decision_deliveries_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAction} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]'))`),
+  }),
+);
+
+export const companionRuntimeLeases = pgTable(
+  "companion_runtime_leases",
+  {
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "restrict" }),
+    companionId: uuid("companion_id").primaryKey().notNull(),
+    claimToken: uuid("claim_token"),
+    claimEpoch: bigint("claim_epoch", { mode: "number" }).notNull().default(0),
+    gateEpoch: bigint("gate_epoch", { mode: "number" }),
+    executorId: text("executor_id"),
+    workKind: companionRuntimeWorkKindEnum("work_kind"),
+    workId: uuid("work_id"),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    renewedAt: timestamp("renewed_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgCompanion: unique("companion_runtime_leases_org_companion_uq").on(t.orgId, t.companionId),
+    expiry: index("companion_runtime_leases_expiry_idx").on(t.expiresAt).where(sql`${t.claimToken} is not null`),
+    runtimeInstanceFk: foreignKey({ columns: [t.orgId, t.companionId], foreignColumns: [companionRuntimeInstances.orgId, companionRuntimeInstances.companionId], name: "companion_runtime_leases_runtime_instance_fk" }).onDelete("cascade"),
+    epochCheck: check("companion_runtime_leases_epoch_check", sql`${t.claimEpoch} >= 0 and (${t.gateEpoch} is null or ${t.gateEpoch} >= 1)`),
+    executorCheck: check("companion_runtime_leases_executor_check", sql`${t.executorId} is null or (char_length(${t.executorId}) between 1 and 200 and ${t.executorId} !~ E'[\\n\\r]')`),
+    claimCheck: check("companion_runtime_leases_claim_check", sql`(${t.claimToken} is null and ${t.gateEpoch} is null and ${t.executorId} is null and ${t.workKind} is null and ${t.workId} is null and ${t.claimedAt} is null and ${t.renewedAt} is null and ${t.expiresAt} is null) or (${t.claimToken} is not null and ${t.claimEpoch} >= 1 and ${t.gateEpoch} is not null and ${t.executorId} is not null and ${t.workKind} is not null and ${t.workId} is not null and ${t.claimedAt} is not null and ${t.renewedAt} is not null and ${t.expiresAt} is not null and ${t.expiresAt} > ${t.renewedAt})`),
   }),
 );
 

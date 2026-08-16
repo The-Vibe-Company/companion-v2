@@ -36,7 +36,7 @@ describe("Skills Hub-only database migration", () => {
           where n.nspname = 'public'
             and (
               p.proname like 'companion%skill_run%'
-              or p.proname like 'companion_run_%'
+              or p.proname ~ '^companion_run_'
               or p.proname in ('companion_reject_run_snapshot_update', 'companion_detach_deleted_run_config')
               or p.proname like 'companion%project%'
               or p.proname like 'companion%model_provider%'

@@ -139,6 +139,7 @@ import {
 } from "@companion/core/services";
 import {
   bumpCompanionSkillsRevisionForSkill,
+  companionsEnabled,
   describeSkillDatabase,
   executeSkillDatabaseStatement,
   getCurrentSkillDatabaseDeclaration,
@@ -2163,8 +2164,12 @@ app.post("/v1/skills/:slug/rename", async (c) => {
           title: body.title,
           database,
         });
-        // Boxes stage the skill under its slug, so a rename changes their effective tree too.
-        await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: renamed.id, database });
+        // Boxes stage the skill under its slug, so a rename changes their effective tree too. The
+        // legacy bump is unavailable after the Runtime v2 cutover and must never run while the
+        // optional Companions control plane is disabled.
+        if (companionsEnabled(process.env)) {
+          await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: renamed.id, database });
+        }
         return renamed;
       },
       true,
@@ -2613,8 +2618,10 @@ app.post("/v1/skills/:slug/archive", async (c) => {
           actor, orgId, slug: c.req.param("slug"), reason: body.reason, database,
         });
         // Archiving removes the skill from every selector's staged set on its next start, so those
-        // Companions are no longer up to date.
-        await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: archived.id, database });
+        // Companions are no longer up to date. Skills Hub-only deployments do not touch runtime.
+        if (companionsEnabled(process.env)) {
+          await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: archived.id, database });
+        }
       },
       true,
     );
@@ -2633,7 +2640,9 @@ app.post("/v1/skills/:slug/restore", async (c) => {
       c,
       async ({ actor, orgId, database }) => {
         const restored = await restoreSkill({ actor, orgId, slug: c.req.param("slug"), database });
-        await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: restored.id, database });
+        if (companionsEnabled(process.env)) {
+          await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: restored.id, database });
+        }
       },
       true,
     );
