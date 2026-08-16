@@ -51,7 +51,12 @@ function runOnBoxDisk(command: string, home: string, pathPrefix?: string): Promi
       "bash",
       ["-c", command],
       {
-        env: { HOME: home, PATH: pathPrefix ? `${pathPrefix}:${path}` : path },
+        env: {
+          HOME: home,
+          PATH: pathPrefix ? `${pathPrefix}:${path}` : path,
+          // The daemon wrapper is normally launched by systemd, which supplies this generation id.
+          INVOCATION_ID: "test-invocation",
+        },
         maxBuffer: 8 * 1024 * 1024,
       },
       (error, stdout, stderr) => {
@@ -182,17 +187,20 @@ async function boxDiskWithPiDaemon(): Promise<{
   daemon: string;
   stderrLog: string;
   argv: string;
+  pi: string;
 }> {
   const home = await mkdtemp(join(tmpdir(), "companion-pi-daemon-"));
   const bin = await mkdtemp(join(tmpdir(), "companion-pi-bin-"));
   const argv = join(home, "pi-argv.log");
+  const pi = join(bin, "pi");
   await writeFile(
-    join(bin, "pi"),
+    pi,
     "#!/bin/sh\n"
+    + "if [ \"$1\" = --version ]; then printf '0.84.2\\n'; exit 0; fi\n"
     + `printf '%s\\n' "$*" >> ${JSON.stringify(argv)}\n`
     + "exit 0\n",
   );
-  await chmod(join(bin, "pi"), 0o755);
+  await chmod(pi, 0o755);
   const script = join(home, LAYOUT_SCRIPT_PATH);
   await mkdir(join(home, ".companion", "bin"), { recursive: true });
   await writeFile(script, await stagedPiLayoutScript());
@@ -203,6 +211,7 @@ async function boxDiskWithPiDaemon(): Promise<{
     daemon: join(home, ".companion", "bin", "pi-daemon"),
     stderrLog: join(home, ".companion", "runtime", "logs", "pi.stderr.log"),
     argv,
+    pi,
   };
 }
 
@@ -613,6 +622,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(result).toMatchObject({ runtimeState: "running", daemonState: "running", staged: false });
     expect(commands).toHaveLength(1);
     expect(commands[0]).toContain("is-active --quiet companion-pi-daemon.service");
+    expect(commands[0]).toContain("-p InvocationID --value");
+    expect(commands[0]).toContain("state/pi.rpc.ready");
     expect(commands[0]).toContain('[ -f "$XDG_RUNTIME_DIR/companion/providers.env" ]');
     expect(commands[0]).not.toContain("systemctl --user start companion-pi-daemon.service");
     expect(commands[0]).not.toContain("systemctl --user restart companion-pi-daemon.service");
@@ -789,7 +800,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     const layoutIndex = stagingOrder.indexOf(`command:${LAYOUT_RUN_COMMAND}`);
     expect(brokerIndex).toBeGreaterThan(-1);
     expect(layoutIndex).toBeGreaterThan(-1);
-    expect(brokerIndex).toBeLessThan(layoutIndex);
+    expect(layoutIndex).toBeLessThan(brokerIndex);
   });
 
   /**
@@ -1767,17 +1778,39 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(markerIndex).toBeGreaterThan(-1);
     expect(piResolveIndex).toBeGreaterThan(-1);
     expect(markerIndex).toBeLessThan(piResolveIndex);
-    // Layout 12 keeps unrestricted tools with bounded execution, and gives shell runs the longer
-    // execution deadline so a warm legacy Pi restarts once and picks the two-tier timer up.
-    expect(COMPANION_PI_DISK_LAYOUT_VERSION).toBe(12);
+    // Layout 13 restores image reads under the bounded execution guard, and keeps shell runs on
+    // their longer deadline, so a warm legacy Pi restarts once and picks both behaviors up.
+    expect(COMPANION_PI_DISK_LAYOUT_VERSION).toBe(13);
     expect(createdSetupScript)
-      .toContain("expected_layout='12:npm:pi-mcp-adapter@2.12.1'");
+      .toContain("expected_layout='13:npm:pi-mcp-adapter@2.12.1:pi>=0.84.2'");
+    expect(createdSetupScript).toContain("or newer is required for bounded image reads");
+    // A layout migration reruns a configured pin even when the template already has some `pi`.
+    expect(createdSetupScript).toContain(
+      "npm install --global @earendil-works/pi-coding-agent@1.2.3",
+    );
     expect(createdSetupScript).toContain("--append-system-prompt");
     // The supervised daemon gets a minimal PATH from the systemd user manager, so Pi is resolved at
     // layout time and pinned both in the wrapper and on the unit.
     expect(createdSetupScript).toContain("pi_bin=\"$(command -v pi)\"");
     expect(createdSetupScript).toContain("exec \"$PI_BIN\" --mode rpc");
     expect(createdSetupScript).toContain("Environment=PATH=");
+  });
+
+  it("refuses layout 13 before staging the permissive extension when Pi is image-unsafe", async () => {
+    const scriptSource = await stagedPiLayoutScript();
+    const home = await mkdtemp(join(tmpdir(), "companion-old-pi-"));
+    const bin = await mkdtemp(join(tmpdir(), "companion-old-pi-bin-"));
+    const pi = join(bin, "pi");
+    await writeFile(pi, "#!/bin/sh\nprintf '0.83.9\\n'\n");
+    await chmod(pi, 0o755);
+    const script = join(home, LAYOUT_SCRIPT_PATH);
+    await mkdir(join(home, ".companion", "bin"), { recursive: true });
+    await writeFile(script, scriptSource);
+
+    const result = await runOnBoxDisk(`bash ${JSON.stringify(script)}`, home, bin);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("0.84.2 or newer is required for bounded image reads");
   });
 
   it("keeps systemctl out of setup and leaves MCP credentials in tmpfs for auto-restart", async () => {
@@ -1923,12 +1956,17 @@ describe("AsciiBoxCompanionRuntime", () => {
         const command = String(body.command);
         if (command.includes("is-active") && !command.includes("companion_label")) {
           probes.push(command);
-          // systemd forks ExecStart and returns from `restart` before Type=simple is up, so the
-          // first probes legitimately answer `activating`.
+          // systemd forks ExecStart and returns from `restart` before Type=simple is up. Even its
+          // later `active` answer is not ready until the daemon wrapper has created the RPC FIFO.
+          const stdout = probes.length === 1
+            ? "activating\ncompanion-pi-rpc-unready\n"
+            : probes.length === 2
+              ? "active\ncompanion-pi-rpc-unready\n"
+              : "active\ncompanion-pi-rpc-ready\n";
           return json({
             success: true,
             exitCode: 0,
-            stdout: probes.length < 3 ? "activating\n" : "active\n",
+            stdout,
             stderr: "",
           });
         }
@@ -1957,8 +1995,8 @@ describe("AsciiBoxCompanionRuntime", () => {
       onBoxAssigned: async () => undefined,
     });
 
-    // The wake succeeds on the probe that observes `active`, and the Box is never replaced or
-    // stopped on the way there.
+    // The wake does not stop at systemd's early `active`; it succeeds only with the FIFO marker,
+    // and the Box is never replaced or stopped on the way there.
     expect(probes.length).toBeGreaterThanOrEqual(3);
     expect(result).toMatchObject({ runtimeState: "running", daemonState: "running" });
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/stop"))).toBe(false);
@@ -3777,6 +3815,8 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(commands[0]).not.toContain("${XDG_RUNTIME_DIR:-");
     expect(commands[0]).toContain("is-active --quiet companion-pi-daemon.service");
     expect(commands[0]).toContain("state/pi.rpc.in");
+    expect(commands[0]).toContain("state/pi.rpc.ready");
+    expect(commands[0]).toContain("-p InvocationID --value");
     expect(commands[0]).toContain(
       '{"id":"msg:1","type":"prompt","message":"Summarize the incident","streamingBehavior":"followUp"}',
     );
@@ -3965,6 +4005,20 @@ describe("AsciiBoxCompanionRuntime", () => {
       expect(await reportedStderrLine(disk.stderrLog)).toMatch(/^pi-daemon: starting \S+pi --no-skills$/);
     });
 
+    it("rejects a Pi binary downgraded after the layout marker was written", async () => {
+      const disk = await boxDiskWithPiDaemon();
+      await writeFile(disk.pi, "#!/bin/sh\nprintf '0.83.9\\n'\n");
+      await chmod(disk.pi, 0o755);
+
+      const started = await runOnBoxDisk(`bash ${JSON.stringify(disk.daemon)}`, disk.home);
+
+      expect(started.exitCode).not.toBe(0);
+      expect(await readFile(disk.stderrLog, "utf8"))
+        .toContain("0.84.2 or newer is required for bounded image reads");
+      expect(await reportedStderrLine(disk.stderrLog)).toContain("failed with status 1");
+      expect(await readFile(disk.argv, "utf8")).not.toContain("--mode rpc");
+    });
+
     it("names the reason a start died before Pi ever ran", async () => {
       // Reproduces the production signature: the unit exits 1 and neither Pi's log nor its stdout
       // has anything in it, because the failure happened before the wrapper reached `exec`. Anything
@@ -4081,6 +4135,12 @@ describe("AsciiBoxCompanionRuntime", () => {
     it.skipIf(process.getuid?.() === 0)("holds the offset when the log cannot be read", async () => {
       const { home, log } = await boxDiskWithPiLog(`${event(0)}\n`);
       await chmod(log, 0o000);
+
+      // Some cloud overlay filesystems grant the file owner read access despite mode 000. The
+      // directory case above covers the same Box command branch there; only assert this POSIX
+      // permission case on a filesystem that actually enforces it.
+      const permissionsAreEnforced = await readFile(log).then(() => false, () => true);
+      if (!permissionsAreEnforced) return;
 
       await expect(readEventsOnBoxDisk({ home, offset: 4_096 }))
         .resolves.toEqual({ chunk: "", offset: 4_096, exitCode: 0 });

@@ -26,22 +26,6 @@ export const COMPANION_PERMISSION_BROKER_EXTENSION_FILE = "companion-permission-
 export const COMPANION_DECISION_TITLE_PATTERN =
   /^companion:(shell|file|question):([A-Za-z0-9._-]{1,120})$/;
 
-const COMPANION_IMAGE_READ_PATH_PATTERN = /\.(?:avif|bmp|gif|jpe?g|png|webp)(?:[?#].*)?$/i;
-export const COMPANION_IMAGE_READ_REFUSAL =
-  "Image reads are disabled in Companion. Use browse or computer; the visual run receives one Box desktop frame automatically.";
-
-/** The same fail-closed decision the staged Pi extension makes before its built-in read executes. */
-export function companionImageReadRefusal(
-  toolName: string,
-  input: Record<string, unknown>,
-): string | null {
-  if (toolName !== "read") return null;
-  const path = input.path ?? input.file_path ?? input.filePath ?? input.file;
-  return typeof path === "string" && COMPANION_IMAGE_READ_PATH_PATTERN.test(path.trim())
-    ? COMPANION_IMAGE_READ_REFUSAL
-    : null;
-}
-
 export function parseCompanionDecisionTitle(title: string): {
   kind: "shell" | "file" | "question";
   name: string;
@@ -103,7 +87,6 @@ function toolTimeoutFor(toolName: string): number {
   return toolRunKind(toolName) === "shell" ? EXEC_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS;
 }
 
-const IMAGE_PATH_PATTERN = /${COMPANION_IMAGE_READ_PATH_PATTERN.source}/${COMPANION_IMAGE_READ_PATH_PATTERN.flags};
 const toolTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
 function clearToolTimeouts() {
@@ -128,18 +111,6 @@ function decisionTitle(name: string): string {
 
 export default function companionPermissionBroker(pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
-    if (event.toolName === "read") {
-      const input = (event.input ?? {}) as Record<string, unknown>;
-      const path = input.path ?? input.file_path ?? input.filePath ?? input.file;
-      if (typeof path === "string" && IMAGE_PATH_PATTERN.test(path.trim())) {
-        return {
-          block: true,
-          reason: ${JSON.stringify(COMPANION_IMAGE_READ_REFUSAL)},
-        };
-      }
-      startToolTimeout(event.toolCallId, event.toolName, ctx);
-      return undefined;
-    }
     // ask_user is an interactive decision with its own five-minute fail-closed UI deadline. Its
     // execute body does not perform external work, so the shorter execution timer must not abort a
     // still-actionable question.

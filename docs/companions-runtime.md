@@ -165,7 +165,20 @@ composer of a `stopped` or retryably `error`ed Companion fires one fire-and-forg
 being written. Typing is the strongest pre-send intent signal there is, the shot is one per opened
 thread, and the server-side lifecycle claim still refuses anything the surface got wrong about the
 state — a mid-transition Companion, an explicit-stop marker, and a deletion lock are never prewarmed.
-The composer hint names the wake while it runs so the reader knows why the chip says Starting.
+The request carries the internal `?intent=message` marker: after it commits a running Pi, it takes a fresh pending
+snapshot and drains any durable send that lost the concurrent lifecycle claim to this prewarm. That
+post-start snapshot is the handoff. Send, sync, and prewarm drains take the same tenant-scoped
+PostgreSQL advisory lock from a small pool isolated from request queries and re-read pending state
+after they own it, so a message in two stale snapshots is written only once without slow Box I/O
+exhausting the API pool. A same-key waiter releases its reserved coordination session between
+non-blocking attempts, leaving unrelated Companion keys free to proceed. A message committed before the snapshot is included; a message
+committed after it sees the running lifecycle and delivers itself. Timeout settlement runs before
+the start so a timed-out tail still receives its one-shot Pi-only recycle; if settlement first exposes
+that tail in the post-wake snapshot, delivery takes a second lifecycle claim and recycles Pi before
+writing the FIFO. If the completed wake
+cannot hand even one saved message to Pi, it records Error and the refusal instead of leaving an
+Online Companion silently idle. The composer hint names the wake while it runs so the reader knows
+why the chip says Starting.
 
 Every browser request also carries a deadline now: the shared fetch helper applies a 20-second
 default, sends and explicit wakes carry a budget that outlasts the proxy's 210-second window, and a
@@ -377,7 +390,7 @@ re-pended and never the whole thread. Re-queueing neither contacts nor wakes Box
 normal live sync or next send delivers the messages before reply state resumes. A narrowly scoped
 database definer performs only this deadline CAS and one-shot watermark recovery, allowing a Viewer
 read to trigger safe housekeeping under forced RLS without granting Viewers transcript writes.
-The extension also refuses image paths before Pi's built-in `read` can enter its vision path;
+Image paths use Pi's worker-isolated `read` implementation under that same file-tool deadline;
 `ask_user` retains its separate five-minute interactive decision deadline.
 
 A visual run — `browse` or `computer` — is worth a picture, so when one settles (including by the
@@ -436,23 +449,28 @@ Box stop archives the disk, so runtime sessions survive stop/resume at:
     │   ├── mcp-accounts.json # account ids, labels, adapter names, and transports
     │   ├── model.txt       # selected model id passed through `pi --model`
     │   ├── skills.json    # injected surface/version/checksum projection
-    │   └── pi.rpc.in      # owner-only FIFO for the Pi JSON RPC stream
+    │   ├── pi.rpc.in      # owner-only FIFO for the Pi JSON RPC stream
+    │   └── pi.rpc.ready   # current systemd InvocationID after the FIFO is open
     └── logs/
         ├── pi.rpc.ndjson  # Pi JSON RPC output
         └── pi.stderr.log  # Pi's stderr and the daemon wrapper's own account of a failed start
 ```
 
-Layout version `12` is written to the control-plane row after a successful Skills/MCP-aware start and
-to an on-disk marker keyed by the adapter package. Starts repair older Box snapshots before resource
+Layout version `13` is written to the control-plane row after a successful Skills/MCP-aware start and
+to an on-disk marker keyed by the adapter package plus minimum Pi version. Starts repair older Box snapshots before resource
 injection. Runtime transcripts and files do not enter PostgreSQL. A systemd user unit supervises Pi
 while Box is active; the lifecycle API starts it after a Box resume. Each start also stages the
 interaction extension under the legacy `~/.companion/pi/extensions/companion-permission-broker.ts`
 path. Reusing that path overwrites older shell/file approval logic; the current extension leaves Pi's
-tools unrestricted, refuses image reads, bounds execution tools, and pauses only explicit `ask_user`
+tools and image reads unrestricted, bounds execution tools, and pauses only explicit `ask_user`
 questions for a control-plane answer. A layout bump restarts a warm legacy Pi once after staging
-because extensions load at daemon start; layout 11 used that to give every already-running Box the
-fail-closed execution guard, and layout 12 uses it again so the same Boxes pick up the two-tier
-timer that grants shell runs their longer deadline.
+because extensions load at daemon start; layout 11 added the fail-closed execution guard, layout 12
+gave shell runs their longer deadline, and layout 13 restores image reads under the 90-second file
+tool guard only after setup verifies Pi 0.84.2 or newer. A configured Pi installer runs during that
+upgrade even when a binary already exists; a template-only Box with an older or unreadable version
+fails visibly before the permissive extension is staged. The daemon wrapper repeats the minimum-version
+proof on every systemd invocation, so replacing or downgrading the mutable Pi binary after the layout
+marker was written fails before the current invocation can publish FIFO readiness.
 
 MCP credential values are not part of that snapshotted tree. A start stages them through the
 owner-only Box file channel, moves the file into `%t/companion/providers.env` in the systemd user
@@ -487,11 +505,12 @@ for the same reason: a Box that never started Pi has no loaded unit, so only a d
 after the stop attempt is reported as a failure.
 
 A successful `systemctl --user start` only means systemd accepted the job. The unit is
-`Type=simple` with `Restart=on-failure`, so a daemon that is merely slow to open its RPC FIFO and one
-that is crash-looping both answer `activating` for the first seconds, and reading a single `is-active`
-probe as the verdict turned healthy starts into `Pi daemon is not running after start` wakes. A start
-therefore polls `is-active` for up to `COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS` (20s by default) at the
-Box poll interval and returns running on the first probe that observes `active`. Between restart
+`Type=simple` with `Restart=on-failure`, so it may report `active` before the daemon wrapper creates
+the owner-only RPC FIFO Pi consumes; a crash-looping daemon can move through the same early states.
+A start therefore polls `is-active`, the FIFO, and a readiness file containing systemd's current
+`InvocationID` for up to `COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS` (20s by default) at the Box poll
+interval, and returns running only when all three match. The warm shortcut and prompt writer enforce
+the same generation check, so a FIFO left by the prior daemon cannot certify the new one. Between restart
 attempts the unit reports `failed` rather than `activating`, so the poll runs to its deadline instead
 of ending on the first answer that is not `active`. The window also outlasts systemd's own
 `StartLimitBurst`, which gives up after five `RestartSec=2` attempts: a daemon that is genuinely

@@ -109,6 +109,7 @@ const emptyThread: Thread = {
 
 function controlPlane(initial: Companion) {
   const wakes: string[] = [];
+  const wakeBodies: unknown[] = [];
   // The claim lands as the wake request does, so runtime reads report the lifecycle in flight even
   // though the wake request itself stays open the way a real one can.
   let settled = initial;
@@ -121,6 +122,7 @@ function controlPlane(initial: Companion) {
     const method = init?.method ?? "GET";
     if (method === "POST" && url.includes("/runtime/start")) {
       wakes.push(url);
+      wakeBodies.push(JSON.parse(String(init?.body)));
       settled = {
         ...initial,
         runtime: { ...initial.runtime, state: "provisioning", daemon_state: "starting" },
@@ -132,7 +134,7 @@ function controlPlane(initial: Companion) {
     if (url.includes("/v1/companions")) return json({ companions: [settled] });
     return json({});
   });
-  return { fetchMock, wakes };
+  return { fetchMock, wakes, wakeBodies };
 }
 
 const roots: Root[] = [];
@@ -190,6 +192,8 @@ describe("CompanionsApp prewarm on typing intent", () => {
 
     await type(container, "C");
     expect(api.wakes).toHaveLength(1);
+    expect(api.wakes[0]).toContain("intent=message");
+    expect(api.wakeBodies).toEqual([{ client_surface: "web" }]);
     // The chip reports the wake the keystroke caused, immediately.
     expect(chip(container)).toContain("Starting");
 

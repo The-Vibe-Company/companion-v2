@@ -105,6 +105,18 @@ describe("replyExpected", () => {
     expect(replyExpected({ entries: [entry()], awake: true })).toBe(true);
   });
 
+  it("does not say replying while a durable tail is still waiting for Pi", () => {
+    expect(replyExpected({
+      entries: [
+        entry(),
+        entry({ event_id: "pi:reply", ordinal: 1, role: "assistant" }),
+        entry({ event_id: "msg:2", ordinal: 2, content: "Wake again" }),
+      ],
+      awake: true,
+      pendingCount: 1,
+    })).toBe(false);
+  });
+
   it("stops waiting once the reply or the run note lands", () => {
     expect(replyExpected({
       entries: [entry(), entry({ event_id: "pi:0", role: "assistant" })],
