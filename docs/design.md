@@ -167,16 +167,25 @@ concurrent request cannot recycle that Pi twice. Prompt acceptance is the correl
 not merely a successful write to the wrapper-held FIFO. Before a timeout-recovery tail is delivered,
 `get_state` must show an idle Pi with no queued messages, since prompt success can also mean queued
 behind the dead turn. A busy or unresponsive Pi daemon alone is recycled, and its replacement must
-answer an idle health probe before that durable prompt is attempted. A later prompt refusal gets one
-health repair and retry; another refusal leaves delivery visibly pending without touching Box
-lifecycle. A per-Companion delivery lease shared with the reconciler serializes sends/syncs and
+answer an idle health probe before that durable prompt is attempted. A missing acknowledgement is
+ambiguous and is never replayed inside the same request: delivery stays visibly pending and Error is
+projected. A later explicit send first reuses any correlated response with the same request id from
+the current Pi invocation; an inherited layout-13 invocation without the new byte marker persists a
+whole-log boundary once because durable request ids are unique. A response that crossed the
+transport timeout therefore cannot execute the turn twice. A per-Companion delivery lease shared
+with the reconciler serializes sends/syncs and
 revalidates the timeout tail after the claim, so a stale concurrent request cannot recycle the valid
-turn its predecessor just started. The exact-token lease is renewed around each bounded Pi operation
-and message, and losing it stops further delivery. A restrictive transcript-read fence gives old API
+turn its predecessor just started. Each correlated acceptance advances the delivery, acceptance, and
+timeout-provenance watermarks in one database function while holding the exact live lease row; an
+expired producer therefore cannot commit after a replacement has claimed and resent the turn. The
+exact-token lease is renewed around each bounded Pi operation and message, and losing it stops
+further delivery. A restrictive transcript-read fence gives old API
 replicas an independent compatibility deadline during migration-first rollout, while protocol-2
 tenant transactions use the exact claim; an initial fence survives an already-active worker claim,
 and a successful legacy read renews a drain deadline derived from actual pending work rather than
-total transcript history. Migration backfill also retains unresolved and still-draining recent
+total transcript history. Migration installs a cheap conservative fence while DDL locks are held,
+then the migration runner refines existing Companions from transcript history after that transaction
+commits. Backfill also retains unresolved and still-draining recent
 assistant-delimited batches independently of a post-snapshot watermark, without letting one old
 watermark release another old request's snapshot.
 A narrow database definer lets Viewer reads trigger

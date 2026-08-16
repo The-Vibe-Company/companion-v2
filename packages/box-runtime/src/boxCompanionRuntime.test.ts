@@ -3938,8 +3938,14 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(commands[0]).toContain("is-active --quiet companion-pi-daemon.service");
     expect(commands[0]).toContain("state/pi.rpc.in");
     expect(commands[0]).toContain("state/pi.rpc.ready");
+    expect(commands[0]).toContain("state/pi.rpc.start");
     expect(commands[0]).toContain("-p InvocationID --value");
     expect(commands[0]).toContain("logs/pi.rpc.ndjson");
+    expect(commands[0]).toContain("rpc_start_size + 1");
+    expect(commands[0]).toContain(
+      "Persist that conservative boundary",
+    );
+    expect(commands[0]).toContain("instead of executing the same turn a second time");
     expect(commands[0]).toContain(
       '{"id":"msg:1","type":"prompt","message":"Summarize the incident","streamingBehavior":"followUp"}',
     );

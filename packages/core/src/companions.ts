@@ -1553,8 +1553,15 @@ export async function listPendingCompanionMessages(input: {
       : latest, -1);
   const timeoutRestartOrdinal = row?.timeoutRestartOrdinal ?? -1;
   const timeoutDeliveryOrdinal = row?.timeoutDeliveryOrdinal ?? -1;
+  const acceptedDeliveryOrdinal = row?.acceptedDeliveryOrdinal ?? -1;
   const protectedTailStart = Math.max(latestTimeoutOrdinal, timeoutDeliveryOrdinal);
+  // Only the correlated acceptance that was recorded together with this timeout boundary retires
+  // recovery. An ordinary accepted follow-up can precede a still-running tool that later times out;
+  // using that generic acceptance would misclassify the newly abandoned turn as healthy.
+  const timeoutRecoveryAccepted = timeoutDeliveryOrdinal > latestTimeoutOrdinal
+    && acceptedDeliveryOrdinal >= timeoutDeliveryOrdinal;
   const timeoutRecoveryOrdinal = latestTimeoutOrdinal > latestStartedTurnOrdinal
+    && !timeoutRecoveryAccepted
     && entries.some((entry) => entry.role === "user" && entry.ordinal > protectedTailStart)
     ? latestTimeoutOrdinal
     : null;
@@ -1677,6 +1684,40 @@ export async function renewCompanionDelivery(input: {
   `);
   const [row] = Array.from(result as unknown as Iterable<{ renewed: boolean }>);
   return row?.renewed ?? false;
+}
+
+/**
+ * Advance delivery only while the exact live lease still owns this turn. The database locks the
+ * lease through the watermark update, so an expired producer cannot commit after its replacement
+ * has claimed and resent the same durable message.
+ */
+export async function acceptCompanionDelivery(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  claimId: string;
+  deliveredOrdinal: number;
+  timeoutDeliveryOrdinal?: number;
+  database?: Db;
+}): Promise<CompanionThread | null> {
+  const database = input.database ?? db;
+  const result = await database.execute(sql`
+    select public.companion_accept_delivery_lease(
+      ${input.orgId}::uuid,
+      ${input.companionId}::uuid,
+      ${input.claimId}::uuid,
+      ${input.deliveredOrdinal}::integer,
+      ${input.timeoutDeliveryOrdinal ?? null}::integer
+    ) as accepted
+  `);
+  const [accepted] = Array.from(result as unknown as Iterable<{ accepted: boolean }>);
+  if (!accepted?.accepted) return null;
+  const companion = await getCompanionForRuntime({ ...input, database });
+  const [row, entries] = await Promise.all([
+    readCompanionThreadRow(database, input.orgId, input.companionId),
+    readCompanionTranscript(database, input.orgId, input.companionId),
+  ]);
+  return toThread({ actor: input.actor, companion, row, entries });
 }
 
 type CompanionStoredToolRun = NonNullable<

@@ -120,6 +120,54 @@ describe("Skills Hub PostgreSQL isolation", () => {
     expect(await visibleSlugs(fixture.orgB, fixture.outsider.id)).toEqual([otherOrgSlug]);
   });
 
+  it("replaces only untouched migration seeds during post-commit delivery refinement", async () => {
+    await integrationSql`
+      insert into companion_reconcile_leases (
+        org_id, companion_id, reason, delivery_compat_expires_at,
+        delivery_compat_next_ordinal, delivery_compat_seeded
+      ) values (
+        ${fixture.orgA}, ${companionId}, 'delivery_compat',
+        statement_timestamp() + interval '10 minutes', 0, true
+      )
+    `;
+    await integrationSql`select companion_refresh_delivery_compat_backfill()`;
+    const [refinedSeed] = await integrationSql<Array<{
+      delivery_compat_expires_at: string;
+      delivery_compat_seeded: boolean;
+    }>>`
+      select delivery_compat_expires_at, delivery_compat_seeded
+      from companion_reconcile_leases
+      where companion_id = ${companionId}
+    `;
+    expect(refinedSeed?.delivery_compat_seeded).toBe(false);
+    expect(Date.parse(refinedSeed?.delivery_compat_expires_at ?? ""))
+      .toBeLessThan(Date.now() + 60_000);
+
+    // Once a legacy read has replaced the seed, a later runner retry must not shorten that real
+    // in-flight snapshot fence even when the Companion's current exact work count is zero.
+    await integrationSql`
+      update companion_reconcile_leases
+      set delivery_compat_expires_at = statement_timestamp() + interval '11 minutes'
+      where companion_id = ${companionId}
+    `;
+    await integrationSql`select companion_refresh_delivery_compat_backfill()`;
+    const [preservedLegacyFence] = await integrationSql<Array<{
+      delivery_compat_expires_at: string;
+      delivery_compat_seeded: boolean;
+    }>>`
+      select delivery_compat_expires_at, delivery_compat_seeded
+      from companion_reconcile_leases
+      where companion_id = ${companionId}
+    `;
+    expect(preservedLegacyFence?.delivery_compat_seeded).toBe(false);
+    expect(Date.parse(preservedLegacyFence?.delivery_compat_expires_at ?? ""))
+      .toBeGreaterThan(Date.now() + 10 * 60_000);
+    await integrationSql`
+      delete from companion_reconcile_leases
+      where companion_id in (${companionId}, ${deliveryFenceCompanionId})
+    `;
+  });
+
   it("fences legacy transcript delivery against protocol-2 claims during rollout", async () => {
     const firstClaim = randomUUID();
     const claimed = await integrationSql.begin(async (tx) => {
@@ -249,6 +297,30 @@ describe("Skills Hub PostgreSQL isolation", () => {
     // Once an assistant closes that tail, the 1,000-ordinal historical bound adds no outage.
     expect(Date.parse(completedHistory!.deadline)).toBeLessThan(Date.now() + 60_000);
     await integrationSql`
+      insert into companion_transcript_entries (
+        org_id, companion_id, event_id, ordinal, role, content, decision
+      ) values (
+        ${fixture.orgA}, ${deliveryFenceCompanionId}, 'delivery-fence-settled-decision', 7,
+        'decision', 'Already allowed', jsonb_build_object(
+          'status', 'allowed',
+          'decided_at', statement_timestamp()::text
+        )
+      )
+    `;
+    const [settlementInFlight] = await integrationSql<Array<{ deadline: string }>>`
+      select companion_delivery_compat_deadline(
+        ${fixture.orgA}, ${deliveryFenceCompanionId}, statement_timestamp()
+      ) as deadline
+    `;
+    // A pre-policy route persists its decision before the FIFO response. Backfill in that gap must
+    // still fence protocol 2 even though the card no longer reports `pending`.
+    expect(Date.parse(settlementInFlight!.deadline)).toBeGreaterThan(Date.now() + 9 * 60_000);
+    await integrationSql`
+      delete from companion_transcript_entries
+      where companion_id = ${deliveryFenceCompanionId}
+        and event_id = 'delivery-fence-settled-decision'
+    `;
+    await integrationSql`
       delete from companion_transcript_entries
       where companion_id = ${deliveryFenceCompanionId}
         and event_id = 'delivery-fence-assistant'
@@ -357,6 +429,70 @@ describe("Skills Hub PostgreSQL isolation", () => {
       `;
     });
     expect(reclaimed).toEqual([{ claimed: true }]);
+
+    const wrongClaim = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`
+        select set_config('app.org_id', ${fixture.orgA}, true),
+               set_config('app.user_id', ${fixture.owner.id}, true),
+               set_config('app.companion_delivery_protocol', '2', true)
+      `;
+      return tx<Array<{ accepted: boolean }>>`
+        select companion_accept_delivery_lease(
+          ${fixture.orgA}, ${deliveryFenceCompanionId}, ${randomUUID()}, 5, NULL
+        ) as accepted
+      `;
+    });
+    expect(wrongClaim).toEqual([{ accepted: false }]);
+
+    const exactAcceptance = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`
+        select set_config('app.org_id', ${fixture.orgA}, true),
+               set_config('app.user_id', ${fixture.owner.id}, true),
+               set_config('app.companion_delivery_protocol', '2', true)
+      `;
+      return tx<Array<{ accepted: boolean }>>`
+        select companion_accept_delivery_lease(
+          ${fixture.orgA}, ${deliveryFenceCompanionId}, ${secondClaim}, 5, 5
+        ) as accepted
+      `;
+    });
+    expect(exactAcceptance).toEqual([{ accepted: true }]);
+
+    await integrationSql`
+      update companion_reconcile_leases
+      set lease_expires_at = statement_timestamp() - interval '1 second'
+      where companion_id = ${deliveryFenceCompanionId}
+    `;
+    const expiredAcceptance = await integrationSql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${apiRole}`);
+      await tx`
+        select set_config('app.org_id', ${fixture.orgA}, true),
+               set_config('app.user_id', ${fixture.owner.id}, true),
+               set_config('app.companion_delivery_protocol', '2', true)
+      `;
+      return tx<Array<{ accepted: boolean }>>`
+        select companion_accept_delivery_lease(
+          ${fixture.orgA}, ${deliveryFenceCompanionId}, ${secondClaim}, 6, 6
+        ) as accepted
+      `;
+    });
+    expect(expiredAcceptance).toEqual([{ accepted: false }]);
+    const [fencedWatermark] = await integrationSql<Array<{
+      delivered_ordinal: number | null;
+      accepted_delivery_ordinal: number | null;
+      timeout_delivery_ordinal: number | null;
+    }>>`
+      select delivered_ordinal, accepted_delivery_ordinal, timeout_delivery_ordinal
+      from companion_threads
+      where companion_id = ${deliveryFenceCompanionId}
+    `;
+    expect(fencedWatermark).toEqual({
+      delivered_ordinal: 5,
+      accepted_delivery_ordinal: 5,
+      timeout_delivery_ordinal: 5,
+    });
   });
 
   it("enforces the workspace-only Companion ACL in PostgreSQL (no per-member overrides)", async () => {

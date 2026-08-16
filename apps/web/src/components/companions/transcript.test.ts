@@ -102,7 +102,25 @@ describe("transcript day keys", () => {
 
 describe("replyExpected", () => {
   it("waits on a running Box whose transcript ends on a member's message", () => {
-    expect(replyExpected({ entries: [entry()], awake: true })).toBe(true);
+    expect(replyExpected({
+      entries: [entry()],
+      awake: true,
+      pendingCount: 0,
+      acceptedDeliveryOrdinal: 0,
+    })).toBe(true);
+  });
+
+  it("does not say replying before Pi accepts an ordinary current turn", () => {
+    expect(replyExpected({
+      entries: [
+        entry(),
+        entry({ event_id: "pi:reply", ordinal: 1, role: "assistant" }),
+        entry({ event_id: "msg:2", ordinal: 2, content: "Held or refused" }),
+      ],
+      awake: true,
+      pendingCount: 0,
+      acceptedDeliveryOrdinal: 0,
+    })).toBe(false);
   });
 
   it("does not say replying while a durable tail is still waiting for Pi", () => {
@@ -227,6 +245,8 @@ describe("replyExpected", () => {
         entry({ event_id: "msg:2", ordinal: 2, content: "One more thing" }),
       ],
       awake: true,
+      pendingCount: 0,
+      acceptedDeliveryOrdinal: 2,
     })).toBe(true);
   });
 
@@ -266,6 +286,7 @@ describe("replyExpected", () => {
       ],
       awake: true,
       pendingCount: 0,
+      acceptedDeliveryOrdinal: 3,
     })).toBe(true);
   });
 

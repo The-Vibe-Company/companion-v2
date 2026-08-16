@@ -857,6 +857,8 @@ export const companionReconcileLeases = pgTable(
     deliveryCompatExpiresAt: timestamp("delivery_compat_expires_at", { withTimezone: true }),
     /** Monotonic transcript bound used to cache the compatibility deadline safely. */
     deliveryCompatNextOrdinal: integer("delivery_compat_next_ordinal"),
+    /** True only for the cheap migration seed until exact post-commit refinement or a legacy read. */
+    deliveryCompatSeeded: boolean("delivery_compat_seeded").notNull().default(false),
     /** Why the reconciler last claimed this Companion. */
     reason: text("reason").notNull(),
     /** Consecutive failed attempts for the current condition; reset by a successful settle. */

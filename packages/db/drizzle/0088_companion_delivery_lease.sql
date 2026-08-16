@@ -23,6 +23,9 @@ ALTER TABLE "companion_reconcile_leases"
   ADD COLUMN "delivery_compat_next_ordinal" integer;
 --> statement-breakpoint
 ALTER TABLE "companion_reconcile_leases"
+  ADD COLUMN "delivery_compat_seeded" boolean NOT NULL DEFAULT false;
+--> statement-breakpoint
+ALTER TABLE "companion_reconcile_leases"
   ADD CONSTRAINT "companion_reconcile_leases_delivery_compat_next_ordinal_check"
   CHECK ("delivery_compat_next_ordinal" IS NULL OR "delivery_compat_next_ordinal" >= 0);
 --> statement-breakpoint
@@ -51,6 +54,7 @@ DECLARE
   v_recovery_tail boolean := false;
   v_work_items bigint := 0;
   v_completed_batch_deadline timestamp with time zone;
+  v_settled_decision_deadline timestamp with time zone;
   v_deadline timestamp with time zone;
 BEGIN
   SELECT t.delivered_ordinal, t.timeout_delivery_ordinal
@@ -104,6 +108,21 @@ BEGIN
   INTO v_completed_batch_deadline
   FROM completed_batches b;
 
+  -- A legacy decision route commits the durable settlement before it checks Box status and writes
+  -- the matching FIFO response. If migration lands in that gap, `pending` is already gone but the
+  -- old request can still be unblocking Pi. Retain recent settled cards for the same ten-minute
+  -- bounded transport window used by the legacy prompt drain; malformed historical JSON is ignored.
+  SELECT MAX(
+    (e.decision->>'decided_at')::timestamp with time zone + interval '600 seconds'
+  )
+  INTO v_settled_decision_deadline
+  FROM public.companion_transcript_entries e
+  WHERE e.org_id = p_org_id
+    AND e.companion_id = p_companion_id
+    AND e.role::text = 'decision'
+    AND e.decision->>'status' IN ('allowed', 'denied', 'answered', 'expired')
+    AND pg_input_is_valid(e.decision->>'decided_at', 'timestamp with time zone');
+
   v_protected_tail_start := GREATEST(
     v_latest_abandoned_tool,
     COALESCE(v_timeout_delivery, -1)
@@ -150,6 +169,9 @@ BEGIN
   -- worst-case window elapses; historical batches whose windows elapsed add no rollout delay.
   IF v_completed_batch_deadline IS NOT NULL THEN
     v_deadline := GREATEST(v_deadline, v_completed_batch_deadline);
+  END IF;
+  IF v_settled_decision_deadline IS NOT NULL THEN
+    v_deadline := GREATEST(v_deadline, v_settled_decision_deadline);
   END IF;
   RETURN GREATEST(p_now, v_deadline);
 END
@@ -206,32 +228,39 @@ DECLARE
   v_next_ordinal integer := 0;
   v_existing_compat_deadline timestamp with time zone;
   v_existing_compat_ordinal integer;
+  v_existing_compat_seeded boolean := false;
   v_existing_claimed_by text;
   v_existing_lease_expires_at timestamp with time zone;
   v_claimed boolean := false;
-  v_owner text := pg_get_userbyid((
-    SELECT p.proowner
-    FROM pg_proc p
-    WHERE p.oid = 'public.companion_delivery_read_fence(uuid,uuid,text)'::regprocedure
-  ));
-  v_timeout_owner text := pg_get_userbyid((
-    SELECT p.proowner
-    FROM pg_proc p
-    WHERE p.oid = 'public.companion_expire_tool_runs(uuid,uuid,timestamp with time zone,integer,integer)'::regprocedure
-  ));
-  v_reconciler_owner text := pg_get_userbyid((
-    SELECT p.proowner
-    FROM pg_proc p
-    WHERE p.oid = 'public.companion_claim_reconcile_candidates(text,integer,integer,integer,integer)'::regprocedure
-  ));
+  v_owner text;
+  v_timeout_owner text;
+  v_reconciler_owner text;
 BEGIN
   -- Definer maintenance functions already serialize through the reconciler lease and must retain
   -- their cross-tenant reads. Protocol-2 API transactions participate in the exact lease below.
-  IF current_setting('app.companion_delivery_protocol', true) = '2'
-    OR p_caller = v_owner
-    OR p_caller = v_timeout_owner
-    OR p_caller = v_reconciler_owner
-  THEN
+  -- Return before catalog owner discovery on the permanent protocol-2 hot path: this restrictive
+  -- policy runs once per transcript row, so even constant catalog work would scale with history.
+  IF current_setting('app.companion_delivery_protocol', true) = '2' THEN
+    RETURN true;
+  END IF;
+  SELECT
+    pg_get_userbyid((
+      SELECT p.proowner
+      FROM pg_proc p
+      WHERE p.oid = 'public.companion_delivery_read_fence(uuid,uuid,text)'::regprocedure
+    )),
+    pg_get_userbyid((
+      SELECT p.proowner
+      FROM pg_proc p
+      WHERE p.oid = 'public.companion_expire_tool_runs(uuid,uuid,timestamp with time zone,integer,integer)'::regprocedure
+    )),
+    pg_get_userbyid((
+      SELECT p.proowner
+      FROM pg_proc p
+      WHERE p.oid = 'public.companion_claim_reconcile_candidates(text,integer,integer,integer,integer)'::regprocedure
+    ))
+  INTO v_owner, v_timeout_owner, v_reconciler_owner;
+  IF p_caller = v_owner OR p_caller = v_timeout_owner OR p_caller = v_reconciler_owner THEN
     RETURN true;
   END IF;
   IF p_org_id IS DISTINCT FROM NULLIF(current_setting('app.org_id', true), '')::uuid
@@ -243,11 +272,13 @@ BEGIN
   SELECT t.next_ordinal,
          l.delivery_compat_expires_at,
          l.delivery_compat_next_ordinal,
+         l.delivery_compat_seeded,
          l.claimed_by,
          l.lease_expires_at
   INTO v_next_ordinal,
        v_existing_compat_deadline,
        v_existing_compat_ordinal,
+       v_existing_compat_seeded,
        v_existing_claimed_by,
        v_existing_lease_expires_at
   FROM public.companion_threads t
@@ -271,7 +302,8 @@ BEGIN
   -- One SELECT evaluates the policy once per returned entry. Reuse the first row's calculation
   -- while the monotonic snapshot bound is unchanged; tool/decision transitions can only reduce
   -- work except running -> timeout, which the deadline helper already counts conservatively.
-  IF v_existing_compat_deadline >= v_now
+  IF NOT v_existing_compat_seeded
+    AND v_existing_compat_deadline >= v_now
     AND COALESCE(v_existing_compat_ordinal, -1) >= COALESCE(v_next_ordinal, 0)
   THEN
     RETURN true;
@@ -284,7 +316,7 @@ BEGIN
 
   INSERT INTO public.companion_reconcile_leases AS l (
     org_id, companion_id, reason, delivery_compat_expires_at,
-    delivery_compat_next_ordinal, updated_at
+    delivery_compat_next_ordinal, delivery_compat_seeded, updated_at
   )
   VALUES (
     p_org_id,
@@ -292,11 +324,13 @@ BEGIN
     'delivery_compat',
     v_drain_deadline,
     v_next_ordinal,
+    false,
     v_now
   )
   ON CONFLICT ON CONSTRAINT companion_reconcile_leases_pkey DO UPDATE
     SET delivery_compat_expires_at = excluded.delivery_compat_expires_at,
         delivery_compat_next_ordinal = excluded.delivery_compat_next_ordinal,
+        delivery_compat_seeded = false,
         updated_at = excluded.updated_at
     WHERE l.claimed_by IS NULL
        OR l.lease_expires_at IS NULL
@@ -322,16 +356,56 @@ CREATE POLICY "companion_transcript_entries_delivery_fence_rls"
   );
 --> statement-breakpoint
 
--- Hold every existing Companion for a drain window sized from pending work in the snapshot it could
--- already have. This compatibility state is updated even behind an active worker claim, so settling
--- that claim cannot open a gap in front of the pre-migration request.
+-- The migration transaction must not scan every Companion's history while its preceding ALTERs
+-- hold table locks. Install a conservative ten-minute fence with a cheap table join here; the API
+-- migration runner refines it with the exact bounded-work calculation immediately after this DDL
+-- transaction commits. The function comment is a durable one-shot marker if that runner crashes.
+CREATE FUNCTION public.companion_refresh_delivery_compat_backfill()
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+  INSERT INTO public.companion_reconcile_leases AS l (
+    org_id, companion_id, reason, delivery_compat_expires_at,
+    delivery_compat_next_ordinal, delivery_compat_seeded, updated_at
+  )
+  SELECT c.org_id, c.id, 'delivery_compat',
+         public.companion_delivery_compat_deadline(c.org_id, c.id, statement_timestamp()),
+         COALESCE(t.next_ordinal, 0), false, statement_timestamp()
+  FROM public.companions c
+  LEFT JOIN public.companion_threads t
+    ON t.org_id = c.org_id
+   AND t.companion_id = c.id
+  ON CONFLICT ON CONSTRAINT companion_reconcile_leases_pkey DO UPDATE
+    SET delivery_compat_expires_at = CASE
+          WHEN l.delivery_compat_seeded THEN excluded.delivery_compat_expires_at
+          ELSE GREATEST(l.delivery_compat_expires_at, excluded.delivery_compat_expires_at)
+        END,
+        delivery_compat_next_ordinal = CASE
+          WHEN l.delivery_compat_seeded THEN excluded.delivery_compat_next_ordinal
+          ELSE GREATEST(
+            COALESCE(l.delivery_compat_next_ordinal, -1),
+            excluded.delivery_compat_next_ordinal
+          )
+        END,
+        delivery_compat_seeded = false,
+        updated_at = excluded.updated_at;
+END
+$$;
+--> statement-breakpoint
+COMMENT ON FUNCTION public.companion_refresh_delivery_compat_backfill() IS
+  'companion-delivery-compat-backfill:pending';
+--> statement-breakpoint
+
 INSERT INTO public.companion_reconcile_leases AS l (
   org_id, companion_id, reason, delivery_compat_expires_at,
-  delivery_compat_next_ordinal, updated_at
+  delivery_compat_next_ordinal, delivery_compat_seeded, updated_at
 )
 SELECT c.org_id, c.id, 'delivery_compat',
-       public.companion_delivery_compat_deadline(c.org_id, c.id, statement_timestamp()),
-       COALESCE(t.next_ordinal, 0), statement_timestamp()
+       statement_timestamp() + interval '600 seconds',
+       COALESCE(t.next_ordinal, 0), true, statement_timestamp()
 FROM public.companions c
 LEFT JOIN public.companion_threads t
   ON t.org_id = c.org_id
@@ -339,6 +413,7 @@ LEFT JOIN public.companion_threads t
 ON CONFLICT ON CONSTRAINT companion_reconcile_leases_pkey DO UPDATE
   SET delivery_compat_expires_at = excluded.delivery_compat_expires_at,
       delivery_compat_next_ordinal = excluded.delivery_compat_next_ordinal,
+      delivery_compat_seeded = true,
       updated_at = excluded.updated_at
 ;
 --> statement-breakpoint
@@ -517,6 +592,65 @@ END
 $$;
 --> statement-breakpoint
 
+-- Commit a correlated Pi acknowledgement only while the caller still owns the exact live lease.
+-- Locking the lease row fences this write against an expiry takeover: a replacement claim waits
+-- for this transaction, then observes the accepted watermark instead of replaying the same turn.
+CREATE FUNCTION public.companion_accept_delivery_lease(
+  p_org_id uuid,
+  p_companion_id uuid,
+  p_claim_id uuid,
+  p_delivered_ordinal integer,
+  p_timeout_delivery_ordinal integer
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+DECLARE
+  v_owned boolean := false;
+BEGIN
+  IF p_org_id IS DISTINCT FROM NULLIF(current_setting('app.org_id', true), '')::uuid
+    OR NULLIF(current_setting('app.user_id', true), '') IS NULL
+    OR p_delivered_ordinal < 0
+    OR (p_timeout_delivery_ordinal IS NOT NULL AND p_timeout_delivery_ordinal < 0)
+  THEN
+    RETURN false;
+  END IF;
+
+  SELECT true
+  INTO v_owned
+  FROM public.companion_reconcile_leases l
+  WHERE l.org_id = p_org_id
+    AND l.companion_id = p_companion_id
+    AND l.claimed_by = 'delivery:' || p_claim_id::text
+    AND l.lease_expires_at >= statement_timestamp()
+  FOR UPDATE;
+
+  IF NOT COALESCE(v_owned, false) THEN
+    RETURN false;
+  END IF;
+
+  UPDATE public.companion_threads t
+  SET delivered_ordinal = GREATEST(COALESCE(t.delivered_ordinal, -1), p_delivered_ordinal),
+      accepted_delivery_ordinal = GREATEST(
+        COALESCE(t.accepted_delivery_ordinal, -1), p_delivered_ordinal
+      ),
+      timeout_delivery_ordinal = CASE
+        WHEN p_timeout_delivery_ordinal IS NULL THEN t.timeout_delivery_ordinal
+        ELSE GREATEST(
+          COALESCE(t.timeout_delivery_ordinal, -1), p_timeout_delivery_ordinal
+        )
+      END,
+      updated_at = statement_timestamp()
+  WHERE t.org_id = p_org_id
+    AND t.companion_id = p_companion_id;
+
+  RETURN FOUND;
+END
+$$;
+--> statement-breakpoint
+
 REVOKE ALL ON FUNCTION public.companion_claim_delivery_lease(uuid, uuid, uuid, integer)
   FROM PUBLIC;
 --> statement-breakpoint
@@ -527,11 +661,18 @@ REVOKE ALL ON FUNCTION public.companion_delivery_compat_deadline(
   uuid, uuid, timestamp with time zone
 ) FROM PUBLIC;
 --> statement-breakpoint
-REVOKE ALL ON FUNCTION public.companion_delivery_read_fence(uuid, uuid, text)
+REVOKE ALL ON FUNCTION public.companion_refresh_delivery_compat_backfill()
   FROM PUBLIC;
 --> statement-breakpoint
+-- Keep the RLS fence callable through the migration-first handoff. The function validates tenant
+-- context internally; runtime-role-grants atomically grants the API role and revokes PUBLIC after
+-- the new policy has committed, so an old API replica never sees the policy without EXECUTE.
 REVOKE ALL ON FUNCTION public.companion_release_delivery_lease(uuid, uuid, uuid)
   FROM PUBLIC;
 --> statement-breakpoint
 REVOKE ALL ON FUNCTION public.companion_renew_delivery_lease(uuid, uuid, uuid, integer)
   FROM PUBLIC;
+--> statement-breakpoint
+REVOKE ALL ON FUNCTION public.companion_accept_delivery_lease(
+  uuid, uuid, uuid, integer, integer
+) FROM PUBLIC;

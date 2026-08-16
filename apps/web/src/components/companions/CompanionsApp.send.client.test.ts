@@ -380,6 +380,20 @@ describe("CompanionsApp send", () => {
       expect(api.sends[0]?.clientMessageId).toMatch(UUID);
     });
 
+    it("keeps a refused ordinary send pending without claiming Pi is replying", async () => {
+      api = controlPlane({ refuseDelivery: true });
+      vi.stubGlobal("fetch", api.fetchMock);
+      const container = await openThread();
+
+      type(container, "Please try this turn");
+      await pressEnter(container);
+      await poll(1);
+
+      expect(container.querySelector("[data-slot='composer-hint']")?.textContent)
+        .toBe("1 message waiting for delivery.");
+      expect(container.querySelector("[data-slot='companion-replying']")).toBeNull();
+    });
+
     it("keeps a refused post-timeout send visibly pending without reopening its chip or replying", async () => {
       api = controlPlane({ watermarkedPostTimeoutTail: true, refuseDelivery: true });
       vi.stubGlobal("fetch", api.fetchMock);
@@ -448,6 +462,7 @@ describe("CompanionsApp send", () => {
 
       expect(api.posts()).toBe(1);
       expect(container.querySelectorAll("[data-role='user']")).toHaveLength(1);
+      expect(container.querySelector("[data-slot='companion-replying']")).toBeNull();
 
       await act(async () => {
         api.releaseSend();

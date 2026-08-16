@@ -59,6 +59,7 @@ const coreMocks = vi.hoisted(() => ({
   sendCompanionMessage: vi.fn(),
   listPendingCompanionMessages: vi.fn(),
   claimCompanionDelivery: vi.fn(),
+  acceptCompanionDelivery: vi.fn(),
   releaseCompanionDelivery: vi.fn(),
   renewCompanionDelivery: vi.fn(),
   recordCompanionTimeoutRestart: vi.fn(),
@@ -413,6 +414,13 @@ describe("Companions API feature gate", () => {
       timeoutRecoveryOrdinal: null,
     });
     coreMocks.claimCompanionDelivery.mockResolvedValue(true);
+    coreMocks.acceptCompanionDelivery.mockResolvedValue({
+      ...viewerThread,
+      access: "owner",
+      read_only: false,
+      can_send: true,
+      accepted_delivery_ordinal: message.ordinal,
+    });
     coreMocks.releaseCompanionDelivery.mockResolvedValue(true);
     coreMocks.renewCompanionDelivery.mockResolvedValue(true);
     coreMocks.recordCompanionPiProjectionWithEffects.mockResolvedValue({
@@ -2404,7 +2412,7 @@ describe("Companions API feature gate", () => {
       message: message.content,
       requestId: message.event_id,
     });
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(
       expect.objectContaining({ deliveredOrdinal: message.ordinal }),
     );
     expect(runtime.refreshTtl).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
@@ -2671,7 +2679,7 @@ describe("Companions API feature gate", () => {
     );
 
     expect(response.status).toBe(409);
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(
       expect.objectContaining({ deliveredOrdinal: backlog.ordinal }),
     );
     expect(coreMocks.updateCompanionRuntime).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -2762,7 +2770,7 @@ describe("Companions API feature gate", () => {
     });
 
     expect(runtime.prompt).toHaveBeenCalledOnce();
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(
       expect.objectContaining({ deliveredOrdinal: message.ordinal }),
     );
     expect(coreMocks.updateCompanionRuntime).not.toHaveBeenCalled();
@@ -2855,7 +2863,7 @@ describe("Companions API feature gate", () => {
       message: stranded.content,
       requestId: stranded.event_id,
     }));
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenLastCalledWith(
       expect.objectContaining({ deliveredOrdinal: 1, timeoutDeliveryOrdinal: 1 }),
     );
     expect(runtime.stop).not.toHaveBeenCalled();
@@ -2885,9 +2893,8 @@ describe("Companions API feature gate", () => {
       message: message.content,
       requestId: message.event_id,
     });
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: 0,
-      entries: [],
     }));
     expect(runtime.refreshTtl).toHaveBeenCalledWith({ boxId: companion.runtime.box_id });
     expect(runtime.start).not.toHaveBeenCalled();
@@ -2982,7 +2989,7 @@ describe("Companions API feature gate", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: message.ordinal,
     }));
   });
@@ -3017,7 +3024,7 @@ describe("Companions API feature gate", () => {
       "Earlier ask",
       "Summarize the incident",
     ]);
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: 1,
     }));
   });
@@ -3132,7 +3139,7 @@ describe("Companions API feature gate", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
     // The watermark stops at what Pi accepted, so the refused message is retried instead of lost.
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: 0,
     }));
   });
@@ -3161,8 +3168,12 @@ describe("Companions API feature gate", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
     expect(coreMocks.recordCompanionPiProjectionWithEffects).not.toHaveBeenCalled();
-    expect(runtime.healPiDaemon).toHaveBeenCalledOnce();
-    expect(runtime.prompt).toHaveBeenCalledTimes(2);
+    expect(coreMocks.acceptCompanionDelivery).not.toHaveBeenCalled();
+    expect(runtime.healPiDaemon).not.toHaveBeenCalled();
+    expect(runtime.prompt).toHaveBeenCalledOnce();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({ runtimeState: "error", daemonState: "error" }),
+    }));
   });
 
   it("leaves an overlapping delivery pending without probing or recycling Pi", async () => {
@@ -3193,7 +3204,7 @@ describe("Companions API feature gate", () => {
     expect(coreMocks.releaseCompanionDelivery).not.toHaveBeenCalled();
   });
 
-  it("heals a FIFO consume miss and records delivery only after Pi accepts the retry", async () => {
+  it("does not replay a prompt whose correlated acknowledgement is ambiguous", async () => {
     const newest = { ...message, event_id: "msg:the-370", ordinal: 5, content: "ping THE-370" };
     coreMocks.getCompanionForRuntime.mockResolvedValue(runningCompanion);
     coreMocks.sendCompanionMessage.mockResolvedValue({
@@ -3211,14 +3222,10 @@ describe("Companions API feature gate", () => {
       timeoutRecoveryOrdinal: 0,
     });
     const order: string[] = [];
-    const prompt = vi.fn()
-      .mockImplementationOnce(async () => {
-        order.push("prompt-refused");
-        throw new Error("FIFO write completed without a Pi response");
-      })
-      .mockImplementationOnce(async () => {
-        order.push("prompt-accepted");
-      });
+    const prompt = vi.fn(async () => {
+      order.push("prompt-ambiguous");
+      throw new Error("FIFO write completed without a Pi response");
+    });
     const runtime = boxRuntime({
       prompt,
       healPiDaemon: vi.fn(async (input: { requireIdle?: boolean }) => {
@@ -3236,17 +3243,14 @@ describe("Companions API feature gate", () => {
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ delivery: "delivered" });
-    expect(order).toEqual(["heal-idle", "prompt-refused", "heal-idle", "prompt-accepted"]);
+    await expect(response.json()).resolves.toMatchObject({ delivery: "pending" });
+    expect(order).toEqual(["heal-idle", "prompt-ambiguous"]);
     expect(runtime.start).not.toHaveBeenCalled();
     expect(runtime.stop).not.toHaveBeenCalled();
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
-      expect.objectContaining({
-        deliveredOrdinal: newest.ordinal,
-        acceptedDeliveryOrdinal: newest.ordinal,
-        timeoutDeliveryOrdinal: newest.ordinal,
-      }),
-    );
+    expect(coreMocks.acceptCompanionDelivery).not.toHaveBeenCalled();
+    expect(coreMocks.updateCompanionRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      patch: expect.objectContaining({ runtimeState: "error", daemonState: "error" }),
+    }));
   });
 
   it("projects Error when a send-owned wake cannot hand its saved turn to Pi", async () => {
@@ -3364,7 +3368,7 @@ describe("Companions API feature gate", () => {
       message: "Ca va ?",
       requestId: "msg:ca-va",
     }));
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenLastCalledWith(
       expect.objectContaining({ deliveredOrdinal: 2, timeoutDeliveryOrdinal: 2 }),
     );
   });
@@ -3583,11 +3587,10 @@ describe("Companions API feature gate", () => {
       offset: 512,
     });
     // Delivery is claimed before the log is read, so the prompt cannot be repeated by a retry.
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenNthCalledWith(1, expect.objectContaining({
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: 0,
-      entries: [],
     }));
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenNthCalledWith(2, expect.objectContaining({
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
       piLogOffset: 512 + Buffer.byteLength(reply, "utf8"),
       piLogRewound: false,
       entries: [expect.objectContaining({ role: "assistant", content: "Two services timed out." })],
@@ -3973,7 +3976,7 @@ describe("Companions API feature gate", () => {
     });
 
     expect(response.status).toBe(200);
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenNthCalledWith(2, expect.objectContaining({
+    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
       entries: [expect.objectContaining({ role: "assistant", content: "2025" })],
     }));
   });
@@ -3997,9 +4000,8 @@ describe("Companions API feature gate", () => {
 
     expect(response.status).toBe(400);
     // The failed read must not cost Pi a second copy of the same message on the next sync.
-    expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(expect.objectContaining({
+    expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(expect.objectContaining({
       deliveredOrdinal: 0,
-      entries: [],
     }));
   });
 
@@ -4273,7 +4275,7 @@ describe("Companions API feature gate", () => {
         message: "Ca va ?",
         requestId: "msg:ca-va",
       }));
-      expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+      expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(
         expect.objectContaining({ deliveredOrdinal: 3, timeoutDeliveryOrdinal: 3 }),
       );
     });
@@ -4309,7 +4311,7 @@ describe("Companions API feature gate", () => {
         message: "Still there?",
         requestId: "msg:after-stale-start",
       }));
-      expect(coreMocks.recordCompanionPiProjectionWithEffects).toHaveBeenCalledWith(
+      expect(coreMocks.acceptCompanionDelivery).toHaveBeenCalledWith(
         expect.objectContaining({ deliveredOrdinal: 3, timeoutDeliveryOrdinal: 3 }),
       );
     });

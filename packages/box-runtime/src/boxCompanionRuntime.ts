@@ -572,7 +572,8 @@ trap 'companion_status=$?; printf "pi-daemon: line %s: %s failed with status %s\
 export PI_CODING_AGENT_DIR="$HOME/.companion/pi"
 fifo="$root/state/pi.rpc.in"
 ready="$root/state/pi.rpc.ready"
-rm -f "$fifo" "$ready"
+rpc_start="$root/state/pi.rpc.start"
+rm -f "$fifo" "$ready" "$rpc_start"
 pi_version="$("$PI_BIN" --version 2>/dev/null || true)"
 node - "$pi_version" "$MINIMUM_IMAGE_SAFE_PI_VERSION" <<'COMPANION_PI_DAEMON_VERSION'
 const actualText = process.argv[2] ?? "";
@@ -603,6 +604,11 @@ if [ -z "\${INVOCATION_ID:-}" ]; then
   echo 'pi-daemon: systemd invocation id is missing' >&2
   exit 1
 fi
+rpc_start_size=0
+if [ -f "$root/logs/pi.rpc.ndjson" ]; then
+  rpc_start_size="$(wc -c < "$root/logs/pi.rpc.ndjson")"
+fi
+printf '%s %s\n' "$INVOCATION_ID" "$rpc_start_size" > "$rpc_start"
 printf '%s\n' "$INVOCATION_ID" > "$ready"
 skill_args=(--no-skills)
 model_args=()
@@ -1284,11 +1290,38 @@ ${USER_BUS_ENVIRONMENT}
 fifo="$HOME/.companion/runtime/state/pi.rpc.in"
 rpc_log="$HOME/.companion/runtime/logs/pi.rpc.ndjson"
 ready="$HOME/.companion/runtime/state/pi.rpc.ready"
+rpc_start="$HOME/.companion/runtime/state/pi.rpc.start"
 systemctl --user is-active --quiet companion-pi-daemon.service
 test -p "$fifo"
 companion_pi_invocation="$(systemctl --user show companion-pi-daemon.service -p InvocationID --value 2>/dev/null || true)"
 [ -n "$companion_pi_invocation" ]
 [ "$(cat "$ready" 2>/dev/null || true)" = "$companion_pi_invocation" ]
+rpc_start_invocation=""
+rpc_start_size=""
+read -r rpc_start_invocation rpc_start_size < "$rpc_start" 2>/dev/null || true
+if [ "$rpc_start_invocation" != "$companion_pi_invocation" ] \
+  || ! [[ "$rpc_start_size" =~ ^[0-9]+$ ]]; then
+  # A layout-13 daemon already running across this deploy predates the marker. Keep it usable; the
+  # whole log is safe because durable request ids are unique. Persist that conservative boundary
+  # once so a late acknowledgement remains visible to every explicit retry on this invocation; the
+  # next natural start replaces it with the exact byte boundary.
+  rpc_start_size=0
+  printf '%s %s\n' "$companion_pi_invocation" "$rpc_start_size" > "$rpc_start"
+fi
+# An earlier request may have timed out after Pi appended the correlated acknowledgement. Reuse
+# that response within this systemd invocation instead of executing the same turn a second time.
+response="$(
+  tail -c "+$((rpc_start_size + 1))" "$rpc_log" 2>/dev/null \
+    | grep -F ${shellQuote('"type":"response"')} \
+    | grep -F ${shellQuote(`"command":"${input.responseCommand}"`)} \
+    | grep -F ${shellQuote(`"id":"${input.command.id}"`)} \
+    | tail -n 1 \
+    || true
+)"
+if [ -n "$response" ]; then
+  printf '%s\n' "$response"
+  exit 0
+fi
 before_size=0
 if [ -f "$rpc_log" ]; then
   before_size="$(wc -c < "$rpc_log")"
@@ -1920,7 +1953,8 @@ if systemctl --user show-environment >/dev/null 2>&1; then
 fi
 rm -f "/run/user/$(id -u)/companion/providers.env" \
   "$HOME/.companion/runtime/state/pi.rpc.in" \
-  "$HOME/.companion/runtime/state/pi.rpc.ready"`,
+  "$HOME/.companion/runtime/state/pi.rpc.ready" \
+  "$HOME/.companion/runtime/state/pi.rpc.start"`,
       );
       if (!stopped.success) throw new BoxRuntimeProviderError("Pi daemon failed to stop", 502);
     }

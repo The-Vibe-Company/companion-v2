@@ -75,7 +75,8 @@ DECLARE
     'public.companion_delivery_read_fence(uuid,uuid,text)'::regprocedure,
     'public.companion_claim_delivery_lease(uuid,uuid,uuid,integer)'::regprocedure,
     'public.companion_release_delivery_lease(uuid,uuid,uuid)'::regprocedure,
-    'public.companion_renew_delivery_lease(uuid,uuid,uuid,integer)'::regprocedure
+    'public.companion_renew_delivery_lease(uuid,uuid,uuid,integer)'::regprocedure,
+    'public.companion_accept_delivery_lease(uuid,uuid,uuid,integer,integer)'::regprocedure
   ];
   worker_functions regprocedure[] := ARRAY[
     'public.companion_claim_skill_database_object_deletions(integer,integer)'::regprocedure,
@@ -294,6 +295,11 @@ BEGIN
   END LOOP;
 
   -- Creator-scoped and pre-tenant service functions belong to the API role.
+  -- companion_delivery_read_fence remains PUBLIC only across the migration-first compatibility
+  -- handoff so old API transactions can evaluate the newly committed restrictive RLS policy. Move
+  -- it to the configured API role in this same DO transaction; there is no permission-denied gap.
+  REVOKE EXECUTE ON FUNCTION public.companion_delivery_read_fence(uuid, uuid, text)
+    FROM PUBLIC;
   EXECUTE format(
     'GRANT EXECUTE ON FUNCTION
       public.companion_list_user_orgs(text),
@@ -319,7 +325,8 @@ BEGIN
       public.companion_delivery_read_fence(uuid, uuid, text),
       public.companion_claim_delivery_lease(uuid, uuid, uuid, integer),
       public.companion_release_delivery_lease(uuid, uuid, uuid),
-      public.companion_renew_delivery_lease(uuid, uuid, uuid, integer)
+      public.companion_renew_delivery_lease(uuid, uuid, uuid, integer),
+      public.companion_accept_delivery_lease(uuid, uuid, uuid, integer, integer)
      TO %I',
     api_role
   );

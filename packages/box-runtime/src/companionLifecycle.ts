@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  acceptCompanionDelivery,
   CompanionProviderError,
   CompanionRuntimeTransitionError,
   COMPANION_RUNTIME_START_BUDGET_MS,
@@ -172,7 +173,7 @@ export async function deliverCompanionMessages(
     );
     if (current.pending.length === 0) return null;
 
-    let deliveredOrdinal: number | undefined;
+    let result: { thread: CompanionThread; deliveredOrdinal: number } | null = null;
     try {
       if (current.timeoutRecoveryPending) {
         // A prompt acknowledgement also covers a follow-up queued behind an old streaming turn.
@@ -198,64 +199,33 @@ export async function deliverCompanionMessages(
         try {
           await prompt();
         } catch (error) {
-          // A wake that just committed Online owns the handoff promised by #314. Surface its first
-          // refusal and project Error instead of hiding it behind an in-request recycle; the saved
-          // tail stays pending for the next explicit send. Ordinary online delivery may still use
-          // THE-370's Pi-only heal and one acknowledged retry below.
-          if (input.throwOnRefusal) {
-            refusal = error;
-            break;
-          }
-          // Missing acknowledgement leaves the original prompt's state ambiguous. Require idle
-          // while holding the lease; a busy process may have accepted it after our read boundary,
-          // so recycling it before the one retry avoids queuing a duplicate behind that turn.
-          if (!await renewLease()) {
-            refusal = error;
-            break;
-          }
-          const healed = await input.runtime.healPiDaemon({
-            boxId: input.boxId,
-            requireIdle: true,
-          });
-          if (healed.daemonState !== "running") {
-            refusal = new BoxRuntimeProviderError(
-              healed.detail ?? "Pi did not become ready to accept messages",
-              409,
-            );
-            break;
-          }
-          if (!await renewLease()) {
-            refusal = error;
-            break;
-          }
-          try {
-            await prompt();
-          } catch (retryError) {
-            refusal = retryError;
-            break;
-          }
+          // A missing correlated response is ambiguous: Pi may have accepted the command after the
+          // transport boundary timed out. Never replay it inside this request. Keep the durable tail
+          // pending and expose Error; a later explicit send can recover the response by request id.
+          refusal = error;
+          break;
         }
-        deliveredOrdinal = message.ordinal;
-        if (!await renewLease()) break;
+        const thread = await withTenantContext(
+          { orgId: ctx.orgId, userId: ctx.actor.id },
+          (database) => acceptCompanionDelivery({
+            actor: ctx.actor,
+            orgId: ctx.orgId,
+            companionId: input.companionId,
+            claimId,
+            deliveredOrdinal: message.ordinal,
+            timeoutDeliveryOrdinal: current.timeoutRecoveryPending
+              ? message.ordinal
+              : undefined,
+            database,
+          }),
+        );
+        if (!thread) break;
+        result = { thread, deliveredOrdinal: message.ordinal };
       }
     } catch (error) {
       refusal = error;
       // Leave the undelivered tail pending instead of losing it or failing the persisted send.
     }
-
-    const result = deliveredOrdinal === undefined
-      ? null
-      : await recordProjection({
-          actor: ctx.actor,
-          orgId: ctx.orgId,
-          companionId: input.companionId,
-          entries: [],
-          // A lost lease stops every further Pi action, but an acknowledgement already received is
-          // still safe to watermark monotonically so the next owner cannot duplicate that prefix.
-          deliveredOrdinal,
-          acceptedDeliveryOrdinal: deliveredOrdinal,
-          timeoutDeliveryOrdinal: current.timeoutRecoveryPending ? deliveredOrdinal : undefined,
-        }).then(({ thread }) => ({ thread, deliveredOrdinal }));
 
     // Preserve #314's visible post-wake refusal while the delivery lease still orders health with
     // every other producer. A later accepted retry can clear this Error; a stale producer cannot
@@ -263,7 +233,7 @@ export async function deliverCompanionMessages(
     const ownsHealthUpdate = await renewLease();
     if (
       ownsHealthUpdate
-      && ((input.throwOnRefusal && refusal !== undefined) || (result && refusal === undefined))
+      && (refusal !== undefined || (result && refusal === undefined))
     ) {
       await withTenantContext(
         { orgId: ctx.orgId, userId: ctx.actor.id },
