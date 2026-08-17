@@ -198,6 +198,10 @@ test("configuration resolves the public image fixture without exposing credentia
   for (const imageUrl of [
     "https://cdn.example.test/PIXEL_PROOF_7K4M.png",
     "https://cdn.example.test/%50%49%58%45%4c_%50%52%4f%4f%46_%37%4b%34%4d.png",
+    `https://cdn.example.test/${encodeURIComponent(encodeURIComponent(encodeURIComponent(
+      "%50%49%58%45%4c_%50%52%4f%4f%46_%37%4b%34%4d",
+    )))}.png`,
+    "https://cdn.example.test/%not-an-escape.png",
   ]) {
     assert.throws(
       () => loadCompanionCanaryConfig(environment({ COMPANION_CANARY_IMAGE_URL: imageUrl })),

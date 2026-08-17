@@ -23,6 +23,7 @@ const apiRole = `migration_api_${suffix}`;
 const workerRole = `migration_worker_${suffix}`;
 const runtimeRole = `migration_runtime_${suffix}`;
 const ownerPassword = `migration-owner-${suffix}`;
+const processRolePassword = `migration-process-${suffix}`;
 const adminSql = postgres(databaseUrl, { max: 1 });
 const ownerUrl = new URL(databaseUrl);
 ownerUrl.pathname = `/${databaseName}`;
@@ -36,9 +37,12 @@ describe("dedicated migration owner", () => {
     await adminSql.unsafe(`
       create role ${ownerRole}
       login password '${ownerPassword}' nosuperuser nobypassrls noinherit;
-      create role ${apiRole} nologin nosuperuser nobypassrls noinherit;
-      create role ${workerRole} nologin nosuperuser nobypassrls noinherit;
-      create role ${runtimeRole} nologin nosuperuser nobypassrls noinherit;
+      create role ${apiRole}
+      login password '${processRolePassword}' nosuperuser nobypassrls noinherit;
+      create role ${workerRole}
+      login password '${processRolePassword}' nosuperuser nobypassrls noinherit;
+      create role ${runtimeRole}
+      login password '${processRolePassword}' nosuperuser nobypassrls noinherit;
     `);
     await adminSql.unsafe(`create database ${databaseName} owner ${ownerRole}`);
     await runMigrations({
@@ -82,6 +86,6 @@ describe("dedicated migration owner", () => {
       order by rolname
     `;
     expect(grantTargets).toHaveLength(3);
-    expect(grantTargets.every((role) => role.can_login === false)).toBe(true);
+    expect(grantTargets.every((role) => role.can_login === true)).toBe(true);
   });
 });

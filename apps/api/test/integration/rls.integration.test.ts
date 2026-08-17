@@ -28,16 +28,112 @@ import {
   type IntegrationFixture,
 } from "./testDatabase";
 
+interface DefaultAclEntry {
+  schemaName: string | null;
+  objectType: "TABLES" | "SEQUENCES" | "FUNCTIONS" | "TYPES" | "SCHEMAS";
+  grantee: string;
+  privilegeType: string;
+  isGrantable: boolean;
+}
+
+const defaultAclObjectTypes = new Set<DefaultAclEntry["objectType"]>([
+  "TABLES",
+  "SEQUENCES",
+  "FUNCTIONS",
+  "TYPES",
+  "SCHEMAS",
+]);
+const defaultAclPrivileges = new Set([
+  "SELECT",
+  "INSERT",
+  "UPDATE",
+  "DELETE",
+  "TRUNCATE",
+  "REFERENCES",
+  "TRIGGER",
+  "MAINTAIN",
+  "USAGE",
+  "EXECUTE",
+  "CREATE",
+]);
+
+function quotedIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+function defaultAclPrefix(entry: Pick<DefaultAclEntry, "schemaName">): string {
+  return `alter default privileges${entry.schemaName === null
+    ? ""
+    : ` in schema ${quotedIdentifier(entry.schemaName)}`}`;
+}
+
+function defaultAclGrantee(grantee: string): string {
+  return grantee === "PUBLIC" ? "PUBLIC" : quotedIdentifier(grantee);
+}
+
+async function readMigrationOwnerDefaultAcl(): Promise<DefaultAclEntry[]> {
+  return await integrationSql<DefaultAclEntry[]>`
+    select namespace.nspname as "schemaName",
+      case defaults.defaclobjtype
+        when 'r' then 'TABLES'
+        when 'S' then 'SEQUENCES'
+        when 'f' then 'FUNCTIONS'
+        when 'T' then 'TYPES'
+        when 'n' then 'SCHEMAS'
+      end as "objectType",
+      case when acl.grantee = 0 then 'PUBLIC' else pg_catalog.pg_get_userbyid(acl.grantee) end
+        as grantee,
+      acl.privilege_type as "privilegeType",
+      acl.is_grantable as "isGrantable"
+    from pg_catalog.pg_default_acl defaults
+    left join pg_catalog.pg_namespace namespace on namespace.oid = defaults.defaclnamespace
+    cross join lateral pg_catalog.aclexplode(defaults.defaclacl) acl
+    where defaults.defaclrole = (
+      select role.oid from pg_catalog.pg_roles role where role.rolname = current_user
+    )
+      and (defaults.defaclnamespace = 0 or namespace.nspname = 'public')
+    order by 1 nulls first, 2, 3, 4, 5
+  `;
+}
+
+async function restoreMigrationOwnerDefaultAcl(snapshot: DefaultAclEntry[]): Promise<void> {
+  const current = await readMigrationOwnerDefaultAcl();
+  const resetTargets = new Map<string, Pick<DefaultAclEntry, "schemaName" | "objectType" | "grantee">>();
+  for (const entry of [...current, ...snapshot]) {
+    if (!defaultAclObjectTypes.has(entry.objectType)) {
+      throw new Error(`unsupported default ACL object type: ${entry.objectType}`);
+    }
+    resetTargets.set(
+      JSON.stringify([entry.schemaName, entry.objectType, entry.grantee]),
+      entry,
+    );
+  }
+  for (const entry of resetTargets.values()) {
+    await integrationSql.unsafe(
+      `${defaultAclPrefix(entry)} revoke all privileges on ${entry.objectType} from ${defaultAclGrantee(entry.grantee)}`,
+    );
+  }
+  for (const entry of snapshot) {
+    if (!defaultAclPrivileges.has(entry.privilegeType)) {
+      throw new Error(`unsupported default ACL privilege: ${entry.privilegeType}`);
+    }
+    await integrationSql.unsafe(
+      `${defaultAclPrefix(entry)} grant ${entry.privilegeType} on ${entry.objectType} to ${defaultAclGrantee(entry.grantee)}${entry.isGrantable ? " with grant option" : ""}`,
+    );
+  }
+  expect(await readMigrationOwnerDefaultAcl()).toEqual(snapshot);
+}
+
 describe("Skills Hub PostgreSQL isolation", () => {
   const suffix = randomUUID().replaceAll("-", "").slice(0, 16);
   const apiRole = `companion_api_${suffix}`;
   const workerRole = `companion_worker_${suffix}`;
   const runtimeRole = `companion_runtime_${suffix}`;
   const processRoles = [apiRole, workerRole, runtimeRole];
-  const baselineApiRole = process.env.DATABASE_API_ROLE ?? "companion_api";
-  const baselineWorkerRole = process.env.DATABASE_WORKER_ROLE ?? "companion_worker";
-  const baselineRuntimeRole = process.env.DATABASE_COMPANION_RUNTIME_ROLE ?? "companion_runtime_v2";
   let fixture: IntegrationFixture;
+  let defaultAclSnapshot: DefaultAclEntry[] = [];
+  let defaultAclCaptured = false;
+  let processRolesCreated = false;
   let grants = "";
   let personalSlug: string;
   let orgSlug: string;
@@ -72,6 +168,9 @@ describe("Skills Hub PostgreSQL isolation", () => {
     await integrationSql.unsafe(`create role ${apiRole} login nosuperuser nobypassrls noinherit`);
     await integrationSql.unsafe(`create role ${workerRole} login nosuperuser nobypassrls noinherit`);
     await integrationSql.unsafe(`create role ${runtimeRole} login nosuperuser nobypassrls noinherit`);
+    processRolesCreated = true;
+    defaultAclSnapshot = await readMigrationOwnerDefaultAcl();
+    defaultAclCaptured = true;
     grants = extractRuntimeRoleGrantBlock(
       await readFile(await resolveRuntimeRoleGrantsFile(), "utf8"),
     );
@@ -84,19 +183,11 @@ describe("Skills Hub PostgreSQL isolation", () => {
   });
 
   afterAll(async () => {
-    await fixture.cleanup();
-    for (const role of processRoles) await integrationSql.unsafe(`drop owned by ${role}`);
-    for (const role of processRoles) await integrationSql.unsafe(`drop role ${role}`);
-    // The grant preflight deliberately rewrites migration-owner default ACLs. Restore the canonical
-    // disposable-database baseline so later integration suites never inherit this test's ephemeral
-    // role names or its PUBLIC revocations.
-    if (grants) {
-      await integrationSql.begin(async (tx) => {
-        await tx`select set_config('companion.api_role', ${baselineApiRole}, true)`;
-        await tx`select set_config('companion.worker_role', ${baselineWorkerRole}, true)`;
-        await tx`select set_config('companion.companion_runtime_role', ${baselineRuntimeRole}, true)`;
-        await tx.unsafe(grants);
-      });
+    await fixture?.cleanup();
+    if (defaultAclCaptured) await restoreMigrationOwnerDefaultAcl(defaultAclSnapshot);
+    if (processRolesCreated) {
+      for (const role of processRoles) await integrationSql.unsafe(`drop owned by ${role}`);
+      for (const role of processRoles) await integrationSql.unsafe(`drop role ${role}`);
     }
   });
 

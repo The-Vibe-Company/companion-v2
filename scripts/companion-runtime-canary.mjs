@@ -108,13 +108,22 @@ function runLabel(env, uuid) {
 
 function assertImageUrlDoesNotRevealExpectedText(imageUrl, expectedText) {
   let decoded = imageUrl;
-  for (let index = 0; index < 3; index += 1) {
+  // Every changing decode removes at least one percent escape, so the input
+  // length is a deterministic upper bound even for deliberately nested URLs.
+  for (let index = 0; index <= imageUrl.length; index += 1) {
+    let next;
     try {
-      const next = decodeURIComponent(decoded);
-      if (next === decoded) break;
-      decoded = next;
+      next = decodeURIComponent(decoded);
     } catch {
-      break;
+      throw new CompanionCanaryError(
+        "invalid_configuration",
+        "image URL contains invalid percent encoding",
+      );
+    }
+    if (next === decoded) break;
+    decoded = next;
+    if (index === imageUrl.length) {
+      throw new CompanionCanaryError("invalid_configuration");
     }
   }
   if (decoded.toLocaleUpperCase("en-US").includes(expectedText.toLocaleUpperCase("en-US"))) {

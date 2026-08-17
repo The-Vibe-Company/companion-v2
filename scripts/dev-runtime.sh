@@ -11,12 +11,34 @@ fi
 
 box_sim_pid=""
 cleanup_box_sim() {
-  if [ -n "$box_sim_pid" ] && kill -0 "$box_sim_pid" 2>/dev/null; then
-    kill "$box_sim_pid" 2>/dev/null || true
-    wait "$box_sim_pid" 2>/dev/null || true
+  local pid="$box_sim_pid"
+  box_sim_pid=""
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    local attempt=0
+    while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 40 ]; do
+      local state
+      state="$(ps -p "$pid" -o stat= 2>/dev/null || true)"
+      case "$state" in
+        ''|Z*) break ;;
+      esac
+      sleep 0.05
+      attempt=$((attempt + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      state="$(ps -p "$pid" -o stat= 2>/dev/null || true)"
+      case "$state" in
+        Z*) ;;
+        *) kill -KILL "$pid" 2>/dev/null || true ;;
+      esac
+    fi
+    wait "$pid" 2>/dev/null || true
   fi
 }
-trap cleanup_box_sim EXIT HUP INT TERM
+trap cleanup_box_sim EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Conductor enables Companions for its demo account. When no real provider is
 # configured, use the deterministic simulator rather than making the fourth
@@ -37,7 +59,7 @@ if companion_dev_uses_box_simulator; then
     COMPANION_WAIT_READY_PID="$box_sim_pid" \
     COMPANION_WAIT_READY_TIMEOUT_MS="${COMPANION_BOX_SIM_READY_TIMEOUT_MS:-10000}" \
     node "$SCRIPT_DIR/wait-http-ready.mjs"; then
-    wait "$box_sim_pid" 2>/dev/null || true
+    cleanup_box_sim
     printf 'Box/Pi simulator failed to become ready; runtime was not started.\n' >&2
     exit 1
   fi

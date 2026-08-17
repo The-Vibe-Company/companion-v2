@@ -119,7 +119,6 @@ let apiBase = "";
 let runtimeBase = "";
 let boxBase = "";
 let boxControlBase = "";
-let portReservations: PortReservation[] = [];
 let apiProcess: ManagedProcess | undefined;
 let workerProcess: ManagedProcess | undefined;
 let runtimeProcess: ManagedProcess | undefined;
@@ -149,6 +148,8 @@ interface PortReservation {
   port: number;
   release(): Promise<void>;
 }
+
+const STARTUP_ATTEMPTS = 2;
 
 async function reservePort(): Promise<PortReservation> {
   return await new Promise((resolve, reject) => {
@@ -185,6 +186,10 @@ async function reserveDistinctPorts(count: number): Promise<PortReservation[]> {
     await Promise.all(reservations.map((reservation) => reservation.release().catch(() => undefined)));
     throw error;
   }
+}
+
+async function releaseReservations(reservations: PortReservation[]): Promise<void> {
+  await Promise.all(reservations.map((reservation) => reservation.release().catch(() => undefined)));
 }
 
 async function applyMigrationFile(client: Sql, name: string): Promise<void> {
@@ -326,16 +331,51 @@ async function waitFor<T>(
   throw new Error(`timed out waiting for ${label}${detail}`);
 }
 
-async function waitForHttp(url: string, processHandle: ManagedProcess): Promise<void> {
+function processExitError(processHandle: ManagedProcess): TerminalWaitError {
+  return new TerminalWaitError(
+    `${processHandle.label} exited early (exit=${String(processHandle.child.exitCode)}, `
+    + `signal=${String(processHandle.child.signalCode)})`,
+  );
+}
+
+async function fetchWhileProcessIsAlive(
+  url: string,
+  processHandle: ManagedProcess,
+  init: RequestInit,
+): Promise<boolean> {
+  if (processHandle.child.exitCode !== null || processHandle.child.signalCode !== null) {
+    throw processExitError(processHandle);
+  }
+  return await new Promise<boolean>((resolve, reject) => {
+    let settled = false;
+    const settle = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      processHandle.child.removeListener("exit", onExit);
+      callback();
+    };
+    const onExit = (): void => settle(() => reject(processExitError(processHandle)));
+    processHandle.child.once("exit", onExit);
+    void fetch(url, init).then(
+      (response) => settle(() => resolve(response.ok)),
+      (error: unknown) => settle(() => reject(error)),
+    );
+  });
+}
+
+async function waitForHttp(
+  url: string,
+  processHandle: ManagedProcess,
+  init: RequestInit = {},
+): Promise<void> {
   await waitFor(`${processHandle.label} readiness`, async () => {
     if (processHandle.child.exitCode !== null || processHandle.child.signalCode) {
-      throw new Error(
-        `${processHandle.label} exited early (exit=${String(processHandle.child.exitCode)}, `
-        + `signal=${String(processHandle.child.signalCode)})`,
-      );
+      throw processExitError(processHandle);
     }
-    const response = await fetch(url, { signal: AbortSignal.timeout(1_000) });
-    return response.ok;
+    return await fetchWhileProcessIsAlive(url, processHandle, {
+      ...init,
+      signal: init.signal ?? AbortSignal.timeout(1_000),
+    });
   }, 30_000);
 }
 
@@ -407,6 +447,100 @@ function startRuntime(executorId: string): ManagedProcess {
       COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS: "10000",
     },
   );
+}
+
+function setBoxPort(port: number): void {
+  boxPort = port;
+  boxBase = `http://127.0.0.1:${boxPort}`;
+  boxControlBase = `${boxBase}/_box-sim`;
+}
+
+function setApiRuntimePorts(api: number, runtime: number): void {
+  apiPort = api;
+  runtimePort = runtime;
+  apiBase = `http://127.0.0.1:${apiPort}`;
+  runtimeBase = `http://127.0.0.1:${runtimePort}`;
+}
+
+function hasAddressInUse(processHandles: ManagedProcess[]): boolean {
+  return processHandles.some((processHandle) => /\bEADDRINUSE\b/.test(processHandle.output()));
+}
+
+async function startBoxWithRetry(): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= STARTUP_ATTEMPTS; attempt += 1) {
+    const reservation = await reservePort();
+    setBoxPort(reservation.port);
+    let candidate: ManagedProcess | undefined;
+    try {
+      await reservation.release();
+      candidate = startProcess(
+        "Box/Pi simulator",
+        ["--filter", "@companion/box-sim", "exec", "tsx", "src/cli.ts"],
+        {
+          BOX_SIM_HOST: "127.0.0.1",
+          BOX_SIM_PORT: String(boxPort),
+          BOX_SIM_API_KEY: boxApiKey,
+          BOX_SIM_CONTROL_TOKEN: controlToken,
+        },
+      );
+      await waitForHttp(`${boxControlBase}/state`, candidate, {
+        headers: { "x-box-sim-token": controlToken },
+      });
+      boxProcess = candidate;
+      return;
+    } catch (error) {
+      lastError = error;
+      await stopProcess(candidate, "SIGTERM").catch(() => undefined);
+      if (candidate && attempt < STARTUP_ATTEMPTS && hasAddressInUse([candidate])) continue;
+      throw error;
+    } finally {
+      await reservation.release().catch(() => undefined);
+    }
+  }
+  throw lastError ?? new Error("Box/Pi simulator did not start");
+}
+
+async function startApiRuntimePair(): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= STARTUP_ATTEMPTS; attempt += 1) {
+    const reservations = await reserveDistinctPorts(2);
+    setApiRuntimePorts(reservations[0]!.port, reservations[1]!.port);
+    let candidateApi: ManagedProcess | undefined;
+    let candidateRuntime: ManagedProcess | undefined;
+    try {
+      await releaseReservations(reservations);
+      candidateApi = startApi();
+      // This is deliberately before the database feature gate is enabled: /healthz must stay
+      // available while claims are disabled, and both sides retain this exact URL pair on retry.
+      candidateRuntime = startRuntime(randomUUID());
+      await Promise.all([
+        waitForHttp(`${apiBase}/health`, candidateApi),
+        waitForHttp(`${runtimeBase}/healthz`, candidateRuntime),
+      ]);
+      apiProcess = candidateApi;
+      runtimeProcess = candidateRuntime;
+      return;
+    } catch (error) {
+      lastError = error;
+      await Promise.all([
+        stopProcess(candidateApi, "SIGTERM").catch(() => undefined),
+        stopProcess(candidateRuntime, "SIGTERM").catch(() => undefined),
+      ]);
+      if (
+        attempt < STARTUP_ATTEMPTS
+        && hasAddressInUse([candidateApi, candidateRuntime].filter(
+          (processHandle): processHandle is ManagedProcess => Boolean(processHandle),
+        ))
+      ) {
+        continue;
+      }
+      throw error;
+    } finally {
+      await releaseReservations(reservations);
+    }
+  }
+  throw lastError ?? new Error("Companion API and Runtime did not start");
 }
 
 async function apiRequest(path: string, init: RequestInit = {}): Promise<Response> {
@@ -572,17 +706,6 @@ async function simulatorState(): Promise<BoxSimState> {
 }
 
 beforeAll(async () => {
-  portReservations = await reserveDistinctPorts(3);
-  [apiPort, runtimePort, boxPort] = portReservations.map((reservation) => reservation.port) as [
-    number,
-    number,
-    number,
-  ];
-  apiBase = `http://127.0.0.1:${apiPort}`;
-  runtimeBase = `http://127.0.0.1:${runtimePort}`;
-  boxBase = `http://127.0.0.1:${boxPort}`;
-  boxControlBase = `${boxBase}/_box-sim`;
-
   await adminSql.unsafe(`
     create role ${apiRole} login password '${rolePassword}' nosuperuser nobypassrls noinherit;
     create role ${workerRole} login password '${rolePassword}' nosuperuser nobypassrls noinherit;
@@ -604,6 +727,9 @@ beforeAll(async () => {
     await migrationSql.end({ timeout: 1 });
   }
   databaseSql = postgres(ownerUrl, { max: 4 });
+
+  await startBoxWithRetry();
+  await startApiRuntimePair();
 
   await runProcess(
     "test-user seed",
@@ -627,29 +753,6 @@ beforeAll(async () => {
   userId = identity.userId;
   orgId = identity.orgId;
 
-  await portReservations[2]!.release();
-  boxProcess = startProcess(
-    "Box/Pi simulator",
-    ["--filter", "@companion/box-sim", "exec", "tsx", "src/cli.ts"],
-    {
-      BOX_SIM_HOST: "127.0.0.1",
-      BOX_SIM_PORT: String(boxPort),
-      BOX_SIM_API_KEY: boxApiKey,
-      BOX_SIM_CONTROL_TOKEN: controlToken,
-    },
-  );
-  await waitFor("Box simulator readiness", async () => {
-    assertProcessAlive(boxProcess);
-    const response = await fetch(`${boxControlBase}/state`, {
-      headers: { "x-box-sim-token": controlToken },
-      signal: AbortSignal.timeout(1_000),
-    });
-    return response.ok;
-  });
-
-  await portReservations[0]!.release();
-  apiProcess = startApi();
-  await waitForHttp(`${apiBase}/health`, apiProcess);
   await signIn();
 
   workerProcess = startWorker();
@@ -684,14 +787,9 @@ beforeAll(async () => {
   if (gate && !gate.enabled) {
     await databaseSql`select * from public.companion_runtime_enable(${gate.epoch}::bigint, 'runtime-e2e')`;
   }
-
-  await portReservations[1]!.release();
-  runtimeProcess = startRuntime(randomUUID());
-  await waitForHttp(`${runtimeBase}/healthz`, runtimeProcess);
 }, 180_000);
 
 afterAll(async () => {
-  await Promise.all(portReservations.map((reservation) => reservation.release().catch(() => undefined)));
   await stopProcess(apiProcess, "SIGTERM").catch(() => undefined);
   await stopProcess(workerProcess, "SIGTERM").catch(() => undefined);
   await stopProcess(runtimeProcess, "SIGTERM").catch(() => undefined);
