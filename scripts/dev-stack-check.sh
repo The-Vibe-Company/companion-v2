@@ -429,7 +429,7 @@ fi
 # from a workspace .env, but children must only inherit the runtime-owned name.
 # shellcheck disable=SC2016
 conductor_box_alias="$(
-  env BOX_API_KEY=box-alias COMPANION_DEV_SKIP_ENV_FILE=1 \
+  env -u COMPANION_BOX_API_KEY -u CONDUCTOR_PORT BOX_API_KEY=box-alias COMPANION_DEV_SKIP_ENV_FILE=1 \
     COMPANION_COMPANIONS_ENABLED=true COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=example.test \
     bash -c 'script="$1"; shift; source "$script"; mode=provider; companion_dev_uses_box_simulator && mode=simulator; printf "%s|%s|%s" "${COMPANION_BOX_API_KEY:-unset}" "${BOX_API_KEY:-unset}" "$mode"' \
     _ "$ROOT/scripts/dev-conductor.sh"
@@ -441,7 +441,7 @@ fi
 
 # shellcheck disable=SC2016
 conductor_box_canonical="$(
-  env BOX_API_KEY=box-alias COMPANION_BOX_API_KEY=box-canonical COMPANION_DEV_SKIP_ENV_FILE=1 \
+  env -u CONDUCTOR_PORT BOX_API_KEY=box-alias COMPANION_BOX_API_KEY=box-canonical COMPANION_DEV_SKIP_ENV_FILE=1 \
     COMPANION_COMPANIONS_ENABLED=true COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=example.test \
     bash -c 'script="$1"; shift; source "$script"; mode=provider; companion_dev_uses_box_simulator && mode=simulator; printf "%s|%s|%s" "${COMPANION_BOX_API_KEY:-unset}" "${BOX_API_KEY:-unset}" "$mode"' \
     _ "$ROOT/scripts/dev-conductor.sh"

@@ -81,7 +81,7 @@ fi
 step() { printf '\n%s%s==> %s%s\n' "$BOLD" "$BLUE" "$1" "$RESET"; }
 info() { printf '  %s%s%s\n' "$CYAN" "$1" "$RESET"; }
 ok()   { printf '  %s[OK]%s %s\n' "$GREEN" "$RESET" "$1"; }
-warn() { printf '  %s[WARN]%s %s\n' "$YELLOW" "$RESET" "$1"; }
+warn() { printf '  %s[WARN]%s %s\n' "$YELLOW" "$RESET" "$1" >&2; }
 die()  { printf '  %s[ERROR]%s %s\n' "$RED" "$RESET" "$1" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
