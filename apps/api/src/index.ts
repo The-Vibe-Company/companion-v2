@@ -139,7 +139,6 @@ import {
 } from "@companion/core/services";
 import {
   bumpCompanionSkillsRevisionForSkill,
-  companionsEnabled,
   describeSkillDatabase,
   executeSkillDatabaseStatement,
   getCurrentSkillDatabaseDeclaration,
@@ -2164,12 +2163,10 @@ app.post("/v1/skills/:slug/rename", async (c) => {
           title: body.title,
           database,
         });
-        // Boxes stage the skill under its slug, so a rename changes their effective tree too. The
-        // legacy bump is unavailable after the Runtime v2 cutover and must never run while the
-        // optional Companions control plane is disabled.
-        if (companionsEnabled(process.env)) {
-          await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: renamed.id, database });
-        }
+        // Boxes stage the skill under its slug, so a rename changes their effective tree too. This
+        // desired-state invalidation is durable even while execution is disabled: otherwise a Box
+        // that was current before the kill switch would remain falsely current after re-enable.
+        await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: renamed.id, database });
         return renamed;
       },
       true,
@@ -2617,11 +2614,9 @@ app.post("/v1/skills/:slug/archive", async (c) => {
         const archived = await archiveSkill({
           actor, orgId, slug: c.req.param("slug"), reason: body.reason, database,
         });
-        // Archiving removes the skill from every selector's staged set on its next start, so those
-        // Companions are no longer up to date. Skills Hub-only deployments do not touch runtime.
-        if (companionsEnabled(process.env)) {
-          await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: archived.id, database });
-        }
+        // Archiving removes the skill from every selector's staged set on its next start. Persist
+        // that invalidation while runtime claims are disabled so re-enable cannot miss the restage.
+        await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: archived.id, database });
       },
       true,
     );
@@ -2640,9 +2635,7 @@ app.post("/v1/skills/:slug/restore", async (c) => {
       c,
       async ({ actor, orgId, database }) => {
         const restored = await restoreSkill({ actor, orgId, slug: c.req.param("slug"), database });
-        if (companionsEnabled(process.env)) {
-          await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: restored.id, database });
-        }
+        await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: restored.id, database });
       },
       true,
     );

@@ -78,7 +78,8 @@ describe("Skills Hub runtime-role grants", () => {
     expect(sql).toContain("REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC");
     expect(sql).toContain("REVOKE EXECUTE ON FUNCTIONS FROM %I");
     expect(sql).toContain("FROM pg_catalog.pg_auth_members membership");
-    expect(sql).toContain("companion runtime executor role must have no role memberships");
+    expect(sql).toContain("FROM unnest(active_roles) AS configured_roles(role_name)");
+    expect(sql).toContain("active companion database role % must have no role memberships");
     expect(sql).toContain("REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC");
     expect(sql).toContain("GRANT EXECUTE ON FUNCTION %s TO %I");
   });

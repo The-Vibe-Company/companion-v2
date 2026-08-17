@@ -50,7 +50,6 @@ DECLARE
   configured_role text;
   function_grantee name;
   default_function_grantees name[] := ARRAY[]::name[];
-  peer_role text;
   runtime_attributes record;
   runtime_membership record;
   protected_table regclass;
@@ -260,23 +259,33 @@ BEGIN
     END IF;
   END LOOP;
 
-  IF legacy_role IS NULL THEN
-    FOR configured_role IN
-      SELECT DISTINCT role_name
-      FROM unnest(active_roles) AS configured_roles(role_name)
-    LOOP
-      FOR peer_role IN
-        SELECT DISTINCT role_name
-        FROM unnest(active_roles) AS peer_roles(role_name)
-        WHERE role_name <> configured_role
-      LOOP
-        IF pg_catalog.pg_has_role(configured_role, peer_role, 'MEMBER')
-          OR pg_catalog.pg_has_role(configured_role, peer_role, 'SET') THEN
-          RAISE EXCEPTION 'active companion database roles must not have cross-role membership';
-        END IF;
-      END LOOP;
-    END LOOP;
-  END IF;
+  -- NOINHERIT does not prevent SET ROLE. Any direct edge in either direction lets an active login
+  -- reach privileges that this grant pass cannot audit (or lets another login assume the active
+  -- process role). Reject the whole role graph edge, not only memberships between the three named
+  -- process roles. With no direct edge touching a process login, no transitive SET ROLE path can
+  -- start from or terminate at that login.
+  FOR configured_role IN
+    SELECT DISTINCT role_name
+    FROM unnest(active_roles) AS configured_roles(role_name)
+  LOOP
+    SELECT parent.rolname AS parent_role, member.rolname AS member_role
+    INTO runtime_membership
+    FROM pg_catalog.pg_auth_members membership
+    JOIN pg_catalog.pg_roles parent ON parent.oid = membership.roleid
+    JOIN pg_catalog.pg_roles member ON member.oid = membership.member
+    WHERE membership.roleid = configured_role::regrole
+       OR membership.member = configured_role::regrole
+    ORDER BY parent.rolname, member.rolname
+    LIMIT 1;
+    IF FOUND THEN
+      RAISE EXCEPTION 'active companion database role % must have no role memberships', configured_role
+        USING DETAIL = format(
+          'role membership %s -> %s would permit inherited privileges or SET ROLE',
+          runtime_membership.member_role,
+          runtime_membership.parent_role
+        );
+    END IF;
+  END LOOP;
 
   IF retired_runtime_role IS NOT NULL THEN
     IF NOT EXISTS (
@@ -295,26 +304,6 @@ BEGIN
         RAISE EXCEPTION 'retired and active companion database roles must not have cross-role membership';
       END IF;
     END LOOP;
-  END IF;
-
-  IF companion_runtime_role IS NOT NULL THEN
-    SELECT parent.rolname AS parent_role, member.rolname AS member_role
-    INTO runtime_membership
-    FROM pg_catalog.pg_auth_members membership
-    JOIN pg_catalog.pg_roles parent ON parent.oid = membership.roleid
-    JOIN pg_catalog.pg_roles member ON member.oid = membership.member
-    WHERE membership.roleid = companion_runtime_role::regrole
-       OR membership.member = companion_runtime_role::regrole
-    ORDER BY parent.rolname, member.rolname
-    LIMIT 1;
-    IF FOUND THEN
-      RAISE EXCEPTION 'companion runtime executor role must have no role memberships'
-        USING DETAIL = format(
-          'role membership %s -> %s would permit inherited privileges or SET ROLE',
-          runtime_membership.member_role,
-          runtime_membership.parent_role
-        );
-    END IF;
   END IF;
 
   IF api_role <> worker_role THEN

@@ -99,14 +99,19 @@ describe("syncPublishedSkillToOnlineCompanions", () => {
     vi.unstubAllEnvs();
   });
 
-  it("does nothing before touching PostgreSQL or Box when Companions are disabled", async () => {
+  it("persists the desired revision without touching Box when Companions are disabled", async () => {
     vi.stubEnv("COMPANION_COMPANIONS_ENABLED", "false");
     const factory = vi.fn(() => ({ start: vi.fn() } as never));
 
     await syncPublishedSkillToOnlineCompanions({ orgId, skillId, actor, runtimeFactory: factory });
 
-    expect(dbMocks.withTenantContext).not.toHaveBeenCalled();
-    expect(coreMocks.bumpCompanionSkillsRevisionForSkill).not.toHaveBeenCalled();
+    expect(dbMocks.withTenantContext).toHaveBeenCalledOnce();
+    expect(coreMocks.bumpCompanionSkillsRevisionForSkill).toHaveBeenCalledWith({
+      orgId,
+      skillId,
+      database: { tenant: true },
+    });
+    expect(coreMocks.listOnlineCompanionsForSkillSync).not.toHaveBeenCalled();
     expect(factory).not.toHaveBeenCalled();
   });
 

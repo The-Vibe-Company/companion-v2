@@ -39,6 +39,8 @@ const workerRole = `runtime_v2_worker_${suffix}`;
 const executorRole = `runtime_v2_exec_${suffix}`;
 const legacyUnionRole = `runtime_v2_union_${suffix}`;
 const unexpectedFunctionRole = `runtime_v2_unexpected_${suffix}`;
+const apiParentRole = `runtime_v2_api_parent_${suffix}`;
+const workerParentRole = `runtime_v2_worker_parent_${suffix}`;
 
 const runtimeTables = [
   "companion_runtime_control",
@@ -885,6 +887,8 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       create role ${executorRole} login nosuperuser nobypassrls noinherit;
       create role ${legacyUnionRole} login nosuperuser nobypassrls noinherit;
       create role ${unexpectedFunctionRole} login nosuperuser nobypassrls noinherit;
+      create role ${apiParentRole} nologin nosuperuser nobypassrls noinherit;
+      create role ${workerParentRole} nologin nosuperuser nobypassrls noinherit;
     `);
     rolesCreated = true;
     await applySplitRuntimeGrants();
@@ -1133,6 +1137,8 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
         executorRole,
         legacyUnionRole,
         unexpectedFunctionRole,
+        apiParentRole,
+        workerParentRole,
       ]) {
         await adminSql.unsafe(`drop role if exists ${role}`);
       }
@@ -1423,11 +1429,49 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       `;
       expect(membership).toEqual({ member: true, canSet: true });
       await expect(applySplitRuntimeGrants())
-        .rejects.toThrow(/runtime executor role must have no role memberships/i);
+        .rejects.toThrow(/active companion database role .* must have no role memberships/i);
     } finally {
       await runtimeSql.unsafe(`revoke ${executorRole} from ${unexpectedFunctionRole}`);
     }
     await applySplitRuntimeGrants();
+  });
+
+  it("rejects unrelated SET ROLE paths from both API and worker logins", async () => {
+    if (!runtimeSql) throw new Error("runtime database is not initialized");
+    const cases = [
+      { login: apiRole, parent: apiParentRole },
+      { login: workerRole, parent: workerParentRole },
+    ];
+
+    for (const roleCase of cases) {
+      await runtimeSql.unsafe(`grant update on table public.companions to ${roleCase.parent}`);
+      await runtimeSql.unsafe(`grant ${roleCase.parent} to ${roleCase.login}`);
+      try {
+        const [membership] = await runtimeSql<Array<{ member: boolean; canSet: boolean }>>`
+          select
+            pg_has_role(${roleCase.login}, ${roleCase.parent}, 'MEMBER') as member,
+            pg_has_role(${roleCase.login}, ${roleCase.parent}, 'SET') as "canSet"
+        `;
+        expect(membership).toEqual({ member: true, canSet: true });
+        await expect(applySplitRuntimeGrants())
+          .rejects.toThrow(/active companion database role .* must have no role memberships/i);
+      } finally {
+        await runtimeSql.unsafe(`revoke ${roleCase.parent} from ${roleCase.login}`);
+      }
+
+      await applySplitRuntimeGrants();
+      await expect(runtimeSql.begin(async (tx) => {
+        await tx.unsafe(`set local session authorization ${roleCase.login}`);
+        await tx.unsafe(`set local role ${roleCase.parent}`);
+        await tx`select set_config('app.companion_runtime_protocol', '2', true)`;
+        await tx`update companions set updated_at = updated_at where id = ${ids.companionA}::uuid`;
+      })).rejects.toThrow(/permission denied to set role/i);
+      const [directPrivilege] = await runtimeSql<Array<{ canUpdate: boolean }>>`
+        select has_table_privilege(${roleCase.login}, 'public.companions', 'UPDATE') as "canUpdate"
+      `;
+      expect(directPrivilege).toEqual({ canUpdate: false });
+      await runtimeSql.unsafe(`revoke all privileges on table public.companions from ${roleCase.parent}`);
+    }
   });
 
   it("commits only atomic v2 Companion aggregates while preserving the operator fixture path", async () => {
@@ -2440,7 +2484,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     })).toBe(true);
   });
 
-  it("terminalizes an expired Box-create intent without adopting provider state under a takeover", async () => {
+  it("reclaims an expired Box-create intent and adopts the late deterministic-name result once", async () => {
     if (!runtimeSql) throw new Error("runtime database is not initialized");
     const gate = await gateStatus();
     const sourceTurnId = await insertQueuedTurn({ companionId: ids.companionA });
@@ -2477,7 +2521,16 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       set renewed_at = now() - interval '2 seconds', expires_at = now() - interval '1 second'
       where companion_id = ${ids.companionA}::uuid
     `;
-    expect(await claimWork("box-create-intent-b", gate.gateEpoch)).toEqual([]);
+    const [claimB] = await claimWork("box-create-intent-b", gate.gateEpoch);
+    expect(claimB).toMatchObject({
+      workKind: "operation",
+      workId: operationId,
+      operationKind: "start",
+      checkpoint: "creating_box",
+      checkpointSequence: 3,
+      claimEpoch: leaseBefore!.claimEpoch + 1,
+      operationAttemptCount: 2,
+    });
 
     expect(await observeInstance(claimA!, "box-create-intent-a", {
       expectedSequence: 3,
@@ -2487,7 +2540,23 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     })).toBeNull();
     expect(await settle(claimA!, "box-create-intent-a", "succeeded")).toBe(false);
 
-    const [terminal] = await runtimeSql<Array<{
+    // The replacement replica lists `Companion <id> g<generation>` before any create attempt. A
+    // provider result that became visible after the first replica died is attached through the
+    // same fenced observation; replaying that observation cannot create a second durable identity.
+    expect(await observeInstance(claimB!, "box-create-intent-b", {
+      expectedSequence: 3,
+      boxId: "bx_56789abc",
+      boxState: "provisioning",
+      piState: "absent",
+    })).toBe(4);
+    expect(await observeInstance(claimB!, "box-create-intent-b", {
+      expectedSequence: 3,
+      boxId: "bx_56789abc",
+      boxState: "provisioning",
+      piState: "absent",
+    })).toBeNull();
+
+    const [recovered] = await runtimeSql<Array<{
       operationStatus: string;
       checkpoint: string;
       sequence: number;
@@ -2523,25 +2592,30 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       join companion_runtime_leases l on l.companion_id = o.companion_id
       where o.id = ${operationId}::uuid
     `;
-    expect(terminal).toEqual({
-      operationStatus: "interrupted",
-      checkpoint: "creating_box",
-      sequence: 3,
-      operationCode: "box_create_outcome_unknown",
-      operationAction: "retry",
-      operationSettled: true,
-      turnStatus: "interrupted",
-      turnCode: "box_create_outcome_unknown",
-      turnSettled: true,
-      boxId: null,
-      boxState: "absent",
+    expect(recovered).toEqual({
+      operationStatus: "running",
+      checkpoint: "box_created",
+      sequence: 4,
+      operationCode: null,
+      operationAction: null,
+      operationSettled: false,
+      turnStatus: "queued",
+      turnCode: null,
+      turnSettled: false,
+      boxId: "bx_56789abc",
+      boxState: "provisioning",
       leaseEpoch: leaseBefore!.claimEpoch + 1,
-      leaseToken: null,
-      leaseExecutor: null,
-      leaseWorkKind: null,
-      leaseWorkId: null,
+      leaseToken: claimB!.claimToken,
+      leaseExecutor: "box-create-intent-b",
+      leaseWorkKind: "operation",
+      leaseWorkId: operationId,
       lastWriteEpoch: leaseBefore!.claimEpoch + 1,
     });
+    expect(await settle(claimB!, "box-create-intent-b", "failed", {
+      errorCode: "fixture_complete",
+      errorMessage: "The recovered create fixture completed.",
+      errorAction: "retry",
+    })).toBe(true);
   });
 
   it("makes Delete resolve a preempted Box-create before proving absence or deleting the found Box", async () => {
@@ -5097,6 +5171,73 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       piState: "idle",
       piInvocationId: "pi-terminal-settings-applied",
     });
+  });
+
+  it("claims every Skill invalidation persisted while the runtime gate is disabled", async () => {
+    if (!runtimeSql) throw new Error("runtime database is not initialized");
+    const initialGate = await gateStatus();
+    const disabled = await disableGate(initialGate.gateEpoch);
+    expect(disabled).toEqual({ enabled: false, gateEpoch: initialGate.gateEpoch + 1 });
+
+    await runtimeSql`
+      update companion_runtime_instances
+      set box_id = 'bx_5679abcd', box_state = 'ready',
+          desired_settings_revision = 1, applied_settings_revision = 1,
+          applied_skills_revision = 1, settings_actor_id = ${ids.ownerA},
+          settings_available_at = now() - interval '1 second'
+      where org_id = ${ids.orgA}::uuid and companion_id = ${ids.companionA}::uuid
+    `;
+    // The API route tests exercise rename, archive, and restore with the feature flag off. These
+    // three committed increments model those same durable invalidations while claims are gated.
+    await runtimeSql`
+      update companions
+      set skills_revision = skills_revision + 3
+      where org_id = ${ids.orgA}::uuid and id = ${ids.companionA}::uuid
+    `;
+    const queuedTurnId = await insertQueuedTurn({ companionId: ids.companionA });
+    expect(await claimWork("disabled-skill-invalidation", disabled.gateEpoch)).toEqual([]);
+
+    const [beforeEnable] = await runtimeSql<Array<{
+      skillsRevision: number;
+      appliedSkillsRevision: number;
+    }>>`
+      select c.skills_revision::int as "skillsRevision",
+             i.applied_skills_revision::int as "appliedSkillsRevision"
+      from companions c join companion_runtime_instances i
+        on i.org_id = c.org_id and i.companion_id = c.id
+      where c.org_id = ${ids.orgA}::uuid and c.id = ${ids.companionA}::uuid
+    `;
+    expect(beforeEnable).toEqual({ skillsRevision: 4, appliedSkillsRevision: 1 });
+
+    const enabled = await ensureEnabled();
+    expect(enabled.gateEpoch).toBe(disabled.gateEpoch + 1);
+    const [settingsClaim] = await claimWork(
+      "reenabled-skill-invalidation",
+      enabled.gateEpoch,
+    );
+    expect(settingsClaim).toMatchObject({
+      companionId: ids.companionA,
+      workKind: "settings",
+      workId: ids.companionA,
+      actorId: ids.ownerA,
+      turnId: queuedTurnId,
+      checkpoint: "applying",
+      checkpointSequence: 1,
+    });
+    const [authorization] = await renewAndAuthorize(
+      settingsClaim!,
+      "reenabled-skill-invalidation",
+    );
+    expect(authorization).toMatchObject({
+      authorized: true,
+      skillsRevision: 4,
+      appliedSkillsRevision: 1,
+    });
+    expect(await settle(settingsClaim!, "reenabled-skill-invalidation", "failed", {
+      errorCode: "fixture_complete",
+      errorMessage: "The durable Skill invalidation fixture completed.",
+      errorAction: "retry",
+    })).toBe(true);
   });
 
   it("settles implicit settings work only after observing the exact claimed revisions", async () => {

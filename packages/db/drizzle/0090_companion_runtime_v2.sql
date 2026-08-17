@@ -2211,48 +2211,10 @@ BEGIN
       CONTINUE;
     END IF;
 
-    -- A persisted Box/Pi write intent whose lease is no longer current is ambiguous evidence. The
-    -- old executor may have reached the provider even though its ACK never became durable, so
-    -- takeover must not turn that intent into a success or replay it. Fence the expired epoch and
-    -- interrupt the parent atomically before considering any other work for this Companion.
-    IF v_work_kind = 'operation'
-       AND v_operation_kind = 'start'
-       AND v_checkpoint = 'creating_box' THEN
-      SELECT o.source_turn_id INTO v_turn_id
-      FROM public.companion_operations o
-      WHERE o.org_id = v_org_id AND o.companion_id = v_companion_id AND o.id = v_work_id;
-
-      UPDATE public.companion_operations o
-      SET status = 'interrupted', settled_at = v_now,
-          last_error_code = 'box_create_outcome_unknown',
-          last_error_message = 'Box creation outcome is unknown after the lifecycle lease was lost.',
-          last_error_action = 'retry', updated_at = v_now
-      WHERE o.org_id = v_org_id AND o.companion_id = v_companion_id
-        AND o.id = v_work_id AND o.status = 'running' AND o.checkpoint = 'creating_box';
-      IF v_turn_id IS NOT NULL THEN
-        UPDATE public.companion_turns t
-        SET status = 'interrupted', settled_at = v_now, state_changed_at = v_now,
-            absolute_deadline_at = COALESCE(t.absolute_deadline_at, v_now),
-            last_error_code = 'box_create_outcome_unknown',
-            last_error_message = 'Box creation outcome is unknown after the lifecycle lease was lost.',
-            last_error_action = 'retry', updated_at = v_now
-        WHERE t.org_id = v_org_id AND t.companion_id = v_companion_id
-          AND t.id = v_turn_id
-          AND t.status IN ('queued', 'starting', 'dispatching', 'running', 'needs_input');
-      END IF;
-
-      UPDATE public.companion_runtime_leases l
-      SET claim_token = NULL, claim_epoch = l.claim_epoch + 1, gate_epoch = NULL,
-          executor_id = NULL, work_kind = NULL, work_id = NULL,
-          claimed_at = NULL, renewed_at = NULL, expires_at = NULL, updated_at = v_now
-      WHERE l.org_id = v_org_id AND l.companion_id = v_companion_id
-      RETURNING l.claim_epoch INTO v_claim_epoch;
-      UPDATE public.companion_runtime_instances i
-      SET last_write_epoch = GREATEST(i.last_write_epoch, v_claim_epoch), updated_at = v_now
-      WHERE i.org_id = v_org_id AND i.companion_id = v_companion_id;
-      CONTINUE;
-    END IF;
-
+    -- Pi prompt and decision write intents below are ambiguous after lease loss because they have
+    -- no provider-side lookup identity. Box create is intentionally different: `creating_box`
+    -- carries a deterministic generation-qualified name, so takeover reclaims this same operation,
+    -- lists that exact name, and adopts the canonical Box without replaying the create POST.
     IF v_work_kind = 'attempt'
        AND v_turn_id IS NULL
        AND v_checkpoint IN ('dispatch_write_intent', 'dispatch_ambiguous') THEN
@@ -4180,9 +4142,9 @@ $$;
 -- Persist only the sanitized, authoritative instance projection. This is the runtime role's sole
 -- write surface for Box/Pi observations: it carries the same lease/gate/work fence as checkpoint,
 -- rejects stale generations/timestamps, and never accepts provider payloads, URLs, or secrets.
--- For start, creating_box is the pre-POST write intent. Recording the returned Box id atomically
--- advances it to box_created; no generic checkpoint can leave creating_box, so takeover without a
--- recorded id is explicitly ambiguous and must never resend the create request.
+-- For start, creating_box is the pre-POST write intent. Recording a returned or deterministically
+-- rediscovered Box id atomically advances it to box_created. No generic checkpoint can leave
+-- creating_box, so takeover must list the generation-qualified name and must never resend POST.
 CREATE FUNCTION public.companion_runtime_observe_instance(
   p_org_id uuid,
   p_companion_id uuid,
