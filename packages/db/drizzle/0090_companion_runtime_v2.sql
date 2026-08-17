@@ -3474,7 +3474,10 @@ BEGIN
           AND s.archived_at IS NULL
           AND (
             s.scope = 'org'
-            OR s.creator_id IN (v_authorization_actor_id, v_companion_owner_id)
+            OR (
+              s.creator_id = v_authorization_actor_id
+              AND (v_decision_actor_id IS NULL OR s.creator_id = v_decision_actor_id)
+            )
           )
         FOR NO KEY UPDATE
       )
@@ -3523,7 +3526,8 @@ BEGIN
         SELECT 1 FROM public.companion_mcp_accounts a
         WHERE a.org_id = p_org_id
           AND a.id::text = selected.account_id
-          AND a.owner_id IN (v_authorization_actor_id, v_companion_owner_id)
+          AND a.owner_id = v_authorization_actor_id
+          AND (v_decision_actor_id IS NULL OR a.owner_id = v_decision_actor_id)
         FOR NO KEY UPDATE
       )
     ) THEN
@@ -3613,7 +3617,8 @@ BEGIN
       INTO v_mcp_refs
       FROM public.companion_mcp_accounts a
       WHERE a.org_id = p_org_id
-        AND a.owner_id IN (v_authorization_actor_id, v_companion_owner_id)
+        AND a.owner_id = v_authorization_actor_id
+        AND (v_decision_actor_id IS NULL OR a.owner_id = v_decision_actor_id)
         AND EXISTS (
           SELECT 1 FROM jsonb_array_elements_text(v_mcp_ids) selected(account_id)
           WHERE selected.account_id = a.id::text

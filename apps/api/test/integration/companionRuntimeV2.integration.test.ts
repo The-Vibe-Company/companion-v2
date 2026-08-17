@@ -708,6 +708,8 @@ async function insertActiveTurnAttempt(input: {
   companionId: string;
   actorId?: string;
   orgId?: string;
+  selectedSkillIds?: string[];
+  selectedMcpAccountIds?: string[];
 }): Promise<{ turnId: string; attemptId: string }> {
   if (!runtimeSql) throw new Error("runtime database is not initialized");
   const orgId = input.orgId ?? ids.orgA;
@@ -734,7 +736,8 @@ async function insertActiveTurnAttempt(input: {
     ) values (
       ${attemptId}::uuid, ${orgId}::uuid, ${input.companionId}::uuid, ${turnId}::uuid,
       1, ${actorId}, 1, 1, 1, ${modelId}, ${runtimeSql.json([providerId])},
-      ${runtimeSql.json([ids.ownerSkill])}, '[]'::jsonb,
+      ${runtimeSql.json(input.selectedSkillIds ?? [ids.ownerSkill])},
+      ${runtimeSql.json(input.selectedMcpAccountIds ?? [])},
       'running', 'running', 'accepted', ${randomUUID()}::uuid, now()
     )
   `;
@@ -3108,7 +3111,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     await settle(privateClaim!, "privacy-replica", "failed");
   });
 
-  it("authorizes an Editor against Owner pins but never grants Owner access to Editor pins", async () => {
+  it("never grants Owner and Editor access to each other's personal resource pins", async () => {
     if (!runtimeSql) throw new Error("runtime database is not initialized");
     const sql = runtimeSql;
     const ownerMcpId = randomUUID();
@@ -3161,13 +3164,68 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
         "editor-owner-pins",
       );
       expect(editorAuthorization).toMatchObject({
-        authorized: true,
-        denialCode: null,
-        authorizationActorId: ids.editorA,
-        skillRefs: [expect.objectContaining({ skill_id: ids.ownerSkill })],
-        mcpRefs: [expect.objectContaining({ account_id: ownerMcpId })],
+        authorized: false,
+        denialCode: "skill_access_revoked",
+        authorizationActorId: null,
+        skillRefs: [],
+        mcpRefs: [],
       });
       expect(await settle(editorClaim!, "editor-owner-pins", "failed")).toBe(true);
+
+      await resetWork();
+      await sql`
+        update companions
+        set selected_skill_ids = '[]'::jsonb,
+            selected_mcp_account_ids = ${sql.json([ownerMcpId])}, skills_revision = 1
+        where org_id = ${ids.orgA}::uuid and id = ${ids.companionA}::uuid
+      `;
+      gate = await gateStatus();
+      const editorMcpTurnId = await insertQueuedTurn({
+        companionId: ids.companionA,
+        actorId: ids.editorA,
+      });
+      const [editorMcpClaim] = await claimWork("editor-owner-mcp", gate.gateEpoch);
+      expect(editorMcpClaim).toMatchObject({ workKind: "attempt", turnId: editorMcpTurnId });
+      const [editorMcpDenial] = await renewAndAuthorize(
+        editorMcpClaim!,
+        "editor-owner-mcp",
+      );
+      expect(editorMcpDenial).toMatchObject({
+        authorized: false,
+        denialCode: "mcp_access_revoked",
+        authorizationActorId: null,
+        skillRefs: [],
+        mcpRefs: [],
+      });
+      expect(await settle(editorMcpClaim!, "editor-owner-mcp", "failed")).toBe(true);
+
+      await resetWork();
+      gate = await gateStatus();
+      const ownerAttempt = await insertActiveTurnAttempt({ companionId: ids.companionA });
+      const editorDecision = await insertDecision({
+        companionId: ids.companionA,
+        turnId: ownerAttempt.turnId,
+        attemptId: ownerAttempt.attemptId,
+        actorId: ids.editorA,
+      });
+      const [editorDecisionClaim] = await claimWork("editor-owner-decision", gate.gateEpoch);
+      expect(editorDecisionClaim).toMatchObject({
+        workKind: "decision",
+        workId: editorDecision.id,
+      });
+      const [editorDecisionDenial] = await renewAndAuthorize(
+        editorDecisionClaim!,
+        "editor-owner-decision",
+      );
+      expect(editorDecisionDenial).toMatchObject({
+        authorized: false,
+        denialCode: "skill_access_revoked",
+        authorizationActorId: null,
+        decisionActorId: null,
+        skillRefs: [],
+        mcpRefs: [],
+      });
+      expect(await settle(editorDecisionClaim!, "editor-owner-decision", "failed")).toBe(true);
 
       await resetWork();
       await sql`
@@ -3442,6 +3500,12 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       )
       on conflict (companion_id) do update
       set role = 'editor', granted_by = excluded.granted_by, updated_at = now()
+    `;
+    // Exercise only the ACL lock ordering: an Editor cannot use the Owner's default personal
+    // fixture, so this attempt intentionally carries no member-private resources.
+    await sql`
+      update companions set selected_skill_ids = '[]'::jsonb
+      where org_id = ${ids.orgA}::uuid and id = ${ids.companionA}::uuid
     `;
     const gate = await gateStatus();
     const turnId = await insertQueuedTurn({
@@ -3797,8 +3861,17 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
         on conflict (companion_id) do update
         set role = 'editor', granted_by = excluded.granted_by, updated_at = now()
       `;
+      // This case isolates responder ACL revocation. Cross-actor delivery with an Owner-private
+      // resource is denied separately and must never reach the delivery state machine.
+      await sql`
+        update companions set selected_skill_ids = '[]'::jsonb
+        where org_id = ${ids.orgA}::uuid and id = ${ids.companionA}::uuid
+      `;
       const gate = await gateStatus();
-      const parent = await insertActiveTurnAttempt({ companionId: ids.companionA });
+      const parent = await insertActiveTurnAttempt({
+        companionId: ids.companionA,
+        selectedSkillIds: [],
+      });
       const primary = await insertDecision({
         companionId: ids.companionA,
         turnId: parent.turnId,
