@@ -32,6 +32,7 @@ container_migration_url="$DATABASE_MIGRATION_URL"
 container_api_url="$DATABASE_API_URL"
 container_worker_url="$DATABASE_WORKER_URL"
 container_runtime_url="$DATABASE_COMPANION_RUNTIME_URL"
+container_peer_host="127.0.0.1"
 if [ "$(uname -s)" = "Darwin" ]; then
   network_args=(--add-host host.docker.internal:host-gateway)
   api_publish_args=(-p 18082:18082)
@@ -41,6 +42,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
   container_api_url="${container_api_url/127.0.0.1/host.docker.internal}"
   container_worker_url="${container_worker_url/127.0.0.1/host.docker.internal}"
   container_runtime_url="${container_runtime_url/127.0.0.1/host.docker.internal}"
+  container_peer_host="host.docker.internal"
 fi
 
 runtime_role_args=(
@@ -96,9 +98,9 @@ for _ in $(seq 1 20); do
 done
 test "$(docker inspect --format '{{.State.Running}}' "$worker_id")" = "true"
 
-# Start the enabled production composition so the deployed bundle must load Box/S3 adapters and the
-# copied Companion skill. The freshly migrated database gate remains disabled, so this makes no Box
-# or object-storage call and cannot claim work.
+# Start the enabled runtime bundle so the deployed image must load Box/S3 adapters and the copied
+# Companion skill. The freshly migrated shared database gate remains disabled, so this is not an
+# enabled-product E2E: it makes no Box/object-storage call and cannot claim work.
 runtime_id="$(docker run -d "${network_args[@]}" "${runtime_publish_args[@]}" \
   -e PORT=18083 \
   -e COMPANION_RUNTIME_HOST=0.0.0.0 \
@@ -109,7 +111,7 @@ runtime_id="$(docker run -d "${network_args[@]}" "${runtime_publish_args[@]}" \
   -e COMPANION_RUNTIME_DESKTOP_HMAC_SECRET="$runtime_hmac_secret" \
   -e COMPANION_SECRETS_MASTER_KEY=CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk= \
   -e COMPANION_RELEASE_ID=container-smoke \
-  -e COMPANION_API_URL=http://127.0.0.1:18082 \
+  -e COMPANION_API_URL="http://${container_peer_host}:18082" \
   -e S3_ENDPOINT=http://127.0.0.1:19000 \
   -e S3_REGION=us-east-1 \
   -e S3_ACCESS_KEY_ID=container-smoke \
@@ -140,7 +142,7 @@ api_id="$(docker run -d "${network_args[@]}" "${api_publish_args[@]}" \
   -e PORT=18082 \
   -e COMPANION_API_HOST=0.0.0.0 \
   -e DATABASE_URL="$container_api_url" \
-  -e COMPANION_RUNTIME_PRIVATE_URL=http://127.0.0.1:18083 \
+  -e COMPANION_RUNTIME_PRIVATE_URL="http://${container_peer_host}:18083" \
   -e COMPANION_RUNTIME_DESKTOP_HMAC_SECRET="$runtime_hmac_secret" \
   -e COMPANION_WEB_URL=http://127.0.0.1:18080 \
   -e COMPANION_API_URL=http://127.0.0.1:18080 \
@@ -156,7 +158,7 @@ for _ in $(seq 1 60); do
   sleep 0.5
 done
 curl -fsS http://127.0.0.1:18082/health
-test "$(docker exec "$api_id" printenv COMPANION_RUNTIME_PRIVATE_URL)" = "http://127.0.0.1:18083"
+test "$(docker exec "$api_id" printenv COMPANION_RUNTIME_PRIVATE_URL)" = "http://${container_peer_host}:18083"
 test "$(docker exec "$api_id" printenv COMPANION_RUNTIME_DESKTOP_HMAC_SECRET)" = "$runtime_hmac_secret"
 assert_container_env_unset "$api_id" COMPANION_BOX_API_KEY API
 assert_container_env_unset "$api_id" DATABASE_COMPANION_RUNTIME_URL API

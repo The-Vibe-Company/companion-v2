@@ -38,6 +38,9 @@ fi
 export DATABASE_API_ROLE="${DATABASE_API_ROLE:-companion_api}"
 export DATABASE_WORKER_ROLE="${DATABASE_WORKER_ROLE:-companion_worker}"
 export DATABASE_COMPANION_RUNTIME_ROLE="${DATABASE_COMPANION_RUNTIME_ROLE:-companion_runtime_v2}"
+export DATABASE_API_PASSWORD="${DATABASE_API_PASSWORD:-companion-api}"
+export DATABASE_WORKER_PASSWORD="${DATABASE_WORKER_PASSWORD:-companion-worker}"
+export DATABASE_COMPANION_RUNTIME_PASSWORD="${DATABASE_COMPANION_RUNTIME_PASSWORD:-companion-runtime-v2}"
 export COMPANION_API_URL="${COMPANION_API_URL:-http://127.0.0.1:${COMPANION_API_PORT}}"
 export COMPANION_WEB_URL="${COMPANION_WEB_URL:-http://127.0.0.1:${COMPANION_WEB_PORT}}"
 export NEXT_PUBLIC_COMPANION_API_URL="${NEXT_PUBLIC_COMPANION_API_URL:-$COMPANION_API_URL}"
@@ -138,29 +141,17 @@ start_stack() {
 
   if [ -z "${CI_USE_GHA_POSTGRES:-}" ]; then
     docker compose -p "$COMPOSE_PROJECT_NAME" exec -T postgres \
-      psql -v ON_ERROR_STOP=1 -U companion -d companion -c \
-      "DO \$\$ BEGIN
-         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'companion_api') THEN
-           CREATE ROLE companion_api LOGIN PASSWORD 'companion-api'
-             NOSUPERUSER NOBYPASSRLS NOINHERIT;
-         END IF;
-         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'companion_worker') THEN
-           CREATE ROLE companion_worker LOGIN PASSWORD 'companion-worker'
-             NOSUPERUSER NOBYPASSRLS NOINHERIT;
-         END IF;
-         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'companion_runtime_v2') THEN
-           CREATE ROLE companion_runtime_v2 LOGIN PASSWORD 'companion-runtime-v2'
-             NOSUPERUSER NOBYPASSRLS NOINHERIT;
-         END IF;
-       END \$\$;
-       ALTER ROLE companion_api NOSUPERUSER NOBYPASSRLS NOINHERIT;
-       ALTER ROLE companion_worker NOSUPERUSER NOBYPASSRLS NOINHERIT;
-       ALTER ROLE companion_runtime_v2 NOSUPERUSER NOBYPASSRLS NOINHERIT;" >/dev/null
+      psql -v ON_ERROR_STOP=1 -U companion -d companion \
+        -v api_role="$DATABASE_API_ROLE" -v api_password="$DATABASE_API_PASSWORD" \
+        -v worker_role="$DATABASE_WORKER_ROLE" -v worker_password="$DATABASE_WORKER_PASSWORD" \
+        -v runtime_role="$DATABASE_COMPANION_RUNTIME_ROLE" \
+        -v runtime_password="$DATABASE_COMPANION_RUNTIME_PASSWORD" \
+        -f - < "$ROOT/scripts/disposable-db-roles.sql" >/dev/null
   fi
 
   log "Applying migrations and seeding test user"
   NODE_ENV=development pnpm --filter @companion/api migrate
-  NODE_ENV=development bash scripts/dev-process.sh api \
+  NODE_ENV=development bash scripts/dev-process.sh api-seed \
     pnpm --filter @companion/api seed:test-user
 
   log "Starting built API"

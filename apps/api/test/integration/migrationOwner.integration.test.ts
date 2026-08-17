@@ -36,9 +36,9 @@ describe("dedicated migration owner", () => {
     await adminSql.unsafe(`
       create role ${ownerRole}
       login password '${ownerPassword}' nosuperuser nobypassrls noinherit;
-      create role ${apiRole} login nosuperuser nobypassrls noinherit;
-      create role ${workerRole} login nosuperuser nobypassrls noinherit;
-      create role ${runtimeRole} login nosuperuser nobypassrls noinherit;
+      create role ${apiRole} nologin nosuperuser nobypassrls noinherit;
+      create role ${workerRole} nologin nosuperuser nobypassrls noinherit;
+      create role ${runtimeRole} nologin nosuperuser nobypassrls noinherit;
     `);
     await adminSql.unsafe(`create database ${databaseName} owner ${ownerRole}`);
     await runMigrations({
@@ -75,5 +75,13 @@ describe("dedicated migration owner", () => {
         and coalesce(array_to_string(p.proconfig, ','), '') ~ 'app\\.companion_.*_protocol'
     `;
     expect(functions).toEqual([]);
+    const grantTargets = await adminSql<Array<{ role_name: string; can_login: boolean }>>`
+      select rolname as role_name, rolcanlogin as can_login
+      from pg_catalog.pg_roles
+      where rolname in (${apiRole}, ${workerRole}, ${runtimeRole})
+      order by rolname
+    `;
+    expect(grantTargets).toHaveLength(3);
+    expect(grantTargets.every((role) => role.can_login === false)).toBe(true);
   });
 });

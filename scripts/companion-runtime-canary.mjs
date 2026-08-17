@@ -98,12 +98,34 @@ function safeReleaseId(raw) {
   }
 }
 
-function runLabel(env) {
-  const raw = `${env.GITHUB_RUN_ID ?? "manual"}-${env.GITHUB_RUN_ATTEMPT ?? "1"}`;
+function runLabel(env, uuid) {
+  const runId = env.GITHUB_RUN_ID?.trim()
+    || env.COMPANION_CANARY_RUN_ID?.trim()
+    || `manual-${uuid()}`;
+  const raw = `${runId}-${env.GITHUB_RUN_ATTEMPT ?? "1"}`;
   return raw.replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 72) || "manual-1";
 }
 
-export function loadCompanionCanaryConfig(env = process.env) {
+function assertImageUrlDoesNotRevealExpectedText(imageUrl, expectedText) {
+  let decoded = imageUrl;
+  for (let index = 0; index < 3; index += 1) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) break;
+      decoded = next;
+    } catch {
+      break;
+    }
+  }
+  if (decoded.toLocaleUpperCase("en-US").includes(expectedText.toLocaleUpperCase("en-US"))) {
+    throw new CompanionCanaryError(
+      "invalid_configuration",
+      "image URL must not reveal the expected text",
+    );
+  }
+}
+
+export function loadCompanionCanaryConfig(env = process.env, dependencies = {}) {
   const apiUrl = serviceUrl(required(env, "COMPANION_CANARY_API_URL"), "API URL");
   const orgId = required(env, "COMPANION_CANARY_ORG_ID");
   const providerId = required(env, "COMPANION_CANARY_PROVIDER_ID");
@@ -114,6 +136,9 @@ export function loadCompanionCanaryConfig(env = process.env) {
   if (!modelId || modelId.length > 200 || /[\r\n\0]/.test(modelId)) {
     throw new CompanionCanaryError("invalid_configuration");
   }
+  const imageUrl = publicImageUrl(env.COMPANION_CANARY_IMAGE_URL?.trim());
+  const expectedText = imageExpectedText(env.COMPANION_CANARY_IMAGE_EXPECTED_TEXT);
+  assertImageUrlDoesNotRevealExpectedText(imageUrl, expectedText);
   return {
     apiUrl,
     email: required(env, "COMPANION_CANARY_EMAIL"),
@@ -121,9 +146,9 @@ export function loadCompanionCanaryConfig(env = process.env) {
     orgId,
     providerId,
     modelId,
-    imageUrl: publicImageUrl(env.COMPANION_CANARY_IMAGE_URL?.trim()),
-    imageExpectedText: imageExpectedText(env.COMPANION_CANARY_IMAGE_EXPECTED_TEXT),
-    runLabel: runLabel(env),
+    imageUrl,
+    imageExpectedText: expectedText,
+    runLabel: runLabel(env, dependencies.randomUUID ?? randomUUID),
     releaseId: releaseId(env.COMPANION_CANARY_RELEASE_ID),
     pollIntervalMs: POLL_INTERVAL_MS,
     requestTimeoutMs: REQUEST_TIMEOUT_MS,
@@ -526,9 +551,12 @@ export async function runCompanionRuntimeCanary(config, dependencies = {}) {
           const result = await api.request(`/v1/companions/${encodeURIComponent(cleanupId)}`, {
             method: "DELETE",
             idempotencyKey: cleanupId === companionId ? deleteRequestId : uuid(),
+            allowNotFound: true,
           });
-          acceptedOperation(result, "delete");
-          await waitForDeleted({ api, companionId: cleanupId, config, now, sleep });
+          if (result.status !== 404) {
+            acceptedOperation(result, "delete");
+            await waitForDeleted({ api, companionId: cleanupId, config, now, sleep });
+          }
         }
         deleted = cleanupIds.length > 0;
         cleanup = cleanupIds.length > 0 ? "succeeded" : "not_needed";

@@ -121,19 +121,21 @@ export function classifyFiles(files, { forceFull = false } = {}) {
     full ||
     uniqueFiles.some((file) =>
       !isDocumentation(file) &&
-      matchesAny(file, [
-        "apps/api/",
-        "apps/runtime/",
-        "packages/box-runtime/",
-        "packages/box-sim/",
-        "packages/companion-runtime/",
-        "packages/companion-skill/",
-        "packages/contracts/",
-        "packages/core/",
-        "packages/db/",
-        "scripts/ci-container-smoke.sh",
-        "scripts/ci-runtime-integration.sh",
-      ]),
+      (file.startsWith("apps/api/test/integration/")
+        || file.startsWith("apps/runtime/test/integration/")
+        || (!isTestFile(file) && matchesAny(file, [
+          "apps/api/",
+          "apps/runtime/",
+          "packages/box-runtime/",
+          "packages/box-sim/",
+          "packages/companion-runtime/",
+          "packages/companion-skill/",
+          "packages/contracts/",
+          "packages/core/",
+          "packages/db/",
+          "scripts/ci-container-smoke.sh",
+          "scripts/ci-runtime-integration.sh",
+        ]))),
     );
   const browser =
     full ||

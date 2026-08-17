@@ -1258,10 +1258,12 @@ COMPANION_PI_BROKER_CLIENT`,
    * file and the transient MCP credential file are never opened, and the control plane redacts and
    * truncates what it stores.
    */
-  async #daemonFailureDetail(boxId: string): Promise<string> {
-    const result = await this.#command(
-      boxId,
-      `${USER_BUS_ENVIRONMENT}
+  async #daemonFailureDetail(boxId: string, signal?: AbortSignal): Promise<string> {
+    let result: CommandEnvelope;
+    try {
+      result = await this.#command(
+        boxId,
+        `${USER_BUS_ENVIRONMENT}
 # The status fields are matched by name here and read by name again by the caller, so the Box
 # reports them in the one language both sides agree on rather than in its own locale.
 LC_ALL=C
@@ -1280,9 +1282,14 @@ if command -v journalctl >/dev/null 2>&1; then
   journalctl --user --unit companion-pi-daemon.service --since=-${PI_DAEMON_JOURNAL_FRESH_MINUTES}min --no-pager --output=cat --lines=25 2>/dev/null | grep -Ev '^(Started|Starting|Stopping|Stopped|Deactivated|Succeeded|Consumed|Scheduled restart job|[[:space:]]*$)' | tail -n 1 | companion_label ${PI_DAEMON_DIAGNOSTIC_LABELS.journal}
 fi
 exit 0`,
-      30,
-    ).catch(() => null);
-    return result ? composeDaemonFailureDetail(result.stdout) : "";
+        30,
+        signal,
+      );
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
+      return "";
+    }
+    return composeDaemonFailureDetail(result.stdout);
   }
 
   async #removeProviderFile(boxId: string): Promise<void> {
@@ -1630,7 +1637,7 @@ trap - EXIT`,
     const daemonState = await this.#waitDaemonActive(input.boxId, input.signal);
     if (daemonState !== "running") {
       throw new BoxRuntimeProviderError(
-        `${PI_DAEMON_FAILURE_MESSAGE}${await this.#daemonFailureDetail(input.boxId)}`,
+        `${PI_DAEMON_FAILURE_MESSAGE}${await this.#daemonFailureDetail(input.boxId, input.signal)}`,
         502,
       );
     }

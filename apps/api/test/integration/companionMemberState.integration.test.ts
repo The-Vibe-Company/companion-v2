@@ -136,6 +136,24 @@ describe("Runtime v2 Companion member state", () => {
     expect(viewerPinned.map((companion) => companion.id)).toEqual([betaId, alphaId]);
     expect(viewerPinned.find((companion) => companion.id === alphaId)?.pinned).toBe(false);
 
+    const provisionedIdentity = {
+      boxId: "bx_23456789",
+      invocationId: "pi-member-state-fixture",
+    };
+    await integrationDb
+      .update(schema.companionRuntimeInstances)
+      .set({
+        boxId: provisionedIdentity.boxId,
+        boxState: "ready",
+        piState: "idle",
+        piInvocationId: provisionedIdentity.invocationId,
+        diskLayoutVersion: 14,
+      })
+      .where(and(
+        eq(schema.companionRuntimeInstances.orgId, fixture.orgA),
+        eq(schema.companionRuntimeInstances.companionId, alphaId),
+      ));
+
     const hidden = await asActor(fixture.developer, (database) => updateCompanionMemberStateV2({
       actor: fixture.developer,
       orgId: fixture.orgA,
@@ -144,13 +162,16 @@ describe("Runtime v2 Companion member state", () => {
       database,
     }));
     expect(hidden.hidden).toBe(true);
-    expect(hidden.runtime.box_id).toBeNull();
+    expect(hidden.runtime.box_id).toBe(provisionedIdentity.boxId);
     expect(await integrationDb.query.companionRuntimeInstances.findFirst({
       where: and(
         eq(schema.companionRuntimeInstances.orgId, fixture.orgA),
         eq(schema.companionRuntimeInstances.companionId, alphaId),
       ),
-    })).toBeDefined();
+    })).toMatchObject({
+      boxId: provisionedIdentity.boxId,
+      piInvocationId: provisionedIdentity.invocationId,
+    });
 
     const unhidden = await asActor(fixture.developer, (database) => updateCompanionMemberStateV2({
       actor: fixture.developer,
@@ -160,6 +181,7 @@ describe("Runtime v2 Companion member state", () => {
       database,
     }));
     expect(unhidden.hidden).toBe(false);
+    expect(unhidden.runtime.box_id).toBe(provisionedIdentity.boxId);
   });
 
   it("tracks unread independently for a Viewer and returns the previous read ordinal", async () => {

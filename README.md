@@ -125,6 +125,13 @@ environment with Pi pinned; otherwise configure an operator-pinned `COMPANION_PI
 The Box TTL is fixed at six hours after successful Pi acceptance. There is no prewarm, Wake button,
 or automatic Full Box recovery.
 
+For a Conductor workspace, put `COMPANION_BOX_API_KEY` in the repository-root `.env` before starting
+or restarting Run. The local Conductor launcher also accepts ascii.dev's `BOX_API_KEY` spelling and
+normalizes it into the runtime-only variable; its startup header says explicitly whether it selected
+the configured provider or the deterministic simulator. Model-provider credentials such as
+`ZAI_API_KEY` are deliberately ignored in process environments: connect z.ai from **Companions →
+Providers**, then select its live Pi model when creating the Companion.
+
 See the [Runtime v2 operations runbook](docs/runbooks/companions-runtime.md) for cutover, purge,
 kill-switch, incident, rollback, and canary procedures. Railway deployment details live in
 [deploy/railway/README.md](deploy/railway/README.md).

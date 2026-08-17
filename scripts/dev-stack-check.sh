@@ -5,7 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 bash -n scripts/dev-stack.sh scripts/setup-conductor.sh scripts/dev-conductor.sh \
-  scripts/dev-stack-check.sh scripts/dev-process.sh scripts/dev-runtime.sh scripts/dev-worker.sh
+  scripts/dev-stack-check.sh scripts/dev-process.sh scripts/dev-runtime.sh scripts/dev-worker.sh \
+  scripts/dev-runtime-mode.sh scripts/ci-create-db-roles.sh scripts/ci-rsc-smoke.sh
 
 # Conductor setup must select the native package manager before installing JS
 # dependencies. Exercise both branches with command shims so this remains safe
@@ -328,7 +329,34 @@ printf '%s\n' "$web_process_env" | grep -Fxq 'UNKNOWN_PROVIDER_API_KEY=unset'
 
 seed_process_env="$(env "${common_probe_env[@]}" bash scripts/dev-process.sh api-seed bash -c "$process_env_probe")"
 printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_SEED_PASSWORD=seed-secret'
+printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=unset'
+printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_SECRETS_MASTER_KEY=unset'
+printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_ID=unset'
+printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_SECRET=unset'
+printf '%s\n' "$seed_process_env" | grep -Fxq 'BETTER_AUTH_SECRET=unset'
+printf '%s\n' "$seed_process_env" | grep -Fxq 'STRIPE_SECRET_KEY=unset'
+printf '%s\n' "$seed_process_env" | grep -Fxq 'GITHUB_APP_PRIVATE_KEY=unset'
+printf '%s\n' "$seed_process_env" | grep -Fxq 'RESEND_API_KEY=unset'
+printf '%s\n' "$seed_process_env" | grep -Fxq 'S3_SECRET_ACCESS_KEY=storage-secret'
 printf '%s\n' "$seed_process_env" | grep -Fxq 'UNKNOWN_PROVIDER_API_KEY=unset'
+
+if DATABASE_MIGRATION_URL=postgres://owner@127.0.0.1/test \
+  bash scripts/ci-create-db-roles.sh >/dev/null 2>&1; then
+  printf '[dev-stack-check] disposable role bootstrap must require CI or an explicit confirmation\n' >&2
+  exit 1
+fi
+if DATABASE_MIGRATION_URL=postgres://owner@database.example.test/test \
+  COMPANION_CONFIRM_DISPOSABLE_DATABASE=1 \
+  bash scripts/ci-create-db-roles.sh >/dev/null 2>&1; then
+  printf '[dev-stack-check] disposable role bootstrap must reject remote databases by default\n' >&2
+  exit 1
+fi
+for role_caller in scripts/ci-create-db-roles.sh scripts/ci-rsc-smoke.sh scripts/dev-stack.sh; do
+  if ! grep -Fq 'disposable-db-roles.sql' "$role_caller"; then
+    printf '[dev-stack-check] %s must use the shared disposable role bootstrap\n' "$role_caller" >&2
+    exit 1
+  fi
+done
 
 box_sim_process_env="$(env "${common_probe_env[@]}" bash scripts/dev-process.sh box-sim bash -c "$process_env_probe")"
 printf '%s\n' "$box_sim_process_env" | grep -Fxq 'BOX_SIM_CONTROL_TOKEN=sim-secret'
@@ -396,6 +424,43 @@ if ! bash scripts/dev-conductor.sh --help >/dev/null 2>&1; then
   printf '[dev-stack-check] dev-conductor.sh --help should exit 0\n' >&2
   exit 1
 fi
+
+# The provider's own CLI uses BOX_API_KEY. Conductor may receive that spelling
+# from a workspace .env, but children must only inherit the runtime-owned name.
+# shellcheck disable=SC2016
+conductor_box_alias="$(
+  env BOX_API_KEY=box-alias COMPANION_DEV_SKIP_ENV_FILE=1 \
+    COMPANION_COMPANIONS_ENABLED=true COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=example.test \
+    bash -c 'script="$1"; shift; source "$script"; mode=provider; companion_dev_uses_box_simulator && mode=simulator; printf "%s|%s|%s" "${COMPANION_BOX_API_KEY:-unset}" "${BOX_API_KEY:-unset}" "$mode"' \
+    _ "$ROOT/scripts/dev-conductor.sh"
+)"
+if [ "$conductor_box_alias" != "box-alias|unset|provider" ]; then
+  printf '[dev-stack-check] Conductor must normalize BOX_API_KEY at the launcher boundary\n' >&2
+  exit 1
+fi
+
+# shellcheck disable=SC2016
+conductor_box_canonical="$(
+  env BOX_API_KEY=box-alias COMPANION_BOX_API_KEY=box-canonical COMPANION_DEV_SKIP_ENV_FILE=1 \
+    COMPANION_COMPANIONS_ENABLED=true COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=example.test \
+    bash -c 'script="$1"; shift; source "$script"; mode=provider; companion_dev_uses_box_simulator && mode=simulator; printf "%s|%s|%s" "${COMPANION_BOX_API_KEY:-unset}" "${BOX_API_KEY:-unset}" "$mode"' \
+    _ "$ROOT/scripts/dev-conductor.sh"
+)"
+if [ "$conductor_box_canonical" != "box-canonical|unset|provider" ]; then
+  printf '[dev-stack-check] canonical Conductor Box credential must win over the local alias\n' >&2
+  exit 1
+fi
+
+for disabled_mode in \
+  'COMPANION_COMPANIONS_ENABLED=false COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=example.test' \
+  'COMPANION_COMPANIONS_ENABLED=true COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS='; do
+  # shellcheck disable=SC2086,SC2016
+  if env $disabled_mode bash -c 'source "$1"; companion_dev_uses_box_simulator' \
+    _ "$ROOT/scripts/dev-runtime-mode.sh"; then
+    printf '[dev-stack-check] disabled Companions must not reserve or launch the Box simulator\n' >&2
+    exit 1
+  fi
+done
 
 # Cloud workspaces intentionally have no CONDUCTOR_PORT. The web listener must
 # still be reachable by Conductor's port forward, while local workspaces remain
@@ -486,6 +551,7 @@ fi
 
   mkdir -p "$lock_test_dir/scripts" "$lock_test_dir/.conductor-pg"
   cp "$ROOT/scripts/dev-conductor.sh" "$lock_test_dir/scripts/dev-conductor.sh"
+  cp "$ROOT/scripts/dev-runtime-mode.sh" "$lock_test_dir/scripts/dev-runtime-mode.sh"
   cd "$lock_test_dir"
   # Keep bash as the long-lived process so `ps` retains the launcher marker.
   # Amazon Linux implements sleep through a coreutils multicall binary, which

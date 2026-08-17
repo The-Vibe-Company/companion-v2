@@ -119,6 +119,7 @@ let apiBase = "";
 let runtimeBase = "";
 let boxBase = "";
 let boxControlBase = "";
+let portReservations: PortReservation[] = [];
 let apiProcess: ManagedProcess | undefined;
 let workerProcess: ManagedProcess | undefined;
 let runtimeProcess: ManagedProcess | undefined;
@@ -144,10 +145,14 @@ function databaseRoleUrl(
   return result;
 }
 
-async function availablePort(): Promise<number> {
+interface PortReservation {
+  port: number;
+  release(): Promise<void>;
+}
+
+async function reservePort(): Promise<PortReservation> {
   return await new Promise((resolve, reject) => {
     const server = createServer();
-    server.unref();
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
@@ -156,15 +161,30 @@ async function availablePort(): Promise<number> {
         reject(new Error("failed to allocate a loopback port"));
         return;
       }
-      server.close((error) => error ? reject(error) : resolve(address.port));
+      let released = false;
+      resolve({
+        port: address.port,
+        release: async () => {
+          if (released) return;
+          released = true;
+          await new Promise<void>((resolveClose, rejectClose) => {
+            server.close((error) => error ? rejectClose(error) : resolveClose());
+          });
+        },
+      });
     });
   });
 }
 
-async function distinctAvailablePorts(count: number): Promise<number[]> {
-  const ports = new Set<number>();
-  while (ports.size < count) ports.add(await availablePort());
-  return [...ports];
+async function reserveDistinctPorts(count: number): Promise<PortReservation[]> {
+  const reservations: PortReservation[] = [];
+  try {
+    while (reservations.length < count) reservations.push(await reservePort());
+    return reservations;
+  } catch (error) {
+    await Promise.all(reservations.map((reservation) => reservation.release().catch(() => undefined)));
+    throw error;
+  }
 }
 
 async function applyMigrationFile(client: Sql, name: string): Promise<void> {
@@ -552,7 +572,12 @@ async function simulatorState(): Promise<BoxSimState> {
 }
 
 beforeAll(async () => {
-  [apiPort, runtimePort, boxPort] = await distinctAvailablePorts(3) as [number, number, number];
+  portReservations = await reserveDistinctPorts(3);
+  [apiPort, runtimePort, boxPort] = portReservations.map((reservation) => reservation.port) as [
+    number,
+    number,
+    number,
+  ];
   apiBase = `http://127.0.0.1:${apiPort}`;
   runtimeBase = `http://127.0.0.1:${runtimePort}`;
   boxBase = `http://127.0.0.1:${boxPort}`;
@@ -602,6 +627,7 @@ beforeAll(async () => {
   userId = identity.userId;
   orgId = identity.orgId;
 
+  await portReservations[2]!.release();
   boxProcess = startProcess(
     "Box/Pi simulator",
     ["--filter", "@companion/box-sim", "exec", "tsx", "src/cli.ts"],
@@ -621,6 +647,7 @@ beforeAll(async () => {
     return response.ok;
   });
 
+  await portReservations[0]!.release();
   apiProcess = startApi();
   await waitForHttp(`${apiBase}/health`, apiProcess);
   await signIn();
@@ -658,11 +685,13 @@ beforeAll(async () => {
     await databaseSql`select * from public.companion_runtime_enable(${gate.epoch}::bigint, 'runtime-e2e')`;
   }
 
+  await portReservations[1]!.release();
   runtimeProcess = startRuntime(randomUUID());
   await waitForHttp(`${runtimeBase}/healthz`, runtimeProcess);
 }, 180_000);
 
 afterAll(async () => {
+  await Promise.all(portReservations.map((reservation) => reservation.release().catch(() => undefined)));
   await stopProcess(apiProcess, "SIGTERM").catch(() => undefined);
   await stopProcess(workerProcess, "SIGTERM").catch(() => undefined);
   await stopProcess(runtimeProcess, "SIGTERM").catch(() => undefined);

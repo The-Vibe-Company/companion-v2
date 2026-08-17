@@ -45,6 +45,16 @@ test("unit-test-only changes stay in the quality lane", () => {
   assert.equal(result.database, false);
   assert.equal(result.browser, false);
   assert.equal(result.containers, false);
+  assert.equal(result.runtime, false);
+});
+
+test("API and runtime integration fixtures retain the runtime lane", () => {
+  for (const file of [
+    "apps/api/test/integration/runtimeRoleGrants.integration.test.ts",
+    "apps/runtime/test/integration/runtimeFullStack.integration.test.ts",
+  ]) {
+    assert.equal(classifyFiles([file]).runtime, true, file);
+  }
 });
 
 test("API changes run database, browser, and container checks", () => {

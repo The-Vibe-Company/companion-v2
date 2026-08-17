@@ -45,6 +45,14 @@ function fastConfig(overrides = {}) {
   };
 }
 
+function fakeClock() {
+  let value = 0;
+  return {
+    now: () => value,
+    sleep: async (milliseconds) => { value += milliseconds; },
+  };
+}
+
 function jsonResponse(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), {
     status,
@@ -117,27 +125,27 @@ function mockCanaryApi(config, options = {}) {
       }
       const entries = messages.flatMap((message, index) => {
         const correlation = /CANARY_[A-Z]+_[A-F0-9]+/.exec(message.content)?.[0] ?? "missing";
-        return [
-          {
-            event_id: `msg:${message.client_message_id}`,
-            ordinal: index * 2 + 1,
-            role: "user",
-            content: message.content,
-          },
-          {
+        const user = {
+          event_id: `msg:${message.client_message_id}`,
+          ordinal: index * 2 + 1,
+          role: "user",
+          content: message.content,
+        };
+        return options.neverReply
+          ? [user]
+          : [user, {
             event_id: `reply:${index}`,
             ordinal: index * 2 + 2,
             role: "assistant",
             content: `${correlation} ${index === 1 && !options.omitVisionExpected
               ? `${config.imageExpectedText} `
               : ""}verified`,
-          },
-        ];
+          }];
       });
       return jsonResponse({
         thread: {
           entries,
-          active_turn: null,
+          active_turn: options.neverReply ? { id: TURN_IDS[messages.length - 1] } : null,
           interrupted_turn: null,
           queued_count: 0,
         },
@@ -156,6 +164,7 @@ function mockCanaryApi(config, options = {}) {
     if (url.pathname === `/v1/companions/${COMPANION_ID}` && method === "DELETE") {
       assert.match(headers.get("idempotency-key") ?? "", /^[0-9a-f-]{36}$/i);
       deleted = true;
+      if (options.deleteAlreadyAbsent) return jsonResponse({ error: "not_found" }, 404);
       return jsonResponse({ operation: { id: OPERATION_ID, kind: "delete" } }, 202);
     }
     if (url.pathname === `/v1/companions/${COMPANION_ID}` && method === "GET") {
@@ -186,6 +195,25 @@ test("configuration resolves the public image fixture without exposing credentia
     () => loadCompanionCanaryConfig(environment({ COMPANION_CANARY_IMAGE_URL: "" })),
     (error) => error instanceof CompanionCanaryError && error.code === "missing_configuration",
   );
+  for (const imageUrl of [
+    "https://cdn.example.test/PIXEL_PROOF_7K4M.png",
+    "https://cdn.example.test/%50%49%58%45%4c_%50%52%4f%4f%46_%37%4b%34%4d.png",
+  ]) {
+    assert.throws(
+      () => loadCompanionCanaryConfig(environment({ COMPANION_CANARY_IMAGE_URL: imageUrl })),
+      (error) => error instanceof CompanionCanaryError && error.code === "invalid_configuration",
+    );
+  }
+  const manualEnvironment = environment({
+    GITHUB_RUN_ID: undefined,
+    GITHUB_RUN_ATTEMPT: undefined,
+  });
+  const labels = [
+    loadCompanionCanaryConfig(manualEnvironment, { randomUUID: () => "manual-a" }).runLabel,
+    loadCompanionCanaryConfig(manualEnvironment, { randomUUID: () => "manual-b" }).runLabel,
+  ];
+  assert.deepEqual(labels, ["manual-manual-a-1", "manual-manual-b-1"]);
+  assert.notEqual(labels[0], labels[1]);
   assert.throws(
     () => loadCompanionCanaryConfig(environment({
       COMPANION_CANARY_IMAGE_URL: "https://cdn.example.test/image.png?token=must-not-persist",
@@ -239,11 +267,11 @@ test("runs cold reply, vision, stop, wake-on-send, and permanent cleanup over th
 test("vision cannot pass by echoing only the correlation marker", async () => {
   const config = fastConfig();
   const api = mockCanaryApi(config, { omitVisionExpected: true });
+  const clock = fakeClock();
   const report = await runCompanionRuntimeCanary(config, {
     fetch: api.fetch,
     randomUUID,
-    now: () => 0,
-    sleep: async () => undefined,
+    ...clock,
   });
 
   assert.equal(report.status, "failed");
@@ -255,11 +283,11 @@ test("vision cannot pass by echoing only the correlation marker", async () => {
 test("a canary checkout cannot be attributed to a different deployed release", async () => {
   const config = fastConfig();
   const api = mockCanaryApi(config, { releaseId: "previous-production-release" });
+  const clock = fakeClock();
   const report = await runCompanionRuntimeCanary(config, {
     fetch: api.fetch,
     randomUUID,
-    now: () => 0,
-    sleep: async () => undefined,
+    ...clock,
   });
 
   assert.equal(report.status, "failed");
@@ -271,11 +299,11 @@ test("a failed phase still permanently deletes the disposable Companion in final
   const config = fastConfig();
   const api = mockCanaryApi(config, { threadFailures: 1 });
   const events = [];
+  const clock = fakeClock();
   const report = await runCompanionRuntimeCanary(config, {
     fetch: api.fetch,
     randomUUID,
-    now: () => 0,
-    sleep: async () => undefined,
+    ...clock,
     logger: (event) => events.push(event),
   });
 
@@ -289,11 +317,11 @@ test("a failed phase still permanently deletes the disposable Companion in final
 test("cleanup recovers the exact run-named Companion when create acknowledgement is malformed", async () => {
   const config = fastConfig();
   const api = mockCanaryApi(config, { invalidCreateResponse: true });
+  const clock = fakeClock();
   const report = await runCompanionRuntimeCanary(config, {
     fetch: api.fetch,
     randomUUID,
-    now: () => 0,
-    sleep: async () => undefined,
+    ...clock,
   });
 
   assert.equal(report.status, "failed");
@@ -305,16 +333,48 @@ test("cleanup recovers the exact run-named Companion when create acknowledgement
 test("a green canary requires a positive runtime generation and still cleans up", async () => {
   const config = fastConfig();
   const api = mockCanaryApi(config, { missingGeneration: true });
+  const clock = fakeClock();
   const report = await runCompanionRuntimeCanary(config, {
     fetch: api.fetch,
     randomUUID,
-    now: () => 0,
-    sleep: async () => undefined,
+    ...clock,
   });
 
   assert.equal(report.status, "failed");
   assert.equal(report.code, "invalid_runtime_generation");
   assert.equal(report.generation, null);
+  assert.equal(report.cleanup, "succeeded");
+  assert.equal(api.wasDeleted(), true);
+});
+
+test("cleanup treats an already absent Companion as successfully deleted", async () => {
+  const config = fastConfig();
+  const api = mockCanaryApi(config, { invalidCreateResponse: true, deleteAlreadyAbsent: true });
+  const clock = fakeClock();
+  const report = await runCompanionRuntimeCanary(config, {
+    fetch: api.fetch,
+    randomUUID,
+    ...clock,
+  });
+
+  assert.equal(report.status, "failed");
+  assert.equal(report.code, "create_failed");
+  assert.equal(report.cleanup, "succeeded");
+  assert.equal(api.wasDeleted(), true);
+});
+
+test("a silent active turn reaches the reply deadline with the advancing fake clock", async () => {
+  const config = fastConfig({ coldReplyTimeoutMs: 3 });
+  const api = mockCanaryApi(config, { neverReply: true });
+  const clock = fakeClock();
+  const report = await runCompanionRuntimeCanary(config, {
+    fetch: api.fetch,
+    randomUUID,
+    ...clock,
+  });
+
+  assert.equal(report.status, "failed");
+  assert.equal(report.code, "reply_timeout");
   assert.equal(report.cleanup, "succeeded");
   assert.equal(api.wasDeleted(), true);
 });

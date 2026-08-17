@@ -36,7 +36,7 @@ deployments, so scope each secret deliberately:
 | `COMPANION_BOX_API_KEY` and Box/Pi tuning | no | **never** | **never** | yes | no |
 | Runtime desktop HMAC secret | no | yes | no | yes | no |
 | Secrets envelope master key | no | yes | no | yes | no |
-| S3 Skill archive access | no | read/write | cleanup as required | read-only | no |
+| S3 Skill archive access | no | read/write | cleanup as required | read-only | historical cutover only |
 | GitHub MCP OAuth client id/secret | no | yes | no | yes | no |
 | GitHub App private key / billing worker secrets | no | no | yes | no | no |
 
@@ -44,6 +44,11 @@ Use sealed values for provider, database, HMAC, envelope, OAuth, S3, email, and 
 Generate `COMPANION_RUNTIME_DESKTOP_HMAC_SECRET` independently from
 `COMPANION_SECRETS_MASTER_KEY`; both are base64 encodings of 32 random bytes. Share the HMAC only
 with API and runtime.
+
+The long-lived/current `release` job has no S3 credential. The table's historical-cutover exception
+means an operator may attach matching S3 access only to an ephemeral maintenance execution while
+settling pre-0063 storage obligations below, then must remove it before restoring the normal release
+entrypoint.
 
 The GitHub MCP OAuth client id and secret also belong on API and runtime. API owns the browser OAuth
 flow; runtime uses the same deployment credential only to refresh an expiring encrypted MCP account

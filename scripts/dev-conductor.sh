@@ -53,7 +53,19 @@ if [ "${COMPANION_DEV_SKIP_ENV_FILE:-0}" != "1" ] && [ -f "$REPO_ROOT/.env" ]; t
     fi
   done < "$REPO_ROOT/.env"
 fi
+
+# ascii.dev calls this credential BOX_API_KEY in its own tooling. Accept that
+# spelling only at the local launcher boundary, normalize it to Companion's
+# runtime-only name, then remove the broad alias before any child is spawned.
+# The canonical name wins when both are present.
+if [ -n "${BOX_API_KEY:-}" ]; then
+  if [ -z "${COMPANION_BOX_API_KEY:-}" ]; then
+    export COMPANION_BOX_API_KEY="$BOX_API_KEY"
+  fi
+  unset BOX_API_KEY
+fi
 cd "$REPO_ROOT"
+source "$REPO_ROOT/scripts/dev-runtime-mode.sh"
 
 # ---------------------------------------------------------------------------
 # Colours & logging
@@ -225,6 +237,7 @@ PG_WORKER_USER="companion_worker"
 PG_WORKER_PASS="companion-worker"
 PG_RUNTIME_USER="companion_runtime_v2"
 PG_RUNTIME_PASS="companion-runtime-v2"
+PG_RETIRED_RUNTIME_ROLE=""
 PG_DB="companion"
 DATABASE_API_URL="postgres://${PG_API_USER}:${PG_API_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
 DATABASE_WORKER_URL="postgres://${PG_WORKER_USER}:${PG_WORKER_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
@@ -538,6 +551,7 @@ bootstrap_database() {
   if "${PSQL[@]}" -tAc "select 1 from pg_roles where rolname = 'companion'" | grep -qx 1; then
     "${PSQL[@]}" -d "$PG_DB" -c "REASSIGN OWNED BY companion TO $PG_OWNER_USER;" >/dev/null
     "${PSQL[@]}" -c "ALTER ROLE companion NOLOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT;" >/dev/null
+    PG_RETIRED_RUNTIME_ROLE="companion"
   fi
   ok "Owner '$PG_OWNER_USER' + API '$PG_API_USER' + worker '$PG_WORKER_USER' + runtime '$PG_RUNTIME_USER' + database '$PG_DB' ready"
 }
@@ -668,11 +682,17 @@ cleanup() {
 # ---------------------------------------------------------------------------
 migrate_and_seed() {
   step "Applying migrations + seeding test user"
-  env DATABASE_MIGRATION_URL="$DATABASE_MIGRATION_URL" \
-    DATABASE_API_ROLE="$PG_API_USER" \
-    DATABASE_WORKER_ROLE="$PG_WORKER_USER" \
-    DATABASE_COMPANION_RUNTIME_ROLE="$PG_RUNTIME_USER" \
-    bash scripts/dev-process.sh migration pnpm db:migrate || die "Migrations failed"
+  local migration_env=(
+    DATABASE_MIGRATION_URL="$DATABASE_MIGRATION_URL"
+    DATABASE_API_ROLE="$PG_API_USER"
+    DATABASE_WORKER_ROLE="$PG_WORKER_USER"
+    DATABASE_COMPANION_RUNTIME_ROLE="$PG_RUNTIME_USER"
+  )
+  if [ -n "$PG_RETIRED_RUNTIME_ROLE" ]; then
+    migration_env+=(DATABASE_RETIRED_RUNTIME_ROLE="$PG_RETIRED_RUNTIME_ROLE")
+  fi
+  env "${migration_env[@]}" bash scripts/dev-process.sh migration pnpm db:migrate \
+    || die "Migrations failed"
   local OWNER_PSQL=("$PG_BIN/psql" "$DATABASE_MIGRATION_URL" -v ON_ERROR_STOP=1)
   ok "Migrations applied"
 
@@ -735,6 +755,13 @@ print_header() {
   fi
   printf '  %sAPI%s        %s\n' "$DIM" "$RESET" "$API_URL"
   printf '  %sRuntime%s    %s/healthz (private)\n' "$DIM" "$RESET" "$RUNTIME_URL"
+  if [ -n "${COMPANION_BOX_API_KEY:-}" ]; then
+    printf '  %sBox/Pi%s     configured provider (simulator disabled)\n' "$DIM" "$RESET"
+  elif companion_dev_uses_box_simulator; then
+    printf '  %sBox/Pi%s     deterministic simulator (no provider credential)\n' "$DIM" "$RESET"
+  else
+    printf '  %sBox/Pi%s     not configured (simulator disabled)\n' "$DIM" "$RESET"
+  fi
   printf '  %sPostgres%s   127.0.0.1:%s\n' "$DIM" "$RESET" "$PG_PORT"
   if [ "$HAS_MINIO" = true ]; then
     printf '  %sMinIO%s      %s (console http://127.0.0.1:%s)\n' "$DIM" "$RESET" "$S3_ENDPOINT" "$MINIO_CONSOLE_PORT"
@@ -776,8 +803,7 @@ launch_apps() {
   free_port "$API_PORT" "api"
   free_port "$RUNTIME_PORT" "runtime"
   free_port "$WEB_PORT" "web"
-  if [ -z "${COMPANION_BOX_API_KEY:-}" ] \
-    && [ "${COMPANION_DEV_BOX_SIM_ENABLED:-true}" != "false" ]; then
+  if companion_dev_uses_box_simulator; then
     free_port "$BOX_SIM_PORT" "box-sim"
   fi
 

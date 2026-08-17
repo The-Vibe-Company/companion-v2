@@ -34,7 +34,11 @@ describe("Skills Hub PostgreSQL isolation", () => {
   const workerRole = `companion_worker_${suffix}`;
   const runtimeRole = `companion_runtime_${suffix}`;
   const processRoles = [apiRole, workerRole, runtimeRole];
+  const baselineApiRole = process.env.DATABASE_API_ROLE ?? "companion_api";
+  const baselineWorkerRole = process.env.DATABASE_WORKER_ROLE ?? "companion_worker";
+  const baselineRuntimeRole = process.env.DATABASE_COMPANION_RUNTIME_ROLE ?? "companion_runtime_v2";
   let fixture: IntegrationFixture;
+  let grants = "";
   let personalSlug: string;
   let orgSlug: string;
   let otherOrgSlug: string;
@@ -68,7 +72,7 @@ describe("Skills Hub PostgreSQL isolation", () => {
     await integrationSql.unsafe(`create role ${apiRole} login nosuperuser nobypassrls noinherit`);
     await integrationSql.unsafe(`create role ${workerRole} login nosuperuser nobypassrls noinherit`);
     await integrationSql.unsafe(`create role ${runtimeRole} login nosuperuser nobypassrls noinherit`);
-    const grants = extractRuntimeRoleGrantBlock(
+    grants = extractRuntimeRoleGrantBlock(
       await readFile(await resolveRuntimeRoleGrantsFile(), "utf8"),
     );
     await integrationSql.begin(async (tx) => {
@@ -83,6 +87,17 @@ describe("Skills Hub PostgreSQL isolation", () => {
     await fixture.cleanup();
     for (const role of processRoles) await integrationSql.unsafe(`drop owned by ${role}`);
     for (const role of processRoles) await integrationSql.unsafe(`drop role ${role}`);
+    // The grant preflight deliberately rewrites migration-owner default ACLs. Restore the canonical
+    // disposable-database baseline so later integration suites never inherit this test's ephemeral
+    // role names or its PUBLIC revocations.
+    if (grants) {
+      await integrationSql.begin(async (tx) => {
+        await tx`select set_config('companion.api_role', ${baselineApiRole}, true)`;
+        await tx`select set_config('companion.worker_role', ${baselineWorkerRole}, true)`;
+        await tx`select set_config('companion.companion_runtime_role', ${baselineRuntimeRole}, true)`;
+        await tx.unsafe(grants);
+      });
+    }
   });
 
   async function asApi<T>(input: {

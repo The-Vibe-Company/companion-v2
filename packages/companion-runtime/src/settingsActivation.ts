@@ -53,6 +53,13 @@ export async function activateRuntimeSettings(input: {
 
   let pi = await input.restartPi();
   for (;;) {
+    if (input.clock.now().getTime() >= input.deadlineAt.getTime()) {
+      throw new RuntimeInvariantError({
+        code: "pi_restart_deadline_exceeded",
+        message: "Pi did not expose a new idle invocation for updated settings before the deadline.",
+        action: "restart_pi",
+      });
+    }
     if (pi.state === "error" || pi.state === "absent") {
       throw new RuntimeInvariantError({
         code: "pi_start_failed",
@@ -71,13 +78,6 @@ export async function activateRuntimeSettings(input: {
         appliedSettingsRevision: staged.appliedSettingsRevision,
         appliedSkillsRevision: staged.appliedSkillsRevision,
       };
-    }
-    if (input.clock.now().getTime() >= input.deadlineAt.getTime()) {
-      throw new RuntimeInvariantError({
-        code: "pi_restart_deadline_exceeded",
-        message: "Pi did not expose a new idle invocation for updated settings before the deadline.",
-        action: "restart_pi",
-      });
     }
     await input.clock.sleep(1_000, input.signal);
     pi = await input.observePi();

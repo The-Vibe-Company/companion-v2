@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/dev-runtime-mode.sh"
 
 cd "$REPO_ROOT"
 
@@ -517,24 +518,12 @@ configure_local_runtime_db_roles() {
   [ "${USE_LOCAL_RUNTIME_DB_ROLES:-0}" = "1" ] || return 0
   log "Configuring separate NOBYPASSRLS API, worker, and runtime database roles"
   docker compose -p "$COMPOSE_PROJECT_NAME" exec -T postgres \
-    psql -v ON_ERROR_STOP=1 -U companion -d companion -c \
-    "DO \$\$ BEGIN
-       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'companion_api') THEN
-         CREATE ROLE companion_api LOGIN PASSWORD 'companion-api'
-           NOSUPERUSER NOBYPASSRLS NOINHERIT;
-       END IF;
-       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'companion_worker') THEN
-         CREATE ROLE companion_worker LOGIN PASSWORD 'companion-worker'
-           NOSUPERUSER NOBYPASSRLS NOINHERIT;
-       END IF;
-       IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'companion_runtime_v2') THEN
-         CREATE ROLE companion_runtime_v2 LOGIN PASSWORD 'companion-runtime-v2'
-           NOSUPERUSER NOBYPASSRLS NOINHERIT;
-       END IF;
-     END \$\$;
-     ALTER ROLE companion_api NOSUPERUSER NOBYPASSRLS NOINHERIT;
-     ALTER ROLE companion_worker NOSUPERUSER NOBYPASSRLS NOINHERIT;
-     ALTER ROLE companion_runtime_v2 NOSUPERUSER NOBYPASSRLS NOINHERIT;" >/dev/null
+    psql -v ON_ERROR_STOP=1 -U companion -d companion \
+      -v api_role="${DATABASE_API_ROLE:-companion_api}" -v api_password=companion-api \
+      -v worker_role="${DATABASE_WORKER_ROLE:-companion_worker}" -v worker_password=companion-worker \
+      -v runtime_role="${DATABASE_COMPANION_RUNTIME_ROLE:-companion_runtime_v2}" \
+      -v runtime_password=companion-runtime-v2 \
+      -f - < "$REPO_ROOT/scripts/disposable-db-roles.sql" >/dev/null
 
   # Older local installs used one union login for API, worker, and runtime. Stop new connections
   # before the grants preflight, fail if any old process is still attached, then hand the exact
@@ -592,8 +581,7 @@ run_dev() {
   stop_port_listeners "$WEB_PORT" "$COMPANION_WEB_HOST"
   stop_port_listeners "$API_PORT" "$COMPANION_API_HOST"
   stop_port_listeners "$RUNTIME_PORT" "$COMPANION_RUNTIME_HOST"
-  if [ -z "${COMPANION_BOX_API_KEY:-}" ] \
-    && [ "${COMPANION_DEV_BOX_SIM_ENABLED:-true}" != "false" ]; then
+  if companion_dev_uses_box_simulator; then
     stop_port_listeners "$BOX_SIM_PORT" "127.0.0.1"
   fi
   start_infra
