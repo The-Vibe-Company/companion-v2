@@ -530,14 +530,29 @@ export class CompanionPiBroker {
       case "extension_ui_response":
         return this.#extensionUiResponse(command);
       case "read_events": {
-        const after = nonNegativeSafeInteger(command.after, "after");
+        const after = brokerCommandNonNegativeSafeInteger(command.after, "after");
         const limit = command.limit === undefined
           ? COMPANION_PI_BROKER_READ_LIMIT
-          : positiveSafeInteger(command.limit, "limit");
+          : brokerCommandPositiveSafeInteger(command.limit, "limit");
+        if (limit > COMPANION_PI_BROKER_READ_LIMIT) {
+          throw new BrokerCommandError(
+            "invalid_command",
+            `limit must be at most ${COMPANION_PI_BROKER_READ_LIMIT}`,
+          );
+        }
+        if (after > this.#journal.tailCursor) {
+          throw new BrokerCommandError("invalid_command", "cannot read beyond the journal tail");
+        }
         return { ...this.#journal.read(after, limit) };
       }
       case "ack_events": {
-        const through = nonNegativeSafeInteger(command.through, "through");
+        const through = brokerCommandNonNegativeSafeInteger(command.through, "through");
+        if (through > this.#journal.tailCursor) {
+          throw new BrokerCommandError(
+            "invalid_command",
+            "cannot acknowledge beyond the journal tail",
+          );
+        }
         return { acknowledgedCursor: this.#journal.acknowledge(through) };
       }
       default:
@@ -1004,5 +1019,19 @@ function positiveSafeInteger(value: unknown, name: string): number {
 
 function nonNegativeSafeInteger(value: unknown, name: string): number {
   if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error(`${name} must be a non-negative safe integer`);
+  return Number(value);
+}
+
+function brokerCommandPositiveSafeInteger(value: unknown, name: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) <= 0) {
+    throw new BrokerCommandError("invalid_command", `${name} must be a positive safe integer`);
+  }
+  return Number(value);
+}
+
+function brokerCommandNonNegativeSafeInteger(value: unknown, name: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new BrokerCommandError("invalid_command", `${name} must be a non-negative safe integer`);
+  }
   return Number(value);
 }

@@ -413,23 +413,30 @@ function selectGenerationBoxes(
 function checkedOperation(
   value: unknown,
   expected: { operationId?: string; boxId: string },
+  outcomeUnknown = false,
 ): BoxDeletionOperation {
   const parsed = deletionOperationSchema.safeParse(value);
   if (!parsed.success) {
-    throw invalidProviderResponse("Box API returned an invalid deletion operation");
+    throw invalidProviderResponse("Box API returned an invalid deletion operation", outcomeUnknown);
   }
   const operation = parsed.data;
   if (expected.operationId !== undefined && operation.id !== expected.operationId) {
-    throw invalidProviderResponse("Box API returned a different deletion operation");
+    throw invalidProviderResponse("Box API returned a different deletion operation", outcomeUnknown);
   }
   if (operation.targetId !== expected.boxId) {
-    throw invalidProviderResponse("Box API returned a deletion operation for a different Box");
+    throw invalidProviderResponse(
+      "Box API returned a deletion operation for a different Box",
+      outcomeUnknown,
+    );
   }
   if (
     (operation.status === "completed" && operation.completedAt === null)
     || (operation.status !== "completed" && operation.completedAt !== null)
   ) {
-    throw invalidProviderResponse("Box API returned an inconsistent deletion operation state");
+    throw invalidProviderResponse(
+      "Box API returned an inconsistent deletion operation state",
+      outcomeUnknown,
+    );
   }
   return operation;
 }
@@ -629,15 +636,21 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
     }
 
     if (response.status !== 202) {
-      throw invalidProviderResponse("Box API returned an unexpected permanent deletion status");
+      throw invalidProviderResponse(
+        "Box API returned an unexpected permanent deletion status",
+        true,
+      );
     }
     const parsed = deleteAcceptedEnvelopeSchema.safeParse(response.body);
     if (!parsed.success) {
-      throw invalidProviderResponse("Box API returned an invalid permanent deletion response");
+      throw invalidProviderResponse(
+        "Box API returned an invalid permanent deletion response",
+        true,
+      );
     }
     return {
       outcome: "accepted",
-      operation: checkedOperation(parsed.data.operation, { boxId }),
+      operation: checkedOperation(parsed.data.operation, { boxId }, true),
     };
   }
 
@@ -774,7 +787,7 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
     );
 
     let operation: BoxDeletionOperation;
-    if (input.operationId) {
+    if (input.operationId !== undefined) {
       operation = await this.getDeletionOperation({
         operationId: input.operationId,
         boxId,

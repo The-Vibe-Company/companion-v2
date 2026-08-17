@@ -55,6 +55,33 @@ describe("Companion pi.dev provider catalog", () => {
       ]));
   });
 
+  it("keeps live model capabilities constrained by the shared Companion input schema", async () => {
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const providerId = providerIdFromUrl(input);
+      if (providerId === "zai") {
+        return jsonResponse({
+          "future-audio": {
+            id: "future-audio",
+            name: "Future audio",
+            input: ["text", "audio"],
+          },
+        });
+      }
+      const id = `${providerId}-live`;
+      return jsonResponse({ [id]: { id, name: `${providerId} live`, input: ["text"] } });
+    }) as typeof fetch;
+
+    const catalog = await getCompanionProviderCatalog({
+      fetchImpl,
+      cache: new CompanionProviderCatalogCache(),
+    });
+
+    expect(catalog.find((provider) => provider.id === "zai")?.models)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ id: "glm-4.7" })]));
+    expect(catalog.find((provider) => provider.id === "zai")?.models)
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ id: "future-audio" })]));
+  });
+
   it("serves last-known models after a failed refresh, then bundled pins on a cold failure", async () => {
     const cache = new CompanionProviderCatalogCache();
     const liveFetch = vi.fn(async (input: string | URL | Request) => {

@@ -143,9 +143,9 @@ export function appendPiEvent(
   event: Record<string, unknown> | string,
 ): void {
   if (typeof event === "string") {
-    incrementBrokerCounter(
+    appendPiFault(
       machine,
-      Buffer.byteLength(event, "utf8") > BROKER_MAX_LINE_BYTES ? "oversizedLines" : "malformedLines",
+      Buffer.byteLength(event, "utf8") > BROKER_MAX_LINE_BYTES ? "oversized" : "malformed",
     );
     return;
   }
@@ -186,8 +186,25 @@ export function appendPiEvent(
   }
 }
 
+/** Record a parser fault without retaining the rejected Pi line or fragment. */
+export function appendPiFault(
+  machine: BoxSimCommandMachine,
+  fault: "malformed" | "oversized" | "unterminated",
+): void {
+  incrementBrokerCounter(
+    machine,
+    fault === "malformed"
+      ? "malformedLines"
+      : fault === "oversized"
+        ? "oversizedLines"
+        : "unterminatedLines",
+  );
+}
+
 const BROKER_MAX_LINE_BYTES = 64 * 1024;
 const BROKER_READ_LIMIT = 256;
+/** Match the production broker's headroom beneath the 256 KiB command response limit. */
+const BROKER_READ_BYTES = 224 * 1024;
 const BROKER_SUPPORTED_EVENT_TYPES = new Set([
   "agent_start",
   "agent_end",
@@ -442,6 +459,11 @@ function brokerNonNegativeInteger(value: unknown): number | null {
   return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : null;
 }
 
+function validBrokerCorrelationId(value: unknown): value is string | number {
+  return (typeof value === "string" && value.length > 0 && value.length <= 256)
+    || (typeof value === "number" && Number.isFinite(value));
+}
+
 function executeBrokerControl(
   machine: BoxSimCommandMachine,
   command: Record<string, unknown>,
@@ -473,10 +495,17 @@ function executeBrokerControl(
         ))}\n`);
       }
       const effectiveAfter = Math.max(after, machine.daemon.brokerAcknowledgedCursor);
-      const events = machine.daemon.brokerJournal
-        .filter((event) => event.sequence > effectiveAfter)
-        .slice(0, limit)
-        .map((event) => structuredClone(event));
+      const events: BoxSimBrokerJournalRecord[] = [];
+      let responseBytes = 0;
+      for (const event of machine.daemon.brokerJournal) {
+        if (event.sequence <= effectiveAfter) continue;
+        const cloned = structuredClone(event);
+        const recordBytes = Buffer.byteLength(JSON.stringify(cloned), "utf8") + 1;
+        if (events.length > 0 && responseBytes + recordBytes > BROKER_READ_BYTES) break;
+        events.push(cloned);
+        responseBytes += recordBytes;
+        if (events.length === limit || responseBytes >= BROKER_READ_BYTES) break;
+      }
       const nextCursor = events.at(-1)?.sequence ?? effectiveAfter;
       return ok(`${JSON.stringify(responseFor(command, {
         events,
@@ -583,12 +612,12 @@ async function executeExtensionResponse(
     return failed("Pi RPC is not ready");
   }
   const brokerCommand = extractBrokerJson(commandText);
-  const requestedAttemptId = typeof brokerCommand?.attemptId === "string"
+  if (!brokerCommand) return failed("Pi extension response was not valid JSON");
+  const requestedAttemptId = typeof brokerCommand.attemptId === "string"
     ? brokerCommand.attemptId
     : machine.daemon.activeAttemptId;
   if (
-    brokerCommand
-    && (
+    (
       !requestedAttemptId
       || (
         brokerCommand.attemptId !== undefined
@@ -603,19 +632,29 @@ async function executeExtensionResponse(
       error: { code, message: "decision does not match an active Pi attempt", ambiguous: false },
     })}\n`);
   }
-  const response = brokerCommand?.type === "extension_ui_response"
+  const response = brokerCommand.type === "extension_ui_response"
     && brokerCommand.response !== null
     && typeof brokerCommand.response === "object"
     && !Array.isArray(brokerCommand.response)
     ? brokerCommand.response as Record<string, unknown>
     : null;
-  if (!response) return failed("Pi extension response was not valid JSON");
+  if (
+    !response
+    || response.type !== "extension_ui_response"
+    || !validBrokerCorrelationId(response.id)
+  ) {
+    return ok(`${JSON.stringify(brokerFailureFor(
+      brokerCommand,
+      "invalid_command",
+      "extension UI response is invalid",
+    ))}\n`);
+  }
   try {
     await machine.piController?.respondExtensionUi(response);
   } catch {
     return failed("simulated Pi extension response failed");
   }
-  return ok(`${JSON.stringify(responseFor(brokerCommand!, {
+  return ok(`${JSON.stringify(responseFor(brokerCommand, {
     attemptId: requestedAttemptId!,
     invocationId: machine.daemon.invocationId,
     delivered: true,

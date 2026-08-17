@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   COMPANION_PROVIDER_CATALOG,
   companionModelIdSchema,
+  companionModelInputSchema,
   type CompanionProviderDefinition,
 } from "@companion/contracts";
 
@@ -26,7 +27,7 @@ export const COMPANION_PI_PROVIDER_IDS = {
 const piModelSchema = z.object({
   id: companionModelIdSchema,
   name: z.string().trim().min(1).max(200),
-  input: z.array(z.enum(["text", "image"])).max(2).optional(),
+  input: z.array(companionModelInputSchema).max(2).optional(),
 }).passthrough();
 
 type CatalogModels = CompanionProviderDefinition["models"];

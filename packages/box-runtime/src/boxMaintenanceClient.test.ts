@@ -44,6 +44,7 @@ function operation(
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -285,15 +286,65 @@ describe("AsciiBoxMaintenanceClient", () => {
   });
 
   it("requires HTTP 202 and the official accepted-delete envelope", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => json({
+    const fetchMock = vi.fn(async () => json({
       ok: true,
       type: "box.deleting",
       operation: operation(),
-    })));
+    }));
+    vi.stubGlobal("fetch", fetchMock);
 
     await expect(client().requestPermanentDeletion({ boxId: BOX_ID }))
-      .rejects.toThrow(/unexpected permanent deletion status/);
+      .rejects.toMatchObject({
+        stableCode: "invalid_provider_response",
+        retryable: false,
+        outcomeUnknown: true,
+      });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    ["invalid JSON", () => new Response("not-json", { status: 202 })],
+    ["invalid envelope", () => json({ ok: true, type: "box.deleting" }, 202)],
+    [
+      "invalid operation id",
+      () => json({
+        ok: true,
+        type: "box.deleting",
+        operation: operation("pending", { id: "operation-invalid" }),
+      }, 202),
+    ],
+    [
+      "different Box target",
+      () => json({
+        ok: true,
+        type: "box.deleting",
+        operation: operation("pending", { targetId: OTHER_BOX_ID }),
+      }, 202),
+    ],
+    [
+      "inconsistent operation state",
+      () => json({
+        ok: true,
+        type: "box.deleting",
+        operation: operation("completed", { completedAt: null }),
+      }, 202),
+    ],
+  ] as const)(
+    "retains outcome uncertainty after DELETE returns %s",
+    async (_name, response) => {
+      const fetchMock = vi.fn<typeof fetch>(async () => response());
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(client().requestPermanentDeletion({ boxId: BOX_ID }))
+        .rejects.toMatchObject({
+          stableCode: "invalid_provider_response",
+          retryable: false,
+          outcomeUnknown: true,
+        });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "DELETE" });
+    },
+  );
 
   it("accepts the documented deletion.operation envelope on DELETE", async () => {
     const accepted = operation();
@@ -678,24 +729,46 @@ describe("AsciiBoxMaintenanceClient", () => {
     })).resolves.toEqual({ outcome: "blocked", operation: blocked });
   });
 
+  it("rejects an explicitly empty operation id without issuing DELETE", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(client().deletePermanentlyAndWait({
+      boxId: BOX_ID,
+      operationId: "",
+      deadlineAt: Date.now() + 1_000,
+    })).rejects.toBeInstanceOf(BoxRuntimeConfigurationError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("bounds pending deletion polling by its shared absolute deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-16T00:00:00.000Z"));
     const pending = operation("pending");
-    vi.stubGlobal("fetch", vi.fn(async () => json({
+    const fetchMock = vi.fn(async () => json({
       ok: true,
       type: "deletion.operation",
       operation: pending,
-    })));
+    }));
+    vi.stubGlobal("fetch", fetchMock);
 
-    await expect(client().deletePermanentlyAndWait({
+    const deletion = client().deletePermanentlyAndWait({
       boxId: BOX_ID,
       operationId: OPERATION_ID,
       deadlineAt: Date.now() + 20,
       pollIntervalMs: 100,
-    })).rejects.toMatchObject({
+    });
+    const rejection = expect(deletion).rejects.toMatchObject({
       stableCode: "box_deletion_deadline_exceeded",
       retryable: true,
       outcomeUnknown: false,
     });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(20);
+
+    await rejection;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("requires an absolute deadline before starting deletion polling", async () => {

@@ -1,5 +1,6 @@
 import {
   appendPiEvent,
+  appendPiFault,
   appendPiProcessExit,
   createBoxSimCommandMachine,
   executeBoxCommand,
@@ -290,6 +291,7 @@ export class BoxSimulator {
         machine.piController = this.#piControllerFactory({
           boxId: id,
           appendEvent: (event) => appendPiEvent(machine, event),
+          appendFault: (fault) => appendPiFault(machine, fault),
           currentInvocationId: () => machine.daemon.invocationId,
         });
         await machine.piController.setScenario(this.#defaults.piScenario);

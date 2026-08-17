@@ -249,6 +249,92 @@ describe("semantic Box command shims", () => {
     ]);
   });
 
+  it.each([
+    ["missing id", { type: "extension_ui_response", value: "yes" }],
+    ["empty id", { type: "extension_ui_response", id: "", value: "yes" }],
+    [
+      "oversized id",
+      { type: "extension_ui_response", id: "x".repeat(257), value: "yes" },
+    ],
+    ["non-finite id", { type: "extension_ui_response", id: Number.POSITIVE_INFINITY, value: "yes" }],
+    ["wrong type", { type: "extension_ui_request", id: "question-1", value: "yes" }],
+  ] as const)("does not deliver a decision with %s", async (_name, response) => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "ask_user" });
+    const respondExtensionUi = vi.fn();
+    machine.daemon.status = "active";
+    machine.daemon.rpcReady = true;
+    machine.daemon.invocationId = "00000000000000000000000000000001";
+    machine.daemon.activeAttemptId = "attempt-question";
+    machine.piController = {
+      start: vi.fn(),
+      restart: vi.fn(),
+      stop: vi.fn(),
+      handleRpc: vi.fn(),
+      respondExtensionUi,
+      crash: vi.fn(),
+      setScenario: vi.fn(),
+      dispose: vi.fn(),
+    };
+
+    const result = await executeBoxCommand(machine, brokerShell({
+      id: "decision-invalid",
+      type: "extension_ui_response",
+      response,
+    }));
+
+    expect(result.success).toBe(true);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      id: "decision-invalid",
+      success: false,
+      error: { code: "invalid_command", ambiguous: false },
+    });
+    expect(respondExtensionUi).not.toHaveBeenCalled();
+  });
+
+  it("bounds read_events pages by encoded bytes without loss or duplication", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    machine.daemon.status = "active";
+    machine.daemon.rpcReady = true;
+    machine.daemon.invocationId = "00000000000000000000000000000001";
+    machine.daemon.activeAttemptId = "attempt-large-events";
+    for (let index = 0; index < 4; index += 1) {
+      appendPiEvent(machine, {
+        type: "message_update",
+        index,
+        delta: "x".repeat(60 * 1024),
+      });
+    }
+
+    const first = await executeBoxCommand(machine, brokerShell({
+      id: "read-large-page-1",
+      type: "read_events",
+      after: 0,
+      limit: 256,
+    }));
+    const firstResponse = JSON.parse(first.stdout) as {
+      data: { events: Array<{ sequence: number }>; nextCursor: number; hasMore: boolean };
+    };
+    expect(Buffer.byteLength(first.stdout, "utf8")).toBeLessThan(256 * 1024);
+    expect(firstResponse.data.events.map((event) => event.sequence)).toEqual([1, 2, 3]);
+    expect(firstResponse.data).toMatchObject({ nextCursor: 3, hasMore: true });
+
+    const second = await executeBoxCommand(machine, brokerShell({
+      id: "read-large-page-2",
+      type: "read_events",
+      after: firstResponse.data.nextCursor,
+      limit: 256,
+    }));
+    const secondResponse = JSON.parse(second.stdout) as {
+      data: { events: Array<{ sequence: number }>; nextCursor: number; hasMore: boolean };
+    };
+    expect(secondResponse.data.events.map((event) => event.sequence)).toEqual([4]);
+    expect(secondResponse.data).toMatchObject({ nextCursor: 4, hasMore: false });
+    expect([
+      ...firstResponse.data.events,
+      ...secondResponse.data.events,
+    ].map((event) => event.sequence)).toEqual([1, 2, 3, 4]);
+  });
+
   it("joins virtual file parts without invoking a host shell", async () => {
     const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
     putBoxFile(machine, "archive.part0", Buffer.from("abc"));

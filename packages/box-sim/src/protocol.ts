@@ -70,6 +70,7 @@ export interface BoxSimPiController {
 export interface BoxSimPiControllerContext {
   readonly boxId: string;
   appendEvent(event: Record<string, unknown> | string): void;
+  appendFault(fault: "malformed" | "oversized" | "unterminated"): void;
   currentInvocationId(): string | null;
 }
 

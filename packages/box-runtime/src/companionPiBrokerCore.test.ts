@@ -387,6 +387,52 @@ describe("CompanionPiBroker", () => {
     ]);
   });
 
+  it.each([
+    ["negative read cursor", { type: "read_events", after: -1 }],
+    ["fractional read cursor", { type: "read_events", after: 0.5 }],
+    ["string read cursor", { type: "read_events", after: "0" }],
+    ["read cursor beyond tail", { type: "read_events", after: 1 }],
+    ["zero read limit", { type: "read_events", after: 0, limit: 0 }],
+    ["fractional read limit", { type: "read_events", after: 0, limit: 1.5 }],
+    ["read limit above maximum", { type: "read_events", after: 0, limit: 257 }],
+    ["negative acknowledgement", { type: "ack_events", through: -1 }],
+    ["string acknowledgement", { type: "ack_events", through: "0" }],
+    ["acknowledgement beyond tail", { type: "ack_events", through: 1 }],
+  ] as const)("classifies %s as an unambiguous invalid command", async (_name, fields) => {
+    const harness = brokerHarness();
+    const response = await harness.broker.command({ id: "invalid-control", ...fields });
+
+    expect(response).toMatchObject({
+      id: "invalid-control",
+      success: false,
+      error: { code: "invalid_command", ambiguous: false },
+    });
+  });
+
+  it("keeps journal persistence failures classified as broker unavailable", async () => {
+    const harness = brokerHarness();
+    harness.journal.append({
+      invocationId: "invocation-1",
+      attemptId: "attempt-1",
+      kind: "pi_event",
+      event: { type: "agent_start" },
+    });
+    const acknowledgementPath = join(harness.directory, "ack.cursor");
+    rmSync(acknowledgementPath);
+    mkdirSync(acknowledgementPath);
+
+    const response = await harness.broker.command({
+      id: "ack-io-failure",
+      type: "ack_events",
+      through: 1,
+    });
+
+    expect(response).toMatchObject({
+      success: false,
+      error: { code: "broker_unavailable", ambiguous: false },
+    });
+  });
+
   it("records process exit separately with the active attempt and clears the binding", async () => {
     const harness = brokerHarness();
     await harness.broker.command({
