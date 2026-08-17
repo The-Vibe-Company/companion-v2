@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-const SCOPE_OUTPUTS = ["quality", "build", "database", "browser", "containers", "dependencies"];
+const SCOPE_OUTPUTS = ["quality", "build", "database", "browser", "containers", "dependencies", "skill"];
 
 function isTrue(value) {
   return value === "true";
@@ -21,6 +21,7 @@ export function rejectedJobs(jobs, eventName) {
   const required = {
     scope: true,
     hygiene: true,
+    "skill-guards-macos": isTrue(outputs.skill),
     quality: isTrue(outputs.quality),
     "application-build": isTrue(outputs.build),
     "database-integration": isTrue(outputs.database),

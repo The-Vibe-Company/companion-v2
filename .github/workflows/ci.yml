@@ -137,6 +137,28 @@ jobs:
         if: needs.scope.outputs.design == 'true'
         run: pnpm design:lint
 
+  skill-guards-macos:
+    name: Skill Guards macOS
+    runs-on: macos-latest
+    needs: scope
+    if: needs.scope.outputs.skill == 'true'
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      # The guards constrain descriptor permissions, and those differ by kernel: Darwin
+      # reports anonymous pipes as 0660 where Linux reports 0600. Secret redemption was
+      # therefore broken on every Mac while the Ubuntu matrix stayed green. Only this
+      # runner can prove the private transport still satisfies its own contract.
+      - name: Test bundled Companion skill guards
+        run: python -m unittest discover -s packages/companion-skill/skill/scripts -p 'test_*.py'
+
   quality:
     name: Quality Node 22
     runs-on: ubuntu-latest
@@ -602,6 +624,7 @@ jobs:
     needs:
       - scope
       - hygiene
+      - skill-guards-macos
       - quality
       - application-build
       - database-integration
