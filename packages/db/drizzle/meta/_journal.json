@@ -673,6 +673,13 @@
       "when": 1788282400000,
       "tag": "0095_companion_runtime_desktop_replay_recovery",
       "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1788368800000,
+      "tag": "0096_companion_runtime_settings_claim_revisions",
+      "breakpoints": true
     }
   ]
 }

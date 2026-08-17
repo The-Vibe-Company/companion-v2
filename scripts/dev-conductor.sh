@@ -342,17 +342,50 @@ release_run_lock() {
   RUN_LOCK_HELD=false
 }
 
-# A PID is "ours" when its working directory is inside this repo — i.e. a dev
-# or native-service process this workspace started. We only ever kill our own
-# stale processes; an unrelated process on a derived port is a hard error so a
-# port collision never silently takes out someone else's work.
+# A PID is "ours" when it's plausibly a leftover from this same workspace's
+# dev-conductor.sh — either its working directory is inside this repo, or (for
+# processes whose cwd lsof can't resolve at all, e.g. reparented orphans left
+# behind when a prior run was torn down without running our EXIT trap) its own
+# command line fingerprints it as one of our services. We only ever kill our
+# own stale processes; an unrelated process on a derived port is a hard error
+# so a port collision never silently takes out someone else's work.
+pid_cwd() {
+  lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
+}
+
+pid_command() {
+  ps -p "$1" -o command= 2>/dev/null || true
+}
+
+pid_comm() {
+  ps -p "$1" -o comm= 2>/dev/null || true
+}
+
 is_repo_pid() {
-  local pid="$1" cwd
-  cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1 || true)"
+  local pid="$1" label="$2" cwd cmd
+  cwd="$(pid_cwd "$pid")"
   case "$cwd" in
     "$REPO_ROOT"|"$REPO_ROOT"/*) return 0 ;;
-    *) return 1 ;;
   esac
+  # A resolved-but-mismatched cwd is a real signal the process belongs
+  # elsewhere — only fall back to command-line fingerprinting when lsof
+  # couldn't resolve a cwd at all.
+  [ -n "$cwd" ] && return 1
+
+  cmd="$(pid_command "$pid")"
+  [ -n "$cmd" ] || return 1
+  case "$label" in
+    postgres|minio-api|minio-console)
+      case "$cmd" in *"$STATE_DIR"*) return 0 ;; esac
+      ;;
+    mailpit-smtp|mailpit-ui)
+      [ "$(pid_comm "$pid")" = "mailpit" ] && return 0
+      ;;
+    api|runtime|web|box-sim)
+      case "$cmd" in *"$REPO_ROOT"*|*"@companion/$label"*) return 0 ;; esac
+      ;;
+  esac
+  return 1
 }
 
 free_port() {
@@ -365,7 +398,7 @@ free_port() {
   fi
 
   for pid in $pids; do
-    if is_repo_pid "$pid"; then
+    if is_repo_pid "$pid" "$label"; then
       repo_pids="${repo_pids:+$repo_pids }$pid"
     else
       foreign_pids="${foreign_pids:+$foreign_pids }$pid"

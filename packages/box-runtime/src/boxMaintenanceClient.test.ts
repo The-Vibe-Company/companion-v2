@@ -71,7 +71,7 @@ describe("AsciiBoxMaintenanceClient", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(client().listAllBoxes()).resolves.toEqual([
-      { id: BOX_ID, name: "Companion one" },
+      { id: BOX_ID, name: "Companion one", state: "archived" },
       { id: OTHER_BOX_ID },
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -504,6 +504,38 @@ describe("AsciiBoxMaintenanceClient", () => {
     });
   });
 
+  it.each(["init", "provisioned", "cloning"] as const)(
+    "accepts a 202 create whose lifecycle status is %s",
+    async (lifecycleStatus) => {
+    const createdId = OTHER_BOX_ID;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "box.list",
+        boxes: [],
+        pageInfo: { nextCursor: null, hasMore: false },
+      }))
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "box.created",
+        status: lifecycleStatus,
+        ttlSeconds: 300,
+        box: { id: createdId, name: "Box 2026-08-16 21:00", state: lifecycleStatus },
+      }, 202));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(client().createOrRecoverGenerationBox({
+      companionId: COMPANION_ID,
+      generation: 14,
+      ttlSeconds: 21_600,
+      deadlineAt: Date.now() + 1_000,
+    })).resolves.toEqual({
+      outcome: "created",
+      boxId: createdId,
+      name: GENERATION_NAME,
+    });
+  });
+
   it("leaves a lost create POST outcome unknown without name reconciliation or replay", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(json({
@@ -564,33 +596,76 @@ describe("AsciiBoxMaintenanceClient", () => {
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
   });
 
-  it("applies deterministic naming and TTL in one idempotent PATCH", async () => {
-    const fetchMock = vi.fn<typeof fetch>(async (_input, _init) => json({
-      ok: true,
-      type: "box.info",
-      box: { id: BOX_ID, name: GENERATION_NAME },
-    }));
-    vi.stubGlobal("fetch", fetchMock);
+  it.each(["box.updated", "box.info"] as const)(
+    "applies deterministic naming and TTL when PATCH returns %s",
+    async (type) => {
+      const fetchMock = vi.fn<typeof fetch>(async (_input, _init) => json({
+        ok: true,
+        type,
+        box: { id: BOX_ID, name: GENERATION_NAME },
+      }));
+      vi.stubGlobal("fetch", fetchMock);
 
-    await expect(client().applyGenerationBoxSettings({
+      await expect(client().applyGenerationBoxSettings({
+        boxId: BOX_ID,
+        companionId: COMPANION_ID,
+        generation: 14,
+        ttlSeconds: 21_600,
+        deadlineAt: Date.now() + 1_000,
+      })).resolves.toEqual({
+        boxId: BOX_ID,
+        name: GENERATION_NAME,
+        ttlSeconds: 21_600,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0]?.[0]).toBe(`https://box.test/v1/boxes/${BOX_ID}`);
+      const patchInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
+      expect(patchInit.method).toBe("PATCH");
+      expect(JSON.parse(String(patchInit.body))).toEqual({
+        name: GENERATION_NAME,
+        ttlSeconds: 21_600,
+      });
+    },
+  );
+
+  it("names the rejected PATCH envelope type instead of a generic invalid response", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({
+      ok: true,
+      type: "box.patched",
+      box: { id: BOX_ID, name: GENERATION_NAME },
+    })));
+
+    const failure = await client().applyGenerationBoxSettings({
       boxId: BOX_ID,
       companionId: COMPANION_ID,
       generation: 14,
       ttlSeconds: 21_600,
       deadlineAt: Date.now() + 1_000,
-    })).resolves.toEqual({
+    }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      stableCode: "invalid_provider_response",
+      outcomeUnknown: true,
+    });
+    expect(String((failure as Error).message)).toContain("type=box.patched");
+    expect(String((failure as Error).message)).toContain("issues=type:");
+  });
+
+  it("names an unexpected PATCH HTTP status", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({
+      ok: true,
+      type: "box.updated",
+      box: { id: BOX_ID, name: GENERATION_NAME },
+    }, 201)));
+
+    const failure = await client().applyGenerationBoxSettings({
       boxId: BOX_ID,
-      name: GENERATION_NAME,
+      companionId: COMPANION_ID,
+      generation: 14,
       ttlSeconds: 21_600,
-    });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe(`https://box.test/v1/boxes/${BOX_ID}`);
-    const patchInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
-    expect(patchInit.method).toBe("PATCH");
-    expect(JSON.parse(String(patchInit.body))).toEqual({
-      name: GENERATION_NAME,
-      ttlSeconds: 21_600,
-    });
+      deadlineAt: Date.now() + 1_000,
+    }).catch((error: unknown) => error);
+    expect(String((failure as Error).message)).toContain("status=201");
+    expect(String((failure as Error).message)).toContain("type=box.updated");
   });
 
   it("leaves a lost settings PATCH outcome unknown without retrying", async () => {

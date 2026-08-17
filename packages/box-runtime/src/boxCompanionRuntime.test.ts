@@ -3,10 +3,12 @@ import { COMPANION_RUNTIME_ERROR_MAX_LENGTH } from "@companion/core";
 
 import {
   AsciiBoxCompanionRuntime,
+  BOX_PROVIDER_STATES,
   BoxRuntimeConfigurationError,
   BoxRuntimeProviderError,
   composeDaemonFailureDetail,
   mintBoxDesktopUrl,
+  observedBoxStateFromProvider,
 } from "./boxCompanionRuntime";
 
 afterEach(() => {
@@ -308,6 +310,61 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
   });
 });
 
+describe("provider Box lifecycle states", () => {
+  it("maps every documented provider state and does not treat provisioned as ready", () => {
+    expect(BOX_PROVIDER_STATES).toEqual([
+      "init",
+      "provisioning",
+      "provisioned",
+      "cloning",
+      "ready",
+      "idle",
+      "running",
+      "archiving",
+      "archived",
+      "error",
+    ]);
+    expect(observedBoxStateFromProvider("init")).toBe("initializing");
+    expect(observedBoxStateFromProvider("provisioning")).toBe("provisioning");
+    expect(observedBoxStateFromProvider("provisioned")).toBe("provisioning");
+    expect(observedBoxStateFromProvider("cloning")).toBe("provisioning");
+    expect(observedBoxStateFromProvider("ready")).toBe("ready");
+    expect(observedBoxStateFromProvider("idle")).toBe("idle");
+    expect(observedBoxStateFromProvider("running")).toBe("running");
+    expect(observedBoxStateFromProvider("archiving")).toBe("archiving");
+    expect(observedBoxStateFromProvider("archived")).toBe("archived");
+    expect(observedBoxStateFromProvider("error")).toBe("error");
+  });
+
+  it("reads live GET box.info and resume box.resuming envelopes", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        return response({
+          ok: true,
+          type: "box.info",
+          box: box("idle"),
+        });
+      }
+      if (url.endsWith("/boxes/bx_23456789/resume") && method === "POST") {
+        return response({
+          ok: true,
+          type: "box.resuming",
+          box: box("ready"),
+        }, 202);
+      }
+      throw new Error(`unexpected request ${method} ${url}`);
+    }));
+
+    const runtime = runtimeClient();
+    await expect(runtime.existingBoxStatus({ boxId: "bx_23456789" })).resolves.toEqual({
+      boxId: "bx_23456789",
+      state: "idle",
+    });
+  });
+});
+
 describe("bounded daemon diagnostics", () => {
   it("keeps a stable, one-line failure inside the persistence limit", () => {
     const detail = composeDaemonFailureDetail([
@@ -331,7 +388,7 @@ function runtimeClient(): AsciiBoxCompanionRuntime {
   });
 }
 
-function box(state: "archived" | "ready" | "archiving") {
+function box(state: "archived" | "ready" | "archiving" | "idle") {
   return {
     id: "bx_23456789",
     name: "Companion 11111111-1111-4111-8111-111111111111 g1",

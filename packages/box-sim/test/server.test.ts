@@ -227,7 +227,7 @@ describe("Box simulator HTTP server", () => {
       body: JSON.stringify({ name: "Companion test", ttlSeconds: 21_600 }),
     });
     expect(await patched.json()).toMatchObject({
-      type: "box.info",
+      type: "box.updated",
       box: { name: "Companion test", ttlSeconds: 21_600 },
     });
     expect(await (await provider(handle, "/boxes?limit=200&sort=desc")).json()).toMatchObject({

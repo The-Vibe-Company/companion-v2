@@ -2,6 +2,8 @@ import { z } from "zod";
 import {
   BoxRuntimeConfigurationError,
   BoxRuntimeProviderError,
+  parseProviderBoxState,
+  type BoxState,
 } from "./boxCompanionRuntime";
 
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
@@ -60,6 +62,7 @@ const generationSchema = z.number().int().positive().max(MAX_GENERATION);
 const boxListItemSchema = z.object({
   id: boxIdSchema,
   name: z.string().optional(),
+  state: z.string().min(1).max(80).optional(),
 }).passthrough();
 
 const boxListEnvelopeSchema = z.object({
@@ -75,14 +78,16 @@ const boxListEnvelopeSchema = z.object({
 const boxCreateEnvelopeSchema = z.object({
   ok: z.literal(true),
   type: z.literal("box.created"),
-  status: z.literal("provisioning"),
+  // Live create echoes the Box lifecycle status (`init`, `provisioning`, …), not a fixed token.
+  status: z.string().min(1).max(80),
   ttlSeconds: z.number().int().positive().max(BOX_TTL_MAX_SECONDS),
   box: boxListItemSchema,
 }).passthrough();
 
 const boxUpdateEnvelopeSchema = z.object({
   ok: z.literal(true),
-  type: z.literal("box.info"),
+  // Live Box PATCH returns `box.updated`. The simulator historically echoed GET's `box.info`.
+  type: z.union([z.literal("box.updated"), z.literal("box.info")]),
   box: boxListItemSchema,
 }).passthrough();
 
@@ -113,6 +118,7 @@ export type BoxDeletionStatus = z.infer<typeof deletionStatusSchema>;
 export interface BoxMaintenanceBox {
   id: string;
   name?: string;
+  state?: BoxState;
 }
 
 /** Exact generation-qualified Box identity. Prefix and whitespace matches are deliberately absent. */
@@ -196,7 +202,7 @@ export type BoxRuntimeAdapterStableCode =
  * bodies, signed URLs, request URLs, tokens, and arbitrary provider diagnostics never cross it.
  */
 export class BoxRuntimeAdapterError extends BoxRuntimeProviderError {
-  readonly stableCode: BoxRuntimeAdapterStableCode;
+  override readonly stableCode: BoxRuntimeAdapterStableCode;
   readonly providerCode?: string;
   readonly retryable: boolean;
   readonly outcomeUnknown: boolean;
@@ -270,6 +276,41 @@ function invalidProviderResponse(
     retryable: false,
     outcomeUnknown,
   });
+}
+
+/**
+ * Why a Box envelope was rejected, without the payload. Operators need the `type` and Zod issue
+ * paths; they do not need the provider body, which is how a live `box.updated` PATCH sat behind
+ * "invalid Box update response" with nothing to grep.
+ */
+function providerEnvelopeDetail(input: {
+  summary: string;
+  status?: number;
+  body?: unknown;
+  issues?: ReadonlyArray<{ path: PropertyKey[]; code: string }>;
+  mismatch?: string;
+}): string {
+  const parts = [input.summary];
+  if (input.status !== undefined) parts.push(`status=${input.status}`);
+  if (input.body && typeof input.body === "object" && !Array.isArray(input.body)) {
+    const type = (input.body as { type?: unknown }).type;
+    if (typeof type === "string" && type.length > 0 && type.length <= 80) {
+      parts.push(`type=${type.replace(/[\r\n\t]+/g, " ")}`);
+    }
+  } else if (input.body !== undefined) {
+    parts.push(`body=${input.body === null ? "null" : typeof input.body}`);
+  }
+  if (input.issues && input.issues.length > 0) {
+    const issues = input.issues.slice(0, 4).map((issue) => {
+      const path = issue.path
+        .filter((part): part is string | number => typeof part === "string" || typeof part === "number")
+        .join(".");
+      return path ? `${path}:${issue.code}` : issue.code;
+    }).join(",");
+    if (issues) parts.push(`issues=${issues}`);
+  }
+  if (input.mismatch) parts.push(input.mismatch);
+  return parts.join(" ");
 }
 
 function assertBoxId(value: string): string {
@@ -602,9 +643,11 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
           throw invalidProviderResponse("Box API repeated a Box across list pages");
         }
         seenBoxIds.add(box.id);
+        const state = parseProviderBoxState(box.state);
         boxes.push({
           id: box.id,
           ...(box.name === undefined ? {} : { name: box.name }),
+          ...(state === undefined ? {} : { state }),
         });
       }
     } while (cursor !== null);
@@ -727,11 +770,20 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
       true,
     );
     if (response.status !== 202) {
-      throw invalidProviderResponse("Box API returned an unexpected create status", true);
+      throw invalidProviderResponse(providerEnvelopeDetail({
+        summary: "Box API returned an unexpected create status",
+        status: response.status,
+        body: response.body,
+      }), true);
     }
     const parsed = boxCreateEnvelopeSchema.safeParse(response.body);
     if (!parsed.success || parsed.data.ttlSeconds !== createTtlSeconds) {
-      throw invalidProviderResponse("Box API returned an invalid Box create response", true);
+      throw invalidProviderResponse(providerEnvelopeDetail({
+        summary: "Box API returned an invalid Box create response",
+        status: response.status,
+        body: response.body,
+        ...(parsed.success ? { mismatch: "ttl_mismatch" } : { issues: parsed.error.issues }),
+      }), true);
     }
     return {
       outcome: "created",
@@ -761,15 +813,28 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
       true,
     );
     if (response.status !== 200) {
-      throw invalidProviderResponse("Box API returned an unexpected update status", true);
+      throw invalidProviderResponse(providerEnvelopeDetail({
+        summary: "Box API returned an unexpected update status",
+        status: response.status,
+        body: response.body,
+      }), true);
     }
     const parsed = boxUpdateEnvelopeSchema.safeParse(response.body);
-    if (
-      !parsed.success
-      || parsed.data.box.id !== boxId
-      || parsed.data.box.name !== name
-    ) {
-      throw invalidProviderResponse("Box API returned an invalid Box update response", true);
+    if (!parsed.success) {
+      throw invalidProviderResponse(providerEnvelopeDetail({
+        summary: "Box API returned an invalid Box update response",
+        status: response.status,
+        body: response.body,
+        issues: parsed.error.issues,
+      }), true);
+    }
+    if (parsed.data.box.id !== boxId || parsed.data.box.name !== name) {
+      throw invalidProviderResponse(providerEnvelopeDetail({
+        summary: "Box API returned an invalid Box update response",
+        status: response.status,
+        body: response.body,
+        mismatch: parsed.data.box.id !== boxId ? "box_id_mismatch" : "box_name_mismatch",
+      }), true);
     }
     return { boxId, name, ttlSeconds };
   }

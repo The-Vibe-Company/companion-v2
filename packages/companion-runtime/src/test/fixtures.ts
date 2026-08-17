@@ -632,6 +632,7 @@ export function engineDependencies(input: {
   clock?: TestClock;
   ports?: FakePorts;
   materialProvider?: RuntimeMaterialProvider;
+  log?: RuntimeEngineDependencies["log"];
 }): RuntimeEngineDependencies {
   const ports = input.ports ?? fakePorts(input.store);
   return {
@@ -651,5 +652,6 @@ export function engineDependencies(input: {
     jitter: () => 0.5,
     executorId: "executor-test",
     eventPollIntervalMs: 1,
+    ...(input.log ? { log: input.log } : {}),
   };
 }

@@ -2,6 +2,7 @@ import {
   decodeGateStatusRow,
   decodeRuntimeAuthorizationRow,
   decodeRuntimeClaimRow,
+  RuntimeRowDecodeError,
   type GateStatus,
   type DuplicateCleanup,
   type DuplicateCleanupStatus,
@@ -81,8 +82,8 @@ export interface RuntimeSqlClient {
 }
 
 export class RuntimeStoreSerializationError extends Error {
-  constructor() {
-    super("Runtime database serialization conflict");
+  constructor(cause?: unknown) {
+    super("Runtime database serialization conflict", cause === undefined ? undefined : { cause });
     this.name = "RuntimeStoreSerializationError";
   }
 }
@@ -109,8 +110,11 @@ export class RuntimeCredentialSnapshotChangedError extends Error {
  * safe.
  */
 export class RuntimeStoreIndeterminateError extends Error {
-  constructor() {
-    super("Runtime database mutation outcome is indeterminate");
+  constructor(cause?: unknown) {
+    super(
+      "Runtime database mutation outcome is indeterminate",
+      cause === undefined ? undefined : { cause },
+    );
     this.name = "RuntimeStoreIndeterminateError";
   }
 }
@@ -130,10 +134,11 @@ async function mapped<T>(operation: () => Promise<T>, mutating = false): Promise
       || error instanceof RuntimeStoreContractError
       || error instanceof RuntimeStoreIndeterminateError
       || error instanceof RuntimeCredentialSnapshotChangedError
+      || error instanceof RuntimeRowDecodeError
     ) throw error;
-    if (sqlState(error) === "40001") throw new RuntimeStoreSerializationError();
+    if (sqlState(error) === "40001") throw new RuntimeStoreSerializationError(error);
     if (sqlState(error) === "22023") throw new RuntimeStoreContractError();
-    if (mutating) throw new RuntimeStoreIndeterminateError();
+    if (mutating) throw new RuntimeStoreIndeterminateError(error);
     throw error;
   }
 }

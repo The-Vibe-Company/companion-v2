@@ -7,6 +7,7 @@ import {
 } from "@companion/box-runtime";
 import {
   createRuntimeKernel,
+  createJsonRuntimeProcessLog,
   PostgresRuntimeStore,
   type CreateRuntimeKernelInput,
   type RuntimeBoxControl,
@@ -102,6 +103,7 @@ export async function buildProductionRuntimeService(
     // A valid URL is insufficient: a mistakenly privileged API/owner login must fail startup.
     await database.verifyRole();
     const store = factories.createStore(database);
+    const log = createJsonRuntimeProcessLog();
     if (!config.companionsEnabled) {
       const kernel = factories.createKernel({
         store,
@@ -112,6 +114,7 @@ export async function buildProductionRuntimeService(
         concurrency: config.concurrency,
         sweepIntervalMs: config.sweepIntervalMs,
         claimsEnabled: false,
+        log,
       });
       return composeRuntimeService({
         config,
@@ -151,6 +154,7 @@ export async function buildProductionRuntimeService(
       concurrency: config.concurrency,
       sweepIntervalMs: config.sweepIntervalMs,
       claimsEnabled: true,
+      log,
     });
     const desktop = createRuntimeDesktopPort({
       authorization: new PostgresRuntimeDesktopAuthorizer(database.sql),

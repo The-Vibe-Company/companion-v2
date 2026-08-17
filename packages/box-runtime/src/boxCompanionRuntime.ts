@@ -150,17 +150,58 @@ const BOX_DESKTOP_MINT_BUDGET_MS = 15_000;
 const VNC_RETRYABLE_STATUSES = new Set([408, 409, 425, 429]);
 
 
-export type BoxState =
-  | "init"
-  | "provisioning"
-  | "provisioned"
-  | "cloning"
-  | "ready"
-  | "idle"
-  | "running"
-  | "archiving"
-  | "archived"
-  | "error";
+export const BOX_PROVIDER_STATES = [
+  "init",
+  "provisioning",
+  "provisioned",
+  "cloning",
+  "ready",
+  "idle",
+  "running",
+  "archiving",
+  "archived",
+  "error",
+] as const;
+
+export type BoxState = (typeof BOX_PROVIDER_STATES)[number];
+
+const BOX_PROVIDER_STATE_SET = new Set<string>(BOX_PROVIDER_STATES);
+
+/**
+ * Map a live Box `state` onto the control-plane enum. Official lifecycle docs treat
+ * `provisioning` / `provisioned` / `cloning` as "keep polling GET" — they are not ready, even
+ * though a previous mapping stored `provisioned` as `ready` and let start skip `waiting_ready`.
+ */
+export function observedBoxStateFromProvider(
+  state: BoxState,
+): "initializing" | "provisioning" | "ready" | "idle" | "running" | "archiving" | "archived" | "error" {
+  switch (state) {
+    case "init":
+      return "initializing";
+    case "provisioning":
+    case "provisioned":
+    case "cloning":
+      return "provisioning";
+    case "ready":
+      return "ready";
+    case "idle":
+      return "idle";
+    case "running":
+      return "running";
+    case "archiving":
+      return "archiving";
+    case "archived":
+      return "archived";
+    case "error":
+      return "error";
+  }
+}
+
+export function parseProviderBoxState(value: unknown): BoxState | undefined {
+  return typeof value === "string" && BOX_PROVIDER_STATE_SET.has(value)
+    ? value as BoxState
+    : undefined;
+}
 
 interface BoxInfo {
   id: string;
@@ -171,15 +212,13 @@ interface BoxInfo {
   setupError?: string | null;
 }
 
-interface BoxEnvelope {
-  box: BoxInfo;
-}
-
 interface CommandEnvelope {
   success: boolean;
   exitCode: number | null;
   stdout: string;
   stderr: string;
+  timedOut?: boolean;
+  signal?: string | number | null;
 }
 
 interface DesktopEnvelope {
@@ -335,6 +374,8 @@ export class BoxRuntimeConfigurationError extends Error {
 export class BoxRuntimeProviderError extends Error {
   readonly status: number;
   readonly code?: string;
+  readonly stableCode: string = "box_provider_error";
+  readonly action = "retry" as const;
 
   constructor(message: string, status: number, code?: string) {
     super(message);
@@ -358,8 +399,77 @@ function commandFailureDetail(result: CommandEnvelope): string {
   const lastLine = (text: string | undefined): string | undefined =>
     (text ?? "").split(/[\r\n]+/).map((line) => line.trim()).filter(Boolean).at(-1);
   const output = lastLine(result.stderr) ?? lastLine(result.stdout);
-  const exit = result.exitCode === null ? "" : ` (exit ${result.exitCode})`;
-  return output ? `${exit}: ${output}` : exit;
+  const flags = [
+    result.timedOut ? "timed out" : undefined,
+    result.signal === undefined || result.signal === null || result.signal === ""
+      ? undefined
+      : `signal ${String(result.signal)}`,
+    result.exitCode === null ? undefined : `exit ${result.exitCode}`,
+  ].filter((flag): flag is string => Boolean(flag));
+  const suffix = flags.length > 0 ? ` (${flags.join(", ")})` : "";
+  return output ? `${suffix}: ${output}` : suffix;
+}
+
+function parseCommandEnvelope(body: unknown): CommandEnvelope {
+  if (!body || typeof body !== "object") {
+    throw new BoxRuntimeProviderError("Box API returned an invalid command response", 502);
+  }
+  const record = body as Record<string, unknown>;
+  if (typeof record.success !== "boolean") {
+    const type = typeof record.type === "string" ? ` type=${record.type.slice(0, 80)}` : "";
+    throw new BoxRuntimeProviderError(`Box API returned an invalid command response${type}`, 502);
+  }
+  return {
+    success: record.success,
+    exitCode: typeof record.exitCode === "number" ? record.exitCode : null,
+    stdout: typeof record.stdout === "string" ? record.stdout : "",
+    stderr: typeof record.stderr === "string" ? record.stderr : "",
+    ...(record.timedOut === true ? { timedOut: true } : {}),
+    ...(typeof record.signal === "string" || typeof record.signal === "number"
+      ? { signal: record.signal }
+      : {}),
+  };
+}
+
+function parseBoxEnvelope(body: unknown): BoxInfo {
+  if (!body || typeof body !== "object") {
+    throw new BoxRuntimeProviderError("Box API returned an invalid Box envelope", 502);
+  }
+  const record = body as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type.slice(0, 80) : undefined;
+  const box = record.box;
+  if (!box || typeof box !== "object") {
+    throw new BoxRuntimeProviderError(
+      `Box API returned an invalid Box envelope${type ? ` type=${type}` : ""}`,
+      502,
+    );
+  }
+  const info = box as Record<string, unknown>;
+  const state = parseProviderBoxState(info.state);
+  if (typeof info.id !== "string" || !state) {
+    throw new BoxRuntimeProviderError(
+      `Box API returned an invalid Box${type ? ` type=${type}` : ""}${
+        typeof info.state === "string" ? ` state=${info.state.slice(0, 40)}` : ""
+      }`,
+      502,
+    );
+  }
+  return {
+    id: info.id,
+    state,
+    desktopAvailable: info.desktopAvailable === true,
+    ...(typeof info.name === "string" ? { name: info.name } : {}),
+    ...(info.setupStatus === "pending"
+      || info.setupStatus === "running"
+      || info.setupStatus === "done"
+      || info.setupStatus === "failed"
+      || info.setupStatus === null
+      ? { setupStatus: info.setupStatus }
+      : {}),
+    ...(typeof info.setupError === "string" || info.setupError === null
+      ? { setupError: info.setupError }
+      : {}),
+  };
 }
 
 /**
@@ -1044,10 +1154,10 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   }
 
   async #get(boxId: string, signal?: AbortSignal): Promise<BoxInfo> {
-    return (await this.#request<BoxEnvelope>(
+    return parseBoxEnvelope(await this.#request<unknown>(
       `/boxes/${encodeURIComponent(boxId)}`,
       signal ? { signal } : undefined,
-    )).box;
+    ));
   }
 
 
@@ -1074,15 +1184,14 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
 
 
   async #resume(boxId: string, signal?: AbortSignal): Promise<BoxInfo> {
-    const resumed = await this.#request<BoxEnvelope>(
+    return parseBoxEnvelope(await this.#request<unknown>(
       `/boxes/${encodeURIComponent(boxId)}/resume`,
       {
         method: "POST",
         body: JSON.stringify({ noEnv: true, ttlSeconds: this.#ttlSeconds }),
         ...(signal ? { signal } : {}),
       },
-    );
-    return resumed.box;
+    ));
   }
 
   async #assertBoxRunnable(box: BoxInfo): Promise<void> {
@@ -1101,11 +1210,15 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     timeoutSeconds = 60,
     signal?: AbortSignal,
   ): Promise<CommandEnvelope> {
-    return this.#request<CommandEnvelope>(`/boxes/${encodeURIComponent(boxId)}/commands`, {
-      method: "POST",
-      body: JSON.stringify({ command, timeoutSeconds }),
-      ...(signal ? { signal } : {}),
-    }, (timeoutSeconds + 10) * 1_000);
+    return parseCommandEnvelope(await this.#request<unknown>(
+      `/boxes/${encodeURIComponent(boxId)}/commands`,
+      {
+        method: "POST",
+        body: JSON.stringify({ command, timeoutSeconds }),
+        ...(signal ? { signal } : {}),
+      },
+      (timeoutSeconds + 10) * 1_000,
+    ));
   }
 
   async #daemonState(boxId: string, signal?: AbortSignal): Promise<CompanionDaemonState> {
@@ -1715,7 +1828,7 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     let box = observed ?? await this.#get(input.boxId, input.signal);
     if (box.state !== "archived" && box.state !== "archiving") {
       try {
-        const response = await this.#request<BoxEnvelope>(
+        const response = await this.#request<unknown>(
           `/boxes/${encodeURIComponent(input.boxId)}/stop`,
           {
             method: "POST",
@@ -1723,7 +1836,7 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
             ...(input.signal ? { signal: input.signal } : {}),
           },
         );
-        box = response.box;
+        box = parseBoxEnvelope(response);
       } catch (error) {
         if (
           input.recoverArchive !== true

@@ -355,6 +355,9 @@ export interface McpOauthCasResult {
 }
 
 export class RuntimeRowDecodeError extends Error {
+  readonly stableCode = "runtime_row_decode_failed";
+  readonly action = "retry" as const;
+
   constructor(readonly field: string, detail = "invalid runtime database row") {
     super(detail);
     this.name = "RuntimeRowDecodeError";

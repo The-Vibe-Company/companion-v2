@@ -76,6 +76,24 @@ describe("runtime Box/Pi port adapters", () => {
     }));
   });
 
+  it("keeps provisioned and cloning in the provisioning bucket until the Box is ready", async () => {
+    const existingBoxStatus = vi.fn()
+      .mockResolvedValueOnce({ boxId: "bx_23456789", state: "provisioned" as const })
+      .mockResolvedValueOnce({ boxId: "bx_23456789", state: "cloning" as const })
+      .mockResolvedValueOnce({ boxId: "bx_23456789", state: "idle" as const });
+    const control = createRuntimeBoxControl({
+      lifecycle: lifecycle(),
+      runtime: () => boxRuntime({ existingBoxStatus }),
+    });
+
+    await expect(control.getStatus({ boxId: "bx_23456789", signal }))
+      .resolves.toEqual({ state: "provisioning" });
+    await expect(control.getStatus({ boxId: "bx_23456789", signal }))
+      .resolves.toEqual({ state: "provisioning" });
+    await expect(control.getStatus({ boxId: "bx_23456789", signal }))
+      .resolves.toEqual({ state: "idle" });
+  });
+
   it("adds an explicit provider deadline to delete work without a turn deadline", async () => {
     const requestPermanentDeletion = vi.fn(async () => ({
       outcome: "accepted" as const,

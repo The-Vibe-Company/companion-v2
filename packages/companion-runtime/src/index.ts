@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { systemRuntimeClock, type RuntimeClock } from "./clock";
 import { RuntimeEngine } from "./engine";
 import { RuntimeHealth } from "./health";
+import type { RuntimeProcessLog } from "./logging";
 import type {
   RuntimeBoxControl,
   RuntimeEventProjector,
@@ -36,6 +37,7 @@ export interface CreateRuntimeKernelInput {
   sweepIntervalMs?: number;
   eventPollIntervalMs?: number;
   claimsEnabled: boolean;
+  log?: RuntimeProcessLog;
 }
 
 export interface RuntimeKernel {
@@ -66,6 +68,7 @@ export function createRuntimeKernel(input: CreateRuntimeKernelInput): RuntimeKer
     ...(input.eventPollIntervalMs === undefined
       ? {}
       : { eventPollIntervalMs: input.eventPollIntervalMs }),
+    ...(input.log ? { log: input.log } : {}),
   });
   const scheduler = new RuntimeScheduler({
     store: input.store,
@@ -75,6 +78,7 @@ export function createRuntimeKernel(input: CreateRuntimeKernelInput): RuntimeKer
     concurrency: input.concurrency ?? DEFAULT_RUNTIME_CONCURRENCY,
     sweepIntervalMs: input.sweepIntervalMs ?? DEFAULT_RUNTIME_SWEEP_INTERVAL_MS,
     claimsEnabled: input.claimsEnabled,
+    ...(input.log ? { log: input.log } : {}),
   });
   return {
     engine,
@@ -93,6 +97,7 @@ export * from "./executionControl";
 export * from "./handler";
 export * from "./health";
 export * from "./leaseSession";
+export * from "./logging";
 export * from "./operations";
 export * from "./piEvents";
 export * from "./ports";

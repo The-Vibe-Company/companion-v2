@@ -1,5 +1,6 @@
 import type { RuntimeClock } from "./clock";
 import type { RuntimeExecutionResult } from "./engine";
+import { describeThrownError, type RuntimeProcessLog } from "./logging";
 import type { RuntimeClaim } from "./types";
 import { claimFence } from "./leaseSession";
 import { RUNTIME_LEASE_SECONDS, type RuntimeStore } from "./store";
@@ -37,6 +38,7 @@ export class RuntimeScheduler {
   readonly #concurrency: number;
   readonly #sweepIntervalMs: number;
   readonly #claimsEnabled: boolean;
+  readonly #log: RuntimeProcessLog | undefined;
   readonly #active = new Map<string, Promise<RuntimeExecutionResult>>();
   #loopAbort = new AbortController();
   #loopTask: Promise<void> | null = null;
@@ -57,6 +59,7 @@ export class RuntimeScheduler {
     concurrency?: number;
     sweepIntervalMs?: number;
     claimsEnabled: boolean;
+    log?: RuntimeProcessLog;
   }) {
     this.#store = input.store;
     this.#engine = input.engine;
@@ -65,6 +68,7 @@ export class RuntimeScheduler {
     this.#concurrency = input.concurrency ?? DEFAULT_RUNTIME_CONCURRENCY;
     this.#sweepIntervalMs = input.sweepIntervalMs ?? DEFAULT_RUNTIME_SWEEP_INTERVAL_MS;
     this.#claimsEnabled = input.claimsEnabled;
+    this.#log = input.log;
     if (!Number.isInteger(this.#concurrency) || this.#concurrency < 1 || this.#concurrency > 100) {
       throw new TypeError("Runtime concurrency must be between 1 and 100");
     }
@@ -176,6 +180,11 @@ export class RuntimeScheduler {
       this.#lastSweepCompletedAt = this.#clock.now();
     } catch (error) {
       this.#claimLoopErrorAt = this.#clock.now();
+      this.#log?.error({
+        ts: this.#clock.now().toISOString(),
+        event: "runtime.claim_loop.error",
+        thrown: describeThrownError(error),
+      });
       throw error;
     }
   }
