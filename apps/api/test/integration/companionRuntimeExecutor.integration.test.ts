@@ -113,16 +113,21 @@ async function replayMigrations(client: Sql, names: string[]): Promise<void> {
   for (const name of names) await applyMigrationFile(client, name);
 }
 
-async function applySplitGrants(): Promise<void> {
-  if (!sql) throw new Error("runtime executor database is not initialized");
+async function applySplitGrants(database: Sql | undefined = sql): Promise<void> {
+  if (!database) throw new Error("runtime executor database is not initialized");
   const grants = extractRuntimeRoleGrantBlock(
     await readFile(await resolveRuntimeRoleGrantsFile(), "utf8"),
   );
-  await sql`select set_config('companion.api_role', ${apiRole}, false)`;
-  await sql`select set_config('companion.worker_role', ${workerRole}, false)`;
-  await sql`select set_config('companion.companion_runtime_role', ${runtimeRole}, false)`;
-  await sql`select set_config('companion.retired_runtime_role', '', false)`;
-  await sql.unsafe(grants);
+  const connection = await database.reserve();
+  try {
+    await connection`select set_config('companion.api_role', ${apiRole}, false)`;
+    await connection`select set_config('companion.worker_role', ${workerRole}, false)`;
+    await connection`select set_config('companion.companion_runtime_role', ${runtimeRole}, false)`;
+    await connection`select set_config('companion.retired_runtime_role', '', false)`;
+    await connection.unsafe(grants);
+  } finally {
+    connection.release();
+  }
 }
 
 async function asRuntime<T>(action: (tx: Tx) => Promise<T>): Promise<T> {
@@ -338,13 +343,22 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       create role ${runtimeRole} login nosuperuser nobypassrls noinherit;
     `);
     await adminSql.unsafe(`create database "${databaseName}"`);
-    sql = postgres(runtimeUrl.toString(), { max: 1 });
+    const migrationSql = postgres(runtimeUrl.toString(), { max: 1 });
     const migrations = await migrationFileNames();
     const cutoverIndex = migrations.findIndex((name) => name.startsWith("0093_"));
     if (cutoverIndex < 0) throw new Error("Runtime v2 cutover migration is missing");
-    await replayMigrations(sql, migrations.slice(0, cutoverIndex));
-    await applySplitGrants();
-    await replayMigrations(sql, migrations.slice(cutoverIndex));
+    try {
+      await replayMigrations(migrationSql, migrations.slice(0, cutoverIndex));
+      await applySplitGrants(migrationSql);
+      await replayMigrations(migrationSql, migrations.slice(cutoverIndex));
+    } finally {
+      await migrationSql.end();
+    }
+    // Runtime grant application and the cutover guard require one physical
+    // migration connection. The behavior tests deliberately use a wider pool
+    // so Promise.all exercises concurrent database transactions instead of a
+    // serialized single-connection queue.
+    sql = postgres(runtimeUrl.toString(), { max: 4 });
 
     for (const [index, userId] of [
       ids.ownerA, ids.editorA, ids.viewerA, ids.revokedA, ids.ownerB,
