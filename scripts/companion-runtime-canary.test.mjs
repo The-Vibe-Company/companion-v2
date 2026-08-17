@@ -94,7 +94,10 @@ function mockCanaryApi(config, options = {}) {
         companion: {
           id: COMPANION_ID,
           name: body.name,
-          runtime: { state: "not_created" },
+          runtime: {
+            state: "not_created",
+            ...(options.missingGeneration ? {} : { generation: options.generation ?? 1 }),
+          },
         },
       }, 201);
     }
@@ -212,6 +215,7 @@ test("runs cold reply, vision, stop, wake-on-send, and permanent cleanup over th
 
   assert.equal(report.status, "succeeded");
   assert.equal(report.cleanup, "not_needed");
+  assert.equal(report.generation, 1);
   assert.equal(api.wasDeleted(), true);
   assert.equal(api.messages.length, 3);
   assert.match(api.messages[1].content, /use the read tool/i);
@@ -294,6 +298,23 @@ test("cleanup recovers the exact run-named Companion when create acknowledgement
 
   assert.equal(report.status, "failed");
   assert.equal(report.code, "create_failed");
+  assert.equal(report.cleanup, "succeeded");
+  assert.equal(api.wasDeleted(), true);
+});
+
+test("a green canary requires a positive runtime generation and still cleans up", async () => {
+  const config = fastConfig();
+  const api = mockCanaryApi(config, { missingGeneration: true });
+  const report = await runCompanionRuntimeCanary(config, {
+    fetch: api.fetch,
+    randomUUID,
+    now: () => 0,
+    sleep: async () => undefined,
+  });
+
+  assert.equal(report.status, "failed");
+  assert.equal(report.code, "invalid_runtime_generation");
+  assert.equal(report.generation, null);
   assert.equal(report.cleanup, "succeeded");
   assert.equal(api.wasDeleted(), true);
 });

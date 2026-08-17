@@ -407,7 +407,7 @@ export async function runCompanionRuntimeCanary(config, dependencies = {}) {
       authenticated = true;
     });
 
-    const companion = await runPhase("create", logger, now, async () => {
+    const created = await runPhase("create", logger, now, async () => {
       const result = await api.request("/v1/companions", {
         method: "POST",
         body: {
@@ -423,10 +423,14 @@ export async function runCompanionRuntimeCanary(config, dependencies = {}) {
       if (result.status !== 201 || !UUID_PATTERN.test(result.data?.companion?.id ?? "")) {
         throw new CompanionCanaryError("create_failed");
       }
-      return result.data.companion;
+      const createdGeneration = generationFrom(result.data.companion);
+      if (createdGeneration === null) {
+        throw new CompanionCanaryError("invalid_runtime_generation");
+      }
+      return { companion: result.data.companion, generation: createdGeneration };
     });
-    companionId = companion.id;
-    generation = generationFrom(companion);
+    companionId = created.companion.id;
+    generation = created.generation;
 
     await runPhase("cold_send", logger, now, async () => {
       const clientMessageId = uuid();
