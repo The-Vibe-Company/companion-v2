@@ -966,6 +966,11 @@ export function CompanionsApp({
         clientMessageId,
       );
       if (openedIdRef.current === companionId && accepted?.turn.companion_id === companionId) {
+        // The POST is newer than every thread snapshot that started before its 202. Retire those
+        // reads before projecting the accepted turn so a slow pre-send GET cannot make the saved
+        // message and queue count disappear until the next poll. The next polling tick is free to
+        // claim a fresh request id even while the retired read is still unwinding.
+        threadRequestRef.current += 1;
         setThread((current) => current?.companion_id === companionId
           ? projectAcceptedMessage({ thread: current, turn: accepted.turn, content })
           : current);

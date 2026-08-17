@@ -174,6 +174,7 @@ function controlPlane(
   const held = new Promise<void>((resolve) => { release = resolve; });
   let releaseThread = () => {};
   const heldThread = new Promise<void>((resolve) => { releaseThread = resolve; });
+  let holdNextThreadRead = options.holdThreadRead ?? false;
 
   const json = (body: unknown) => new Response(JSON.stringify(body), {
     status: 200,
@@ -290,7 +291,14 @@ function controlPlane(
       });
     }
     if (url.includes("/thread")) {
-      if (options.holdThreadRead) await heldThread;
+      if (holdNextThreadRead) {
+        holdNextThreadRead = false;
+        // Materialize the response when the GET reaches the control plane, not when its delayed
+        // bytes finally arrive. This is the stale snapshot a real overlapping send must reject.
+        const snapshot = thread(requestedCompanionId);
+        await heldThread;
+        return json({ thread: snapshot });
+      }
       settleReplies();
       return json({ thread: thread(requestedCompanionId) });
     }
@@ -305,6 +313,8 @@ function controlPlane(
     /** Answer the send this control plane is holding open. */
     releaseSend: () => release(),
     releaseThread: () => releaseThread(),
+    holdNextThreadRead: () => { holdNextThreadRead = true; },
+    threadGets: () => requests.filter((request) => request.includes("/thread")).length,
     posts: () => requests.filter((request) => request.endsWith("/messages")).length,
     releaseReply: () => { replyReleased = true; },
   };
@@ -560,6 +570,32 @@ describe("CompanionsApp send", () => {
     expect(api.posts()).toBe(1);
     expect(api.sends).toHaveLength(1);
     await act(async () => api.releaseThread());
+  });
+
+  it("does not let a pre-send thread snapshot erase the accepted turn", async () => {
+    api = controlPlane();
+    vi.stubGlobal("fetch", api.fetchMock);
+    const container = await openThread();
+    const initialReads = api.threadGets();
+
+    api.holdNextThreadRead();
+    await act(async () => vi.advanceTimersByTimeAsync(8_100));
+    expect(api.threadGets()).toBe(initialReads + 1);
+
+    type(container, "Keep the accepted turn visible");
+    await pressEnter(container);
+    expect(container.textContent).toContain("Keep the accepted turn visible");
+    expect(container.querySelector("[data-slot='composer-hint']")?.textContent)
+      .toBe("1 message is saved and queued.");
+
+    await act(async () => {
+      api.releaseThread();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(container.textContent).toContain("Keep the accepted turn visible");
+    expect(container.querySelector("[data-slot='composer-hint']")?.textContent)
+      .toBe("1 message is saved and queued.");
   });
 
   describe("when a send that woke an asleep Companion loses its request after persisting", () => {

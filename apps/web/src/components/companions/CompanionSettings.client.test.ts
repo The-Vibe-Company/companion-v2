@@ -189,7 +189,14 @@ describe("CompanionSettings", () => {
     }));
     companionApi.deleteCompanion.mockResolvedValue({ ...operation, kind: "delete" });
     companionApi.getCompanionRuntime.mockResolvedValue(companion("owner", "running"));
-    companionApi.restartCompanionRuntime.mockResolvedValue(operation);
+    companionApi.restartCompanionRuntime.mockImplementation(async (
+      _orgId: string,
+      _companionId: string,
+      input: { target: "pi" | "box" },
+    ): Promise<CompanionOperation> => ({
+      ...operation,
+      kind: input.target === "pi" ? "restart_pi" : "restart_box",
+    }));
   });
 
   afterEach(async () => {
@@ -302,6 +309,65 @@ describe("CompanionSettings", () => {
     );
   });
 
+  it("presents a running restart replay as in progress instead of newly accepted", async () => {
+    vi.useFakeTimers();
+    const runningReplay: CompanionOperation = {
+      ...operation,
+      status: "running",
+      checkpoint: "restarting_pi",
+      attempt_count: 1,
+      started_at: "2026-08-12T12:00:01.000Z",
+    };
+    const runningProjection = companion("owner", "running");
+    runningProjection.runtime = {
+      ...runningProjection.runtime,
+      latest_operation: {
+        id: runningReplay.id,
+        source_turn_id: null,
+        kind: "restart_pi",
+        status: "running",
+        error: null,
+      },
+    };
+    companionApi.getCompanionRuntime.mockResolvedValue(runningProjection);
+    companionApi.restartCompanionRuntime
+      .mockRejectedValueOnce(new ApiFetchError("Request timed out.", 408))
+      .mockResolvedValueOnce(runningReplay);
+    const { container } = await mount(companion("owner", "running"));
+
+    await click(button(container, "Restart Pi"));
+    await click(button(container, "Restart Pi"));
+
+    expect(container.textContent).toContain("Pi restart is in progress.");
+    expect(container.textContent).not.toContain("Pi restart accepted.");
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+
+    expect(container.textContent).toContain("Pi restart is in progress.");
+    expect(container.textContent).not.toContain("Pi restart completed.");
+  });
+
+  it("presents a succeeded restart replay as completed instead of newly accepted", async () => {
+    const succeededReplay: CompanionOperation = {
+      ...operation,
+      status: "succeeded",
+      checkpoint: "pi_restarted",
+      attempt_count: 1,
+      started_at: "2026-08-12T12:00:01.000Z",
+      settled_at: "2026-08-12T12:00:02.000Z",
+    };
+    companionApi.restartCompanionRuntime
+      .mockRejectedValueOnce(new ApiFetchError("Request timed out.", 408))
+      .mockResolvedValueOnce(succeededReplay);
+    const { container } = await mount(companion("owner", "running"));
+
+    await click(button(container, "Restart Pi"));
+    await click(button(container, "Restart Pi"));
+
+    expect(container.textContent).toContain("Pi restart completed.");
+    expect(container.textContent).not.toContain("Pi restart accepted.");
+  });
+
   it("polls an accepted restart every three seconds and surfaces its durable failure", async () => {
     vi.useFakeTimers();
     const failed = companion("owner", "running");
@@ -374,6 +440,41 @@ describe("CompanionSettings", () => {
     expect(onDeleted).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Deletion accepted.");
     expect(button(container, "Deletion requested").disabled).toBe(true);
+  });
+
+  it("surfaces a failed deletion replay without announcing a new acceptance", async () => {
+    const failedReplay: CompanionOperation = {
+      ...operation,
+      kind: "delete",
+      status: "failed",
+      checkpoint: "waiting_deleted",
+      attempt_count: 1,
+      error: {
+        code: "box_delete_failed",
+        message: "The Box could not be deleted.",
+        action: "retry",
+      },
+      started_at: "2026-08-12T12:00:01.000Z",
+      settled_at: "2026-08-12T12:00:02.000Z",
+    };
+    companionApi.deleteCompanion
+      .mockRejectedValueOnce(new ApiFetchError("Request timed out.", 408))
+      .mockResolvedValueOnce(failedReplay);
+    const { container } = await mount(companion("owner", "running"));
+
+    await click(button(container, "Delete Companion"));
+    await click(button(document.querySelector<HTMLElement>('[role="dialog"]')!, "Delete Companion"));
+    await click(button(container, "Delete Companion"));
+    await click(button(document.querySelector<HTMLElement>('[role="dialog"]')!, "Delete Companion"));
+
+    expect(companionApi.deleteCompanion.mock.calls[1]?.[2]).toBe(
+      companionApi.deleteCompanion.mock.calls[0]?.[2],
+    );
+    expect(container.querySelector("[role='alert']")?.textContent).toContain(
+      "The Box could not be deleted.",
+    );
+    expect(container.textContent).not.toContain("Deletion accepted.");
+    expect(button(container, "Retry Delete").disabled).toBe(false);
   });
 
   it("clears a transient deletion polling error after a successful refresh", async () => {

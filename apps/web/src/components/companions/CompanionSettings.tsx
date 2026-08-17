@@ -3,6 +3,7 @@
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type {
   Companion,
+  CompanionLatestOperation,
   CompanionProvidersResponse,
 } from "@companion/contracts";
 import type { RestartCompanionRuntimeInput } from "@companion/contracts/companion-runtime";
@@ -29,6 +30,69 @@ import { CompanionSkillsSyncStatus } from "./CompanionSkillsSyncStatus";
 const SKILLS_SYNC_POLL_MS = 3_000;
 /** A stalled apply stops moving on its own; cap the poll instead of reading forever. */
 const SKILLS_SYNC_POLL_MAX_TICKS = 40;
+
+type RuntimeNotice = {
+  operationId: string | null;
+  message: string;
+};
+
+function operationNotice(
+  operation: Pick<CompanionLatestOperation, "id" | "kind" | "status">,
+): RuntimeNotice | null {
+  const operationId = operation.id;
+  if (operation.status === "pending") {
+    switch (operation.kind) {
+      case "delete":
+        return {
+          operationId,
+          message: "Deletion accepted. This Companion remains visible until its Box is permanently deleted.",
+        };
+      case "restart_pi":
+        return { operationId, message: "Pi restart accepted. It will run after earlier runtime work." };
+      case "restart_box":
+        return { operationId, message: "Full Box restart accepted. It will run after earlier runtime work." };
+      default:
+        return null;
+    }
+  }
+  if (operation.status !== "succeeded") return null;
+  switch (operation.kind) {
+    case "delete":
+      return { operationId, message: "Deletion completed." };
+    case "restart_pi":
+      return { operationId, message: "Pi restart completed." };
+    case "restart_box":
+      return { operationId, message: "Full Box restart completed." };
+    case "stop":
+      return { operationId, message: "Stop completed." };
+    case "start":
+      return { operationId, message: "Start completed." };
+    case "apply_settings":
+      return { operationId, message: "Settings applied." };
+  }
+}
+
+function operationFailureMessage(operation: CompanionLatestOperation | null): string | null {
+  if (operation === null
+    || !["failed", "interrupted", "cancelled"].includes(operation.status)) return null;
+  if (operation.error?.message) return operation.error.message;
+  const label = operation.kind === "delete"
+    ? "Deletion"
+    : operation.kind === "restart_pi"
+      ? "Pi restart"
+      : operation.kind === "restart_box"
+        ? "Full Box restart"
+        : operation.kind === "apply_settings"
+          ? "Settings apply"
+          : operation.kind === "start"
+            ? "Start"
+            : "Stop";
+  return operation.status === "failed"
+    ? `${label} failed.`
+    : operation.status === "interrupted"
+      ? `${label} was interrupted. Retry when it is safe.`
+      : `${label} was cancelled.`;
+}
 
 export function CompanionSettings({
   orgId,
@@ -64,7 +128,7 @@ export function CompanionSettings({
   const [restarting, setRestarting] = useState<RestartCompanionRuntimeInput["target"] | null>(null);
   const [runtimeSnapshot, setRuntimeSnapshot] = useState(companion.runtime);
   const [latestOperation, setLatestOperation] = useState(companion.runtime.latest_operation ?? null);
-  const [runtimeMessage, setRuntimeMessage] = useState<string | null>(null);
+  const [runtimeNotice, setRuntimeNotice] = useState<RuntimeNotice | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [hidden, setHidden] = useState(companion.hidden);
@@ -88,10 +152,8 @@ export function CompanionSettings({
     setRuntimeSnapshot(companion.runtime);
     const nextOperation = companion.runtime.latest_operation ?? null;
     setLatestOperation(nextOperation);
-    if (nextOperation !== null
-      && nextOperation.status !== "pending"
-      && nextOperation.status !== "running") {
-      setRuntimeMessage(null);
+    if (nextOperation !== null && nextOperation.status !== "pending") {
+      setRuntimeNotice(operationNotice(nextOperation));
     }
   }, [companion.runtime]);
 
@@ -119,19 +181,39 @@ export function CompanionSettings({
     && (latestOperation.status === "failed"
       || latestOperation.status === "interrupted"
       || latestOperation.status === "cancelled");
+  const operationPending = latestOperation?.status === "pending";
   const durableOperationMessage = operationActive
     ? latestOperation.kind === "delete"
-      ? "Deletion is queued. This Companion remains until its Box is permanently deleted."
+      ? operationPending
+        ? "Deletion is queued. This Companion remains until its Box is permanently deleted."
+        : "Deletion is in progress. This Companion remains until its Box is permanently deleted."
       : latestOperation.kind === "stop"
-        ? "Stop is in progress. Status refreshes every three seconds."
+        ? operationPending
+          ? "Stop is queued. Status refreshes every three seconds."
+          : "Stop is in progress. Status refreshes every three seconds."
         : latestOperation.kind === "restart_pi"
-          ? "Pi restart is in progress. Status refreshes every three seconds."
+          ? operationPending
+            ? "Pi restart is queued. Status refreshes every three seconds."
+            : "Pi restart is in progress. Status refreshes every three seconds."
           : latestOperation.kind === "restart_box"
-            ? "Full Box restart is in progress. Status refreshes every three seconds."
+            ? operationPending
+              ? "Full Box restart is queued. Status refreshes every three seconds."
+              : "Full Box restart is in progress. Status refreshes every three seconds."
             : latestOperation.kind === "start"
-              ? "Start is in progress. Status refreshes every three seconds."
-              : "Settings are being applied. Status refreshes every three seconds."
+              ? operationPending
+                ? "Start is queued. Status refreshes every three seconds."
+                : "Start is in progress. Status refreshes every three seconds."
+              : operationPending
+                ? "Settings apply is queued. Status refreshes every three seconds."
+                : "Settings are being applied. Status refreshes every three seconds."
     : null;
+  const runtimeMessage = runtimeNotice !== null
+    && (latestOperation === null
+      || runtimeNotice.operationId === null
+      || runtimeNotice.operationId === latestOperation.id)
+    ? runtimeNotice.message
+    : null;
+  const durableOperationError = operationFailureMessage(latestOperation);
   const lifecycleActive = operationActive
     || runtimeSnapshot.state === "provisioning"
     || runtimeSnapshot.state === "stopping";
@@ -146,10 +228,8 @@ export function CompanionSettings({
         setRuntimeSnapshot(next.runtime);
         const nextOperation = next.runtime.latest_operation ?? null;
         setLatestOperation(nextOperation);
-        if (nextOperation !== null
-          && nextOperation.status !== "pending"
-          && nextOperation.status !== "running") {
-          setRuntimeMessage(null);
+        if (nextOperation !== null && nextOperation.status !== "pending") {
+          setRuntimeNotice(operationNotice(nextOperation));
         }
         setLatest(next);
         onSavedRef.current(next);
@@ -158,14 +238,19 @@ export function CompanionSettings({
           || next.runtime.state === "stopping") return;
         if (next.runtime.state === "error") {
           setError(next.runtime.last_error ?? "The accepted restart failed. Retry when it is safe.");
-          setRuntimeMessage(null);
+          setRuntimeNotice(null);
           return;
         }
         if (nextOperation !== null
+          && (nextOperation.status === "pending" || nextOperation.status === "running")) return;
+        if (nextOperation !== null
           && ["failed", "interrupted", "cancelled"].includes(nextOperation.status)) return;
-        setRuntimeMessage(pendingRestartTarget === "pi"
-          ? "Pi restart completed."
-          : "Full Box restart completed.");
+        setRuntimeNotice({
+          operationId: nextOperation?.id ?? null,
+          message: pendingRestartTarget === "pi"
+            ? "Pi restart completed."
+            : "Full Box restart completed.",
+        });
       } catch (cause) {
         if (!active) return;
         setError(cause instanceof Error
@@ -219,10 +304,8 @@ export function CompanionSettings({
         setRuntimeSnapshot(next.runtime);
         const nextOperation = next.runtime.latest_operation ?? null;
         setLatestOperation(nextOperation);
-        if (nextOperation !== null
-          && nextOperation.status !== "pending"
-          && nextOperation.status !== "running") {
-          setRuntimeMessage(null);
+        if (nextOperation !== null && nextOperation.status !== "pending") {
+          setRuntimeNotice(operationNotice(nextOperation));
         }
         setLatest(next);
         onSavedRef.current(next);
@@ -314,9 +397,7 @@ export function CompanionSettings({
       deleteRequestIdRef.current = null;
       setConfirmingDelete(false);
       setLatestOperation(operation);
-      setRuntimeMessage(
-        "Deletion accepted. This Companion remains visible until its Box is permanently deleted.",
-      );
+      setRuntimeNotice(operationNotice(operation));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "This Companion could not be deleted.");
       setConfirmingDelete(false);
@@ -330,16 +411,14 @@ export function CompanionSettings({
     setBusy(true);
     setRestarting(target);
     setError(null);
-    setRuntimeMessage(null);
+    setRuntimeNotice(null);
     const requestId = restartRequestIdRef.current[target] ?? crypto.randomUUID();
     restartRequestIdRef.current[target] = requestId;
     try {
       const operation = await restartCompanionRuntime(orgId, companion.id, { target }, requestId);
       delete restartRequestIdRef.current[target];
       setLatestOperation(operation);
-      setRuntimeMessage(target === "pi"
-        ? "Pi restart accepted. It will run after earlier runtime work."
-        : "Full Box restart accepted. It will run after earlier runtime work.");
+      setRuntimeNotice(operationNotice(operation));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "This Companion could not be restarted.");
     } finally {
@@ -364,9 +443,9 @@ export function CompanionSettings({
       </header>
 
       <div className="companions-content companions-settings__content">
-        {(error ?? latestOperation?.error?.message) && (
+        {(error ?? durableOperationError) && (
           <div className="companions-error" role="alert">
-            {error ?? latestOperation?.error?.message}
+            {error ?? durableOperationError}
           </div>
         )}
         {saved && <div className="companions-settings__saved" role="status">Settings saved.</div>}
