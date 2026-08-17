@@ -21,7 +21,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from functools import cmp_to_key
 from pathlib import Path
@@ -92,6 +92,45 @@ def _agent_request(token: str, payload: dict[str, Any]) -> Any:
     return result.get("data")
 
 
+def _private_secret_pipe() -> tuple[int, int]:
+    """Return (read_fd, write_fd) over a FIFO the Agent Auth client will accept.
+
+    os.pipe() cannot be used here. macOS reports every anonymous pipe as mode 0660, the
+    client rejects any descriptor carrying group or other bits, and fchmod on a pipe is
+    refused with EINVAL, so the mode cannot be corrected after the fact. A named FIFO can
+    be created at 0600 instead. Unlinking it once both ends are open keeps the transport
+    exactly as private as an anonymous pipe: the descriptors hold the inode alive while no
+    path remains for another process to reopen.
+    """
+    directory = tempfile.mkdtemp(prefix="companion-secret-")
+    os.chmod(directory, 0o700)
+    path = os.path.join(directory, "pipe")
+    read_fd: int | None = None
+    write_fd: int | None = None
+    try:
+        os.mkfifo(path, 0o600)
+        os.chmod(path, 0o600)  # mkfifo subtracts the umask, so restate the mode explicitly.
+        # Opening the read end non-blocking sidesteps the FIFO rendezvous, which would
+        # otherwise deadlock a single-threaded opener. The reader thread wants blocking
+        # semantics, so the flag is cleared once the write end exists.
+        read_fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        write_fd = os.open(path, os.O_WRONLY)
+        os.set_blocking(read_fd, True)
+        return read_fd, write_fd
+    except BaseException:
+        for fd in (read_fd, write_fd):
+            if fd is not None:
+                os.close(fd)
+        raise
+    finally:
+        # Best-effort: a cleanup error must never mask the redemption outcome, and the
+        # descriptors above are what actually carry the secret.
+        with suppress(OSError):
+            os.unlink(path)
+        with suppress(OSError):
+            os.rmdir(directory)
+
+
 def _agent_secret_redeem(token: str, plan_id: str) -> dict[str, Any]:
     """Redeem one plan through an inherited pipe so plaintext never reaches stdout or argv."""
     if os.name != "posix":  # pragma: no cover - the bundled local workflow currently targets macOS/Linux
@@ -106,7 +145,7 @@ def _agent_secret_redeem(token: str, plan_id: str) -> dict[str, Any]:
     if not node:
         fail("Node.js 20 or newer is required for Companion Agent Auth")
 
-    read_fd, write_fd = os.pipe()
+    read_fd, write_fd = _private_secret_pipe()
     secret_bytes = bytearray()
     reader_errors: list[BaseException] = []
     too_large = threading.Event()
