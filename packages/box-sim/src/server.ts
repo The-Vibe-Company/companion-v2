@@ -61,14 +61,33 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
   response.end(payload);
 }
 
-function sendError(response: ServerResponse, error: BoxSimHttpError): void {
+function sendError(response: ServerResponse, error: BoxSimHttpError, requestId: string): void {
   sendJson(response, error.status, {
     ok: false,
-    type: "error",
+    type: "box.error",
+    status: error.status,
     code: error.code,
     message: error.message,
-    error: { message: error.message },
+    error: {
+      code: error.code,
+      message: error.message,
+      status: error.status,
+      details: { error: error.message },
+    },
+    requestId,
   });
+}
+
+function parseBoxListLimit(value: string | null): number {
+  if (value === null) return 100;
+  if (!/^\d+$/.test(value)) {
+    throw new BoxSimHttpError(400, "invalid_request", "limit must be a positive integer");
+  }
+  const limit = Number(value);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+    throw new BoxSimHttpError(400, "invalid_request", "limit must be between 1 and 200");
+  }
+  return limit;
 }
 
 async function readJsonBody(request: IncomingMessage, limit: number): Promise<unknown> {
@@ -152,6 +171,17 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
       : options.piControllerFactory,
   });
   const sockets = new Set<Socket>();
+  const requestIds = new WeakMap<IncomingMessage, string>();
+  let requestSequence = 0;
+
+  const requestIdFor = (request: IncomingMessage): string => {
+    const existing = requestIds.get(request);
+    if (existing) return existing;
+    requestSequence += 1;
+    const requestId = `req_box_sim_${requestSequence.toString(10).padStart(8, "0")}`;
+    requestIds.set(request, requestId);
+    return requestId;
+  };
 
   let server!: Server;
 
@@ -165,11 +195,15 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
     if (!action) return false;
     switch (action.kind) {
       case "http":
-        sendError(response, new BoxSimHttpError(
-          action.status,
-          action.code ?? "simulated_fault",
-          action.message ?? `Simulated fault at ${point}`,
-        ));
+        sendError(
+          response,
+          new BoxSimHttpError(
+            action.status,
+            action.code ?? "simulated_fault",
+            action.message ?? `Simulated fault at ${point}`,
+          ),
+          requestIdFor(request),
+        );
         return true;
       case "disconnect":
         request.socket.destroy();
@@ -179,11 +213,15 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
         return true;
       case "command":
         if (!commandEndpoint) {
-          sendError(response, new BoxSimHttpError(
-            500,
-            "invalid_fault_action",
-            `Command fault cannot run at ${point}`,
-          ));
+          sendError(
+            response,
+            new BoxSimHttpError(
+              500,
+              "invalid_fault_action",
+              `Command fault cannot run at ${point}`,
+            ),
+            requestIdFor(request),
+          );
         } else {
           sendJson(response, 200, {
             ok: true,
@@ -328,7 +366,7 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
         point: "box.list",
         operation: () => simulator.listBoxes({
           cursor: url.searchParams.get("cursor"),
-          limit: Number.parseInt(url.searchParams.get("limit") ?? "100", 10),
+          limit: parseBoxListLimit(url.searchParams.get("limit")),
           sort: url.searchParams.get("sort") === "desc" ? "desc" : "asc",
         }),
         respond: (result) => sendJson(response, 200, {
@@ -530,6 +568,7 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
   }
 
   server = createServer((request, response) => {
+    const requestId = requestIdFor(request);
     void (async () => {
       const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "box-sim.invalid"}`);
       const control = controlPath(url.pathname);
@@ -544,8 +583,12 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
       else await handleProvider(request, response, url);
     })().catch((error: unknown) => {
       if (response.destroyed) return;
-      if (error instanceof BoxSimHttpError) sendError(response, error);
-      else sendError(response, new BoxSimHttpError(500, "internal_error", "Box simulator request failed"));
+      if (error instanceof BoxSimHttpError) sendError(response, error, requestId);
+      else sendError(
+        response,
+        new BoxSimHttpError(500, "internal_error", "Box simulator request failed"),
+        requestId,
+      );
     });
   });
   server.on("connection", (socket) => {

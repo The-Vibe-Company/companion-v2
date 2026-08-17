@@ -81,6 +81,13 @@ function validatePositiveInteger(value: unknown, name: string): number {
 }
 
 function validateDefaults(input: Partial<BoxSimDefaults>, current: BoxSimDefaults): BoxSimDefaults {
+  if (input.archiveStates !== undefined && !Array.isArray(input.archiveStates)) {
+    throw new BoxSimHttpError(
+      400,
+      "invalid_defaults",
+      "archiveStates must contain at least one valid Box state",
+    );
+  }
   const archiveStates = input.archiveStates === undefined
     ? [...current.archiveStates]
     : [...input.archiveStates];
@@ -280,16 +287,16 @@ export class BoxSimulator {
     };
     this.#boxes.set(id, record);
     if (this.#piControllerFactory) {
-      machine.piController = this.#piControllerFactory({
-        boxId: id,
-        appendEvent: (event) => appendPiEvent(machine, event),
-        currentInvocationId: () => machine.daemon.invocationId,
-      });
       try {
+        machine.piController = this.#piControllerFactory({
+          boxId: id,
+          appendEvent: (event) => appendPiEvent(machine, event),
+          currentInvocationId: () => machine.daemon.invocationId,
+        });
         await machine.piController.setScenario(this.#defaults.piScenario);
       } catch {
         this.#boxes.delete(id);
-        await Promise.resolve(machine.piController.dispose()).catch(() => undefined);
+        await Promise.resolve(machine.piController?.dispose()).catch(() => undefined);
         throw new BoxSimHttpError(502, "pi_scenario_failed", "Pi simulator scenario could not be set");
       }
     }

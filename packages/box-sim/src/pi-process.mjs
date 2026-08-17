@@ -48,6 +48,7 @@ function run() {
   let isStreaming = false;
   let messageCount = 0;
   let promptSequence = 0;
+  let pendingPromptSequence = null;
   let pendingUiRequest = null;
   let stopped = false;
 
@@ -401,6 +402,7 @@ function run() {
     if (command.type === "abort") {
       correlatedResponse(command, { success: true });
       if (isStreaming) {
+        pendingPromptSequence = null;
         const message = { ...textMessage("", "aborted"), content: [] };
         writeJson({ type: "message_end", message });
         writeJson({ type: "agent_end", messages: [message], willRetry: false });
@@ -437,8 +439,17 @@ function run() {
     }
 
     promptSequence += 1;
+    const dispatchSequence = promptSequence;
+    pendingPromptSequence = dispatchSequence;
+    // Reserve the one active run before yielding. stdin may contain a following abort in the same
+    // chunk, and that command must be able to invalidate this not-yet-dispatched prompt.
+    isStreaming = true;
     correlatedResponse(command, { success: true });
-    queueMicrotask(dispatchScenario);
+    queueMicrotask(() => {
+      if (pendingPromptSequence !== dispatchSequence) return;
+      pendingPromptSequence = null;
+      dispatchScenario();
+    });
   }
 
   function handleLine(rawLine) {

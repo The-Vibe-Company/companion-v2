@@ -110,13 +110,23 @@ export class PiProcessController implements BoxSimPiController {
     if (this.running) return;
     if (this.#startPromise) return this.#startPromise;
 
-    const startPromise = this.#spawn();
+    const startPromise = this.#startAfterPreviousExit();
     this.#startPromise = startPromise;
     try {
       await startPromise;
     } finally {
       if (this.#startPromise === startPromise) this.#startPromise = null;
     }
+  }
+
+  async #startAfterPreviousExit(): Promise<void> {
+    // `exitCode` is observable before Node emits `close`. Do not replace #child during that window:
+    // the old close handler still owns rejection of its in-flight RPCs and cleanup of its pipes.
+    const previousExit = this.#exitPromise;
+    if (previousExit) await previousExit;
+    this.#assertUsable();
+    if (this.running) return;
+    await this.#spawn();
   }
 
   async restart(): Promise<void> {

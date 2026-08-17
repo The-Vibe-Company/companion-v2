@@ -7,6 +7,9 @@ import { PiProcessController } from "../src/piController";
 import type { PiScenarioName } from "../src/scenarios";
 
 const PI_PROCESS_PATH = fileURLToPath(new URL("../src/pi-process.mjs", import.meta.url));
+const DELAYED_CLOSE_PROCESS_PATH = fileURLToPath(
+  new URL("./fixtures/delayed-close-child.mjs", import.meta.url),
+);
 const liveControllers: PiProcessController[] = [];
 const liveChildren: ChildProcessWithoutNullStreams[] = [];
 
@@ -66,6 +69,34 @@ describe("the real Pi JSONL subprocess", () => {
         success: false,
       }),
     ]);
+  });
+
+  it("cancels a prompt queued before an abort in the same stdin chunk", async () => {
+    const harness = spawnRawPi("normal");
+    harness.child.stdin.write([
+      JSON.stringify({ id: "prompt-same-chunk", type: "prompt", message: "do not dispatch" }),
+      JSON.stringify({ id: "abort-same-chunk", type: "abort" }),
+      "",
+    ].join("\n"), "utf8");
+
+    const records = await waitForRawRecords(harness, (items) => (
+      items.some((item) => item.type === "agent_settled")
+    ));
+    expect(records.map((record) => record.type)).toEqual([
+      "response",
+      "response",
+      "message_end",
+      "agent_end",
+      "agent_settled",
+    ]);
+    expect(records.slice(0, 2)).toEqual([
+      expect.objectContaining({ id: "prompt-same-chunk", command: "prompt", success: true }),
+      expect.objectContaining({ id: "abort-same-chunk", command: "abort", success: true }),
+    ]);
+    expect(records.some((record) => record.type === "agent_start")).toBe(false);
+    expect(records.find((record) => record.type === "message_end")).toMatchObject({
+      message: { stopReason: "aborted" },
+    });
   });
 });
 
@@ -252,6 +283,43 @@ describe("PiProcessController", () => {
     await expect(harness.controller.setScenario("not-a-scenario")).rejects.toThrow(
       "unknown Pi simulator scenario",
     );
+  });
+
+  it("waits for the previous close before replacing an exited child", async () => {
+    const events: Array<Record<string, unknown> | string> = [];
+    const controller = new PiProcessController({
+      boxId: "box-sim-delayed-close",
+      appendEvent: (event) => events.push(event),
+      currentInvocationId: () => "00000000000000000000000000000001",
+    }, {
+      processPath: DELAYED_CLOSE_PROCESS_PATH,
+      rpcTimeoutMs: 1_000,
+      stopTimeoutMs: 1_000,
+    });
+    liveControllers.push(controller);
+    await controller.start();
+    const firstPid = controller.pid;
+    const pendingFailure = controller.handleRpc({ id: "pending-before-close", type: "get_state" })
+      .then(() => null, (error: unknown) => error);
+
+    await waitFor(() => controller.running ? null : true);
+    let replacementStarted = false;
+    const startReplacement = () => controller.start().then(() => {
+      replacementStarted = true;
+      return controller.pid;
+    });
+    const replacements = [startReplacement(), startReplacement()];
+    await delay(30);
+    expect(replacementStarted).toBe(false);
+
+    const failure = await pendingFailure;
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("exited with code 0");
+    const replacementPids = await Promise.all(replacements);
+    expect(controller.running).toBe(true);
+    expect(controller.pid).not.toBe(firstPid);
+    expect(new Set(replacementPids).size).toBe(1);
+    expect(events).toEqual([]);
   });
 });
 

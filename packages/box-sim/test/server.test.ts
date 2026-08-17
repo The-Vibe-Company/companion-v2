@@ -1,14 +1,22 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createBoxSimServer, type BoxSimServerHandle } from "../src/server";
+import {
+  createBoxSimServer,
+  type BoxSimServerHandle,
+  type BoxSimServerOptions,
+} from "../src/server";
 
 const API_KEY = "provider-test-key";
 const CONTROL_TOKEN = "control-test-token";
 
 const openServers: BoxSimServerHandle[] = [];
 
-async function start(): Promise<BoxSimServerHandle> {
-  const handle = createBoxSimServer({ apiKey: API_KEY, controlToken: CONTROL_TOKEN });
+async function start(options: BoxSimServerOptions = {}): Promise<BoxSimServerHandle> {
+  const handle = createBoxSimServer({
+    ...options,
+    apiKey: API_KEY,
+    controlToken: CONTROL_TOKEN,
+  });
   await handle.listen();
   openServers.push(handle);
   return handle;
@@ -27,6 +35,32 @@ async function provider(
       ...init.headers,
     },
   });
+}
+
+async function expectBoxError(
+  response: Response,
+  status: number,
+  code: string,
+): Promise<Record<string, unknown>> {
+  expect(response.status).toBe(status);
+  const body = await response.json() as Record<string, unknown>;
+  expect(body).toMatchObject({
+    ok: false,
+    type: "box.error",
+    status,
+    code,
+    message: expect.any(String),
+    error: {
+      code,
+      message: expect.any(String),
+      status,
+      details: { error: expect.any(String) },
+    },
+    requestId: expect.stringMatching(/^req_box_sim_\d{8}$/),
+  });
+  expect((body.error as { message: string; details: { error: string } }).details.error)
+    .toBe((body.error as { message: string }).message);
+  return body;
 }
 
 async function control(
@@ -53,14 +87,105 @@ describe("Box simulator HTTP server", () => {
     const handle = await start();
 
     expect((await fetch(`${handle.baseUrl}/health`)).status).toBe(200);
-    expect((await fetch(`${handle.baseUrl}/boxes?apiKey=${API_KEY}`)).status).toBe(401);
-    expect((await fetch(`${handle.baseUrl}/boxes`, {
-      headers: { Authorization: `bearer ${API_KEY}` },
-    })).status).toBe(401);
-    expect((await fetch(`${handle.controlUrl}/state`, {
-      headers: { Authorization: `Bearer ${API_KEY}` },
-    })).status).toBe(401);
+    const errors = await Promise.all([
+      expectBoxError(await fetch(`${handle.baseUrl}/boxes?apiKey=${API_KEY}`), 401, "unauthorized"),
+      expectBoxError(await fetch(`${handle.baseUrl}/boxes`, {
+        headers: { Authorization: `bearer ${API_KEY}` },
+      }), 401, "unauthorized"),
+      expectBoxError(await fetch(`${handle.controlUrl}/state`, {
+        headers: { Authorization: `Bearer ${API_KEY}` },
+      }), 401, "invalid_control_token"),
+    ]);
+    expect(new Set(errors.map((error) => error.requestId)).size).toBe(3);
+    expect(errors.map((error) => error.requestId)).toEqual([
+      "req_box_sim_00000002",
+      "req_box_sim_00000003",
+      "req_box_sim_00000004",
+    ]);
+    expect(JSON.stringify(errors)).not.toContain(API_KEY);
+    expect(JSON.stringify(errors)).not.toContain(CONTROL_TOKEN);
     expect((await control(handle, "/state")).status).toBe(200);
+  });
+
+  it("uses the Box error envelope for unknown provider routes", async () => {
+    const handle = await start();
+
+    await expectBoxError(
+      await provider(handle, "/unknown-provider-route"),
+      404,
+      "route_not_found",
+    );
+  });
+
+  it("uses the Box error envelope for injected HTTP faults", async () => {
+    const handle = await start();
+    expect((await control(handle, "/faults", {
+      method: "POST",
+      body: JSON.stringify({
+        point: "box.list.before",
+        action: {
+          kind: "http",
+          status: 429,
+          code: "synthetic_rate_limit",
+          message: "Synthetic list rate limit",
+        },
+      }),
+    })).status).toBe(201);
+
+    await expectBoxError(
+      await provider(handle, "/boxes"),
+      429,
+      "synthetic_rate_limit",
+    );
+  });
+
+  it("rejects non-array archive defaults without mutating simulator state", async () => {
+    const handle = await start();
+    const initial = handle.simulator.defaults;
+
+    for (const archiveStates of [null, {}, 42, "archiving,archived"]) {
+      await expectBoxError(await control(handle, "/defaults", {
+        method: "PUT",
+        body: JSON.stringify({ archiveStates }),
+      }), 400, "invalid_defaults");
+      expect(handle.simulator.defaults).toEqual(initial);
+    }
+  });
+
+  it("removes a partially-created Box when the Pi controller factory throws", async () => {
+    const handle = await start({
+      piControllerFactory: () => {
+        throw new Error("synthetic factory diagnostic must not escape");
+      },
+    });
+
+    const failure = await expectBoxError(await provider(handle, "/boxes", {
+      method: "POST",
+      body: "{}",
+    }), 502, "pi_scenario_failed");
+    expect(JSON.stringify(failure)).not.toContain("factory diagnostic");
+    expect(handle.simulator.snapshot().boxes).toEqual([]);
+    expect(await (await provider(handle, "/boxes")).json()).toMatchObject({ boxes: [] });
+  });
+
+  it("rejects malformed list limits instead of returning a misleading page", async () => {
+    const handle = await start();
+    const created = await (await provider(handle, "/boxes", {
+      method: "POST",
+      body: "{}",
+    })).json() as { box: { id: string } };
+
+    for (const limit of ["", "wat", "1junk", "0", "-1", "1.5", "201"]) {
+      await expectBoxError(
+        await provider(handle, `/boxes?limit=${encodeURIComponent(limit)}`),
+        400,
+        "invalid_request",
+      );
+    }
+    expect(await (await provider(handle, "/boxes?limit=1")).json()).toMatchObject({
+      boxes: [{ id: created.box.id }],
+      pageInfo: { hasMore: false, nextCursor: null },
+    });
   });
 
   it("serves deterministic create, observe, patch, list, stop, resume, and desktop envelopes", async () => {
