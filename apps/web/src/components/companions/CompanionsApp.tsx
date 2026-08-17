@@ -154,7 +154,6 @@ function projectAcceptedMessage(input: {
     active_turn: activeTurn,
     queued_count: queuedCount,
     interrupted_turn: interruptedTurn,
-    pending_count: queuedCount + (activeTurn ? 1 : 0) + (interruptedTurn ? 1 : 0),
     last_message_at: alreadyProjected ? input.thread.last_message_at : input.turn.created_at,
   };
 }
