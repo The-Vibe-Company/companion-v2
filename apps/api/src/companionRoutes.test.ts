@@ -157,6 +157,48 @@ const thread = {
   last_read_ordinal: null,
 };
 
+const operatorTurnError = {
+  code: "provider_account_revoked",
+  message: "Provider account acct_internal_42 rejected credential generation 17.",
+  action: "reconnect_provider" as const,
+};
+
+const operatorAttemptError = {
+  code: "pi_process_crashed",
+  message: "Pi exited after reading /root/.config/provider-private.json.",
+  action: "restart_pi" as const,
+};
+
+const interruptedTurn = {
+  ...turn,
+  status: "interrupted" as const,
+  latest_attempt: {
+    id: "77777777-7777-4777-8777-777777777777",
+    turn_id: TURN_ID,
+    attempt_number: 1,
+    retry_id: null,
+    status: "interrupted" as const,
+    dispatch_state: "ambiguous" as const,
+    pi_invocation_id: "pi-invocation-operator-only",
+    dispatch_accepted_at: null,
+    error: operatorAttemptError,
+    started_at: NOW,
+    settled_at: NOW,
+  },
+  error: operatorTurnError,
+  settled_at: NOW,
+};
+
+function threadWithInterruptedTurn(access: "owner" | "editor" | "viewer") {
+  return {
+    ...thread,
+    access,
+    read_only: access === "viewer",
+    can_send: access !== "viewer",
+    interrupted_turn: interruptedTurn,
+  };
+}
+
 function registerCompanionRoutes(
   app: Hono<{ Variables: ApiVariables }>,
   env: NodeJS.ProcessEnv = {},
@@ -263,6 +305,50 @@ describe("Companions Runtime v2 API", () => {
       expect(response.headers.get("cache-control")).toBe("private, no-store");
     }
   });
+
+  it("replaces Viewer turn and attempt diagnostics with one generic non-actionable error", async () => {
+    const viewerThread = threadWithInterruptedTurn("viewer");
+    coreMocks.readCompanionThreadV2.mockResolvedValue(viewerThread);
+
+    const response = await appWithRoutes().request(
+      `/v1/companions/${COMPANION_ID}/thread`,
+    );
+    const payload = await response.json() as { thread: typeof viewerThread };
+
+    expect(response.status).toBe(200);
+    expect(payload.thread.interrupted_turn.error).toEqual({
+      code: "runtime_unavailable",
+      message: "Companion runtime needs attention.",
+      action: "none",
+    });
+    expect(payload.thread.interrupted_turn.latest_attempt?.error).toEqual({
+      code: "runtime_unavailable",
+      message: "Companion runtime needs attention.",
+      action: "none",
+    });
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain(operatorTurnError.code);
+    expect(serialized).not.toContain(operatorTurnError.message);
+    expect(serialized).not.toContain(operatorAttemptError.code);
+    expect(serialized).not.toContain(operatorAttemptError.message);
+  });
+
+  it.each(["owner", "editor"] as const)(
+    "preserves full actionable thread diagnostics for %s access",
+    async (access) => {
+      const operatorThread = threadWithInterruptedTurn(access);
+      coreMocks.readCompanionThreadV2.mockResolvedValue(operatorThread);
+
+      const response = await appWithRoutes().request(
+        `/v1/companions/${COMPANION_ID}/thread`,
+      );
+      const payload = await response.json() as { thread: typeof operatorThread };
+
+      expect(response.status).toBe(200);
+      expect(payload.thread.interrupted_turn.error).toEqual(operatorTurnError);
+      expect(payload.thread.interrupted_turn.latest_attempt?.error).toEqual(operatorAttemptError);
+    },
+  );
 
   it("does not expose the retired thread sync route", async () => {
     const response = await appWithRoutes().request(

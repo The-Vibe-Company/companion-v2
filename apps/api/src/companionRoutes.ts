@@ -59,6 +59,9 @@ import {
   setDefaultCompanionProvider,
 } from "@companion/core";
 import {
+  type CompanionRuntimeSafeError,
+  type CompanionThread,
+  type CompanionTurn,
   createCompanionInputSchema,
   cancelCompanionTurnInputSchema,
   companionProviderIdSchema,
@@ -97,6 +100,42 @@ const COMPANION_PLUGIN_OAUTH_FLOW_PURPOSE = "companion-mcp-oauth-flow";
 const COMPANION_PLUGIN_OAUTH_TTL_MS = 10 * 60_000;
 const COMPANION_PROVIDER_OAUTH_FLOW_PURPOSE = "companion-provider-oauth-flow";
 const COMPANION_PROVIDER_OAUTH_COOKIE = "companion_provider_oauth";
+
+const VIEWER_RUNTIME_ERROR: CompanionRuntimeSafeError = {
+  code: "runtime_unavailable",
+  message: "Companion runtime needs attention.",
+  action: "none",
+};
+
+/**
+ * A Viewer can follow durable progress, but runtime diagnostics and their recovery hints belong to
+ * the Owner/Editor operating boundary. Keep the same turn shape so polling remains stable while
+ * replacing both the turn-level and attempt-level error with one non-actionable projection.
+ */
+function projectThreadForHttp(thread: CompanionThread): CompanionThread {
+  if (thread.access !== "viewer") return thread;
+
+  const projectTurn = (turn: CompanionTurn | null): CompanionTurn | null => turn === null
+    ? null
+    : {
+        ...turn,
+        error: turn.error === null ? null : { ...VIEWER_RUNTIME_ERROR },
+        latest_attempt: turn.latest_attempt === null
+          ? null
+          : {
+              ...turn.latest_attempt,
+              error: turn.latest_attempt.error === null
+                ? null
+                : { ...VIEWER_RUNTIME_ERROR },
+            },
+      };
+
+  return {
+    ...thread,
+    active_turn: projectTurn(thread.active_turn),
+    interrupted_turn: projectTurn(thread.interrupted_turn),
+  };
+}
 
 type CompanionPluginOAuthState = {
   orgId: string;
@@ -867,7 +906,7 @@ export function registerCompanionRoutes(
       const thread = await tenant(c, ({ actor, orgId, database }) =>
         readCompanionThreadV2({ actor, orgId, companionId, database }));
       c.header("Cache-Control", "private, no-store");
-      return c.json({ thread });
+      return c.json({ thread: projectThreadForHttp(thread) });
     } catch (error) {
       return routeError(c, error);
     }
@@ -910,7 +949,9 @@ export function registerCompanionRoutes(
           text: body.action === "answer" ? body.answer : undefined,
           database,
         });
-        return readCompanionThreadV2({ actor, orgId, companionId, database });
+        return projectThreadForHttp(
+          await readCompanionThreadV2({ actor, orgId, companionId, database }),
+        );
       });
       return c.json({ thread }, 202);
     } catch (error) {
@@ -945,7 +986,7 @@ export function registerCompanionRoutes(
       const accepted = await tenant(c, async ({ actor, orgId, database }) => {
         const turn = await cancelCompanionTurnV2({ orgId, companionId, turnId, database });
         const thread = await readCompanionThreadV2({ actor, orgId, companionId, database });
-        return { turn, thread };
+        return { turn, thread: projectThreadForHttp(thread) };
       });
       return c.json(accepted, 202);
     } catch (error) {
