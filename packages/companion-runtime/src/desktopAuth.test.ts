@@ -85,12 +85,14 @@ describe("desktop request HMAC", () => {
       method: "POST",
       pathname: `${DESKTOP_REQUEST_PATH}?org=one`,
       timestamp,
+      requestId,
       rawBody,
     })).toThrow();
     expect(() => signDesktopRequest({
       method: "POST",
       pathname: DESKTOP_REQUEST_PATH,
       timestamp,
+      requestId,
       rawBody,
     }, Buffer.alloc(31))).toThrow();
   });
