@@ -649,7 +649,7 @@ beforeAll(async () => {
   `;
   await databaseSql`
     insert into companion_runtime_instances (org_id, companion_id, health_due_at)
-    values (${orgId}::uuid, ${companionId}::uuid, now() + interval '1 day')
+    values (${orgId}::uuid, ${companionId}::uuid, now() - interval '1 second')
   `;
   const [gate] = await databaseSql<Array<{ epoch: string; enabled: boolean }>>`
     select gate_epoch::text as epoch, enabled from companion_runtime_control where id = 'runtime-v2'
@@ -732,6 +732,10 @@ describe("Runtime v2 real-process control plane", () => {
     await stopProcess(apiProcess, "SIGKILL");
     apiProcess = undefined;
     const coldTerminal = await waitForTurn(cold.turn.id, "succeeded", 45_000);
+    expect(coldTerminal.startedAt).not.toBeNull();
+    // A just-due health observation must release its lease instead of starving the accepted Send
+    // until the 30-second lease expiry. This is the production claim-latency SLO, not UI polling.
+    expect(coldTerminal.startedAt!.getTime() - coldAcceptedAt).toBeLessThan(5_000);
     expect(coldTerminal.errorCode).toBeNull();
     const [coldProjection] = await databaseSql!<Array<{ assistants: number }>>`
       select count(*) filter (where role = 'assistant')::int as assistants

@@ -656,6 +656,7 @@ async function insertOperation(input: {
   orgId?: string;
   requestId?: string;
   sourceTurnId?: string | null;
+  clientSurface?: "web" | "mobile_web" | "native_mobile";
   targetSettingsRevision?: number | null;
   targetSkillsRevision?: number | null;
 }): Promise<string> {
@@ -664,12 +665,13 @@ async function insertOperation(input: {
   await runtimeSql`
     insert into companion_operations (
       id, org_id, companion_id, request_id, kind, trigger, actor_id, source_turn_id,
-      runtime_generation,
+      runtime_generation, client_surface,
       target_settings_revision, target_skills_revision
     ) values (
       ${id}::uuid, ${input.orgId ?? ids.orgA}::uuid, ${input.companionId}::uuid,
       ${input.requestId ?? randomUUID()}::uuid, ${input.kind ?? "stop"}, ${input.trigger ?? "user"},
       ${input.actorId ?? ids.ownerA}, ${input.sourceTurnId ?? null}::uuid, 1,
+      ${input.clientSurface ?? null}::companion_client_surface,
       ${input.targetSettingsRevision ?? null},
       ${input.targetSkillsRevision ?? null}
     )
@@ -4248,6 +4250,56 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     )).toBe(true);
   });
 
+  it("preserves the native-mobile profile for an explicit start without a source turn", async () => {
+    if (!runtimeSql) throw new Error("runtime database is not initialized");
+    const operationId = await insertOperation({
+      companionId: ids.companionA,
+      kind: "start",
+      trigger: "user",
+      clientSurface: "native_mobile",
+    });
+
+    const [snapshot] = await runtimeSql<Array<{
+      clientSurface: string;
+      canWriteSkills: boolean;
+      selectedSkillIds: string[];
+      skillRefs: unknown[];
+      selectedMcpAccountIds: string[];
+    }>>`
+      select client_surface::text as "clientSurface", can_write_skills as "canWriteSkills",
+             selected_skill_ids as "selectedSkillIds", skill_refs as "skillRefs",
+             selected_mcp_account_ids as "selectedMcpAccountIds"
+      from companion_operations where id = ${operationId}::uuid
+    `;
+    expect(snapshot).toEqual({
+      clientSurface: "native_mobile",
+      canWriteSkills: false,
+      selectedSkillIds: [],
+      skillRefs: [],
+      selectedMcpAccountIds: [],
+    });
+
+    const gate = await gateStatus();
+    const executorId = "explicit-native-start";
+    const [claim] = await claimWork(executorId, gate.gateEpoch);
+    expect(claim).toMatchObject({
+      workKind: "operation",
+      workId: operationId,
+      operationKind: "start",
+      turnId: null,
+      clientSurface: "native_mobile",
+    });
+    const [authorization] = await renewAndAuthorize(claim!, executorId);
+    expect(authorization).toMatchObject({
+      authorized: true,
+      clientSurface: "native_mobile",
+      canWriteSkills: false,
+      skillRefs: [],
+      mcpRefs: [],
+    });
+    expect(await settle(claim!, executorId, "failed")).toBe(true);
+  });
+
   it("keeps native-mobile cold starts Skill-free while restaging Skills before the next web turn", async () => {
     if (!runtimeSql) throw new Error("runtime database is not initialized");
     const sql = runtimeSql;
@@ -4480,6 +4532,8 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
         mcpRefs: [expect.objectContaining({ account_id: nativeMcpId })],
       });
       expect(await observeInstance(settingsClaim!, settingsExecutor, {
+        piState: "idle",
+        piInvocationId: "pi-web-skill-restage",
         appliedSettingsRevision: 2,
         appliedSkillsRevision: 2,
       })).toBe(settingsClaim!.checkpointSequence + 1);
@@ -5111,6 +5165,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     await runtimeSql`
       update companion_runtime_instances
       set box_id = ${boxId}, box_state = 'ready',
+          pi_state = 'idle', pi_invocation_id = 'pi-implicit-settings-old',
           desired_settings_revision = 2, applied_settings_revision = 1,
           applied_skills_revision = 1, settings_actor_id = ${ids.ownerA},
           settings_available_at = now() - interval '1 second'
@@ -5135,14 +5190,24 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     expect(await settle(settingsClaim!, "implicit-settings-replica", "succeeded")).toBe(false);
     await expect(observeInstance(settingsClaim!, "implicit-settings-replica", {
       appliedSettingsRevision: 2,
-      appliedSkillsRevision: 1,
-    })).rejects.toThrow(/exact claimed revisions/);
+      appliedSkillsRevision: 2,
+    })).rejects.toThrow(/exact revisions and a new idle Pi invocation/);
+    await expect(observeInstance(settingsClaim!, "implicit-settings-replica", {
+      piState: "idle",
+      piInvocationId: "pi-implicit-settings-old",
+      appliedSettingsRevision: 2,
+      appliedSkillsRevision: 2,
+    })).rejects.toThrow(/exact revisions and a new idle Pi invocation/);
 
     expect(await observeInstance(settingsClaim!, "implicit-settings-replica", {
+      piState: "idle",
+      piInvocationId: "pi-implicit-settings-new",
       appliedSettingsRevision: 2,
       appliedSkillsRevision: 2,
     })).toBe(2);
     expect(await observeInstance(settingsClaim!, "implicit-settings-replica", {
+      piState: "idle",
+      piInvocationId: "pi-implicit-settings-new",
       appliedSettingsRevision: 2,
       appliedSkillsRevision: 2,
     })).toBeNull();
@@ -5151,6 +5216,8 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       sequence: number;
       appliedSettings: number;
       appliedSkills: number;
+      piState: string;
+      piInvocationId: string;
       claimRevision: number | null;
       claimSkillsRevision: number | null;
       leaseToken: string | null;
@@ -5159,6 +5226,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
              i.settings_checkpoint_sequence::int as sequence,
              i.applied_settings_revision::int as "appliedSettings",
              i.applied_skills_revision::int as "appliedSkills",
+             i.pi_state::text as "piState", i.pi_invocation_id as "piInvocationId",
              i.settings_claim_revision::int as "claimRevision",
              i.settings_claim_skills_revision::int as "claimSkillsRevision",
              l.claim_token::text as "leaseToken"
@@ -5172,6 +5240,8 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       sequence: 2,
       appliedSettings: 1,
       appliedSkills: 1,
+      piState: "idle",
+      piInvocationId: "pi-implicit-settings-new",
       claimRevision: 2,
       claimSkillsRevision: 2,
       leaseToken: settingsClaim!.claimToken,
@@ -5183,6 +5253,8 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       sequence: number;
       appliedSettings: number;
       appliedSkills: number;
+      piState: string;
+      piInvocationId: string;
       claimEpoch: number | null;
       claimActor: string | null;
       claimRevision: number | null;
@@ -5193,6 +5265,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
              i.settings_checkpoint_sequence::int as sequence,
              i.applied_settings_revision::int as "appliedSettings",
              i.applied_skills_revision::int as "appliedSkills",
+             i.pi_state::text as "piState", i.pi_invocation_id as "piInvocationId",
              i.settings_claim_epoch::int as "claimEpoch",
              i.settings_claim_actor_id as "claimActor",
              i.settings_claim_revision::int as "claimRevision",
@@ -5208,6 +5281,8 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       sequence: 3,
       appliedSettings: 2,
       appliedSkills: 2,
+      piState: "idle",
+      piInvocationId: "pi-implicit-settings-new",
       claimEpoch: null,
       claimActor: null,
       claimRevision: null,
@@ -5597,6 +5672,8 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       skillRefs: [expect.objectContaining({ skill_id: ids.ownerSkill })],
     });
     expect(await observeInstance(settingsClaim!, settingsExecutor, {
+      piState: "idle",
+      piInvocationId: "pi-web-restage-after-native",
       appliedSettingsRevision: 2,
       appliedSkillsRevision: 1,
     })).toBe(settingsClaim!.checkpointSequence + 1);
@@ -5869,6 +5946,8 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
         mcpRefs: [expect.objectContaining({ account_id: mcpTwoId })],
       });
       expect(await observeInstance(nextClaim!, "settings-drift-next-replica", {
+        piState: "idle",
+        piInvocationId: "pi-settings-drift-next",
         appliedSettingsRevision: 3,
         appliedSkillsRevision: 3,
       })).toBe(3);
@@ -7207,6 +7286,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       authorized: true,
       denialCode: null,
       authorizationActorId: null,
+      clientSurface: null,
       boxId: healthBoxId,
       boxState: "idle",
       piState: "running",

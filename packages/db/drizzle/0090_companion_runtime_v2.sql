@@ -991,7 +991,14 @@ BEGIN
   END IF;
 
   IF NEW.kind IN ('start', 'restart_pi', 'restart_box', 'apply_settings') THEN
-    SELECT COALESCE(t.client_surface, 'web'::public.companion_client_surface)
+    -- A turn-triggered lifecycle operation inherits the immutable send surface. Explicit user
+    -- lifecycle intent has no source turn, so preserve the surface authorized by the API instead
+    -- of silently widening native-mobile work to the web Skills/MCP profile.
+    SELECT COALESCE(
+      t.client_surface,
+      NEW.client_surface,
+      'web'::public.companion_client_surface
+    )
     INTO NEW.client_surface
     FROM (SELECT 1) singleton
     LEFT JOIN public.companion_turns t
@@ -3089,6 +3096,7 @@ BEGIN
     -- Health may observe identifiers already in the runtime projection. It never receives an actor,
     -- model/resource selection, credential reference, or authority to wake/decrypt.
     v_actor_authorized := true;
+    v_client_surface := NULL;
     SELECT i.health_checkpoint, i.health_checkpoint_sequence
     INTO v_work_checkpoint, v_work_checkpoint_sequence
     FROM public.companion_runtime_instances i
@@ -4392,16 +4400,17 @@ BEGIN
   IF p_work_kind = 'settings' AND (
        p_box_id IS NOT NULL
        OR p_box_state IS NOT NULL
-       OR p_pi_state IS NOT NULL
-       OR p_pi_invocation_id IS NOT NULL
        OR p_disk_layout_version IS NOT NULL
+       OR p_pi_state IS DISTINCT FROM 'idle'::public.companion_pi_observed_state
+       OR p_pi_invocation_id IS NULL
+       OR p_pi_invocation_id IS NOT DISTINCT FROM v_pi_invocation_id
        OR p_applied_settings_revision IS DISTINCT FROM v_settings_claim_revision
        OR CASE WHEN v_client_surface = 'native_mobile'
             THEN p_applied_skills_revision IS NOT NULL
             ELSE p_applied_skills_revision IS DISTINCT FROM v_settings_claim_skills_revision
           END
      ) THEN
-    RAISE EXCEPTION 'settings observation must prove the exact claimed revisions only'
+    RAISE EXCEPTION 'settings activation requires exact revisions and a new idle Pi invocation'
       USING ERRCODE = '22023';
   END IF;
 

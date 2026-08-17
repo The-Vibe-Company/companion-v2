@@ -2,7 +2,11 @@ import { RuntimeInvariantError } from "./errors";
 import { runtimeSucceeded, type RuntimeWorkDisposition } from "./handler";
 import type { LeaseSession } from "./leaseSession";
 import type { RuntimeEngineDependencies } from "./ports";
+import { retryIdempotentLifecycle, type IdempotentLifecycleCall } from "./retry";
+import { activateRuntimeSettings } from "./settingsActivation";
 import type { RuntimeAuthorization, SettingsRuntimeClaim } from "./types";
+
+const SETTINGS_ACTIVATION_DEADLINE_MS = 10 * 60 * 1_000;
 
 interface SettingsContext {
   claim: SettingsRuntimeClaim;
@@ -49,6 +53,20 @@ function snapshot(context: SettingsContext): {
 export async function handleSettings(
   context: SettingsContext,
 ): Promise<RuntimeWorkDisposition> {
+  const deadlineAt = context.claim.coldStartDeadlineAt
+    ?? new Date(context.deps.clock.now().getTime() + SETTINGS_ACTIVATION_DEADLINE_MS);
+  const lifecycle = async <T>(
+    call: IdempotentLifecycleCall,
+    effect: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> => await retryIdempotentLifecycle({
+    call,
+    clock: context.deps.clock,
+    jitter: context.deps.jitter,
+    signal: context.session.signal,
+    deadlineAt,
+    operation: async () => await context.session.external(effect),
+  });
+
   for (;;) {
     const authorization = await context.session.reauthorize();
     if (authorization.workCheckpoint === "applied") return runtimeSucceeded;
@@ -60,48 +78,57 @@ export async function handleSettings(
       });
     }
     const frozen = snapshot(context);
-    const material = await context.session.fencedMutation(async () =>
-      await context.deps.materialProvider.getMaterial({
-        store: context.deps.store,
-        fence: context.session.fence,
-        signal: context.session.signal,
-      }));
-    const staged = await context.session.external(async (signal) => {
-      // `getMaterial` may have completed a fenced OAuth generation CAS. The
-      // mandatory pre-Box reauthorization performed by `external` is therefore
-      // the authoritative ref set to pair with those material bytes.
-      const live = snapshot(context);
-      return await context.deps.resourceStager.stageExistingBox({
-        orgId: context.claim.orgId,
-        companionId: context.claim.companionId,
-        boxId: live.boxId,
-        allowBoxCreate: false,
-        authorization: live.authorization,
-        material,
-        clientSurface: live.clientSurface,
-        targetSettingsRevision: live.settingsRevision,
-        targetSkillsRevision: live.skillsRevision,
-        signal,
-      });
+    const activated = await activateRuntimeSettings({
+      expectedSettingsRevision: frozen.settingsRevision,
+      expectedSkillsRevision: frozen.skillsRevision,
+      previousPiInvocationId: frozen.authorization.piInvocationId,
+      deadlineAt,
+      clock: context.deps.clock,
+      signal: context.session.signal,
+      stage: async () => {
+        const material = await context.session.fencedMutation(async () =>
+          await context.deps.materialProvider.getMaterial({
+            store: context.deps.store,
+            fence: context.session.fence,
+            signal: context.session.signal,
+          }));
+        return await context.session.external(async (signal) => {
+          // `getMaterial` may have completed a fenced OAuth generation CAS. The
+          // mandatory pre-Box reauthorization performed by `external` is therefore
+          // the authoritative ref set to pair with those material bytes.
+          const live = snapshot(context);
+          return await context.deps.resourceStager.stageExistingBox({
+            orgId: context.claim.orgId,
+            companionId: context.claim.companionId,
+            boxId: live.boxId,
+            allowBoxCreate: false,
+            authorization: live.authorization,
+            material,
+            clientSurface: live.clientSurface,
+            targetSettingsRevision: live.settingsRevision,
+            targetSkillsRevision: live.skillsRevision,
+            signal,
+          });
+        });
+      },
+      restartPi: async () => await lifecycle("restart_pi", async (signal) => {
+        const live = snapshot(context);
+        return await context.deps.pi.restartPiDaemon({ boxId: live.boxId, signal });
+      }),
+      observePi: async () => await lifecycle("get_status", async (signal) => {
+        const live = snapshot(context);
+        return await context.deps.pi.piDaemonStatus({ boxId: live.boxId, signal });
+      }),
     });
-    if (
-      staged.diskLayoutVersion !== 14
-      || staged.appliedSettingsRevision !== frozen.settingsRevision
-      || staged.appliedSkillsRevision !== frozen.skillsRevision
-    ) {
-      throw new RuntimeInvariantError({
-        code: "settings_apply_mismatch",
-        message: "The Box did not apply the exact claimed settings snapshot.",
-        action: "retry",
-      });
-    }
     await context.session.observe({
       runtimeGeneration: context.claim.runtimeGeneration,
       observedAt: context.deps.clock.now(),
-      appliedSettingsRevision: frozen.settingsRevision,
-      ...(frozen.skillsRevision === null
+      piState: activated.piState,
+      piInvocationId: activated.piInvocationId,
+      appliedSettingsRevision: activated.appliedSettingsRevision,
+      ...(activated.appliedSkillsRevision === null
         ? {}
-        : { appliedSkillsRevision: frozen.skillsRevision }),
+        : { appliedSkillsRevision: activated.appliedSkillsRevision }),
     });
   }
 }

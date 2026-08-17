@@ -171,7 +171,9 @@ The immutable Companion Owner is never a fallback resource owner for an Editor. 
 requires both the turn actor and the responder to retain access to every personal resource used by
 the attempt. Revocation fails closed before secrets are decrypted or Box is contacted. A settings
 change accepted while a turn is active waits until that turn settles, then applies before the next
-turn.
+turn. Applying configuration to a warm Box stages the exact authorized snapshot and restarts Pi;
+the applied revisions advance only in the same fenced proof as a different idle Pi invocation. A
+takeover that cannot see that proof stages and restarts again rather than trusting the old daemon.
 
 ## Box lifecycle
 

@@ -116,7 +116,9 @@ queued → starting → dispatching → running ↔ needs_input
 
 Only one attempt is active per Companion. Later turns remain queued in durable order. An interrupted
 turn blocks the queue until Owner/Editor Retry or Cancel. Settings revisions accepted during a turn
-apply after its settlement and before the next turn.
+apply after its settlement and before the next turn. On a warm Box, configuration is published as
+applied only after runtime stages the exact snapshot, restarts Pi, and observes a different idle Pi
+invocation; takeover repeats those idempotent steps if their final observation was lost.
 
 ## Dedicated runtime execution
 
