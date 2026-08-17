@@ -949,12 +949,12 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       })).rejects.toMatchObject({ code: "P0002" });
 
       await sql`
-        delete from memberships where org_id = ${ids.orgA}::uuid and user_id = ${ids.editorA}
+        delete from memberships where org_id = ${ids.orgA}::uuid and user_id = ${ids.viewerA}
       `;
       try {
         await expect(asApi({
           orgId: ids.orgA,
-          actorId: ids.editorA,
+          actorId: ids.viewerA,
           action: (tx) => tx`
             select * from public.companion_api_update_member_state(
               ${ids.orgA}::uuid, ${companionId}::uuid, true, null, null
@@ -964,7 +964,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       } finally {
         await sql`
           insert into memberships(org_id, user_id, org_role)
-          values (${ids.orgA}::uuid, ${ids.editorA}, 'developer')
+          values (${ids.orgA}::uuid, ${ids.viewerA}, 'developer')
           on conflict (org_id, user_id) do nothing
         `;
       }
