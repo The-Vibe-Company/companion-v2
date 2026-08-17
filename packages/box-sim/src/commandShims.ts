@@ -365,6 +365,11 @@ async function startDaemon(machine: BoxSimCommandMachine, restart: boolean): Pro
   }
   machine.daemon.status = "active";
   machine.daemon.invocationId = nextInvocationId(machine);
+  // Match SegmentedCompanionPiJournal.beginInvocation(): a new broker invocation cannot resume
+  // the attempt bound by its predecessor, so its remaining records are retired before Pi can emit
+  // anything for the new invocation. Without this, the simulator poisons an explicit Retry with a
+  // permanently non-empty broker queue even though the production broker starts cleanly.
+  machine.daemon.brokerAcknowledgedCursor = brokerTailCursor(machine);
   machine.daemon.rpcReady = true;
   machine.daemon.activeAttemptId = null;
   try {

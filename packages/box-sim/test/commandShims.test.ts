@@ -201,6 +201,9 @@ describe("semantic Box command shims", () => {
 
     await expect(executeBoxCommand(machine, command("start"))).resolves.toMatchObject({ success: true });
     expect(machine.persistentFiles.has(".companion/runtime/state/providers.env")).toBe(false);
+    machine.daemon.activeAttemptId = "attempt-before-restart";
+    appendPiEvent(machine, { type: "turn_start" });
+    expect(machine.daemon).toMatchObject({ brokerAcknowledgedCursor: 0 });
     await expect(executeBoxCommand(machine, command("restart"))).resolves.toMatchObject({ success: true });
 
     expect(controller.restart).toHaveBeenCalledOnce();
@@ -210,6 +213,10 @@ describe("semantic Box command shims", () => {
       status: "active",
       invocationId: "00000000000000000000000000000002",
       restartCount: 1,
+      activeAttemptId: null,
+      // The old event and the process-exit record belong to the retired invocation. A real layout-14
+      // broker acknowledges both before accepting commands for the replacement process.
+      brokerAcknowledgedCursor: 2,
     });
   });
 
