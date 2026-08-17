@@ -74,6 +74,8 @@ const ids = {
   mcpGeneration: randomUUID(),
   editorMcpAccount: randomUUID(),
   editorMcpGeneration: randomUUID(),
+  revokedMcpAccount: randomUUID(),
+  revokedMcpGeneration: randomUUID(),
 };
 const providerId = `runtime-exec-${suffix}`;
 const providerGeneration = randomUUID();
@@ -136,11 +138,14 @@ async function createCompanion(input: {
   const actorId = input.actorId ?? ids.ownerA;
   const selectedSkillIds = input.selectedSkillIds ?? [ids.skill];
   const selectedMcpAccountIds = input.selectedMcpAccountIds ?? [ids.mcpAccount];
+  const mcpGenerations = new Map<string, string>([
+    [ids.mcpAccount, ids.mcpGeneration],
+    [ids.editorMcpAccount, ids.editorMcpGeneration],
+    [ids.revokedMcpAccount, ids.revokedMcpGeneration],
+  ]);
   const mcpCredentialRefs = selectedMcpAccountIds.map((accountId) => ({
     account_id: accountId,
-    credential_generation: accountId === ids.editorMcpAccount
-      ? ids.editorMcpGeneration
-      : ids.mcpGeneration,
+    credential_generation: mcpGenerations.get(accountId) ?? ids.mcpGeneration,
   }));
   await sql`
     insert into companions (
@@ -391,6 +396,13 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           ${ids.editorMcpGeneration}::uuid, 'ciphertext-editor-mcp', 'iv-editor-mcp',
           'tag-editor-mcp', 'wrapped-editor-mcp', 'wrap-iv-editor-mcp',
           'wrap-tag-editor-mcp', 'key-editor-mcp'
+        ),
+        (
+          ${ids.revokedMcpAccount}::uuid, ${ids.orgA}::uuid, ${ids.revokedA}, 'fixture-mcp',
+          'Revocation fixture', 'http', ${sql.json({ endpoint: "revoked-fixture" })},
+          ${ids.revokedMcpGeneration}::uuid, 'ciphertext-revoked-mcp', 'iv-revoked-mcp',
+          'tag-revoked-mcp', 'wrapped-revoked-mcp', 'wrap-iv-revoked-mcp',
+          'wrap-tag-revoked-mcp', 'key-revoked-mcp'
         )
     `;
     const [gate] = await sql<Array<{ gateEpoch: string }>>`
@@ -460,7 +472,12 @@ describe("Companion runtime executor PostgreSQL surface", () => {
 
   it("returns exact encrypted material, fences OAuth CAS, and refuses forged or revoked authority", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
-    const fixture = await createCompanion({ actorId: ids.revokedA, workspaceRole: "editor" });
+    const fixture = await createCompanion({
+      actorId: ids.revokedA,
+      workspaceRole: "editor",
+      selectedSkillIds: [ids.orgSkill],
+      selectedMcpAccountIds: [ids.revokedMcpAccount],
+    });
     try {
       const claim = await claimWork();
       expect(claim.workKind).toBe("attempt");
@@ -486,14 +503,14 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         ciphertext: "ciphertext-provider",
       }]);
       expect(material[0]?.skillMaterial).toMatchObject([{
-        skill_id: ids.skill,
-        version_id: ids.skillVersion,
-        checksum,
+        skill_id: ids.orgSkill,
+        version_id: ids.orgSkillVersion,
+        checksum: `sha256:${"b".repeat(64)}`,
       }]);
       expect(material[0]?.mcpMaterial).toMatchObject([{
-        account_id: ids.mcpAccount,
-        credential_generation: ids.mcpGeneration,
-        ciphertext: "ciphertext-mcp",
+        account_id: ids.revokedMcpAccount,
+        credential_generation: ids.revokedMcpGeneration,
+        ciphertext: "ciphertext-revoked-mcp",
       }]);
 
       const forged = await asRuntime((tx) => tx`
@@ -511,8 +528,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         from public.companion_runtime_cas_mcp_oauth(
           ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
           ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
-          ${claim.workKind}, ${claim.workId}::uuid, ${ids.mcpAccount}::uuid,
-          ${ids.mcpGeneration}::uuid, ${nextGeneration}::uuid,
+          ${claim.workKind}, ${claim.workId}::uuid, ${ids.revokedMcpAccount}::uuid,
+          ${ids.revokedMcpGeneration}::uuid, ${nextGeneration}::uuid,
           'ciphertext-mcp-next', 'iv-mcp-next', 'tag-mcp-next', 'wrapped-mcp-next',
           'wrap-iv-mcp-next', 'wrap-tag-mcp-next', 'key-mcp-next'
         )
@@ -523,7 +540,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       await sql`
         update companion_mcp_accounts
         set credential_generation = ${nextGeneration}::uuid, updated_at = now()
-        where id = ${ids.mcpAccount}::uuid
+        where id = ${ids.revokedMcpAccount}::uuid
       `;
       const changed = await asRuntime((tx) => tx<Array<{ matches: boolean }>>`
         select credential_snapshot_matches as matches
