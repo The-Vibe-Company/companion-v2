@@ -102,9 +102,9 @@ The compiled `scripts/companion-agent-client.mjs` is the only programmatic trans
 JSON request from stdin, writes one value-free JSON result to stdout, signs a fresh request-bound
 JWT, and accepts only the closed operation registry documented in `reference/api.md`. Upload and
 download paths also travel in that JSON input, never as secret-bearing command arguments. Secret
-redemption is isolated further: `companion_lib.api_redeem_secret_plan` passes an anonymous inherited
-pipe to the client's `secret-redeem` action. The client refuses stdout, stderr, and regular-file
-descriptors; plaintext exists only in the pipe reader's memory and the final mode-0600 projection.
+redemption is isolated further: `companion_lib.api_redeem_secret_plan` passes an inherited owner-only
+FIFO to the client's `secret-redeem` action. The client refuses stdout, stderr, sockets, and
+regular-file descriptors; plaintext exists only in the pipe reader's memory and the final mode-0600 projection.
 
 Schema v2 and legacy flat PAT entries are migrated/preserved as `legacyPat`; they are never selected
 silently. A user must set `COMPANION_AUTH_MODE=legacy-pat` explicitly to use one. An environment
@@ -1334,7 +1334,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.66.0","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.66.1","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 

@@ -6,6 +6,7 @@ import json
 import contextlib
 import io
 import os
+import stat
 import sys
 import tempfile
 import threading
@@ -256,6 +257,39 @@ print(json.dumps({"ok": True, "data": {"items": 1, "tombstones": 0}}))
         recorded = trace.read_text(encoding="utf-8")
         self.assertNotIn(SENTINEL, recorded)
         self.assertNotIn("value", recorded)
+
+
+class PrivateSecretPipeTests(unittest.TestCase):
+    """Pin the descriptor contract that assertPrivateOutputDescriptor enforces client-side.
+
+    Only a macOS runner reproduces the original failure: Darwin reports every anonymous
+    pipe as 0660, so os.pipe() could never satisfy the owner-only check and no secret
+    could be projected on a Mac. On Linux anonymous pipes are already 0600, which is why
+    the Ubuntu-only CI matrix never caught it.
+    """
+
+    def test_descriptor_satisfies_the_client_guard(self) -> None:
+        read_fd, write_fd = companion_lib._private_secret_pipe()
+        try:
+            info = os.fstat(write_fd)
+            self.assertTrue(stat.S_ISFIFO(info.st_mode))
+            self.assertEqual(info.st_mode & 0o077, 0)
+            self.assertEqual(info.st_uid, os.getuid())
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+
+    def test_transports_bytes_and_signals_eof(self) -> None:
+        read_fd, write_fd = companion_lib._private_secret_pipe()
+        try:
+            os.write(write_fd, SENTINEL.encode("utf-8"))
+        finally:
+            os.close(write_fd)
+        try:
+            self.assertEqual(os.read(read_fd, 64).decode("utf-8"), SENTINEL)
+            self.assertEqual(os.read(read_fd, 64), b"")
+        finally:
+            os.close(read_fd)
 
 
 if __name__ == "__main__":

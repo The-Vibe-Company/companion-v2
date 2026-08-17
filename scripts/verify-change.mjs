@@ -175,15 +175,11 @@ export function createVerificationPlan(files, { workspaces = [], env = process.e
     fastSteps.push(
       step("skill-agent-client", "pnpm", ["--filter", "@companion/companion-skill", "check:agent-client"]),
       step("skill-version", "pnpm", ["--filter", "@companion/companion-skill", "check:version-bump"]),
-      step("skill-guards", "python", [
-        "-m",
-        "unittest",
-        "discover",
-        "-s",
-        "packages/companion-skill/skill/scripts",
-        "-p",
-        "test_*.py",
-      ]),
+      // Shared with both CI guard jobs so the suite is invoked one way everywhere, and so a
+      // vacuous "Ran 0 tests" pass cannot slip through any of the three callers. The script
+      // honours PYTHON, which is what makes this step runnable on a stock macOS where only
+      // python3 exists on PATH.
+      step("skill-guards", "bash", ["scripts/run-skill-guards.sh"]),
     );
   }
   if (scope.quality) {

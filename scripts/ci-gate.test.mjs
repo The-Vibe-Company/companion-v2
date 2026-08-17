@@ -9,12 +9,14 @@ const scopeOutputs = {
   browser: "false",
   containers: "false",
   dependencies: "false",
+  skill: "false",
 };
 
 function jobs(overrides = {}, outputs = scopeOutputs) {
   return {
     scope: { result: "success", outputs },
     hygiene: { result: "success" },
+    "skill-guards-macos": { result: "skipped" },
     quality: { result: "skipped" },
     "application-build": { result: "skipped" },
     "database-integration": { result: "skipped" },
@@ -45,6 +47,17 @@ test("rejects missing scope outputs instead of treating them as false", () => {
   assert.deepEqual(rejectedJobs(jobs({}, outputs), "pull_request"), [
     "scope.browser=missing (required boolean output)",
   ]);
+});
+
+test("requires the macOS skill guards whenever the skill scope is on", () => {
+  const outputs = { ...scopeOutputs, skill: "true" };
+  assert.deepEqual(rejectedJobs(jobs({}, outputs), "pull_request"), [
+    "skill-guards-macos=skipped (required success)",
+  ]);
+  assert.deepEqual(
+    rejectedJobs(jobs({ "skill-guards-macos": { result: "success" } }, outputs), "pull_request"),
+    [],
+  );
 });
 
 test("requires Node 20 on main pushes and Node 20 plus coverage weekly", () => {

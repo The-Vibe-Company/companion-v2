@@ -77,8 +77,8 @@ Uploads use `action: "upload"` plus `inputPath` and an exact query containing
 `action=publish|validate`, `expect_slug`, and `version`; existing skills also require
 `expect_skill_id`. Downloads use `action: "download"` plus `outputPath`. Neither a PAT, JWT,
 transfer ticket, nor secret value belongs in argv. Secret redemption is the one special transport:
-the Python runtime invokes `action: "secret-redeem"` with an inherited anonymous pipe descriptor
-of 3 or greater. The client refuses stdout, stderr, and regular files, writes the redeemed JSON only
+the Python runtime invokes `action: "secret-redeem"` with an inherited owner-only FIFO descriptor
+of 3 or greater. The client refuses stdout, stderr, sockets, and regular files, writes the redeemed JSON only
 to that pipe, and leaves only item counts on stdout. Do not invoke the grant or redeem endpoints via
 the generic `api` action. These are the
 closed Companion Agent Auth operations; the same routes remain compatible with an explicitly chosen
@@ -301,7 +301,7 @@ missing slot blocks before local mutation; an optional missing slot only warns.
 
 After one global user confirmation, explicit legacy PAT mode performs the two HTTP exchanges below.
 Agent Auth instead calls `api_redeem_secret_plan`, which performs the same exchange inside the
-bundled client and returns plaintext only through its inherited anonymous pipe:
+bundled client and returns plaintext only through its inherited owner-only FIFO:
 
 ```http
 POST /secret-retrievals/{planId}/grant

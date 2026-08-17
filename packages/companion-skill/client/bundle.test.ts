@@ -1,6 +1,17 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -217,6 +228,67 @@ describe("compiled Companion agent client", () => {
       expect(result.stderr).toBe("");
       expect(existsSync(join(fixtureRoot, ".companion", "credentials.json"))).toBe(false);
     } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts the owner-only FIFO the bundled Python runtime builds, and only that", async () => {
+    // companion_lib._private_secret_pipe is the only producer of these descriptors, and it
+    // asserts the guard's conditions in Python rather than calling the guard itself. Tighten
+    // the guard beyond what that helper builds and the Python suite stays green while secret
+    // projection breaks again, which is exactly how the macOS outage happened. This runs both
+    // descriptors through the real compiled guard so the two sides cannot drift apart.
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "companion-delegation-fifo-"));
+    const fifoPath = join(fixtureRoot, "pipe");
+    const created = spawnSync("mkfifo", ["-m", "600", fifoPath]);
+    expect(created.status).toBe(0);
+    // Mirror the helper: open both ends, then unlink, so the descriptor under test is the
+    // one the client actually receives in production.
+    const readFd = openSync(fifoPath, constants.O_RDONLY | constants.O_NONBLOCK);
+    const writeFd = openSync(fifoPath, constants.O_WRONLY);
+    unlinkSync(fifoPath);
+
+    const delegateOverFd = (descriptor: number | "pipe") =>
+      new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+        const child = spawn(process.execPath, [clientPath], {
+          env: { ...process.env, HOME: fixtureRoot },
+          stdio: ["pipe", "pipe", "pipe", descriptor],
+        });
+        // Passing a raw descriptor widens the stdio types, so narrow them once here.
+        const { stdin, stdout: childStdout, stderr: childStderr } = child;
+        if (!stdin || !childStdout || !childStderr) {
+          reject(new Error("expected piped stdin, stdout, and stderr"));
+          return;
+        }
+        let stdout = "";
+        let stderr = "";
+        childStdout.on("data", (chunk) => { stdout += String(chunk); });
+        childStderr.on("data", (chunk) => { stderr += String(chunk); });
+        child.once("error", reject);
+        child.once("close", (status) => resolve({ status, stdout, stderr }));
+        stdin.end(JSON.stringify({
+          action: "delegate",
+          outputFd: 3,
+          targetWorkspaceId: "conductor-workspace-1",
+        }));
+      });
+
+    try {
+      // delegate checks the descriptor before it reads credentials, so the guard is reached
+      // even with an empty HOME. secret-redeem resolves credentials first and would fail
+      // earlier, proving nothing about the descriptor.
+      const overSocket = await delegateOverFd("pipe");
+      expect(overSocket.stdout).toContain("requires a private owner-only FIFO");
+
+      const overFifo = await delegateOverFd(writeFd);
+      expect(overFifo.stdout).not.toContain("requires a private owner-only FIFO");
+      expect(overFifo.stdout).not.toContain("requires an inherited private pipe descriptor");
+      expect(JSON.parse(overFifo.stdout).ok).toBe(false); // stopped later, on missing credentials
+      expect(overFifo.stdout).not.toContain("cmp_pat_");
+      expect(overFifo.stderr).toBe("");
+    } finally {
+      closeSync(readFd);
+      closeSync(writeFd);
       rmSync(fixtureRoot, { recursive: true, force: true });
     }
   });

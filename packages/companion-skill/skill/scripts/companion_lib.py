@@ -21,7 +21,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from functools import cmp_to_key
 from pathlib import Path
@@ -92,6 +92,56 @@ def _agent_request(token: str, payload: dict[str, Any]) -> Any:
     return result.get("data")
 
 
+def _private_secret_pipe() -> tuple[int, int]:
+    """Return (read_fd, write_fd) over a FIFO the Agent Auth client will accept.
+
+    os.pipe() cannot be used here. macOS reports every anonymous pipe as mode 0660, the
+    client rejects any descriptor carrying group or other bits, and fchmod on a pipe is
+    refused with EINVAL, so the mode cannot be corrected after the fact. A named FIFO can
+    be created at 0600 instead, and it is unlinked as soon as both ends are open.
+
+    That is very nearly, but not exactly, an anonymous pipe. Between mkfifo and unlink the
+    transport carries a filesystem name. The enclosing 0700 directory keeps other users
+    out, so this is not a cross-privilege window, but a process running as this same uid
+    could open it during that interval. Callers already trust same-uid processes, which
+    read the 0600 secret projections directly.
+    """
+    try:
+        directory = tempfile.mkdtemp(prefix="companion-secret-")
+        os.chmod(directory, 0o700)
+    except OSError as error:
+        # os.pipe() touched no filesystem, so this is a new way to fail. Report it in the
+        # module's convention instead of surfacing a traceback.
+        fail(f"could not create the private secret transport directory: {error}")
+    path = os.path.join(directory, "pipe")
+    read_fd: int | None = None
+    write_fd: int | None = None
+    try:
+        os.mkfifo(path, 0o600)
+        os.chmod(path, 0o600)  # mkfifo subtracts the umask, so restate the mode explicitly.
+        # Opening the read end non-blocking sidesteps the FIFO rendezvous, which would
+        # otherwise deadlock a single-threaded opener. The reader thread wants blocking
+        # semantics, so the flag is cleared once the write end exists.
+        read_fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        write_fd = os.open(path, os.O_WRONLY)
+        os.set_blocking(read_fd, True)
+        return read_fd, write_fd
+    except BaseException as error:
+        for fd in (read_fd, write_fd):
+            if fd is not None:
+                os.close(fd)
+        if isinstance(error, OSError):
+            fail(f"could not create the private secret transport: {error}")
+        raise
+    finally:
+        # Best-effort: a cleanup error must never mask the redemption outcome, and the
+        # descriptors above are what actually carry the secret.
+        with suppress(OSError):
+            os.unlink(path)
+        with suppress(OSError):
+            os.rmdir(directory)
+
+
 def _agent_secret_redeem(token: str, plan_id: str) -> dict[str, Any]:
     """Redeem one plan through an inherited pipe so plaintext never reaches stdout or argv."""
     if os.name != "posix":  # pragma: no cover - the bundled local workflow currently targets macOS/Linux
@@ -106,7 +156,7 @@ def _agent_secret_redeem(token: str, plan_id: str) -> dict[str, Any]:
     if not node:
         fail("Node.js 20 or newer is required for Companion Agent Auth")
 
-    read_fd, write_fd = os.pipe()
+    read_fd, write_fd = _private_secret_pipe()
     secret_bytes = bytearray()
     reader_errors: list[BaseException] = []
     too_large = threading.Event()
