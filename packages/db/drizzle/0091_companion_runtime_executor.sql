@@ -895,7 +895,13 @@ DECLARE
   v_box_id text;
   v_box_state public.companion_box_observed_state;
   v_generation bigint;
-  v_authorized boolean := false;
+  v_owner_id text;
+  v_selected_skill_ids jsonb;
+  v_selected_mcp_account_ids jsonb;
+  v_applied_settings_revision bigint;
+  v_desired_settings_revision bigint;
+  v_applied_skills_revision integer;
+  v_skills_revision integer;
 BEGIN
   IF p_actor_id IS NULL OR char_length(p_actor_id) NOT BETWEEN 1 AND 200
      OR p_actor_id ~ E'[\n\r]' THEN
@@ -910,29 +916,128 @@ BEGIN
     RETURN;
   END IF;
 
+  -- Runtime claims and API settings mutations both take the instance before the Companion. Keep
+  -- that order here and hold SHARE locks through the authorization result so a concurrent settings
+  -- edit cannot mix an old staged revision with a new resource selection.
   SELECT instance.box_id, instance.box_state, instance.generation,
-    companion.owner_id = p_actor_id OR EXISTS (
-      SELECT 1 FROM public.companion_workspace_access access
-      WHERE access.org_id = companion.org_id
-        AND access.companion_id = companion.id
-        AND access.role = 'editor'
-    )
-  INTO v_box_id, v_box_state, v_generation, v_authorized
-  FROM public.memberships membership
-  JOIN public.companions companion
-    ON companion.org_id = membership.org_id AND companion.id = p_companion_id
-  JOIN public.companion_runtime_instances instance
-    ON instance.org_id = companion.org_id AND instance.companion_id = companion.id
-  WHERE membership.org_id = p_org_id
-    AND membership.user_id = p_actor_id
-    AND companion.org_id = p_org_id
+         instance.applied_settings_revision, instance.desired_settings_revision,
+         instance.applied_skills_revision
+  INTO v_box_id, v_box_state, v_generation,
+       v_applied_settings_revision, v_desired_settings_revision,
+       v_applied_skills_revision
+  FROM public.companion_runtime_instances instance
+  WHERE instance.org_id = p_org_id
+    AND instance.companion_id = p_companion_id
     AND instance.retirement_state = 'active'
-  FOR KEY SHARE OF membership, companion, instance;
-  IF NOT FOUND OR NOT v_authorized THEN
+  FOR SHARE;
+  IF NOT FOUND THEN
     RETURN QUERY SELECT false, 'not_authorized'::text, NULL::text,
       NULL::public.companion_box_observed_state, NULL::bigint;
     RETURN;
   END IF;
+
+  SELECT companion.owner_id, companion.selected_skill_ids,
+         companion.selected_mcp_account_ids, companion.skills_revision
+  INTO v_owner_id, v_selected_skill_ids, v_selected_mcp_account_ids, v_skills_revision
+  FROM public.memberships membership
+  JOIN public.companions companion
+    ON companion.org_id = membership.org_id AND companion.id = p_companion_id
+  WHERE membership.org_id = p_org_id
+    AND membership.user_id = p_actor_id
+    AND companion.org_id = p_org_id
+  FOR SHARE OF membership, companion;
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT false, 'not_authorized'::text, NULL::text,
+      NULL::public.companion_box_observed_state, NULL::bigint;
+    RETURN;
+  END IF;
+
+  IF v_owner_id <> p_actor_id THEN
+    PERFORM 1
+    FROM public.companion_workspace_access access
+    WHERE access.org_id = p_org_id
+      AND access.companion_id = p_companion_id
+      AND access.role = 'editor'
+    FOR SHARE;
+    IF NOT FOUND THEN
+      RETURN QUERY SELECT false, 'not_authorized'::text, NULL::text,
+        NULL::public.companion_box_observed_state, NULL::bigint;
+      RETURN;
+    END IF;
+  END IF;
+
+  -- A desktop exposes the already-running Box, including anything left on disk. Never mint while
+  -- a newer settings or Skills selection is pending, because the warm Box may still contain the
+  -- previous actor's private resources.
+  IF v_applied_settings_revision IS DISTINCT FROM v_desired_settings_revision
+     OR v_applied_skills_revision IS DISTINCT FROM v_skills_revision THEN
+    RETURN QUERY SELECT false, 'settings_not_applied'::text, NULL::text,
+      NULL::public.companion_box_observed_state, NULL::bigint;
+    RETURN;
+  END IF;
+
+  IF jsonb_typeof(v_selected_skill_ids) IS DISTINCT FROM 'array'
+     OR jsonb_typeof(v_selected_mcp_account_ids) IS DISTINCT FROM 'array' THEN
+    RETURN QUERY SELECT false, 'resource_access_revoked'::text, NULL::text,
+      NULL::public.companion_box_observed_state, NULL::bigint;
+    RETURN;
+  END IF;
+
+  -- Skill mutations take their resource row before bumping selected Companions. Do not wait on a
+  -- resource while holding the instance/Companion hierarchy: NOWAIT turns that inverse-order race
+  -- into a stable fail-closed response instead of a deadlock victim. Deterministic ordering also
+  -- prevents selected resources from contending with each other in different JSON array orders.
+  BEGIN
+    PERFORM skill.id
+    FROM jsonb_array_elements_text(v_selected_skill_ids) selected(skill_id)
+    JOIN public.skills skill
+      ON skill.org_id = p_org_id AND skill.id::text = selected.skill_id
+    ORDER BY skill.id
+    FOR SHARE OF skill NOWAIT;
+
+    PERFORM account.id
+    FROM jsonb_array_elements_text(v_selected_mcp_account_ids) selected(account_id)
+    JOIN public.companion_mcp_accounts account
+      ON account.org_id = p_org_id AND account.id::text = selected.account_id
+    ORDER BY account.id
+    FOR SHARE OF account NOWAIT;
+  EXCEPTION WHEN lock_not_available THEN
+    RETURN QUERY SELECT false, 'settings_not_applied'::text, NULL::text,
+      NULL::public.companion_box_observed_state, NULL::bigint;
+    RETURN;
+  END;
+
+  IF EXISTS (
+       SELECT 1
+       FROM jsonb_array_elements_text(v_selected_skill_ids) selected(skill_id)
+       WHERE NOT EXISTS (
+         SELECT 1
+         FROM public.skills skill
+         WHERE skill.org_id = p_org_id
+           AND skill.id::text = selected.skill_id
+           AND skill.archived_at IS NULL
+           AND (
+             skill.scope = 'org'
+             OR (skill.scope = 'personal' AND skill.creator_id = p_actor_id)
+           )
+       )
+     )
+     OR EXISTS (
+       SELECT 1
+       FROM jsonb_array_elements_text(v_selected_mcp_account_ids) selected(account_id)
+       WHERE NOT EXISTS (
+         SELECT 1
+         FROM public.companion_mcp_accounts account
+         WHERE account.org_id = p_org_id
+           AND account.id::text = selected.account_id
+           AND account.owner_id = p_actor_id
+       )
+     ) THEN
+    RETURN QUERY SELECT false, 'resource_access_revoked'::text, NULL::text,
+      NULL::public.companion_box_observed_state, NULL::bigint;
+    RETURN;
+  END IF;
+
   IF v_box_id IS NULL OR v_box_state NOT IN ('ready', 'idle', 'running') THEN
     RETURN QUERY SELECT false, 'box_unavailable'::text, NULL::text,
       NULL::public.companion_box_observed_state, NULL::bigint;

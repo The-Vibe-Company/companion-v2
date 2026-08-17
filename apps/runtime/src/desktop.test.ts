@@ -45,9 +45,15 @@ describe("runtime desktop reauthorization", () => {
     });
   });
 
-  it("never contacts Box for Viewer, cross-tenant, unavailable, or disabled denials", async () => {
+  it("never contacts Box for any authorization denial", async () => {
     const desktop = vi.fn();
-    for (const denialCode of ["not_authorized", "box_unavailable", "runtime_disabled"]) {
+    for (const denialCode of [
+      "not_authorized",
+      "resource_access_revoked",
+      "settings_not_applied",
+      "box_unavailable",
+      "runtime_disabled",
+    ]) {
       const authorization = {
         authorize: vi.fn(async () => ({
           authorized: false,

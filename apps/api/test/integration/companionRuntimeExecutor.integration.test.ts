@@ -1,12 +1,13 @@
 /**
  * Product promise:
  * the isolated Runtime v2 login can fetch only lease-authorized material and can commit a typed
- * broker projection before ACK without ever receiving direct table privileges.
+ * broker projection before ACK without ever receiving direct table privileges. Desktop minting
+ * exposes only a fully staged warm Box whose personal Skills and MCP pins belong to that actor.
  *
  * Regression caught:
  * a forged tenant/fence, response-lost projection retry, revoked actor, duplicate generation Box,
- * or Viewer desktop request must not leak credentials, duplicate transcript rows, or cross a stale
- * lease epoch.
+ * Viewer request, revision drift, or Owner/Editor resource-owner swap must not expose a Box,
+ * leak credentials, duplicate transcript rows, or cross a stale lease epoch.
  *
  * Why integrated:
  * the guarantees depend on real SECURITY DEFINER ownership, FORCE RLS, triggers, enum/check
@@ -65,8 +66,14 @@ const ids = {
   ownerB: `runtime-exec-owner-b-${suffix}`,
   skill: randomUUID(),
   skillVersion: randomUUID(),
+  orgSkill: randomUUID(),
+  orgSkillVersion: randomUUID(),
+  editorSkill: randomUUID(),
+  editorSkillVersion: randomUUID(),
   mcpAccount: randomUUID(),
   mcpGeneration: randomUUID(),
+  editorMcpAccount: randomUUID(),
+  editorMcpGeneration: randomUUID(),
 };
 const providerId = `runtime-exec-${suffix}`;
 const providerGeneration = randomUUID();
@@ -117,6 +124,8 @@ async function createCompanion(input: {
   actorId?: string;
   boxReady?: boolean;
   workspaceRole?: "editor" | "viewer";
+  selectedSkillIds?: string[];
+  selectedMcpAccountIds?: string[];
 } = {}): Promise<{ companionId: string; turnId: string; attemptId: string; prompt: string }> {
   if (!sql) throw new Error("runtime executor database is not initialized");
   const companionId = randomUUID();
@@ -125,14 +134,22 @@ async function createCompanion(input: {
   const clientMessageId = randomUUID();
   const prompt = `durable prompt ${clientMessageId}`;
   const actorId = input.actorId ?? ids.ownerA;
+  const selectedSkillIds = input.selectedSkillIds ?? [ids.skill];
+  const selectedMcpAccountIds = input.selectedMcpAccountIds ?? [ids.mcpAccount];
+  const mcpCredentialRefs = selectedMcpAccountIds.map((accountId) => ({
+    account_id: accountId,
+    credential_generation: accountId === ids.editorMcpAccount
+      ? ids.editorMcpGeneration
+      : ids.mcpGeneration,
+  }));
   await sql`
     insert into companions (
       id, org_id, owner_id, name, model_id, provider_ids,
       selected_skill_ids, selected_mcp_account_ids
     ) values (
       ${companionId}::uuid, ${ids.orgA}::uuid, ${ids.ownerA}, 'Runtime executor fixture',
-      'fixture-model', ${sql.json([providerId])}, ${sql.json([ids.skill])},
-      ${sql.json([ids.mcpAccount])}
+      'fixture-model', ${sql.json([providerId])}, ${sql.json(selectedSkillIds)},
+      ${sql.json(selectedMcpAccountIds)}
     )
   `;
   if (input.workspaceRole) {
@@ -197,11 +214,8 @@ async function createCompanion(input: {
         provider_id: providerId,
         credential_generation: providerGeneration,
         credential_version: 1,
-      }])}, ${sql.json([ids.skill])}, ${sql.json([ids.mcpAccount])},
-      ${sql.json([{
-        account_id: ids.mcpAccount,
-        credential_generation: ids.mcpGeneration,
-      }])},
+      }])}, ${sql.json(selectedSkillIds)}, ${sql.json(selectedMcpAccountIds)},
+      ${sql.json(mcpCredentialRefs)},
       'running', 'running', 'accepted', ${randomUUID()}::uuid,
       now(), ${`pi-${attemptId}`}, now()
     )
@@ -245,6 +259,28 @@ async function removeCompanion(companionId: string): Promise<void> {
   await sql`delete from companion_runtime_leases where companion_id = ${companionId}::uuid`;
   await sql`delete from companion_runtime_instances where companion_id = ${companionId}::uuid`;
   await sql`delete from companions where id = ${companionId}::uuid`;
+}
+
+interface DesktopAuthorization {
+  authorized: boolean;
+  denialCode: string | null;
+  boxId: string | null;
+  boxState: string | null;
+  generation: string | null;
+}
+
+async function authorizeDesktop(input: {
+  companionId: string;
+  orgId?: string;
+  actorId: string;
+}): Promise<DesktopAuthorization[]> {
+  return await asRuntime((tx) => tx<Array<DesktopAuthorization>>`
+    select authorized, denial_code as "denialCode", box_id as "boxId",
+      box_state::text as "boxState", runtime_generation::text as generation
+    from public.companion_runtime_authorize_desktop(
+      ${input.orgId ?? ids.orgA}::uuid, ${input.companionId}::uuid, ${input.actorId}
+    )
+  `);
 }
 
 describe("Companion runtime executor PostgreSQL surface", () => {
@@ -292,36 +328,70 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     `;
     await sql`
       insert into skills(id, org_id, slug, description, creator_id, scope)
-      values (
-        ${ids.skill}::uuid, ${ids.orgA}::uuid, ${`runtime-skill-${suffix}`},
-        'Runtime immutable Skill fixture', ${ids.ownerA}, 'personal'
-      )
+      values
+        (
+          ${ids.skill}::uuid, ${ids.orgA}::uuid, ${`runtime-skill-${suffix}`},
+          'Runtime immutable Skill fixture', ${ids.ownerA}, 'personal'
+        ),
+        (
+          ${ids.orgSkill}::uuid, ${ids.orgA}::uuid, ${`runtime-org-skill-${suffix}`},
+          'Runtime organization Skill fixture', ${ids.ownerA}, 'org'
+        ),
+        (
+          ${ids.editorSkill}::uuid, ${ids.orgA}::uuid, ${`runtime-editor-skill-${suffix}`},
+          'Runtime Editor Skill fixture', ${ids.editorA}, 'personal'
+        )
     `;
     await sql`
       insert into skill_versions(
         id, org_id, skill_id, version, frontmatter, tools, size_bytes,
         checksum, storage_path, validation, created_by
-      ) values (
-        ${ids.skillVersion}::uuid, ${ids.orgA}::uuid, ${ids.skill}::uuid, '1.0.0',
-        'name: runtime-fixture', '[]'::jsonb, 42, ${checksum},
-        ${`skills/${ids.skillVersion}.tar.gz`}, 'valid', ${ids.ownerA}
-      )
+      ) values
+        (
+          ${ids.skillVersion}::uuid, ${ids.orgA}::uuid, ${ids.skill}::uuid, '1.0.0',
+          'name: runtime-fixture', '[]'::jsonb, 42, ${checksum},
+          ${`skills/${ids.skillVersion}.tar.gz`}, 'valid', ${ids.ownerA}
+        ),
+        (
+          ${ids.orgSkillVersion}::uuid, ${ids.orgA}::uuid, ${ids.orgSkill}::uuid, '1.0.0',
+          'name: runtime-org-fixture', '[]'::jsonb, 42, ${`sha256:${"b".repeat(64)}`},
+          ${`skills/${ids.orgSkillVersion}.tar.gz`}, 'valid', ${ids.ownerA}
+        ),
+        (
+          ${ids.editorSkillVersion}::uuid, ${ids.orgA}::uuid, ${ids.editorSkill}::uuid, '1.0.0',
+          'name: runtime-editor-fixture', '[]'::jsonb, 42, ${`sha256:${"c".repeat(64)}`},
+          ${`skills/${ids.editorSkillVersion}.tar.gz`}, 'valid', ${ids.editorA}
+        )
     `;
     await sql`
-      update skills set current_version_id = ${ids.skillVersion}::uuid
-      where id = ${ids.skill}::uuid
+      update skills skill
+      set current_version_id = version.version_id
+      from (values
+        (${ids.skill}::uuid, ${ids.skillVersion}::uuid),
+        (${ids.orgSkill}::uuid, ${ids.orgSkillVersion}::uuid),
+        (${ids.editorSkill}::uuid, ${ids.editorSkillVersion}::uuid)
+      ) version(skill_id, version_id)
+      where skill.id = version.skill_id
     `;
     await sql`
       insert into companion_mcp_accounts(
         id, org_id, owner_id, provider, label, transport, account_config,
         credential_generation, ciphertext, iv, auth_tag, wrapped_dek,
         wrap_iv, wrap_auth_tag, key_id
-      ) values (
-        ${ids.mcpAccount}::uuid, ${ids.orgA}::uuid, ${ids.ownerA}, 'fixture-mcp',
-        'Runtime fixture', 'http', ${sql.json({ endpoint: "fixture" })},
-        ${ids.mcpGeneration}::uuid, 'ciphertext-mcp', 'iv-mcp', 'tag-mcp',
-        'wrapped-mcp', 'wrap-iv-mcp', 'wrap-tag-mcp', 'key-mcp'
-      )
+      ) values
+        (
+          ${ids.mcpAccount}::uuid, ${ids.orgA}::uuid, ${ids.ownerA}, 'fixture-mcp',
+          'Runtime fixture', 'http', ${sql.json({ endpoint: "fixture" })},
+          ${ids.mcpGeneration}::uuid, 'ciphertext-mcp', 'iv-mcp', 'tag-mcp',
+          'wrapped-mcp', 'wrap-iv-mcp', 'wrap-tag-mcp', 'key-mcp'
+        ),
+        (
+          ${ids.editorMcpAccount}::uuid, ${ids.orgA}::uuid, ${ids.editorA}, 'fixture-mcp',
+          'Runtime fixture', 'http', ${sql.json({ endpoint: "editor-fixture" })},
+          ${ids.editorMcpGeneration}::uuid, 'ciphertext-editor-mcp', 'iv-editor-mcp',
+          'tag-editor-mcp', 'wrapped-editor-mcp', 'wrap-iv-editor-mcp',
+          'wrap-tag-editor-mcp', 'key-editor-mcp'
+        )
     `;
     const [gate] = await sql<Array<{ gateEpoch: string }>>`
       select gate_epoch::text as "gateEpoch" from companion_runtime_control
@@ -1020,47 +1090,263 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
-  it("reauthorizes desktop access without waking Box and enforces the JS generation ceiling", async () => {
-    if (!sql) throw new Error("runtime executor database is not initialized");
+  it("keeps Viewer, nonmember, and cross-tenant desktop requests opaque", async () => {
     const fixture = await createCompanion({ boxReady: true, workspaceRole: "viewer" });
+    const denied = [{
+      authorized: false,
+      denialCode: "not_authorized",
+      boxId: null,
+      boxState: null,
+      generation: null,
+    }];
     try {
-      const authorize = (orgId: string, actorId: string) => asRuntime((tx) => tx<Array<{
-        authorized: boolean;
-        denialCode: string | null;
-        boxId: string | null;
-        generation: string | null;
-      }>>`
-        select authorized, denial_code as "denialCode", box_id as "boxId",
-          runtime_generation::text as generation
-        from public.companion_runtime_authorize_desktop(
-          ${orgId}::uuid, ${fixture.companionId}::uuid, ${actorId}
-        )
-      `);
-      expect(await authorize(ids.orgA, ids.ownerA)).toEqual([{
-        authorized: true, denialCode: null, boxId: "bx_23456789", generation: "1",
+      expect(await authorizeDesktop({
+        companionId: fixture.companionId,
+        actorId: ids.ownerA,
+      })).toEqual([{
+        authorized: true,
+        denialCode: null,
+        boxId: "bx_23456789",
+        boxState: "ready",
+        generation: "1",
       }]);
-      expect(await authorize(ids.orgA, ids.viewerA)).toEqual([{
-        authorized: false, denialCode: "not_authorized", boxId: null, generation: null,
-      }]);
-      expect(await authorize(ids.orgB, ids.viewerA)).toEqual([{
-        authorized: false, denialCode: "not_authorized", boxId: null, generation: null,
-      }]);
+      expect(await authorizeDesktop({
+        companionId: fixture.companionId,
+        actorId: ids.viewerA,
+      })).toEqual(denied);
+      expect(await authorizeDesktop({
+        companionId: fixture.companionId,
+        actorId: ids.ownerB,
+      })).toEqual(denied);
+      expect(await authorizeDesktop({
+        companionId: fixture.companionId,
+        orgId: ids.orgB,
+        actorId: ids.ownerB,
+      })).toEqual(denied);
+    } finally {
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
+  it("requires the desktop actor to own every personal Skill and MCP pin", async () => {
+    const privateCases = [
+      {
+        name: "Editor on Owner personal Skill",
+        actorId: ids.editorA,
+        selectedSkillIds: [ids.skill],
+        selectedMcpAccountIds: [],
+      },
+      {
+        name: "Editor on Owner MCP account",
+        actorId: ids.editorA,
+        selectedSkillIds: [ids.orgSkill],
+        selectedMcpAccountIds: [ids.mcpAccount],
+      },
+      {
+        name: "Owner on Editor personal Skill",
+        actorId: ids.ownerA,
+        selectedSkillIds: [ids.editorSkill],
+        selectedMcpAccountIds: [],
+      },
+      {
+        name: "Owner on Editor MCP account",
+        actorId: ids.ownerA,
+        selectedSkillIds: [ids.orgSkill],
+        selectedMcpAccountIds: [ids.editorMcpAccount],
+      },
+    ];
+    for (const privacyCase of privateCases) {
+      const fixture = await createCompanion({
+        boxReady: true,
+        workspaceRole: "editor",
+        selectedSkillIds: privacyCase.selectedSkillIds,
+        selectedMcpAccountIds: privacyCase.selectedMcpAccountIds,
+      });
+      try {
+        expect(
+          await authorizeDesktop({
+            companionId: fixture.companionId,
+            actorId: privacyCase.actorId,
+          }),
+          privacyCase.name,
+        ).toEqual([{
+          authorized: false,
+          denialCode: "resource_access_revoked",
+          boxId: null,
+          boxState: null,
+          generation: null,
+        }]);
+      } finally {
+        await removeCompanion(fixture.companionId);
+      }
+    }
+
+    const editorFixture = await createCompanion({
+      boxReady: true,
+      workspaceRole: "editor",
+      selectedSkillIds: [ids.editorSkill],
+      selectedMcpAccountIds: [ids.editorMcpAccount],
+    });
+    try {
+      expect(await authorizeDesktop({
+        companionId: editorFixture.companionId,
+        actorId: ids.editorA,
+      })).toMatchObject([{ authorized: true, denialCode: null, boxId: "bx_23456789" }]);
+    } finally {
+      await removeCompanion(editorFixture.companionId);
+    }
+
+    const orgFixture = await createCompanion({
+      boxReady: true,
+      workspaceRole: "editor",
+      selectedSkillIds: [ids.orgSkill],
+      selectedMcpAccountIds: [],
+    });
+    try {
+      expect(await authorizeDesktop({
+        companionId: orgFixture.companionId,
+        actorId: ids.editorA,
+      })).toMatchObject([{ authorized: true, denialCode: null, boxId: "bx_23456789" }]);
+    } finally {
+      await removeCompanion(orgFixture.companionId);
+    }
+  });
+
+  it("denies desktop until both current settings and Skills revisions are applied", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion({
+      boxReady: true,
+      workspaceRole: "editor",
+      selectedSkillIds: [ids.orgSkill],
+      selectedMcpAccountIds: [],
+    });
+    const settingsNotApplied = [{
+      authorized: false,
+      denialCode: "settings_not_applied",
+      boxId: null,
+      boxState: null,
+      generation: null,
+    }];
+    try {
       await sql`
-        update companion_workspace_access set role = 'editor'
+        update companion_runtime_instances
+        set desired_settings_revision = 2
         where companion_id = ${fixture.companionId}::uuid
       `;
-      expect(await authorize(ids.orgA, ids.viewerA)).toEqual([{
-        authorized: true, denialCode: null, boxId: "bx_23456789", generation: "1",
-      }]);
+      expect(await authorizeDesktop({
+        companionId: fixture.companionId,
+        actorId: ids.editorA,
+      })).toEqual(settingsNotApplied);
+
       await sql`
-        update companion_runtime_instances set generation = 2147483647
+        update companion_runtime_instances
+        set applied_settings_revision = 2
         where companion_id = ${fixture.companionId}::uuid
       `;
+      await sql`
+        update companions
+        set skills_revision = 2
+        where id = ${fixture.companionId}::uuid
+      `;
+      expect(await authorizeDesktop({
+        companionId: fixture.companionId,
+        actorId: ids.editorA,
+      })).toEqual(settingsNotApplied);
+
+      await sql`
+        update companion_runtime_instances
+        set applied_skills_revision = 2, generation = 2147483647
+        where companion_id = ${fixture.companionId}::uuid
+      `;
+      expect(await authorizeDesktop({
+        companionId: fixture.companionId,
+        actorId: ids.editorA,
+      })).toMatchObject([{
+        authorized: true,
+        denialCode: null,
+        boxId: "bx_23456789",
+        generation: "2147483647",
+      }]);
       await expect(sql`
         update companion_runtime_instances set generation = 2147483648
         where companion_id = ${fixture.companionId}::uuid
       `).rejects.toMatchObject({ code: "23514" });
     } finally {
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
+  it("locks staged revisions and resource ownership through desktop authorization", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion({
+      boxReady: true,
+      workspaceRole: "editor",
+      selectedSkillIds: [ids.orgSkill],
+      selectedMcpAccountIds: [],
+    });
+    const writer = await sql.reserve();
+    let transactionOpen = false;
+    const authorizeWithLockTimeout = () => asRuntime(async (tx) => {
+      await tx.unsafe("set local lock_timeout = '150ms'");
+      return await tx`
+        select * from public.companion_runtime_authorize_desktop(
+          ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${ids.editorA}
+        )
+      `;
+    });
+    try {
+      await writer`begin`;
+      transactionOpen = true;
+      await writer`
+        select 1 from skills where id = ${ids.orgSkill}::uuid for update
+      `;
+      expect(await authorizeDesktop({
+        companionId: fixture.companionId,
+        actorId: ids.editorA,
+      })).toEqual([{
+        authorized: false,
+        denialCode: "settings_not_applied",
+        boxId: null,
+        boxState: null,
+        generation: null,
+      }]);
+      await writer`rollback`;
+      transactionOpen = false;
+      expect(await authorizeDesktop({
+        companionId: fixture.companionId,
+        actorId: ids.editorA,
+      })).toMatchObject([{ authorized: true, denialCode: null }]);
+
+      await writer`begin`;
+      transactionOpen = true;
+      // Match the Runtime/API hierarchy: instance before Companion. Authorization must wait and
+      // then evaluate the committed pair, never mix either side of this restage boundary.
+      await writer`
+        update companion_runtime_instances
+        set applied_skills_revision = 2
+        where companion_id = ${fixture.companionId}::uuid
+      `;
+      await writer`
+        update companions
+        set selected_skill_ids = ${sql.json([ids.skill])}, skills_revision = 2
+        where id = ${fixture.companionId}::uuid
+      `;
+      await expect(authorizeWithLockTimeout()).rejects.toMatchObject({ code: "55P03" });
+      await writer`commit`;
+      transactionOpen = false;
+      expect(await authorizeDesktop({
+        companionId: fixture.companionId,
+        actorId: ids.editorA,
+      })).toEqual([{
+        authorized: false,
+        denialCode: "resource_access_revoked",
+        boxId: null,
+        boxState: null,
+        generation: null,
+      }]);
+    } finally {
+      if (transactionOpen) await writer`rollback`;
+      await writer.release();
       await removeCompanion(fixture.companionId);
     }
   });
