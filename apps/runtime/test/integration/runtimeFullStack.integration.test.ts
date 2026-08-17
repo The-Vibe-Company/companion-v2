@@ -715,12 +715,12 @@ beforeAll(async () => {
   await adminSql.unsafe(`create database "${databaseName}"`);
   databaseCreated = true;
   const migrationNames = await migrationFileNames();
-  const cutoverIndex = migrationNames.findIndex((name) => name.startsWith("0093_"));
+  const cutoverIndex = migrationNames.findIndex((name) => name.startsWith("0094_"));
   if (cutoverIndex < 0) throw new Error("Runtime v2 cutover migration is missing");
   const migrationSql = postgres(ownerUrl, { max: 1 });
   try {
     await replayMigrations(migrationSql, migrationNames.slice(0, cutoverIndex));
-    // 0093 verifies a grants nonce bound to this physical backend before destructive cutover.
+    // 0094 verifies a grants nonce bound to this physical backend before destructive cutover.
     await applyRuntimeGrants(migrationSql);
     await replayMigrations(migrationSql, migrationNames.slice(cutoverIndex));
   } finally {

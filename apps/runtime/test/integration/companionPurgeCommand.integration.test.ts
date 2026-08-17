@@ -98,7 +98,7 @@ describe("legacy Companion purge command at the guarded pre-v2 cutover checkpoin
     databaseCreated = true;
     // The destructive command must run after 0089 installed its ledger/finalizer and before 0090+
     // make Runtime v2 rows authoritative. Replaying the exact historical checkpoint also proves the
-    // final 0093 migration cannot accidentally be required before external Box cleanup.
+    // final 0094 migration cannot accidentally be required before external Box cleanup.
     const migrationSql = postgres(upgradeUrl.toString(), { max: 1 });
     try {
       await replayThroughLegacyPurge(migrationSql);

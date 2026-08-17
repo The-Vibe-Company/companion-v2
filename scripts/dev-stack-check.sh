@@ -391,7 +391,7 @@ late_runtime_grant_file_source='-f "$REPO_ROOT/packages/db/runtime-role-grants.s
 late_runtime_grant_stdin_source='< "$REPO_ROOT/packages/db/runtime-role-grants.sql"'
 if grep -Fq -- "$late_runtime_grant_file_source" scripts/dev-conductor.sh \
   || grep -Fq -- "$late_runtime_grant_stdin_source" scripts/dev-stack.sh; then
-  printf '[dev-stack-check] development launchers must not apply grants after migration 0093\n' >&2
+  printf '[dev-stack-check] development launchers must not apply grants after migration 0094\n' >&2
   exit 1
 fi
 if grep -Fq -- ":'gate_epoch'" scripts/dev-conductor.sh scripts/dev-stack.sh \

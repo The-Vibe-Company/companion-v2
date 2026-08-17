@@ -4,7 +4,7 @@
  * succeeded on the same PostgreSQL backend and every former union credential is already inert.
  *
  * Regression caught:
- * Applying 0093 before validating grants strands a deployment on the destructive schema while a
+ * Applying 0094 before validating grants strands a deployment on the destructive schema while a
  * missing role/object or still-live legacy login leaves the old executor privileged.
  *
  * Why integrated:
@@ -12,7 +12,7 @@
  * are PostgreSQL behavior. String-shape tests cannot prove the two-phase commit boundary.
  */
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,7 +23,6 @@ import { afterAll, describe, expect, it } from "vitest";
 import {
   RUNTIME_V2_FINAL_CUTOVER_TAG,
   extractRuntimeRoleGrantBlock,
-  prepareMigrationPhases,
   resolveRuntimeRoleGrantsFile,
   run as runMigrations,
 } from "../../src/migrate";
@@ -39,6 +38,9 @@ const adminSql = postgres(requiredAdminUrl, { max: 1 });
 const cleanupDatabases: string[] = [];
 const cleanupRoles: string[] = [];
 const tempDirs: string[] = [];
+const desktopReplayWhen = 1_788_152_800_000;
+const finalCutoverWhen = 1_788_196_000_000;
+const desktopReplayTag = "0093_companion_runtime_desktop_replay";
 
 interface Fixture {
   databaseName: string;
@@ -89,14 +91,28 @@ function migrationEnv(fixture: Fixture, retiredRuntimeRole?: string): NodeJS.Pro
 }
 
 async function migrateThrough0092(databaseUrl: string): Promise<void> {
+  const journal = JSON.parse(
+    await readFile(join(migrationsDir, "meta", "_journal.json"), "utf8"),
+  ) as { entries: Array<{ tag: string }> };
+  const desktopReplayIndex = journal.entries.findIndex((entry) => entry.tag === desktopReplayTag);
+  if (desktopReplayIndex < 0) throw new Error("desktop replay repair migration is missing");
+  const migrationsThrough0092 = await mkdtemp(join(tmpdir(), "companion-migrations-through-0092-"));
+  tempDirs.push(migrationsThrough0092);
+  await mkdir(join(migrationsThrough0092, "meta"), { recursive: true });
+  const checkpointEntries = journal.entries.slice(0, desktopReplayIndex);
+  await writeFile(
+    join(migrationsThrough0092, "meta", "_journal.json"),
+    `${JSON.stringify({ ...journal, entries: checkpointEntries }, null, 2)}\n`,
+    "utf8",
+  );
+  await Promise.all(checkpointEntries.map((entry) =>
+    copyFile(join(migrationsDir, `${entry.tag}.sql`), join(migrationsThrough0092, `${entry.tag}.sql`))
+  ));
   const client = postgres(databaseUrl, { max: 1 });
-  const phases = await prepareMigrationPhases(migrationsDir);
   try {
-    expect(phases.hasFinalCutover).toBe(true);
-    await migrate(drizzle(client), { migrationsFolder: phases.checkpointFolder });
+    await migrate(drizzle(client), { migrationsFolder: migrationsThrough0092 });
   } finally {
     await client.end({ timeout: 1 });
-    await phases.cleanup();
   }
 }
 
@@ -112,8 +128,10 @@ async function lastMigration(databaseUrl: string): Promise<number | null> {
   }
 }
 
-async function expect0093Absent(databaseUrl: string): Promise<void> {
-  expect(await lastMigration(databaseUrl)).toBe(1_788_109_600_000);
+async function expectCutoverAbsent(databaseUrl: string): Promise<void> {
+  const latestMigration = await lastMigration(databaseUrl);
+  if (latestMigration === null) throw new Error("migration ledger is missing");
+  expect(latestMigration).toBeLessThan(finalCutoverWhen);
   const client = postgres(databaseUrl, { max: 1 });
   try {
     const [row] = await client<Array<{ legacyTable: string | null }>>`
@@ -164,10 +182,10 @@ afterAll(async () => {
 }, 30_000);
 
 describe("Runtime v2 final migration protocol", () => {
-  it("applies a fresh database through 0093 and reruns idempotently without a retired role", async () => {
+  it("applies a fresh database through 0094 and never reapplies grants after cutover", async () => {
     const fixture = await createFixture();
     await runMigrations({ env: migrationEnv(fixture) });
-    expect(await lastMigration(fixture.databaseUrl)).toBe(1_788_196_000_000);
+    expect(await lastMigration(fixture.databaseUrl)).toBe(finalCutoverWhen);
 
     const client = postgres(fixture.databaseUrl, { max: 1 });
     try {
@@ -179,16 +197,71 @@ describe("Runtime v2 final migration protocol", () => {
       await client.end({ timeout: 1 });
     }
 
-    await expect(runMigrations({ env: migrationEnv(fixture) })).resolves.toBeUndefined();
-    expect(await lastMigration(fixture.databaseUrl)).toBe(1_788_196_000_000);
+    const dir = await mkdtemp(join(tmpdir(), "companion-cutover-poison-grants-"));
+    tempDirs.push(dir);
+    const grantsFile = join(dir, "runtime-role-grants.sql");
+    await writeFile(
+      grantsFile,
+      "-- companion-runtime-grants-begin\nDO $$ BEGIN RAISE EXCEPTION 'post-cutover grants ran'; END $$;\n-- companion-runtime-grants-end\n",
+    );
+    await expect(runMigrations({
+      env: { ...migrationEnv(fixture), COMPANION_RUNTIME_GRANTS_FILE: grantsFile },
+    })).resolves.toBeUndefined();
+    expect(await lastMigration(fixture.databaseUrl)).toBe(finalCutoverWhen);
   }, 120_000);
 
-  it("leaves 0093 unapplied when an active role or a grant-block object is missing", async () => {
+  it("repairs an old 0091/0092 ledger before grants and cutover", async () => {
+    const fixture = await createFixture();
+    await migrateThrough0092(fixture.databaseUrl);
+    const client = postgres(fixture.databaseUrl, { max: 1 });
+    try {
+      const [before] = await client<Array<{ replayTable: string | null; consumeFunction: string | null }>>`
+        select
+          to_regclass('public.companion_runtime_desktop_requests')::text as "replayTable",
+          to_regprocedure(
+            'public.companion_runtime_consume_desktop_request(text,bigint,integer)'
+          )::text as "consumeFunction"
+      `;
+      expect(before).toEqual({ replayTable: null, consumeFunction: null });
+
+      await runMigrations({ env: migrationEnv(fixture) });
+      const ledger = await client<Array<{ createdAt: string }>>`
+        select created_at::text as "createdAt"
+        from drizzle.__drizzle_migrations
+        where created_at in (${desktopReplayWhen}, ${finalCutoverWhen})
+        order by created_at
+      `;
+      expect(ledger.map((row) => Number(row.createdAt))).toEqual([
+        desktopReplayWhen,
+        finalCutoverWhen,
+      ]);
+      const requestId = `upgrade-${randomUUID()}`;
+      await client.unsafe(`set role ${fixture.runtimeRole}`);
+      const [first] = await client<Array<{ consumed: boolean }>>`
+        select public.companion_runtime_consume_desktop_request(
+          ${requestId}, floor(extract(epoch from clock_timestamp()))::bigint, 60
+        ) as consumed
+      `;
+      const [replay] = await client<Array<{ consumed: boolean }>>`
+        select public.companion_runtime_consume_desktop_request(
+          ${requestId}, floor(extract(epoch from clock_timestamp()))::bigint, 60
+        ) as consumed
+      `;
+      expect(first?.consumed).toBe(true);
+      expect(replay?.consumed).toBe(false);
+      await client.unsafe("reset role");
+    } finally {
+      await client.unsafe("reset role").catch(() => undefined);
+      await client.end({ timeout: 1 });
+    }
+  }, 120_000);
+
+  it("leaves 0094 unapplied when an active role or a grant-block object is missing", async () => {
     const missingRole = await createFixture();
     await adminSql.unsafe(`drop role ${missingRole.runtimeRole}`);
     cleanupRoles.splice(cleanupRoles.indexOf(missingRole.runtimeRole), 1);
     await expect(runMigrations({ env: migrationEnv(missingRole) })).rejects.toThrow("does not exist");
-    await expect0093Absent(missingRole.databaseUrl);
+    await expectCutoverAbsent(missingRole.databaseUrl);
 
     const missingObject = await createFixture();
     const grantsSource = await readFile(await resolveRuntimeRoleGrantsFile(), "utf8");
@@ -207,10 +280,10 @@ describe("Runtime v2 final migration protocol", () => {
         env: { ...migrationEnv(missingObject), COMPANION_RUNTIME_GRANTS_FILE: grantsFile },
       }),
     ).rejects.toThrow();
-    await expect0093Absent(missingObject.databaseUrl);
+    await expectCutoverAbsent(missingObject.databaseUrl);
   }, 120_000);
 
-  it("retires the historical union role before applying 0093 and leaves no direct/default ACL", async () => {
+  it("retires the historical union role before applying 0094 and leaves no direct/default ACL", async () => {
     const fixture = await createFixture();
     await migrateThrough0092(fixture.databaseUrl);
     const retiredRole = name("cutover_retired");
@@ -220,7 +293,7 @@ describe("Runtime v2 final migration protocol", () => {
 
     await expect(runMigrations({ env: migrationEnv(fixture) }))
       .rejects.toThrow("legacy union runtime role detected but not named for retirement");
-    await expect0093Absent(fixture.databaseUrl);
+    await expectCutoverAbsent(fixture.databaseUrl);
     await runMigrations({ env: migrationEnv(fixture, retiredRole) });
     const client = postgres(fixture.databaseUrl, { max: 1 });
     try {
@@ -274,12 +347,12 @@ describe("Runtime v2 final migration protocol", () => {
     }
   }, 120_000);
 
-  it("rejects an absent or spoofed same-connection grant marker before any 0093 DDL", async () => {
+  it("rejects an absent or spoofed same-connection grant marker before any 0094 DDL", async () => {
     const fixture = await createFixture();
     await migrateThrough0092(fixture.databaseUrl);
     const source = await readFile(join(migrationsDir, `${RUNTIME_V2_FINAL_CUTOVER_TAG}.sql`), "utf8");
     const guard = source.split("--> statement-breakpoint", 1)[0]?.trim();
-    if (!guard) throw new Error("0093 no longer has a first-statement grants guard");
+    if (!guard) throw new Error("0094 no longer has a first-statement grants guard");
     const client = postgres(fixture.databaseUrl, { max: 1 });
     try {
       await expect(client.unsafe(guard)).rejects.toThrow("grants were not verified");
@@ -294,7 +367,7 @@ describe("Runtime v2 final migration protocol", () => {
     } finally {
       await client.end({ timeout: 1 });
     }
-    await expect0093Absent(fixture.databaseUrl);
+    await expectCutoverAbsent(fixture.databaseUrl);
   }, 120_000);
 
   it("rejects partial role variables and a retired role reused as an active role", async () => {
@@ -343,7 +416,7 @@ describe("Runtime v2 final migration protocol", () => {
       await adminSql.unsafe(`alter role ${retiredRole} nologin`);
       await expect(runMigrations({ env: migrationEnv(fixture, retiredRole) }))
         .rejects.toThrow("still has active sessions");
-      await expect0093Absent(fixture.databaseUrl);
+      await expectCutoverAbsent(fixture.databaseUrl);
     } finally {
       await oldSession.end({ timeout: 1 });
     }

@@ -39,8 +39,9 @@ report checksum, and canary result for every production change. Do not record se
    role names to the grants script. For an upgrade from the historical union credential, first make
    that role `NOLOGIN`, drain every `pg_stat_activity` session, remove its role memberships, and pass
    its exact name as `DATABASE_RETIRED_RUNTIME_ROLE`; `DATABASE_RUNTIME_ROLE` is rejected. The runner
-   commits the compatible schema through 0092, validates/revokes grants, and only then applies 0093 on the same
-   connection, followed by every later migration in the full journal. A failure after the first
+   commits the compatible schema through additive desktop-replay repair 0093, validates/revokes
+   grants, and only then applies destructive cutover 0094 on the same connection, followed by every
+   later migration in the full journal. A failure after the first
    pass is a one-way disabled checkpoint, not permission to restart an old executor. Start the
    matching application processes only after the release deployment exits zero and is marked
    `Completed`. The API service must not receive the owner URL or role-name variables, and invoking
@@ -156,12 +157,12 @@ report. An installation missing any prerequisite must remain on its disabled pur
 there is no compatibility mode in the final runtime.
 
 Immediately before that final migration, disable the database gate again with its observed epoch,
-set the three feature-flag consumers false, and wait until every lease is neutral. Migration 0093
+set the three feature-flag consumers false, and wait until every lease is neutral. Migration 0094
 rejects an enabled gate or active claim even when the earlier purge evidence is complete. Re-run the
 saved purge report. If a historical union database role exists, make it `NOLOGIN`, wait until
 `pg_stat_activity` has no session for it, remove its memberships, and configure
 `DATABASE_RETIRED_RUNTIME_ROLE`; the grants preflight removes its current and default ACLs before
-0093. Deploy the final migration through the one-shot release job, require `Completed`, and only then
+0094. Deploy the final migration through the one-shot release job, require `Completed`, and only then
 deploy all four processes from that same commit before following the explicit enable procedure
 above. The preceding seven-day canary evidence authorizes this cutover; it does not authorize
 migrating while Runtime v2 is still claiming work.

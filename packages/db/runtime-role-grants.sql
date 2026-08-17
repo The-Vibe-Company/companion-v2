@@ -386,8 +386,10 @@ BEGIN
       'public.companion_runtime_close_attempt_decisions(uuid,uuid,uuid,text,text,public.companion_runtime_error_action,uuid)'::regprocedure
     ];
 
-    -- 0091 is additive and the hook is also replayed by historical-migration tests. Resolve its
-    -- exact surface only when the migration sentinel exists; a partial 0091 remains fail closed.
+    -- 0091 and desktop-replay repair 0093 are additive, and the hook is also replayed by
+    -- historical-migration tests. Resolve the executor surface only when the 0091 sentinel exists;
+    -- the two-phase runner applies 0093 before these exact casts, so either partial migration still
+    -- fails closed.
     IF pg_catalog.to_regprocedure(
       'public.companion_runtime_get_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'
     ) IS NOT NULL THEN
@@ -915,7 +917,7 @@ BEGIN
   END IF;
 
   -- This nonce and its role/backend-bound marker are deliberately written only at the very end of
-  -- the exact grant block. Migration 0093 consumes them on this same connection before its first
+  -- the exact grant block. Migration 0094 consumes them on this same connection before its first
   -- DDL statement; a missing, stale, copied or human-friendly spoof marker fails closed.
   PERFORM set_config('companion.runtime_grants_nonce', runtime_grants_nonce, false);
   PERFORM set_config(

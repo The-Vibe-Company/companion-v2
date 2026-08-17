@@ -656,8 +656,15 @@
     {
       "idx": 93,
       "version": "7",
+      "when": 1788152800000,
+      "tag": "0093_companion_runtime_desktop_replay",
+      "breakpoints": true
+    },
+    {
+      "idx": 94,
+      "version": "7",
       "when": 1788196000000,
-      "tag": "0093_companion_runtime_cutover",
+      "tag": "0094_companion_runtime_cutover",
       "breakpoints": true
     }
   ]

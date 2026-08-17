@@ -59,7 +59,7 @@ The launcher starts the local dependencies, creates the distinct API/worker/runt
 runs the guarded two-phase migration and grants step, seeds the test user, then starts all four
 processes. Direct `pnpm db:migrate` is also the same two-phase runner and requires the migration URL
 plus all three application role names; raw `drizzle-kit migrate` cannot cross Runtime v2 migration
-0093 safely.
+0094 safely.
 
 The application topology is web, API, worker, and private runtime. Conductor uses
 `.conductor/settings.toml` and `bash scripts/dev-conductor.sh` to give each workspace isolated

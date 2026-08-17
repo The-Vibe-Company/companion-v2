@@ -167,14 +167,15 @@ describe("databaseRuntimeRoles", () => {
 });
 
 describe("prepareMigrationPhases", () => {
-  it("builds a temporary Drizzle journal ending at 0092 and leaves 0093 for phase two", async () => {
+  it("includes additive 0093 in the checkpoint and leaves cutover 0094 for phase two", async () => {
     const root = await tempDir();
     const folder = join(root, "drizzle");
     await mkdir(join(folder, "meta"), { recursive: true });
     const entries = [
       { idx: 91, version: "7", when: 91, tag: "0091_companion_runtime_executor" },
       { idx: 92, version: "7", when: 92, tag: "0092_companion_runtime_api" },
-      { idx: 93, version: "7", when: 93, tag: RUNTIME_V2_FINAL_CUTOVER_TAG },
+      { idx: 93, version: "7", when: 93, tag: "0093_companion_runtime_desktop_replay" },
+      { idx: 94, version: "7", when: 94, tag: RUNTIME_V2_FINAL_CUTOVER_TAG },
     ];
     await writeFile(
       join(folder, "meta", "_journal.json"),
@@ -184,6 +185,7 @@ describe("prepareMigrationPhases", () => {
 
     const phases = await prepareMigrationPhases(folder);
     expect(phases.hasFinalCutover).toBe(true);
+    expect(phases.finalCutoverWhen).toBe(94);
     expect(phases.checkpointFolder).not.toBe(folder);
     const checkpoint = JSON.parse(
       await readFile(join(phases.checkpointFolder, "meta", "_journal.json"), "utf8"),
@@ -191,6 +193,7 @@ describe("prepareMigrationPhases", () => {
     expect(checkpoint.entries.map((entry) => entry.tag)).toEqual([
       "0091_companion_runtime_executor",
       "0092_companion_runtime_api",
+      "0093_companion_runtime_desktop_replay",
     ]);
     await expect(access(join(phases.checkpointFolder, `${RUNTIME_V2_FINAL_CUTOVER_TAG}.sql`)))
       .rejects.toThrow();
@@ -198,13 +201,13 @@ describe("prepareMigrationPhases", () => {
     await expect(access(phases.checkpointFolder)).rejects.toThrow();
   });
 
-  it("keeps later migrations in phase two behind the 0093 grant guard", async () => {
+  it("keeps later migrations in phase two behind the 0094 grant guard", async () => {
     const root = await tempDir();
     const folder = join(root, "drizzle");
     await mkdir(join(folder, "meta"), { recursive: true });
     const entries = [
-      { tag: RUNTIME_V2_FINAL_CUTOVER_TAG },
-      { tag: "0094_must_not_skip_cutover_protocol" },
+      { when: 94, tag: RUNTIME_V2_FINAL_CUTOVER_TAG },
+      { when: 95, tag: "0095_must_not_skip_cutover_protocol" },
     ];
     await writeFile(
       join(folder, "meta", "_journal.json"),
@@ -227,9 +230,9 @@ describe("prepareMigrationPhases", () => {
     ) as { entries: { tag: string }[] };
     expect(full.entries.map((entry) => entry.tag)).toEqual([
       RUNTIME_V2_FINAL_CUTOVER_TAG,
-      "0094_must_not_skip_cutover_protocol",
+      "0095_must_not_skip_cutover_protocol",
     ]);
-    await expect(access(join(folder, "0094_must_not_skip_cutover_protocol.sql"))).resolves.toBeUndefined();
+    await expect(access(join(folder, "0095_must_not_skip_cutover_protocol.sql"))).resolves.toBeUndefined();
     await phases.cleanup();
   });
 });
@@ -386,7 +389,7 @@ describe("formatMigrationFailure", () => {
 
     const formatted = formatMigrationFailure(error);
     expect(formatted.split("\n")[0]).toBe(RUNTIME_V2_CUTOVER_GUARD_MESSAGE);
-    expect(formatted).toContain("0093_companion_runtime_cutover.sql");
+    expect(formatted).toContain("0094_companion_runtime_cutover.sql");
     expect(formatted).toContain("node dist/companionPurge.js report");
     expect(formatted).toContain("purge --confirm-delete-all-companions");
   });
@@ -400,7 +403,7 @@ describe("formatMigrationFailure", () => {
     const formatted = formatMigrationFailure(error);
     expect(formatted).toContain("two-phase API migration runner");
     expect(formatted).toContain("DATABASE_RETIRED_RUNTIME_ROLE");
-    expect(formatted).toContain("Do not execute 0093 directly");
+    expect(formatted).toContain("Do not execute 0094 directly");
   });
 
   it("tolerates a self-referential cause chain", () => {

@@ -899,7 +899,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     await adminSql.unsafe(`create database "${guardDatabaseName}"`);
     guardDatabaseCreated = true;
     guardSql = postgres(guardUrl.toString(), { max: 1 });
-    await replayMigrations(guardSql, "0093_companion_runtime_cutover.sql");
+    await replayMigrations(guardSql, "0094_companion_runtime_cutover.sql");
     await applySplitRuntimeGrants(guardSql, true);
 
     await guardSql`
@@ -939,7 +939,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     await adminSql.unsafe(`create database "${runtimeDatabaseName}"`);
     runtimeDatabaseCreated = true;
     const runtimeMigrationSql = postgres(runtimeUrl.toString(), { max: 1 });
-    await replayMigrations(runtimeMigrationSql, "0093_companion_runtime_cutover.sql");
+    await replayMigrations(runtimeMigrationSql, "0094_companion_runtime_cutover.sql");
 
     const [ledger] = await runtimeMigrationSql<Array<{ count: number }>>`
       select count(*)::int as count from companion_legacy_purge_runs
@@ -952,7 +952,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     freshGate = initialGate;
 
     await applySplitRuntimeGrants(runtimeMigrationSql, true);
-    await applyMigrationFile(runtimeMigrationSql, "0093_companion_runtime_cutover.sql");
+    await applyMigrationFile(runtimeMigrationSql, "0094_companion_runtime_cutover.sql");
     await runtimeMigrationSql.end({ timeout: 1 });
     runtimeSql = postgres(runtimeUrl.toString(), { max: 10 });
     await runtimeSql.unsafe(`
@@ -1069,7 +1069,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
   it("blocks final cutover until legacy ownership is gone and retains owner-only purge evidence", async () => {
     if (!guardSql) throw new Error("guard database is not initialized");
 
-    await expect(applyMigrationFile(guardSql, "0093_companion_runtime_cutover.sql"))
+    await expect(applyMigrationFile(guardSql, "0094_companion_runtime_cutover.sql"))
       .rejects.toThrow("Runtime v2 final cutover preflight failed");
 
     const [blocked] = await guardSql<Array<{ poolTable: string | null; poolCount: number }>>`
@@ -1090,7 +1090,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
         ${disabledGate.gateEpoch}, 'runtime-v2-cutover-guard-test'
       )
     `;
-    await expect(applyMigrationFile(guardSql, "0093_companion_runtime_cutover.sql"))
+    await expect(applyMigrationFile(guardSql, "0094_companion_runtime_cutover.sql"))
       .rejects.toThrow("Runtime v2 final cutover preflight failed");
 
     const [enabledGate] = await guardSql<Array<GateStatus>>`
@@ -1103,7 +1103,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
         ${enabledGate.gateEpoch}, 'runtime-v2-cutover-guard-test'
       )
     `;
-    await applyMigrationFile(guardSql, "0093_companion_runtime_cutover.sql");
+    await applyMigrationFile(guardSql, "0094_companion_runtime_cutover.sql");
 
     const [cutover] = await guardSql<Array<{
       poolTable: string | null;

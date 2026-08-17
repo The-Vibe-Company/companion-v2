@@ -111,12 +111,13 @@ DATABASE_URL=postgres://companion_worker:...@.../companion
 DATABASE_COMPANION_RUNTIME_URL=postgres://companion_runtime_v2:...@.../companion
 ```
 
-`node dist/migrate.js` applies compatible migrations through 0092, executes
-`packages/db/runtime-role-grants.sql`, then admits 0093 and every later migration in the full journal
-only on that same physical PostgreSQL connection after the grant block records success. The 0092
-checkpoint is one-way: a missing role, drifted object, live retired session/membership, or incomplete
-ACL revocation leaves 0093 unapplied, but does not undo 0090-0092. Keep the flag disabled and do not
-restart an old executor while correcting the preflight. The `release` deployment exits with status
+`node dist/migrate.js` applies compatible migrations through additive desktop-replay repair 0093,
+executes `packages/db/runtime-role-grants.sql`, then admits cutover 0094 and every later migration in
+the full journal only on that same physical PostgreSQL connection after the grant block records
+success. The 0093 checkpoint is one-way: a missing role, drifted object, live retired
+session/membership, or incomplete ACL revocation leaves 0094 unapplied, but does not undo 0090-0093.
+Keep the flag disabled and do not restart an old executor while correcting the preflight. The
+`release` deployment exits with status
 zero and becomes Railway `Completed` only after the full run succeeds. API connects through its
 ordinary restricted `DATABASE_URL`; never add the owner URL or role-name variables to API, worker,
 runtime, or web.

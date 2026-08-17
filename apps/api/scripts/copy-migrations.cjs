@@ -10,9 +10,9 @@ const migrationsDest = join(apiRoot, "dist", "drizzle");
 rmSync(migrationsDest, { recursive: true, force: true });
 cpSync(migrationsSource, migrationsDest, { recursive: true });
 
-// The migration entrypoint checkpoints through 0092, applies least-privilege runtime grants, then
-// admits guarded migration 0093 on the same connection. The distinct DATABASE_API_ROLE +
-// DATABASE_WORKER_ROLE + DATABASE_COMPANION_RUNTIME_ROLE contract is mandatory for that cutover.
+// The migration entrypoint checkpoints through additive migration 0093, applies least-privilege
+// runtime grants, then admits guarded cutover migration 0094 on the same connection. The distinct
+// DATABASE_API_ROLE + DATABASE_WORKER_ROLE + DATABASE_COMPANION_RUNTIME_ROLE contract is mandatory.
 copyFileSync(
   join(repoRoot, "packages", "db", "runtime-role-grants.sql"),
   join(apiRoot, "dist", "runtime-role-grants.sql"),

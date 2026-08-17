@@ -2,8 +2,9 @@
 -- executor schema only after the one-shot provider purge and every migration-first compatibility
 -- fence are demonstrably quiescent. No DROP uses CASCADE.
 
--- The migration runner first checkpoints through 0092 and executes the exact role-grant block on
--- this physical connection. That block writes a random nonce and this backend/role-bound marker
+-- The migration runner first checkpoints through additive migration 0093 and executes the exact
+-- role-grant block on this physical connection. That block writes a random nonce and this
+-- backend/role-bound marker
 -- only after every role, object and ACL validation succeeds. Keep this guard as the first statement:
 -- a standalone replay, a connection-pool hop, or a copied/spoof marker must precede no cutover DDL.
 DO $runtime_v2_cutover_grants_guard$
@@ -42,7 +43,7 @@ BEGIN
     RAISE EXCEPTION 'Runtime v2 final cutover grants were not verified on this connection'
       USING ERRCODE = '55000',
             DETAIL = 'the grant marker is missing, stale, copied, or does not match this backend and role set',
-            HINT = 'Run the two-phase API migration entrypoint; do not execute migration 0093 directly.';
+            HINT = 'Run the two-phase API migration entrypoint; do not execute migration 0094 directly.';
   END IF;
 
   PERFORM set_config('companion.runtime_grants_verified', 'consumed', false);

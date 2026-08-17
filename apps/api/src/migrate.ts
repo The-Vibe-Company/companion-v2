@@ -14,7 +14,7 @@ const DEFAULT_MIGRATION_LOCK_TIMEOUT_MS = 60_000;
 const RUNTIME_GRANTS_BEGIN = "-- companion-runtime-grants-begin";
 const RUNTIME_GRANTS_END = "-- companion-runtime-grants-end";
 const DATABASE_ROLE_PATTERN = /^[a-z_][a-z0-9_]{0,62}$/;
-export const RUNTIME_V2_FINAL_CUTOVER_TAG = "0093_companion_runtime_cutover";
+export const RUNTIME_V2_FINAL_CUTOVER_TAG = "0094_companion_runtime_cutover";
 
 export const CUTOVER_GUARD_SQLSTATE = "55000";
 export const CUTOVER_GUARD_MESSAGE = "Skills Hub-only migration requires runtime resource cleanup first";
@@ -87,6 +87,7 @@ export function databaseRuntimeRoles(env: NodeJS.ProcessEnv = process.env): Data
 
 interface DrizzleJournalEntry {
   tag: string;
+  when: number;
   [key: string]: unknown;
 }
 
@@ -98,6 +99,7 @@ interface DrizzleJournal {
 export interface MigrationPhases {
   checkpointFolder: string;
   hasFinalCutover: boolean;
+  finalCutoverWhen: number | null;
   cleanup: () => Promise<void>;
 }
 
@@ -113,7 +115,11 @@ function parseMigrationJournal(source: string, journalPath: string): DrizzleJour
     || typeof parsed !== "object"
     || !Array.isArray((parsed as { entries?: unknown }).entries)
     || !(parsed as { entries: unknown[] }).entries.every(
-      (entry) => entry && typeof entry === "object" && typeof (entry as { tag?: unknown }).tag === "string",
+      (entry) => entry
+        && typeof entry === "object"
+        && typeof (entry as { tag?: unknown }).tag === "string"
+        && typeof (entry as { when?: unknown }).when === "number"
+        && Number.isFinite((entry as { when: number }).when),
     )
   ) {
     throw new Error(`migration journal has an invalid entries array: ${journalPath}`);
@@ -122,10 +128,10 @@ function parseMigrationJournal(source: string, journalPath: string): DrizzleJour
 }
 
 /**
- * Drizzle commits each migration separately. Presenting it with a journal ending at 0092 creates a
- * deliberate, one-way compatibility checkpoint before the destructive cutover migration can be
- * considered. The full journal (including every migration after 0093) is used only after the exact
- * role-grant block succeeds.
+ * PostgreSQL Drizzle commits all pending entries in one transaction. Presenting it with a journal
+ * ending at additive 0093 creates a deliberate, one-way compatibility checkpoint before the
+ * destructive cutover migration can be considered. The full journal (including every migration
+ * after 0094) is used only after the exact role-grant block succeeds.
  */
 export async function prepareMigrationPhases(migrationsFolder: string): Promise<MigrationPhases> {
   const journalPath = join(migrationsFolder, "meta", "_journal.json");
@@ -135,10 +141,11 @@ export async function prepareMigrationPhases(migrationsFolder: string): Promise<
     return {
       checkpointFolder: migrationsFolder,
       hasFinalCutover: false,
+      finalCutoverWhen: null,
       cleanup: async () => undefined,
     };
   }
-  const checkpointFolder = await mkdtemp(join(tmpdir(), "companion-migrations-through-0092-"));
+  const checkpointFolder = await mkdtemp(join(tmpdir(), "companion-migrations-through-0093-"));
   try {
     await mkdir(join(checkpointFolder, "meta"), { recursive: true });
     const checkpointJournal: DrizzleJournal = {
@@ -163,8 +170,20 @@ export async function prepareMigrationPhases(migrationsFolder: string): Promise<
   return {
     checkpointFolder,
     hasFinalCutover: true,
+    finalCutoverWhen: journal.entries[cutoverIndex]?.when ?? null,
     cleanup: () => rm(checkpointFolder, { recursive: true, force: true }),
   };
+}
+
+async function isFinalCutoverPending(
+  client: ReturnType<typeof postgres>,
+  finalCutoverWhen: number,
+): Promise<boolean> {
+  const [row] = await client<Array<{ pending: boolean }>>`
+    select coalesce(max(created_at), 0) < ${finalCutoverWhen} as pending
+    from drizzle.__drizzle_migrations
+  `;
+  return row?.pending ?? true;
 }
 
 async function isReadableMigrationFolder(path: string): Promise<boolean> {
@@ -276,7 +295,7 @@ async function applyRuntimeRoleGrants(
 ): Promise<void> {
   const source = await readFile(grantsFile, "utf8");
   const grantBlock = extractRuntimeRoleGrantBlock(source);
-  // A previous invocation on a reused connection must never satisfy 0093. The grants block creates
+  // A previous invocation on a reused connection must never satisfy 0094. The grants block creates
   // a new nonce and writes the verified marker only after every validation and ACL change succeeds.
   await client.unsafe("reset companion.runtime_grants_verified").catch(() => undefined);
   await client.unsafe("reset companion.runtime_grants_nonce").catch(() => undefined);
@@ -301,7 +320,6 @@ export async function run(input?: { env?: NodeJS.ProcessEnv }): Promise<void> {
   const env = input?.env ?? process.env;
   const migrationsFolder = await resolveMigrationsFolder({ env });
   const runtimeRoles = databaseRuntimeRoles(env);
-  const grantsFile = runtimeRoles ? await resolveRuntimeRoleGrantsFile({ env }) : null;
   const migrationUrl = databaseUrl(env);
   const phases = await prepareMigrationPhases(migrationsFolder);
   let client: ReturnType<typeof postgres>;
@@ -321,15 +339,23 @@ export async function run(input?: { env?: NodeJS.ProcessEnv }): Promise<void> {
     await acquireMigrationLock(client, migrationLockTimeoutMs(env));
     lockAcquired = true;
     await migrate(database, { migrationsFolder: phases.checkpointFolder });
+    const finalCutoverPending = phases.finalCutoverWhen === null
+      ? false
+      : await isFinalCutoverPending(client, phases.finalCutoverWhen);
     if (phases.hasFinalCutover) {
-      console.log("Drizzle compatibility checkpoint applied through 0092");
-      if (!runtimeRoles || !grantsFile) {
+      if (finalCutoverPending) {
+        console.log("Drizzle compatibility checkpoint applied through 0093");
+      } else {
+        console.log("Runtime v2 final cutover is already recorded; skipping pre-cutover grants");
+      }
+      if (finalCutoverPending && !runtimeRoles) {
         throw new Error(
           "Runtime v2 final cutover requires DATABASE_API_ROLE, DATABASE_WORKER_ROLE, and DATABASE_COMPANION_RUNTIME_ROLE; set DATABASE_RETIRED_RUNTIME_ROLE as well when upgrading a legacy union role",
         );
       }
     }
-    if (runtimeRoles && grantsFile) {
+    if (runtimeRoles && (!phases.hasFinalCutover || finalCutoverPending)) {
+      const grantsFile = await resolveRuntimeRoleGrantsFile({ env });
       await applyRuntimeRoleGrants(client, runtimeRoles, grantsFile);
       const roleSummary = [
         `API ${runtimeRoles.apiRole}`,
@@ -421,7 +447,7 @@ export function formatMigrationFailure(error: unknown): string {
   ) {
     lines.push(
       "",
-      "Migration 0093_companion_runtime_cutover.sql refuses to remove the legacy Box/Pi executor",
+      "Migration 0094_companion_runtime_cutover.sql refuses to remove the legacy Box/Pi executor",
       "until the Companions flag and Runtime v2 database gate are off, every claim is neutral, old",
       "API/worker replicas are drained, every legacy Box deletion is durably confirmed, and the",
       "legacy database aggregate is empty.",
@@ -440,13 +466,13 @@ export function formatMigrationFailure(error: unknown): string {
   ) {
     lines.push(
       "",
-      "Migration 0093 must be invoked by the two-phase API migration runner on one physical",
-      "PostgreSQL connection. It checkpoints through 0092, validates the exact API/worker/runtime",
-      "roles, retires any named legacy union credential, and only then presents 0093.",
+      "Migration 0094 must be invoked by the two-phase API migration runner on one physical",
+      "PostgreSQL connection. It checkpoints through additive migration 0093, validates the exact",
+      "API/worker/runtime roles, retires any named legacy union credential, and only then presents 0094.",
       "",
       "Set DATABASE_API_ROLE, DATABASE_WORKER_ROLE, and DATABASE_COMPANION_RUNTIME_ROLE. For an",
       "upgrade, first make the former union role NOLOGIN, drain all of its sessions, and set",
-      "DATABASE_RETIRED_RUNTIME_ROLE to that exact role name. Do not execute 0093 directly.",
+      "DATABASE_RETIRED_RUNTIME_ROLE to that exact role name. Do not execute 0094 directly.",
     );
   }
 
