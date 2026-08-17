@@ -330,6 +330,7 @@ describe("PiProcessController", () => {
     const controller = new PiProcessController({
       boxId: "box-sim-delayed-close",
       appendEvent: (event) => events.push(event),
+      appendFault: () => undefined,
       currentInvocationId: () => "00000000000000000000000000000001",
     }, {
       processPath: DELAYED_CLOSE_PROCESS_PATH,

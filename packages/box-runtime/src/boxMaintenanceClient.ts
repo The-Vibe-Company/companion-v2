@@ -628,7 +628,8 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
       if (
         error instanceof BoxRuntimeProviderError
         && error.status === 404
-        && error.code === "box_not_found"
+        && error instanceof BoxRuntimeAdapterError
+        && error.providerCode === "box_not_found"
       ) {
         return { outcome: "absent", boxId };
       }

@@ -208,7 +208,8 @@ describe("AsciiBoxMaintenanceClient", () => {
       await expect(client().requestPermanentDeletion({ boxId: BOX_ID })).rejects.toMatchObject({
         name: "BoxRuntimeProviderError",
         status: 404,
-        code,
+        stableCode: "box_not_found",
+        providerCode: code === "deletion_operation_not_found" ? code : undefined,
       });
     },
   );
