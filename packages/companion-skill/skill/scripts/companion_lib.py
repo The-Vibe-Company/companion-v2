@@ -98,12 +98,21 @@ def _private_secret_pipe() -> tuple[int, int]:
     os.pipe() cannot be used here. macOS reports every anonymous pipe as mode 0660, the
     client rejects any descriptor carrying group or other bits, and fchmod on a pipe is
     refused with EINVAL, so the mode cannot be corrected after the fact. A named FIFO can
-    be created at 0600 instead. Unlinking it once both ends are open keeps the transport
-    exactly as private as an anonymous pipe: the descriptors hold the inode alive while no
-    path remains for another process to reopen.
+    be created at 0600 instead, and it is unlinked as soon as both ends are open.
+
+    That is very nearly, but not exactly, an anonymous pipe. Between mkfifo and unlink the
+    transport carries a filesystem name. The enclosing 0700 directory keeps other users
+    out, so this is not a cross-privilege window, but a process running as this same uid
+    could open it during that interval. Callers already trust same-uid processes, which
+    read the 0600 secret projections directly.
     """
-    directory = tempfile.mkdtemp(prefix="companion-secret-")
-    os.chmod(directory, 0o700)
+    try:
+        directory = tempfile.mkdtemp(prefix="companion-secret-")
+        os.chmod(directory, 0o700)
+    except OSError as error:
+        # os.pipe() touched no filesystem, so this is a new way to fail. Report it in the
+        # module's convention instead of surfacing a traceback.
+        fail(f"could not create the private secret transport directory: {error}")
     path = os.path.join(directory, "pipe")
     read_fd: int | None = None
     write_fd: int | None = None
@@ -117,10 +126,12 @@ def _private_secret_pipe() -> tuple[int, int]:
         write_fd = os.open(path, os.O_WRONLY)
         os.set_blocking(read_fd, True)
         return read_fd, write_fd
-    except BaseException:
+    except BaseException as error:
         for fd in (read_fd, write_fd):
             if fd is not None:
                 os.close(fd)
+        if isinstance(error, OSError):
+            fail(f"could not create the private secret transport: {error}")
         raise
     finally:
         # Best-effort: a cleanup error must never mask the redemption outcome, and the

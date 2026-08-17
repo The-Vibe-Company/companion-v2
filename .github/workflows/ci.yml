@@ -131,7 +131,7 @@ jobs:
 
       - name: Test bundled Companion skill guards
         if: needs.scope.outputs.skill == 'true'
-        run: python -m unittest discover -s packages/companion-skill/skill/scripts -p 'test_*.py'
+        run: bash scripts/run-skill-guards.sh
 
       - name: Validate DESIGN.md
         if: needs.scope.outputs.design == 'true'
@@ -157,7 +157,7 @@ jobs:
       # therefore broken on every Mac while the Ubuntu matrix stayed green. Only this
       # runner can prove the private transport still satisfies its own contract.
       - name: Test bundled Companion skill guards
-        run: python -m unittest discover -s packages/companion-skill/skill/scripts -p 'test_*.py'
+        run: bash scripts/run-skill-guards.sh
 
   quality:
     name: Quality Node 22

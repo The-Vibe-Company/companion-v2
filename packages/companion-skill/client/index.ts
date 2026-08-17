@@ -46,7 +46,7 @@ type ClientInput =
       name?: string;
       ttlSeconds?: number;
       targetWorkspaceId?: string;
-      /** Inherited anonymous pipe descriptor. stdout/stderr and regular files are refused. */
+      /** Inherited owner-only FIFO descriptor. stdout/stderr, sockets, and regular files are refused. */
       outputFd: number;
     }
   | {
@@ -89,7 +89,7 @@ type ClientInput =
       action: "secret-redeem";
       workspaceId?: string;
       planId: string;
-      /** Inherited anonymous pipe descriptor. stdout/stderr and regular files are refused. */
+      /** Inherited owner-only FIFO descriptor. stdout/stderr, sockets, and regular files are refused. */
       outputFd: number;
     }
   | {
