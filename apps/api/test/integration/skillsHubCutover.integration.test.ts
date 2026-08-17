@@ -33,6 +33,9 @@ if (!databaseUrl?.trim()) {
 }
 
 const migrationsDir = fileURLToPath(new URL("../../../../packages/db/drizzle/", import.meta.url));
+const preflightScript = fileURLToPath(
+  new URL("../../../../packages/db/skills-hub-cutover-preflight.sql", import.meta.url),
+);
 const databaseName = `companion_cutover_${randomUUID().replaceAll("-", "")}`;
 const adminSql = postgres(databaseUrl, { max: 1 });
 const upgradeUrl = new URL(databaseUrl);
@@ -44,6 +47,30 @@ const bucket = new Set<string>();
 const deleteObject = async (key: string): Promise<void> => {
   if (!bucket.delete(key)) throw new Error(`object is not in the bucket: ${key}`);
 };
+
+/**
+ * Run the operator preflight script the runbook hands out, and return its guard-parity row. Every
+ * statement is executed so a broken query in the script fails this test rather than an operator.
+ */
+async function runPreflightScript(): Promise<Record<string, number>> {
+  const source = await readFile(preflightScript, "utf8");
+  const statements = source
+    .split(";")
+    .map((statement) =>
+      statement
+        .split("\n")
+        .filter((line) => !line.trimStart().startsWith("--"))
+        .join("\n")
+        .trim(),
+    )
+    .filter((statement) => statement.length > 0);
+  expect(statements).toHaveLength(5);
+
+  const [guardParity, ...rest] = statements;
+  const [counts] = await upgradeSql.unsafe<Record<string, string>[]>(guardParity ?? "");
+  for (const statement of rest) await upgradeSql.unsafe(statement);
+  return Object.fromEntries(Object.entries(counts ?? {}).map(([key, value]) => [key, Number(value)]));
+}
 
 async function applyMigrationFile(name: string): Promise<void> {
   const source = await readFile(`${migrationsDir}/${name}`, "utf8");
@@ -164,6 +191,14 @@ describe("Skills Hub-only cutover", () => {
     expect(counts.pendingStorage).toBe(2);
     expect(counts.pendingProjects).toBe(1);
 
+    // The runbook's psql preflight must report exactly what the migration guard checks.
+    expect(await runPreflightScript()).toEqual({
+      pending_storage: counts.pendingStorage,
+      pending_projects: counts.pendingProjects,
+      pending_sandboxes: counts.pendingSandboxes,
+      active_usage: counts.activeUsage,
+    });
+
     const inventory: string[] = [];
     await report(upgradeSql, (message) => inventory.push(message));
     const printed = inventory.join("\n");
@@ -211,6 +246,12 @@ describe("Skills Hub-only cutover", () => {
       pendingProjects: 0,
       pendingSandboxes: 0,
       activeUsage: 0,
+    });
+    expect(await runPreflightScript()).toEqual({
+      pending_storage: 0,
+      pending_projects: 0,
+      pending_sandboxes: 0,
+      active_usage: 0,
     });
 
     await migrateWithApiEnvironment();
