@@ -1265,6 +1265,26 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       }]);
       expect(await enqueueStop()).toEqual([{ ...stop[0], replayed: true }]);
 
+      for (const [initialSurface, conflictingSurface] of [
+        ["web", "native_mobile"],
+        ["native_mobile", "web"],
+      ] as const) {
+        const startRequestId = randomUUID();
+        const enqueueStart = (surface: "web" | "native_mobile") => asApi({
+          orgId: ids.orgA,
+          actorId: ids.editorA,
+          action: (tx: Tx) => tx<Array<{ replayed: boolean }>>`
+            select replayed from public.companion_api_enqueue_operation(
+              ${ids.orgA}::uuid, ${companionId}::uuid, ${startRequestId}::uuid,
+              'start', ${surface}::public.companion_client_surface
+            )
+          `,
+        });
+        expect(await enqueueStart(initialSurface)).toEqual([{ replayed: false }]);
+        expect(await enqueueStart(initialSurface)).toEqual([{ replayed: true }]);
+        await expect(enqueueStart(conflictingSurface)).rejects.toMatchObject({ code: "22023" });
+      }
+
       const deleteRequestId = randomUUID();
       const enqueueDelete = () => asApi({
         orgId: ids.orgA,

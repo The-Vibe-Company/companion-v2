@@ -1256,6 +1256,8 @@ DECLARE
   v_instance public.companion_runtime_instances%ROWTYPE;
   v_operation_id uuid;
   v_existing_kind public.companion_operation_kind;
+  v_existing_surface public.companion_client_surface;
+  v_requested_surface public.companion_client_surface;
   v_now timestamp with time zone := clock_timestamp();
 BEGIN
   IF p_request_id IS NULL OR p_kind IS NULL
@@ -1263,6 +1265,10 @@ BEGIN
      OR p_kind IN ('start', 'restart_pi', 'restart_box') AND p_client_surface IS NULL THEN
     RAISE EXCEPTION 'invalid Companion operation request' USING ERRCODE = '22023';
   END IF;
+  v_requested_surface := CASE
+    WHEN p_kind IN ('start', 'restart_pi', 'restart_box') THEN p_client_surface
+    ELSE NULL
+  END;
   v_required := CASE WHEN p_kind = 'delete' THEN 'owner' ELSE 'editor' END;
   PERFORM public.companion_api_require_access(p_org_id, p_companion_id, v_required);
   SELECT instance.* INTO STRICT v_instance
@@ -1270,13 +1276,15 @@ BEGIN
   WHERE instance.org_id = p_org_id AND instance.companion_id = p_companion_id
   FOR UPDATE;
 
-  SELECT existing.id, existing.kind INTO v_operation_id, v_existing_kind
+  SELECT existing.id, existing.kind, existing.client_surface
+  INTO v_operation_id, v_existing_kind, v_existing_surface
   FROM public.companion_operations existing
   WHERE existing.org_id = p_org_id AND existing.companion_id = p_companion_id
     AND existing.request_id = p_request_id;
   IF FOUND THEN
-    IF v_existing_kind <> p_kind THEN
-      RAISE EXCEPTION 'operation request id was reused for another kind' USING ERRCODE = '22023';
+    IF v_existing_kind <> p_kind
+       OR v_existing_surface IS DISTINCT FROM v_requested_surface THEN
+      RAISE EXCEPTION 'operation request id was reused for another intent' USING ERRCODE = '22023';
     END IF;
     RETURN QUERY SELECT
       public.companion_api_operation_json(p_org_id, p_companion_id, v_operation_id), true;
@@ -1292,7 +1300,7 @@ BEGIN
     status, created_at, updated_at
   ) VALUES (
     p_org_id, p_companion_id, p_request_id, p_kind, 'user', v_actor_id,
-    0, 0, v_instance.generation, p_client_surface, 'pending', v_now, v_now
+    0, 0, v_instance.generation, v_requested_surface, 'pending', v_now, v_now
   ) RETURNING companion_operations.id INTO v_operation_id;
 
   IF p_kind = 'delete' THEN
