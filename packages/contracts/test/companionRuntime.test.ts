@@ -64,6 +64,10 @@ function turn(overrides: Record<string, unknown> = {}) {
 describe("Companion Runtime v2 public contracts", () => {
   it("bounds persisted errors to one safe line and one supported action", () => {
     expect(companionRuntimeSafeErrorSchema.parse(safeError)).toEqual(safeError);
+    expect(companionRuntimeSafeErrorSchema.parse({
+      ...safeError,
+      message: "🧪".repeat(500),
+    }).message).toBe("🧪".repeat(500));
     expect(() => companionRuntimeSafeErrorSchema.parse({
       ...safeError,
       message: "provider payload\nsecret",
@@ -71,6 +75,10 @@ describe("Companion Runtime v2 public contracts", () => {
     expect(() => companionRuntimeSafeErrorSchema.parse({
       ...safeError,
       message: "x".repeat(501),
+    })).toThrow();
+    expect(() => companionRuntimeSafeErrorSchema.parse({
+      ...safeError,
+      message: "🧪".repeat(501),
     })).toThrow();
     expect(() => companionRuntimeSafeErrorSchema.parse({
       ...safeError,

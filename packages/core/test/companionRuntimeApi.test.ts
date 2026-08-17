@@ -139,6 +139,23 @@ describe("Runtime v2 Companion projection", () => {
     ]);
   });
 
+  it("preserves the deployable-stage Skill sync error and its Viewer redaction", () => {
+    const owner = projectCompanionRuntimeV2({
+      ...companion,
+      runtime: { ...companion.runtime, skills_last_error: "Box exec timed out" },
+    }, runtime());
+    const viewer = projectCompanionRuntimeV2({
+      ...companion,
+      access: "viewer",
+      // The second PostgreSQL read may observe an Editor -> Viewer downgrade after the legacy
+      // projection already returned operator detail, so the Runtime v2 overlay must redact again.
+      runtime: { ...companion.runtime, skills_last_error: "Box exec timed out" },
+    }, runtime({ access_role: "viewer" }));
+
+    expect(owner.runtime.skills_last_error).toBe("Box exec timed out");
+    expect(viewer.runtime.skills_last_error).toBe("Skill sync failed.");
+  });
+
   it("rejects a non-positive runtime generation at the projection boundary", () => {
     expect(() => projectCompanionRuntimeV2(companion, runtime({ generation: 0 })))
       .toThrow("Companion runtime generation is invalid");

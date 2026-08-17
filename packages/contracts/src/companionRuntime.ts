@@ -14,10 +14,15 @@ export type CompanionRuntimeErrorAction = z.infer<typeof companionRuntimeErrorAc
 /** The complete error shape allowed to cross the Runtime v2 projection boundary. */
 export const companionRuntimeSafeErrorSchema = z.object({
   code: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
-  message: z.string().min(1).max(500).refine(
-    (value) => !/[\r\n\0]/.test(value),
-    "Runtime error messages must be a single line",
-  ),
+  message: z.string().min(1)
+    .refine(
+      (value) => [...value].length <= 500,
+      "Runtime error messages must be at most 500 Unicode code points",
+    )
+    .refine(
+      (value) => !/[\r\n\0]/.test(value),
+      "Runtime error messages must be a single line",
+    ),
   action: companionRuntimeErrorActionSchema,
 }).strict();
 export type CompanionRuntimeSafeError = z.infer<typeof companionRuntimeSafeErrorSchema>;

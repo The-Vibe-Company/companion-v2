@@ -83,6 +83,7 @@ describe("Runtime desktop private client", () => {
     [{ COMPANION_RUNTIME_PRIVATE_URL: "https://user:pass@runtime.internal" }, "credential URL"],
     [{ COMPANION_RUNTIME_DESKTOP_HMAC_SECRET: undefined }, "missing secret"],
     [{ COMPANION_RUNTIME_DESKTOP_HMAC_SECRET: Buffer.alloc(31).toString("base64") }, "short secret"],
+    [{ COMPANION_RUNTIME_DESKTOP_HMAC_SECRET: Buffer.alloc(33).toString("base64") }, "long secret"],
     [{ COMPANION_RUNTIME_DESKTOP_HMAC_SECRET: "not base64!" }, "invalid secret"],
   ])("fails closed for %s (%s)", async (override, _label) => {
     const fetchMock = vi.fn();
@@ -97,7 +98,7 @@ describe("Runtime desktop private client", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("maps authorization failures without disclosing the private URL or upstream body", async () => {
+  it("rejects query-string private URLs without disclosure", async () => {
     const upstreamSecret = "signed-url=https://box.example.test/?token=provider-secret";
     const fetchMock = vi.fn(async () => new Response(upstreamSecret, { status: 403 }));
 
@@ -121,6 +122,7 @@ describe("Runtime desktop private client", () => {
   });
 
   it.each([
+    [401, "unavailable"],
     [403, "forbidden"],
     [500, "unavailable"],
   ] as const)("redacts an upstream %s response", async (status, code) => {
@@ -135,6 +137,25 @@ describe("Runtime desktop private client", () => {
     expect(error).toMatchObject({ code, message: "Companion desktop is unavailable." });
     expect(String(error)).not.toContain("upstream-secret");
     expect(String(error)).not.toContain("box.invalid");
+  });
+
+  it("accepts an unpadded canonical 32-byte secret", async () => {
+    const fetchMock = vi.fn(async () => Response.json({
+      desktop_url: "https://desktop.example.test/short-lived",
+      provisioning: false,
+      automation: "lux",
+      transport: "vnc",
+    }));
+
+    await expect(mintCompanionDesktop({
+      env: environment({
+        COMPANION_RUNTIME_DESKTOP_HMAC_SECRET: SECRET_BASE64.replace(/=+$/, ""),
+      }),
+      ...identifiers,
+      fetch: fetchMock as typeof fetch,
+      now: () => NOW_MS,
+    })).resolves.toMatchObject({ provisioning: false });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it("redacts transport exceptions and invalid success payloads", async () => {

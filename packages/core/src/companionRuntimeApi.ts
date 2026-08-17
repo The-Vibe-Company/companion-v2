@@ -32,9 +32,21 @@ import {
   listCompanions,
 } from "./companions";
 import { companionCatalogModel, getCompanionProviderCatalog } from "./companionProviderCatalog";
+import { COMPANION_SKILLS_SYNC_ERROR_VIEWER_MESSAGE } from "./companionRuntimeErrors";
 
 function rows<T>(result: unknown): T[] {
   return Array.from(result as Iterable<T>);
+}
+
+function hasDatabaseErrorCode(error: unknown, expected: string): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    if ("code" in current && current.code === expected) return true;
+    current = "cause" in current ? current.cause : null;
+  }
+  return false;
 }
 
 function integer(value: number | string | bigint | null | undefined): number {
@@ -175,7 +187,11 @@ export function projectCompanionRuntimeV2(
       // Runtime v2 deliberately stores the monotonic revision, not an approximate timestamp. The
       // UI can say "up to date" without mislabeling a later health observation as the apply time.
       skills_applied_at: null,
-      skills_last_error: null,
+      skills_last_error: companion.runtime.skills_last_error
+        ? row.access_role === "viewer"
+          ? COMPANION_SKILLS_SYNC_ERROR_VIEWER_MESSAGE
+          : companion.runtime.skills_last_error
+        : null,
       last_observed_at: lastObservedAt,
     },
   };
@@ -339,10 +355,35 @@ export async function setCompanionProviderV2(input: {
       "this Companion already has a provider; create another Companion to use a different one",
     );
   }
-  return updateCompanionV2({
-    ...input,
-    patch: { provider_id: input.providerId },
-  });
+  const modelId = companionCatalogModel(
+    await getCompanionProviderCatalog(),
+    input.providerId,
+  );
+  if (!modelId) {
+    throw new CompanionProviderError(
+      "provider_model_invalid",
+      "The selected provider has no available model.",
+      input.providerId,
+    );
+  }
+  try {
+    await input.database.execute(sql`
+      select * from public.companion_api_set_initial_provider(
+        ${input.orgId}::uuid,
+        ${input.companionId}::uuid,
+        ${input.providerId}::text,
+        ${modelId}::text
+      )
+    `);
+  } catch (error) {
+    if (hasDatabaseErrorCode(error, "55000")) {
+      throw new CompanionRuntimeTransitionError(
+        "this Companion can no longer accept an initial provider; reload its settings",
+      );
+    }
+    throw error;
+  }
+  return getCompanionV2(input);
 }
 
 export async function duplicateCompanionV2(input: {

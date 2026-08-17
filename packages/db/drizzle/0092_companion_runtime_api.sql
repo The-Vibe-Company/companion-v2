@@ -478,6 +478,93 @@ END
 $$;
 --> statement-breakpoint
 
+CREATE FUNCTION public.companion_api_set_initial_provider(
+  p_org_id uuid,
+  p_companion_id uuid,
+  p_provider_id text,
+  p_model_id text
+)
+RETURNS TABLE (
+  companion_id uuid,
+  desired_settings_revision bigint,
+  updated_at timestamp with time zone
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+SET row_security = on
+AS $$
+DECLARE
+  v_actor_id text := public.companion_api_actor(p_org_id);
+  v_instance public.companion_runtime_instances%ROWTYPE;
+  v_companion public.companions%ROWTYPE;
+  v_updated_at timestamp with time zone := clock_timestamp();
+BEGIN
+  PERFORM public.companion_api_require_access(p_org_id, p_companion_id, 'owner');
+  IF p_provider_id IS NULL OR p_provider_id !~ '^[a-z][a-z0-9-]{0,62}$'
+     OR p_model_id IS NULL OR char_length(p_model_id) NOT BETWEEN 1 AND 200
+     OR p_model_id ~ E'[\n\r]' THEN
+    RAISE EXCEPTION 'invalid initial Companion provider' USING ERRCODE = '22023';
+  END IF;
+
+  -- Match Runtime's instance -> Companion lock order. The empty-provider assertion is evaluated
+  -- only after both locks are held, so two accepted requests cannot replace one another.
+  SELECT instance.* INTO STRICT v_instance
+  FROM public.companion_runtime_instances instance
+  WHERE instance.org_id = p_org_id AND instance.companion_id = p_companion_id
+  FOR UPDATE;
+  IF v_instance.retirement_state <> 'active' THEN
+    RAISE EXCEPTION 'retired Companion settings cannot change' USING ERRCODE = '55000';
+  END IF;
+  SELECT companion.* INTO STRICT v_companion
+  FROM public.companions companion
+  WHERE companion.org_id = p_org_id AND companion.id = p_companion_id
+  FOR UPDATE;
+
+  IF v_companion.provider_ids <> '[]'::jsonb THEN
+    RAISE EXCEPTION 'Companion already has a provider' USING ERRCODE = '55000';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM public.companion_provider_connections connection
+    WHERE connection.org_id = p_org_id AND connection.provider_id = p_provider_id
+  ) THEN
+    RAISE EXCEPTION 'Companion provider is not connected' USING ERRCODE = '22023';
+  END IF;
+
+  UPDATE public.companions companion
+  SET provider_ids = jsonb_build_array(p_provider_id),
+      model_id = p_model_id,
+      updated_at = v_updated_at
+  WHERE companion.org_id = p_org_id AND companion.id = p_companion_id;
+
+  UPDATE public.companion_runtime_instances instance
+  SET desired_settings_revision = instance.desired_settings_revision + 1,
+      settings_actor_id = v_actor_id,
+      settings_checkpoint = 'pending',
+      settings_available_at = v_updated_at,
+      last_error_code = NULL,
+      last_error_message = NULL,
+      last_error_action = NULL,
+      updated_at = v_updated_at
+  WHERE instance.org_id = p_org_id AND instance.companion_id = p_companion_id
+  RETURNING instance.desired_settings_revision INTO v_instance.desired_settings_revision;
+
+  INSERT INTO public.audit_log(
+    org_id, actor_id, action, target_type, target_id, metadata
+  ) VALUES (
+    p_org_id,
+    v_actor_id,
+    'companion.settings.updated',
+    'companion',
+    p_companion_id::text,
+    jsonb_build_object('provider', true, 'model', true, 'initial_provider', true)
+  );
+
+  RETURN QUERY SELECT p_companion_id, v_instance.desired_settings_revision, v_updated_at;
+END
+$$;
+--> statement-breakpoint
+
 CREATE FUNCTION public.companion_api_require_access(
   p_org_id uuid,
   p_companion_id uuid,
@@ -1732,6 +1819,8 @@ REVOKE ALL ON FUNCTION public.companion_api_assign_attempt_retry_id() FROM PUBLI
 REVOKE ALL ON FUNCTION public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid) FROM PUBLIC;
 --> statement-breakpoint
 REVOKE ALL ON FUNCTION public.companion_api_update_companion(uuid,uuid,jsonb) FROM PUBLIC;
+--> statement-breakpoint
+REVOKE ALL ON FUNCTION public.companion_api_set_initial_provider(uuid,uuid,text,text) FROM PUBLIC;
 --> statement-breakpoint
 REVOKE ALL ON FUNCTION public.companion_api_set_workspace_access(uuid,uuid,public.companion_share_role) FROM PUBLIC;
 --> statement-breakpoint

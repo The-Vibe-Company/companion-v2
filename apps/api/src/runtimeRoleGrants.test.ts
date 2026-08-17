@@ -97,6 +97,7 @@ describe("Skills Hub runtime-role grants", () => {
     for (const signature of [
       "companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)",
       "companion_api_update_companion(uuid,uuid,jsonb)",
+      "companion_api_set_initial_provider(uuid,uuid,text,text)",
       "companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)",
       "companion_api_update_member_state(uuid,uuid,boolean,boolean,boolean)",
       "companion_api_mark_thread_read(uuid,uuid)",

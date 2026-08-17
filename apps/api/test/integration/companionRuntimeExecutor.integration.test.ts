@@ -498,6 +498,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     const apiSignatures = [
       "public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)",
       "public.companion_api_update_companion(uuid,uuid,jsonb)",
+      "public.companion_api_set_initial_provider(uuid,uuid,text,text)",
       "public.companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)",
       "public.companion_api_update_member_state(uuid,uuid,boolean,boolean,boolean)",
       "public.companion_api_mark_thread_read(uuid,uuid)",
@@ -545,6 +546,119 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         ) as "helperCallable"
     `;
     expect(apiIsolation).toEqual({ privateTableReads: 0, helperCallable: false });
+  });
+
+  it("atomically accepts only one initial provider selection", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const database = sql;
+    const [created] = await asApi({
+      orgId: ids.orgA,
+      actorId: ids.ownerA,
+      action: (tx) => tx<Array<{ companionId: string }>>`
+        select companion_id::text as "companionId"
+        from public.companion_api_create_companion(
+          ${ids.orgA}::uuid,
+          'Atomic initial provider',
+          null::text,
+          null::text,
+          null::text,
+          '[]'::jsonb,
+          false,
+          '[]'::jsonb,
+          null::uuid
+        )
+      `,
+    });
+    if (!created) throw new Error("failed to create the initial-provider fixture");
+
+    try {
+      await database`
+        insert into companion_workspace_access(
+          org_id, companion_id, owner_id, role, granted_by
+        ) values (
+          ${ids.orgA}::uuid, ${created.companionId}::uuid, ${ids.ownerA}, 'editor', ${ids.ownerA}
+        )
+      `;
+      await expect(asApi({
+        orgId: ids.orgA,
+        actorId: ids.editorA,
+        action: (tx) => tx`
+          select * from public.companion_api_set_initial_provider(
+            ${ids.orgA}::uuid,
+            ${created.companionId}::uuid,
+            ${providerId},
+            'editor-model'
+          )
+        `,
+      })).rejects.toMatchObject({ code: "42501" });
+
+      const attempts = await Promise.allSettled([
+        asApi({
+          orgId: ids.orgA,
+          actorId: ids.ownerA,
+          action: (tx) => tx`
+            select * from public.companion_api_set_initial_provider(
+              ${ids.orgA}::uuid,
+              ${created.companionId}::uuid,
+              ${providerId},
+              'fixture-model-a'
+            )
+          `,
+        }),
+        asApi({
+          orgId: ids.orgA,
+          actorId: ids.ownerA,
+          action: (tx) => tx`
+            select * from public.companion_api_set_initial_provider(
+              ${ids.orgA}::uuid,
+              ${created.companionId}::uuid,
+              ${providerId},
+              'fixture-model-b'
+            )
+          `,
+        }),
+      ]);
+
+      expect(attempts.map((attempt) => attempt.status).sort()).toEqual([
+        "fulfilled",
+        "rejected",
+      ]);
+      const rejected = attempts.find((attempt) => attempt.status === "rejected");
+      if (!rejected || rejected.status !== "rejected") {
+        throw new Error("expected one conflicting provider selection");
+      }
+      expect(rejected.reason).toMatchObject({ code: "55000" });
+
+      const [stored] = await database<Array<{
+        providerIds: string[];
+        modelId: string;
+        settingsRevision: string;
+        auditCount: number;
+      }>>`
+        select companion.provider_ids as "providerIds", companion.model_id as "modelId",
+          instance.desired_settings_revision::text as "settingsRevision",
+          (
+            select count(*)::int from audit_log audit
+            where audit.org_id = companion.org_id
+              and audit.target_id = companion.id::text
+              and audit.action = 'companion.settings.updated'
+          ) as "auditCount"
+        from companions companion
+        join companion_runtime_instances instance
+          on instance.org_id = companion.org_id and instance.companion_id = companion.id
+        where companion.org_id = ${ids.orgA}::uuid
+          and companion.id = ${created.companionId}::uuid
+      `;
+      expect(stored?.providerIds).toEqual([providerId]);
+      expect(["fixture-model-a", "fixture-model-b"]).toContain(stored?.modelId);
+      expect(stored).toMatchObject({ settingsRevision: "2", auditCount: 1 });
+    } finally {
+      await database`
+        delete from audit_log
+        where org_id = ${ids.orgA}::uuid and target_id = ${created.companionId}
+      `;
+      await removeCompanion(created.companionId);
+    }
   });
 
   it("persists API intents atomically, projects exact queue state, and enforces tenant ACLs", async () => {

@@ -59,7 +59,8 @@ function desktopSecret(env: NodeJS.ProcessEnv): Buffer {
     );
   }
   const secret = Buffer.from(raw, "base64");
-  if (secret.byteLength < 32 || secret.toString("base64") !== raw) {
+  const canonical = secret.toString("base64").replace(/=+$/, "");
+  if (secret.byteLength !== 32 || canonical !== raw.replace(/=+$/, "")) {
     secret.fill(0);
     throw new RuntimeDesktopClientError(
       "not_configured",
@@ -119,7 +120,7 @@ export async function mintCompanionDesktop(input: {
     rawBody.fill(0);
   }
 
-  if (response.status === 401 || response.status === 403) {
+  if (response.status === 403) {
     throw new RuntimeDesktopClientError("forbidden", "Companion desktop is unavailable.");
   }
   if (!response.ok) {
