@@ -1,0 +1,625 @@
+import { describe, expect, it } from "vitest";
+import { RuntimeEngine } from "./engine";
+import { RuntimeStoreIndeterminateError } from "./store";
+import type { OperationRuntimeClaim } from "./types";
+import {
+  BOX_ID,
+  PI_INVOCATION_ID,
+  MemoryRuntimeStore,
+  engineDependencies,
+  fakePorts,
+  operationAuthorization,
+  operationClaim,
+} from "./test/fixtures";
+
+describe("runtime lifecycle operations", () => {
+  it("recycles only Pi when a warm Send already has an invocation", async () => {
+    const claim = operationClaim({ checkpoint: "starting_pi", checkpointSequence: 6n });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "ready",
+        piState: "idle",
+        piInvocationId: "old-pi-invocation",
+      }),
+    });
+    const ports = fakePorts(store);
+    let starts = 0;
+    let restarts = 0;
+    let boxRestarts = 0;
+    ports.pi.startPiDaemon = async () => {
+      starts += 1;
+      return { state: "idle", invocationId: PI_INVOCATION_ID };
+    };
+    ports.pi.restartPiDaemon = async () => {
+      restarts += 1;
+      return { state: "idle", invocationId: PI_INVOCATION_ID };
+    };
+    ports.box.stopExistingBox = async () => { boxRestarts += 1; };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(starts).toBe(0);
+    expect(restarts).toBe(1);
+    expect(boxRestarts).toBe(0);
+    expect(store.authorization.piInvocationId).toBe(PI_INVOCATION_ID);
+  });
+
+  it("durably deletes a duplicate discovered by create recovery before attaching canonical", async () => {
+    const claim = operationClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: null,
+        boxState: "absent",
+        piState: "absent",
+        piInvocationId: null,
+        diskLayoutVersion: 0,
+        appliedSettingsRevision: 0n,
+        appliedSkillsRevision: 0,
+      }),
+    });
+    const ports = fakePorts(store);
+    const generationName = `Companion ${claim.companionId} g1`;
+    const duplicateId = "bx_2345678a";
+    const effects: string[] = [];
+    let discoveryCalls = 0;
+    ports.box.findGenerationBoxes = async () => {
+      discoveryCalls += 1;
+      return discoveryCalls === 1
+        ? { name: generationName, canonical: null, duplicates: [] }
+        : {
+            name: generationName,
+            canonical: { id: BOX_ID, name: generationName, state: "provisioning" },
+            duplicates: [],
+          };
+    };
+    ports.box.createGenerationBox = async () => {
+      effects.push("create");
+      return {
+        outcome: "recovered",
+        boxId: BOX_ID,
+        name: generationName,
+        canonical: { id: BOX_ID, name: generationName, state: "provisioning" },
+        duplicates: [{ id: duplicateId, name: generationName, state: "ready" }],
+      };
+    };
+    ports.box.requestPermanentDeletion = async ({ boxId }) => {
+      effects.push(`delete:${boxId}`);
+      return { outcome: "accepted", operationId: "delete-op-1" };
+    };
+    ports.box.pollPermanentDeletion = async ({ boxId }) => {
+      effects.push(`poll:${boxId}`);
+      return { status: "completed" };
+    };
+    ports.box.applyGenerationBoxSettings = async ({ boxId }) => {
+      effects.push(`settings:${boxId}`);
+    };
+    const originalStage = ports.resourceStager.stageExistingBox;
+    ports.resourceStager.stageExistingBox = async (input) => {
+      effects.push(`stage:${input.boxId}`);
+      return await originalStage(input);
+    };
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(effects).toEqual([
+      "create",
+      `delete:${duplicateId}`,
+      `poll:${duplicateId}`,
+      `settings:${BOX_ID}`,
+      `stage:${BOX_ID}`,
+    ]);
+    expect(store.duplicateCleanups.get(duplicateId)).toMatchObject({
+      status: "deleted",
+      providerOperationId: "delete-op-1",
+    });
+    expect(store.authorization.boxId).toBe(BOX_ID);
+    expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
+  });
+
+  it("deletes a duplicate that appears after deterministic Box naming before staging", async () => {
+    const claim = operationClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: null,
+        boxState: "absent",
+        piState: "absent",
+        piInvocationId: null,
+        diskLayoutVersion: 0,
+        appliedSettingsRevision: 0n,
+        appliedSkillsRevision: 0,
+      }),
+    });
+    const ports = fakePorts(store);
+    const generationName = `Companion ${claim.companionId} g1`;
+    const duplicateId = "bx_2345678c";
+    const effects: string[] = [];
+    let discoveryCalls = 0;
+    ports.box.findGenerationBoxes = async () => {
+      discoveryCalls += 1;
+      effects.push(`list:${discoveryCalls}`);
+      return discoveryCalls === 1
+        ? { name: generationName, canonical: null, duplicates: [] }
+        : {
+            name: generationName,
+            canonical: { id: BOX_ID, name: generationName, state: "provisioning" },
+            duplicates: [{ id: duplicateId, name: generationName, state: "ready" }],
+          };
+    };
+    ports.box.createGenerationBox = async () => {
+      effects.push("create");
+      return { outcome: "created", boxId: BOX_ID, name: generationName };
+    };
+    ports.box.applyGenerationBoxSettings = async ({ boxId }) => {
+      effects.push(`settings:${boxId}`);
+    };
+    ports.box.requestPermanentDeletion = async ({ boxId }) => {
+      effects.push(`delete:${boxId}`);
+      return { outcome: "accepted", operationId: "delete-op-late" };
+    };
+    ports.box.pollPermanentDeletion = async ({ boxId }) => {
+      effects.push(`poll:${boxId}`);
+      return { status: "completed" };
+    };
+    const originalStage = ports.resourceStager.stageExistingBox;
+    ports.resourceStager.stageExistingBox = async (input) => {
+      effects.push(`stage:${input.boxId}`);
+      return await originalStage(input);
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(effects).toEqual([
+      "list:1",
+      "create",
+      `settings:${BOX_ID}`,
+      "list:2",
+      `delete:${duplicateId}`,
+      `poll:${duplicateId}`,
+      `stage:${BOX_ID}`,
+    ]);
+    expect(store.authorization.boxId).toBe(BOX_ID);
+    expect(store.duplicateCleanups.get(duplicateId)).toMatchObject({
+      status: "deleted",
+      providerOperationId: "delete-op-late",
+    });
+  });
+
+  it("resumes post-name duplicate cleanup after an indeterminate durable checkpoint", async () => {
+    const claim = operationClaim({
+      checkpoint: "box_created",
+      checkpointSequence: 4n,
+    });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "provisioning",
+        piState: "absent",
+        piInvocationId: null,
+        diskLayoutVersion: 0,
+        appliedSettingsRevision: 0n,
+        appliedSkillsRevision: 0,
+      }),
+    });
+    const ports = fakePorts(store);
+    const generationName = `Companion ${claim.companionId} g1`;
+    const duplicateId = "bx_2345678d";
+    let creates = 0;
+    let deleteRequests = 0;
+    let deletePolls = 0;
+    ports.box.findGenerationBoxes = async () => ({
+      name: generationName,
+      canonical: { id: BOX_ID, name: generationName, state: "provisioning" },
+      duplicates: [{ id: duplicateId, name: generationName, state: "ready" }],
+    });
+    ports.box.createGenerationBox = async () => {
+      creates += 1;
+      return { outcome: "created", boxId: BOX_ID, name: generationName };
+    };
+    ports.box.requestPermanentDeletion = async () => {
+      deleteRequests += 1;
+      return { outcome: "accepted", operationId: "delete-op-takeover" };
+    };
+    ports.box.pollPermanentDeletion = async () => {
+      deletePolls += 1;
+      return { status: "completed" };
+    };
+    const durableCleanupCheckpoint = store.checkpointDuplicateCleanup.bind(store);
+    let loseFirstResponse = true;
+    store.checkpointDuplicateCleanup = async (fence, input) => {
+      const result = await durableCleanupCheckpoint(fence, input);
+      if (loseFirstResponse) {
+        loseFirstResponse = false;
+        throw new RuntimeStoreIndeterminateError();
+      }
+      return result;
+    };
+
+    const first = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(first.outcome).toBe("fence_lost");
+    expect(store.duplicateCleanups.get(duplicateId)).toMatchObject({
+      status: "delete_requested",
+      providerOperationId: "delete-op-takeover",
+    });
+    expect(store.settlements).toHaveLength(0);
+
+    store.checkpointDuplicateCleanup = durableCleanupCheckpoint;
+    const takeoverClaim = operationClaim({
+      claimEpoch: 2n,
+      checkpoint: "box_created",
+      checkpointSequence: store.authorization.workCheckpointSequence,
+    });
+    const takeover = await new RuntimeEngine(engineDependencies({ store, ports }))
+      .execute(takeoverClaim);
+
+    expect(takeover.outcome).toBe("succeeded");
+    expect(creates).toBe(0);
+    expect(deleteRequests).toBe(1);
+    expect(deletePolls).toBe(1);
+    expect(store.authorization.boxId).toBe(BOX_ID);
+    expect(store.duplicateCleanups.get(duplicateId)).toMatchObject({
+      status: "deleted",
+      providerOperationId: "delete-op-takeover",
+    });
+    expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
+  });
+
+  it("waits for archive completion before resuming an explicit Box restart", async () => {
+    const claim = operationClaim({ operationKind: "restart_box" });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "ready",
+        piState: "idle",
+        piInvocationId: "old-pi-invocation",
+      }),
+    });
+    const ports = fakePorts(store);
+    const effects: string[] = [];
+    const states: Array<"archiving" | "archived" | "ready"> = [
+      "archiving",
+      "archived",
+      "ready",
+    ];
+    ports.box.stopExistingBox = async () => { effects.push("stop"); };
+    ports.box.getStatus = async () => {
+      const state = states.shift() ?? "ready";
+      effects.push(`status:${state}`);
+      return { state };
+    };
+    ports.box.resumeExistingBox = async () => { effects.push("resume"); };
+    ports.pi.startPiDaemon = async () => {
+      effects.push("start-pi");
+      return { state: "idle", invocationId: PI_INVOCATION_ID };
+    };
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(effects.slice(0, 5)).toEqual([
+      "stop",
+      "status:archiving",
+      "status:archived",
+      "resume",
+      "status:ready",
+    ]);
+    expect(effects.indexOf("resume")).toBeGreaterThan(effects.indexOf("status:archived"));
+    expect(effects).toContain("start-pi");
+  });
+
+  it("waits for a different idle Pi invocation after an explicit Pi restart", async () => {
+    const claim = operationClaim({ operationKind: "restart_pi" });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "ready",
+        piState: "idle",
+        piInvocationId: "old-pi-invocation",
+      }),
+    });
+    const ports = fakePorts(store);
+    let statusCalls = 0;
+    ports.pi.restartPiDaemon = async () => ({
+      state: "starting",
+      invocationId: "old-pi-invocation",
+    });
+    ports.pi.piDaemonStatus = async () => {
+      statusCalls += 1;
+      return statusCalls === 1
+        ? { state: "idle", invocationId: "old-pi-invocation" }
+        : { state: "idle", invocationId: PI_INVOCATION_ID };
+    };
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(statusCalls).toBe(2);
+    expect(store.authorization.piInvocationId).toBe(PI_INVOCATION_ID);
+  });
+
+  it("activates staged settings with a new idle Pi invocation before publishing revisions", async () => {
+    const claim = operationClaim({
+      operationKind: "apply_settings",
+      targetSettingsRevision: 2n,
+      targetSkillsRevision: 2,
+    });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "ready",
+        piState: "idle",
+        piInvocationId: "old-pi-invocation",
+        appliedSettingsRevision: 1n,
+        appliedSkillsRevision: 1,
+      }),
+    });
+    const ports = fakePorts(store);
+    const effects: string[] = [];
+    const originalStage = ports.resourceStager.stageExistingBox;
+    ports.resourceStager.stageExistingBox = async (input) => {
+      effects.push("stage");
+      expect(store.authorization.appliedSettingsRevision).toBe(1n);
+      return await originalStage(input);
+    };
+    ports.pi.restartPiDaemon = async () => {
+      effects.push("restart-pi");
+      expect(store.authorization.appliedSettingsRevision).toBe(1n);
+      return { state: "starting", invocationId: "old-pi-invocation" };
+    };
+    let statusCalls = 0;
+    ports.pi.piDaemonStatus = async () => {
+      statusCalls += 1;
+      effects.push(`pi-status:${statusCalls}`);
+      expect(store.authorization.appliedSettingsRevision).toBe(1n);
+      return statusCalls === 1
+        ? { state: "idle", invocationId: "old-pi-invocation" }
+        : { state: "idle", invocationId: PI_INVOCATION_ID };
+    };
+    ports.box.stopExistingBox = async () => { effects.push("stop-box"); };
+    ports.box.resumeExistingBox = async () => { effects.push("resume-box"); };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(effects).toEqual(["stage", "restart-pi", "pi-status:1", "pi-status:2"]);
+    expect(store.authorization.piInvocationId).toBe(PI_INVOCATION_ID);
+    expect(store.authorization.appliedSettingsRevision).toBe(2n);
+    expect(store.authorization.appliedSkillsRevision).toBe(2);
+    expect(store.authorization.workCheckpoint).toBe("settings_applied");
+    expect(store.observations.at(-1)).toMatchObject({
+      piState: "idle",
+      piInvocationId: PI_INVOCATION_ID,
+      appliedSettingsRevision: 2n,
+      appliedSkillsRevision: 2,
+    });
+    expect(store.observations.at(-1)).not.toHaveProperty("diskLayoutVersion");
+    expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
+  });
+
+  it("does not publish staged revisions when settings activation lacks a new idle Pi", async () => {
+    const claim = operationClaim({
+      checkpoint: "applying_settings",
+      checkpointSequence: 1n,
+      operationKind: "apply_settings",
+      targetSettingsRevision: 2n,
+      targetSkillsRevision: 2,
+    });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "ready",
+        piState: "idle",
+        piInvocationId: "old-pi-invocation",
+        appliedSettingsRevision: 1n,
+        appliedSkillsRevision: 1,
+      }),
+    });
+    const ports = fakePorts(store);
+    let stages = 0;
+    const originalStage = ports.resourceStager.stageExistingBox;
+    ports.resourceStager.stageExistingBox = async (input) => {
+      stages += 1;
+      return await originalStage(input);
+    };
+    ports.pi.restartPiDaemon = async () => ({
+      state: "idle",
+      invocationId: "old-pi-invocation",
+    });
+    ports.pi.piDaemonStatus = async () => ({ state: "error", invocationId: null });
+    let boxLifecycleCalls = 0;
+    ports.box.stopExistingBox = async () => { boxLifecycleCalls += 1; };
+    ports.box.resumeExistingBox = async () => { boxLifecycleCalls += 1; };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("failed");
+    expect(stages).toBe(1);
+    expect(boxLifecycleCalls).toBe(0);
+    expect(store.authorization.piInvocationId).toBe("old-pi-invocation");
+    expect(store.authorization.appliedSettingsRevision).toBe(1n);
+    expect(store.authorization.appliedSkillsRevision).toBe(1);
+    expect(store.authorization.workCheckpoint).toBe("applying_settings");
+    expect(store.observations).toHaveLength(0);
+    expect(store.settlements[0]?.error?.code).toBe("pi_start_failed");
+  });
+
+  it("repeats idempotent settings activation after takeover when the final observation was lost", async () => {
+    const claim = operationClaim({
+      checkpoint: "applying_settings",
+      checkpointSequence: 1n,
+      operationKind: "apply_settings",
+      targetSettingsRevision: 2n,
+      targetSkillsRevision: 2,
+    });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "ready",
+        piState: "idle",
+        piInvocationId: "old-pi-invocation",
+        appliedSettingsRevision: 1n,
+        appliedSkillsRevision: 1,
+      }),
+    });
+    const ports = fakePorts(store);
+    let stages = 0;
+    const originalStage = ports.resourceStager.stageExistingBox;
+    ports.resourceStager.stageExistingBox = async (input) => {
+      stages += 1;
+      return await originalStage(input);
+    };
+    let restarts = 0;
+    ports.pi.restartPiDaemon = async () => {
+      restarts += 1;
+      return { state: "idle", invocationId: `settings-pi-${restarts}` };
+    };
+    let boxLifecycleCalls = 0;
+    ports.box.stopExistingBox = async () => { boxLifecycleCalls += 1; };
+    ports.box.resumeExistingBox = async () => { boxLifecycleCalls += 1; };
+
+    const durableObserve = store.observeInstance.bind(store);
+    store.observeInstance = async () => null;
+    const first = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(first.outcome).toBe("fence_lost");
+    expect(store.authorization.workCheckpoint).toBe("applying_settings");
+    expect(store.authorization.appliedSettingsRevision).toBe(1n);
+
+    store.observeInstance = durableObserve;
+    const takeover = await new RuntimeEngine(engineDependencies({ store, ports })).execute(
+      operationClaim({
+        claimEpoch: 2n,
+        checkpoint: "applying_settings",
+        checkpointSequence: 1n,
+        operationKind: "apply_settings",
+        targetSettingsRevision: 2n,
+        targetSkillsRevision: 2,
+      }),
+    );
+
+    expect(takeover.outcome).toBe("succeeded");
+    expect(stages).toBe(2);
+    expect(restarts).toBe(2);
+    expect(boxLifecycleCalls).toBe(0);
+    expect(store.authorization.piInvocationId).toBe("settings-pi-2");
+    expect(store.authorization.appliedSettingsRevision).toBe(2n);
+    expect(store.authorization.workCheckpoint).toBe("settings_applied");
+  });
+
+  it("never replays create after takeover of an unresolved write intent", async () => {
+    const claim = operationClaim({
+      checkpoint: "creating_box",
+      checkpointSequence: 3n,
+    });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: null,
+        boxState: "absent",
+        piState: "absent",
+        piInvocationId: null,
+      }),
+    });
+    const ports = fakePorts(store);
+    let creates = 0;
+    ports.box.findGenerationBoxes = async () => ({
+      name: `Companion ${claim.companionId} g1`,
+      canonical: null,
+      duplicates: [],
+    });
+    ports.box.createGenerationBox = async () => {
+      creates += 1;
+      return {
+        outcome: "created",
+        boxId: BOX_ID,
+        name: `Companion ${claim.companionId} g1`,
+      };
+    };
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("interrupted");
+    expect(creates).toBe(0);
+    expect(store.settlements[0]?.error?.code).toBe("box_create_ambiguous");
+  });
+
+  it("fails stop explicitly instead of polling forever when the recorded Box is absent", async () => {
+    const resourceClaim = operationClaim();
+    const claim = {
+      ...resourceClaim,
+      clientSurface: null,
+      operationKind: "stop",
+      checkpoint: "waiting_archived",
+      checkpointSequence: 2n,
+      targetSettingsRevision: null,
+      targetSkillsRevision: null,
+      coldStartDeadlineAt: null,
+    } as OperationRuntimeClaim;
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        clientSurface: null,
+        workCheckpoint: "waiting_archived",
+        workCheckpointSequence: 2n,
+        operationKind: "stop",
+        desiredSettingsRevision: null,
+        skillsRevision: null,
+        modelId: null,
+      }),
+    });
+    const ports = fakePorts(store);
+    ports.box.getStatus = async () => ({ state: "absent" });
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("failed");
+    expect(store.settlements[0]?.error?.code).toBe("box_stop_failed");
+  });
+
+  it("terminates explicit provider polling at the durable operation deadline", async () => {
+    const resourceClaim = operationClaim();
+    const claim = {
+      ...resourceClaim,
+      clientSurface: null,
+      operationKind: "stop",
+      checkpoint: "waiting_archived",
+      checkpointSequence: 2n,
+      operationStartedAt: new Date("2026-08-16T11:49:00.000Z"),
+      targetSettingsRevision: null,
+      targetSkillsRevision: null,
+      coldStartDeadlineAt: null,
+    } as OperationRuntimeClaim;
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        clientSurface: null,
+        workCheckpoint: "waiting_archived",
+        workCheckpointSequence: 2n,
+        operationKind: "stop",
+        operationStartedAt: claim.operationStartedAt,
+        desiredSettingsRevision: null,
+        skillsRevision: null,
+        modelId: null,
+      }),
+    });
+    const ports = fakePorts(store);
+    let statusCalls = 0;
+    ports.box.getStatus = async () => {
+      statusCalls += 1;
+      return { state: "archiving" };
+    };
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("failed");
+    expect(statusCalls).toBe(0);
+    expect(store.settlements[0]?.error?.code).toBe("box_stop_deadline_exceeded");
+  });
+});

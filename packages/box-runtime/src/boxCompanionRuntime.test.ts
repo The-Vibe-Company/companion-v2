@@ -745,6 +745,126 @@ describe("AsciiBoxCompanionRuntime", () => {
       String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
   });
 
+  it("lets Runtime v2 resume an assigned Box without ever replacing one that vanished", async () => {
+    const companionId = "11111111-1111-4111-8111-111111111111";
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        return json({ code: "box_not_found" }, 404);
+      }
+      if (url.includes("/boxes?limit=200") && method === "GET") {
+        return json({ boxes: [], pageInfo: { nextCursor: null, hasMore: false } });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.start({
+      companionId,
+      runtimeGeneration: 4,
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: {},
+      replaceProviderAuth: false,
+      allowBoxWake: true,
+      allowBoxCreate: false,
+      modelId: "claude-opus-4-8",
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async () => undefined,
+    })).rejects.toMatchObject({ status: 409, code: "box_not_found" });
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
+  });
+
+  it("keeps exact Box observation and archival separate from Pi lifecycle", async () => {
+    const requests: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      requests.push(`${method} ${url}`);
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        return json({ box: { ...box, state: "idle" } });
+      }
+      if (url.endsWith("/boxes/bx_23456789/stop") && method === "POST") {
+        return json({ box: { ...box, state: "archiving" } });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.existingBoxStatus({ boxId: "bx_23456789" })).resolves.toEqual({
+      boxId: "bx_23456789",
+      state: "idle",
+    });
+    await expect(runtime.archiveExistingBox({ boxId: "bx_23456789" })).resolves.toEqual({
+      boxId: "bx_23456789",
+      state: "archiving",
+    });
+    expect(requests.filter((request) => request.includes("/commands"))).toEqual([]);
+    expect(requests.filter((request) => request.endsWith("/resume"))).toEqual([]);
+  });
+
+  it("starts only Pi and returns its correlated invocation and model capabilities", async () => {
+    const commands: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (!url.endsWith("/commands") || method !== "POST") {
+        throw new Error(`unexpected lifecycle request: ${method} ${url}`);
+      }
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const command = String(body.command);
+      commands.push(command);
+      const brokerCommand = decodedPiBrokerCommand(command);
+      if (brokerCommand?.type === "runtime_state") {
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: `${JSON.stringify({
+            id: brokerCommand.id,
+            type: "response",
+            command: "runtime_state",
+            success: true,
+            data: {
+              invocationId: "invocation-runtime-v2",
+              activeAttemptId: null,
+              tailCursor: 0,
+              acknowledgedCursor: 0,
+              modelInput: ["text", "image"],
+              counters: {
+                malformedLines: 0,
+                oversizedLines: 0,
+                unterminatedLines: 0,
+                unknownEvents: 0,
+                unboundEvents: 0,
+                orphanResponses: 0,
+              },
+            },
+          })}\n`,
+          stderr: "",
+        });
+      }
+      if (command.includes("is-active companion-pi-daemon.service")) {
+        return json({ success: true, exitCode: 0, stdout: "active\n", stderr: "" });
+      }
+      return json({ success: true, exitCode: 0, stdout: "", stderr: "" });
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.startPiDaemon({ boxId: "bx_23456789" })).resolves.toEqual({
+      state: "idle",
+      invocationId: "invocation-runtime-v2",
+    });
+    expect(commands.some((command) => command.includes("systemctl --user start"))).toBe(true);
+    expect(commands.some((command) => decodedPiBrokerCommand(command)?.type === "runtime_state"))
+      .toBe(true);
+  });
+
   it("rejects a stale generation name and recovers only the exact generation-qualified Box", async () => {
     const companionId = "11111111-1111-4111-8111-111111111111";
     const stale = { ...box, id: "bx_stale123", name: `Companion ${companionId} g3` };
@@ -3226,7 +3346,7 @@ describe("AsciiBoxCompanionRuntime", () => {
           exitCode: 0,
           stdout: '{"type":"response","command":"prompt","success":true,'
             + '"id":"msg:stop-wake","data":{"attemptId":"msg:stop-wake",'
-            + '"piAcknowledged":true}}\n',
+            + '"invocationId":"invocation-stop-wake","piAcknowledged":true}}\n',
           stderr: "",
         });
       }
@@ -4375,7 +4495,8 @@ describe("AsciiBoxCompanionRuntime", () => {
           success: true,
           exitCode: 0,
           stdout: '{"type":"response","command":"prompt","success":true,"id":"msg:1",'
-            + '"data":{"attemptId":"msg:1","piAcknowledged":true}}\n',
+            + '"data":{"attemptId":"msg:1","invocationId":"invocation-1",'
+            + '"piAcknowledged":true}}\n',
           stderr: "",
         });
       }
@@ -4464,7 +4585,14 @@ describe("AsciiBoxCompanionRuntime", () => {
       const command = decodedPiBrokerCommand(String(body.command));
       if (outcome === "reject") throw new Error("connection lost after decision write");
       const result = outcome === "accepted"
-        ? { success: true, data: { attemptId: "attempt-1", delivered: true } }
+        ? {
+            success: true,
+            data: {
+              attemptId: "attempt-1",
+              invocationId: "invocation-1",
+              delivered: true,
+            },
+          }
         : {
             success: false,
             error: {
@@ -4496,6 +4624,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     await expect(runtime.dispatchExtensionUi(input)).resolves.toEqual({
       outcome: "accepted",
       attemptId: "attempt-1",
+      invocationId: "invocation-1",
     });
     outcome = "refused";
     await expect(runtime.dispatchExtensionUi({ ...input, requestId: "decision-2" })).resolves.toEqual({
@@ -4518,12 +4647,13 @@ describe("AsciiBoxCompanionRuntime", () => {
       const command = decodedPiBrokerCommand(String(body.command));
       if (!command) throw new Error("missing broker command");
       commands.push(command);
-      const data = command.type === "broker_state"
+      const data = command.type === "runtime_state"
         ? {
             invocationId: "invocation-1",
             activeAttemptId: "attempt-1",
             tailCursor: 8,
             acknowledgedCursor: 6,
+            modelInput: ["text", "image"],
             counters: {
               malformedLines: 1,
               oversizedLines: 2,
@@ -4567,6 +4697,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       activeAttemptId: "attempt-1",
       tailCursor: 8,
       acknowledgedCursor: 6,
+      modelInput: ["text", "image"],
     });
     await expect(runtime.readEvents({ boxId: "bx_23456789", after: 6, limit: 1 }))
       .resolves.toEqual({
@@ -4584,7 +4715,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     await expect(runtime.ackEvents({ boxId: "bx_23456789", through: 7 }))
       .resolves.toEqual({ acknowledgedCursor: 7 });
     expect(commands).toEqual([
-      expect.objectContaining({ type: "broker_state" }),
+      expect.objectContaining({ type: "runtime_state" }),
       expect.objectContaining({ type: "read_events", after: 6, limit: 1 }),
       expect.objectContaining({ type: "ack_events", through: 7 }),
     ]);

@@ -265,6 +265,8 @@ export interface CompanionPiBrokerState {
   tailCursor: number;
   acknowledgedCursor: number;
   counters: CompanionPiBrokerCounters;
+  /** Current Pi `get_state.model.input`, preserved for text/vision dispatch validation. */
+  modelInput: Array<"text" | "image">;
 }
 
 /** One monotonic page from the segmented layout-14 event journal. */
@@ -277,7 +279,7 @@ export interface CompanionPiBrokerEventPage {
 
 /** Prompt dispatch never collapses an ambiguous write into a safe negative acknowledgement. */
 export type CompanionPiPromptDispatch =
-  | { outcome: "accepted"; attemptId: string }
+  | { outcome: "accepted"; attemptId: string; invocationId: string }
   | { outcome: "refused"; code: string; message: string }
   | { outcome: "ambiguous"; code: string; message: string };
 
@@ -299,6 +301,12 @@ export interface CompanionBoxRuntime {
     refreshRuntimeLayout?: boolean;
     /** Refuse creation or resume when a caller may touch only an already-runnable Box. */
     allowBoxWake?: boolean;
+    /**
+     * Runtime v2 owns create through its durable lifecycle ledger. When false, this staging helper
+     * may still resume the exact assigned Box but must never replace a Box that disappeared between
+     * the lifecycle checkpoint and resource injection.
+     */
+    allowBoxCreate?: boolean;
     /** This start claimed an archive continuation even if the provider's first read says idle. */
     waitForArchive?: boolean;
     /** Operator instructions applied when Pi next starts; changing them never restarts a warm Box. */
@@ -327,10 +335,11 @@ export interface CompanionBoxRuntime {
     boxId: string;
     /** Retry an in-flight Stop handoff; provider 409s are safe once wake waits for archival. */
     recoverArchive?: boolean;
+    signal?: AbortSignal;
   }): Promise<CompanionRuntimeObservation>;
-  status(input: { boxId: string }): Promise<CompanionRuntimeObservation>;
+  status(input: { boxId: string; signal?: AbortSignal }): Promise<CompanionRuntimeObservation>;
   /** Mint one fresh desktop URL for a Box that is already running; never creates or resumes one. */
-  desktop(input: { boxId: string }): Promise<CompanionDesktopMint>;
+  desktop(input: { boxId: string; signal?: AbortSignal }): Promise<CompanionDesktopMint>;
   /** Hand one chat message to Pi and wait for its correlated acceptance; never wakes the Box. */
   prompt(input: { boxId: string; message: string; requestId: string }): Promise<void>;
   /**
@@ -345,7 +354,7 @@ export interface CompanionBoxRuntime {
     response: Record<string, unknown>;
   }): Promise<void>;
   /** Reset the provider's idle clock after Pi accepts a durable message. */
-  refreshTtl(input: { boxId: string }): Promise<void>;
+  refreshTtl(input: { boxId: string; ttlSeconds?: number; signal?: AbortSignal }): Promise<void>;
   /**
    * Repair a stopped or RPC-unresponsive Pi daemon. A healthy active daemon acknowledges get_state
    * and stays untouched; an unresponsive active daemon is restarted. Never resumes or creates a Box.
@@ -366,21 +375,73 @@ export interface CompanionBoxRuntime {
 
 /** Layout-14 protocol used only by the dedicated Runtime v2 service during the stacked cutover. */
 export interface CompanionBoxRuntimeV2 extends CompanionBoxRuntime {
+  /** Read the provider's exact lifecycle state without probing Pi or waking the Box. */
+  existingBoxStatus(input: {
+    boxId: string;
+    signal?: AbortSignal;
+  }): Promise<{ boxId: string; state: BoxState }>;
+  /** Resume only the exact durable Box. Never searches by name, creates, stages, or starts Pi. */
+  resumeExistingBox(input: {
+    boxId: string;
+    signal?: AbortSignal;
+  }): Promise<CompanionRuntimeObservation>;
+  /** Archive only the exact durable Box. Pi lifecycle is a separate runtime checkpoint. */
+  archiveExistingBox(input: {
+    boxId: string;
+    recoverArchive?: boolean;
+    signal?: AbortSignal;
+  }): Promise<{ boxId: string; state: BoxState }>;
+  /**
+   * Install layout 14 and concrete, already-authorized resources on one runnable Box. It never
+   * creates/resumes a Box and never starts Pi; apps/runtime owns decryption and material loading.
+   */
+  stageExistingBox(input: {
+    companionId: string;
+    runtimeGeneration: number;
+    orgId: string;
+    boxId: string;
+    clientSurface: CompanionClientSurface;
+    providerAuth: Record<string, Record<string, unknown>>;
+    replaceProviderAuth: boolean;
+    instructions?: string | null;
+    modelId: string;
+    mcpCredentials: McpRuntimeCredential[];
+    mcpAccounts: CompanionMcpAccount[];
+    skills: CompanionRuntimeSkill[];
+    hubEnv?: Record<string, string>;
+    signal?: AbortSignal;
+  }): Promise<{ boxId: string; diskLayoutVersion: typeof COMPANION_PI_DISK_LAYOUT_VERSION }>;
+  /** Pi-only lifecycle controls. None may resume/archive/create the Box. */
+  startPiDaemon(input: { boxId: string; signal?: AbortSignal }): Promise<{
+    state: "idle";
+    invocationId: string;
+  }>;
+  restartPiDaemon(input: { boxId: string; signal?: AbortSignal }): Promise<{
+    state: "idle";
+    invocationId: string;
+  }>;
+  stopPiDaemon(input: { boxId: string; signal?: AbortSignal }): Promise<void>;
+  piDaemonStatus(input: { boxId: string; signal?: AbortSignal }): Promise<{
+    state: "idle" | "running" | "stopped" | "error";
+    invocationId: string | null;
+  }>;
   /** Dispatch one durable attempt and preserve positive, proven-negative, and ambiguous outcomes. */
   dispatchPrompt(input: {
     boxId: string;
     attemptId: string;
     message: string;
     requestId?: string;
+    signal?: AbortSignal;
   }): Promise<CompanionPiPromptDispatch>;
-  /** Observe broker invocation/binding/cursors without asking Pi for state. */
-  brokerState(input: { boxId: string }): Promise<CompanionPiBrokerState>;
+  /** Observe broker identity/cursors and Pi's current model input capabilities in one command. */
+  brokerState(input: { boxId: string; signal?: AbortSignal }): Promise<CompanionPiBrokerState>;
   /** Deliver one durable decision without collapsing a lost Box response into a safe refusal. */
   dispatchExtensionUi(input: {
     boxId: string;
     attemptId?: string;
     requestId?: string;
     response: Record<string, unknown>;
+    signal?: AbortSignal;
   }): Promise<CompanionPiExtensionUiDispatch>;
   readEvents(input: { boxId: string; offset: number }): Promise<CompanionPiEventChunk>;
   /** Read the layout-14 journal after an exclusive monotonic cursor. */
@@ -388,9 +449,14 @@ export interface CompanionBoxRuntimeV2 extends CompanionBoxRuntime {
     boxId: string;
     after: number;
     limit?: number;
+    signal?: AbortSignal;
   }): Promise<CompanionPiBrokerEventPage>;
   /** Acknowledge a journal cursor so the broker may retain or prune closed segments safely. */
-  ackEvents(input: { boxId: string; through: number }): Promise<{ acknowledgedCursor: number }>;
+  ackEvents(input: {
+    boxId: string;
+    through: number;
+    signal?: AbortSignal;
+  }): Promise<{ acknowledgedCursor: number }>;
 }
 
 export class BoxRuntimeConfigurationError extends Error {
@@ -601,7 +667,7 @@ function parseBrokerJournalRecord(value: unknown): CompanionPiJournalRecord | nu
   if (
     (code !== null && !Number.isSafeInteger(code))
     || (signal !== null && (typeof signal !== "string" || signal.length > 32))
-    || (value.attemptId !== null && !opaqueBrokerId(value.attemptId))
+    || !opaqueBrokerId(value.attemptId)
   ) return null;
   return {
     sequence: value.sequence,
@@ -1154,8 +1220,11 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     return await response.json() as T;
   }
 
-  async #get(boxId: string): Promise<BoxInfo> {
-    return (await this.#request<BoxEnvelope>(`/boxes/${encodeURIComponent(boxId)}`)).box;
+  async #get(boxId: string, signal?: AbortSignal): Promise<BoxInfo> {
+    return (await this.#request<BoxEnvelope>(
+      `/boxes/${encodeURIComponent(boxId)}`,
+      signal ? { signal } : undefined,
+    )).box;
   }
 
   /** A Box the provider no longer knows about is reported as missing so the start can replace it. */
@@ -1283,14 +1352,14 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   }
 
   /** One poll interval, ended early by the running start's budget. */
-  async #pause(): Promise<void> {
-    await sleep(this.#pollIntervalMs, undefined, { signal: this.#startSignal });
+  async #pause(signal: AbortSignal | undefined = this.#startSignal): Promise<void> {
+    await sleep(this.#pollIntervalMs, undefined, { signal });
   }
 
-  async #waitReady(boxId: string): Promise<BoxInfo> {
+  async #waitReady(boxId: string, signal?: AbortSignal): Promise<BoxInfo> {
     const deadline = Date.now() + this.#readyTimeoutMs;
     while (Date.now() < deadline) {
-      const box = await this.#get(boxId);
+      const box = await this.#get(boxId, signal);
       if (READY_STATES.has(box.state) && (box.setupStatus === undefined || box.setupStatus === null || box.setupStatus === "done")) {
         return box;
       }
@@ -1298,7 +1367,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
       if (box.setupStatus === "failed") {
         throw new BoxRuntimeProviderError(`Box Pi setup failed: ${box.setupError || "unknown error"}`, 502);
       }
-      await this.#pause();
+      await this.#pause(signal);
     }
     throw new BoxRuntimeProviderError("Box did not become ready before the configured timeout", 504);
   }
@@ -1326,12 +1395,13 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     return current;
   }
 
-  async #resume(boxId: string): Promise<BoxInfo> {
+  async #resume(boxId: string, signal?: AbortSignal): Promise<BoxInfo> {
     const resumed = await this.#request<BoxEnvelope>(
       `/boxes/${encodeURIComponent(boxId)}/resume`,
       {
         method: "POST",
         body: JSON.stringify({ noEnv: true, ttlSeconds: this.#ttlSeconds }),
+        ...(signal ? { signal } : {}),
       },
     );
     return resumed.box;
@@ -1407,14 +1477,16 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     boxId: string,
     command: string,
     timeoutSeconds = 60,
+    signal?: AbortSignal,
   ): Promise<CommandEnvelope> {
     return this.#request<CommandEnvelope>(`/boxes/${encodeURIComponent(boxId)}/commands`, {
       method: "POST",
       body: JSON.stringify({ command, timeoutSeconds }),
+      ...(signal ? { signal } : {}),
     }, (timeoutSeconds + 10) * 1_000);
   }
 
-  async #daemonState(boxId: string): Promise<CompanionDaemonState> {
+  async #daemonState(boxId: string, signal?: AbortSignal): Promise<CompanionDaemonState> {
     const result = await this.#command(
       boxId,
       `${USER_BUS_ENVIRONMENT}
@@ -1431,6 +1503,8 @@ if [ "$companion_pi_state" = active ] &&
 else
   printf '%s\n' companion-pi-broker-unready
 fi`,
+      60,
+      signal,
     );
     const lines = result.stdout.trim().split(/\r?\n/);
     // Exact `active` remains accepted for older Box command fakes. The real probe always prints an
@@ -1448,12 +1522,15 @@ fi`,
    * means systemd accepted the job, and Type=simple becomes active before the broker binds its
    * socket, so the wait ends only when both signals say the protocol boundary is ready.
    */
-  async #waitDaemonActive(boxId: string): Promise<CompanionDaemonState> {
+  async #waitDaemonActive(
+    boxId: string,
+    signal?: AbortSignal,
+  ): Promise<CompanionDaemonState> {
     const deadline = Date.now() + this.#daemonActiveTimeoutMs;
-    let daemonState = await this.#daemonState(boxId);
+    let daemonState = await this.#daemonState(boxId, signal);
     while (daemonState !== "running" && Date.now() < deadline) {
-      await this.#pause();
-      daemonState = await this.#daemonState(boxId);
+      await this.#pause(signal);
+      daemonState = await this.#daemonState(boxId, signal);
     }
     return daemonState;
   }
@@ -1468,6 +1545,7 @@ fi`,
     command: Record<string, unknown> & { id: string };
     responseCommand: string;
     acceptTimeoutSeconds?: number;
+    signal?: AbortSignal;
   }): Promise<Record<string, unknown> | null> {
     const encodedCommand = Buffer.from(JSON.stringify(input.command), "utf8").toString("base64");
     const acceptTimeoutSeconds = Math.max(
@@ -1527,6 +1605,7 @@ socket.on("end", () => {
 socket.on("error", () => fail("Pi broker command transport failed"));
 COMPANION_PI_BROKER_CLIENT`,
       acceptTimeoutSeconds + 5,
+      input.signal,
     );
     if (!result.success) return null;
     for (const line of result.stdout.trim().split(/[\r\n]+/).reverse()) {
@@ -1917,6 +1996,243 @@ exit 0`,
     }
   }
 
+  async #activatePiDaemon(input: {
+    boxId: string;
+    restart: boolean;
+    signal?: AbortSignal;
+    /** Legacy callers predate the correlated broker-state contract and ignore this return value. */
+    verifyBrokerState?: boolean;
+  }): Promise<{ state: "idle"; invocationId: string }> {
+    let started: CommandEnvelope;
+    try {
+      started = await this.#command(
+        input.boxId,
+        `set -e
+staged_credential_file="$HOME/.companion/runtime/state/providers.env"
+runtime_credential_file="/run/user/$(id -u)/companion/providers.env"
+trap 'rm -f "$staged_credential_file" "$runtime_credential_file"' EXIT
+auth_file="$HOME/.companion/pi/auth.json"
+if [ ! -f "$auth_file" ]; then echo 'Companion provider auth file is missing' >&2; exit 1; fi
+chmod 700 "$HOME/.companion/pi"
+chmod 600 "$auth_file"
+${PREPARE_USER_BUS}
+runtime_credential_dir="$XDG_RUNTIME_DIR/companion"
+runtime_credential_file="$runtime_credential_dir/providers.env"
+mkdir -p "$runtime_credential_dir"
+chmod 700 "$runtime_credential_dir"
+if [ -f "$staged_credential_file" ]; then
+  mv -f "$staged_credential_file" "$runtime_credential_file"
+fi
+if [ ! -f "$runtime_credential_file" ]; then
+  echo 'Companion runtime credentials are missing' >&2
+  exit 1
+fi
+chmod 600 "$runtime_credential_file"
+systemctl --user daemon-reload
+systemctl --user reset-failed companion-pi-daemon.service >/dev/null 2>&1 || true
+systemctl --user ${input.restart ? "restart" : "start"} companion-pi-daemon.service
+trap - EXIT`,
+        120,
+        input.signal,
+      );
+    } catch (error) {
+      await this.#removeProviderFile(input.boxId).catch(() => undefined);
+      throw error;
+    }
+    if (!started.success) {
+      await this.#removeProviderFile(input.boxId).catch(() => undefined);
+      throw new BoxRuntimeProviderError(
+        `Pi daemon failed to start${commandFailureDetail(started)}`,
+        502,
+      );
+    }
+    const daemonState = await this.#waitDaemonActive(input.boxId, input.signal);
+    if (daemonState !== "running") {
+      throw new BoxRuntimeProviderError(
+        `${PI_DAEMON_FAILURE_MESSAGE}${await this.#daemonFailureDetail(input.boxId)}`,
+        502,
+      );
+    }
+    if (input.verifyBrokerState === false) {
+      return { state: "idle", invocationId: "legacy-unobserved" };
+    }
+    const broker = await this.brokerState({ boxId: input.boxId, signal: input.signal });
+    if (broker.activeAttemptId !== null) {
+      throw new BoxRuntimeProviderError("Pi became active with an unexpected turn", 409);
+    }
+    return { state: "idle", invocationId: broker.invocationId };
+  }
+
+  async #deactivatePiDaemon(input: { boxId: string; signal?: AbortSignal }): Promise<void> {
+    const stopped = await this.#command(
+      input.boxId,
+      `${USER_BUS_ENVIRONMENT}
+if systemctl --user show-environment >/dev/null 2>&1; then
+  systemctl --user stop companion-pi-daemon.service >/dev/null 2>&1 || true
+  if systemctl --user is-active --quiet companion-pi-daemon.service; then
+    echo 'Pi daemon is still active after stop' >&2
+    exit 1
+  fi
+fi
+rm -f "/run/user/$(id -u)/companion/providers.env" \
+  "$HOME/${COMPANION_PI_BROKER_SOCKET_PATH}" \
+  "$HOME/.companion/runtime/state/pi.rpc.in" \
+  "$HOME/.companion/runtime/state/pi.rpc.ready" \
+  "$HOME/.companion/runtime/state/pi.rpc.start"`,
+      60,
+      input.signal,
+    );
+    if (!stopped.success) throw new BoxRuntimeProviderError("Pi daemon failed to stop", 502);
+  }
+
+  async resumeExistingBox(input: {
+    boxId: string;
+    signal?: AbortSignal;
+  }): Promise<CompanionRuntimeObservation> {
+    let box = await this.#get(input.boxId, input.signal);
+    if (box.state === "archiving") {
+      throw new BoxRuntimeProviderError("Box is still archiving", 409, "box_already_stopping");
+    }
+    if (box.state === "archived") {
+      box = await this.#resume(input.boxId, input.signal);
+    }
+    if (STARTING_STATES.has(box.state)) {
+      box = await this.#waitReady(input.boxId, input.signal);
+    }
+    if (!READY_STATES.has(box.state)) {
+      throw new BoxRuntimeProviderError(`Box cannot resume from state ${box.state}`, 409);
+    }
+    const daemonState = await this.#daemonState(input.boxId, input.signal).catch(() => "stopped" as const);
+    return observation(box, daemonState);
+  }
+
+  async existingBoxStatus(input: {
+    boxId: string;
+    signal?: AbortSignal;
+  }): Promise<{ boxId: string; state: BoxState }> {
+    const box = await this.#get(input.boxId, input.signal);
+    return { boxId: box.id, state: box.state };
+  }
+
+  async archiveExistingBox(input: {
+    boxId: string;
+    recoverArchive?: boolean;
+    signal?: AbortSignal;
+  }): Promise<{ boxId: string; state: BoxState }> {
+    return await this.#archiveBox(input);
+  }
+
+  async #archiveBox(input: {
+    boxId: string;
+    recoverArchive?: boolean;
+    signal?: AbortSignal;
+  }, observed?: BoxInfo): Promise<{ boxId: string; state: BoxState }> {
+    let box = observed ?? await this.#get(input.boxId, input.signal);
+    if (box.state !== "archived" && box.state !== "archiving") {
+      try {
+        const response = await this.#request<BoxEnvelope>(
+          `/boxes/${encodeURIComponent(input.boxId)}/stop`,
+          {
+            method: "POST",
+            body: JSON.stringify({ force: false }),
+            ...(input.signal ? { signal: input.signal } : {}),
+          },
+        );
+        box = response.box;
+      } catch (error) {
+        if (
+          input.recoverArchive !== true
+          || !(error instanceof BoxRuntimeProviderError)
+          || error.status !== 409
+        ) throw error;
+        box = await this.#get(input.boxId, input.signal);
+      }
+    }
+    return { boxId: box.id, state: box.state };
+  }
+
+  async stageExistingBox(input: {
+    companionId: string;
+    runtimeGeneration: number;
+    orgId: string;
+    boxId: string;
+    clientSurface: CompanionClientSurface;
+    providerAuth: Record<string, Record<string, unknown>>;
+    replaceProviderAuth: boolean;
+    instructions?: string | null;
+    modelId: string;
+    mcpCredentials: McpRuntimeCredential[];
+    mcpAccounts: CompanionMcpAccount[];
+    skills: CompanionRuntimeSkill[];
+    hubEnv?: Record<string, string>;
+    signal?: AbortSignal;
+  }): Promise<{ boxId: string; diskLayoutVersion: typeof COMPANION_PI_DISK_LAYOUT_VERSION }> {
+    companionBoxName(input.companionId, input.runtimeGeneration);
+    this.#startSignal = input.signal;
+    try {
+      const box = await this.#get(input.boxId, input.signal);
+      if (!isCompanionOwnBox(box, input.companionId, input.runtimeGeneration)) {
+        throw new BoxRuntimeProviderError("The durable Box identity does not match this Companion", 409);
+      }
+      if (!READY_STATES.has(box.state)) {
+        throw new BoxRuntimeProviderError("Box must be resumed before staging runtime resources", 409);
+      }
+      await this.#firstCommand(box, false, false);
+      await this.#ensurePiLayout(box.id);
+      await this.#stageCompanionInteractionExtension(box.id);
+      await this.#injectPiResources({
+        boxId: box.id,
+        clientSurface: input.clientSurface,
+        providerAuth: input.providerAuth,
+        replaceProviderAuth: input.replaceProviderAuth,
+        modelId: input.modelId,
+        instructions: input.instructions,
+        mcpCredentials: input.mcpCredentials,
+        mcpAccounts: input.mcpAccounts,
+        skills: input.skills,
+        hubEnv: input.hubEnv,
+      });
+      return { boxId: box.id, diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION };
+    } finally {
+      this.#startSignal = undefined;
+    }
+  }
+
+  async startPiDaemon(input: { boxId: string; signal?: AbortSignal }): Promise<{
+    state: "idle";
+    invocationId: string;
+  }> {
+    return await this.#activatePiDaemon({ ...input, restart: false });
+  }
+
+  async restartPiDaemon(input: { boxId: string; signal?: AbortSignal }): Promise<{
+    state: "idle";
+    invocationId: string;
+  }> {
+    return await this.#activatePiDaemon({ ...input, restart: true });
+  }
+
+  async stopPiDaemon(input: { boxId: string; signal?: AbortSignal }): Promise<void> {
+    await this.#deactivatePiDaemon(input);
+  }
+
+  async piDaemonStatus(input: { boxId: string; signal?: AbortSignal }): Promise<{
+    state: "idle" | "running" | "stopped" | "error";
+    invocationId: string | null;
+  }> {
+    const state = await this.#daemonState(input.boxId, input.signal);
+    if (state !== "running") return { state: "stopped", invocationId: null };
+    try {
+      const broker = await this.brokerState({ boxId: input.boxId, signal: input.signal });
+      return {
+        state: broker.activeAttemptId === null ? "idle" : "running",
+        invocationId: broker.invocationId,
+      };
+    } catch {
+      return { state: "error", invocationId: null };
+    }
+  }
+
   async start(input: {
     companionId: string;
     runtimeGeneration?: number;
@@ -1928,6 +2244,7 @@ exit 0`,
     restartPi?: boolean;
     refreshRuntimeLayout?: boolean;
     allowBoxWake?: boolean;
+    allowBoxCreate?: boolean;
     /** This start claimed a control-plane archive continuation even if Box's first read says idle. */
     waitForArchive?: boolean;
     instructions?: string | null;
@@ -1962,6 +2279,7 @@ exit 0`,
     restartPi?: boolean;
     refreshRuntimeLayout?: boolean;
     allowBoxWake?: boolean;
+    allowBoxCreate?: boolean;
     waitForArchive?: boolean;
     instructions?: string | null;
     modelId: string;
@@ -1973,6 +2291,7 @@ exit 0`,
     onBoxAssigned: (boxId: string | null) => Promise<void>;
   }): Promise<CompanionRuntimeStartObservation> {
     const allowBoxWake = input.allowBoxWake !== false;
+    const allowBoxCreate = input.allowBoxCreate !== false;
     const assigned = input.boxId ? await this.#getAssignedBox(input.boxId) : null;
     // A recorded id that names a machine this Companion does not own is treated as no assignment at
     // all, and the row is cleared so nothing else — a stop, a live status, a thread sync — reaches
@@ -1999,6 +2318,13 @@ exit 0`,
     if (!box) {
       if (!allowBoxWake) {
         throw new BoxRuntimeProviderError("Box is no longer online; apply on the next wake", 409);
+      }
+      if (!allowBoxCreate) {
+        throw new BoxRuntimeProviderError(
+          "The durably assigned Box disappeared before runtime staging",
+          409,
+          "box_not_found",
+        );
       }
       box = await this.#createCompanionBox(input);
       boxIdPersisted = true;
@@ -2090,90 +2416,24 @@ exit 0`,
       skills: input.skills,
       hubEnv: input.hubEnv,
     });
-    let started: CommandEnvelope;
-    try {
-      started = await this.#command(
-        box.id,
-        `set -e
-staged_credential_file="$HOME/.companion/runtime/state/providers.env"
-runtime_credential_file="/run/user/$(id -u)/companion/providers.env"
-trap 'rm -f "$staged_credential_file" "$runtime_credential_file"' EXIT
-chmod 600 "$staged_credential_file"
-auth_file="$HOME/.companion/pi/auth.json"
-if [ ! -f "$auth_file" ]; then echo 'Companion provider auth file is missing' >&2; exit 1; fi
-chmod 700 "$HOME/.companion/pi"
-chmod 600 "$auth_file"
-${PREPARE_USER_BUS}
-runtime_credential_dir="$XDG_RUNTIME_DIR/companion"
-runtime_credential_file="$runtime_credential_dir/providers.env"
-mkdir -p "$runtime_credential_dir"
-chmod 700 "$runtime_credential_dir"
-mv -f "$staged_credential_file" "$runtime_credential_file"
-chmod 600 "$runtime_credential_file"
-# The create setupScript only writes the unit file, so this is the first load of the Pi daemon unit.
-systemctl --user daemon-reload
-# A unit that crash-looped past systemd's start limit refuses every later start until its failure is
-# cleared, so a Companion that once crash-looped would answer the next wake with "Start request
-# repeated too quickly" instead of starting Pi — even after whatever broke Pi was fixed. Clearing the
-# latched failure first makes this a real start attempt again; a unit with nothing latched is
-# unaffected, and a Box that will not clear it still gets its start attempt.
-systemctl --user reset-failed companion-pi-daemon.service >/dev/null 2>&1 || true
-# Keep an unchanged-provider start idempotent so it cannot kill a turn already in flight. Replacing
-# auth.json is different: Pi loaded the old provider into memory, so only its daemon is recycled.
-# A refreshed layout is staged safely and becomes active on Pi's next natural daemon start.
-systemctl --user ${replaceProviderAuth || input.restartPi ? "restart" : "start"} companion-pi-daemon.service
-# Keep the tmpfs file while the Box is awake so Restart=on-failure can reread the same credentials.
-# Box stop/reboot destroys /run, and the explicit stop path removes it as soon as Pi is down.
-trap - EXIT`,
-        120,
-      );
-    } catch (error) {
-      await this.#removeProviderFile(box.id).catch(() => undefined);
-      throw error;
-    }
-    if (!started.success) {
-      await this.#removeProviderFile(box.id).catch(() => undefined);
-      throw new BoxRuntimeProviderError(
-        `Pi daemon failed to start${commandFailureDetail(started)}`,
-        502,
-      );
-    }
-    const daemonState = await this.#waitDaemonActive(box.id);
-    if (daemonState !== "running") {
-      throw new BoxRuntimeProviderError(
-        `${PI_DAEMON_FAILURE_MESSAGE}${await this.#daemonFailureDetail(box.id)}`,
-        502,
-      );
-    }
-    return { ...observation(await this.#get(box.id), daemonState), staged: true };
+    await this.#activatePiDaemon({
+      boxId: box.id,
+      restart: replaceProviderAuth || input.restartPi === true,
+      signal: this.#startSignal,
+      verifyBrokerState: false,
+    });
+    return { ...observation(await this.#get(box.id), "running"), staged: true };
   }
 
   async stop(input: {
     boxId: string;
     recoverArchive?: boolean;
+    signal?: AbortSignal;
   }): Promise<CompanionRuntimeObservation> {
-    let box = await this.#get(input.boxId);
+    let box = await this.#get(input.boxId, input.signal);
     if (READY_STATES.has(box.state)) {
       try {
-        const stopped = await this.#command(
-          input.boxId,
-          // The unit is loaded by the first start, so a Box that never started Pi has nothing to stop.
-          // Only a daemon still active after the stop attempt is a failure worth reporting.
-          `${USER_BUS_ENVIRONMENT}
-if systemctl --user show-environment >/dev/null 2>&1; then
-  systemctl --user stop companion-pi-daemon.service >/dev/null 2>&1 || true
-  if systemctl --user is-active --quiet companion-pi-daemon.service; then
-    echo 'Pi daemon is still active after stop' >&2
-    exit 1
-  fi
-fi
-rm -f "/run/user/$(id -u)/companion/providers.env" \
-  "$HOME/${COMPANION_PI_BROKER_SOCKET_PATH}" \
-  "$HOME/.companion/runtime/state/pi.rpc.in" \
-  "$HOME/.companion/runtime/state/pi.rpc.ready" \
-  "$HOME/.companion/runtime/state/pi.rpc.start"`,
-        );
-        if (!stopped.success) throw new BoxRuntimeProviderError("Pi daemon failed to stop", 502);
+        await this.#deactivatePiDaemon({ boxId: input.boxId, signal: input.signal });
       } catch (error) {
         // A Stop owner can die after Box accepted archival but before PostgreSQL recorded it. During
         // the provider's transient idle projection, command execution can answer "not running".
@@ -2186,31 +2446,16 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
         ) throw error;
       }
     }
-    if (box.state !== "archived" && box.state !== "archiving") {
-      try {
-        const response = await this.#request<BoxEnvelope>(
-          `/boxes/${encodeURIComponent(input.boxId)}/stop`,
-          { method: "POST", body: JSON.stringify({ force: false }) },
-        );
-        box = response.box;
-      } catch (error) {
-        // Stop is idempotent at the lifecycle layer. Box can reject the duplicate request while its
-        // snapshot is already in flight and still expose `idle`; retain that exact Box and let the
-        // archive-aware start poll through to the terminal `archived` state.
-        if (
-          input.recoverArchive !== true
-          || !(error instanceof BoxRuntimeProviderError)
-          || error.status !== 409
-        ) throw error;
-        box = await this.#get(input.boxId);
-      }
-    }
+    const archived = await this.#archiveBox(input, box);
+    box = { ...box, state: archived.state };
     return observation(box, "stopped");
   }
 
-  async status(input: { boxId: string }): Promise<CompanionRuntimeObservation> {
-    const box = await this.#get(input.boxId);
-    const daemonState = READY_STATES.has(box.state) ? await this.#daemonState(input.boxId) : "stopped";
+  async status(input: { boxId: string; signal?: AbortSignal }): Promise<CompanionRuntimeObservation> {
+    const box = await this.#get(input.boxId, input.signal);
+    const daemonState = READY_STATES.has(box.state)
+      ? await this.#daemonState(input.boxId, input.signal)
+      : "stopped";
     return observation(box, daemonState);
   }
 
@@ -2231,6 +2476,7 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     attemptId: string;
     message: string;
     requestId?: string;
+    signal?: AbortSignal;
   }): Promise<CompanionPiPromptDispatch> {
     let response: Record<string, unknown> | null;
     try {
@@ -2243,6 +2489,7 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
           attemptId: input.attemptId,
           message: input.message,
         },
+        signal: input.signal,
       });
     } catch {
       // The Box command can have written the prompt and lost its HTTP response. Conservatively keep
@@ -2258,8 +2505,16 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     }
     if (response.success === true) {
       const data = isJsonObject(response.data) ? response.data : null;
-      if (data?.piAcknowledged === true && data.attemptId === input.attemptId) {
-        return { outcome: "accepted", attemptId: input.attemptId };
+      if (
+        data?.piAcknowledged === true
+        && data.attemptId === input.attemptId
+        && opaqueBrokerId(data.invocationId)
+      ) {
+        return {
+          outcome: "accepted",
+          attemptId: input.attemptId,
+          invocationId: data.invocationId,
+        };
       }
       return {
         outcome: "ambiguous",
@@ -2279,14 +2534,22 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     };
   }
 
-  async brokerState(input: { boxId: string }): Promise<CompanionPiBrokerState> {
+  async brokerState(input: {
+    boxId: string;
+    signal?: AbortSignal;
+  }): Promise<CompanionPiBrokerState> {
     const response = await this.#rpcCommandResponse({
       boxId: input.boxId,
-      responseCommand: "broker_state",
-      command: { id: `companion-broker-state:${randomUUID()}`, type: "broker_state" },
+      responseCommand: "runtime_state",
+      command: { id: `companion-runtime-state:${randomUUID()}`, type: "runtime_state" },
+      signal: input.signal,
     });
     const data = response?.success === true && isJsonObject(response.data) ? response.data : null;
     const counters = parseBrokerCounters(data?.counters);
+    const modelInput = Array.isArray(data?.modelInput)
+      && data.modelInput.every((item) => item === "text" || item === "image")
+      ? [...new Set(data.modelInput)] as Array<"text" | "image">
+      : null;
     if (
       !data
       || !opaqueBrokerId(data.invocationId)
@@ -2295,6 +2558,7 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
       || !nonNegativeSafeInteger(data.acknowledgedCursor)
       || data.acknowledgedCursor > data.tailCursor
       || !counters
+      || !modelInput
     ) {
       throw new BoxRuntimeProviderError("Pi broker state is unavailable", 502);
     }
@@ -2304,6 +2568,7 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
       tailCursor: data.tailCursor,
       acknowledgedCursor: data.acknowledgedCursor,
       counters,
+      modelInput,
     };
   }
 
@@ -2329,6 +2594,7 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     attemptId?: string;
     requestId?: string;
     response: Record<string, unknown>;
+    signal?: AbortSignal;
   }): Promise<CompanionPiExtensionUiDispatch> {
     let response: Record<string, unknown> | null;
     try {
@@ -2341,6 +2607,7 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
           ...(input.attemptId === undefined ? {} : { attemptId: input.attemptId }),
           response: input.response,
         },
+        signal: input.signal,
       });
     } catch {
       response = null;
@@ -2357,9 +2624,14 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
       if (
         data?.delivered === true
         && opaqueBrokerId(data.attemptId)
+        && opaqueBrokerId(data.invocationId)
         && (input.attemptId === undefined || data.attemptId === input.attemptId)
       ) {
-        return { outcome: "accepted", attemptId: data.attemptId };
+        return {
+          outcome: "accepted",
+          attemptId: data.attemptId,
+          invocationId: data.invocationId,
+        };
       }
       return {
         outcome: "ambiguous",
@@ -2382,10 +2654,15 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     };
   }
 
-  async refreshTtl(input: { boxId: string }): Promise<void> {
+  async refreshTtl(input: {
+    boxId: string;
+    ttlSeconds?: number;
+    signal?: AbortSignal;
+  }): Promise<void> {
     await this.#request(`/boxes/${encodeURIComponent(input.boxId)}`, {
       method: "PATCH",
-      body: JSON.stringify({ ttlSeconds: this.#ttlSeconds }),
+      body: JSON.stringify({ ttlSeconds: input.ttlSeconds ?? this.#ttlSeconds }),
+      ...(input.signal ? { signal: input.signal } : {}),
     });
   }
 
@@ -2443,6 +2720,7 @@ systemctl --user ${initialState === "running" ? "restart" : "start"} companion-p
   async ackEvents(input: {
     boxId: string;
     through: number;
+    signal?: AbortSignal;
   }): Promise<{ acknowledgedCursor: number }> {
     const response = await this.#rpcCommandResponse({
       boxId: input.boxId,
@@ -2452,6 +2730,7 @@ systemctl --user ${initialState === "running" ? "restart" : "start"} companion-p
         type: "ack_events",
         through: input.through,
       },
+      signal: input.signal,
     });
     const data = response?.success === true && isJsonObject(response.data) ? response.data : null;
     if (!data || !nonNegativeSafeInteger(data.acknowledgedCursor)) {
@@ -2465,11 +2744,13 @@ systemctl --user ${initialState === "running" ? "restart" : "start"} companion-p
     boxId: string;
     after: number;
     limit?: number;
+    signal?: AbortSignal;
   }): Promise<CompanionPiBrokerEventPage>;
   async readEvents(input: { boxId: string; offset: number } | {
     boxId: string;
     after: number;
     limit?: number;
+    signal?: AbortSignal;
   }): Promise<CompanionPiEventChunk | CompanionPiBrokerEventPage> {
     if ("after" in input) {
       const response = await this.#rpcCommandResponse({
@@ -2481,6 +2762,7 @@ systemctl --user ${initialState === "running" ? "restart" : "start"} companion-p
           after: input.after,
           ...(input.limit === undefined ? {} : { limit: input.limit }),
         },
+        signal: input.signal,
       });
       const data = response?.success === true && isJsonObject(response.data) ? response.data : null;
       const events = Array.isArray(data?.events)
@@ -2623,17 +2905,25 @@ exit 0`,
    * never creates or resumes one, which is what keeps a panel that opens on a sleeping Box — or a
    * join a Viewer could reach — from being a wake.
    */
-  async desktop(input: { boxId: string }): Promise<CompanionDesktopMint> {
-    const box = await this.#get(input.boxId);
+  async desktop(input: { boxId: string; signal?: AbortSignal }): Promise<CompanionDesktopMint> {
+    const box = await this.#get(input.boxId, input.signal);
     if (!READY_STATES.has(box.state)) {
       throw new BoxRuntimeProviderError("Box must already be running before requesting desktop access", 409);
     }
     const desktopPath = `/boxes/${encodeURIComponent(input.boxId)}/desktop`;
     return mintBoxDesktopUrl({
-      vnc: () => this.#request<DesktopEnvelope>(`${desktopPath}?vnc=1`, { method: "POST", body: "{}" }),
-      webrtc: () => this.#request<DesktopEnvelope>(desktopPath, { method: "POST", body: "{}" }),
+      vnc: () => this.#request<DesktopEnvelope>(`${desktopPath}?vnc=1`, {
+        method: "POST",
+        body: "{}",
+        ...(input.signal ? { signal: input.signal } : {}),
+      }),
+      webrtc: () => this.#request<DesktopEnvelope>(desktopPath, {
+        method: "POST",
+        body: "{}",
+        ...(input.signal ? { signal: input.signal } : {}),
+      }),
       budgetMs: this.#desktopMintBudgetMs,
-      pause: () => this.#pause(),
+      pause: () => this.#pause(input.signal),
     });
   }
 }

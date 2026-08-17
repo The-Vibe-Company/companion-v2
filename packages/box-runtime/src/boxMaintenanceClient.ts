@@ -8,6 +8,9 @@ const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
 const BOX_REQUEST_TIMEOUT_MS = 30_000;
 const BOX_LIST_PAGE_LIMIT = 200;
 const BOX_TTL_MAX_SECONDS = 2_592_000;
+// Create has no idempotency key and cannot set the generation name. Keep the irreducible
+// POST-response/process-crash orphan bounded until runtime durably records the returned Box id.
+const BOX_UNASSIGNED_CREATE_TTL_SECONDS = 300;
 const DEFAULT_DELETION_POLL_INTERVAL_MS = 1_000;
 const MAX_GENERATION = 2_147_483_647;
 const SAFE_PROVIDER_CODES = new Set([
@@ -698,6 +701,7 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
   ): Promise<BoxGenerationCreateResult> {
     const name = companionGenerationBoxName(input);
     const ttlSeconds = assertBoxTtlSeconds(input.ttlSeconds);
+    const createTtlSeconds = Math.min(ttlSeconds, BOX_UNASSIGNED_CREATE_TTL_SECONDS);
     const initial = selectGenerationBoxes(await this.listAllBoxes(input), name);
     if (initial.canonical) {
       return {
@@ -712,7 +716,7 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
       {
         method: "POST",
         body: JSON.stringify({
-          ttlSeconds,
+          ttlSeconds: createTtlSeconds,
           noEnv: true,
           ...(input.setupScript === undefined ? {} : { setupScript: input.setupScript }),
           ...(input.environment === undefined ? {} : { environment: input.environment }),
@@ -726,7 +730,7 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
       throw invalidProviderResponse("Box API returned an unexpected create status", true);
     }
     const parsed = boxCreateEnvelopeSchema.safeParse(response.body);
-    if (!parsed.success || parsed.data.ttlSeconds !== ttlSeconds) {
+    if (!parsed.success || parsed.data.ttlSeconds !== createTtlSeconds) {
       throw invalidProviderResponse("Box API returned an invalid Box create response", true);
     }
     return {

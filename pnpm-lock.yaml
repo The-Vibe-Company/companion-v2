@@ -144,6 +144,55 @@ importers:
         specifier: 3.2.7
         version: 3.2.7(@types/debug@4.1.13)(@types/node@22.19.20)(happy-dom@20.10.6)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.22.4)(yaml@2.9.0)
 
+  apps/runtime:
+    dependencies:
+      '@aws-sdk/client-s3':
+        specifier: ^3.744.0
+        version: 3.1063.0
+      '@companion/box-runtime':
+        specifier: workspace:*
+        version: link:../../packages/box-runtime
+      '@companion/companion-runtime':
+        specifier: workspace:*
+        version: link:../../packages/companion-runtime
+      '@companion/companion-skill':
+        specifier: workspace:*
+        version: link:../../packages/companion-skill
+      '@companion/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@companion/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@companion/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@companion/skills':
+        specifier: workspace:*
+        version: link:../../packages/skills
+      '@companion/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
+      postgres:
+        specifier: ^3.4.5
+        version: 3.4.9
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.19.20
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(jiti@2.7.0)(postcss@8.5.18)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+      tsx:
+        specifier: ^4.19.2
+        version: 4.22.4
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: 3.2.7
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@22.19.20)(happy-dom@20.10.6)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.22.4)(yaml@2.9.0)
+
   apps/web:
     dependencies:
       '@assistant-ui/react':
@@ -437,6 +486,18 @@ importers:
       tsx:
         specifier: ^4.19.2
         version: 4.22.4
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: 3.2.7
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@22.19.20)(happy-dom@20.10.6)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.22.4)(yaml@2.9.0)
+
+  packages/companion-runtime:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.19.20
       typescript:
         specifier: ^5.7.2
         version: 5.9.3

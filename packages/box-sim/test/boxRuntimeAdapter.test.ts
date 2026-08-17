@@ -96,6 +96,7 @@ describe("production Box runtime against the simulator", () => {
       activeAttemptId: null,
       tailCursor: 0,
       acknowledgedCursor: 0,
+      modelInput: ["text", "image"],
       counters: {
         malformedLines: 0,
         oversizedLines: 0,
@@ -114,7 +115,11 @@ describe("production Box runtime against the simulator", () => {
       attemptId: "attempt-journal-1",
       requestId: "dispatch-journal-1",
       message: "Ask before continuing.",
-    })).resolves.toEqual({ outcome: "accepted", attemptId: "attempt-journal-1" });
+    })).resolves.toEqual({
+      outcome: "accepted",
+      attemptId: "attempt-journal-1",
+      invocationId: "00000000000000000000000000000001",
+    });
 
     const waitingPage = await waitForBrokerEvent(
       runtime,
@@ -159,7 +164,11 @@ describe("production Box runtime against the simulator", () => {
       attemptId: "attempt-journal-1",
       requestId: "decision-journal-1",
       response: { type: "extension_ui_response", id: requestId, value: "Continue" },
-    })).resolves.toEqual({ outcome: "accepted", attemptId: "attempt-journal-1" });
+    })).resolves.toEqual({
+      outcome: "accepted",
+      attemptId: "attempt-journal-1",
+      invocationId: "00000000000000000000000000000001",
+    });
 
     const settledPage = await waitForBrokerEvent(
       runtime,

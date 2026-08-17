@@ -161,13 +161,9 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
     expect(brokerExit).toMatchObject({ code: 1, signal: null });
     expect(existsSync(socketPath)).toBe(false);
     const journalRecords = readJournalRecords(join(runtimeRoot, "events"));
-    expect(journalRecords).toContainEqual(expect.objectContaining({
-      sequence: 4,
-      invocationId: "invocation-source-1",
-      attemptId: null,
-      kind: "pi_process_exit",
-      exit: { code: null, signal: "SIGKILL" },
-    }));
+    expect(journalRecords.some((record) => record.kind === "pi_process_exit")).toBe(false);
+    expect(JSON.parse(readFileSync(join(runtimeRoot, "events", "counters.json"), "utf8")))
+      .toMatchObject({ unboundEvents: 1 });
   });
 
   it("terminates a spawned Pi when the command socket cannot start", async () => {

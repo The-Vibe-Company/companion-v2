@@ -1,0 +1,383 @@
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
+
+import {
+  DESKTOP_REQUEST_PATH,
+  DESKTOP_SIGNATURE_HEADER,
+  DESKTOP_TIMESTAMP_HEADER,
+  verifyDesktopRequest,
+} from "./desktopAuth";
+
+const DEFAULT_BODY_LIMIT_BYTES = 4 * 1024;
+const DEFAULT_HEALTH_PING_TIMEOUT_MS = 1_000;
+
+export interface RuntimeSchedulerHealthSnapshot {
+  claimLoopAlive: boolean;
+  fatal: boolean;
+  lastSweepStartedAt: Date | null;
+  lastSweepCompletedAt: Date | null;
+  claimLoopErrorAt: Date | null;
+  activeCount: number;
+}
+
+export interface RuntimeHealthPort {
+  ping(): Promise<void>;
+  snapshot(): RuntimeSchedulerHealthSnapshot;
+}
+
+export interface RuntimeDesktopMint {
+  url: string | null;
+  provisioning: boolean;
+  transport: "vnc" | "webrtc" | null;
+}
+
+export interface RuntimeDesktopPort {
+  /** Must perform SQL Owner/Editor reauthorization before it creates or calls a Box client. */
+  authorizeAndMint(input: {
+    orgId: string;
+    companionId: string;
+    actorId: string;
+    signal: AbortSignal;
+  }): Promise<RuntimeDesktopMint | null>;
+}
+
+export interface RuntimeHttpServerOptions {
+  host: string;
+  port: number;
+  sweepIntervalMs: number;
+  /** Null only while the product kill switch is active; desktop then fails closed with 503. */
+  desktopHmacSecret: Uint8Array | null;
+  desktopMaxSkewSeconds: number;
+  health: RuntimeHealthPort;
+  desktop: RuntimeDesktopPort;
+  now?: () => number;
+  bodyLimitBytes?: number;
+  healthPingTimeoutMs?: number;
+}
+
+export interface RuntimeHttpServer {
+  readonly nodeServer: Server;
+  readonly baseUrl: string;
+  listen(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export function createRuntimeHttpServer(options: RuntimeHttpServerOptions): RuntimeHttpServer {
+  const now = options.now ?? Date.now;
+  const bodyLimitBytes = positiveInteger(
+    options.bodyLimitBytes ?? DEFAULT_BODY_LIMIT_BYTES,
+    "bodyLimitBytes",
+  );
+  const healthPingTimeoutMs = positiveInteger(
+    options.healthPingTimeoutMs ?? DEFAULT_HEALTH_PING_TIMEOUT_MS,
+    "healthPingTimeoutMs",
+  );
+  const shutdown = new AbortController();
+  let listening = false;
+
+  const server = createServer((request, response) => {
+    void route(request, response).catch(() => {
+      if (!response.headersSent && !response.destroyed) {
+        sendJson(response, 500, { error: "runtime_request_failed" });
+      } else if (!response.destroyed) {
+        response.end();
+      }
+    });
+  });
+
+  async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const url = new URL(request.url ?? "/", "http://runtime.invalid");
+    if (request.method === "GET" && url.pathname === "/healthz" && url.search === "") {
+      await healthResponse(response);
+      return;
+    }
+    if (url.pathname === DESKTOP_REQUEST_PATH && url.search === "") {
+      if (request.method !== "POST") {
+        response.setHeader("Allow", "POST");
+        sendJson(response, 405, { error: "method_not_allowed" });
+        return;
+      }
+      await desktopResponse(request, response, url.pathname);
+      return;
+    }
+    sendJson(response, 404, { error: "not_found" });
+  }
+
+  async function healthResponse(response: ServerResponse): Promise<void> {
+    let snapshot: RuntimeSchedulerHealthSnapshot;
+    try {
+      snapshot = options.health.snapshot();
+    } catch {
+      snapshot = emptyUnhealthySnapshot();
+    }
+    const database = await settlesBefore(options.health.ping(), healthPingTimeoutMs);
+    const completedAt = validDate(snapshot.lastSweepCompletedAt);
+    const errorAt = validDate(snapshot.claimLoopErrorAt);
+    const elapsed = completedAt ? now() - completedAt.getTime() : Number.POSITIVE_INFINITY;
+    const sweepFresh = elapsed >= 0 && elapsed <= options.sweepIntervalMs * 2 + 1_000;
+    const unrecoveredClaimError = errorAt !== null
+      && (completedAt === null || errorAt.getTime() >= completedAt.getTime());
+    const activeCount = Number.isSafeInteger(snapshot.activeCount) && snapshot.activeCount >= 0
+      ? snapshot.activeCount
+      : 0;
+    const claimLoop = snapshot.claimLoopAlive && !snapshot.fatal && !unrecoveredClaimError;
+    const healthy = database && claimLoop && sweepFresh;
+    sendJson(response, healthy ? 200 : 503, {
+      status: healthy ? "ok" : "unhealthy",
+      checks: {
+        database,
+        claim_loop: claimLoop,
+        sweep_fresh: sweepFresh,
+      },
+      last_sweep_started_at: isoOrNull(snapshot.lastSweepStartedAt),
+      last_sweep_completed_at: isoOrNull(snapshot.lastSweepCompletedAt),
+      claim_loop_error_at: isoOrNull(snapshot.claimLoopErrorAt),
+      active_count: activeCount,
+    });
+  }
+
+  async function desktopResponse(
+    request: IncomingMessage,
+    response: ServerResponse,
+    pathname: string,
+  ): Promise<void> {
+    if (shutdown.signal.aborted) {
+      sendJson(response, 503, { error: "runtime_stopping" });
+      return;
+    }
+    if (options.desktopHmacSecret === null) {
+      request.resume();
+      sendJson(response, 503, { error: "desktop_not_configured" });
+      return;
+    }
+    if (!request.headers["content-type"]?.toLowerCase().startsWith("application/json")) {
+      request.resume();
+      sendJson(response, 415, { error: "content_type_required" });
+      return;
+    }
+    const length = Number(request.headers["content-length"] ?? 0);
+    if (Number.isFinite(length) && length > bodyLimitBytes) {
+      request.resume();
+      sendJson(response, 413, { error: "request_too_large" });
+      return;
+    }
+    let rawBody: Buffer;
+    try {
+      rawBody = await readBody(request, bodyLimitBytes);
+    } catch (error) {
+      if (error instanceof RequestTooLargeError) {
+        sendJson(response, 413, { error: "request_too_large" });
+        return;
+      }
+      throw error;
+    }
+    const timestampHeader = oneHeader(request, DESKTOP_TIMESTAMP_HEADER);
+    const signature = oneHeader(request, DESKTOP_SIGNATURE_HEADER);
+    const timestamp = timestampHeader !== null && /^(0|[1-9][0-9]*)$/.test(timestampHeader)
+      ? Number(timestampHeader)
+      : Number.NaN;
+    if (
+      !signature
+      || !Number.isSafeInteger(timestamp)
+      || !verifyDesktopRequest({
+        method: request.method ?? "",
+        pathname,
+        timestamp,
+        rawBody,
+        signature,
+        nowMs: now(),
+        maxSkewSeconds: options.desktopMaxSkewSeconds,
+      }, options.desktopHmacSecret)
+    ) {
+      sendJson(response, 401, { error: "invalid_runtime_signature" });
+      return;
+    }
+    const input = desktopInput(rawBody);
+    if (!input) {
+      sendJson(response, 400, { error: "invalid_request" });
+      return;
+    }
+    let desktop: RuntimeDesktopMint | null;
+    try {
+      desktop = await options.desktop.authorizeAndMint({ ...input, signal: shutdown.signal });
+    } catch {
+      // In particular, never surface or log a provider error that may contain a minted URL.
+      sendJson(response, 503, { error: "desktop_unavailable" });
+      return;
+    }
+    if (!desktop) {
+      sendJson(response, 403, { error: "desktop_forbidden" });
+      return;
+    }
+    if (!validDesktopMint(desktop)) {
+      sendJson(response, 503, { error: "desktop_unavailable" });
+      return;
+    }
+    sendJson(response, 200, {
+      desktop_url: desktop.url,
+      provisioning: desktop.provisioning,
+      automation: "lux",
+      transport: desktop.transport,
+    });
+  }
+
+  return {
+    nodeServer: server,
+    get baseUrl(): string {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("runtime server is not listening");
+      const host = address.family === "IPv6" ? `[${address.address}]` : address.address;
+      return `http://${host}:${address.port}`;
+    },
+    async listen(): Promise<void> {
+      if (listening) return;
+      await new Promise<void>((resolve, reject) => {
+        const onError = (error: Error): void => {
+          server.off("listening", onListening);
+          reject(error);
+        };
+        const onListening = (): void => {
+          server.off("error", onError);
+          listening = true;
+          resolve();
+        };
+        server.once("error", onError);
+        server.once("listening", onListening);
+        server.listen(options.port, options.host);
+      });
+    },
+    async close(): Promise<void> {
+      if (shutdown.signal.aborted) return;
+      shutdown.abort(new Error("runtime server is stopping"));
+      if (!listening) return;
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      });
+      listening = false;
+    },
+  };
+}
+
+function sendJson(response: ServerResponse, status: number, body: unknown): void {
+  const payload = Buffer.from(`${JSON.stringify(body)}\n`, "utf8");
+  response.writeHead(status, {
+    "Cache-Control": "no-store",
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": payload.byteLength,
+  });
+  response.end(payload);
+}
+
+async function readBody(request: IncomingMessage, limit: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  let tooLarge = false;
+  for await (const chunk of request) {
+    const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += value.byteLength;
+    if (bytes > limit) {
+      tooLarge = true;
+      continue;
+    }
+    chunks.push(value);
+  }
+  if (tooLarge) throw new RequestTooLargeError();
+  return Buffer.concat(chunks, bytes);
+}
+
+function desktopInput(rawBody: Buffer): {
+  orgId: string;
+  companionId: string;
+  actorId: string;
+} | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody.toString("utf8")) as unknown;
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const value = parsed as Record<string, unknown>;
+  const keys = Object.keys(value).sort();
+  if (keys.join(",") !== "actorId,companionId,orgId") return null;
+  if (!isUuid(value.orgId) || !isUuid(value.companionId) || !safeActorId(value.actorId)) return null;
+  return { orgId: value.orgId, companionId: value.companionId, actorId: value.actorId };
+}
+
+function validDesktopMint(value: RuntimeDesktopMint): boolean {
+  if (typeof value.provisioning !== "boolean") return false;
+  if (value.transport !== null && value.transport !== "vnc" && value.transport !== "webrtc") {
+    return false;
+  }
+  if (value.url === null) return value.transport === null;
+  if (value.transport === null) return false;
+  try {
+    const url = new URL(value.url);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+function isUuid(value: unknown): value is string {
+  return typeof value === "string"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function safeActorId(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length >= 1
+    && value.length <= 200
+    && !/[\r\n]/.test(value);
+}
+
+function oneHeader(request: IncomingMessage, name: string): string | null {
+  const value = request.headers[name];
+  return typeof value === "string" && value.length <= 512 ? value : null;
+}
+
+function validDate(value: Date | null): Date | null {
+  return value instanceof Date && Number.isFinite(value.getTime()) ? value : null;
+}
+
+function isoOrNull(value: Date | null): string | null {
+  return validDate(value)?.toISOString() ?? null;
+}
+
+function emptyUnhealthySnapshot(): RuntimeSchedulerHealthSnapshot {
+  return {
+    claimLoopAlive: false,
+    fatal: true,
+    lastSweepStartedAt: null,
+    lastSweepCompletedAt: null,
+    claimLoopErrorAt: null,
+    activeCount: 0,
+  };
+}
+
+async function settlesBefore(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => true, () => false),
+      new Promise<boolean>((resolve) => {
+        timeout = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function positiveInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} must be positive`);
+  return value;
+}
+
+class RequestTooLargeError extends Error {}
+
+export function runtimeServerAddress(server: Server): AddressInfo | null {
+  const address = server.address();
+  return address && typeof address !== "string" ? address : null;
+}
