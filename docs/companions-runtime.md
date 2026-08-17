@@ -148,11 +148,14 @@ Before every Box interaction, runtime re-evaluates:
 - current organization membership and Companion Owner/Editor ACL;
 - provider connection and selected model;
 - selected accessible Skills and `can_write_skills` policy;
-- selected MCP accounts still owned and connected by the actor/Owner;
+- selected MCP accounts still owned and connected by the actor performing the Box interaction;
 - the latest settings revision.
 
-Revocation fails closed before secrets are decrypted or Box is contacted. A settings change accepted
-while a turn is active waits until that turn settles, then applies before the next turn.
+The immutable Companion Owner is never a fallback resource owner for an Editor. A decision delivery
+requires both the turn actor and the responder to retain access to every personal resource used by
+the attempt. Revocation fails closed before secrets are decrypted or Box is contacted. A settings
+change accepted while a turn is active waits until that turn settles, then applies before the next
+turn.
 
 ## Box lifecycle
 
@@ -294,8 +297,10 @@ slower cadence when stable. There is no SSE and no Box-to-control-plane push age
 
 Desktop remains Owner/Editor-only and never wakes Box. API performs user authorization, then sends a
 short-lived HMAC-authenticated request to a private runtime endpoint. Runtime revalidates access and
-mints the provider desktop URL. Neither process stores or logs the URL, and Viewer requests fail
-before a Box client exists.
+mints the provider desktop URL only when the exact current settings and Skills revisions are already
+staged and every selected personal Skill and MCP account belongs to that actor. A pending restage or
+foreign personal resource denies desktop access, so a warm shared Box cannot bypass creator-only
+privacy. Neither process stores or logs the URL, and Viewer requests fail before a Box client exists.
 
 ## Legacy purge
 

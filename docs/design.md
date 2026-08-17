@@ -170,7 +170,9 @@ bounded bundled fallback; there is no global learned capability table.
 Web and mobile-web starts resolve the actor's currently accessible selected Skills and member MCP
 accounts. Runtime revalidates every id before staging. Empty selection means no library Skills or
 member MCP pins; the bundled Companion skill remains the Skills Hub bridge. Native mobile receives
-neither source.
+neither source. Companion ownership is not a resource-access fallback: an Editor cannot stage an
+Owner's personal Skill or MCP account, and an Owner cannot stage an Editor's. A cross-actor decision
+is deliverable only when both actors can access the attempt's resources.
 
 Provider connections and member MCP accounts are workspace/member-scoped, envelope-encrypted, and
 write-only. Runtime decrypts only the selected values after authorization. Durable Box config uses
@@ -201,7 +203,9 @@ attempt. Viewer/list/thread/status reads remain PostgreSQL-only.
 
 Desktop minting remains an Owner/Editor action that cannot wake Box. The API authorizes the member,
 then calls a private runtime endpoint with a short-lived HMAC request. Runtime revalidates the
-Companion and returns the fresh provider URL; neither process persists or logs it.
+Companion and returns the fresh provider URL only after the current actor owns every selected
+personal resource and the applied settings/Skills revisions exactly match desired state. This gate
+keeps a warm Box unavailable during a cross-actor restage; neither process persists or logs the URL.
 
 Sending is the sole normal wake path. There is no Wake button or first-keystroke prewarm. Successful
 Pi acceptance refreshes Box TTL to six hours. Automatic recovery may recycle Pi only. Full Box
