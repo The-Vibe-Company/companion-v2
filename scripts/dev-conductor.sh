@@ -65,6 +65,7 @@ if [ -n "${BOX_API_KEY:-}" ]; then
   unset BOX_API_KEY
 fi
 cd "$REPO_ROOT"
+# shellcheck disable=SC1091
 source "$REPO_ROOT/scripts/dev-runtime-mode.sh"
 
 # ---------------------------------------------------------------------------
