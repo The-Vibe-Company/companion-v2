@@ -159,7 +159,13 @@ export function CompanionSettings({
         if (next.runtime.state === "error") {
           setError(next.runtime.last_error ?? "The accepted restart failed. Retry when it is safe.");
           setRuntimeMessage(null);
+          return;
         }
+        if (nextOperation !== null
+          && ["failed", "interrupted", "cancelled"].includes(nextOperation.status)) return;
+        setRuntimeMessage(pendingRestartTarget === "pi"
+          ? "Pi restart completed."
+          : "Full Box restart completed.");
       } catch (cause) {
         if (!active) return;
         setError(cause instanceof Error

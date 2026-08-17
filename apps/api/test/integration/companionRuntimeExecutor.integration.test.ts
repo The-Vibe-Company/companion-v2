@@ -2664,7 +2664,10 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       selectedSkillIds: [ids.orgSkill],
       selectedMcpAccountIds: [],
     });
-    const writer = await sql.reserve();
+    // The final rollout deliberately exercises the application pool at max=1. Use a distinct
+    // writer connection for lock races so the authorization call tests PostgreSQL contention,
+    // rather than waiting forever for the only client-side pool slot.
+    const writer = postgres(runtimeUrl.toString(), { max: 1 });
     let transactionOpen = false;
     const authorizeWithLockTimeout = () => asRuntime(async (tx) => {
       await tx.unsafe("set local lock_timeout = '150ms'");
@@ -2726,7 +2729,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       }]);
     } finally {
       if (transactionOpen) await writer`rollback`;
-      await writer.release();
+      await writer.end({ timeout: 1 });
       await removeCompanion(fixture.companionId);
     }
   });
