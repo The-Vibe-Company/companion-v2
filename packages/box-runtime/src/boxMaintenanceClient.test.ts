@@ -191,6 +191,23 @@ describe("AsciiBoxMaintenanceClient", () => {
     });
   });
 
+  it.each(["deletion_operation_not_found", "route_not_found", undefined])(
+    "does not treat a DELETE 404 with provider code %s as proof that the Box is absent",
+    async (code) => {
+      vi.stubGlobal("fetch", vi.fn(async () => json({
+        ok: false,
+        ...(code === undefined ? {} : { code }),
+        message: "Not found",
+      }, 404)));
+
+      await expect(client().requestPermanentDeletion({ boxId: BOX_ID })).rejects.toMatchObject({
+        name: "BoxRuntimeProviderError",
+        status: 404,
+        code,
+      });
+    },
+  );
+
   it.each<BoxDeletionStatus>(["pending", "processing", "blocked", "completed"])(
     "accepts and returns the documented %s deletion status",
     async (status) => {

@@ -251,7 +251,11 @@ export class AsciiBoxMaintenanceClient implements BoxMaintenanceClient {
         signal: input.signal,
       });
     } catch (error) {
-      if (error instanceof BoxRuntimeProviderError && error.status === 404) {
+      if (
+        error instanceof BoxRuntimeProviderError
+        && error.status === 404
+        && error.code === "box_not_found"
+      ) {
         return { outcome: "absent", boxId };
       }
       throw error;
