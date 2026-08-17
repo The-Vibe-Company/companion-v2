@@ -134,6 +134,8 @@ assert_container_env_unset "$runtime_id" DATABASE_MIGRATION_URL runtime
 sleep 2
 test "$(docker inspect --format '{{.State.Running}}' "$worker_id")" = "true"
 
+# Exercise the self-host package lifecycle with only the restricted API credential. `start` must
+# launch the HTTP server directly; schema ownership remains in the completed release container.
 api_id="$(docker run -d "${network_args[@]}" "${api_publish_args[@]}" \
   -e PORT=18082 \
   -e COMPANION_API_HOST=0.0.0.0 \
@@ -145,7 +147,7 @@ api_id="$(docker run -d "${network_args[@]}" "${api_publish_args[@]}" \
   -e BETTER_AUTH_URL=http://127.0.0.1:18080 \
   -e BETTER_AUTH_SECRET=ci-railway-smoke-better-auth-secret-with-enough-entropy \
   -e EMAIL_PROVIDER=log \
-  companion-api:ci)"
+  companion-api:ci npm start)"
 
 for _ in $(seq 1 60); do
   if curl -fsS http://127.0.0.1:18082/health >/dev/null; then

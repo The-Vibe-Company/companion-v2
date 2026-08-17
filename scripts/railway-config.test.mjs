@@ -12,6 +12,9 @@ function config(name) {
 
 test("the public API never runs owner migrations in its service lifecycle", () => {
   const api = config("api");
+  const apiPackage = JSON.parse(readFileSync(join(root, "apps", "api", "package.json"), "utf8"));
+  assert.equal(apiPackage.scripts.start, "node dist/index.js");
+  assert.equal(apiPackage.scripts.migrate, "node dist/migrate.js");
   assert.equal(api.deploy.startCommand, "node dist/index.js");
   assert.equal(Object.hasOwn(api.deploy, "preDeployCommand"), false);
 });

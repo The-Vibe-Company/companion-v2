@@ -66,6 +66,22 @@ DECLARE
     'companion_legacy_purge_runs',
     'companion_legacy_purge_targets'
   ];
+  api_capability_managed_tables regclass[] := ARRAY[
+    'public.companions'::regclass,
+    'public.companion_workspace_access'::regclass,
+    'public.companion_member_state'::regclass,
+    'public.companion_threads'::regclass,
+    'public.companion_transcript_entries'::regclass
+  ];
+  worker_forbidden_companion_tables regclass[] := ARRAY[
+    'public.companions'::regclass,
+    'public.companion_workspace_access'::regclass,
+    'public.companion_member_state'::regclass,
+    'public.companion_threads'::regclass,
+    'public.companion_transcript_entries'::regclass,
+    'public.companion_provider_connections'::regclass,
+    'public.companion_mcp_accounts'::regclass
+  ];
   api_unprotected_tables regclass[] := ARRAY[
     'public.account'::regclass,
     'public.agent'::regclass,
@@ -565,6 +581,32 @@ BEGIN
           configured_role
         );
       END LOOP;
+    END LOOP;
+
+    -- Runtime v2 aggregate mutations are capabilities, not ambient table access. The API keeps
+    -- direct SELECT for its PostgreSQL-backed list/detail projections, but every write to these
+    -- rows must cross a tenant- and actor-scoped companion_api_* SECURITY DEFINER function. The
+    -- diagnostic protocol GUC is deliberately not an authorization boundary.
+    FOREACH protected_table IN ARRAY api_capability_managed_tables
+    LOOP
+      EXECUTE format(
+        'REVOKE INSERT, UPDATE, DELETE ON TABLE %s FROM %I',
+        protected_table,
+        api_role
+      );
+      EXECUTE format('GRANT SELECT ON TABLE %s TO %I', protected_table, api_role);
+    END LOOP;
+
+    -- Billing, GitHub sync, and Skill Database cleanup never inspect or mutate hosted Companion
+    -- state. Remove the generic RLS-table grant from every Companion table the worker could
+    -- otherwise reach, including credential metadata that remains directly API-managed.
+    FOREACH protected_table IN ARRAY worker_forbidden_companion_tables
+    LOOP
+      EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON TABLE %s FROM %I',
+        protected_table,
+        worker_role
+      );
     END LOOP;
 
       -- The dedicated executor reaches tenant/runtime state only through fenced v2 functions.

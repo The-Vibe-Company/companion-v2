@@ -149,6 +149,21 @@ async function asApi<T>(input: {
   return wrapped.value;
 }
 
+async function asApplicationRoleWithForgedProtocol<T>(input: {
+  role: string;
+  action: (tx: Tx) => PromiseLike<T>;
+}): Promise<T> {
+  if (!sql) throw new Error("runtime executor database is not initialized");
+  const wrapped = await sql.begin(async (tx) => {
+    await tx.unsafe(`set local role ${input.role}`);
+    await tx`select set_config('app.org_id', ${ids.orgA}, true)`;
+    await tx`select set_config('app.user_id', ${ids.ownerA}, true)`;
+    await tx`select set_config('app.companion_runtime_protocol', '2', true)`;
+    return { value: await input.action(tx) };
+  });
+  return wrapped.value;
+}
+
 async function createCompanion(input: {
   actorId?: string;
   boxReady?: boolean;
@@ -664,6 +679,133 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         where org_id = ${ids.orgA}::uuid and target_id = ${created.companionId}
       `;
       await removeCompanion(created.companionId);
+    }
+  });
+
+  it("keeps Companion aggregate DML behind API capabilities even with a forged protocol GUC", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const capabilityTables = [
+      "companions",
+      "companion_workspace_access",
+      "companion_member_state",
+      "companion_threads",
+      "companion_transcript_entries",
+    ];
+    const workerForbiddenTables = [
+      ...capabilityTables,
+      "companion_provider_connections",
+      "companion_mcp_accounts",
+    ];
+    const tableAcl = await sql<Array<{
+      tableName: string;
+      apiSelect: boolean;
+      apiInsert: boolean;
+      apiUpdate: boolean;
+      apiDelete: boolean;
+      workerSelect: boolean;
+      workerInsert: boolean;
+      workerUpdate: boolean;
+      workerDelete: boolean;
+    }>>`
+      select table_name as "tableName",
+        has_table_privilege(${apiRole}, 'public.' || table_name, 'SELECT') as "apiSelect",
+        has_table_privilege(${apiRole}, 'public.' || table_name, 'INSERT') as "apiInsert",
+        has_table_privilege(${apiRole}, 'public.' || table_name, 'UPDATE') as "apiUpdate",
+        has_table_privilege(${apiRole}, 'public.' || table_name, 'DELETE') as "apiDelete",
+        has_table_privilege(${workerRole}, 'public.' || table_name, 'SELECT') as "workerSelect",
+        has_table_privilege(${workerRole}, 'public.' || table_name, 'INSERT') as "workerInsert",
+        has_table_privilege(${workerRole}, 'public.' || table_name, 'UPDATE') as "workerUpdate",
+        has_table_privilege(${workerRole}, 'public.' || table_name, 'DELETE') as "workerDelete"
+      from unnest(${workerForbiddenTables}::text[]) tables(table_name)
+      order by table_name
+    `;
+    expect(tableAcl).toHaveLength(workerForbiddenTables.length);
+    for (const acl of tableAcl) {
+      if (capabilityTables.includes(acl.tableName)) {
+        expect(acl.apiSelect, `${acl.tableName} remains an API read projection`).toBe(true);
+        expect(
+          [acl.apiInsert, acl.apiUpdate, acl.apiDelete],
+          `${acl.tableName} API writes require a capability function`,
+        ).toEqual([false, false, false]);
+      }
+      expect(
+        [acl.workerSelect, acl.workerInsert, acl.workerUpdate, acl.workerDelete],
+        `${acl.tableName} is outside the worker boundary`,
+      ).toEqual([false, false, false, false]);
+    }
+
+    const directDml = capabilityTables.flatMap((table) => [
+      `insert into public.${table} default values`,
+      `update public.${table} set org_id = org_id where false`,
+      `delete from public.${table} where false`,
+    ]);
+    for (const role of [apiRole, workerRole]) {
+      for (const statement of directDml) {
+        await expect(asApplicationRoleWithForgedProtocol({
+          role,
+          action: (tx) => tx.unsafe(statement),
+        })).rejects.toThrow(/permission denied/i);
+      }
+    }
+
+    let companionId = "";
+    try {
+      const created = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Capability-only fixture', ${null}::text,
+            ${null}::text, ${null}::text, '[]'::jsonb, false, '[]'::jsonb, ${null}::uuid
+          )
+        `,
+      });
+      companionId = created[0]?.companionId ?? "";
+      expect(companionId).toMatch(/^[0-9a-f-]{36}$/);
+
+      const sharing = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ role: string }>>`
+          select workspace_role::text as role
+          from public.companion_api_set_workspace_access(
+            ${ids.orgA}::uuid, ${companionId}::uuid, 'editor'
+          )
+        `,
+      });
+      expect(sharing).toEqual([{ role: "editor" }]);
+
+      const memberState = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ hidden: boolean }>>`
+          select hidden
+          from public.companion_api_update_member_state(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${null}::boolean, true, ${null}::boolean
+          )
+        `,
+      });
+      expect(memberState).toEqual([{ hidden: true }]);
+
+      const clientMessageId = randomUUID();
+      const enqueued = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ turn: { client_message_id: string }; replayed: boolean }>>`
+          select turn, replayed
+          from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
+            'Capability-backed send', 'web'
+          )
+        `,
+      });
+      expect(enqueued).toEqual([{
+        turn: expect.objectContaining({ client_message_id: clientMessageId }),
+        replayed: false,
+      }]);
+    } finally {
+      if (companionId) await removeCompanion(companionId);
     }
   });
 

@@ -165,7 +165,7 @@ start_stack() {
 
   log "Starting built API"
   NODE_ENV=production bash scripts/dev-process.sh api \
-    node apps/api/dist/index.js >"$LOG_DIR/api.log" 2>&1 < /dev/null &
+    pnpm --filter @companion/api start >"$LOG_DIR/api.log" 2>&1 < /dev/null &
   write_pid_file "$API_PID_FILE" "$!"
   wait_for_url "$COMPANION_API_URL/health" "API"
 

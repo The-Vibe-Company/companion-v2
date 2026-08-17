@@ -26,6 +26,11 @@ Only `apps/runtime` receives the Box service key. API, worker, and runtime use d
 roles. Runtime has no broad tenant access: narrow `SECURITY DEFINER` functions claim, renew,
 checkpoint, and settle work under forced RLS and attempt-epoch fencing.
 
+The restricted API role may select the PostgreSQL projections needed for list/detail reads, but it
+cannot directly insert, update, or delete the Companion aggregate. Those writes cross only the
+tenant- and actor-scoped `companion_api_*` functions. The worker receives no hosted Companion table
+access; setting tenant, actor, or Runtime v2 protocol GUCs cannot manufacture either capability.
+
 The browser is never a watchdog. Closing it, killing the API after its response, or losing one
 runtime replica does not abandon accepted work.
 

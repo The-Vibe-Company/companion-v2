@@ -97,6 +97,10 @@ Runtime state is explicit and durable:
 All rows are org-scoped and force-RLS-enabled. API, worker, and runtime use distinct
 `NOSUPERUSER NOBYPASSRLS NOINHERIT` roles. Runtime claims, renewals, checkpoints, and settlements use
 narrow worker-style `SECURITY DEFINER` functions; it receives no general auth or tenant-data grant.
+The API keeps RLS-scoped `SELECT` on `companions`, workspace access, member state, threads, and
+transcript projections, but their `INSERT`, `UPDATE`, and `DELETE` paths exist only behind the
+tenant- and actor-scoped `companion_api_*` capability functions. The worker has no hosted Companion
+table access, including provider-connection or member-MCP metadata.
 
 One `(companion_id, client_message_id)` produces exactly one turn. The transaction that stores the
 user message also stores that turn. A duplicate POST resolves to the same row. A retry names a new

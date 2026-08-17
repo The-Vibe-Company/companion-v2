@@ -12,6 +12,9 @@ configuration lives in `deploy/railway/README.md`.
 - Run schema changes as the migration owner in an ephemeral release job. Never inject that owner
   credential into a long-lived process. Run API, worker, and runtime through three distinct `LOGIN
   NOSUPERUSER NOBYPASSRLS NOINHERIT` roles.
+- Invoke migrations explicitly with the release image's `node dist/migrate.js` (or
+  `pnpm --filter @companion/api migrate` in a source checkout). API `start` runs only
+  `node dist/index.js`; it is never a migration hook.
 - Keep the runtime desktop endpoint private even though requests are HMAC authenticated. Never
   persist or log its returned signed URL.
 - Never replay a dispatch automatically once the prompt may have been written. Mark it interrupted
@@ -40,7 +43,8 @@ report checksum, and canary result for every production change. Do not record se
    connection, followed by every later migration in the full journal. A failure after the first
    pass is a one-way disabled checkpoint, not permission to restart an old executor. Start the
    matching application processes only after the release deployment exits zero and is marked
-   `Completed`. The API service must not receive the owner URL or role-name variables.
+   `Completed`. The API service must not receive the owner URL or role-name variables, and invoking
+   its `start` command never retries or completes a failed migration.
 5. Deploy API, worker, runtime, and web from the same commit. Keep `drainingSeconds` at least 30 and
    the runtime drain timeout below its fixed 30-second lease.
 6. Check API `/health`, runtime `/healthz`, login, Skills browser smoke, and public package download.

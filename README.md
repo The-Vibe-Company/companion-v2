@@ -65,6 +65,28 @@ The application topology is web, API, worker, and private runtime. Conductor use
 `.conductor/settings.toml` and `bash scripts/dev-conductor.sh` to give each workspace isolated
 PostgreSQL, optional MinIO/Mailpit, unique cookies, and non-conflicting ports.
 
+### Self-hosted production
+
+Build once, apply migrations with an ephemeral migration-owner credential, and only then start the
+long-lived services with their restricted credentials. The API `start` script starts the HTTP
+server only; it never applies migrations and must not receive `DATABASE_MIGRATION_URL` or the role
+name variables.
+
+```bash
+pnpm --filter @companion/api build
+DATABASE_MIGRATION_URL=postgres://migration_owner:...@db/companion \
+DATABASE_API_ROLE=companion_api \
+DATABASE_WORKER_ROLE=companion_worker \
+DATABASE_COMPANION_RUNTIME_ROLE=companion_runtime_v2 \
+pnpm --filter @companion/api migrate
+
+DATABASE_URL=postgres://companion_api:...@db/companion \
+pnpm --filter @companion/api start
+```
+
+Treat a successful migration command as a release gate before starting or restarting API, worker,
+runtime, and web from that same build. Never use `start` as a migration mechanism.
+
 ### Companions runtime
 
 Companions are disabled by default. To enable them, set the same flag and exact-domain allowlist on

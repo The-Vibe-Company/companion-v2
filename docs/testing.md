@@ -29,7 +29,7 @@ simulator; lifecycle commands must never execute against the CI host.
 | Viewer and ordinary reads never contact or wake Box | Read causes spend, secret access, or lifecycle mutation | HTTP + browser + provider spy | Instantiate Box before the runner guard |
 | Provider/MCP secrets stay write-only and runtime errors stay expurgated | Token, signed URL, provider payload, or Pi line persisted | Core + runtime + HTTP + logs | Return raw adapter error text |
 | Permanent legacy purge deletes external ownership before rows | Orphan Box or irrecoverable ownership loss | Command + PostgreSQL + provider contract | Delete the row before provider confirmation |
-| API, worker, and runtime database roles stay separated | API/runtime claims the other's work or reads auth data | Migrated PostgreSQL | Grant the opposite process function/table |
+| API, worker, and runtime database roles stay separated | API/runtime claims the other's work, API bypasses a Companion capability function, or worker reads Companion state | Migrated PostgreSQL | Grant the opposite process function/table or forge the Runtime protocol GUC |
 | Billing changes stay outside the runtime overhaul | Undocumented runtime entitlement or Skills access change | Contracts + Core + web | Add a runtime quota or bypass an existing skill limit |
 
 ## Required suites

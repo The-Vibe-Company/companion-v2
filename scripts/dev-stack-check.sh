@@ -331,6 +331,8 @@ printf '%s\n' "$box_sim_process_env" | grep -Fxq 'UNKNOWN_PROVIDER_API_KEY=unset
 # The migration runner must see the retired union-role variable so it can reject that dangerous
 # compatibility credential explicitly; silently scrubbing it would turn a misconfigured upgrade
 # into what looks like a fresh split-role install.
+# The single quotes intentionally defer expansion to the nested migration-role shell.
+# shellcheck disable=SC2016
 migration_legacy_role="$(env DATABASE_MIGRATION_URL=postgres://owner \
   DATABASE_RUNTIME_ROLE=legacy_union bash scripts/dev-process.sh migration \
   bash -c 'printf %s "${DATABASE_RUNTIME_ROLE:-unset}"')"
@@ -346,8 +348,14 @@ if ! grep -Fq -- '--names api,worker,runtime,web' scripts/dev-conductor.sh \
   printf '[dev-stack-check] native Conductor must launch runtime and use the two-phase role-aware migration runner\n' >&2
   exit 1
 fi
-if grep -Fq -- '-f "$REPO_ROOT/packages/db/runtime-role-grants.sql"' scripts/dev-conductor.sh \
-  || grep -Fq -- '< "$REPO_ROOT/packages/db/runtime-role-grants.sql"' scripts/dev-stack.sh; then
+# This pattern inspects launcher source, so its REPO_ROOT reference must remain literal.
+# shellcheck disable=SC2016
+late_runtime_grant_file_source='-f "$REPO_ROOT/packages/db/runtime-role-grants.sql"'
+# This second source pattern likewise must not expand in the check process.
+# shellcheck disable=SC2016
+late_runtime_grant_stdin_source='< "$REPO_ROOT/packages/db/runtime-role-grants.sql"'
+if grep -Fq -- "$late_runtime_grant_file_source" scripts/dev-conductor.sh \
+  || grep -Fq -- "$late_runtime_grant_stdin_source" scripts/dev-stack.sh; then
   printf '[dev-stack-check] development launchers must not apply grants after migration 0093\n' >&2
   exit 1
 fi

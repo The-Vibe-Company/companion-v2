@@ -135,6 +135,46 @@ describe("Skills Hub runtime-role grants", () => {
     expect(apiGrantLoop).not.toContain("companion_runtime_role");
   });
 
+  it("keeps capability-managed Companion aggregates read-only for API and hidden from worker", async () => {
+    const sql = await readFile(await resolveRuntimeRoleGrantsFile(), "utf8");
+    const capabilityTables = [
+      "companions",
+      "companion_workspace_access",
+      "companion_member_state",
+      "companion_threads",
+      "companion_transcript_entries",
+    ];
+    const workerForbiddenTables = [
+      ...capabilityTables,
+      "companion_provider_connections",
+      "companion_mcp_accounts",
+    ];
+
+    const declarations = sql.slice(
+      sql.indexOf("api_capability_managed_tables regclass[]"),
+      sql.indexOf("api_unprotected_tables regclass[]"),
+    );
+    for (const table of capabilityTables) {
+      expect(declarations).toContain(`'public.${table}'::regclass`);
+    }
+    for (const table of workerForbiddenTables) {
+      expect(declarations).toContain(`'public.${table}'::regclass`);
+    }
+
+    const restrictionBlock = sql.slice(
+      sql.indexOf("FOREACH protected_table IN ARRAY api_capability_managed_tables"),
+      sql.indexOf("-- The dedicated executor reaches tenant/runtime state"),
+    );
+    expect(restrictionBlock).toContain("REVOKE INSERT, UPDATE, DELETE ON TABLE %s FROM %I");
+    expect(restrictionBlock).toContain("GRANT SELECT ON TABLE %s TO %I");
+    expect(restrictionBlock).toContain("api_role");
+    expect(restrictionBlock).toContain(
+      "FOREACH protected_table IN ARRAY worker_forbidden_companion_tables",
+    );
+    expect(restrictionBlock).toContain("REVOKE ALL PRIVILEGES ON TABLE %s FROM %I");
+    expect(restrictionBlock).toContain("worker_role");
+  });
+
   it("requires three distinct active roles and fail-closed retirement of a detected union role", async () => {
     const sql = await readFile(await resolveRuntimeRoleGrantsFile(), "utf8");
     expect(sql).toContain("api_role text := nullif(current_setting('companion.api_role', true), '')");

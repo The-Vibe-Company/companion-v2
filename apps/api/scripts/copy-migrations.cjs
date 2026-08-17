@@ -4,7 +4,7 @@ const { join } = require("node:path");
 const apiRoot = join(__dirname, "..");
 const repoRoot = join(apiRoot, "..", "..");
 
-// Drizzle migrations: read at startup by dist/migrate.js.
+// Drizzle migrations: read only by the explicit one-shot dist/migrate.js entrypoint.
 const migrationsSource = join(repoRoot, "packages", "db", "drizzle");
 const migrationsDest = join(apiRoot, "dist", "drizzle");
 rmSync(migrationsDest, { recursive: true, force: true });

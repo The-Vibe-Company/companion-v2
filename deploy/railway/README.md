@@ -116,6 +116,11 @@ zero and becomes Railway `Completed` only after the full run succeeds. API conne
 ordinary restricted `DATABASE_URL`; never add the owner URL or role-name variables to API, worker,
 runtime, or web.
 
+The API package's `start` command is exactly `node dist/index.js`; it does not invoke
+`dist/migrate.js`. This is also the required self-host boundary: run
+`pnpm --filter @companion/api migrate` (or the built `node dist/migrate.js`) as an explicit one-shot
+release action, then run `pnpm --filter @companion/api start` with only the restricted API URL.
+
 ## Base service configuration
 
 Configure public API/web origins, Better Auth secret and cookie prefix, S3, email, and optional
