@@ -716,6 +716,35 @@ describe("RuntimeEngine attempts", () => {
     expect(store.settlements[0]?.error?.code).toBe("turn_stalled");
   });
 
+  it("hands off an active accepted attempt without settling or releasing its lease", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    let markReadStarted!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      markReadStarted = resolve;
+    });
+    ports.pi.readBrokerEvents = async ({ signal }) => {
+      markReadStarted();
+      if (signal.aborted) throw signal.reason;
+      return await new Promise<never>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    };
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const execution = engine.execute(claim);
+    await readStarted;
+    engine.handoffActive();
+    const result = await execution;
+
+    expect(result.outcome).toBe("handed_off");
+    expect(ports.promptCalls).toHaveLength(1);
+    expect(store.authorization.workCheckpoint).toBe("dispatch_accepted");
+    expect(store.settlements).toHaveLength(0);
+    expect(store.releases).toBe(0);
+  });
+
   it("interrupts a newly handed-off claim during shutdown", async () => {
     const claim = attemptClaim();
     const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });

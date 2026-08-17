@@ -23,6 +23,7 @@ export interface RuntimeSchedulerSnapshot {
 
 export interface RuntimeEngineControl {
   execute(claim: RuntimeClaim): Promise<RuntimeExecutionResult>;
+  handoffActive(): void;
   interruptActive(): void;
   requestShutdown(): void;
   drain(): Promise<void>;
@@ -85,7 +86,7 @@ export class RuntimeScheduler {
 
   async shutdown(input: { drainTimeoutMs?: number } = {}): Promise<void> {
     this.stopClaims();
-    this.#engine.requestShutdown();
+    this.#engine.handoffActive();
     await this.#loopTask?.catch(() => undefined);
     const drain = Promise.allSettled([...this.#active.values()])
       .then(async () => await this.#engine.drain());
@@ -153,6 +154,10 @@ export class RuntimeScheduler {
           gateEpoch: gate.gateEpoch,
         });
         for (const claim of claims) {
+          if (!this.#acceptingClaims) {
+            await this.#store.release(claimFence(claim, this.#executorId));
+            continue;
+          }
           if (this.#active.has(claim.companionId)) {
             await this.#store.release(claimFence(claim, this.#executorId));
             continue;

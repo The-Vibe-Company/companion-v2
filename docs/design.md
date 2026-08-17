@@ -144,6 +144,9 @@ Disabling the existing Companions flag blocks new claims. Active work reaches a 
 becomes interrupted. This kill switch is the operational rollback after v2 data exists; a legacy
 executor must never process v2 rows.
 
+A normal runtime process shutdown is a replica handoff, not that kill switch. It stops new claims
+and local lease renewal without settling active work; the next replica takes over after lease expiry.
+
 ## Box and Pi boundary
 
 box.ascii.dev is the only runtime provider and Pi the only agent harness. Runtime creates/resumes the

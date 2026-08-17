@@ -28,6 +28,7 @@ export type RuntimeExecutionOutcome =
   | "failed"
   | "interrupted"
   | "cancelled"
+  | "handed_off"
   | "released"
   | "fence_lost";
 
@@ -75,6 +76,10 @@ export class RuntimeEngine {
     this.interruptActive();
   }
 
+  handoffActive(): void {
+    for (const session of this.#sessions.values()) session.requestHandoff();
+  }
+
   interruptActive(): void {
     for (const session of this.#sessions.values()) session.requestShutdown();
   }
@@ -93,27 +98,22 @@ export class RuntimeEngine {
     this.#sessions.set(claim.workId, session);
     try {
       const authorization = await session.start();
+      const localControl = await this.#honorLocalControl(claim, session);
+      if (localControl) return localControl;
       if (!authorization.authorized) {
         return await this.#finishDenial(claim, session, authorization.denialCode);
       }
-      if (this.#shuttingDown) {
-        session.requestShutdown();
-        return await this.#finishSettlement(claim, session, {
-          terminalStatus: "interrupted",
-          error: safeErrorFromUnknown(new RuntimeShutdownError(), {
-            code: "runtime_shutting_down",
-            message: "Runtime execution was interrupted during shutdown.",
-            action: "retry",
-          }),
-        });
-      }
       const disposition = await this.#dispatch(claim, session);
+      const controlAfterDispatch = await this.#honorLocalControl(claim, session);
+      if (controlAfterDispatch) return controlAfterDispatch;
       if (disposition.kind === "release") {
         const released = await session.release();
         return this.#result(claim, released ? "released" : "fence_lost");
       }
       return await this.#finishSettlement(claim, session, disposition.settlement);
     } catch (error) {
+      const localControl = await this.#honorLocalControl(claim, session);
+      if (localControl) return localControl;
       if (error instanceof LeaseFenceLostError || error instanceof LeaseRenewalError) {
         return this.#result(claim, "fence_lost");
       }
@@ -193,6 +193,25 @@ export class RuntimeEngine {
     }
     const settlement = denialRuntimeError(code);
     return await this.#finishSettlement(claim, session, settlement);
+  }
+
+  async #honorLocalControl(
+    claim: RuntimeClaim,
+    session: LeaseSession,
+  ): Promise<RuntimeExecutionResult | null> {
+    if (session.handoffRequested) {
+      return this.#result(claim, "handed_off");
+    }
+    if (!this.#shuttingDown && !session.shutdownRequested) return null;
+    session.requestShutdown();
+    return await this.#finishSettlement(claim, session, {
+      terminalStatus: "interrupted",
+      error: safeErrorFromUnknown(new RuntimeShutdownError(), {
+        code: "runtime_shutting_down",
+        message: "Runtime execution was interrupted during shutdown.",
+        action: "retry",
+      }),
+    });
   }
 
   async #finishSettlement(

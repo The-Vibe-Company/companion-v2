@@ -1,5 +1,6 @@
 import {
   AmbiguousExternalEffectError,
+  RuntimeHandoffError,
   RuntimeInvariantError,
   RuntimeShutdownError,
   safeErrorFromUnknown,
@@ -384,6 +385,7 @@ function mustAbandonFence(error: unknown): boolean {
     || error instanceof LeaseAuthorizationDeniedError
     || error instanceof RuntimeStoreSerializationError
     || error instanceof RuntimeStoreIndeterminateError
+    || error instanceof RuntimeHandoffError
     || error instanceof RuntimeShutdownError;
 }
 

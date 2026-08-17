@@ -1,5 +1,5 @@
 import type { RuntimeClock } from "./clock";
-import { RuntimeShutdownError } from "./errors";
+import { RuntimeHandoffError, RuntimeShutdownError } from "./errors";
 import {
   RUNTIME_LEASE_SECONDS,
   type RuntimeStore,
@@ -64,6 +64,8 @@ export class LeaseSession {
   #lost = false;
   #denialCode: string | null = null;
   #renewalFailed = false;
+  #handoffRequested = false;
+  #shutdownRequested = false;
 
   constructor(input: {
     store: RuntimeStore;
@@ -103,6 +105,14 @@ export class LeaseSession {
     return this.#renewalFailed;
   }
 
+  get handoffRequested(): boolean {
+    return this.#handoffRequested;
+  }
+
+  get shutdownRequested(): boolean {
+    return this.#shutdownRequested;
+  }
+
   async start(): Promise<RuntimeAuthorization> {
     if (this.#running) {
       if (!this.#authorization) throw new LeaseFenceLostError();
@@ -120,7 +130,7 @@ export class LeaseSession {
 
   async #renewAuthorization(allowDenied: boolean): Promise<RuntimeAuthorization> {
     return await this.#enqueue(async () => {
-      if (this.#lost) throw new LeaseFenceLostError();
+      this.#assertMutable();
       let authorization: RuntimeAuthorization | null;
       try {
         authorization = await this.#store.renewAndAuthorize(this.fence, RUNTIME_LEASE_SECONDS);
@@ -222,6 +232,7 @@ export class LeaseSession {
 
   async settle(input: RuntimeSettlementInput): Promise<boolean> {
     return await this.#enqueue(async () => {
+      if (this.#handoffRequested) throw new RuntimeHandoffError();
       if (this.#lost) return false;
       const settled = await this.#store.settle(this.fence, input);
       if (!settled) {
@@ -235,6 +246,7 @@ export class LeaseSession {
 
   async release(): Promise<boolean> {
     return await this.#enqueue(async () => {
+      if (this.#handoffRequested) throw new RuntimeHandoffError();
       if (this.#lost) return false;
       const released = await this.#store.release(this.fence);
       if (!released) this.#lost = true;
@@ -243,8 +255,18 @@ export class LeaseSession {
     });
   }
 
-  /** Stop local I/O. The engine may still use the live DB fence to record interruption. */
+  /** Stop local I/O and renewal without mutating the durable lease or work outcome. */
+  requestHandoff(): void {
+    if (this.#shutdownRequested) return;
+    this.#handoffRequested = true;
+    this.#abort(new RuntimeHandoffError());
+    this.#clearRenewal();
+  }
+
+  /** Kill-switch interruption. The engine may still use the live DB fence to settle it. */
   requestShutdown(): void {
+    this.#shutdownRequested = true;
+    this.#handoffRequested = false;
     this.#abort(new RuntimeShutdownError());
     this.#clearRenewal();
   }
@@ -259,6 +281,8 @@ export class LeaseSession {
   }
 
   #assertMutable(): void {
+    if (this.#handoffRequested) throw new RuntimeHandoffError();
+    if (this.#shutdownRequested) throw new RuntimeShutdownError();
     if (this.#lost) throw new LeaseFenceLostError();
     if (this.#denialCode) throw new LeaseAuthorizationDeniedError(this.#denialCode);
     if (this.#renewalFailed) throw new LeaseRenewalError();
@@ -275,7 +299,14 @@ export class LeaseSession {
   }
 
   #scheduleRenewal(): void {
-    if (!this.#running || this.#lost || this.#denialCode || this.#renewalFailed) return;
+    if (
+      !this.#running
+      || this.#handoffRequested
+      || this.#shutdownRequested
+      || this.#lost
+      || this.#denialCode
+      || this.#renewalFailed
+    ) return;
     this.#timer = this.#clock.setTimeout(() => {
       this.#timer = undefined;
       void this.reauthorize()

@@ -42,6 +42,14 @@ export class RuntimeShutdownError extends Error {
   }
 }
 
+/** Local process handoff signal. This error must never be persisted as a terminal outcome. */
+export class RuntimeHandoffError extends Error {
+  constructor() {
+    super("Runtime execution is being handed off to another replica.");
+    this.name = "RuntimeHandoffError";
+  }
+}
+
 const DENIAL_ERRORS: Record<string, SafeRuntimeError> = {
   cold_start_deadline_exceeded: {
     code: "cold_start_deadline_exceeded",

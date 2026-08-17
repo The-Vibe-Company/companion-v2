@@ -19,7 +19,7 @@ export interface RuntimeApplicationStore {
 export interface RuntimeApplicationScheduler {
   start(): void | Promise<void>;
   stopClaims(): void | Promise<void>;
-  /** Reaches safe checkpoints and interrupts remaining work before the supplied bound. */
+  /** Stops local I/O and abandons active leases for expiry-based replica takeover. */
   shutdown(input: { drainTimeoutMs: number }): Promise<void>;
   snapshot(): RuntimeSchedulerHealthSnapshot;
 }
@@ -41,7 +41,7 @@ const MAX_DISABLE_SERIALIZATION_ATTEMPTS = 5;
 
 /**
  * Owns process ordering, but none of the turn state machine. In particular the scheduler is the
- * component that turns a shutdown abort into a fenced, safe checkpoint/interruption.
+ * component that distinguishes process handoff from a feature-gate interruption.
  */
 export function createRuntimeApplication(options: RuntimeApplicationOptions): RuntimeApplication {
   let started = false;

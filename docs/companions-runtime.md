@@ -44,6 +44,12 @@ The flag is the operational kill switch and rollback once v2 rows exist. A legac
 never execute them. The flag is not a mechanism for enabling excluded harness, provider, deployment,
 routine, schedule, or multi-Bot surfaces.
 
+SIGTERM or an ordinary runtime service shutdown is instead a replica handoff. The process stops new
+claims and local I/O, does not settle or release already-active work, and stops renewing those leases
+so another replica can take over after expiry. A claim returned by PostgreSQL but not yet handed to
+the engine is safe to release immediately. This path never substitutes for the feature-gate kill
+switch, which still explicitly interrupts active work.
+
 During the stacked deployment, the flag remains disabled from the destructive purge through the
 runtime-service layer. Those intermediate binaries install the fenced v2 schema but are not an
 activatable mixed-protocol release. The flag may be re-enabled only once the asynchronous API/web

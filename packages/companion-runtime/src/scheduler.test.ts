@@ -16,6 +16,7 @@ import {
 
 class HoldingEngine implements RuntimeEngineControl {
   readonly claims: RuntimeClaim[] = [];
+  handoffs = 0;
   shutdowns = 0;
   interruptions = 0;
 
@@ -26,6 +27,10 @@ class HoldingEngine implements RuntimeEngineControl {
 
   requestShutdown(): void {
     this.shutdowns += 1;
+  }
+
+  handoffActive(): void {
+    this.handoffs += 1;
   }
 
   interruptActive(): void {
@@ -138,6 +143,42 @@ describe("RuntimeScheduler", () => {
     expect(scheduler.snapshot().activeCount).toBe(1);
   });
 
+  it("releases a claim captured while process handoff stops the claim loop", async () => {
+    const base = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(base) });
+    const captured = numberedClaim(0);
+    let resolveClaimWork!: (claims: RuntimeClaim[]) => void;
+    let markClaimWorkStarted!: () => void;
+    const claimWorkStarted = new Promise<void>((resolve) => {
+      markClaimWorkStarted = resolve;
+    });
+    store.claimWork = async () => {
+      markClaimWorkStarted();
+      return await new Promise<RuntimeClaim[]>((resolve) => {
+        resolveClaimWork = resolve;
+      });
+    };
+    const engine = new HoldingEngine();
+    const scheduler = new RuntimeScheduler({
+      store,
+      engine,
+      clock: new TestClock(),
+      executorId: "scheduler-test",
+      claimsEnabled: true,
+    });
+
+    scheduler.start();
+    await claimWorkStarted;
+    const shutdown = scheduler.shutdown({ drainTimeoutMs: 250 });
+    resolveClaimWork([captured]);
+    await shutdown;
+
+    expect(engine.claims).toHaveLength(0);
+    expect(engine.handoffs).toBe(1);
+    expect(engine.shutdowns).toBe(0);
+    expect(store.releases).toBe(1);
+  });
+
   it("publishes the two-second sweep contract", () => {
     expect(DEFAULT_RUNTIME_SWEEP_INTERVAL_MS).toBe(2_000);
     expect(DEFAULT_RUNTIME_CONCURRENCY).toBe(8);
@@ -162,7 +203,8 @@ describe("RuntimeScheduler", () => {
     clock.runNextTimer();
     await shutdown;
 
-    expect(engine.shutdowns).toBe(1);
+    expect(engine.handoffs).toBe(1);
+    expect(engine.shutdowns).toBe(0);
     expect(scheduler.snapshot().acceptingClaims).toBe(false);
   });
 });
