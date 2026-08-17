@@ -76,6 +76,7 @@ const runningCompanion: Companion = {
   unread: false,
   last_message: null,
   runtime: {
+    generation: 1,
     state: "running",
     daemon_state: "running",
     box_id: "bx_23456789",

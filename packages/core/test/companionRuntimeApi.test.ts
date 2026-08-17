@@ -21,6 +21,7 @@ const companion: Companion = {
   unread: false,
   last_message: null,
   runtime: {
+    generation: 1,
     state: "not_created",
     daemon_state: "unknown",
     box_id: null,
@@ -47,6 +48,8 @@ function runtime(
   return {
     access_role: "owner",
     generation: 1,
+    selected_skill_ids: [],
+    selected_mcp_account_ids: [],
     box_id: null,
     box_state: "absent",
     pi_state: "absent",
@@ -107,6 +110,9 @@ describe("Runtime v2 Companion projection", () => {
 
   it("projects a ready Box and idle Pi as online with its applied skill revision", () => {
     const projected = projectCompanionRuntimeV2(companion, runtime({
+      generation: "9",
+      selected_skill_ids: ["44444444-4444-4444-8444-444444444444"],
+      selected_mcp_account_ids: ["55555555-5555-4555-8555-555555555555"],
       box_id: "bx_23456789",
       box_state: "ready",
       pi_state: "idle",
@@ -116,6 +122,7 @@ describe("Runtime v2 Companion projection", () => {
     }));
 
     expect(projected.runtime).toMatchObject({
+      generation: 9,
       state: "running",
       daemon_state: "running",
       box_id: "bx_23456789",
@@ -124,6 +131,17 @@ describe("Runtime v2 Companion projection", () => {
       skills_applied_revision: 3,
       skills_applied_at: null,
     });
+    expect(projected.selected_skill_ids).toEqual([
+      "44444444-4444-4444-8444-444444444444",
+    ]);
+    expect(projected.selected_mcp_account_ids).toEqual([
+      "55555555-5555-4555-8555-555555555555",
+    ]);
+  });
+
+  it("rejects a non-positive runtime generation at the projection boundary", () => {
+    expect(() => projectCompanionRuntimeV2(companion, runtime({ generation: 0 })))
+      .toThrow("Companion runtime generation is invalid");
   });
 
   it("never exposes Box identity or operator error detail to a Viewer", () => {

@@ -294,6 +294,11 @@ export function CompanionTranscript({
     if (!outgoing || saved.some((entry) => entry.event_id === outgoing.event_id)) return [...saved];
     return [...saved, outgoing];
   }, [outgoing, thread]);
+  useEffect(() => {
+    if (outgoing && thread?.entries.some((entry) => entry.event_id === outgoing.event_id)) {
+      setOutgoing(null);
+    }
+  }, [outgoing, thread]);
   const stableEntries = useStableEntries(entries);
 
   /**
@@ -353,13 +358,16 @@ export function CompanionTranscript({
       decision: null,
       created_at: new Date().toISOString(),
     });
+    let saved = false;
     try {
-      const saved = await onSend(content, clientMessageId);
+      saved = await onSend(content, clientMessageId);
       if (saved) pendingSendRef.current = null;
       else restoreDraft(runtimeRef.current, content);
     } finally {
       inFlight.current = false;
-      setOutgoing(null);
+      // A bounded send ACK carries only the turn. Keep the accepted message visible until the
+      // thread projection contains its durable event id; a failed send still restores the draft.
+      if (!saved) setOutgoing(null);
     }
   }, [canSend, onSend, viewerId]);
 

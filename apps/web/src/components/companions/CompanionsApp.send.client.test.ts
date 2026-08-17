@@ -79,6 +79,7 @@ const companion: Companion = {
   unread: false,
   last_message: null,
   runtime: {
+    generation: 1,
     state: "running",
     daemon_state: "running",
     box_id: "bx_23456789",
@@ -286,8 +287,7 @@ function controlPlane(
       }
       if (options.holdSend) await held;
       return json({
-        turn: projectedTurn(options.refuseDelivery ? "queued" : "running"),
-        thread: thread(requestedCompanionId),
+        turn: projectedTurn("queued"),
       });
     }
     if (method === "POST" && url.endsWith("/thread/sync")) {
@@ -419,6 +419,18 @@ describe("CompanionsApp send", () => {
 
       expect(api.sends).toHaveLength(1);
       expect(api.sends[0]?.clientMessageId).toMatch(UUID);
+    });
+
+    it("keeps the accepted message visible while its bounded ACK waits for the thread poll", async () => {
+      const container = await openThread();
+      type(container, "Keep this accepted message");
+
+      await pressEnter(container);
+
+      expect(container.querySelectorAll("[data-role='user']")).toHaveLength(1);
+      expect(container.textContent).toContain("Keep this accepted message");
+      expect(container.querySelector("[data-slot='composer-hint']")?.textContent)
+        .toBe("1 message is saved and queued.");
     });
 
     it("keeps a refused ordinary send pending without claiming Pi is replying", async () => {

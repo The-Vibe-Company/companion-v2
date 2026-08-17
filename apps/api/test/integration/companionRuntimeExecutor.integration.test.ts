@@ -677,6 +677,42 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           )
         `,
       });
+      await sql`
+        update companions
+        set selected_skill_ids = ${sql.json([ids.skill, ids.editorSkill, ids.orgSkill])},
+            selected_mcp_account_ids = ${sql.json([ids.mcpAccount, ids.editorMcpAccount])}
+        where org_id = ${ids.orgA}::uuid and id = ${companionId}::uuid
+      `;
+      const [editorRuntime] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.editorA,
+        action: (tx) => tx<Array<{
+          selectedSkillIds: string[];
+          selectedMcpAccountIds: string[];
+        }>>`
+          select selected_skill_ids as "selectedSkillIds",
+            selected_mcp_account_ids as "selectedMcpAccountIds"
+          from public.companion_api_read_runtime(${ids.orgA}::uuid, ${companionId}::uuid)
+        `,
+      });
+      expect(editorRuntime).toEqual({
+        selectedSkillIds: [ids.editorSkill, ids.orgSkill],
+        selectedMcpAccountIds: [ids.editorMcpAccount],
+      });
+      const [editorList] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.editorA,
+        action: (tx) => tx<Array<{
+          selectedSkillIds: string[];
+          selectedMcpAccountIds: string[];
+        }>>`
+          select selected_skill_ids as "selectedSkillIds",
+            selected_mcp_account_ids as "selectedMcpAccountIds"
+          from public.companion_api_list_runtime(${ids.orgA}::uuid)
+          where companion_id = ${companionId}::uuid
+        `,
+      });
+      expect(editorList).toEqual(editorRuntime);
       const clientMessageId = randomUUID();
       const enqueue = () => asApi({
         orgId: ids.orgA,
@@ -756,17 +792,25 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         actorId: ids.ownerA,
         action: (tx) => tx<Array<{
           accessRole: string;
+          generation: string;
+          selectedSkillIds: string[];
+          selectedMcpAccountIds: string[];
           boxId: string | null;
           queuedCount: number;
           activeTurn: unknown;
         }>>`
-          select access_role as "accessRole", box_id as "boxId",
+          select access_role as "accessRole", generation::text,
+            selected_skill_ids as "selectedSkillIds",
+            selected_mcp_account_ids as "selectedMcpAccountIds", box_id as "boxId",
             queued_count as "queuedCount", active_turn as "activeTurn"
           from public.companion_api_read_runtime(${ids.orgA}::uuid, ${companionId}::uuid)
         `,
       });
       expect(ownerRuntime).toEqual([{
         accessRole: "owner",
+        generation: "1",
+        selectedSkillIds: [ids.skill, ids.orgSkill],
+        selectedMcpAccountIds: [ids.mcpAccount],
         boxId: "bx_2345678d",
         queuedCount: 1,
         activeTurn: null,
@@ -841,19 +885,37 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       });
       const viewerRuntime = await asApi({
         orgId: ids.orgA,
-        actorId: ids.editorA,
-        action: (tx) => tx<Array<{ accessRole: string; boxId: string | null }>>`
-          select access_role as "accessRole", box_id as "boxId"
+        actorId: ids.viewerA,
+        action: (tx) => tx<Array<{
+          accessRole: string;
+          selectedSkillIds: string[];
+          selectedMcpAccountIds: string[];
+          boxId: string | null;
+        }>>`
+          select access_role as "accessRole", selected_skill_ids as "selectedSkillIds",
+            selected_mcp_account_ids as "selectedMcpAccountIds", box_id as "boxId"
           from public.companion_api_read_runtime(${ids.orgA}::uuid, ${companionId}::uuid)
         `,
       });
-      expect(viewerRuntime).toEqual([{ accessRole: "viewer", boxId: null }]);
+      expect(viewerRuntime).toEqual([{
+        accessRole: "viewer",
+        selectedSkillIds: [ids.orgSkill],
+        selectedMcpAccountIds: [],
+        boxId: null,
+      }]);
       const viewerList = await asApi({
         orgId: ids.orgA,
-        actorId: ids.editorA,
-        action: (tx) => tx<Array<{ companionId: string; accessRole: string; boxId: string | null }>>`
+        actorId: ids.viewerA,
+        action: (tx) => tx<Array<{
+          companionId: string;
+          accessRole: string;
+          selectedSkillIds: string[];
+          selectedMcpAccountIds: string[];
+          boxId: string | null;
+        }>>`
           select companion_id::text as "companionId", access_role as "accessRole",
-            box_id as "boxId"
+            selected_skill_ids as "selectedSkillIds",
+            selected_mcp_account_ids as "selectedMcpAccountIds", box_id as "boxId"
           from public.companion_api_list_runtime(${ids.orgA}::uuid)
           where companion_id = ${companionId}::uuid
         `,
@@ -861,6 +923,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       expect(viewerList).toEqual([{
         companionId,
         accessRole: "viewer",
+        selectedSkillIds: [ids.orgSkill],
+        selectedMcpAccountIds: [],
         boxId: null,
       }]);
       await expect(enqueue()).rejects.toMatchObject({ code: "42501" });
@@ -981,6 +1045,80 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         })]);
     } finally {
       if (duplicateId) await removeCompanion(duplicateId);
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("accepts only exact sequential and concurrent client_message_id replays", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    try {
+      const [created] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Concurrent enqueue fixture', null, null, null,
+            '[]'::jsonb, false, '[]'::jsonb
+          )
+        `,
+      });
+      companionId = created?.companionId ?? "";
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_set_workspace_access(
+            ${ids.orgA}::uuid, ${companionId}::uuid, 'editor'
+          )
+        `,
+      });
+
+      const clientMessageId = randomUUID();
+      const enqueue = (
+        actorId = ids.editorA,
+        content = "Concurrent durable message",
+        surface: "web" | "mobile_web" = "web",
+      ) => asApi({
+        orgId: ids.orgA,
+        actorId,
+        action: (tx: Tx) => tx<Array<{
+          turn: Record<string, unknown>;
+          replayed: boolean;
+        }>>`
+          select turn, replayed from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
+            ${content}, ${surface}::companion_client_surface
+          )
+        `,
+      });
+
+      const concurrent = await Promise.all([enqueue(), enqueue()]);
+      expect(concurrent.flatMap((result) => result.map((row) => row.replayed)).sort())
+        .toEqual([false, true]);
+      expect(new Set(concurrent.flatMap((result) => result.map((row) => row.turn.id))).size).toBe(1);
+      await expect(enqueue(ids.editorA, "  Concurrent durable message  "))
+        .resolves.toEqual([expect.objectContaining({ replayed: true })]);
+
+      await expect(enqueue(ids.editorA, "Different content"))
+        .rejects.toMatchObject({ code: "23505" });
+      await expect(enqueue(ids.editorA, "Concurrent durable message", "mobile_web"))
+        .rejects.toMatchObject({ code: "23505" });
+      await expect(enqueue(ids.ownerA))
+        .rejects.toMatchObject({ code: "23505" });
+
+      const [stored] = await sql<Array<{ turns: number; messages: number; operations: number }>>`
+        select
+          (select count(*)::int from companion_turns
+            where companion_id = ${companionId}::uuid) as turns,
+          (select count(*)::int from companion_transcript_entries
+            where companion_id = ${companionId}::uuid and role = 'user') as messages,
+          (select count(*)::int from companion_operations
+            where companion_id = ${companionId}::uuid) as operations
+      `;
+      expect(stored).toEqual({ turns: 1, messages: 1, operations: 1 });
+    } finally {
       if (companionId) await removeCompanion(companionId);
     }
   });

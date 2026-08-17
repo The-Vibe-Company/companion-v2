@@ -26,6 +26,7 @@ const companion: Companion = {
   unread: false,
   last_message: null,
   runtime: {
+    generation: 1,
     state: "running",
     daemon_state: "running",
     box_id: "bx_23456789",
@@ -366,8 +367,9 @@ describe("CompanionThread composer", () => {
       settle(true);
     });
 
-    // Once the saved thread arrives it owns the message; the sent copy is dropped in the same update.
-    expect(container.querySelectorAll("[data-role='user'] [aria-busy='true']")).toHaveLength(0);
+    // The bounded ACK carries no thread snapshot. Keep the accepted copy until a later poll returns
+    // the same event id; clearing it at ACK would make the committed message disappear.
+    expect(container.querySelectorAll("[data-role='user'] [aria-busy='true']")).toHaveLength(1);
   });
 
   it("sends one message even when the composer is submitted twice", async () => {

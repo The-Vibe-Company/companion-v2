@@ -113,6 +113,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
       created_at: "2026-08-14T09:05:00.000Z",
     },
     runtime: {
+      generation: 1,
       state: "stopped",
       daemon_state: "stopped",
       box_id: null,

@@ -46,6 +46,7 @@ describe("Companion MCP attach contracts (THE-361)", () => {
       hidden: false,
       unread: false,
       runtime: {
+        generation: 1,
         state: "not_created",
         daemon_state: "unknown",
         box_id: null,

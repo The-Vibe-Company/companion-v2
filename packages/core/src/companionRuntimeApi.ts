@@ -14,6 +14,8 @@ import type {
 } from "@companion/contracts";
 import {
   companionOperationSchema,
+  companionSelectedMcpAccountIdsSchema,
+  companionSelectedSkillIdsSchema,
   companionTranscriptEntrySchema,
   companionTurnSchema,
 } from "@companion/contracts";
@@ -42,6 +44,14 @@ function integer(value: number | string | bigint | null | undefined): number {
   return 0;
 }
 
+function positiveInteger(value: number | string | bigint | null | undefined): number {
+  const parsed = integer(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error("Companion runtime generation is invalid");
+  }
+  return parsed;
+}
+
 function iso(value: Date | string | null | undefined): string | null {
   if (value === null || value === undefined) return null;
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
@@ -50,6 +60,8 @@ function iso(value: Date | string | null | undefined): string | null {
 type RuntimeReadRow = {
   access_role: CompanionAccess;
   generation: number | string | bigint;
+  selected_skill_ids: unknown;
+  selected_mcp_account_ids: unknown;
   box_id: string | null;
   box_state: "absent" | "initializing" | "provisioning" | "ready" | "idle" | "running"
     | "archiving" | "archived" | "error" | "unknown";
@@ -142,8 +154,13 @@ export function projectCompanionRuntimeV2(
   const runtimeError = operationError?.message ?? row.last_error_message;
   return {
     ...companion,
+    selected_skill_ids: companionSelectedSkillIdsSchema.parse(row.selected_skill_ids),
+    selected_mcp_account_ids: companionSelectedMcpAccountIdsSchema.parse(
+      row.selected_mcp_account_ids,
+    ),
     runtime: {
       ...companion.runtime,
+      generation: positiveInteger(row.generation),
       state: projectedRuntimeState(row, latestOperation),
       daemon_state: projectedDaemonState(row),
       box_id: row.access_role === "viewer" ? null : row.box_id,

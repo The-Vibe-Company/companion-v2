@@ -77,6 +77,7 @@ const asleep: Companion = {
   unread: false,
   last_message: null,
   runtime: {
+    generation: 1,
     state: "stopped",
     daemon_state: "stopped",
     box_id: null,
@@ -239,8 +240,7 @@ function controlPlane(options: { piAcceptsOnWake: boolean; holdSend?: boolean })
       if (options.holdSend) await held;
       if (options.piAcceptsOnWake) deliverPending();
       return json({
-        turn: projectedTurn(options.piAcceptsOnWake ? "running" : "queued"),
-        thread: thread(),
+        turn: projectedTurn("queued"),
       });
     }
     if (method === "POST" && url.endsWith("/thread/sync")) {
@@ -369,7 +369,8 @@ describe("CompanionsApp wake on send", () => {
 
     expect(wakeControls(container)).toHaveLength(0);
     expect(chip(container)).toContain("Online");
-    expect(footer(container)).toContain("Luna is working on this turn.");
+    // The bounded enqueue ACK is queued; only a later PostgreSQL poll may claim Pi accepted it.
+    expect(footer(container)).toContain("1 message is saved and queued.");
 
     // A woken thread pulls Pi, so the reply arrives on the live cadence instead of on a reload.
     await poll(1);

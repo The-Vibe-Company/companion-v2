@@ -243,6 +243,8 @@ export const companionSchema = z.object({
    */
   last_message: companionLastMessageSchema.nullable().default(null),
   runtime: z.object({
+    /** Positive runtime identity generation. It is non-secret and safe in control-plane reads. */
+    generation: z.number().int().positive(),
     state: companionRuntimeStateSchema,
     daemon_state: companionDaemonStateSchema,
     box_id: z.string().nullable(),
@@ -524,7 +526,6 @@ export type SendCompanionMessageInput = z.infer<typeof sendCompanionMessageInput
 
 export const sendCompanionMessageAcceptedResponseSchema = z.object({
   turn: companionTurnSchema,
-  thread: companionThreadSchema,
 }).strict();
 export type SendCompanionMessageAcceptedResponse = z.infer<
   typeof sendCompanionMessageAcceptedResponseSchema

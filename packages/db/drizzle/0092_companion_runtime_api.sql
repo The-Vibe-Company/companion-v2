@@ -738,6 +738,11 @@ DECLARE
   v_instance public.companion_runtime_instances%ROWTYPE;
   v_turn_id uuid;
   v_operation_id uuid;
+  v_existing_actor_id text;
+  v_existing_surface public.companion_client_surface;
+  v_existing_content text;
+  v_existing_author_id text;
+  v_message_found boolean := false;
   v_message_ordinal integer;
   v_now timestamp with time zone := clock_timestamp();
   v_replayed boolean := false;
@@ -756,7 +761,8 @@ BEGIN
     RAISE EXCEPTION 'retired Companion cannot accept messages' USING ERRCODE = '55000';
   END IF;
 
-  SELECT queued_turn.id INTO v_turn_id
+  SELECT queued_turn.id, queued_turn.actor_id, queued_turn.client_surface
+  INTO v_turn_id, v_existing_actor_id, v_existing_surface
   FROM public.companion_turns queued_turn
   WHERE queued_turn.org_id = p_org_id
     AND queued_turn.companion_id = p_companion_id
@@ -764,6 +770,13 @@ BEGIN
 
   IF FOUND THEN
     v_replayed := true;
+    SELECT entry.content, entry.author_id
+    INTO v_existing_content, v_existing_author_id
+    FROM public.companion_transcript_entries entry
+    WHERE entry.org_id = p_org_id AND entry.companion_id = p_companion_id
+      AND entry.event_id = 'msg:' || p_client_message_id::text
+      AND entry.role = 'user';
+    v_message_found := FOUND;
     SELECT start_operation.id INTO v_operation_id
     FROM public.companion_operations start_operation
     WHERE start_operation.org_id = p_org_id
@@ -772,13 +785,15 @@ BEGIN
       AND start_operation.kind = 'start'
     ORDER BY start_operation.queue_sequence, start_operation.id
     LIMIT 1;
-    IF v_operation_id IS NULL OR NOT EXISTS (
-      SELECT 1 FROM public.companion_transcript_entries entry
-      WHERE entry.org_id = p_org_id AND entry.companion_id = p_companion_id
-        AND entry.event_id = 'msg:' || p_client_message_id::text
-        AND entry.role = 'user'
-    ) THEN
+    IF v_operation_id IS NULL OR NOT v_message_found THEN
       RAISE EXCEPTION 'idempotent Companion turn is incomplete' USING ERRCODE = '55000';
+    END IF;
+    IF v_existing_actor_id IS DISTINCT FROM v_actor_id
+       OR v_existing_author_id IS DISTINCT FROM v_actor_id
+       OR v_existing_surface IS DISTINCT FROM p_client_surface
+       OR v_existing_content IS DISTINCT FROM btrim(p_content) THEN
+      RAISE EXCEPTION 'client_message_id was reused with different message intent'
+        USING ERRCODE = '23505', CONSTRAINT = 'companion_turns_client_message_uq';
     END IF;
   ELSE
     INSERT INTO public.companion_threads(
@@ -844,6 +859,8 @@ CREATE FUNCTION public.companion_api_read_runtime(
 RETURNS TABLE (
   access_role text,
   generation bigint,
+  selected_skill_ids jsonb,
+  selected_mcp_account_ids jsonb,
   box_id text,
   box_state public.companion_box_observed_state,
   pi_state public.companion_pi_observed_state,
@@ -869,11 +886,28 @@ SET search_path = pg_catalog, public
 SET row_security = on
 AS $$
 DECLARE
+  v_actor_id text := public.companion_api_actor(p_org_id);
   v_access text := public.companion_api_require_access(p_org_id, p_companion_id, 'read');
 BEGIN
   RETURN QUERY
   SELECT v_access,
     instance.generation,
+    COALESCE((
+      SELECT jsonb_agg(selected.skill_id ORDER BY selected.ordinality)
+      FROM jsonb_array_elements_text(companion.selected_skill_ids)
+        WITH ORDINALITY selected(skill_id, ordinality)
+      JOIN public.skills skill
+        ON skill.org_id = p_org_id AND skill.id::text = selected.skill_id
+      WHERE skill.scope = 'org' OR skill.creator_id = v_actor_id
+    ), '[]'::jsonb),
+    COALESCE((
+      SELECT jsonb_agg(selected.account_id ORDER BY selected.ordinality)
+      FROM jsonb_array_elements_text(companion.selected_mcp_account_ids)
+        WITH ORDINALITY selected(account_id, ordinality)
+      JOIN public.companion_mcp_accounts account
+        ON account.org_id = p_org_id AND account.id::text = selected.account_id
+      WHERE account.owner_id = v_actor_id
+    ), '[]'::jsonb),
     CASE WHEN v_access = 'viewer' THEN NULL ELSE instance.box_id END,
     instance.box_state, instance.pi_state,
     instance.pi_invocation_id, instance.disk_layout_version,
@@ -891,6 +925,8 @@ BEGIN
     latest_operation.value,
     COALESCE((active_turn.value ->> 'replying')::boolean, false)
   FROM public.companion_runtime_instances instance
+  JOIN public.companions companion
+    ON companion.org_id = instance.org_id AND companion.id = instance.companion_id
   LEFT JOIN LATERAL (
     SELECT public.companion_api_turn_json(
       active.org_id, active.companion_id, active.id
@@ -929,6 +965,8 @@ RETURNS TABLE (
   companion_id uuid,
   access_role text,
   generation bigint,
+  selected_skill_ids jsonb,
+  selected_mcp_account_ids jsonb,
   box_id text,
   box_state public.companion_box_observed_state,
   pi_state public.companion_pi_observed_state,
@@ -960,6 +998,22 @@ BEGIN
   SELECT instance.companion_id,
     CASE WHEN companion.owner_id = v_actor_id THEN 'owner' ELSE access.role::text END,
     instance.generation,
+    COALESCE((
+      SELECT jsonb_agg(selected.skill_id ORDER BY selected.ordinality)
+      FROM jsonb_array_elements_text(companion.selected_skill_ids)
+        WITH ORDINALITY selected(skill_id, ordinality)
+      JOIN public.skills skill
+        ON skill.org_id = p_org_id AND skill.id::text = selected.skill_id
+      WHERE skill.scope = 'org' OR skill.creator_id = v_actor_id
+    ), '[]'::jsonb),
+    COALESCE((
+      SELECT jsonb_agg(selected.account_id ORDER BY selected.ordinality)
+      FROM jsonb_array_elements_text(companion.selected_mcp_account_ids)
+        WITH ORDINALITY selected(account_id, ordinality)
+      JOIN public.companion_mcp_accounts account
+        ON account.org_id = p_org_id AND account.id::text = selected.account_id
+      WHERE account.owner_id = v_actor_id
+    ), '[]'::jsonb),
     CASE WHEN companion.owner_id <> v_actor_id AND access.role = 'viewer'
       THEN NULL ELSE instance.box_id END,
     instance.box_state, instance.pi_state,

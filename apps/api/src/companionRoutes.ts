@@ -296,9 +296,19 @@ class CompanionAccessForbiddenError extends Error {
 
 type RuntimeFactory = () => CompanionBoxRuntime;
 
+function databaseErrorCode(error: unknown): string | null {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    if ("code" in current && typeof current.code === "string") return current.code;
+    current = "cause" in current ? current.cause : null;
+  }
+  return null;
+}
+
 function errorStatus(error: unknown): number {
-  const databaseCode = error && typeof error === "object" && "code" in error
-    && typeof error.code === "string" ? error.code : null;
+  const databaseCode = databaseErrorCode(error);
   if (databaseCode === "42501") return 403;
   if (databaseCode === "P0002" || databaseCode === "02000") return 404;
   if (["23505", "40001", "55000"].includes(databaseCode ?? "")) return 409;
@@ -1038,7 +1048,7 @@ export function registerCompanionRoutes(
       const companionId = companionIdSchema.parse(c.req.param("id"));
       const body = sendCompanionMessageInputSchema.parse(await c.req.json());
       const accepted = await tenant(c, async ({ actor, orgId, database }) => {
-        const enqueued = await enqueueCompanionTurnV2({
+        const { turn } = await enqueueCompanionTurnV2({
           actor,
           orgId,
           companionId,
@@ -1047,8 +1057,7 @@ export function registerCompanionRoutes(
           clientSurface: body.client_surface,
           database,
         });
-        const thread = await readCompanionThreadV2({ actor, orgId, companionId, database });
-        return { turn: enqueued.turn, thread };
+        return { turn };
       });
       c.header("Cache-Control", "private, no-store");
       return c.json(accepted, 202);

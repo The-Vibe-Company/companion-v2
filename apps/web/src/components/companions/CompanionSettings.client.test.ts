@@ -92,6 +92,7 @@ function companion(
     unread: false,
     last_message: null,
     runtime: {
+      generation: 1,
       state: runtimeState,
       daemon_state: runtimeState === "running" ? "running" : "stopped",
       box_id: access === "viewer" ? null : "bx_23456789",

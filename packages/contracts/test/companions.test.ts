@@ -19,6 +19,7 @@ import {
   createCompanionInputSchema,
   saveCompanionProviderInputSchema,
   saveCompanionPluginInputSchema,
+  sendCompanionMessageAcceptedResponseSchema,
   sendCompanionMessageInputSchema,
   setCompanionWorkspaceShareInputSchema,
   startCompanionRuntimeInputSchema,
@@ -306,6 +307,25 @@ describe("Companion chat contracts", () => {
       .toBe("msg:33333333-3333-4333-8333-333333333333");
   });
 
+  it("bounds the asynchronous send acknowledgement to the accepted turn", () => {
+    const turn = {
+      id: "22222222-2222-4222-8222-222222222222",
+      companion_id: "11111111-1111-4111-8111-111111111111",
+      client_message_id: clientMessageId,
+      status: "queued",
+      queue_sequence: 1,
+      latest_attempt: null,
+      replying: false,
+      error: null,
+      state_changed_at: "2026-08-17T00:00:00.000Z",
+      settled_at: null,
+      created_at: "2026-08-17T00:00:00.000Z",
+      updated_at: "2026-08-17T00:00:00.000Z",
+    };
+    expect(sendCompanionMessageAcceptedResponseSchema.parse({ turn })).toEqual({ turn });
+    expect(() => sendCompanionMessageAcceptedResponseSchema.parse({ turn, thread: {} })).toThrow();
+  });
+
   it("describes one thread per Companion with its run boundary and message authors", () => {
     const thread = companionThreadSchema.parse({
       companion_id: "11111111-1111-4111-8111-111111111111",
@@ -588,6 +608,7 @@ describe("Companion conversation-list contracts", () => {
     hidden: false,
     unread: false,
     runtime: {
+      generation: 1,
       state: "running",
       daemon_state: "running",
       box_id: "bx_23456789",
@@ -632,6 +653,14 @@ describe("Companion conversation-list contracts", () => {
     expect(() => companionSchema.parse({
       ...companion,
       runtime: { ...companion.runtime, disk_layout_version: -1 },
+    })).toThrow();
+  });
+
+  it("requires a positive runtime generation", () => {
+    expect(companionSchema.parse(companion).runtime.generation).toBe(1);
+    expect(() => companionSchema.parse({
+      ...companion,
+      runtime: { ...companion.runtime, generation: 0 },
     })).toThrow();
   });
 

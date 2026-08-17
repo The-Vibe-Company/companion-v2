@@ -83,6 +83,7 @@ const companion = {
   unread: false,
   last_message: null,
   runtime: {
+    generation: 7,
     state: "running" as const,
     daemon_state: "running" as const,
     box_id: "bx_runtime_v2",
@@ -272,7 +273,7 @@ describe("Companions Runtime v2 API", () => {
     }
   });
 
-  it("persists a send through the v2 enqueue boundary and returns 202", async () => {
+  it("persists a send through the v2 enqueue boundary and returns only a bounded 202 ACK", async () => {
     const runtimeFactory = vi.fn();
     const app = appWithRoutes(runtimeFactory);
     const response = await app.request(jsonPost(`/v1/companions/${COMPANION_ID}/messages`, {
@@ -282,16 +283,14 @@ describe("Companions Runtime v2 API", () => {
     }));
 
     expect(response.status).toBe(202);
-    await expect(response.json()).resolves.toEqual({ turn, thread });
+    await expect(response.json()).resolves.toEqual({ turn });
     expect(coreMocks.enqueueCompanionTurnV2).toHaveBeenCalledWith(expect.objectContaining({
       companionId: COMPANION_ID,
       clientMessageId: MESSAGE_ID,
       content: "Summarize the incident",
       clientSurface: "mobile_web",
     }));
-    expect(coreMocks.readCompanionThreadV2).toHaveBeenCalledAfter(
-      coreMocks.enqueueCompanionTurnV2,
-    );
+    expect(coreMocks.readCompanionThreadV2).not.toHaveBeenCalled();
     expect(runtimeFactory).not.toHaveBeenCalled();
   });
 
@@ -314,6 +313,20 @@ describe("Companions Runtime v2 API", () => {
     expect(await replay.json()).toEqual(await first.json());
     expect(coreMocks.enqueueCompanionTurnV2.mock.calls.map(([input]) => input.clientMessageId))
       .toEqual([MESSAGE_ID, MESSAGE_ID]);
+  });
+
+  it("maps a conflicting client_message_id replay SQLSTATE to 409", async () => {
+    coreMocks.enqueueCompanionTurnV2.mockRejectedValueOnce(Object.assign(
+      new Error("query failed"),
+      { cause: Object.assign(new Error("message intent differs"), { code: "23505" }) },
+    ));
+
+    const response = await appWithRoutes().request(jsonPost(
+      `/v1/companions/${COMPANION_ID}/messages`,
+      { content: "Different intent", client_message_id: MESSAGE_ID },
+    ));
+
+    expect(response.status).toBe(409);
   });
 
   it("requires a client_message_id before any durable write", async () => {

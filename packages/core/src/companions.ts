@@ -329,6 +329,7 @@ function toCompanion(
     unread: member.unread,
     last_message: lastMessage,
     runtime: {
+      generation: 1,
       state: row.runtimeState,
       daemon_state: row.daemonState,
       box_id: access === "viewer" ? null : row.boxId,

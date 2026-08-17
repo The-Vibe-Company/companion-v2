@@ -19,8 +19,10 @@ import type {
   CompanionPluginAccount,
   CompanionProvidersResponse,
   CompanionThread as Thread,
+  CompanionTranscriptEntry,
+  CompanionTurn,
 } from "@companion/contracts";
-import { COMPANION_PROVIDER_CATALOG } from "@companion/contracts";
+import { COMPANION_PROVIDER_CATALOG, companionMessageEventId } from "@companion/contracts";
 import type { OrgVM } from "@/lib/types";
 import { ApiFetchError } from "@/lib/apiClient";
 import {
@@ -110,6 +112,51 @@ function mergeCompanion(previous: Companion, next: Companion): Companion {
   return next.last_message === null && previous.last_message !== null
     ? { ...next, last_message: previous.last_message }
     : next;
+}
+
+/** Keep a committed send visible while the PostgreSQL thread poll catches up with its bounded ACK. */
+function projectAcceptedMessage(input: {
+  thread: Thread;
+  turn: CompanionTurn;
+  content: string;
+}): Thread {
+  const eventId = companionMessageEventId(input.turn.client_message_id);
+  const alreadyProjected = input.thread.entries.some((entry) => entry.event_id === eventId);
+  const entries = alreadyProjected
+    ? input.thread.entries
+    : [...input.thread.entries, {
+        event_id: eventId,
+        ordinal: input.thread.entries.reduce((latest, entry) => Math.max(latest, entry.ordinal), -1) + 1,
+        role: "user",
+        content: input.content,
+        reasoning: null,
+        author_id: input.thread.viewer_id,
+        author_name: null,
+        tool: null,
+        decision: null,
+        created_at: input.turn.created_at,
+      } satisfies CompanionTranscriptEntry];
+
+  let activeTurn = input.thread.active_turn;
+  let interruptedTurn = input.thread.interrupted_turn;
+  let queuedCount = input.thread.queued_count;
+  if (input.turn.status === "queued") {
+    if (!alreadyProjected) queuedCount += 1;
+  } else if (["starting", "dispatching", "running", "needs_input"].includes(input.turn.status)) {
+    activeTurn = input.turn;
+  } else if (input.turn.status === "interrupted") {
+    interruptedTurn = input.turn;
+  }
+
+  return {
+    ...input.thread,
+    entries,
+    active_turn: activeTurn,
+    queued_count: queuedCount,
+    interrupted_turn: interruptedTurn,
+    pending_count: queuedCount + (activeTurn ? 1 : 0) + (interruptedTurn ? 1 : 0),
+    last_message_at: alreadyProjected ? input.thread.last_message_at : input.turn.created_at,
+  };
 }
 
 const CONTEXT_OPEN_KEY = "companions:context-open";
@@ -916,10 +963,10 @@ export function CompanionsApp({
         () => sendCompanionMessage(currentOrg.id, companionId, content, clientMessageId),
         { skipWhenBusy: false },
       );
-      const next = accepted?.thread;
-      if (openedIdRef.current === companionId && next?.companion_id === companionId) {
-        threadRequestRef.current += 1;
-        setThread(next);
+      if (openedIdRef.current === companionId && accepted?.turn.companion_id === companionId) {
+        setThread((current) => current?.companion_id === companionId
+          ? projectAcceptedMessage({ thread: current, turn: accepted.turn, content })
+          : current);
       }
       return true;
     } catch (cause) {

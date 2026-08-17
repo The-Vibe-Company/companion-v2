@@ -68,6 +68,7 @@ function companionIn(state: "stopped" | "stopping" | "running" | "error"): Compa
     unread: false,
     last_message: null,
     runtime: {
+      generation: 1,
       state,
       daemon_state: state === "running" ? "running" : "stopped",
       box_id: "bx_23456789",
@@ -128,8 +129,23 @@ function controlPlane(initial: Companion) {
       return await new Promise<Response>(() => {});
     }
     if (method === "POST" && url.endsWith("/messages")) {
-      messages.push(JSON.parse(String(init?.body)));
-      return json({ turn: {}, thread: emptyThread });
+      const body = JSON.parse(String(init?.body)) as { client_message_id: string };
+      messages.push(body);
+      const now = "2026-08-17T00:00:00.000Z";
+      return json({ turn: {
+        id: "22222222-2222-4222-8222-222222222222",
+        companion_id: companionId,
+        client_message_id: body.client_message_id,
+        status: "queued",
+        queue_sequence: 1,
+        latest_attempt: null,
+        replying: false,
+        error: null,
+        state_changed_at: now,
+        settled_at: null,
+        created_at: now,
+        updated_at: now,
+      } });
     }
     if (url.includes("/runtime")) return json({ companion: settled });
     if (url.includes("/thread")) return json({ thread: emptyThread });

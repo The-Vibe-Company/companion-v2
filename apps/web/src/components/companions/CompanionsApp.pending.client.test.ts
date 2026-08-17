@@ -81,6 +81,7 @@ function companionIn(state: "provisioning" | "running" | "stopping" | "error"): 
     unread: false,
     last_message: null,
     runtime: {
+      generation: 1,
       state,
       daemon_state: state === "running" ? "running" : state === "error" ? "error" : "starting",
       box_id: "bx_23456789",
