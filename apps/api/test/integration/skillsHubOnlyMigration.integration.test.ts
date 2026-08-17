@@ -42,6 +42,14 @@ describe("Skills Hub-only database migration", () => {
               or p.proname like 'companion%model_provider%'
               or p.proname like 'companion%sandbox%'
             )
+            -- Runtime v2 projects correlated broker events and terminal attempt state. Those
+            -- verbs contain the English word "project" but are unrelated to the removed generic
+            -- Projects product. Keep the historical-runtime assertion exact instead of treating
+            -- every future use of "projection" as a resurrected Project function.
+            and p.proname not in (
+              'companion_runtime_get_attempt_terminal_projection',
+              'companion_runtime_project_event_batch'
+            )
         ) as "runtimeFunctions",
         (
           select count(*)::int
