@@ -25,7 +25,11 @@ import { preventImplicitBoxCreate } from "./boxGuard";
 import { composeRuntimeService, type RuntimeService } from "./composition";
 import { loadRuntimeServiceConfig, type RuntimeServiceConfig } from "./config";
 import { createRuntimeDatabase, type RuntimeDatabase } from "./database";
-import { createRuntimeDesktopPort, PostgresRuntimeDesktopAuthorizer } from "./desktop";
+import {
+  createRuntimeDesktopPort,
+  PostgresRuntimeDesktopAuthorizer,
+  PostgresRuntimeDesktopReplayGuard,
+} from "./desktop";
 import {
   createRuntimeMaterialPipeline,
   loadBundledCompanionRuntimeSkill,
@@ -162,6 +166,7 @@ export async function buildProductionRuntimeService(
       store,
       scheduler: createRuntimeSchedulerAdapter(kernel.scheduler),
       desktop,
+      desktopReplay: new PostgresRuntimeDesktopReplayGuard(database.sql),
       closeResources,
     });
   } catch (error) {

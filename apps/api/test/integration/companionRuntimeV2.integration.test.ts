@@ -7323,7 +7323,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     const healthBoxId = "bx_3456789a";
     await runtimeSql`
       update companion_runtime_instances
-      set box_id = ${healthBoxId}, box_state = 'idle', pi_state = 'idle',
+      set box_id = ${healthBoxId}, box_state = 'idle', pi_state = 'running',
           pi_invocation_id = 'pi-health-one', disk_layout_version = 1,
           health_due_at = now() - interval '1 second'
       where companion_id = ${ids.companionB}::uuid
@@ -7345,7 +7345,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       authorizationActorId: null,
       boxId: healthBoxId,
       boxState: "idle",
-      piState: "idle",
+      piState: "running",
       piInvocationId: "pi-health-one",
       diskLayoutVersion: 1,
       appliedSettingsRevision: 1,
@@ -7365,8 +7365,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     expect(await observeInstance(healthClaim!, "observe-health-replica", {
       boxId: healthBoxId,
       boxState: "running",
-      piState: "running",
-      piInvocationId: "pi-health-one",
+      piState: "absent",
       observedAt: healthObservedAt,
     })).toBe(2);
     expect(await observeInstance(healthClaim!, "observe-health-replica", {
@@ -7379,6 +7378,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       boxId: string;
       boxState: string;
       piState: string;
+      piInvocationId: string | null;
       layout: number;
       healthCheckpoint: string;
       healthSequence: number;
@@ -7386,6 +7386,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       observedAt: Date;
     }>>`
       select box_id as "boxId", box_state::text as "boxState", pi_state::text as "piState",
+             pi_invocation_id as "piInvocationId",
              disk_layout_version::int as layout, health_checkpoint as "healthCheckpoint",
              health_checkpoint_sequence::int as "healthSequence", last_heartbeat_at as "heartbeatAt",
              last_observed_at as "observedAt"
@@ -7394,7 +7395,8 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     expect(healthProjection).toMatchObject({
       boxId: healthBoxId,
       boxState: "running",
-      piState: "running",
+      piState: "absent",
+      piInvocationId: null,
       layout: 1,
       healthCheckpoint: "observed",
       healthSequence: 2,

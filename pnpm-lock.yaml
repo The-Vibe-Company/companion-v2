@@ -128,6 +128,9 @@ importers:
       '@auth/agent-cli':
         specifier: 0.5.1
         version: 0.5.1
+      '@companion/companion-runtime':
+        specifier: workspace:*
+        version: link:../../packages/companion-runtime
       '@types/node':
         specifier: ^22.10.2
         version: 22.19.20

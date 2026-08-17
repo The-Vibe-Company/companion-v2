@@ -1130,6 +1130,21 @@ export const companionRuntimeEventProjections = pgTable(
   }),
 );
 
+/** Short-lived, globally unique HMAC request ids consumed atomically by every runtime replica. */
+export const companionRuntimeDesktopRequests = pgTable(
+  "companion_runtime_desktop_requests",
+  {
+    requestId: text("request_id").primaryKey().notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: now(),
+  },
+  (t) => ({
+    expiry: index("companion_runtime_desktop_requests_expiry_idx").on(t.expiresAt),
+    requestIdCheck: check("companion_runtime_desktop_requests_id_check", sql`${t.requestId} ~ '^[A-Za-z0-9._:-]{16,128}$'`),
+    expiryCheck: check("companion_runtime_desktop_requests_expiry_check", sql`${t.expiresAt} > ${t.createdAt} - interval '5 minutes'`),
+  }),
+);
+
 export const companionRuntimeLeases = pgTable(
   "companion_runtime_leases",
   {

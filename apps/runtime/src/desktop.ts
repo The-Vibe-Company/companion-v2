@@ -1,4 +1,4 @@
-import type { RuntimeDesktopPort } from "./server";
+import type { RuntimeDesktopPort, RuntimeDesktopReplayPort } from "./server";
 
 export interface RuntimeDesktopAuthorization {
   authorized: boolean;
@@ -33,6 +33,27 @@ export class RuntimeDesktopContractError extends Error {
   constructor() {
     super("Runtime desktop authorization returned an invalid result");
     this.name = "RuntimeDesktopContractError";
+  }
+}
+
+/** Uses one PostgreSQL uniqueness decision shared by all private HTTP server replicas. */
+export class PostgresRuntimeDesktopReplayGuard implements RuntimeDesktopReplayPort {
+  constructor(private readonly sql: RuntimeDesktopSqlClient) {}
+
+  async consume(input: {
+    requestId: string;
+    timestamp: number;
+    maxSkewSeconds: number;
+  }): Promise<boolean> {
+    const rows = await this.sql.unsafe(`
+      SELECT public.companion_runtime_consume_desktop_request(
+        $1::text, $2::bigint, $3::integer
+      ) AS consumed
+    `, [input.requestId, input.timestamp, input.maxSkewSeconds]);
+    if (rows.length !== 1 || typeof rows[0]?.consumed !== "boolean") {
+      throw new RuntimeDesktopContractError();
+    }
+    return rows[0].consumed;
   }
 }
 

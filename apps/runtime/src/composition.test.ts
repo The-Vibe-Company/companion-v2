@@ -53,7 +53,7 @@ describe("runtime service composition seam", () => {
       apiUrl: "http://127.0.0.1:3001",
     };
     expect(() => composeRuntimeService(dependencies(config))).toThrow(
-      "enabled runtime requires the desktop authorization adapter",
+      "enabled runtime requires desktop authorization and replay adapters",
     );
   });
 

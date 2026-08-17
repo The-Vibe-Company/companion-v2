@@ -22,6 +22,11 @@ import {
   RuntimeDatabaseRoleError,
   verifyRuntimeDatabaseRole,
 } from "@companion/db/runtime-role";
+import {
+  PostgresRuntimeStore,
+  type LeaseFence,
+  type RuntimeSqlClient,
+} from "@companion/companion-runtime";
 import { extractRuntimeRoleGrantBlock, resolveRuntimeRoleGrantsFile } from "../../src/migrate";
 
 const databaseUrl = process.env.DATABASE_MIGRATION_URL ?? process.env.DATABASE_URL;
@@ -435,7 +440,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'companion_runtime_control', 'companion_runtime_instances', 'companion_turns',
             'companion_turn_attempts', 'companion_operations', 'companion_decision_deliveries',
             'companion_runtime_leases', 'companion_runtime_duplicate_cleanups',
-            'companion_runtime_event_projections'
+            'companion_runtime_event_projections', 'companion_runtime_desktop_requests'
           ]) protected(table_name)
           where has_table_privilege(${runtimeRole}, 'public.' || protected.table_name, 'SELECT')
         ) as "privateTableReads",
@@ -447,6 +452,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'public.companion_runtime_register_duplicate_cleanups(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text[])',
             'public.companion_runtime_checkpoint_duplicate_cleanup(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text,bigint,public.companion_duplicate_cleanup_status,text)',
             'public.companion_runtime_authorize_desktop(uuid,uuid,text)',
+            'public.companion_runtime_consume_desktop_request(text,bigint,integer)',
             'public.companion_runtime_project_event_batch(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)'
           ]) protected(signature)
           where has_function_privilege(${runtimeRole}, protected.signature, 'EXECUTE')
@@ -455,7 +461,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           ${runtimeRole}, 'public.companion_runtime_guard_duplicate_cleanup()', 'EXECUTE'
         ) as "helperCallable"
     `;
-    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 7, helperCallable: false });
+    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 8, helperCallable: false });
     await expect(asRuntime((tx) => tx`select * from companion_turn_attempts`))
       .rejects.toThrow(/permission denied/i);
 
@@ -468,6 +474,97 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     `;
     await expect(verifyRuntimeDatabaseRole(sql, owner?.name ?? ""))
       .rejects.toBeInstanceOf(RuntimeDatabaseRoleError);
+  });
+
+  it("rejects effective CREATE inherited through PUBLIC in verification and the real grant hook", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    await sql.unsafe(`grant create on database "${databaseName}" to public`);
+    try {
+      await expect(asRuntime(async (tx) => {
+        await verifyRuntimeDatabaseRole(tx as unknown as Pick<Sql, "unsafe">, runtimeRole);
+      })).rejects.toBeInstanceOf(RuntimeDatabaseRoleError);
+      await expect(applySplitGrants()).rejects.toThrow(/must not have database or public schema CREATE/i);
+    } finally {
+      await sql.unsafe(`revoke create on database "${databaseName}" from public`);
+      await applySplitGrants();
+    }
+  });
+
+  it("atomically consumes one desktop request id across independent runtime connections", async () => {
+    const timestamp = Math.floor(Date.now() / 1_000);
+    const requestId = randomUUID();
+    const consume = async (): Promise<boolean> => await asRuntime(async (tx) => {
+      const [row] = await tx<Array<{ consumed: boolean }>>`
+        select public.companion_runtime_consume_desktop_request(
+          ${requestId}, ${timestamp}::bigint, 30
+        ) as consumed
+      `;
+      return row?.consumed ?? false;
+    });
+    expect((await Promise.all([consume(), consume()])).sort()).toEqual([false, true]);
+    // A later process/connection sees the durable id and rejects it for the rest of the window.
+    expect(await consume()).toBe(false);
+  });
+
+  it("projects JSONB and advances the durable cursor through PostgresRuntimeStore", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    // Production createRuntimeDatabase uses prepare:false. Exercise that exact postgres.js
+    // serialization boundary instead of this suite's default prepared fixture connection.
+    const storeSql = postgres(runtimeUrl.toString(), { max: 1, prepare: false });
+    const fixture = await createCompanion();
+    try {
+      const claim = await claimWork();
+      const fence: LeaseFence = {
+        orgId: claim.orgId,
+        companionId: claim.companionId,
+        claimToken: claim.claimToken,
+        claimEpoch: BigInt(claim.claimEpoch),
+        gateEpoch: BigInt(claim.gateEpoch),
+        executorId,
+        workKind: "attempt",
+        workId: claim.workId,
+      };
+      const wrapped = await storeSql.begin(async (tx) => {
+        await tx.unsafe(`set local role ${runtimeRole}`);
+        return { result: await new PostgresRuntimeStore(
+          tx as unknown as RuntimeSqlClient,
+        ).projectEventBatch(fence, {
+          expectedSequence: BigInt(claim.checkpointSequence),
+          piInvocationId: `pi-${fixture.attemptId}`,
+          events: [{
+            sequence: 1n,
+            type: "assistant",
+            entry_key: "assistant:1",
+            content: "Stored through the production serializer",
+          }],
+          throughCursor: 1n,
+          unknownEventCount: 0,
+          malformedEventCount: 0,
+          oversizedEventCount: 0,
+        }) };
+      });
+      const result = wrapped.result;
+      expect(result).toEqual({
+        checkpointSequence: 1n,
+        eventCursor: 1n,
+        hasVisibleOutput: true,
+      });
+      const [durable] = await sql<Array<{ cursor: string; content: string }>>`
+        select attempt.event_cursor::text as cursor, entry.content
+        from companion_turn_attempts attempt
+        join companion_transcript_entries entry
+          on entry.org_id = attempt.org_id and entry.companion_id = attempt.companion_id
+        where attempt.id = ${fixture.attemptId}::uuid
+          and entry.event_id = ${`v2:${fixture.attemptId}:1`}
+      `;
+      expect(durable).toEqual({
+        cursor: "1",
+        content: "Stored through the production serializer",
+      });
+    } finally {
+      await storeSql.end({ timeout: 1 });
+      await removeCompanion(fixture.companionId);
+    }
   });
 
   it("returns exact encrypted material, fences OAuth CAS, and refuses forged or revoked authority", async () => {

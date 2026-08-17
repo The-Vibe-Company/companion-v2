@@ -67,7 +67,8 @@ DECLARE
     'companion_decision_deliveries',
     'companion_runtime_leases',
     'companion_runtime_duplicate_cleanups',
-    'companion_runtime_event_projections'
+    'companion_runtime_event_projections',
+    'companion_runtime_desktop_requests'
   ];
   legacy_companion_mutation_tables regclass[] := ARRAY[
     'public.companions'::regclass,
@@ -212,6 +213,7 @@ BEGIN
         'public.companion_runtime_register_duplicate_cleanups(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text[])'::regprocedure,
         'public.companion_runtime_checkpoint_duplicate_cleanup(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text,bigint,public.companion_duplicate_cleanup_status,text)'::regprocedure,
         'public.companion_runtime_authorize_desktop(uuid,uuid,text)'::regprocedure,
+        'public.companion_runtime_consume_desktop_request(text,bigint,integer)'::regprocedure,
         'public.companion_runtime_project_event_batch(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)'::regprocedure
       ];
       internal_runtime_functions := internal_runtime_functions || ARRAY[
@@ -274,6 +276,13 @@ BEGIN
       OR runtime_attributes.rolbypassrls
       OR runtime_attributes.rolinherit THEN
       RAISE EXCEPTION 'companion runtime role % must be LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT', configured_role;
+    END IF;
+    -- These are effective-privilege checks, so an unsafe ambient PUBLIC CREATE grant is rejected
+    -- just as firmly as a direct role grant.
+    IF pg_catalog.has_database_privilege(configured_role, current_database(), 'CREATE')
+       OR pg_catalog.has_schema_privilege(configured_role, 'public', 'CREATE') THEN
+      RAISE EXCEPTION 'companion runtime role % must not have database or public schema CREATE',
+        configured_role;
     END IF;
     IF pg_catalog.pg_has_role(configured_role, current_user, 'member') THEN
       RAISE EXCEPTION 'companion runtime role % must not inherit the migration-owner role', configured_role;

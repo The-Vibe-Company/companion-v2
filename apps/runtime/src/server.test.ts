@@ -44,6 +44,7 @@ async function start(input: {
   snapshot?: RuntimeSchedulerHealthSnapshot;
   ping?: () => Promise<void>;
   authorizeAndMint?: ReturnType<typeof vi.fn>;
+  replayIds?: Set<string>;
 } = {}) {
   let snapshot = input.snapshot ?? healthySnapshot();
   const authorizeAndMint = input.authorizeAndMint ?? vi.fn(async () => ({
@@ -51,6 +52,7 @@ async function start(input: {
     provisioning: false,
     transport: "vnc" as const,
   }));
+  const replayIds = input.replayIds ?? new Set<string>();
   const server = createRuntimeHttpServer({
     host: "127.0.0.1",
     port: 0,
@@ -62,6 +64,13 @@ async function start(input: {
       snapshot: () => snapshot,
     },
     desktop: { authorizeAndMint },
+    desktopReplay: {
+      consume: vi.fn(async ({ requestId }) => {
+        if (replayIds.has(requestId)) return false;
+        replayIds.add(requestId);
+        return true;
+      }),
+    },
     now: () => nowMs,
     healthPingTimeoutMs: 20,
   });
@@ -208,6 +217,44 @@ describe("private runtime HTTP server", () => {
     expect(handle.authorizeAndMint).toHaveBeenCalledOnce();
   });
 
+  it("uses shared replay storage across two server replicas and a restart", async () => {
+    const replayIds = new Set<string>();
+    const first = await start({ replayIds });
+    const second = await start({ replayIds });
+    const rawBody = Buffer.from(JSON.stringify(ids));
+    const timestamp = Math.floor(nowMs / 1_000);
+    const requestId = nextRequestId();
+    const signature = signDesktopRequest({
+      method: "POST",
+      pathname: DESKTOP_REQUEST_PATH,
+      timestamp,
+      requestId,
+      rawBody,
+    }, hmacSecret);
+    const send = async (server: RuntimeHttpServer): Promise<number> => (await fetch(
+      `${server.baseUrl}${DESKTOP_REQUEST_PATH}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          [DESKTOP_TIMESTAMP_HEADER]: String(timestamp),
+          [DESKTOP_REQUEST_ID_HEADER]: requestId,
+          [DESKTOP_SIGNATURE_HEADER]: signature,
+        },
+        body: rawBody,
+      },
+    )).status;
+
+    const statuses = await Promise.all([send(first.server), send(second.server)]);
+    expect(statuses.sort()).toEqual([200, 401]);
+    await first.server.close();
+    const restarted = await start({ replayIds });
+    expect(await send(restarted.server)).toBe(401);
+    expect(first.authorizeAndMint.mock.calls.length + second.authorizeAndMint.mock.calls.length)
+      .toBe(1);
+    expect(restarted.authorizeAndMint).not.toHaveBeenCalled();
+  });
+
   it("rejects extra desktop fields and never logs or returns provider failure details", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const providerSecret = "https://desktop.invalid/?token=provider-secret";
@@ -253,6 +300,7 @@ describe("private runtime HTTP server", () => {
       desktopMaxSkewSeconds: 30,
       health: { ping: async () => undefined, snapshot: healthySnapshot },
       desktop: { authorizeAndMint },
+      desktopReplay: { consume: async () => false },
       now: () => nowMs,
     });
     await server.listen();

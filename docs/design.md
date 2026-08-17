@@ -200,7 +200,9 @@ separate fenced metadata-only function, then ACKed and settled without credentia
 refresh compare-and-swap is limited to pre-dispatch settings and operation staging. Projection
 redaction uses every string leaf of the validated plaintext material in memory plus generic
 credential patterns; tool projections retain metadata and an opaque hashed call id only, never
-arguments or results. Redacted or oversized decision identifiers are rejected fail-closed.
+arguments or results. Generic scrubbing removes complete Authorization and Cookie header values
+before narrower token/assignment matchers run. Redacted or oversized decision identifiers are
+rejected fail-closed.
 
 Persisted runtime failures contain a stable code, an expurgated message no longer than 500
 characters, and an allowed next action. Provider response bodies, raw Pi lines, tokens, auth files,
@@ -227,7 +229,10 @@ Desktop minting remains an Owner/Editor action that cannot wake Box. The API aut
 then calls a private runtime endpoint with a short-lived HMAC request. Runtime revalidates the
 Companion and returns the fresh provider URL only after the current actor owns every selected
 personal resource and the applied settings/Skills revisions exactly match desired state. This gate
-keeps a warm Box unavailable during a cross-actor restage; neither process persists or logs the URL.
+keeps a warm Box unavailable during a cross-actor restage. Each authenticated request id is
+atomically consumed through a narrow `SECURITY DEFINER` function and retained in PostgreSQL until
+its signature window expires, so replicas and restarted processes share one replay boundary;
+neither process persists or logs the URL.
 
 Sending is the sole normal wake path. There is no Wake button or first-keystroke prewarm. Successful
 Pi acceptance refreshes Box TTL to six hours. Automatic recovery may recycle Pi only. Full Box

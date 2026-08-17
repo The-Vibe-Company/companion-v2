@@ -319,6 +319,7 @@ The projection boundary receives an in-memory dictionary built from every string
 validated, decrypted credentials. Assistant text and decision copy are scrubbed against those exact
 values plus bounded generic credential patterns. Tool activity is deliberately metadata-only: it
 stores a safe kind/name/title and an opaque hashed call id, never tool arguments or results. A
+complete Authorization or Cookie header value is removed before narrower generic matchers run. A
 decision request key that would require redaction fails closed and interrupts the turn. The
 dictionary, ciphertext, and raw Pi event are never serialized or logged.
 
@@ -344,7 +345,10 @@ short-lived HMAC-authenticated request to a private runtime endpoint. Runtime re
 mints the provider desktop URL only when the exact current settings and Skills revisions are already
 staged and every selected personal Skill and MCP account belongs to that actor. A pending restage or
 foreign personal resource denies desktop access, so a warm shared Box cannot bypass creator-only
-privacy. Neither process stores or logs the URL, and Viewer requests fail before a Box client exists.
+privacy. Runtime atomically consumes the signed request id through a narrow `SECURITY DEFINER`
+function; PostgreSQL retains it through the signature window so replay is rejected across replicas
+and process restarts. Neither process stores or logs the URL, and Viewer requests fail before a Box
+client exists.
 
 ## Legacy purge
 

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createRuntimeDesktopPort,
   PostgresRuntimeDesktopAuthorizer,
+  PostgresRuntimeDesktopReplayGuard,
   RuntimeDesktopContractError,
 } from "./desktop";
 
@@ -13,6 +14,20 @@ const request = {
 };
 
 describe("runtime desktop reauthorization", () => {
+  it("delegates replay consumption to the narrow PostgreSQL definer", async () => {
+    const unsafe = vi.fn(async () => [{ consumed: true }]);
+    const guard = new PostgresRuntimeDesktopReplayGuard({ unsafe });
+    await expect(guard.consume({
+      requestId: "11111111-1111-4111-8111-111111111111",
+      timestamp: 1_800_000_000,
+      maxSkewSeconds: 30,
+    })).resolves.toBe(true);
+    expect(unsafe).toHaveBeenCalledWith(
+      expect.stringContaining("companion_runtime_consume_desktop_request"),
+      ["11111111-1111-4111-8111-111111111111", 1_800_000_000, 30],
+    );
+  });
+
   it("calls the narrow definer with a text actor and mints only after authorization", async () => {
     const unsafe = vi.fn(async () => [{
       authorized: true,

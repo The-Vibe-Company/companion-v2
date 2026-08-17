@@ -23,6 +23,18 @@ describe("runtime error safety", () => {
     expect(message).toContain("[redacted]");
   });
 
+  it.each([
+    "Authorization: Basic dXNlcjpwYXNzL3dpdGg9cHVuY3Q=",
+    "Authorization: Digest username=member,response=opaque-secret,nonce=second-secret",
+    "Cookie: session=opaque-session; refresh=opaque-refresh, preference=private",
+  ])("redacts the complete sensitive header value before generic matching: %s", (source) => {
+    const message = expurgateRuntimeMessage(`provider rejected ${source}`);
+    expect(message).toMatch(/(?:Authorization|Cookie) \[redacted\]$/);
+    expect(message).not.toContain("opaque");
+    expect(message).not.toContain("dXNlcj");
+    expect(message).not.toContain("private");
+  });
+
   it("replaces unstable error codes", () => {
     expect(safeRuntimeError({ code: "BAD CODE", message: "failed", action: "retry" }).code)
       .toBe("runtime_failure");

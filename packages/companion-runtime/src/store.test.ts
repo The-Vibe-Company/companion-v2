@@ -139,7 +139,7 @@ describe("PostgresRuntimeStore", () => {
     expect(sql.calls[0]?.query).not.toContain("provider_material");
   });
 
-  it("serializes event batches as JSON text for postgres.js jsonb parameters", async () => {
+  it("passes structured event batches to postgres.js for one jsonb serialization", async () => {
     const sql = new RecordingSql();
     sql.rows = [{
       checkpoint_sequence: "3",
@@ -171,13 +171,13 @@ describe("PostgresRuntimeStore", () => {
       eventCursor: 10n,
       hasVisibleOutput: true,
     });
-    expect(JSON.parse(String(sql.calls[0]?.parameters[10]))).toEqual([{
+    expect(sql.calls[0]?.parameters[10]).toEqual([{
       sequence: "10",
       type: "assistant",
       entry_key: "assistant:10",
       content: "hello",
     }]);
-    expect(typeof sql.calls[0]?.parameters[10]).toBe("string");
+    expect(Array.isArray(sql.calls[0]?.parameters[10])).toBe(true);
   });
 
   it("maps a lost response from a mutating definer to an indeterminate outcome", async () => {

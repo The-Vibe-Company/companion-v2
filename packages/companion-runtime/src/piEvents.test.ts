@@ -322,6 +322,44 @@ describe("Pi journal validation and projection", () => {
     expect(tools[1]?.tool.call_id).toBe(tools[0]?.tool.call_id);
   });
 
+  it("redacts complete Authorization and multi-value Cookie headers from Pi projections", () => {
+    const page = validatePiJournalRead({
+      value: {
+        events: [{
+          sequence: 1,
+          invocationId: PI_INVOCATION_ID,
+          attemptId: ATTEMPT_ID,
+          kind: "pi_event",
+          event: {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [{
+                type: "text",
+                text: "Authorization: Basic dXNlcjpwYXNzL3dpdGg9cHVuY3Q=\nCookie: session=opaque-session; refresh=opaque-refresh, final=private",
+              }],
+            },
+          },
+        }],
+        nextCursor: 1,
+        acknowledgedCursor: 0,
+        hasMore: false,
+      },
+      after: 0n,
+      attemptId: ATTEMPT_ID,
+      invocationId: PI_INVOCATION_ID,
+    });
+
+    const classified = classifyPiJournalPage(page);
+    const serialized = JSON.stringify(classified.projections, (_key, value) =>
+      typeof value === "bigint" ? value.toString() : value);
+    expect(serialized).toContain("Authorization [redacted]");
+    expect(serialized).toContain("Cookie [redacted]");
+    expect(serialized).not.toContain("dXNlcj");
+    expect(serialized).not.toContain("opaque-session");
+    expect(serialized).not.toContain("private");
+  });
+
   it.each([
     ["webfetch", "browse"],
     ["execute", "shell"],
