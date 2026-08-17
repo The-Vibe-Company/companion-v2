@@ -4,6 +4,7 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Companion, CompanionThread as Thread } from "@companion/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiFetchError } from "@/lib/apiClient";
 import { CompanionThread, type CompanionContextPanel } from "./CompanionThread";
 import { CHAT_VIEWPORT_SETTLE_MS } from "./useVisualViewportPin";
 
@@ -241,11 +242,13 @@ describe("CompanionThread composer", () => {
     expect(retryIds[0]).toMatch(/^[0-9a-f-]{36}$/);
   });
 
-  it("shows that an interrupted-turn retry was accepted without claiming completion", async () => {
+  it("keeps Cancel available after an interrupted-turn retry is durably accepted", async () => {
     const onRetryInterrupted = vi.fn(async () => {});
+    const onCancelInterrupted = vi.fn(async () => {});
     const container = await mount(async () => true, {
       thread: interruptedThread,
       onRetryInterrupted,
+      onCancelInterrupted,
     });
     const retry = [...container.querySelectorAll("button")]
       .find((candidate) => candidate.textContent === "Retry turn") as HTMLButtonElement;
@@ -260,6 +263,37 @@ describe("CompanionThread composer", () => {
     expect(container.textContent).not.toContain("Retry completed");
     expect([...container.querySelectorAll("button")]
       .some((candidate) => candidate.textContent === "Retry turn")).toBe(false);
+    const cancel = [...container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent === "Cancel turn") as HTMLButtonElement;
+    expect(cancel.disabled).toBe(false);
+
+    await act(async () => cancel.click());
+    expect(onCancelInterrupted).toHaveBeenCalledWith(interruptedThread.interrupted_turn?.id);
+  });
+
+  it("explains when Cancel loses a race with a running retry", async () => {
+    const onCancelInterrupted = vi.fn(async () => {
+      throw new ApiFetchError("Companion turn retry is already running", 409);
+    });
+    const container = await mount(async () => true, {
+      thread: interruptedThread,
+      onRetryInterrupted: async () => {},
+      onCancelInterrupted,
+    });
+
+    const retry = [...container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent === "Retry turn") as HTMLButtonElement;
+    await act(async () => retry.click());
+    const cancel = [...container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent === "Cancel turn") as HTMLButtonElement;
+    await act(async () => cancel.click());
+
+    const alert = container.querySelector<HTMLElement>(".chat-interruption__error")!;
+    expect(alert.textContent).toContain("retry has already started");
+    expect(alert.textContent).toContain("Wait for the turn to refresh");
+    expect(document.activeElement).toBe(alert);
+    expect([...container.querySelectorAll("button")]
+      .some((candidate) => candidate.textContent === "Cancel turn")).toBe(true);
   });
 
   it("disables both actions while Cancel is pending and focuses a recoverable error", async () => {

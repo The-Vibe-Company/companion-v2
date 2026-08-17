@@ -267,6 +267,14 @@ describe("Companions mobile viewport", () => {
     expect(declarationsFor(".chat-head > *")[0]).toContain("flex: none;");
   });
 
+  it("keeps programmatically focused interrupted-action errors visible", () => {
+    const focusedError = declarationsFor(".chat-interruption__error:focus")[0];
+
+    expect(focusedError).toContain("outline: 2px solid var(--color-accent-ring);");
+    expect(focusedError).toContain("outline-offset: 2px;");
+    expect(focusedError).not.toContain("outline: none;");
+  });
+
   it("keeps the new-message divider readable in every theme", () => {
     // `accent-edge` is an edge token: it is not lifted for the dark theme, and as small uppercase
     // text on canvas it falls under the contrast floor on every accent preset. The accent stays on

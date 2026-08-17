@@ -326,6 +326,24 @@ describe("CompanionSettings", () => {
     expect(container.textContent).not.toContain("Pi restart accepted.");
   });
 
+  it("clears a transient restart polling error after a successful refresh", async () => {
+    vi.useFakeTimers();
+    companionApi.getCompanionRuntime
+      .mockRejectedValueOnce(new Error("Network unavailable."))
+      .mockResolvedValueOnce(companion("owner", "running"));
+    const { container } = await mount(companion("owner", "running"));
+
+    await click(button(container, "Restart Pi"));
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(container.querySelector("[role='alert']")?.textContent).toContain(
+      "Restart status could not be refreshed: Network unavailable.",
+    );
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(container.querySelector("[role='alert']")).toBeNull();
+    expect(container.textContent).toContain("Pi restart completed.");
+  });
+
   it("keeps an accepted deletion visible until permanent Box deletion is confirmed", async () => {
     const { container, onDeleted } = await mount(companion("owner", "running"));
 
@@ -342,6 +360,25 @@ describe("CompanionSettings", () => {
     expect(onDeleted).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Deletion accepted.");
     expect(button(container, "Deletion requested").disabled).toBe(true);
+  });
+
+  it("clears a transient deletion polling error after a successful refresh", async () => {
+    vi.useFakeTimers();
+    companionApi.getCompanionRuntime
+      .mockRejectedValueOnce(new Error("Network unavailable."))
+      .mockResolvedValue(companion("owner", "running"));
+    const { container } = await mount(companion("owner", "running"));
+
+    await click(button(container, "Delete Companion"));
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    await click(button(dialog, "Delete Companion"));
+    expect(container.querySelector("[role='alert']")?.textContent).toContain(
+      "Deletion is still queued, but its status could not be refreshed: Network unavailable.",
+    );
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(container.querySelector("[role='alert']")).toBeNull();
+    expect(container.textContent).toContain("Deletion accepted.");
   });
 
   it("leaves Settings only after the durable delete projection disappears", async () => {

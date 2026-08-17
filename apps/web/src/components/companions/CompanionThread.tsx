@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import type { Companion, CompanionDesktop, CompanionThread as Thread } from "@companion/contracts";
+import { ApiFetchError } from "@/lib/apiClient";
 import { Icon } from "../Icon";
 import { CompanionContext, type CompanionContextSkill } from "./CompanionContext";
 import { CompanionTranscript } from "./CompanionTranscript";
@@ -68,13 +69,15 @@ function InterruptedTurnNotice({
   };
 
   const cancel = async () => {
-    if (!canAct || action || retryAccepted) return;
+    if (!canAct || action) return;
     setAction("cancel");
     setActionError(null);
     try {
       await onCancel(turn.id);
     } catch (cause) {
-      setActionError(cause instanceof Error ? cause.message : "This turn could not be cancelled.");
+      setActionError(cause instanceof ApiFetchError && cause.status === 409
+        ? "The retry has already started, so it cannot be cancelled now. Wait for the turn to refresh."
+        : cause instanceof Error ? cause.message : "This turn could not be cancelled.");
       setAction(null);
     }
   };
@@ -96,29 +99,34 @@ function InterruptedTurnNotice({
           <p className="chat-interruption__status">
             An Owner or Editor must retry or cancel this turn before the queue can continue.
           </p>
-        ) : retryAccepted ? (
-          <p className="chat-interruption__status" role="status">
-            Retry accepted. Pi will restart before this turn runs again.
-          </p>
         ) : (
-          <div className="chat-interruption__actions">
-            <button
-              type="button"
-              className="cds-btn cds-btn--primary cds-btn--sm"
-              disabled={action !== null}
-              onClick={() => void retry()}
-            >
-              {action === "retry" ? "Requesting retry…" : "Retry turn"}
-            </button>
-            <button
-              type="button"
-              className="cds-btn cds-btn--secondary cds-btn--sm"
-              disabled={action !== null}
-              onClick={() => void cancel()}
-            >
-              {action === "cancel" ? "Cancelling…" : "Cancel turn"}
-            </button>
-          </div>
+          <>
+            {retryAccepted ? (
+              <p className="chat-interruption__status" role="status">
+                Retry accepted. Pi will restart before this turn runs again.
+              </p>
+            ) : null}
+            <div className="chat-interruption__actions">
+              {!retryAccepted ? (
+                <button
+                  type="button"
+                  className="cds-btn cds-btn--primary cds-btn--sm"
+                  disabled={action !== null}
+                  onClick={() => void retry()}
+                >
+                  {action === "retry" ? "Requesting retry…" : "Retry turn"}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="cds-btn cds-btn--secondary cds-btn--sm"
+                disabled={action !== null}
+                onClick={() => void cancel()}
+              >
+                {action === "cancel" ? "Cancelling…" : "Cancel turn"}
+              </button>
+            </div>
+          </>
         )}
         {actionError ? (
           <p ref={errorRef} className="chat-interruption__error" role="alert" tabIndex={-1}>

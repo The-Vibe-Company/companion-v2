@@ -1567,7 +1567,9 @@ button.chat-box:focus-visible {
 }
 
 .chat-interruption__error:focus {
-  outline: none;
+  outline: 2px solid var(--color-accent-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
 }
 
 @media (pointer: coarse) {

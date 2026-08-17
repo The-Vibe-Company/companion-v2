@@ -111,6 +111,7 @@ export function CompanionSettings({
       try {
         const next = await getCompanionRuntime(orgId, companion.id);
         if (!active) return;
+        setError(null);
         setRuntimeSnapshot(next.runtime);
         setLatest(next);
         onSavedRef.current(next);
@@ -175,6 +176,7 @@ export function CompanionSettings({
       try {
         const next = await getCompanionRuntime(orgId, companion.id);
         if (!active) return;
+        setError(null);
         setRuntimeSnapshot(next.runtime);
         setLatest(next);
         onSavedRef.current(next);
