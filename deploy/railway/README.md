@@ -1,272 +1,236 @@
 # Railway deployment
 
-Companion deploys as three services plus managed dependencies:
+Companion runs as four long-lived application services, one one-shot release job, and managed
+dependencies:
 
-- `web`: Next.js Skills Hub
-- `api`: REST/tRPC, authentication, skills, secrets, Skill Databases, public releases
-- `worker`: GitHub sync, billing reconciliation, Skill Database object cleanup
-- PostgreSQL and S3-compatible object storage; email provider as configured
+| Service | Config | Responsibility | Network |
+| --- | --- | --- | --- |
+| `web` | `web.railway.json` | Next.js UI | Public |
+| `api` | `api.railway.json` | Auth, REST/tRPC, durable runtime intent | Public |
+| `worker` | `worker.railway.json` | GitHub, billing, Skill Database cleanup | Private, no inbound route |
+| `runtime` | `runtime.railway.json` | Sole Box/Pi owner and Runtime v2 executor | Private, no public domain |
+| `release` | `release.railway.json` | Owner-only migrations and grant cutover, then exit | One-shot, no route |
 
-There is no sandbox, Project, run, model-provider, or agent-execution service.
+PostgreSQL, S3-compatible object storage, and the configured email provider are dependencies. Keep
+all four services, the release job, and PostgreSQL in the same Railway project and environment so
+API can use Railway's private network for the runtime desktop request. Runtime and release must not
+have Public Networking or a TCP proxy enabled.
 
-## Order
+The backend Dockerfile selects `@companion/api`, `@companion/worker`, or `@companion/runtime` from
+Railway's `RAILWAY_SERVICE_NAME`; `release` deliberately packages the API's migration entrypoints
+without starting its HTTP server. Name the services exactly `api`, `worker`, `runtime`, and
+`release`, or set the build argument explicitly.
+
+## Credential boundary
+
+Do not paste one combined `.env` into every service. Railway exposes service variables to builds and
+deployments, so scope each secret deliberately:
+
+| Variable or credential | web | api | worker | runtime | release |
+| --- | :---: | :---: | :---: | :---: | :---: |
+| Companions flag and email allowlist | yes | yes | no | yes | no |
+| API PostgreSQL URL | no | yes | no | no | no |
+| Worker PostgreSQL URL | no | no | yes | no | no |
+| Runtime PostgreSQL URL | no | no | no | yes | no |
+| Migration-owner URL and role names | no | **never** | no | no | yes |
+| `COMPANION_BOX_API_KEY` and Box/Pi tuning | no | **never** | **never** | yes | no |
+| Runtime desktop HMAC secret | no | yes | no | yes | no |
+| Secrets envelope master key | no | yes | no | yes | no |
+| S3 Skill archive access | no | read/write | cleanup as required | read-only | no |
+| GitHub MCP OAuth client id/secret | no | yes | no | yes | no |
+| GitHub App private key / billing worker secrets | no | no | yes | no | no |
+
+Use sealed values for provider, database, HMAC, envelope, OAuth, S3, email, and billing secrets.
+Generate `COMPANION_RUNTIME_DESKTOP_HMAC_SECRET` independently from
+`COMPANION_SECRETS_MASTER_KEY`; both are base64 encodings of 32 random bytes. Share the HMAC only
+with API and runtime.
+
+The GitHub MCP OAuth client id and secret also belong on API and runtime. API owns the browser OAuth
+flow; runtime uses the same deployment credential only to refresh an expiring encrypted MCP account
+immediately before staging. Runtime must not write either value into Box files or Pi environment.
+
+### Runtime private address
+
+Set these service variables:
+
+```dotenv
+# api
+COMPANION_RUNTIME_PRIVATE_URL=http://${{runtime.RAILWAY_PRIVATE_DOMAIN}}:${{runtime.PORT}}
+COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=${{shared.COMPANION_RUNTIME_DESKTOP_HMAC_SECRET}}
+
+# runtime
+PORT=3007
+COMPANION_RUNTIME_HOST=::
+COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=${{shared.COMPANION_RUNTIME_DESKTOP_HMAC_SECRET}}
+```
+
+Use HTTP for Railway private networking. Define `PORT` explicitly on runtime because a cross-service
+`${{runtime.PORT}}` reference resolves a service variable, not Railway's dynamically injected port.
+Do not also define `COMPANION_RUNTIME_PORT`; runtime reads `PORT`. Binding `::` supports Railway's
+IPv4/IPv6 and legacy IPv6-only private networks. `/healthz` is the platform healthcheck, but it is
+not an authorization boundary; the absence of a public route and the HMAC-protected desktop
+endpoint are both required.
+
+`COMPANION_API_URL` on runtime must be the API's public HTTPS origin. It is staged into the Box for
+Skills Hub access, so a `*.railway.internal` address is not usable there.
+
+## PostgreSQL roles
+
+Create four credentials:
+
+- a migration owner used only by the one-shot `release` job;
+- `companion_api`, a `LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT` role;
+- `companion_worker`, with the same restrictions;
+- `companion_runtime_v2`, with the same restrictions and only the narrow Runtime v2
+  `SECURITY DEFINER` functions.
+
+The three application roles must be distinct and must not own tables. Configure the services as
+follows:
+
+```dotenv
+# api service
+DATABASE_URL=postgres://companion_api:...@.../companion
+
+# release job only
+DATABASE_MIGRATION_URL=postgres://migration_owner:...@.../companion
+DATABASE_API_ROLE=companion_api
+DATABASE_WORKER_ROLE=companion_worker
+DATABASE_COMPANION_RUNTIME_ROLE=companion_runtime_v2
+# Upgrade only, after NOLOGIN + session drain + membership removal:
+# DATABASE_RETIRED_RUNTIME_ROLE=companion_runtime_legacy
+
+# worker service
+DATABASE_URL=postgres://companion_worker:...@.../companion
+
+# runtime service
+DATABASE_COMPANION_RUNTIME_URL=postgres://companion_runtime_v2:...@.../companion
+```
+
+`node dist/migrate.js` applies compatible migrations through 0092, executes
+`packages/db/runtime-role-grants.sql`, then admits 0093 and every later migration in the full journal
+only on that same physical PostgreSQL connection after the grant block records success. The 0092
+checkpoint is one-way: a missing role, drifted object, live retired session/membership, or incomplete
+ACL revocation leaves 0093 unapplied, but does not undo 0090-0092. Keep the flag disabled and do not
+restart an old executor while correcting the preflight. The `release` deployment exits with status
+zero and becomes Railway `Completed` only after the full run succeeds. API connects through its
+ordinary restricted `DATABASE_URL`; never add the owner URL or role-name variables to API, worker,
+runtime, or web.
+
+## Base service configuration
+
+Configure public API/web origins, Better Auth secret and cookie prefix, S3, email, and optional
+GitHub/Stripe/PostHog integrations from `.env.example`. Keep Companions disabled for a fresh deploy:
+
+```dotenv
+COMPANION_COMPANIONS_ENABLED=false
+COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=
+```
+
+The disabled runtime still requires its dedicated database URL and serves `/healthz`; it does not
+require Box, HMAC, master-key, or S3 credentials and durably keeps the shared claim gate disabled.
+
+Railway [GitHub-push deployments](https://docs.railway.com/deployments/deployment-actions#when-ordering-does-not-apply)
+of separate services are independent and do not provide migration ordering. Disable GitHub
+autodeploy on `api`, `worker`, `runtime`, and `web`. Either trigger `release` manually as well, or
+leave autodeploy enabled only for `release` with **Wait for CI**. For every production release, use
+this two-phase sequence from one immutable commit:
 
 1. Back up PostgreSQL and object storage.
-2. While still on the previous release, stop web/API traffic so no Project, run, upload, artifact,
-   prewarm, or sandbox can be created. Keep the old worker and its S3/Vercel credentials running.
-3. With the migration-owner URL, run the lifecycle-only block below to queue every Project for the
-   old worker. This does not read or grant access to private Project content. Wait for Project rows
-   plus `project_attachment_uploads` to drain. Cancel/expire every run and prewarm, wait for
-   `sandbox_cleaned_at` and usage settlement, then delete every key named by
-   `skill_run_attachments`, `skill_run_attachment_uploads`, and `skill_run_artifacts` with the
-   configured object-storage administration tooling. Delete those legacy metadata rows only after
-   the corresponding external delete succeeds.
-4. Verify the cutover preflight query below returns four zeroes. Also remove any shared golden
-   snapshot or provider resource configured outside PostgreSQL; the database cannot discover it.
-5. Deploy the new API image and run `node dist/migrate.js` with the migration-owner URL.
-6. Deploy worker and web from the same commit.
-7. Run health, Skills browser smoke, and public package checks.
+2. Create the three restricted application roles.
+3. Deploy `release` for the target commit and require the deployment to reach `Completed`. A failed,
+   crashed, skipped, or still-active deployment does not authorize application rollout.
+4. Verify the default branch has not advanced. Then deploy API, worker, runtime, and web from that
+   exact same commit; if it advanced, restart at step 3 for the new commit.
+5. Require API `/health`, runtime `/healthz`, login, Skills browser smoke, and public package checks.
+6. Leave Companions disabled until the Runtime v2 cutover below is complete.
 
-```sql
-begin;
+## Historical Skills Hub-only guard
 
--- Public traffic is already stopped. Temporarily suspend the creator-only policies solely to mark
--- lifecycle metadata, including Projects whose creator is no longer an organization member.
-alter table public.projects disable row level security;
-alter table public.project_workspaces disable row level security;
+Installations older than migration `0063_skills_hub_only.sql` may still own retired Project/run
+objects or provider resources. This is an historical cleanup obligation, not a current product
+surface. The migration intentionally fails with `SQLSTATE 55000` until its four preflight counts are
+zero.
 
-update public.projects
-set delete_requested_at = clock_timestamp(),
-    revision = revision + 1,
-    updated_at = clock_timestamp()
-where delete_requested_at is null;
+If that guard stops the one-shot `release` job:
 
-update public.project_workspaces workspace
-set status = case
-      when workspace.status = 'deleted' then workspace.status
-      else 'deleting'::public.project_workspace_status
-    end,
-    available_at = clock_timestamp(),
-    idle_deadline_at = null,
-    updated_at = clock_timestamp()
-where exists (
-  select 1
-  from public.projects project
-  where project.org_id = workspace.org_id
-    and project.id = workspace.project_id
-    and project.creator_id = workspace.creator_id
-    and project.delete_requested_at is not null
-);
-
-alter table public.projects enable row level security;
-alter table public.projects force row level security;
-alter table public.project_workspaces enable row level security;
-alter table public.project_workspaces force row level security;
-commit;
-```
-
-```sql
-select
-  (select count(*) from project_attachment_uploads)
-    + (select count(*) from project_attachments)
-    + (select count(*) from project_files)
-    + (select count(*) from project_file_versions)
-    + (select count(*) from skill_run_attachment_uploads)
-    + (select count(*) from skill_run_attachments)
-    + (select count(*) from skill_run_artifacts) as pending_storage,
-  (select count(*) from projects) as pending_projects,
-  (select count(*) from skill_runs
-    where sandbox_cleaned_at is null
-      and (sandbox_name is not null or sandbox_id is not null))
-    + (select count(*) from skill_run_prewarms
-      where sandbox_cleaned_at is null
-        and (sandbox_name is not null or sandbox_id is not null)) as pending_sandboxes,
-  (select count(*) from sandbox_usage_sessions where ended_at is null) as active_usage;
-```
-
-Migration `0063_skills_hub_only.sql` intentionally deletes historical runtime data. Its first
-statement repeats the preflight and aborts before any `DROP` when an external cleanup obligation
-remains. It must finish before starting the new API/worker version. Historical migrations are not
-rewritten.
-
-## Skills Hub-only cutover
-
-### Symptom
-
-The API service runs `node dist/migrate.js` as its `preDeployCommand`, so a database that still
-holds Project and run rows fails **every** API deployment on the `0063` guard:
-
-```
-Skills Hub-only migration requires runtime resource cleanup first
-SQLSTATE: 55000
-DETAIL: pending storage records=..., Projects=..., sandboxes=..., active usage sessions=...
-```
-
-Web and worker have no pre-deploy migration, so they keep deploying successfully from the same
-commit. The symptom therefore looks like an API-only build failure that is unrelated to whatever
-was merged, and it repeats on every commit until the cutover below is finished. The image builds
-fine; only the pre-deploy step fails.
-
-### Why this needs an operator
-
-The guard is correct, not a false positive. Those rows hold the only remaining references to objects
-in the configured bucket and to sandboxes and checkpoints at the provider. Dropping them without
-deleting the external resources first strands sensitive objects and billable resources permanently.
-The earlier procedure relied on the previous release's cleanup worker to drain them; once the new
-worker is deployed that release no longer exists, so the one-shot `cutover` command below performs
-that cleanup instead. It always deletes an object before removing the row that names it.
-
-### Runbook
-
-Everything below runs against the migration-owner database URL and the same S3 credentials the API
-uses. Take a PostgreSQL backup first.
-
-1. **Get the current API image running.** The cutover command ships in the API image, which cannot
-   become active while the pre-deploy migration fails. In the Railway API service settings,
-   temporarily clear the pre-deploy command (or set it to `node dist/cutover.js report`) and
-   redeploy. This also quiesces the database on its own: the new API and web have no Project or run
-   surface, so nothing can create new runtime rows while you work.
-
-2. **Inventory the obligations.** `railway ssh` into the API service and run:
+1. Keep public traffic stopped and take a PostgreSQL/object-storage backup.
+2. Run the release image's owner-only maintenance entrypoint without applying later migrations:
 
    ```bash
    node dist/cutover.js report
+   node dist/cutover.js purge --dry-run
    ```
 
-   This is read-only. It prints the same four counts the migration checks, every distinct object key
-   still referenced, every sandbox and checkpoint identity, and every unsettled usage session.
-   **Save this output.** After the cutover it is the only record of which external objects existed.
-   If you used the pre-deploy override instead of `railway ssh`, the deploy log holds the same
-   output.
-
-3. **Handle anything you want to keep.** Copy or relocate any object from the printed list that
-   should outlive the cutover. Then release the printed sandboxes and checkpoints at the provider;
-   no code in this release can reach them.
-
-4. **Settle the obligations.**
+3. Save the inventory. Release every listed sandbox/checkpoint through the historical provider and
+   retain anything that must survive. The database cannot discover provider resources configured
+   outside its rows.
+4. With `DATABASE_MIGRATION_URL`, the matching S3 credentials, and explicit confirmation, settle
+   the obligations:
 
    ```bash
    node dist/cutover.js purge --confirm-provider-cleanup
    ```
 
-   The command refuses to delete anything until `--confirm-provider-cleanup` asserts step 3 is done,
-   deletes each object from the bucket and only then removes the rows naming it, empties the retired
-   runtime tables, and re-checks the guard's four counts before reporting success. Add `--dry-run`
-   first to see exactly what it would do. Add `--skip-object-delete` only when you have already
-   moved or deleted the objects yourself; the rows are then discarded without touching the bucket.
+   The command deletes each named object before its ownership row and then rechecks the same four
+   migration counts. Use `--skip-object-delete` only when those exact objects were already moved or
+   deleted independently.
+5. Restore `node dist/migrate.js` as the release job's start command and redeploy that job. Do not
+   bypass or edit migration `0063`; historical migrations remain immutable. Do not move the owner
+   URL into API as a workaround.
 
-   Objects belonging to Skills, Skill Databases, public releases, logos, avatars, and comment images
-   share the bucket and are never in the list, because the command only deletes keys the retired
-   tables reference.
+## Runtime v2 upgrade and cutover
 
-5. **Restore the pre-deploy command** to `node dist/migrate.js` and redeploy. Migrations `0063`
-   through the current head apply, and the API becomes healthy again.
+Legacy Companions, transcripts, state, and Boxes are deleted rather than migrated. Encrypted
+provider connections and member MCP accounts survive. An existing installation must use the
+purge-capable staged release before deploying a release that removes the legacy schema/executor.
 
-If a new Project or run row appears between steps 2 and 4, the final verification fails with the
-remaining counts rather than reporting success; stop web and API traffic and re-run step 4.
+1. Back up PostgreSQL and record the deployed commit and Box account/environment.
+2. Set `COMPANION_COMPANIONS_ENABLED=false` on web, API, and runtime. Deploy all three and wait for
+   active work to reach an interrupted checkpoint. Verify the database runtime gate is disabled.
+3. Run the [legacy purge](../../docs/runbooks/companions-runtime.md#legacy-purge) from an ephemeral,
+   private maintenance execution of the **runtime image**. Give that command the migration-owner URL
+   and Box key only for its lifetime; do not add the owner URL to the long-lived runtime service.
+4. Save the report. It must show no remaining legacy database ownership, exact-name provider Box,
+   pending/blocked delete operation, or unresolved external resource.
+5. Deploy the asynchronous API/web and Runtime v2 service with the flag still disabled. Do not let
+   any legacy binary execute v2 rows.
+6. Configure the flag and allowlist on web, API, and runtime. Runtime additionally receives Box/Pi,
+   envelope master key, public API origin, and read-only Skill archive credentials. API and runtime
+   receive the shared desktop HMAC. Deploy runtime first, then API and web, while user traffic stays
+   quiesced.
+7. Confirm runtime `/healthz` is healthy, inspect the disabled gate epoch, and have the database
+   owner call `companion_runtime_enable(<observed_epoch>, '<change-id>')`. This compare-and-set is
+   intentionally unavailable to the runtime role.
+8. Restore traffic and execute a disposable Companion cold-send, response, desktop authorization,
+   stop, wake-on-send, second response, and permanent deletion.
 
-## Runtime v2 legacy Companion purge
+This release already contains the guarded final legacy-removal migration. Do not deploy it until the
+saved purge report is empty, the target environment has seven consecutive green daily real-provider
+canaries, and no P0/P1 runtime incident is open. If an installation has not met those prerequisites,
+keep its currently deployed purge-capable release disabled and postpone this release.
 
-Migration `0089_legacy_companion_purge.sql` installs a durable provider-deletion ledger and the
-narrow database finalizer used by the Runtime v2 cutover. The command is an offline API-image
-entrypoint; the API server itself still never contacts Box. Run it once before any Runtime v2 schema
-or executor is enabled.
+## Health and operations
 
-1. Take a PostgreSQL backup. Deploy/scale every web, API, and worker replica with
-   `COMPANION_COMPANIONS_ENABLED=false`, then let in-flight legacy requests drain. The command
-   deliberately rejects an unset or true flag, including a true flag paired with an empty email
-   allowlist.
+- API readiness: `/health`.
+- Runtime readiness: `/healthz`, healthy only when PostgreSQL responds, the claim loop is alive, and
+  the last two-second sweep is fresh.
+- Worker and web: Railway process state plus the configured web healthcheck.
+- Runtime draining: keep Railway `drainingSeconds` at 30 or more and
+  `COMPANION_RUNTIME_SHUTDOWN_DRAIN_MS` below the fixed 30-second lease (default 25 seconds).
 
-2. Provide the migration-owner URL as `DATABASE_MIGRATION_URL` and the Box administrative
-   credentials as `COMPANION_BOX_API_KEY` plus the deployment's `COMPANION_BOX_API_BASE` when it is
-   not the default. The command refuses to fall back to the ordinary API database URL and shares the
-   migrator advisory lock, so do not run a deploy migration concurrently.
+Do not enable Railway Serverless/App Sleeping for runtime: wake-on-send is a Box product rule, not a
+license to suspend the durable claim loop.
 
-3. Save the read-only inventory and inspect every target:
+The [Runtime v2 operations runbook](../../docs/runbooks/companions-runtime.md) is authoritative for
+the kill switch, legacy purge, incidents, rollback, and daily canary. In particular:
 
-   ```bash
-   node dist/companionPurge.js report
-   node dist/companionPurge.js purge --dry-run
-   ```
+- an ambiguous prompt dispatch becomes `interrupted`; never replay it automatically;
+- Full Box restart is user-confirmed only and is not incident healing;
+- a rollback after v2 data exists disables claims and rolls forward to a compatible v2 build; it
+  never starts a legacy executor;
+- provider payloads, raw Pi lines, signed desktop URLs, tokens, and plaintext credentials must not
+  be copied into logs, tickets, or durable error fields.
 
-   The union contains every non-null Box id in `companions` or the retired runtime pools plus every
-   provider Box whose name exactly matches one of the three historical formats or its
-   `Retired ... <digits>` form. Generation-qualified Runtime v2 names and other near-matches are
-   printed as excluded and are never deleted.
-
-4. Permanently delete the reported legacy estate:
-
-   ```bash
-   node dist/companionPurge.js purge --confirm-delete-all-companions
-   ```
-
-   For each Box the command writes intent first, sends the provider's exact irreversible-delete
-   confirmation header, saves the returned deletion operation id, and polls
-   `pending|processing|blocked|completed`. A DELETE `404` is recorded as already absent. `blocked`, a
-   poll `404`, malformed provider data, or any other provider error stops before legacy ownership is
-   removed. Re-run the same command after correction: a saved operation is polled rather than
-   deleted twice, and a request interrupted before its operation id was saved follows the accepted
-   `404 = absent` cutover rule.
-
-5. Only when every ledger target is `completed` or `absent`, a short locked transaction removes
-   legacy Companions, runtime pools, workspace access, member state, threads, transcript entries,
-   reconcile leases, and PATs with `source_type='companion'`. It preserves organizations, users,
-   memberships, provider connections, MCP accounts, Skills and Skill Databases, secrets, billing,
-   human/Agent Auth PATs, and `audit_log`. The final report retains every provider operation id in
-   the durable ledger and must show zero legacy database rows and no exact legacy provider Box.
-
-## Shared configuration
-
-Configure public API/web origins, Better Auth secret/cookie prefix, PostgreSQL role URLs, S3 credentials, and email. Configure `COMPANION_SECRETS_MASTER_KEY` for skill secrets. Optional integrations use GitHub App, Stripe, and PostHog variables documented in `.env.example`.
-
-API and worker should use distinct `LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT` PostgreSQL roles. Apply `packages/db/runtime-role-grants.sql` after migrations. The API owns request paths; the worker receives only billing, GitHub, and Skill Database cleanup grants.
-
-The worker needs no Vercel, OpenCode, model-provider, golden snapshot, or runtime lifecycle variables.
-
-## Companions (optional, default off)
-
-`COMPANION_COMPANIONS_ENABLED` gates the Companions control plane on both web and API. It defaults to
-`false` when unset, so a fresh Railway deployment boots with Companions disabled and none of the
-Box/Pi/provider variables are required — leave the flag unset to keep it off. The API registers no
-Companion routes and the web shell hides the Companions surface until the flag is `true` and a
-non-empty allowlist is configured.
-
-Set the flag and allowlist on both `web` and `api` only when you intend to run Companions, and
-provide the runtime secrets it needs:
-
-- `COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS` — required comma-separated, case-insensitive exact
-  domains. Only authenticated users with a matching email domain can see the web surface or use
-  Companion API routes. Missing or malformed user emails are denied. When unset or empty, Companions
-  stays disabled and the API registers no Companion routes even if the master flag is `true`.
-- `COMPANION_BOX_API_KEY` — required for Box lifecycle calls (start/stop/status).
-- `COMPANION_SECRETS_MASTER_KEY` — the base64 32-byte Skills master key also envelope-encrypts
-  companion provider subscriptions, MCP OAuth grants, and pending OAuth callbacks; it is already
-  required by Secrets in production.
-- `COMPANION_MCP_GITHUB_CLIENT_ID` and `COMPANION_MCP_GITHUB_CLIENT_SECRET` — set on `api` only from
-  the deployment's GitHub OAuth App. Register
-  `${COMPANION_WEB_URL}/v1/companion-plugins/oauth/callback` as its callback URL. Linear and Notion
-  MCP OAuth use dynamic client registration and do not need deployment-owned client credentials.
-- `COMPANION_PI_INSTALL_COMMAND` — set an operator-pinned Pi install command unless the Box template
-  preinstalls Pi.
-
-Optional tuning variables (`COMPANION_BOX_API_BASE`, `COMPANION_BOX_ENVIRONMENT`,
-`COMPANION_BOX_TTL_SECONDS`, `COMPANION_PI_MCP_ADAPTER_PACKAGE`) fall back to the safe defaults in
-`.env.example`. When the flag is `true`, the allowlist is non-empty, and a required secret is unset,
-the API still boots and logs a single startup warning naming the missing variables; Box and provider
-actions fail until they are set.
-
-Set `COMPANION_BOX_TTL_SECONDS=21600` on the Railway `api` service. Successful message delivery
-refreshes that TTL, making the six-hour idle window run from the last message rather than the last
-wake. The web and worker services do not contact Box and do not need this variable.
-
-For the initial production rollout, set these exact values on both the Railway `api` and `web`
-services:
-
-```dotenv
-COMPANION_COMPANIONS_ENABLED=true
-COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=thevibecompany.co
-```
-
-## Health and rollback
-
-Use `/health` for API availability and the Railway process status for worker/web. A rollback across migration 0062 restores code but not intentionally dropped runtime data; restore the pre-deploy database backup only if the product decision itself is rolled back. Skills, organizations, users, auth, Agent Auth, secrets, Skill Databases, GitHub, billing, and public-release data are preserved by the migration.
+The real-provider canary is a separate scheduled workflow, not a merge gate. Configure its dedicated
+account secrets listed in the runbook; absent configuration must remain a visible non-green
+`not_configured` run.

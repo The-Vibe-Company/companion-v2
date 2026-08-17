@@ -25,27 +25,6 @@ export const validationStateEnum = pgEnum("validation_state", ["valid", "validat
 // even admins do not. Share flips 'personal' → 'org'; there is no reverse transition.
 export const skillScopeEnum = pgEnum("skill_scope", ["personal", "org"]);
 export const orgKindEnum = pgEnum("org_kind", ["personal", "team"]);
-export const companionRuntimeStateEnum = pgEnum("companion_runtime_state", [
-  "not_created",
-  "provisioning",
-  "running",
-  "stopping",
-  "stopped",
-  "error",
-]);
-export const companionDaemonStateEnum = pgEnum("companion_daemon_state", [
-  "unknown",
-  "starting",
-  "running",
-  "stopped",
-  "error",
-]);
-// A shared Box runtime pool is scoped to a workspace: 'personal' is one Box for a user in their
-// personal workspace (keyed by owner); 'org' is one Box shared by every member of a team workspace.
-export const companionRuntimePoolScopeEnum = pgEnum("companion_runtime_pool_scope", [
-  "personal",
-  "org",
-]);
 export const companionBoxObservedStateEnum = pgEnum("companion_box_observed_state", [
   "absent", "initializing", "provisioning", "ready", "idle", "running",
   "archiving", "archived", "error", "unknown",
@@ -458,37 +437,11 @@ export const companions = pgTable(
      * member MCP pins beyond whatever the Pi runtime itself requires (the adapter binary only).
      */
     selectedMcpAccountIds: jsonb("selected_mcp_account_ids").$type<string[]>().notNull().default([]),
-    boxId: text("box_id"),
-    runtimeState: companionRuntimeStateEnum("runtime_state").notNull().default("not_created"),
-    daemonState: companionDaemonStateEnum("daemon_state").notNull().default("unknown"),
     providerIds: jsonb("provider_ids").$type<string[]>().notNull().default([]),
-    /** Encrypted provider credential generation last applied to the Box Pi auth file. */
-    providerCredentialGeneration: uuid("provider_credential_generation"),
     /**
-     * Monotonic desired skill-set revision; bumped when the selection changes and when a selected
-     * skill is republished, archived, restored, or renamed. Compared against skillsAppliedRevision
-     * to answer "is the saved skill list effective on the Box yet".
+     * Monotonic desired skill-set revision; the Runtime v2 instance carries the applied revision.
      */
     skillsRevision: integer("skills_revision").notNull().default(1),
-    /** Last skills revision successfully staged onto the Box Pi runtime. */
-    skillsAppliedRevision: integer("skills_applied_revision").notNull().default(0),
-    skillsAppliedAt: timestamp("skills_applied_at", { withTimezone: true }),
-    /**
-     * Why the last skill restage failed, as one sanitized operator line; cleared on the next bump
-     * and on a successful apply. Credential material must never reach it.
-     */
-    skillsLastError: text("skills_last_error"),
-    diskLayoutVersion: integer("disk_layout_version").notNull().default(1),
-    desktopAvailable: boolean("desktop_available").notNull().default(false),
-    /**
-     * Why the last lifecycle attempt failed, as one sanitized operator line. It exists so a
-     * refreshed `error` state still explains itself; credential material and provider payloads
-     * must never reach it.
-     */
-    lastError: text("last_error"),
-    lastObservedAt: timestamp("last_observed_at", { withTimezone: true }),
-    lastStartedAt: timestamp("last_started_at", { withTimezone: true }),
-    lastStoppedAt: timestamp("last_stopped_at", { withTimezone: true }),
     createdAt: now(),
     updatedAt: updatedAt(),
   },
@@ -501,94 +454,13 @@ export const companions = pgTable(
       foreignColumns: [memberships.orgId, memberships.userId],
       name: "companions_owner_membership_fk",
     }),
-    positiveDiskLayout: check("companions_disk_layout_version_check", sql`${t.diskLayoutVersion} >= 1`),
     personaLength: check(
       "companions_persona_check",
       sql`${t.persona} is null or char_length(${t.persona}) <= 280`,
     ),
-    boxIdShape: check(
-      "companions_box_id_check",
-      sql`${t.boxId} is null or ${t.boxId} ~ '^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$'`,
-    ),
-    lastErrorLength: check(
-      "companions_last_error_check",
-      sql`${t.lastError} is null or char_length(${t.lastError}) <= 500`,
-    ),
     skillsRevisionBounds: check(
       "companions_skills_revision_check",
-      sql`${t.skillsRevision} >= 1 and ${t.skillsAppliedRevision} >= 0 and ${t.skillsAppliedRevision} <= ${t.skillsRevision}`,
-    ),
-    skillsLastErrorLength: check(
-      "companions_skills_last_error_check",
-      sql`${t.skillsLastError} is null or char_length(${t.skillsLastError}) <= 500`,
-    ),
-  }),
-);
-
-/**
- * Retained-but-unused shared Box pool from THE-330. THE-332 reverts Box cardinality to one Box per
- * Companion (1 Companion = 1 Box = 1 Pi): the runtime chip lives on the `companions` row again, and
- * no code reads or writes this table. It is kept only so migrations 0074 and 0075 stay a
- * non-destructive clean cut — leftover pool rows are left in place, unreferenced, rather than
- * dropped, and 0075 reads them to find the Companion rows 0074 handed a shared Box id.
- */
-export const companionRuntimePools = pgTable(
-  "companion_runtime_pools",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    orgId: uuid("org_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    scope: companionRuntimePoolScopeEnum("scope").notNull(),
-    /** The member for a `personal` pool (keyed by owner); null for an `org` pool shared by all. */
-    ownerId: text("owner_id"),
-    boxId: text("box_id"),
-    runtimeState: companionRuntimeStateEnum("runtime_state").notNull().default("not_created"),
-    daemonState: companionDaemonStateEnum("daemon_state").notNull().default("unknown"),
-    /** Encrypted provider credential generation last applied to the shared Box Pi auth file. */
-    providerCredentialGeneration: uuid("provider_credential_generation"),
-    diskLayoutVersion: integer("disk_layout_version").notNull().default(1),
-    desktopAvailable: boolean("desktop_available").notNull().default(false),
-    /**
-     * Why the last lifecycle attempt failed, as one sanitized operator line. It exists so a
-     * refreshed `error` state still explains itself; credential material and provider payloads
-     * must never reach it.
-     */
-    lastError: text("last_error"),
-    lastObservedAt: timestamp("last_observed_at", { withTimezone: true }),
-    lastStartedAt: timestamp("last_started_at", { withTimezone: true }),
-    lastStoppedAt: timestamp("last_stopped_at", { withTimezone: true }),
-    createdAt: now(),
-    updatedAt: updatedAt(),
-  },
-  (t) => ({
-    // One shared pool per personal workspace (org + owner) and one per team organization.
-    personalPoolUq: uniqueIndex("companion_runtime_pools_personal_uq")
-      .on(t.orgId, t.ownerId)
-      .where(sql`${t.scope} = 'personal' and ${t.ownerId} is not null`),
-    orgPoolUq: uniqueIndex("companion_runtime_pools_org_uq")
-      .on(t.orgId)
-      .where(sql`${t.scope} = 'org' and ${t.ownerId} is null`),
-    ownerMembershipFk: foreignKey({
-      columns: [t.orgId, t.ownerId],
-      foreignColumns: [memberships.orgId, memberships.userId],
-      name: "companion_runtime_pools_owner_membership_fk",
-    }).onDelete("cascade"),
-    scopeOwner: check(
-      "companion_runtime_pools_scope_owner_check",
-      sql`(${t.scope} = 'personal' and ${t.ownerId} is not null) or (${t.scope} = 'org' and ${t.ownerId} is null)`,
-    ),
-    positiveDiskLayout: check(
-      "companion_runtime_pools_disk_layout_version_check",
-      sql`${t.diskLayoutVersion} >= 1`,
-    ),
-    boxIdShape: check(
-      "companion_runtime_pools_box_id_check",
-      sql`${t.boxId} is null or ${t.boxId} ~ '^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$'`,
-    ),
-    lastErrorLength: check(
-      "companion_runtime_pools_last_error_check",
-      sql`${t.lastError} is null or char_length(${t.lastError}) <= 500`,
+      sql`${t.skillsRevision} >= 1`,
     ),
   }),
 );
@@ -1246,12 +1118,7 @@ export const companionMemberState = pgTable(
   }),
 );
 
-/**
- * One chat thread per Companion. The primary key is the Companion id, so a Companion can never own
- * a second thread and a thread can never span Companions. The row also carries the two watermarks
- * that make Pi exchange idempotent: the highest message ordinal Pi has received and the byte offset
- * already projected from the Box RPC log.
- */
+/** One durable chat sequence per Companion; Runtime v2 owns delivery and event cursors. */
 export const companionThreads = pgTable(
   "companion_threads",
   {
@@ -1263,21 +1130,6 @@ export const companionThreads = pgTable(
       .references(() => companions.id, { onDelete: "cascade" }),
     /** Next transcript ordinal to hand out; monotonic, so concurrent sends cannot collide. */
     nextOrdinal: integer("next_ordinal").notNull().default(0),
-    /**
-     * Highest user-message ordinal already delivered to Pi. Timeout settlement may move it behind
-     * an unanswered post-tool tail so a recycled Pi receives those stranded messages again.
-     */
-    deliveredOrdinal: integer("delivered_ordinal"),
-    /** Highest user message whose correlated prompt response proved Pi accepted protocol 2. */
-    acceptedDeliveryOrdinal: integer("accepted_delivery_ordinal"),
-    /** Highest timed-out tool whose unanswered tail has been assessed for one-time re-delivery. */
-    timeoutRecoveryOrdinal: integer("timeout_recovery_ordinal"),
-    /** Highest timed-out tool after which delivery started a fresh Pi process. */
-    timeoutRestartOrdinal: integer("timeout_restart_ordinal"),
-    /** Highest post-timeout user message accepted by that fresh Pi process. */
-    timeoutDeliveryOrdinal: integer("timeout_delivery_ordinal"),
-    /** Bytes of `~/.companion/runtime/logs/pi.rpc.ndjson` already projected into the transcript. */
-    piLogOffset: bigint("pi_log_offset", { mode: "number" }).notNull().default(0),
     lastMessageAt: timestamp("last_message_at", { withTimezone: true }),
     createdAt: now(),
     updatedAt: updatedAt(),
@@ -1289,27 +1141,6 @@ export const companionThreads = pgTable(
       name: "companion_threads_companion_fk",
     }),
     nonnegativeNextOrdinal: check("companion_threads_next_ordinal_check", sql`${t.nextOrdinal} >= 0`),
-    nonnegativeDeliveredOrdinal: check(
-      "companion_threads_delivered_ordinal_check",
-      sql`${t.deliveredOrdinal} is null or ${t.deliveredOrdinal} >= 0`,
-    ),
-    nonnegativeAcceptedDeliveryOrdinal: check(
-      "companion_threads_accepted_delivery_ordinal_check",
-      sql`${t.acceptedDeliveryOrdinal} is null or ${t.acceptedDeliveryOrdinal} >= 0`,
-    ),
-    nonnegativeTimeoutRecoveryOrdinal: check(
-      "companion_threads_timeout_recovery_ordinal_check",
-      sql`${t.timeoutRecoveryOrdinal} is null or ${t.timeoutRecoveryOrdinal} >= 0`,
-    ),
-    nonnegativeTimeoutRestartOrdinal: check(
-      "companion_threads_timeout_restart_ordinal_check",
-      sql`${t.timeoutRestartOrdinal} is null or ${t.timeoutRestartOrdinal} >= 0`,
-    ),
-    nonnegativeTimeoutDeliveryOrdinal: check(
-      "companion_threads_timeout_delivery_ordinal_check",
-      sql`${t.timeoutDeliveryOrdinal} is null or ${t.timeoutDeliveryOrdinal} >= 0`,
-    ),
-    nonnegativeLogOffset: check("companion_threads_pi_log_offset_check", sql`${t.piLogOffset} >= 0`),
   }),
 );
 
@@ -1474,57 +1305,6 @@ export const companionProviderConnections = pgTable(
     credentialVersionCheck: check(
       "companion_provider_connections_credential_version_check",
       sql`${t.credentialVersion} >= 1`,
-    ),
-  }),
-);
-
-/**
- * Reconciler bookkeeping: one lease row per Companion the worker is treating or backing off from.
- * Kept beside `companions` because that table's `updated_at` is the CAS token of every lifecycle
- * finalizer and reconciler housekeeping must never move it. Under FORCE RLS only the SECURITY
- * DEFINER claim/settle functions' owner touches rows; runtime roles have no direct row access.
- */
-export const companionReconcileLeases = pgTable(
-  "companion_reconcile_leases",
-  {
-    orgId: uuid("org_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    companionId: uuid("companion_id")
-      .primaryKey()
-      .references(() => companions.id, { onDelete: "cascade" }),
-    /** Worker instance currently holding the lease; null when free. */
-    claimedBy: text("claimed_by"),
-    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
-    /** Migration-first fence for protocol-1 transcript snapshots; independent of active claims. */
-    deliveryCompatExpiresAt: timestamp("delivery_compat_expires_at", { withTimezone: true }),
-    /** Monotonic transcript bound used to cache the compatibility deadline safely. */
-    deliveryCompatNextOrdinal: integer("delivery_compat_next_ordinal"),
-    /** True only for the cheap migration seed until exact post-commit refinement or a legacy read. */
-    deliveryCompatSeeded: boolean("delivery_compat_seeded").notNull().default(false),
-    /** Why the reconciler last claimed this Companion. */
-    reason: text("reason").notNull(),
-    /** Consecutive failed attempts for the current condition; reset by a successful settle. */
-    attempts: integer("attempts").notNull().default(0),
-    /** Backoff gate: the claim function skips this Companion until the moment passes. */
-    nextAttentionAt: timestamp("next_attention_at", { withTimezone: true }),
-    lastOutcome: text("last_outcome"),
-    createdAt: now(),
-    updatedAt: updatedAt(),
-  },
-  (t) => ({
-    companionOrgFk: foreignKey({
-      columns: [t.orgId, t.companionId],
-      foreignColumns: [companions.orgId, companions.id],
-      name: "companion_reconcile_leases_companion_fk",
-    }),
-    nonnegativeAttempts: check(
-      "companion_reconcile_leases_attempts_check",
-      sql`${t.attempts} >= 0`,
-    ),
-    nonnegativeDeliveryCompatNextOrdinal: check(
-      "companion_reconcile_leases_delivery_compat_next_ordinal_check",
-      sql`${t.deliveryCompatNextOrdinal} is null or ${t.deliveryCompatNextOrdinal} >= 0`,
     ),
   }),
 );
@@ -2194,6 +1974,11 @@ export const apiTokens = pgTable(
   },
   (t) => ({
     byOrgUser: index("api_tokens_org_user_idx").on(t.orgId, t.userId),
+    sourceProvenance: check(
+      "api_tokens_source_provenance_check",
+      sql`(${t.sourceType} = 'human' and ${t.sourceAgentId} is null and ${t.targetWorkspaceId} is null)
+        or (${t.sourceType} = 'agent_auth' and ${t.sourceAgentId} is not null)`,
+    ),
   }),
 );
 

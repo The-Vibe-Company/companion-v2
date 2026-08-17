@@ -111,7 +111,6 @@ describe("runtime material provider and Box stager", () => {
       boxId: "bx_23456789",
       diskLayoutVersion: 14 as const,
     }));
-    const broadStart = vi.fn();
     const pipeline = createRuntimeMaterialPipeline({
       masterKey,
       apiUrl: "https://api.example.test",
@@ -121,7 +120,7 @@ describe("runtime material provider and Box stager", () => {
         checksum: `sha256:${"1".repeat(64)}`,
         archive: Buffer.from("bundled"),
       },
-      runtime: () => ({ stageExistingBox, start: broadStart }) as unknown as CompanionBoxRuntimeV2,
+      runtime: () => ({ stageExistingBox }) as unknown as CompanionBoxRuntimeV2,
       loadSkillArchive: vi.fn(),
       refreshOauth: async () => oauth("new-token"),
       uuid: () => nextGeneration,
@@ -168,7 +167,6 @@ describe("runtime material provider and Box stager", () => {
       },
       signal: expect.any(AbortSignal),
     }));
-    expect(broadStart).not.toHaveBeenCalled();
   });
 
   it("treats a lost OAuth CAS as fence loss and never stages the token", async () => {

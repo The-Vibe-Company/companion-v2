@@ -22,7 +22,6 @@ const companionsApi = vi.hoisted(() => ({
   sendCompanionMessage: vi.fn(),
   setCompanionProvider: vi.fn(),
   startCompanionRuntime: vi.fn(),
-  syncCompanionThread: vi.fn(),
 }));
 
 vi.mock("@/lib/companions", async (importOriginal) => ({
@@ -100,6 +99,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
       last_observed_at: null,
       last_started_at: null,
       last_stopped_at: null,
+      latest_operation: null,
     },
     created_at: "2026-08-12T12:00:00.000Z",
     updated_at: "2026-08-12T12:00:00.000Z",
@@ -115,7 +115,6 @@ function thread(overrides: Partial<Thread> = {}): Thread {
     read_only: false,
     can_send: true,
     entries: [],
-    pending_count: 0,
     last_message_at: null,
     last_read_ordinal: null,
     ...overrides,
@@ -230,7 +229,6 @@ describe("CompanionsApp Box desktop", () => {
     window.localStorage.setItem("companions:context-open", "false");
     companionsApi.listCompanions.mockResolvedValue([companion()]);
     companionsApi.getCompanionThread.mockResolvedValue(thread());
-    companionsApi.syncCompanionThread.mockResolvedValue(thread());
     companionsApi.getCompanionRuntime.mockResolvedValue(companion());
     window.open = vi.fn();
   });
@@ -413,7 +411,6 @@ describe("CompanionsApp Box desktop", () => {
 
     expect(companionsApi.openCompanionDesktop).not.toHaveBeenCalled();
     expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
-    expect(companionsApi.syncCompanionThread).not.toHaveBeenCalled();
     expect(window.open).not.toHaveBeenCalled();
     // A Viewer follows the control-plane projection and never requests a live Box observation.
     expect(companionsApi.getCompanionRuntime).toHaveBeenCalled();
@@ -462,7 +459,6 @@ describe("CompanionsApp context panel", () => {
     window.localStorage.setItem("companions:context-open", "false");
     companionsApi.listCompanions.mockResolvedValue([companion()]);
     companionsApi.getCompanionThread.mockResolvedValue(thread());
-    companionsApi.syncCompanionThread.mockResolvedValue(thread());
     companionsApi.getCompanionRuntime.mockResolvedValue(companion());
     window.open = vi.fn();
   });

@@ -75,13 +75,14 @@ workspaces, or PostgreSQL 17 plus optional MinIO/Mailpit with Homebrew locally, 
 `corepack enable && pnpm install`. Run executes `bash scripts/dev-conductor.sh`; archive executes
 `bash scripts/dev-conductor.sh archive`.
 
-The current native Conductor stack starts per-workspace PostgreSQL plus optional MinIO and Mailpit
-under `.conductor-pg/`, then API, worker, and web. Ports derive from `CONDUCTOR_PORT`: web `+0`, API
-`+1`, PostgreSQL `+2`, MinIO API `+3`, console `+4`, SMTP `+5`, Mailpit UI `+6`. Cloud workspaces use
-base `3000`. Internal services bind loopback; cloud web binds `0.0.0.0`. Cookies use a
-workspace-specific prefix. Missing MinIO disables uploads; missing Mailpit falls back to logged
-email. The Runtime v2 rollout must add `apps/runtime` as a fourth private process without changing
-the published web/API port contract.
+The native Conductor stack starts per-workspace PostgreSQL plus optional MinIO and Mailpit under
+`.conductor-pg/`, then API, worker, runtime, and web in one process group. Ports derive from
+`CONDUCTOR_PORT`: web `+0`, API `+1`, PostgreSQL `+2`, MinIO API `+3`, console `+4`, SMTP `+5`,
+Mailpit UI `+6`, and private runtime `+7`; `+8` is available to the deterministic Box/Pi simulator.
+Cloud workspaces use base `3000`. Internal services, including runtime, bind loopback; cloud web
+alone binds `0.0.0.0`. Cookies and the runtime desktop HMAC key are workspace-specific. Missing
+MinIO disables uploads; missing Mailpit falls back to logged email. The launcher gives the Box key
+and runtime database URL only to `apps/runtime` without changing the published web/API port contract.
 
 ## Companions Runtime v2 contract
 

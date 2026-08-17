@@ -1,15 +1,18 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   CUTOVER_GUARD_MESSAGE,
   CUTOVER_GUARD_SQLSTATE,
-  databaseRuntimeRole,
+  RUNTIME_V2_FINAL_CUTOVER_TAG,
+  RUNTIME_V2_CUTOVER_GUARD_MESSAGE,
+  RUNTIME_V2_GRANTS_GUARD_MESSAGE,
   databaseRuntimeRoles,
   databaseUrl,
   extractRuntimeRoleGrantBlock,
   formatMigrationFailure,
+  prepareMigrationPhases,
   resolveMigrationsFolder,
   resolveRuntimeRoleGrantsFile,
 } from "./migrate";
@@ -46,47 +49,12 @@ describe("databaseUrl", () => {
   });
 });
 
-describe("databaseRuntimeRole", () => {
-  it("is opt-in", () => {
-    expect(databaseRuntimeRole({})).toBeNull();
-    expect(databaseRuntimeRole({ DATABASE_RUNTIME_ROLE: "" })).toBeNull();
-  });
-
-  it("accepts a strict lowercase PostgreSQL identifier", () => {
-    expect(databaseRuntimeRole({ DATABASE_RUNTIME_ROLE: "companion_runtime_2" })).toBe("companion_runtime_2");
-  });
-
-  it.each(["Companion", " companion_runtime", "companion-runtime", "9runtime", "a".repeat(64)])(
-    "fails closed for invalid configured role %s",
-    (role) => {
-      expect(() => databaseRuntimeRole({ DATABASE_RUNTIME_ROLE: role })).toThrow(
-        "DATABASE_RUNTIME_ROLE must be a lowercase PostgreSQL identifier",
-      );
-    },
-  );
-});
-
 describe("databaseRuntimeRoles", () => {
   it("is opt-in", () => {
     expect(databaseRuntimeRoles({})).toBeNull();
   });
 
-  it("returns distinct API and worker roles", () => {
-    expect(
-      databaseRuntimeRoles({
-        DATABASE_API_ROLE: "companion_api",
-        DATABASE_WORKER_ROLE: "companion_worker",
-      }),
-    ).toEqual({
-      apiRole: "companion_api",
-      workerRole: "companion_worker",
-      companionRuntimeRole: null,
-      legacySingleRole: false,
-      retiredRuntimeRole: null,
-    });
-  });
-
-  it("accepts an optional, distinct Companion runtime role after the API/worker split", () => {
+  it("requires and returns three distinct application roles", () => {
     expect(
       databaseRuntimeRoles({
         DATABASE_API_ROLE: "companion_api",
@@ -97,74 +65,48 @@ describe("databaseRuntimeRoles", () => {
       apiRole: "companion_api",
       workerRole: "companion_worker",
       companionRuntimeRole: "companion_runtime_v2",
-      legacySingleRole: false,
       retiredRuntimeRole: null,
     });
-  });
 
-  it("accepts an optional retired union role during a separated-role cutover", () => {
-    expect(
-      databaseRuntimeRoles({
-        DATABASE_API_ROLE: "companion_api",
-        DATABASE_WORKER_ROLE: "companion_worker",
-        DATABASE_RETIRED_RUNTIME_ROLE: "companion_runtime",
-      }),
-    ).toEqual({
-      apiRole: "companion_api",
-      workerRole: "companion_worker",
-      companionRuntimeRole: null,
-      legacySingleRole: false,
-      retiredRuntimeRole: "companion_runtime",
-    });
-  });
-
-  it("keeps the active runtime and retired union login separate during cutover", () => {
     expect(
       databaseRuntimeRoles({
         DATABASE_API_ROLE: "companion_api",
         DATABASE_WORKER_ROLE: "companion_worker",
         DATABASE_COMPANION_RUNTIME_ROLE: "companion_runtime_v2",
-        DATABASE_RETIRED_RUNTIME_ROLE: "companion_runtime_v1",
+        DATABASE_RETIRED_RUNTIME_ROLE: "companion_runtime_legacy",
       }),
     ).toEqual({
       apiRole: "companion_api",
       workerRole: "companion_worker",
       companionRuntimeRole: "companion_runtime_v2",
-      legacySingleRole: false,
-      retiredRuntimeRole: "companion_runtime_v1",
+      retiredRuntimeRole: "companion_runtime_legacy",
     });
   });
 
-  it("supports the legacy single-role contract for simple installations", () => {
-    expect(databaseRuntimeRoles({ DATABASE_RUNTIME_ROLE: "companion_runtime" })).toEqual({
-      apiRole: "companion_runtime",
-      workerRole: "companion_runtime",
-      companionRuntimeRole: "companion_runtime",
-      legacySingleRole: true,
-      retiredRuntimeRole: null,
-    });
-  });
-
-  it("requires both separated roles and rejects ambiguous or ineffective separation", () => {
+  it("rejects partial or shared role configuration", () => {
     expect(() => databaseRuntimeRoles({ DATABASE_API_ROLE: "companion_api" })).toThrow(
-      "DATABASE_API_ROLE and DATABASE_WORKER_ROLE must be configured together",
+      "must be configured together",
     );
     expect(() =>
       databaseRuntimeRoles({ DATABASE_COMPANION_RUNTIME_ROLE: "companion_runtime_v2" }),
-    ).toThrow("DATABASE_API_ROLE and DATABASE_WORKER_ROLE must be configured together");
+    ).toThrow("must be configured together");
     expect(() =>
       databaseRuntimeRoles({
         DATABASE_API_ROLE: "companion_runtime",
         DATABASE_WORKER_ROLE: "companion_runtime",
+        DATABASE_COMPANION_RUNTIME_ROLE: "companion_runtime_v2",
       }),
-    ).toThrow("DATABASE_API_ROLE and DATABASE_WORKER_ROLE must be distinct");
+    ).toThrow("must be distinct");
     expect(() =>
       databaseRuntimeRoles({
         DATABASE_API_ROLE: "companion_api",
         DATABASE_WORKER_ROLE: "companion_worker",
-        DATABASE_RUNTIME_ROLE: "companion_runtime",
+        DATABASE_COMPANION_RUNTIME_ROLE: "companion_api",
       }),
-    ).toThrow("DATABASE_RUNTIME_ROLE cannot be combined");
+    ).toThrow("must be distinct");
+    expect(() =>
+      databaseRuntimeRoles({ DATABASE_RETIRED_RUNTIME_ROLE: "companion_runtime_legacy" }),
+    ).toThrow("must be configured together");
     expect(() =>
       databaseRuntimeRoles({
         DATABASE_API_ROLE: "companion_api",
@@ -172,32 +114,34 @@ describe("databaseRuntimeRoles", () => {
         DATABASE_COMPANION_RUNTIME_ROLE: "companion_runtime_v2",
         DATABASE_RETIRED_RUNTIME_ROLE: "companion_runtime_v2",
       }),
-    ).toThrow("DATABASE_RETIRED_RUNTIME_ROLE must be distinct from every active database role");
+    ).toThrow("must be distinct");
+  });
+
+  it("rejects the former union role as an active migration credential", () => {
+    expect(() =>
+      databaseRuntimeRoles({ DATABASE_RUNTIME_ROLE: "companion_runtime" }),
+    ).toThrow("retired union credential");
     expect(() =>
       databaseRuntimeRoles({
-        DATABASE_API_ROLE: "companion_api",
-        DATABASE_WORKER_ROLE: "companion_worker",
-        DATABASE_COMPANION_RUNTIME_ROLE: "companion_api",
-      }),
-    ).toThrow("DATABASE_COMPANION_RUNTIME_ROLE must be distinct");
-    expect(() =>
-      databaseRuntimeRoles({
-        DATABASE_API_ROLE: "companion_api",
-        DATABASE_WORKER_ROLE: "companion_worker",
         DATABASE_RUNTIME_ROLE: "companion_runtime",
+        DATABASE_API_ROLE: "companion_api",
+        DATABASE_WORKER_ROLE: "companion_worker",
         DATABASE_COMPANION_RUNTIME_ROLE: "companion_runtime_v2",
       }),
-    ).toThrow("DATABASE_RUNTIME_ROLE cannot be combined");
-    expect(() =>
-      databaseRuntimeRoles({
-        DATABASE_RETIRED_RUNTIME_ROLE: "companion_runtime",
-      }),
-    ).toThrow("DATABASE_RETIRED_RUNTIME_ROLE requires");
+    ).toThrow("DATABASE_RUNTIME_ROLE is a retired union credential");
   });
 
   it.each([
-    ["DATABASE_API_ROLE", { DATABASE_API_ROLE: "Companion", DATABASE_WORKER_ROLE: "companion_worker" }],
-    ["DATABASE_WORKER_ROLE", { DATABASE_API_ROLE: "companion_api", DATABASE_WORKER_ROLE: " worker" }],
+    ["DATABASE_API_ROLE", {
+      DATABASE_API_ROLE: "Companion",
+      DATABASE_WORKER_ROLE: "companion_worker",
+      DATABASE_COMPANION_RUNTIME_ROLE: "companion_runtime",
+    }],
+    ["DATABASE_WORKER_ROLE", {
+      DATABASE_API_ROLE: "companion_api",
+      DATABASE_WORKER_ROLE: " worker",
+      DATABASE_COMPANION_RUNTIME_ROLE: "companion_runtime",
+    }],
     [
       "DATABASE_COMPANION_RUNTIME_ROLE",
       {
@@ -211,13 +155,82 @@ describe("databaseRuntimeRoles", () => {
       {
         DATABASE_API_ROLE: "companion_api",
         DATABASE_WORKER_ROLE: "companion_worker",
-        DATABASE_RETIRED_RUNTIME_ROLE: "retired-role",
+        DATABASE_COMPANION_RUNTIME_ROLE: "companion_runtime",
+        DATABASE_RETIRED_RUNTIME_ROLE: "RetiredRuntime",
       },
     ],
   ])("validates %s as a strict PostgreSQL identifier", (name, env) => {
     expect(() => databaseRuntimeRoles(env)).toThrow(
       `${name} must be a lowercase PostgreSQL identifier`,
     );
+  });
+});
+
+describe("prepareMigrationPhases", () => {
+  it("builds a temporary Drizzle journal ending at 0092 and leaves 0093 for phase two", async () => {
+    const root = await tempDir();
+    const folder = join(root, "drizzle");
+    await mkdir(join(folder, "meta"), { recursive: true });
+    const entries = [
+      { idx: 91, version: "7", when: 91, tag: "0091_companion_runtime_executor" },
+      { idx: 92, version: "7", when: 92, tag: "0092_companion_runtime_api" },
+      { idx: 93, version: "7", when: 93, tag: RUNTIME_V2_FINAL_CUTOVER_TAG },
+    ];
+    await writeFile(
+      join(folder, "meta", "_journal.json"),
+      JSON.stringify({ version: "7", dialect: "postgresql", entries }),
+    );
+    for (const entry of entries) await writeFile(join(folder, `${entry.tag}.sql`), "select 1;");
+
+    const phases = await prepareMigrationPhases(folder);
+    expect(phases.hasFinalCutover).toBe(true);
+    expect(phases.checkpointFolder).not.toBe(folder);
+    const checkpoint = JSON.parse(
+      await readFile(join(phases.checkpointFolder, "meta", "_journal.json"), "utf8"),
+    ) as { entries: { tag: string }[] };
+    expect(checkpoint.entries.map((entry) => entry.tag)).toEqual([
+      "0091_companion_runtime_executor",
+      "0092_companion_runtime_api",
+    ]);
+    await expect(access(join(phases.checkpointFolder, `${RUNTIME_V2_FINAL_CUTOVER_TAG}.sql`)))
+      .rejects.toThrow();
+    await phases.cleanup();
+    await expect(access(phases.checkpointFolder)).rejects.toThrow();
+  });
+
+  it("keeps later migrations in phase two behind the 0093 grant guard", async () => {
+    const root = await tempDir();
+    const folder = join(root, "drizzle");
+    await mkdir(join(folder, "meta"), { recursive: true });
+    const entries = [
+      { tag: RUNTIME_V2_FINAL_CUTOVER_TAG },
+      { tag: "0094_must_not_skip_cutover_protocol" },
+    ];
+    await writeFile(
+      join(folder, "meta", "_journal.json"),
+      JSON.stringify({
+        version: "7",
+        dialect: "postgresql",
+        entries,
+      }),
+    );
+    for (const entry of entries) await writeFile(join(folder, `${entry.tag}.sql`), "select 1;");
+
+    const phases = await prepareMigrationPhases(folder);
+    expect(phases.hasFinalCutover).toBe(true);
+    const checkpoint = JSON.parse(
+      await readFile(join(phases.checkpointFolder, "meta", "_journal.json"), "utf8"),
+    ) as { entries: unknown[] };
+    expect(checkpoint.entries).toEqual([]);
+    const full = JSON.parse(
+      await readFile(join(folder, "meta", "_journal.json"), "utf8"),
+    ) as { entries: { tag: string }[] };
+    expect(full.entries.map((entry) => entry.tag)).toEqual([
+      RUNTIME_V2_FINAL_CUTOVER_TAG,
+      "0094_must_not_skip_cutover_protocol",
+    ]);
+    await expect(access(join(folder, "0094_must_not_skip_cutover_protocol.sql"))).resolves.toBeUndefined();
+    await phases.cleanup();
   });
 });
 
@@ -319,7 +332,7 @@ describe("runtime role grants", () => {
   it("extracts only the driver-safe marked SQL block", () => {
     expect(
       extractRuntimeRoleGrantBlock(
-        "\\if :{?runtime_role}\n-- companion-runtime-grants-begin\nDO $$ BEGIN NULL; END $$;\n-- companion-runtime-grants-end\n\\endif",
+        "\\if :{?api_role}\n-- companion-runtime-grants-begin\nDO $$ BEGIN NULL; END $$;\n-- companion-runtime-grants-end\n\\endif",
       ),
     ).toBe("DO $$ BEGIN NULL; END $$;");
   });
@@ -360,6 +373,34 @@ describe("formatMigrationFailure", () => {
     expect(formatted).toContain("pending storage records=12");
     expect(formatted).toContain("node dist/cutover.js purge --confirm-provider-cleanup");
     expect(formatted).toContain("deploy/railway/README.md");
+  });
+
+  it("explains the fail-closed Runtime v2 purge remediation", () => {
+    const error = new Error("Failed query", {
+      cause: Object.assign(new Error(RUNTIME_V2_CUTOVER_GUARD_MESSAGE), {
+        code: CUTOVER_GUARD_SQLSTATE,
+        detail: "legacy runtime pools remain",
+        hint: "Disable Companions and complete the legacy purge.",
+      }),
+    });
+
+    const formatted = formatMigrationFailure(error);
+    expect(formatted.split("\n")[0]).toBe(RUNTIME_V2_CUTOVER_GUARD_MESSAGE);
+    expect(formatted).toContain("0093_companion_runtime_cutover.sql");
+    expect(formatted).toContain("node dist/companionPurge.js report");
+    expect(formatted).toContain("purge --confirm-delete-all-companions");
+  });
+
+  it("explains the same-connection split-role grant protocol", () => {
+    const error = Object.assign(new Error(RUNTIME_V2_GRANTS_GUARD_MESSAGE), {
+      code: CUTOVER_GUARD_SQLSTATE,
+      detail: "the grant marker is missing or stale",
+    });
+
+    const formatted = formatMigrationFailure(error);
+    expect(formatted).toContain("two-phase API migration runner");
+    expect(formatted).toContain("DATABASE_RETIRED_RUNTIME_ROLE");
+    expect(formatted).toContain("Do not execute 0093 directly");
   });
 
   it("tolerates a self-referential cause chain", () => {

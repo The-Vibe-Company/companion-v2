@@ -10,9 +10,7 @@ export async function syncPublishedSkillToOnlineCompanions(input: {
   orgId: string;
   skillId: string;
   actor: ActorContext;
-  /** Transitional parameters remain accepted until the final legacy-removal layer. */
   env?: NodeJS.ProcessEnv;
-  runtimeFactory?: unknown;
 }): Promise<void> {
   // The kill switch blocks claims, not desired-state invalidations. Persist this revision even
   // while runtime execution is disabled so re-enable cannot treat a stale Box as current.

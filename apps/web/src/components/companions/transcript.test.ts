@@ -38,7 +38,6 @@ function thread(overrides: Partial<CompanionThread> = {}): CompanionThread {
     read_only: false,
     can_send: true,
     entries: [],
-    pending_count: 0,
     last_message_at: null,
     last_read_ordinal: null,
     ...overrides,

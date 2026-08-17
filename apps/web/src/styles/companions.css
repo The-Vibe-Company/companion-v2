@@ -2144,6 +2144,17 @@ button.chat-box:focus-visible {
     min-height: 44px;
   }
 
+  .chat-head .chat-settings,
+  .chat-head .chat-context-toggle {
+    width: 44px;
+    height: 44px;
+  }
+
+  .chat-head button.chat-box {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
   .chat-head .cds-btn {
     min-height: 44px;
   }

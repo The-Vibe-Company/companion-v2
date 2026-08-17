@@ -94,6 +94,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
       last_observed_at: null,
       last_started_at: null,
       last_stopped_at: null,
+      latest_operation: null,
     },
     created_at: "2026-08-12T12:00:00.000Z",
     updated_at: "2026-08-12T12:00:00.000Z",
@@ -134,7 +135,6 @@ function thread(overrides: Partial<Thread> = {}): Thread {
         created_at: "2026-08-12T12:01:20.000Z",
       },
     ],
-    pending_count: 0,
     last_message_at: "2026-08-12T12:01:20.000Z",
     last_read_ordinal: null,
     ...overrides,
@@ -181,7 +181,22 @@ function render(props: {
     onSettings: () => {},
     onThread: () => {},
     onDesktop: () => {},
-    onRetryInterrupted: async () => {},
+    onRetryInterrupted: async () => ({
+      id: "44444444-4444-4444-8444-444444444444",
+      companion_id: companion().id,
+      request_id: null,
+      source_turn_id: null,
+      kind: "restart_pi" as const,
+      trigger: "user" as const,
+      status: "pending" as const,
+      queue_sequence: 1,
+      checkpoint: "queued",
+      attempt_count: 0,
+      error: null,
+      created_at: "2026-08-12T12:00:00.000Z",
+      started_at: null,
+      settled_at: null,
+    }),
     onCancelInterrupted: async () => {},
   }));
 }
@@ -353,7 +368,6 @@ describe("CompanionThread", () => {
         access: "viewer",
         read_only: true,
         can_send: false,
-        pending_count: 2,
       }),
     });
 
@@ -442,7 +456,7 @@ describe("CompanionThread", () => {
   });
 
   it("shows an empty thread as what to do next rather than a dead surface", () => {
-    const markup = render({ thread: thread({ entries: [], pending_count: 0, last_message_at: null }) });
+    const markup = render({ thread: thread({ entries: [], last_message_at: null }) });
 
     expect(markup).toContain("No messages yet");
     expect(markup).toContain("Send a message to start Luna and get a reply.");

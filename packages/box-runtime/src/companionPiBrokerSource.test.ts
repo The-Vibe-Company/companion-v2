@@ -145,15 +145,6 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
     const commands = readFileSync(capturePath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     expect(commands.map((command) => command.type)).toEqual(["get_state", "prompt"]);
     expect(commands[1]).not.toHaveProperty("streamingBehavior");
-    const compatibility = readFileSync(join(runtimeRoot, "logs", "pi.rpc.ndjson"), "utf8");
-    expect(compatibility).toBe([
-      '{"type":"agent_start"}',
-      '{"type":"message_end","message":{"role":"assistant","content":[]}}',
-      '{"type":"agent_settled"}',
-      "",
-    ].join("\n"));
-    expect(compatibility).not.toContain("provider-secret");
-
     const piPid = Number(readFileSync(piPidPath, "utf8"));
     expect(Number.isSafeInteger(piPid)).toBe(true);
     process.kill(piPid, "SIGKILL");

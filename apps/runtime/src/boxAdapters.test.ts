@@ -41,10 +41,9 @@ describe("runtime Box/Pi port adapters", () => {
       boxId: "bx_23456789",
       state: "archiving" as const,
     }));
-    const broadStart = vi.fn();
     const control = createRuntimeBoxControl({
       lifecycle: lifecycle({ findGenerationBoxes, createOrRecoverGenerationBox }),
-      runtime: () => boxRuntime({ existingBoxStatus, start: broadStart }),
+      runtime: () => boxRuntime({ existingBoxStatus }),
       now: () => deadlineAt.getTime() - 10_000,
     });
 
@@ -75,7 +74,6 @@ describe("runtime Box/Pi port adapters", () => {
       deadlineAt,
       signal,
     }));
-    expect(broadStart).not.toHaveBeenCalled();
   });
 
   it("adds an explicit provider deadline to delete work without a turn deadline", async () => {

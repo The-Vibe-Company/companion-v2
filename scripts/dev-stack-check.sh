@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-bash -n scripts/dev-stack.sh scripts/setup-conductor.sh scripts/dev-conductor.sh scripts/dev-stack-check.sh
+bash -n scripts/dev-stack.sh scripts/setup-conductor.sh scripts/dev-conductor.sh \
+  scripts/dev-stack-check.sh scripts/dev-process.sh scripts/dev-runtime.sh scripts/dev-worker.sh
 
 # Conductor setup must select the native package manager before installing JS
 # dependencies. Exercise both branches with command shims so this remains safe
@@ -95,8 +96,10 @@ env_output="$(
   -u COMPOSE_PROJECT_NAME \
   -u DATABASE_URL \
   -u DATABASE_WORKER_URL \
+  -u DATABASE_COMPANION_RUNTIME_URL \
   -u COMPANION_API_URL \
   -u COMPANION_WEB_URL \
+  -u COMPANION_RUNTIME_PRIVATE_URL \
   -u NEXT_PUBLIC_COMPANION_API_URL \
   -u BETTER_AUTH_URL \
   -u S3_ENDPOINT \
@@ -119,8 +122,10 @@ require_env() {
 
 require_env "DATABASE_URL=postgres://companion_api:companion-api@127.0.0.1:15432/companion"
 require_env "DATABASE_WORKER_URL=postgres://companion_worker:companion-worker@127.0.0.1:15432/companion"
+require_env "DATABASE_COMPANION_RUNTIME_URL=postgres://companion_runtime_v2:companion-runtime-v2@127.0.0.1:15432/companion"
 require_env "COMPANION_API_URL=http://127.0.0.1:13001"
 require_env "COMPANION_WEB_URL=http://127.0.0.1:13000"
+require_env "COMPANION_RUNTIME_PRIVATE_URL=http://127.0.0.1:3007"
 require_env "NEXT_PUBLIC_COMPANION_API_URL=http://127.0.0.1:13001"
 require_env "BETTER_AUTH_URL=http://127.0.0.1:13001"
 require_env "S3_ENDPOINT=http://127.0.0.1:19000"
@@ -137,12 +142,29 @@ if ! printf '%s\n' "$disabled_database_env_output" | grep -Fxq "COMPANION_SKILL_
   exit 1
 fi
 
+legacy_database_env_output="$(
+  env -u CONDUCTOR_PORT -u CONDUCTOR_WORKSPACE_NAME \
+  COMPANION_DEV_SKIP_ENV_FILE=1 \
+  DATABASE_URL=postgres://companion_runtime:companion-runtime@127.0.0.1:5432/companion \
+  POSTGRES_PORT=15432 \
+  bash scripts/dev-stack.sh print-env
+)"
+if ! printf '%s\n' "$legacy_database_env_output" \
+  | grep -Fxq "DATABASE_URL=postgres://companion_api:companion-api@127.0.0.1:15432/companion" \
+  || ! printf '%s\n' "$legacy_database_env_output" \
+  | grep -Fxq "DATABASE_COMPANION_RUNTIME_URL=postgres://companion_runtime_v2:companion-runtime-v2@127.0.0.1:15432/companion"; then
+  printf '[dev-stack-check] a known legacy local union URL must upgrade to split role URLs\n' >&2
+  exit 1
+fi
+
 conductor_env_output="$(
   env -u COMPOSE_PROJECT_NAME \
   -u DATABASE_URL \
   -u DATABASE_WORKER_URL \
+  -u DATABASE_COMPANION_RUNTIME_URL \
   -u COMPANION_API_URL \
   -u COMPANION_WEB_URL \
+  -u COMPANION_RUNTIME_PRIVATE_URL \
   -u NEXT_PUBLIC_COMPANION_API_URL \
   -u BETTER_AUTH_URL \
   -u S3_ENDPOINT \
@@ -163,8 +185,10 @@ require_conductor_env() {
 require_conductor_env "COMPOSE_PROJECT_NAME=companion-montpellier-v1"
 require_conductor_env "DATABASE_URL=postgres://companion_api:companion-api@127.0.0.1:55102/companion"
 require_conductor_env "DATABASE_WORKER_URL=postgres://companion_worker:companion-worker@127.0.0.1:55102/companion"
+require_conductor_env "DATABASE_COMPANION_RUNTIME_URL=postgres://companion_runtime_v2:companion-runtime-v2@127.0.0.1:55102/companion"
 require_conductor_env "COMPANION_API_URL=http://127.0.0.1:55101"
 require_conductor_env "COMPANION_WEB_URL=http://127.0.0.1:55100"
+require_conductor_env "COMPANION_RUNTIME_PRIVATE_URL=http://127.0.0.1:55107"
 require_conductor_env "NEXT_PUBLIC_COMPANION_API_URL=http://127.0.0.1:55101"
 require_conductor_env "BETTER_AUTH_URL=http://127.0.0.1:55101"
 require_conductor_env "S3_ENDPOINT=http://127.0.0.1:55103"
@@ -174,6 +198,8 @@ require_conductor_env "MINIO_PORT=55103"
 require_conductor_env "MINIO_CONSOLE_PORT=55104"
 require_conductor_env "MAILPIT_SMTP_PORT=55105"
 require_conductor_env "MAILPIT_WEB_PORT=55106"
+require_conductor_env "COMPANION_RUNTIME_PORT=55107"
+require_conductor_env "COMPANION_BOX_SIM_PORT=55108"
 
 # The standalone `pnpm dev:app` path must not turn an absent database URL into DATABASE_URL="",
 # because postgres.js interprets that as OS-user defaults instead of @companion/db's local fallback.
@@ -209,6 +235,126 @@ worker_url_overridden="$(
 )"
 if [ "$worker_url_overridden" != "postgres://worker" ]; then
   printf '[dev-stack-check] dev-worker must prefer DATABASE_WORKER_URL\n' >&2
+  exit 1
+fi
+
+# The repo-root .env is intentionally shared only with the launcher. Child
+# wrappers enforce the API/worker/runtime/web trust boundaries.
+# shellcheck disable=SC2016
+process_env_probe='for name in COMPANION_BOX_API_KEY COMPANION_PI_INSTALL_COMMAND DATABASE_URL DATABASE_WORKER_URL DATABASE_COMPANION_RUNTIME_URL DATABASE_MIGRATION_URL COMPANION_RUNTIME_PRIVATE_URL COMPANION_RUNTIME_DESKTOP_HMAC_SECRET COMPANION_SECRETS_MASTER_KEY COMPANION_MCP_GITHUB_CLIENT_ID COMPANION_MCP_GITHUB_CLIENT_SECRET BETTER_AUTH_SECRET STRIPE_SECRET_KEY GITHUB_APP_PRIVATE_KEY RESEND_API_KEY S3_SECRET_ACCESS_KEY UNKNOWN_PROVIDER_API_KEY COMPANION_SEED_PASSWORD BOX_SIM_CONTROL_TOKEN; do if [ -n "${!name+x}" ]; then printf "%s=%s\n" "$name" "${!name}"; else printf "%s=unset\n" "$name"; fi; done'
+common_probe_env=(
+  COMPANION_BOX_API_KEY=box-secret
+  COMPANION_PI_INSTALL_COMMAND=pi-secret
+  DATABASE_URL=postgres://api
+  DATABASE_WORKER_URL=postgres://worker
+  DATABASE_COMPANION_RUNTIME_URL=postgres://runtime
+  DATABASE_MIGRATION_URL=postgres://owner
+  COMPANION_RUNTIME_PRIVATE_URL=http://runtime.internal
+  COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=hmac-secret
+  COMPANION_SECRETS_MASTER_KEY=master-secret
+  COMPANION_MCP_GITHUB_CLIENT_ID=mcp-github-client
+  COMPANION_MCP_GITHUB_CLIENT_SECRET=mcp-github-secret
+  BETTER_AUTH_SECRET=auth-secret
+  STRIPE_SECRET_KEY=stripe-secret
+  GITHUB_APP_PRIVATE_KEY=github-secret
+  RESEND_API_KEY=email-secret
+  S3_SECRET_ACCESS_KEY=storage-secret
+  UNKNOWN_PROVIDER_API_KEY=provider-secret
+  COMPANION_SEED_PASSWORD=seed-secret
+  BOX_SIM_CONTROL_TOKEN=sim-secret
+)
+
+api_process_env="$(env "${common_probe_env[@]}" bash scripts/dev-process.sh api bash -c "$process_env_probe")"
+printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_BOX_API_KEY=unset'
+printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_PI_INSTALL_COMMAND=unset'
+printf '%s\n' "$api_process_env" | grep -Fxq 'DATABASE_URL=postgres://api'
+printf '%s\n' "$api_process_env" | grep -Fxq 'DATABASE_COMPANION_RUNTIME_URL=unset'
+printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=hmac-secret'
+printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_ID=mcp-github-client'
+printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_SECRET=mcp-github-secret'
+printf '%s\n' "$api_process_env" | grep -Fxq 'BETTER_AUTH_SECRET=auth-secret'
+printf '%s\n' "$api_process_env" | grep -Fxq 'STRIPE_SECRET_KEY=stripe-secret'
+printf '%s\n' "$api_process_env" | grep -Fxq 'UNKNOWN_PROVIDER_API_KEY=unset'
+printf '%s\n' "$api_process_env" | grep -Fxq 'COMPANION_SEED_PASSWORD=unset'
+
+worker_process_env="$(env "${common_probe_env[@]}" bash scripts/dev-worker.sh bash -c "$process_env_probe")"
+printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_BOX_API_KEY=unset'
+printf '%s\n' "$worker_process_env" | grep -Fxq 'DATABASE_URL=postgres://worker'
+printf '%s\n' "$worker_process_env" | grep -Fxq 'DATABASE_COMPANION_RUNTIME_URL=unset'
+printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=unset'
+printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_ID=unset'
+printf '%s\n' "$worker_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_SECRET=unset'
+printf '%s\n' "$worker_process_env" | grep -Fxq 'BETTER_AUTH_SECRET=unset'
+printf '%s\n' "$worker_process_env" | grep -Fxq 'STRIPE_SECRET_KEY=stripe-secret'
+printf '%s\n' "$worker_process_env" | grep -Fxq 'GITHUB_APP_PRIVATE_KEY=github-secret'
+printf '%s\n' "$worker_process_env" | grep -Fxq 'RESEND_API_KEY=unset'
+printf '%s\n' "$worker_process_env" | grep -Fxq 'UNKNOWN_PROVIDER_API_KEY=unset'
+
+runtime_process_env="$(env "${common_probe_env[@]}" bash scripts/dev-process.sh runtime bash -c "$process_env_probe")"
+printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_BOX_API_KEY=box-secret'
+printf '%s\n' "$runtime_process_env" | grep -Fxq 'DATABASE_URL=unset'
+printf '%s\n' "$runtime_process_env" | grep -Fxq 'DATABASE_COMPANION_RUNTIME_URL=postgres://runtime'
+printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=hmac-secret'
+printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_SECRETS_MASTER_KEY=master-secret'
+printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_ID=mcp-github-client'
+printf '%s\n' "$runtime_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_SECRET=mcp-github-secret'
+printf '%s\n' "$runtime_process_env" | grep -Fxq 'S3_SECRET_ACCESS_KEY=storage-secret'
+printf '%s\n' "$runtime_process_env" | grep -Fxq 'BETTER_AUTH_SECRET=unset'
+printf '%s\n' "$runtime_process_env" | grep -Fxq 'STRIPE_SECRET_KEY=unset'
+printf '%s\n' "$runtime_process_env" | grep -Fxq 'GITHUB_APP_PRIVATE_KEY=unset'
+printf '%s\n' "$runtime_process_env" | grep -Fxq 'RESEND_API_KEY=unset'
+printf '%s\n' "$runtime_process_env" | grep -Fxq 'UNKNOWN_PROVIDER_API_KEY=unset'
+
+web_process_env="$(env "${common_probe_env[@]}" bash scripts/dev-process.sh web bash -c "$process_env_probe")"
+printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_BOX_API_KEY=unset'
+printf '%s\n' "$web_process_env" | grep -Fxq 'DATABASE_URL=unset'
+printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=unset'
+printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_SECRETS_MASTER_KEY=unset'
+printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_ID=unset'
+printf '%s\n' "$web_process_env" | grep -Fxq 'COMPANION_MCP_GITHUB_CLIENT_SECRET=unset'
+printf '%s\n' "$web_process_env" | grep -Fxq 'BETTER_AUTH_SECRET=unset'
+printf '%s\n' "$web_process_env" | grep -Fxq 'STRIPE_SECRET_KEY=unset'
+printf '%s\n' "$web_process_env" | grep -Fxq 'GITHUB_APP_PRIVATE_KEY=unset'
+printf '%s\n' "$web_process_env" | grep -Fxq 'RESEND_API_KEY=unset'
+printf '%s\n' "$web_process_env" | grep -Fxq 'S3_SECRET_ACCESS_KEY=unset'
+printf '%s\n' "$web_process_env" | grep -Fxq 'UNKNOWN_PROVIDER_API_KEY=unset'
+
+seed_process_env="$(env "${common_probe_env[@]}" bash scripts/dev-process.sh api-seed bash -c "$process_env_probe")"
+printf '%s\n' "$seed_process_env" | grep -Fxq 'COMPANION_SEED_PASSWORD=seed-secret'
+printf '%s\n' "$seed_process_env" | grep -Fxq 'UNKNOWN_PROVIDER_API_KEY=unset'
+
+box_sim_process_env="$(env "${common_probe_env[@]}" bash scripts/dev-process.sh box-sim bash -c "$process_env_probe")"
+printf '%s\n' "$box_sim_process_env" | grep -Fxq 'BOX_SIM_CONTROL_TOKEN=sim-secret'
+printf '%s\n' "$box_sim_process_env" | grep -Fxq 'COMPANION_BOX_API_KEY=unset'
+printf '%s\n' "$box_sim_process_env" | grep -Fxq 'UNKNOWN_PROVIDER_API_KEY=unset'
+
+# The migration runner must see the retired union-role variable so it can reject that dangerous
+# compatibility credential explicitly; silently scrubbing it would turn a misconfigured upgrade
+# into what looks like a fresh split-role install.
+migration_legacy_role="$(env DATABASE_MIGRATION_URL=postgres://owner \
+  DATABASE_RUNTIME_ROLE=legacy_union bash scripts/dev-process.sh migration \
+  bash -c 'printf %s "${DATABASE_RUNTIME_ROLE:-unset}"')"
+if [ "$migration_legacy_role" != "legacy_union" ]; then
+  printf '[dev-stack-check] migration wrapper must preserve DATABASE_RUNTIME_ROLE for fail-closed rejection\n' >&2
+  exit 1
+fi
+
+# shellcheck disable=SC2016
+if ! grep -Fq -- '--names api,worker,runtime,web' scripts/dev-conductor.sh \
+  || ! grep -Fq -- 'DATABASE_COMPANION_RUNTIME_ROLE="$PG_RUNTIME_USER"' scripts/dev-conductor.sh \
+  || ! grep -Fq -- 'bash scripts/dev-process.sh migration pnpm db:migrate' scripts/dev-conductor.sh; then
+  printf '[dev-stack-check] native Conductor must launch runtime and use the two-phase role-aware migration runner\n' >&2
+  exit 1
+fi
+if grep -Fq -- '-f "$REPO_ROOT/packages/db/runtime-role-grants.sql"' scripts/dev-conductor.sh \
+  || grep -Fq -- '< "$REPO_ROOT/packages/db/runtime-role-grants.sql"' scripts/dev-stack.sh; then
+  printf '[dev-stack-check] development launchers must not apply grants after migration 0093\n' >&2
+  exit 1
+fi
+if grep -Fq -- ":'gate_epoch'" scripts/dev-conductor.sh scripts/dev-stack.sh \
+  || ! grep -Fq -- "*[!0-9]*)" scripts/dev-conductor.sh \
+  || ! grep -Fq -- "*[!0-9]*)" scripts/dev-stack.sh; then
+  printf '[dev-stack-check] runtime gate activation must validate and embed the numeric epoch; psql -c does not expand variables\n' >&2
   exit 1
 fi
 
@@ -248,19 +394,19 @@ inspect_conductor_network() {
     # The inner shell must expand variables defined by the sourced launcher, not this process.
     # shellcheck disable=SC2016
     env -u CONDUCTOR_PORT CONDUCTOR_IS_LOCAL="$is_local" COMPANION_DEV_SKIP_ENV_FILE=1 \
-      bash -c 'script="$1"; shift; source "$script" "$@"; printf "%s|%s|%s|%s" "$BASE" "$WEB_BIND_HOST" "$WEB_URL" "$API_URL"' \
+      bash -c 'script="$1"; shift; source "$script" "$@"; printf "%s|%s|%s|%s|%s" "$BASE" "$WEB_BIND_HOST" "$WEB_URL" "$API_URL" "$RUNTIME_URL"' \
       _ "$ROOT/scripts/dev-conductor.sh" "$@"
   else
     # The inner shell must expand variables defined by the sourced launcher, not this process.
     # shellcheck disable=SC2016
     env CONDUCTOR_PORT="$conductor_port" CONDUCTOR_IS_LOCAL="$is_local" COMPANION_DEV_SKIP_ENV_FILE=1 \
-      bash -c 'script="$1"; shift; source "$script" "$@"; printf "%s|%s|%s|%s" "$BASE" "$WEB_BIND_HOST" "$WEB_URL" "$API_URL"' \
+      bash -c 'script="$1"; shift; source "$script" "$@"; printf "%s|%s|%s|%s|%s" "$BASE" "$WEB_BIND_HOST" "$WEB_URL" "$API_URL" "$RUNTIME_URL"' \
       _ "$ROOT/scripts/dev-conductor.sh" "$@"
   fi
 }
 
 cloud_network="$(inspect_conductor_network 0 unset)"
-if [ "$cloud_network" != "3000|0.0.0.0|http://127.0.0.1:3000|http://127.0.0.1:3001" ]; then
+if [ "$cloud_network" != "3000|0.0.0.0|http://127.0.0.1:3000|http://127.0.0.1:3001|http://127.0.0.1:3007" ]; then
   printf '[dev-stack-check] unexpected cloud Conductor network config: %s\n' "$cloud_network" >&2
   exit 1
 fi
@@ -289,19 +435,19 @@ if [ "$local_install_hints" != "brew install lsof|brew install postgresql@17" ];
 fi
 
 local_network="$(inspect_conductor_network 1 4310)"
-if [ "$local_network" != "4310|127.0.0.1|http://127.0.0.1:4310|http://127.0.0.1:4311" ]; then
+if [ "$local_network" != "4310|127.0.0.1|http://127.0.0.1:4310|http://127.0.0.1:4311|http://127.0.0.1:4317" ]; then
   printf '[dev-stack-check] unexpected local Conductor network config: %s\n' "$local_network" >&2
   exit 1
 fi
 
 cloud_override_network="$(inspect_conductor_network 0 4310 --base 4520)"
-if [ "$cloud_override_network" != "4520|0.0.0.0|http://127.0.0.1:4520|http://127.0.0.1:4521" ]; then
+if [ "$cloud_override_network" != "4520|0.0.0.0|http://127.0.0.1:4520|http://127.0.0.1:4521|http://127.0.0.1:4527" ]; then
   printf '[dev-stack-check] cloud --base must override CONDUCTOR_PORT: %s\n' "$cloud_override_network" >&2
   exit 1
 fi
 
 local_override_network="$(inspect_conductor_network 1 4310 --base 4530)"
-if [ "$local_override_network" != "4530|127.0.0.1|http://127.0.0.1:4530|http://127.0.0.1:4531" ]; then
+if [ "$local_override_network" != "4530|127.0.0.1|http://127.0.0.1:4530|http://127.0.0.1:4531|http://127.0.0.1:4537" ]; then
   printf '[dev-stack-check] local --base must override CONDUCTOR_PORT: %s\n' "$local_override_network" >&2
   exit 1
 fi

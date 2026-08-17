@@ -16,6 +16,7 @@ function validEnv(patch: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     COMPANION_SECRETS_MASTER_KEY: key,
     COMPANION_RUNTIME_DESKTOP_HMAC_SECRET: Buffer.alloc(32, 11).toString("base64"),
     COMPANION_API_URL: "http://127.0.0.1:3001",
+    COMPANION_RELEASE_ID: "production-2026-08-17.3",
     ...patch,
   };
 }
@@ -39,6 +40,7 @@ describe("runtime-only configuration", () => {
       shutdownDrainMs: 25_000,
       companionsEnabled: true,
       apiUrl: "http://127.0.0.1:3001",
+      releaseId: "production-2026-08-17.3",
     });
     expect(config.masterKey).toHaveLength(32);
     expect(config.desktopHmacSecret).toHaveLength(32);
@@ -102,6 +104,7 @@ describe("runtime-only configuration", () => {
       masterKey: null,
       desktopHmacSecret: null,
       apiUrl: null,
+      releaseId: "unknown",
     });
   });
 

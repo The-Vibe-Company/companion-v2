@@ -95,6 +95,7 @@ const companion: Companion = {
     last_observed_at: null,
     last_started_at: null,
     last_stopped_at: null,
+    latest_operation: null,
   },
   created_at: "2026-08-12T12:00:00.000Z",
   updated_at: "2026-08-12T12:00:00.000Z",
@@ -120,6 +121,7 @@ function controlPlane(
     watermarkedPostTimeoutTail?: boolean;
     refuseDelivery?: boolean;
     holdReply?: boolean;
+    holdThreadRead?: boolean;
   } = {},
 ) {
   const runtime = options.companion ?? companion;
@@ -164,13 +166,14 @@ function controlPlane(
   let ordinal = entries.length;
   // THE-370 starts with the post-timeout tail already watermarked even though Pi never answered it.
   let delivered = options.watermarkedPostTimeoutTail ? ordinal - 1 : -1;
-  let accepted: number | null = null;
   let owed = 0;
   let lastClientMessageId = "00000000-0000-4000-8000-000000000000";
   let replyReleased = !options.holdReply;
   let dropped = 0;
   let release = () => {};
   const held = new Promise<void>((resolve) => { release = resolve; });
+  let releaseThread = () => {};
+  const heldThread = new Promise<void>((resolve) => { releaseThread = resolve; });
 
   const json = (body: unknown) => new Response(JSON.stringify(body), {
     status: 200,
@@ -236,8 +239,6 @@ function controlPlane(
     active_turn: owed > 0 ? projectedTurn("running") : null,
     queued_count: threadEntries.filter((entry) => entry.role === "user" && entry.ordinal > delivered).length,
     interrupted_turn: null,
-    pending_count: threadEntries.filter((entry) => entry.role === "user" && entry.ordinal > delivered).length,
-    accepted_delivery_ordinal: accepted,
     last_message_at: threadEntries.at(-1)?.created_at ?? null,
     last_read_ordinal: null,
   };
@@ -271,13 +272,11 @@ function controlPlane(
         });
         if (!options.refuseDelivery) {
           delivered = ordinal - 1;
-          accepted = delivered;
           owed += 1;
         }
       }
-      // THE-341: the turn is durable the moment it is stored, before the wake the request then waits
-      // on. A proxy that gives up mid-wake returns 500 over an already-persisted turn; model that by
-      // answering the first send with 500 after it has stored the message.
+      // THE-341: the turn is durable before the client necessarily receives the response. Model a
+      // lost response by returning 500 after the first send has stored the message.
       if (options.dropFirstSend && dropped < 1) {
         dropped += 1;
         return new Response(JSON.stringify({ error: "Request failed" }), {
@@ -290,15 +289,12 @@ function controlPlane(
         turn: projectedTurn("queued"),
       });
     }
-    if (method === "POST" && url.endsWith("/thread/sync")) {
-      settleReplies();
-      return json({ thread: thread(requestedCompanionId), source: "box" });
-    }
     if (url.includes("/thread")) {
+      if (options.holdThreadRead) await heldThread;
       settleReplies();
       return json({ thread: thread(requestedCompanionId) });
     }
-    if (url.includes("/runtime")) return json({ companion: runtime, source: "control_plane" });
+    if (url.includes("/runtime")) return json({ companion: runtime });
     return json({});
   });
 
@@ -308,8 +304,8 @@ function controlPlane(
     sends,
     /** Answer the send this control plane is holding open. */
     releaseSend: () => release(),
+    releaseThread: () => releaseThread(),
     posts: () => requests.filter((request) => request.endsWith("/messages")).length,
-    accepted: () => accepted,
     releaseReply: () => { replyReleased = true; },
   };
 }
@@ -479,9 +475,8 @@ describe("CompanionsApp send", () => {
       await pressEnter(container);
       await poll(1);
 
-      expect(api.accepted()).toBe(api.entries.at(-1)?.ordinal);
       // Re-open from the persisted send response so no optimistic composer state can supply the
-      // signal: only the correlated protocol-2 acceptance marker may make this recovered turn live.
+      // signal: only the durable accepted attempt projection may make this recovered turn live.
       const confirmed = await openThread();
       expect(confirmed.querySelector("[data-slot='companion-replying']")).not.toBeNull();
       expect(confirmed.textContent).toContain("read /tmp/conductor-cli.png");
@@ -554,6 +549,19 @@ describe("CompanionsApp send", () => {
     });
   });
 
+  it("posts a send immediately while an older thread GET is still in flight", async () => {
+    api = controlPlane({ holdThreadRead: true });
+    vi.stubGlobal("fetch", api.fetchMock);
+    const container = await openThread();
+    type(container, "Do not wait for the poll");
+
+    await pressEnter(container);
+
+    expect(api.posts()).toBe(1);
+    expect(api.sends).toHaveLength(1);
+    await act(async () => api.releaseThread());
+  });
+
   describe("when a send that woke an asleep Companion loses its request after persisting", () => {
     const asleep: Companion = {
       ...companion,
@@ -575,8 +583,8 @@ describe("CompanionsApp send", () => {
       const container = await openThread(asleep);
       const composer = type(container, "What year is it?");
 
-      // The wake outlives the proxy and the request comes back 500 over an already-durable turn. The
-      // composer keeps the draft so nothing typed is lost.
+      // The response is lost after the turn becomes durable. The composer keeps the draft so
+      // nothing typed is lost.
       await pressEnter(container);
       expect(composer.value).toBe("What year is it?");
 

@@ -33,7 +33,6 @@ const companionsApi = vi.hoisted(() => ({
   setDefaultCompanionProvider: vi.fn(),
   setCompanionProvider: vi.fn(),
   startCompanionRuntime: vi.fn(),
-  syncCompanionThread: vi.fn(),
   updateCompanionMemberState: vi.fn(),
 }));
 
@@ -129,6 +128,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
       last_observed_at: null,
       last_started_at: null,
       last_stopped_at: null,
+      latest_operation: null,
     },
     created_at: "2026-08-12T12:00:00.000Z",
     updated_at: "2026-08-12T12:00:00.000Z",
@@ -144,7 +144,6 @@ function thread(overrides: Partial<Thread> = {}): Thread {
     read_only: false,
     can_send: true,
     entries: [],
-    pending_count: 0,
     last_message_at: null,
     last_read_ordinal: null,
     ...overrides,
@@ -212,7 +211,6 @@ describe("CompanionsApp conversation list", () => {
     companionsApi.listCompanions.mockResolvedValue([companion()]);
     companionsApi.listCompanionProviders.mockResolvedValue(providers);
     companionsApi.getCompanionThread.mockResolvedValue(thread());
-    companionsApi.syncCompanionThread.mockResolvedValue(thread());
     companionsApi.getCompanionRuntime.mockResolvedValue(companion());
     companionsApi.deleteCompanionProvider.mockResolvedValue(undefined);
     companionsApi.saveCompanionProvider.mockResolvedValue({

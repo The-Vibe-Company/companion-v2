@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import {
@@ -22,7 +22,6 @@ const socketPath = optionalAbsolutePath("COMPANION_PI_SOCKET_PATH")
   ?? join(root, "state", "pi-broker.sock");
 const journalPath = optionalAbsolutePath("COMPANION_PI_JOURNAL_PATH")
   ?? join(root, "events");
-const compatibilityLogPath = join(root, "logs", "pi.rpc.ndjson");
 const maxLineBytes = optionalPositiveInteger("COMPANION_PI_MAX_LINE_BYTES")
   ?? COMPANION_PI_BROKER_MAX_LINE_BYTES;
 const segmentBytes = optionalPositiveInteger("COMPANION_PI_SEGMENT_BYTES");
@@ -185,12 +184,6 @@ async function main(): Promise<void> {
     invocationId,
     transport,
     journal,
-    appendCompatibilityEvent(event) {
-      appendFileSync(compatibilityLogPath, `${JSON.stringify(event)}\n`, {
-        encoding: "utf8",
-        mode: 0o600,
-      });
-    },
   });
   transport.bind({
     onEvent(record) {

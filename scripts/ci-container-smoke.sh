@@ -1,71 +1,90 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-for image in companion-api:ci companion-worker:ci companion-web:ci; do
+for image in companion-release:ci companion-api:ci companion-worker:ci companion-runtime:ci companion-web:ci; do
   test "$(docker image inspect --format '{{.Config.User}}' "$image")" = "node"
 done
-docker run --rm companion-api:ci test -f dist/runtime-role-grants.sql
+docker run --rm companion-release:ci test -f dist/runtime-role-grants.sql
+for runtime_asset in SKILL.md companion.json companion.integrity.json; do
+  docker run --rm companion-runtime:ci test -f "dist/companion-skill/$runtime_asset"
+done
+
+assert_container_env_unset() {
+  local container_id="$1"
+  local variable_name="$2"
+  local process_name="$3"
+  if docker exec "$container_id" printenv "$variable_name" >/dev/null 2>&1; then
+    echo "$process_name container must not receive $variable_name" >&2
+    exit 1
+  fi
+}
+
+: "${DATABASE_MIGRATION_URL:?DATABASE_MIGRATION_URL is required}"
+: "${DATABASE_API_URL:?DATABASE_API_URL is required}"
+: "${DATABASE_WORKER_URL:?DATABASE_WORKER_URL is required}"
+: "${DATABASE_COMPANION_RUNTIME_URL:?DATABASE_COMPANION_RUNTIME_URL is required}"
 
 network_args=(--network host)
 api_publish_args=()
 web_publish_args=()
-container_migration_url="${DATABASE_MIGRATION_URL:-$DATABASE_URL}"
-container_api_url="${DATABASE_API_URL:-${DATABASE_RUNTIME_URL:-$DATABASE_URL}}"
-container_worker_url="${DATABASE_WORKER_URL:-${DATABASE_RUNTIME_URL:-$DATABASE_URL}}"
+runtime_publish_args=()
+container_migration_url="$DATABASE_MIGRATION_URL"
+container_api_url="$DATABASE_API_URL"
+container_worker_url="$DATABASE_WORKER_URL"
+container_runtime_url="$DATABASE_COMPANION_RUNTIME_URL"
 if [ "$(uname -s)" = "Darwin" ]; then
   network_args=(--add-host host.docker.internal:host-gateway)
   api_publish_args=(-p 18082:18082)
   web_publish_args=(-p 18080:18080)
+  runtime_publish_args=(-p 18083:18083)
   container_migration_url="${container_migration_url/127.0.0.1/host.docker.internal}"
   container_api_url="${container_api_url/127.0.0.1/host.docker.internal}"
   container_worker_url="${container_worker_url/127.0.0.1/host.docker.internal}"
+  container_runtime_url="${container_runtime_url/127.0.0.1/host.docker.internal}"
 fi
 
-runtime_role_args=()
-if [ -n "${DATABASE_API_ROLE:-}" ] || [ -n "${DATABASE_WORKER_ROLE:-}" ]; then
-  runtime_role_args=(
-    -e "DATABASE_API_ROLE=${DATABASE_API_ROLE:-}"
-    -e "DATABASE_WORKER_ROLE=${DATABASE_WORKER_ROLE:-}"
-  )
-elif [ -n "${DATABASE_RUNTIME_ROLE:-}" ]; then
-  runtime_role_args=(-e "DATABASE_RUNTIME_ROLE=$DATABASE_RUNTIME_ROLE")
-fi
+runtime_role_args=(
+  -e "DATABASE_API_ROLE=${DATABASE_API_ROLE:-companion_api}"
+  -e "DATABASE_WORKER_ROLE=${DATABASE_WORKER_ROLE:-companion_worker}"
+  -e "DATABASE_COMPANION_RUNTIME_ROLE=${DATABASE_COMPANION_RUNTIME_ROLE:-companion_runtime_v2}"
+)
 
-# The pre-deploy entrypoints must execute, not merely re-export. A bundler that splits them into a
-# shared chunk leaves `node dist/migrate.js` exiting 0 without applying anything, which Railway
-# reports as a successful deploy onto an unmigrated database.
-if docker run --rm companion-api:ci node dist/migrate.js; then
+# The one-shot release entrypoints must execute, not merely re-export. A bundler that splits them
+# into a shared chunk leaves `node dist/migrate.js` exiting 0 without applying anything, which
+# Railway reports as a successful deploy onto an unmigrated database.
+if docker run --rm companion-release:ci node dist/migrate.js; then
   echo "dist/migrate.js exited 0 without a database URL; the entrypoint did not run" >&2
   exit 1
 fi
-if docker run --rm companion-api:ci node dist/cutover.js; then
+if docker run --rm companion-release:ci node dist/cutover.js; then
   echo "dist/cutover.js exited 0 without a command; the entrypoint did not run" >&2
   exit 1
 fi
-if docker run --rm companion-api:ci node dist/companionPurge.js; then
+if docker run --rm companion-runtime:ci node dist/companionPurge.js; then
   echo "dist/companionPurge.js exited 0 without a command; the entrypoint did not run" >&2
   exit 1
 fi
 
 docker run --rm "${network_args[@]}" \
-  -e DATABASE_URL="$container_api_url" \
   -e DATABASE_MIGRATION_URL="$container_migration_url" \
   "${runtime_role_args[@]}" \
-  companion-api:ci node dist/migrate.js
+  companion-release:ci node dist/migrate.js
 
-docker run --rm "${network_args[@]}" postgres:16-alpine \
+docker run --rm "${network_args[@]}" postgres:17-alpine \
   psql "$container_migration_url" -v ON_ERROR_STOP=1 -tAc \
   'select count(*) from drizzle.__drizzle_migrations' | grep -qE '^[1-9][0-9]*$'
 
 worker_id="$(docker run -d "${network_args[@]}" \
   -e COMPANION_BILLING_MODE=off \
-  -e COMPANION_SECRETS_MASTER_KEY=CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk= \
   -e DATABASE_URL="$container_worker_url" \
   companion-worker:ci)"
+runtime_hmac_secret="BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+runtime_box_key="ci-runtime-only-box-key"
+runtime_id=""
 api_id=""
 web_id=""
 cleanup() {
-  docker rm -f "$web_id" "$api_id" "$worker_id" >/dev/null 2>&1 || true
+  docker rm -f "$web_id" "$api_id" "$runtime_id" "$worker_id" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -77,6 +96,41 @@ for _ in $(seq 1 20); do
 done
 test "$(docker inspect --format '{{.State.Running}}' "$worker_id")" = "true"
 
+# Start the enabled production composition so the deployed bundle must load Box/S3 adapters and the
+# copied Companion skill. The freshly migrated database gate remains disabled, so this makes no Box
+# or object-storage call and cannot claim work.
+runtime_id="$(docker run -d "${network_args[@]}" "${runtime_publish_args[@]}" \
+  -e PORT=18083 \
+  -e COMPANION_RUNTIME_HOST=0.0.0.0 \
+  -e DATABASE_COMPANION_RUNTIME_URL="$container_runtime_url" \
+  -e COMPANION_COMPANIONS_ENABLED=true \
+  -e COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=example.test \
+  -e COMPANION_BOX_API_KEY="$runtime_box_key" \
+  -e COMPANION_RUNTIME_DESKTOP_HMAC_SECRET="$runtime_hmac_secret" \
+  -e COMPANION_SECRETS_MASTER_KEY=CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk= \
+  -e COMPANION_RELEASE_ID=container-smoke \
+  -e COMPANION_API_URL=http://127.0.0.1:18082 \
+  -e S3_ENDPOINT=http://127.0.0.1:19000 \
+  -e S3_REGION=us-east-1 \
+  -e S3_ACCESS_KEY_ID=container-smoke \
+  -e S3_SECRET_ACCESS_KEY=container-smoke-secret \
+  -e S3_BUCKET_SKILL_ARCHIVES=skill-archives \
+  -e S3_FORCE_PATH_STYLE=true \
+  companion-runtime:ci)"
+
+for _ in $(seq 1 60); do
+  if curl -fsS http://127.0.0.1:18083/healthz >/dev/null; then
+    break
+  fi
+  sleep 0.5
+done
+curl -fsS http://127.0.0.1:18083/healthz | grep -q '"release_id":"container-smoke"'
+test "$(docker exec "$runtime_id" printenv COMPANION_BOX_API_KEY)" = "$runtime_box_key"
+test "$(docker exec "$runtime_id" printenv DATABASE_COMPANION_RUNTIME_URL)" = "$container_runtime_url"
+test "$(docker exec "$runtime_id" printenv COMPANION_RUNTIME_DESKTOP_HMAC_SECRET)" = "$runtime_hmac_secret"
+assert_container_env_unset "$runtime_id" DATABASE_URL runtime
+assert_container_env_unset "$runtime_id" DATABASE_MIGRATION_URL runtime
+
 sleep 2
 test "$(docker inspect --format '{{.State.Running}}' "$worker_id")" = "true"
 
@@ -84,6 +138,8 @@ api_id="$(docker run -d "${network_args[@]}" "${api_publish_args[@]}" \
   -e PORT=18082 \
   -e COMPANION_API_HOST=0.0.0.0 \
   -e DATABASE_URL="$container_api_url" \
+  -e COMPANION_RUNTIME_PRIVATE_URL=http://127.0.0.1:18083 \
+  -e COMPANION_RUNTIME_DESKTOP_HMAC_SECRET="$runtime_hmac_secret" \
   -e COMPANION_WEB_URL=http://127.0.0.1:18080 \
   -e COMPANION_API_URL=http://127.0.0.1:18080 \
   -e BETTER_AUTH_URL=http://127.0.0.1:18080 \
@@ -98,6 +154,16 @@ for _ in $(seq 1 60); do
   sleep 0.5
 done
 curl -fsS http://127.0.0.1:18082/health
+test "$(docker exec "$api_id" printenv COMPANION_RUNTIME_PRIVATE_URL)" = "http://127.0.0.1:18083"
+test "$(docker exec "$api_id" printenv COMPANION_RUNTIME_DESKTOP_HMAC_SECRET)" = "$runtime_hmac_secret"
+assert_container_env_unset "$api_id" COMPANION_BOX_API_KEY API
+assert_container_env_unset "$api_id" DATABASE_COMPANION_RUNTIME_URL API
+assert_container_env_unset "$api_id" DATABASE_MIGRATION_URL API
+assert_container_env_unset "$worker_id" COMPANION_BOX_API_KEY worker
+assert_container_env_unset "$worker_id" DATABASE_COMPANION_RUNTIME_URL worker
+assert_container_env_unset "$worker_id" COMPANION_RUNTIME_PRIVATE_URL worker
+assert_container_env_unset "$worker_id" COMPANION_RUNTIME_DESKTOP_HMAC_SECRET worker
+assert_container_env_unset "$worker_id" COMPANION_SECRETS_MASTER_KEY worker
 
 web_id="$(docker run -d "${network_args[@]}" "${web_publish_args[@]}" \
   -e PORT=18080 \
@@ -111,3 +177,7 @@ for _ in $(seq 1 60); do
   sleep 0.5
 done
 curl -fsS http://127.0.0.1:18080/login >/dev/null
+assert_container_env_unset "$web_id" COMPANION_BOX_API_KEY web
+assert_container_env_unset "$web_id" DATABASE_COMPANION_RUNTIME_URL web
+assert_container_env_unset "$web_id" COMPANION_RUNTIME_PRIVATE_URL web
+assert_container_env_unset "$web_id" COMPANION_RUNTIME_DESKTOP_HMAC_SECRET web

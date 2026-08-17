@@ -10,9 +10,8 @@ export class ApiFetchError extends Error {
 
 /**
  * Every call gets a deadline. A fetch left without one can hang on a dead proxy or a laptop that
- * slept mid-request, and the thread queue serializes on it — one hung request then silently wedges
- * every poll and queued send behind it. Callers with a longer legitimate wait (a send riding a cold
- * Box wake) pass their own budget; a caller-provided signal still composes with the deadline.
+ * slept mid-request. Callers with a longer legitimate wait pass their own budget; a caller-provided
+ * signal still composes with the deadline.
  */
 export const API_FETCH_DEFAULT_TIMEOUT_MS = 20_000;
 

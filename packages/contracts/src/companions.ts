@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   companionActiveTurnSchema,
   companionInterruptedTurnSchema,
+  companionLatestOperationSchema,
   companionTurnSchema,
 } from "./companionRuntime";
 
@@ -271,6 +272,8 @@ export const companionSchema = z.object({
     last_observed_at: z.string().datetime().nullable(),
     last_started_at: z.string().datetime().nullable(),
     last_stopped_at: z.string().datetime().nullable(),
+    /** Latest durable lifecycle intent, sufficient to restore operation UI after navigation/reload. */
+    latest_operation: companionLatestOperationSchema.nullable(),
   }),
   created_at: z.string().datetime(),
   updated_at: z.string().datetime(),
@@ -466,8 +469,7 @@ export type CompanionTranscriptRole = CompanionTranscriptEntry["role"];
 
 /**
  * One Companion owns exactly one chat thread. The payload is the control-plane read model, so a
- * Viewer reads it without any Box contact; `can_send` reflects the Owner/Editor run boundary and
- * `pending_count` counts messages Pi has not received yet.
+ * Viewer reads it without any Box contact; `can_send` reflects the Owner/Editor run boundary.
  */
 export const companionThreadSchema = z.object({
   companion_id: z.string().uuid(),
@@ -483,16 +485,12 @@ export const companionThreadSchema = z.object({
   queued_count: z.number().int().nonnegative(),
   /** The queue-blocking ambiguous turn that requires explicit Retry or Cancel, if any. */
   interrupted_turn: companionInterruptedTurnSchema.nullable(),
-  /** Legacy pending-message count retained while older surfaces move to `queued_count`. */
-  pending_count: z.number().int().nonnegative(),
-  /** Correlated protocol-2 acceptance; absent while an older API replica serves the read. */
-  accepted_delivery_ordinal: z.number().int().nonnegative().nullable().optional(),
   last_message_at: z.string().datetime().nullable(),
   /**
    * This reader's own unread watermark (THE-351) as it stood *before* opening advanced it, so the
    * transcript can draw one divider where they left off. It is carried by the read that opens a
-   * thread; a send or a sync answers about what it just wrote and carries null, as does a reader who
-   * has never opened this thread. Null means "no divider", which is what a first visit looks like.
+   * thread; an accepted write answers about what it just wrote and carries null, as does a reader
+   * who has never opened this thread. Null means "no divider", which is what a first visit looks like.
    */
   last_read_ordinal: z.number().int().nonnegative().nullable().default(null),
 });
@@ -795,12 +793,6 @@ export const companionProviderErrorSchema = z.object({
   message: z.string(),
 });
 export type CompanionProviderError = z.infer<typeof companionProviderErrorSchema>;
-
-export const companionRuntimeStatusSchema = z.object({
-  companion: companionSchema,
-  source: z.enum(["control_plane", "box"]),
-});
-export type CompanionRuntimeStatus = z.infer<typeof companionRuntimeStatusSchema>;
 
 /**
  * How the minted desktop URL carries the screen. VNC is a plain WebSocket stream that survives

@@ -289,7 +289,6 @@ describe("CompanionPiBroker", () => {
       expect.objectContaining({ sequence: 2, attemptId: "attempt-1", event: { type: "agent_settled" } }),
     ]);
     expect(harness.journal.counters.unknownEvents).toBe(2);
-    expect(harness.compatibilityEvents).toEqual([{ type: "agent_start" }, { type: "agent_settled" }]);
   });
 
   it("binds the attempt before writing prompt so events racing its ACK stay correlated", async () => {
@@ -691,7 +690,6 @@ function brokerHarness(state: Partial<PiJsonObject> = {}): {
   journal: SegmentedCompanionPiJournal;
   transport: FakePiTransport;
   broker: CompanionPiBroker;
-  compatibilityEvents: PiJsonObject[];
 } {
   const directory = temporaryDirectory("pi-broker-");
   const journal = new SegmentedCompanionPiJournal({ directory, segmentBytes: 512 });
@@ -702,14 +700,12 @@ function brokerHarness(state: Partial<PiJsonObject> = {}): {
     model: { id: "model-1", input: ["text", "image"] },
     ...state,
   });
-  const compatibilityEvents: PiJsonObject[] = [];
   const broker = new CompanionPiBroker({
     invocationId: "invocation-1",
     journal,
     transport,
-    appendCompatibilityEvent: (event) => compatibilityEvents.push(event),
   });
-  return { directory, journal, transport, broker, compatibilityEvents };
+  return { directory, journal, transport, broker };
 }
 
 function temporaryDirectory(prefix: string): string {

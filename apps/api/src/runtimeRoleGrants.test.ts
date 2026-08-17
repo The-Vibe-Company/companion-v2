@@ -54,7 +54,6 @@ describe("Skills Hub runtime-role grants", () => {
       "companion_runtime_create_lease_row()",
       "companion_runtime_assert_v2_mutation()",
       "companion_runtime_require_v2_mutation()",
-      "companion_runtime_fence_legacy_token()",
       "companion_runtime_require_instance_at_commit()",
       "companion_runtime_assign_turn_sequence()",
       "companion_runtime_assign_operation_intent()",
@@ -136,57 +135,76 @@ describe("Skills Hub runtime-role grants", () => {
     expect(apiGrantLoop).not.toContain("companion_runtime_role");
   });
 
-  it("makes the Runtime v2 cutover a one-way downgrade for legacy executors", async () => {
+  it("requires three distinct active roles and fail-closed retirement of a detected union role", async () => {
     const sql = await readFile(await resolveRuntimeRoleGrantsFile(), "utf8");
-    const sentinel =
-      "IF pg_catalog.to_regprocedure('public.companion_runtime_gate_status()') IS NOT NULL THEN";
-    expect(sql).toContain(sentinel);
+    expect(sql).toContain("api_role text := nullif(current_setting('companion.api_role', true), '')");
+    expect(sql).toContain("worker_role text := nullif(current_setting('companion.worker_role', true), '')");
+    expect(sql).toContain(
+      "nullif(current_setting('companion.companion_runtime_role', true), '')",
+    );
+    expect(sql).toContain("companion API, worker, and runtime roles are required");
+    expect(sql).toContain("companion API, worker, and dedicated runtime roles must be distinct");
+    expect(sql).toContain("active companion database roles must not have cross-role membership");
+    expect(sql).toContain("current_setting('companion.retired_runtime_role', true)");
+    expect(sql).toContain("detected_legacy_union_roles");
+    expect(sql).toContain("legacy union runtime role detected but not named for retirement");
+    expect(sql).toContain("must already be NOLOGIN");
+    expect(sql).toContain("FROM pg_catalog.pg_stat_activity activity");
+    expect(sql).toContain("REVOKE ALL PRIVILEGES ON TABLES FROM %I");
+    expect(sql).toContain("REVOKE ALL PRIVILEGES ON SEQUENCES FROM %I");
+    expect(sql).toContain("REVOKE ALL PRIVILEGES ON FUNCTIONS FROM %I");
+    expect(sql).toContain("REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM %I");
+    expect(sql).toContain("REVOKE ALL PRIVILEGES ON SCHEMA public FROM %I");
+    expect(sql).toContain("REVOKE CONNECT, TEMPORARY ON DATABASE %I FROM %I");
+    expect(sql).toContain("companion.runtime_grants_nonce");
+    expect(sql).toContain("companion.runtime_grants_verified");
+    expect(sql.indexOf("set_config(\n    'companion.runtime_grants_verified'")).toBeGreaterThan(
+      sql.indexOf("FOREACH protected_function IN ARRAY shared_functions"),
+    );
 
-    for (const table of [
-      "public.companions",
-      "public.companion_runtime_pools",
-      "public.companion_workspace_access",
-      "public.companion_member_state",
-      "public.companion_threads",
-      "public.companion_transcript_entries",
-      "public.companion_reconcile_leases",
+    for (const retiredSurface of [
+      "companion.runtime_role",
+      "retired_companion_functions",
+      "companion_claim_delivery_lease",
+      "companion_release_delivery_lease",
+      "companion_renew_delivery_lease",
+      "companion_accept_delivery_lease",
+      "companion_expire_tool_runs",
+      "companion_claim_reconcile_candidates",
+      "companion_settle_reconcile_lease",
+      "companion_delivery_read_fence",
+      "companion_reconcile_leases",
     ]) {
-      expect(sql).toContain(`'${table}'::regclass`);
+      expect(sql).not.toContain(retiredSurface);
     }
-    expect(sql).toContain("REVOKE INSERT, UPDATE, DELETE ON TABLE %s FROM PUBLIC");
-    expect(sql).toContain("REVOKE INSERT, UPDATE, DELETE ON TABLE %s FROM %I");
+  });
 
-    for (const signature of [
-      "companion_claim_delivery_lease(uuid,uuid,uuid,integer)",
-      "companion_release_delivery_lease(uuid,uuid,uuid)",
-      "companion_renew_delivery_lease(uuid,uuid,uuid,integer)",
-      "companion_accept_delivery_lease(uuid,uuid,uuid,integer,integer)",
-      "companion_expire_tool_runs(uuid,uuid,timestamp with time zone,integer,integer)",
-      "companion_claim_reconcile_candidates(text,integer,integer,integer,integer)",
-      "companion_settle_reconcile_lease(uuid,uuid,text,text,integer)",
-    ]) {
-      expect(sql).toContain(`'public.${signature}'::regprocedure`);
-    }
+  it("installs mutually exclusive API, worker, and runtime function capabilities", async () => {
+    const sql = await readFile(await resolveRuntimeRoleGrantsFile(), "utf8");
+    const workerGrantLoop = sql.slice(
+      sql.indexOf("FOREACH protected_function IN ARRAY worker_functions"),
+      sql.indexOf("FOREACH protected_function IN ARRAY api_functions"),
+    );
+    expect(workerGrantLoop).toMatch(/protected_function,\s+api_role/);
+    expect(workerGrantLoop).toMatch(/protected_function,\s+companion_runtime_role/);
+    expect(workerGrantLoop).toMatch(/protected_function,\s+worker_role/);
 
-    const retiredFunctions = sql.slice(
-      sql.indexOf("retired_companion_functions := ARRAY["),
-      sql.indexOf("-- A migration owner can carry arbitrary"),
+    const apiGrantLoop = sql.slice(
+      sql.indexOf("FOREACH protected_function IN ARRAY api_functions"),
+      sql.indexOf("-- No process role receives direct access to Runtime v2"),
     );
-    expect(retiredFunctions).not.toContain("companion_delivery_read_fence");
-    expect(sql).toContain("public.companion_delivery_read_fence(uuid, uuid, text)");
+    expect(apiGrantLoop).toMatch(/protected_function,\s+worker_role/);
+    expect(apiGrantLoop).toMatch(/protected_function,\s+companion_runtime_role/);
+    expect(apiGrantLoop).toMatch(/protected_function,\s+api_role/);
 
-    const finalDowngrade = sql.lastIndexOf("FOREACH protected_function IN ARRAY retired_companion_functions");
-    const finalLegacyApiGrant = sql.lastIndexOf("public.companion_accept_delivery_lease");
-    const finalLegacyWorkerGrant = sql.lastIndexOf("public.companion_settle_reconcile_lease");
-    expect(finalDowngrade).toBeGreaterThan(finalLegacyApiGrant);
-    expect(finalDowngrade).toBeGreaterThan(finalLegacyWorkerGrant);
-    const cutoverBlock = sql.slice(
-      sql.lastIndexOf("Runtime v2 is a one-way cutover"),
-      sql.indexOf("END\n$companion_runtime_grants$"),
+    const runtimeGrantLoop = sql.slice(
+      sql.indexOf("FOREACH protected_function IN ARRAY companion_runtime_functions"),
+      sql.indexOf("-- Re-enable and trigger/helper functions are owner-only"),
     );
-    expect(cutoverBlock).toContain(
-      "REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM %I",
-    );
-    expect(cutoverBlock).toContain("REVOKE USAGE, SELECT ON SEQUENCES FROM %I");
+    expect(runtimeGrantLoop).toContain("acl.grantee <> protected_proc.proowner");
+    expect(runtimeGrantLoop).toMatch(/protected_function,\s+function_grantee/);
+    expect(runtimeGrantLoop).toMatch(/protected_function,\s+companion_runtime_role/);
+    expect(runtimeGrantLoop).not.toMatch(/protected_function,\s+api_role/);
+    expect(runtimeGrantLoop).not.toMatch(/protected_function,\s+worker_role/);
   });
 });

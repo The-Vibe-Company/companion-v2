@@ -42,6 +42,7 @@ export function composeRuntimeService(input: RuntimeServiceDependencies): Runtim
     host: input.config.listenHost,
     port: input.config.listenPort,
     sweepIntervalMs: input.config.sweepIntervalMs,
+    releaseId: input.config.releaseId,
     desktopHmacSecret: input.config.desktopHmacSecret,
     desktopMaxSkewSeconds: input.config.desktopMaxSkewSeconds,
     health: {

@@ -93,6 +93,7 @@ const asleep: Companion = {
     last_observed_at: null,
     last_started_at: null,
     last_stopped_at: null,
+    latest_operation: null,
   },
   created_at: "2026-08-12T12:00:00.000Z",
   updated_at: "2026-08-12T12:00:00.000Z",
@@ -163,8 +164,6 @@ function controlPlane(options: { piAcceptsOnWake: boolean; holdSend?: boolean })
       .filter((entry) => entry.role === "user")
       .filter((entry) => entry.ordinal > delivered).length,
     interrupted_turn: null,
-    pending_count: entries
-      .filter((entry) => entry.role === "user" && entry.ordinal > delivered).length,
     last_message_at: entries.at(-1)?.created_at ?? null,
     last_read_ordinal: null,
   });
@@ -243,13 +242,8 @@ function controlPlane(options: { piAcceptsOnWake: boolean; holdSend?: boolean })
         turn: projectedTurn("queued"),
       });
     }
-    if (method === "POST" && url.endsWith("/thread/sync")) {
-      deliverPending();
-      settleReplies();
-      return json({ thread: thread(), source: "box" });
-    }
     if (url.includes("/runtime")) {
-      return json({ companion: companion(), source: url.includes("live=true") ? "box" : "control_plane" });
+      return json({ companion: companion() });
     }
     if (url.includes("/thread")) {
       deliverPending();

@@ -84,6 +84,7 @@ function companionIn(state: "stopped" | "stopping" | "running" | "error"): Compa
       last_observed_at: null,
       last_started_at: null,
       last_stopped_at: null,
+      latest_operation: null,
     },
     created_at: "2026-08-12T12:00:00.000Z",
     updated_at: "2026-08-12T12:00:00.000Z",
@@ -100,7 +101,6 @@ const emptyThread: Thread = {
   active_turn: null,
   queued_count: 0,
   interrupted_turn: null,
-  pending_count: 0,
   last_message_at: null,
   last_read_ordinal: null,
 };

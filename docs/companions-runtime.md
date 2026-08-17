@@ -1,8 +1,8 @@
 # Companions Runtime v2
 
-This document is the normative Runtime v2 Box/Pi contract for the stacked rollout. Companion remains
-a Skills Hub at its core; the optional Companions surface adds one bounded hosted shape. Legacy
-orchestration may remain temporarily until cutover, but it is not the contract described here:
+This document is the normative, as-built Runtime v2 Box/Pi contract. Companion remains a Skills Hub
+at its core; the optional Companions surface adds one bounded hosted shape. The guarded cutover
+removed the legacy orchestration surface:
 
 ```text
 1 Companion = 1 durable thread = 1 persistent Box = 1 Pi daemon
@@ -50,11 +50,10 @@ so another replica can take over after expiry. A claim returned by PostgreSQL bu
 the engine is safe to release immediately. This path never substitutes for the feature-gate kill
 switch, which still explicitly interrupts active work.
 
-During the stacked deployment, the flag remains disabled from the destructive purge through the
-runtime-service layer. Those intermediate binaries install the fenced v2 schema but are not an
-activatable mixed-protocol release. The flag may be re-enabled only once the asynchronous API/web
-cutover is deployed; rollback after that point means disabling claims, never sending v2 rows back to
-the legacy executor.
+During the stacked deployment, the flag remained disabled from the destructive purge through the
+runtime-service layer. Those intermediate binaries installed the fenced v2 schema but were never an
+activatable mixed-protocol release. Now that the asynchronous cutover is complete, rollback means
+disabling claims, never sending v2 rows back to a legacy executor.
 
 ## Durable data model
 
@@ -369,9 +368,10 @@ shares, member states, threads, transcripts, and leases. It preserves provider c
 accounts, Skills, secret rows, organizations, users, billing, and audit history. The process is
 resumable after partial success.
 
-Legacy columns may remain during the stacked rollout solely for deployability; no backfill is
-performed. Final removal requires seven consecutive green real-provider canary days, no open P0/P1
-runtime issue, and no resource remaining in the purge report.
+The stacked rollout retained legacy columns solely for deployability and never backfilled them. The
+final migration removes them; its release gate requires seven consecutive green real-provider
+canary days, no open P0/P1 runtime issue, and no resource remaining in the purge report. The
+immutable purge ledger remains owner-readable evidence; its mutating finalizer no longer exists.
 
 ## Health, observability, and acceptance
 
@@ -391,6 +391,8 @@ Acceptance bounds:
 - absolute settlement under two hours plus one sweep.
 
 The deterministic simulator and real-provider canary requirements live in `docs/testing.md`.
+Production cutover, kill-switch, purge, incident, rollback, and canary procedures live in
+`docs/runbooks/companions-runtime.md`.
 
 ## Explicit exclusions
 

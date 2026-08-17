@@ -7,7 +7,22 @@ import { join } from "node:path";
  * an undeclared variable and the operator has no way to discover it. This guard scans the server
  * sources for Companions env reads and fails when one is missing from .env.example.
  */
-const COMPANIONS_ENV_PREFIXES = ["COMPANION_BOX_", "COMPANION_PI_", "COMPANION_COMPANIONS_"];
+const COMPANIONS_ENV_PREFIXES = [
+  "COMPANION_BOX_",
+  "COMPANION_PI_",
+  "COMPANION_RUNTIME_",
+  "COMPANION_COMPANIONS_",
+];
+
+// These variables exist only inside the generated, per-Box broker command.
+// They are created by apps/runtime for one correlated invocation and are not
+// deployment inputs, so advertising them in .env.example would be unsafe.
+const BOX_BROKER_INTERNAL_ENV = new Set([
+  "COMPANION_PI_BROKER_COMMAND",
+  "COMPANION_PI_BROKER_SOCKET",
+  "COMPANION_PI_BROKER_TIMEOUT_MS",
+  "COMPANION_PI_INVOCATION_ID",
+]);
 
 /**
  * Companions variables that are read through a constant rather than a literal member access, so the
@@ -18,16 +33,21 @@ export const COMPANIONS_INDIRECT_ENV = [
   "COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS",
   "COMPANION_COMPANIONS_ENABLED",
   "COMPANION_SECRETS_MASTER_KEY",
+  "COMPANION_API_URL",
+  "DATABASE_COMPANION_RUNTIME_URL",
 ];
 
 /** Deployed server sources. The agent-side skill scripts are deliberately excluded: their
  *  COMPANION_* variables are supplied by the delegated client, not by a Railway service. */
 const SOURCE_ROOTS = [
   "apps/api/src",
+  "apps/runtime/src",
   "apps/web/src",
   "apps/worker/src",
   "packages/core/src",
   "packages/db/src",
+  "packages/box-runtime/src",
+  "packages/companion-runtime/src",
 ];
 
 const SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".js", ".mjs"];
@@ -61,7 +81,10 @@ export function companionsEnvNamesInSource(text) {
   const names = new Set();
   for (const match of text.matchAll(/(?:process\.)?env\.(COMPANION_[A-Z0-9_]+)/g)) {
     const name = match[1];
-    if (COMPANIONS_ENV_PREFIXES.some((prefix) => name.startsWith(prefix))) names.add(name);
+    if (
+      COMPANIONS_ENV_PREFIXES.some((prefix) => name.startsWith(prefix))
+      && !BOX_BROKER_INTERNAL_ENV.has(name)
+    ) names.add(name);
   }
   return names;
 }

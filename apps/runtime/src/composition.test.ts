@@ -18,6 +18,7 @@ const baseConfig = {
   listenPort: 0,
   desktopMaxSkewSeconds: 30,
   shutdownDrainMs: 25_000,
+  releaseId: "production-2026-08-17.3",
 } as const;
 
 function dependencies(config: RuntimeServiceConfig) {

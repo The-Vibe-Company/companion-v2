@@ -675,8 +675,6 @@ export class BoxSimulator {
             counters: { ...record.machine.daemon.brokerCounters },
             restartCount: record.machine.daemon.restartCount,
             scenario: record.machine.daemon.scenario,
-            rpcLogBytes: Buffer.byteLength(record.machine.daemon.rpcLog, "utf8"),
-            rpcLogSha256: sha256(record.machine.daemon.rpcLog),
             stderrSha256: sha256(record.machine.daemon.stderrLog),
             unknownCommandDigests: [...record.machine.unknownCommandDigests],
           },

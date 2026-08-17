@@ -1,10 +1,14 @@
 # Companion v2
 
-Companion v2 is an open-source, self-hostable, multi-tenant **Skills Hub** for organizations and the coding agents their members already use.
+Companion v2 is an open-source, self-hostable, multi-tenant **Skills Hub at its core**, with an
+optional Companions control plane. It manages personal and organization `SKILL.md` libraries,
+labels, safe uploads, validation, immutable versions, dependencies, comments, installs and updates,
+public releases, GitHub synchronization, write-only skill secrets, and hosted Skill Databases.
 
-It manages personal and organization `SKILL.md` libraries, labels, safe uploads, validation, immutable versions, dependencies, comments, installs and updates, public releases, GitHub synchronization, write-only skill secrets, and hosted Skill Databases.
-
-Companion does **not** create, launch, run, resume, chat with, or deploy agents. External coding agents connect as delegated Skills Hub clients through Agent Auth.
+When Companions are enabled, each Companion is one named teammate with one persistent
+[box.ascii.dev](https://box.ascii.dev) Box, one Pi daemon, and one durable chat thread. External
+coding agents remain delegated Skills Hub clients through Agent Auth; Companion does not turn them
+into hosted Companions or launch them as a runtime harness.
 
 ## Product model
 
@@ -15,20 +19,30 @@ Companion does **not** create, launch, run, resume, chat with, or deploy agents.
 - Personal skills are creator-only, including against admins.
 - **Share** is the one-way, owner-only `personal → org` transition.
 - Labels organize each library; install rows track organization skills used by a member.
+- A hosted Companion has an immutable Owner and optional workspace-wide Editor or Viewer access.
 
 ## Repository
 
 ```text
-apps/web       Next.js Skills workspace
-apps/api       REST/tRPC API
-apps/worker    GitHub, billing, and Skill Database maintenance
-cli            Companion skill CLI
-packages/      auth, billing, contracts, core, db, skills, skilldb, storage, GitHub
-docs/          product and architecture
-deploy/        self-hosted and Railway deployment
+apps/web                    Next.js Skills workspace and Companion threads
+apps/api                    REST/tRPC authorization and durable control-plane intent
+apps/worker                 GitHub, billing, and Skill Database maintenance
+apps/runtime                sole Box/Pi lifecycle and durable-turn executor
+cli                         Companion skill CLI
+packages/box-runtime        ascii.dev transport and layout-14 Pi broker
+packages/companion-runtime  Runtime v2 state machine
+packages/                   auth, billing, contracts, core, db, skills, skilldb, storage, GitHub
+docs/                       product, architecture, testing, and operations
+deploy/                     self-hosted and Railway deployment
 ```
 
-See [vision](docs/vision.md), [product](docs/product.md), [architecture](docs/design.md), [PRD](docs/PRD.md), and [testing](docs/testing.md).
+The API persists an accepted message or lifecycle operation and returns; it never calls Box or Pi.
+`apps/runtime` is the only process that receives `COMPANION_BOX_API_KEY`, claims runtime work, or
+owns a runtime lease. API, worker, and runtime use three distinct least-privilege PostgreSQL roles.
+
+See [vision](docs/vision.md), [product](docs/product.md), [architecture](docs/design.md),
+[Companions Runtime v2](docs/companions-runtime.md), [PRD](docs/PRD.md), and
+[testing](docs/testing.md).
 
 ## Local development
 
@@ -38,55 +52,60 @@ Requirements: Node.js 20+, pnpm 9, PostgreSQL, and optionally MinIO/Mailpit.
 corepack enable
 pnpm install
 cp .env.example .env
-pnpm compose:up
-pnpm db:migrate
-pnpm db:seed
 pnpm dev
 ```
 
-Conductor uses `.conductor/settings.toml` and `bash scripts/dev-conductor.sh` for isolated native services.
+The launcher starts the local dependencies, creates the distinct API/worker/runtime database roles,
+runs the guarded two-phase migration and grants step, seeds the test user, then starts all four
+processes. Direct `pnpm db:migrate` is also the same two-phase runner and requires the migration URL
+plus all three application role names; raw `drizzle-kit migrate` cannot cross Runtime v2 migration
+0093 safely.
+
+The application topology is web, API, worker, and private runtime. Conductor uses
+`.conductor/settings.toml` and `bash scripts/dev-conductor.sh` to give each workspace isolated
+PostgreSQL, optional MinIO/Mailpit, unique cookies, and non-conflicting ports.
 
 ### Companions runtime
 
-Companions are disabled by default. To expose the authenticated list/create shell, workspace
-provider connections, and control-plane API, set the same server-side flag for both web and API,
-then restart:
+Companions are disabled by default. To enable them, set the same flag and exact-domain allowlist on
+web, API, and runtime, then restart those services:
 
 ```bash
 COMPANION_COMPANIONS_ENABLED=true
-# Required exact-domain allowlist (comma-separated and case-insensitive):
-COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=thevibecompany.co
+COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=example.com
 ```
 
-With the flag unset or `false`, `/companions`, `/v1/companions`, and `/v1/companion-providers`
-return not found and no Companions navigation is rendered. The same fail-closed behavior applies when
-the flag is `true` but the allowlist is unset or empty. With both values configured, users need an
-exact matching email domain. Missing or malformed emails are always denied.
+With either value missing, Companion routes and navigation stay absent and runtime claims stay off.
+The flag is also the operational kill switch after Runtime v2 data exists; rollback never sends v2
+rows to a legacy executor.
 
-Once Companions is enabled, the Pi/Box harness itself still stays out of the web shell: a thread has
-a compact provider picker, one Box status chip, and one Computer panel showing that Box's desktop,
-but no Pi, runtime, or harness controls of its own.
-
-Configured Owner/Editor lifecycle calls use Pi inside a no-env [Box](https://box.ascii.dev). Set:
+Runtime needs its dedicated database URL, the public API origin reachable from Box, and the sole
+copy of the Box key. API reaches only the runtime's private desktop endpoint. The two services share
+a short-request HMAC key generated independently from the envelope-encryption master key:
 
 ```bash
+# runtime only
+DATABASE_COMPANION_RUNTIME_URL=postgres://companion_runtime_v2:...@127.0.0.1:5432/companion
 COMPANION_BOX_API_KEY=box_...
-# Optional overrides:
-COMPANION_BOX_API_BASE=https://ascii.dev/api/box/v1
-COMPANION_BOX_ENVIRONMENT=base
-# Refreshed after each message Pi accepts; the default idle window is six hours.
-COMPANION_BOX_TTL_SECONDS=21600
-COMPANION_PI_INSTALL_COMMAND='npm install --global @earendil-works/pi-coding-agent@<pin>'
-COMPANION_PI_MCP_ADAPTER_PACKAGE=npm:pi-mcp-adapter@2.12.1
+COMPANION_API_URL=http://127.0.0.1:3001
+COMPANION_RUNTIME_HOST=127.0.0.1
+COMPANION_RUNTIME_PORT=3007
+
+# API + runtime only; base64-encoded 32 random bytes
+COMPANION_RUNTIME_DESKTOP_HMAC_SECRET=...
+
+# API only
+COMPANION_RUNTIME_PRIVATE_URL=http://127.0.0.1:3007
 ```
 
-Prefer a Box environment/template with Pi already pinned and omit the install command. Never put
-provider credentials in these variables; workspace model-provider credentials are
-envelope-encrypted and only the selected Pi auth entry is delivered to Box. Web and mobile-web
-lifecycle starts inject the actor's valid Installed packages as native Pi Skills. Native-mobile
-starts inject no skills. Labeled MCP accounts are accepted by the same start API and converted to
-adapter config with environment references only, while their values travel in the transient
-`mcp_credentials` channel. See `docs/companions-runtime.md`.
+Runtime also needs the envelope master key and read access to selected Skill archives. Prefer a Box
+environment with Pi pinned; otherwise configure an operator-pinned `COMPANION_PI_INSTALL_COMMAND`.
+The Box TTL is fixed at six hours after successful Pi acceptance. There is no prewarm, Wake button,
+or automatic Full Box recovery.
+
+See the [Runtime v2 operations runbook](docs/runbooks/companions-runtime.md) for cutover, purge,
+kill-switch, incident, rollback, and canary procedures. Railway deployment details live in
+[deploy/railway/README.md](deploy/railway/README.md).
 
 ## Verification
 

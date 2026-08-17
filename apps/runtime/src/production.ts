@@ -21,7 +21,6 @@ import {
 } from "@companion/storage";
 
 import { createRuntimeBoxControl, createRuntimePiControl } from "./boxAdapters";
-import { preventImplicitBoxCreate } from "./boxGuard";
 import { composeRuntimeService, type RuntimeService } from "./composition";
 import { loadRuntimeServiceConfig, type RuntimeServiceConfig } from "./config";
 import { createRuntimeDatabase, type RuntimeDatabase } from "./database";
@@ -124,11 +123,9 @@ export async function buildProductionRuntimeService(
 
     const boxEnv = runtimeBoxEnvironment(config, env);
     const lifecycle = factories.createLifecycle(boxEnv);
-    // AsciiBoxCompanionRuntime historically held one broad-start signal. A new instance for every
-    // call makes signal ownership local even though Runtime v2 only uses its granular primitives.
-    const freshRuntime = (): CompanionBoxRuntimeV2 => preventImplicitBoxCreate(
-      factories.createBoxRuntime(boxEnv),
-    );
+    // Staging is a multi-request transaction with one shared abort budget. Keep adapter instances
+    // call-local so that budget cannot leak into a later lifecycle or broker operation.
+    const freshRuntime = (): CompanionBoxRuntimeV2 => factories.createBoxRuntime(boxEnv);
     archiveStorage = factories.createArchiveStorage();
     const bundledSkill = await factories.loadBundledSkill();
     const material = createRuntimeMaterialPipeline({

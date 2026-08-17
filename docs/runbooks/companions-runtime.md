@@ -1,0 +1,307 @@
+# Companions Runtime v2 operations
+
+This runbook covers the production Runtime v2 boundary: migration and cutover, permanent legacy
+purge, kill switch, incident response, rollback, and the daily real-provider canary. The state
+machine and protocol contract remain authoritative in `docs/companions-runtime.md`; Railway-specific
+configuration lives in `deploy/railway/README.md`.
+
+## Safety rules
+
+- `apps/runtime` is the only long-lived process with the Box key or permission to claim Runtime v2
+  work. API and worker must not receive either capability.
+- Run schema changes as the migration owner in an ephemeral release job. Never inject that owner
+  credential into a long-lived process. Run API, worker, and runtime through three distinct `LOGIN
+  NOSUPERUSER NOBYPASSRLS NOINHERIT` roles.
+- Keep the runtime desktop endpoint private even though requests are HMAC authenticated. Never
+  persist or log its returned signed URL.
+- Never replay a dispatch automatically once the prompt may have been written. Mark it interrupted
+  and require an Owner/Editor Retry or Cancel decision.
+- Never use Full Box restart as automatic repair. Never delete a Box unless an explicit user delete
+  or the audited legacy-purge procedure owns it.
+- Do not put provider payloads, tokens, signed URLs, raw Pi lines, auth files, or decrypted material
+  in a command transcript, incident ticket, log search, or database error field.
+
+Record the environment, release commit, operator/change id, database backup id, gate epoch, purge
+report checksum, and canary result for every production change. Do not record secret values.
+
+## Release and migration
+
+1. Confirm API `/health` and runtime `/healthz` are green on the current release. Resolve any open
+   P0/P1 runtime incident before continuing.
+2. Back up PostgreSQL and object storage. A database rollback does not roll back external Boxes, so
+   record the Box environment/account separately.
+3. Verify the API, worker, and runtime connection URLs identify different restricted roles. Verify
+   the runtime role has narrow function execution only and no direct table privilege.
+4. Deploy the one-shot release job with the owner URL and pass the exact API, worker, and runtime
+   role names to the grants script. For an upgrade from the historical union credential, first make
+   that role `NOLOGIN`, drain every `pg_stat_activity` session, remove its role memberships, and pass
+   its exact name as `DATABASE_RETIRED_RUNTIME_ROLE`; `DATABASE_RUNTIME_ROLE` is rejected. The runner
+   commits the compatible schema through 0092, validates/revokes grants, and only then applies 0093 on the same
+   connection, followed by every later migration in the full journal. A failure after the first
+   pass is a one-way disabled checkpoint, not permission to restart an old executor. Start the
+   matching application processes only after the release deployment exits zero and is marked
+   `Completed`. The API service must not receive the owner URL or role-name variables.
+5. Deploy API, worker, runtime, and web from the same commit. Keep `drainingSeconds` at least 30 and
+   the runtime drain timeout below its fixed 30-second lease.
+6. Check API `/health`, runtime `/healthz`, login, Skills browser smoke, and public package download.
+
+For ordinary compatible Runtime v2 releases, use rolling deployment. One runtime replica receiving
+SIGTERM stops new claims, reaches bounded safe checkpoints, and releases or loses its leases; another
+replica must take over within 45 seconds. Do not clear lease rows or edit epochs manually.
+
+## Legacy purge
+
+The purge is mandatory for an installation with pre-v2 Companions. It deletes legacy Companions,
+transcripts, runtime state, and Boxes; there is no history migration. Provider connections, member
+MCP accounts, Skills, secrets, users, organizations, billing, and audit history must survive.
+
+### Prepare
+
+1. Take a fresh PostgreSQL backup.
+2. Set `COMPANION_COMPANIONS_ENABLED=false` on web, API, and runtime, then deploy. The purge rejects
+   every value other than explicit `false` and takes the migration advisory lock.
+3. Wait for the runtime to stop claims and for active work to become interrupted. Keep public
+   Companion traffic quiesced until cutover completes.
+4. Run the command as an ephemeral private execution of the **runtime image**, never in the API
+   image. Supply only for that execution:
+   - `DATABASE_MIGRATION_URL`, using the migration owner;
+   - `COMPANION_BOX_API_KEY` and, if needed, `COMPANION_BOX_API_BASE`;
+   - `COMPANION_COMPANIONS_ENABLED=false`;
+   - optional bounded delete polling values.
+
+Do not add the migration-owner URL to the long-lived runtime service. Do not run a deployment
+migration concurrently with the purge.
+
+### Inventory and delete
+
+Save both non-destructive outputs before approving deletion:
+
+```bash
+node dist/companionPurge.js report
+node dist/companionPurge.js purge --dry-run
+```
+
+Review every database `box_id`, every provider Box matching an exact supported legacy name, and
+every excluded near-match. Generation-qualified Runtime v2 names must not be targets. If the report
+cannot list provider state completely, stop.
+
+After independent review, run the explicit destructive mode:
+
+```bash
+node dist/companionPurge.js purge --confirm-delete-all-companions
+```
+
+The command must persist delete intent, send permanent-delete confirmation, save the provider
+operation id, and wait for the asynchronous result. A delete `404` means already absent. A blocked
+operation, poll `404`, malformed result, timeout, or any other provider error blocks cutover and
+leaves PostgreSQL ownership intact. Correct the cause and rerun; saved operations are resumed rather
+than submitted twice.
+
+Only after every provider target is `completed` or `absent` may the finalizer delete legacy database
+rows. Save the final report and its checksum. It must show:
+
+- zero legacy Companion, pool, share, member-state, transcript, watermark, and lease rows;
+- zero unresolved purge-ledger operation;
+- zero exact-name legacy Box still owned by the provider;
+- the retained operation ids for audit;
+- the command's preserved-data declaration, plus an independent before/after count confirming
+  provider connections and MCP accounts still present.
+
+Do not deploy final legacy-removal migrations when any item remains.
+
+## Runtime v2 cutover
+
+1. Complete and archive the legacy purge report while the feature flag and database gate are off.
+2. Deploy the asynchronous API/web, dedicated runtime, separated role grants, and Runtime v2 schema
+   from one compatible stack. No legacy executor may be restarted against v2 rows.
+3. Configure on web, API, and runtime:
+
+   ```dotenv
+   COMPANION_COMPANIONS_ENABLED=true
+   COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=example.com
+   ```
+
+4. Give API only its private runtime URL and the desktop HMAC. Give runtime its dedicated DB URL,
+   Box/Pi configuration, the same HMAC, envelope master key, public API origin, and read-only Skill
+   archive access. Confirm API and worker environments contain no Box key.
+5. Deploy runtime first, then API and web, with Companion traffic still quiesced. Require runtime
+   `/healthz` to report PostgreSQL, claim loop, and sweep freshness healthy.
+6. As the migration owner, read the compare-and-set epoch:
+
+   ```sql
+   select enabled, gate_epoch, updated_at
+   from public.companion_runtime_gate_status();
+   ```
+
+7. If it is disabled and the observation is still current, enable it with a traceable change id:
+
+   ```sql
+   select enabled, gate_epoch, updated_at
+   from public.companion_runtime_enable(<observed_gate_epoch>, 'cutover-<change-id>');
+   ```
+
+   A stale-epoch failure is protective. Re-read state and investigate who changed it; do not retry
+   with a guessed epoch. Runtime deliberately cannot enable this gate itself.
+8. Restore traffic. Execute the acceptance smoke: cold send to durable reply, desktop authorization,
+   stop, send-as-wake, second reply, and permanent delete. Confirm Viewer and cross-tenant reads made
+   no Box call.
+
+The guarded final legacy-removal migration in this release may be deployed only after seven
+consecutive green daily real-provider canaries, no open P0/P1 runtime issue, and an empty purge
+report. An installation missing any prerequisite must remain on its disabled purge-capable release;
+there is no compatibility mode in the final runtime.
+
+Immediately before that final migration, disable the database gate again with its observed epoch,
+set the three feature-flag consumers false, and wait until every lease is neutral. Migration 0093
+rejects an enabled gate or active claim even when the earlier purge evidence is complete. Re-run the
+saved purge report. If a historical union database role exists, make it `NOLOGIN`, wait until
+`pg_stat_activity` has no session for it, remove its memberships, and configure
+`DATABASE_RETIRED_RUNTIME_ROLE`; the grants preflight removes its current and default ACLs before
+0093. Deploy the final migration through the one-shot release job, require `Completed`, and only then
+deploy all four processes from that same commit before following the explicit enable procedure
+above. The preceding seven-day canary evidence authorizes this cutover; it does not authorize
+migrating while Runtime v2 is still claiming work.
+
+## Kill switch
+
+Use the kill switch for provider instability, unsafe duplicate execution, credential exposure,
+broken fencing, corrupt projection, or any incident where continued claims may cause harm.
+
+### Immediate fence
+
+1. As the migration owner, read `companion_runtime_gate_status()` and call:
+
+   ```sql
+   select enabled, gate_epoch, updated_at
+   from public.companion_runtime_disable(<observed_gate_epoch>, 'incident-<id>');
+   ```
+
+   This increments the epoch, invalidates leases, interrupts active attempts/operations, and fences
+   later checkpoints. A provider request already on the wire may still have succeeded externally.
+2. Set `COMPANION_COMPANIONS_ENABLED=false` on runtime, API, and web and deploy runtime first. This
+   prevents new claims and then removes new Companion intent/navigation at ingress.
+3. Verify the gate is disabled, all leases are fenced, and no turn/operation remains in an active
+   state. Queued durable work may remain; do not delete it to make a dashboard look clear.
+4. Preserve expurgated metrics and identifiers. Never capture raw provider/Pi payloads.
+
+The ordinary flag-off path performs a bounded drain before interruption. Use the direct database
+fence when waiting for a rolling deployment is unsafe.
+
+### Re-enable
+
+Re-enable only after the cause is corrected, an empty-claim dry observation is healthy, and an
+Owner/Editor communication plan exists for interrupted turns. Deploy all three flag consumers with
+the flag on, verify `/healthz`, then have the migration owner call `companion_runtime_enable` with
+the newly observed epoch. Interrupted turns remain explicit Retry/Cancel decisions; enabling the
+gate never replays them.
+
+## Incident response
+
+### Runtime `/healthz` is 503
+
+Inspect only its structured checks:
+
+- `database=false`: verify the private database path and restricted runtime login. Do not substitute
+  the API or owner URL.
+- `claim_loop=false`: stop new claims, preserve the first stable error code, and roll one replica.
+  If another replica cannot take over within 45 seconds, engage the kill switch.
+- `sweep_fresh=false`: look for event-loop starvation or a stuck sweep. A process that still accepts
+  TCP traffic is not healthy; roll it or disable claims.
+
+Do not make the health endpoint public and do not weaken it to satisfy Railway readiness.
+
+### Turn is interrupted or Pi is silent
+
+The ten-minute inactivity deadline and two-hour absolute deadline must settle visibly. If prompt
+write/ACK outcome is ambiguous, warn that earlier external effects may have succeeded and expose
+Retry/Cancel only. Retry creates a new attempt and recycles Pi; it does not restart the Box. Never
+manually mark an ambiguous attempt queued.
+
+### Box lifecycle/provider outage
+
+The runtime retries only idempotent lifecycle calls on network, 429, and 5xx failures. For create,
+it discovers the generation-qualified name before retrying and selects one canonical Box. Do not
+manually delete suspected duplicates until their generation and ownership are proven. A permanent
+delete failure keeps the operation and ownership rows; never finalize them by hand.
+
+### Desktop failures
+
+Desktop is not a wake path. Verify private DNS, runtime port, clock skew, and that API/runtime share
+the current HMAC. Rotate the HMAC on both services together. Never paste a minted URL into logs or
+tickets, and never grant Viewer a fallback direct Box path.
+
+### Suspected secret exposure
+
+Fence claims first. Rotate the Box key on runtime only, the desktop HMAC on API and runtime, and the
+affected provider/MCP or envelope credentials according to their own procedures. Search logs only
+for stable identifiers and error codes; do not broaden collection to raw bodies.
+
+## Rollback
+
+After Runtime v2 data exists, rollback means **kill switch plus roll-forward-compatible v2 code**:
+
+1. Fence the database gate and set the three flag consumers false.
+2. Snapshot PostgreSQL and inventory external Box operations before changing code.
+3. Deploy the last known-good build only if it understands the current Runtime v2 schema and fencing
+   protocol. Never deploy a legacy API/worker executor and never replay interrupted attempts.
+4. Repair forward, run simulator/PostgreSQL acceptance, deploy with claims still off, then follow the
+   explicit re-enable procedure.
+
+A database restore is disaster recovery, not an application rollback. It can make PostgreSQL older
+than external Box side effects. If restoration is unavoidable, leave claims off, inventory every
+generation-qualified Box and delete operation, reconcile ownership manually, and obtain incident
+approval before enabling. Re-enabling the feature flag alone never enables the database gate.
+
+## Daily real-provider canary
+
+Run this outside merge-blocking simulator CI against the production-equivalent Box environment. Use
+a dedicated canary owner/provider connection and a disposable Companion name containing the run id.
+The separate `Companion Runtime Real-Provider Canary` workflow runs daily and on manual dispatch;
+locally, the identical entrypoint is `pnpm canary:companions-runtime`.
+
+Configure these workflow secrets for the dedicated account:
+
+- `COMPANION_CANARY_API_URL`;
+- `COMPANION_CANARY_EMAIL` and `COMPANION_CANARY_PASSWORD`;
+- `COMPANION_CANARY_ORG_ID`;
+- `COMPANION_CANARY_PROVIDER_ID` and `COMPANION_CANARY_MODEL_ID`;
+- `COMPANION_CANARY_IMAGE_URL`, an unauthenticated HTTPS fixture containing a unique uppercase OCR
+  code that is not present in its URL;
+- `COMPANION_CANARY_IMAGE_EXPECTED_TEXT`, that exact 4–64 character OCR code. The prompt never
+  includes it, and the vision phase fails unless the durable assistant reply contains it;
+- `COMPANION_CANARY_RELEASE_ID`, the immutable API/runtime deployment identifier targeted by the
+  canary. Configure the same value as `COMPANION_RELEASE_ID` on API and runtime; the canary compares
+  the API `/health` value before login. Do not use the workflow checkout SHA unless it is also the
+  deployed release. Runtime `/healthz` exposes the same non-secret value for private operational
+  verification.
+
+Rotate the OCR fixture and expected text whenever the image leaks into a prompt, log, or test
+artifact. The expected value is comparison-only configuration and must never be interpolated into
+the Companion prompt.
+
+The login cookie exists in process memory only. Output is restricted to phase, duration, stable
+code, runtime generation when the API exposes it, target release id, and cleanup status; it never
+prints response bodies, credentials, cookies, image URLs, or signed URLs. Missing or invalid
+configuration emits `not_configured` and exits nonzero, so an unconfigured schedule can never count
+as green.
+
+Every run must:
+
+1. create a Companion and cold-send a correlation string;
+2. receive the correlated durable reply within the cold-start deadline;
+3. stage and read the configured image fixture with a vision-capable model, then return its hidden
+   OCR code (echoing only the prompt correlation marker is a failure);
+4. stop the Box without deleting it;
+5. send again, proving send-only wake and receiving a second correlated reply;
+6. request permanent deletion, wait for its operation to complete, and verify no Box or Companion
+   ownership remains.
+
+Record phase timings, stable error codes, Box generation, target release id, and final cleanup status.
+Never record response bodies that might contain user/provider material. A skipped phase, cleanup
+failure, missing fixture, missing credential, or missing provider secret is `not configured` or
+failed—never green.
+
+Legacy removal eligibility requires seven consecutive green calendar-day runs for the exact target
+environment, an empty purge report, and no open P0/P1 runtime issue. Reset the streak after a failed
+or unconfigured run, a material Box/Pi layout change, or a credential/environment change that makes
+the preceding evidence non-comparable.

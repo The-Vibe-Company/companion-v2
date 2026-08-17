@@ -2,7 +2,7 @@
 # =============================================================================
 # scripts/dev-conductor.sh — Conductor dev launcher for Companion v2, WITHOUT
 # Docker. Runs Postgres + MinIO + Mailpit as native per-workspace services and
-# launches the API + web apps via concurrently. Local workspaces derive every
+# launches API, worker, runtime, and web via concurrently. Local workspaces derive every
 # port from the Conductor port range (CONDUCTOR_PORT + offset); isolated cloud
 # workspaces use the fixed fallback range starting at 3000. All state lives in
 # .conductor-pg/ and is torn down by `archive`.
@@ -23,7 +23,9 @@
 #   +4  MinIO console
 #   +5  Mailpit SMTP
 #   +6  Mailpit web UI
-#   +7..+9 reserved
+#   +7  Companion runtime (private)
+#   +8  deterministic Box/Pi simulator (when no real Box key is configured)
+#   +9  reserved
 # =============================================================================
 
 set -euo pipefail
@@ -31,7 +33,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Load the repo-root .env (if present) so GitHub, storage, email and skill-secret settings reach the
-# API and worker without depending on the launcher's environment. dotenv semantics: never overrides variables
+# child processes without depending on the launcher's environment. Per-process
+# wrappers remove credentials outside each process's trust boundary. Dotenv semantics: never overrides variables
 # already in the environment, and skips empty assignments (a copied .env.example full of empty
 # values must not nuke exported shell vars).
 if [ "${COMPANION_DEV_SKIP_ENV_FILE:-0}" != "1" ] && [ -f "$REPO_ROOT/.env" ]; then
@@ -82,7 +85,7 @@ ${BOLD}dev-conductor.sh${RESET} — Companion v2 Conductor dev stack, native (no
 Usage: bash scripts/dev-conductor.sh [command] [options]
 
 Commands:
-  run               Start Postgres/MinIO/Mailpit + API + web (default)
+  run               Start Postgres/MinIO/Mailpit + API + worker + runtime + web (default)
   archive           Stop native services and remove .conductor-pg/
 
 Options:
@@ -167,9 +170,11 @@ MINIO_API_PORT=$((BASE + 3))
 MINIO_CONSOLE_PORT=$((BASE + 4))
 MAILPIT_SMTP_PORT=$((BASE + 5))
 MAILPIT_UI_PORT=$((BASE + 6))
+RUNTIME_PORT=$((BASE + 7))
+BOX_SIM_PORT=$((BASE + 8))
 
 # Only the web process is reachable through Conductor's cloud port forward.
-# API, Postgres, MinIO, and Mailpit stay bound to loopback.
+# API, runtime, Postgres, MinIO, Mailpit, and the simulator stay bound to loopback.
 WEB_BIND_HOST="127.0.0.1"
 if [ "$CONDUCTOR_IS_CLOUD" = true ]; then
   WEB_BIND_HOST="0.0.0.0"
@@ -195,6 +200,7 @@ PROJECT="$(workspace_slug)"
 STATE_DIR="$REPO_ROOT/.conductor-pg"
 RUN_LOCK="$STATE_DIR/run.lock"
 SECRETS_KEY_FILE="$STATE_DIR/secrets-master-key"
+RUNTIME_HMAC_KEY_FILE="$STATE_DIR/runtime-desktop-hmac-key"
 PG_DATA="$STATE_DIR/postgres/data"
 # Socket lives in a short /tmp path, NOT under the (long) workspace dir: the
 # Unix-domain socket path has a hard 103-byte limit and Conductor workspace
@@ -217,13 +223,17 @@ PG_API_USER="companion_api"
 PG_API_PASS="companion-api"
 PG_WORKER_USER="companion_worker"
 PG_WORKER_PASS="companion-worker"
+PG_RUNTIME_USER="companion_runtime_v2"
+PG_RUNTIME_PASS="companion-runtime-v2"
 PG_DB="companion"
 DATABASE_API_URL="postgres://${PG_API_USER}:${PG_API_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
 DATABASE_WORKER_URL="postgres://${PG_WORKER_USER}:${PG_WORKER_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
+DATABASE_COMPANION_RUNTIME_URL="postgres://${PG_RUNTIME_USER}:${PG_RUNTIME_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
 DATABASE_MIGRATION_URL="postgres://${PG_OWNER_USER}:${PG_OWNER_PASS}@127.0.0.1:${PG_PORT}/${PG_DB}"
 
 WEB_URL="http://127.0.0.1:${WEB_PORT}"
 API_URL="http://127.0.0.1:${API_PORT}"
+RUNTIME_URL="http://127.0.0.1:${RUNTIME_PORT}"
 
 S3_ACCESS_KEY_ID="companion"
 S3_SECRET_ACCESS_KEY="companion-secret"
@@ -385,6 +395,22 @@ ensure_secrets_master_key() {
   export COMPANION_SECRETS_MASTER_KEY
 }
 
+ensure_runtime_hmac_key() {
+  if [ -n "${COMPANION_RUNTIME_DESKTOP_HMAC_SECRET:-}" ]; then
+    export COMPANION_RUNTIME_DESKTOP_HMAC_SECRET
+    return
+  fi
+  mkdir -p "$STATE_DIR"
+  chmod 700 "$STATE_DIR"
+  if [ ! -s "$RUNTIME_HMAC_KEY_FILE" ]; then
+    umask 077
+    node -e "process.stdout.write(require('crypto').randomBytes(32).toString('base64'))" >"$RUNTIME_HMAC_KEY_FILE"
+  fi
+  chmod 600 "$RUNTIME_HMAC_KEY_FILE"
+  COMPANION_RUNTIME_DESKTOP_HMAC_SECRET="$(cat "$RUNTIME_HMAC_KEY_FILE")"
+  export COMPANION_RUNTIME_DESKTOP_HMAC_SECRET
+}
+
 check_prerequisites() {
   step "Checking prerequisites"
   require_command node "install Node.js >= 20"
@@ -484,7 +510,7 @@ start_postgres() {
 }
 
 bootstrap_database() {
-  step "Ensuring migration-owner + separate NOBYPASSRLS API/worker roles"
+  step "Ensuring migration-owner + separate NOBYPASSRLS API/worker/runtime roles"
   local PSQL=("$PG_BIN/psql" -h 127.0.0.1 -p "$PG_PORT" -U postgres -d postgres -v ON_ERROR_STOP=1)
   "${PSQL[@]}" -c "DO \$\$ BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$PG_OWNER_USER') THEN
@@ -496,18 +522,24 @@ bootstrap_database() {
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$PG_WORKER_USER') THEN
       CREATE ROLE $PG_WORKER_USER LOGIN PASSWORD '$PG_WORKER_PASS' NOSUPERUSER NOBYPASSRLS NOINHERIT;
     END IF;
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$PG_RUNTIME_USER') THEN
+      CREATE ROLE $PG_RUNTIME_USER LOGIN PASSWORD '$PG_RUNTIME_PASS' NOSUPERUSER NOBYPASSRLS NOINHERIT;
+    END IF;
   END \$\$;" >/dev/null
   "${PSQL[@]}" -c "ALTER ROLE $PG_OWNER_USER NOSUPERUSER BYPASSRLS;" >/dev/null
   "${PSQL[@]}" -c "ALTER ROLE $PG_API_USER NOSUPERUSER NOBYPASSRLS NOINHERIT;" >/dev/null
   "${PSQL[@]}" -c "ALTER ROLE $PG_WORKER_USER NOSUPERUSER NOBYPASSRLS NOINHERIT;" >/dev/null
+  "${PSQL[@]}" -c "ALTER ROLE $PG_RUNTIME_USER NOSUPERUSER NOBYPASSRLS NOINHERIT;" >/dev/null
   "${PSQL[@]}" -c "CREATE DATABASE $PG_DB OWNER $PG_OWNER_USER;" 2>/dev/null || true
   "${PSQL[@]}" -c "ALTER DATABASE $PG_DB OWNER TO $PG_OWNER_USER;" >/dev/null
-  # Upgrade old Conductor clusters whose application role used to own every migrated object.
+  # Preserve Skills Hub data in pre-split local clusters: the former application owner may still
+  # own tables even though it must never execute Runtime v2. Transfer ownership, then disable its
+  # login. No grants or compatibility executor are restored.
   if "${PSQL[@]}" -tAc "select 1 from pg_roles where rolname = 'companion'" | grep -qx 1; then
     "${PSQL[@]}" -d "$PG_DB" -c "REASSIGN OWNED BY companion TO $PG_OWNER_USER;" >/dev/null
-    "${PSQL[@]}" -c "ALTER ROLE companion NOLOGIN;" >/dev/null
+    "${PSQL[@]}" -c "ALTER ROLE companion NOLOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT;" >/dev/null
   fi
-  ok "Owner '$PG_OWNER_USER' + API '$PG_API_USER' + worker '$PG_WORKER_USER' + database '$PG_DB' ready"
+  ok "Owner '$PG_OWNER_USER' + API '$PG_API_USER' + worker '$PG_WORKER_USER' + runtime '$PG_RUNTIME_USER' + database '$PG_DB' ready"
 }
 
 # ---------------------------------------------------------------------------
@@ -636,25 +668,32 @@ cleanup() {
 # ---------------------------------------------------------------------------
 migrate_and_seed() {
   step "Applying migrations + seeding test user"
-  env DATABASE_URL="$DATABASE_MIGRATION_URL" DATABASE_MIGRATION_URL="$DATABASE_MIGRATION_URL" \
-    pnpm db:migrate || die "Migrations failed"
+  env DATABASE_MIGRATION_URL="$DATABASE_MIGRATION_URL" \
+    DATABASE_API_ROLE="$PG_API_USER" \
+    DATABASE_WORKER_ROLE="$PG_WORKER_USER" \
+    DATABASE_COMPANION_RUNTIME_ROLE="$PG_RUNTIME_USER" \
+    bash scripts/dev-process.sh migration pnpm db:migrate || die "Migrations failed"
   local OWNER_PSQL=("$PG_BIN/psql" "$DATABASE_MIGRATION_URL" -v ON_ERROR_STOP=1)
-  local retired_role=""
-  if "${OWNER_PSQL[@]}" -tAc \
-    "select 1 from pg_roles where rolname = 'companion'" | grep -qx 1; then
-    retired_role="companion"
-  fi
-  if [ -n "$retired_role" ]; then
-    "${OWNER_PSQL[@]}" -v api_role="$PG_API_USER" -v worker_role="$PG_WORKER_USER" \
-      -v retired_runtime_role="$retired_role" \
-      -f "$REPO_ROOT/packages/db/runtime-role-grants.sql" >/dev/null \
-      || die "Runtime database grants failed"
-  else
-    "${OWNER_PSQL[@]}" -v api_role="$PG_API_USER" -v worker_role="$PG_WORKER_USER" \
-      -f "$REPO_ROOT/packages/db/runtime-role-grants.sql" >/dev/null \
-      || die "Runtime database grants failed"
-  fi
   ok "Migrations applied"
+
+  # Runtime deliberately cannot re-enable its own shared gate. Development is
+  # an explicit local cutover controlled by the migration owner.
+  if [ "${COMPANION_COMPANIONS_ENABLED:-}" = "true" ] \
+    && [ -n "${COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS//[[:space:],]/}" ] \
+    && "${OWNER_PSQL[@]}" -tAc \
+      "select 1 where to_regprocedure('public.companion_runtime_enable(bigint,text)') is not null" \
+      | grep -qx 1; then
+    local gate_epoch
+    gate_epoch="$("${OWNER_PSQL[@]}" -tAc \
+      "select gate_epoch from public.companion_runtime_control where id = 'runtime-v2'")"
+    case "$gate_epoch" in
+      ''|*[!0-9]*) die "Runtime v2 gate returned an invalid epoch: '$gate_epoch'" ;;
+    esac
+    "${OWNER_PSQL[@]}" -c \
+      "select * from public.companion_runtime_enable(${gate_epoch}::bigint, 'dev-conductor');" \
+      >/dev/null || die "Could not enable the local Runtime v2 gate"
+    ok "Runtime v2 gate enabled for local development"
+  fi
 
   local seed_env=(
     DATABASE_URL="$DATABASE_API_URL"
@@ -673,7 +712,8 @@ migrate_and_seed() {
     )
   fi
 
-  if env "${seed_env[@]}" pnpm --filter @companion/api seed:test-user; then
+  if env "${seed_env[@]}" bash scripts/dev-process.sh api-seed \
+    pnpm --filter @companion/api seed:test-user; then
     ok "Seed complete — login: ${COMPANION_SEED_EMAIL:-admin@thevibecompany.co} / adminadmin"
   else
     warn "Seed failed (database still usable)"
@@ -694,6 +734,7 @@ print_header() {
     printf '  %sWeb%s        %s\n' "$DIM" "$RESET" "$WEB_URL"
   fi
   printf '  %sAPI%s        %s\n' "$DIM" "$RESET" "$API_URL"
+  printf '  %sRuntime%s    %s/healthz (private)\n' "$DIM" "$RESET" "$RUNTIME_URL"
   printf '  %sPostgres%s   127.0.0.1:%s\n' "$DIM" "$RESET" "$PG_PORT"
   if [ "$HAS_MINIO" = true ]; then
     printf '  %sMinIO%s      %s (console http://127.0.0.1:%s)\n' "$DIM" "$RESET" "$S3_ENDPOINT" "$MINIO_CONSOLE_PORT"
@@ -712,9 +753,9 @@ print_header() {
 # Launch apps via concurrently (inline env, no .env mutation)
 # ---------------------------------------------------------------------------
 launch_apps() {
-  step "Launching API + worker + web via concurrently"
+  step "Launching API + worker + runtime + web via concurrently"
 
-  # Storage is shared by API uploads and the runs worker; email remains API-only.
+  # Storage is shared by API uploads, worker cleanup, and runtime skill staging; email remains API-only.
   local shared_storage_env="" api_email_env
   if [ "$HAS_MINIO" = true ]; then
     shared_storage_env="S3_ENDPOINT=\"$S3_ENDPOINT\" S3_REGION=us-east-1 S3_ACCESS_KEY_ID=\"$S3_ACCESS_KEY_ID\" S3_SECRET_ACCESS_KEY=\"$S3_SECRET_ACCESS_KEY\" S3_BUCKET_SKILL_ARCHIVES=\"$S3_BUCKET\" S3_FORCE_PATH_STYLE=true"
@@ -725,25 +766,31 @@ launch_apps() {
     api_email_env="EMAIL_PROVIDER=log"
   fi
 
-  # The master key is exported by ensure_secrets_master_key and inherited by API + worker. Never
-  # interpolate it into concurrently's command argument, where process listings could expose it.
-  local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_API_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" COMPANION_SKILL_DATABASES_ENABLED=\"$SKILL_DATABASES_ENABLED\" $shared_storage_env $api_email_env pnpm --filter @companion/api dev"
-  local worker_cmd="DATABASE_URL=\"$DATABASE_WORKER_URL\" COMPANION_WEB_URL=\"$WEB_URL\" $shared_storage_env pnpm --filter @companion/worker dev"
-  local web_cmd="COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" pnpm --filter @companion/web dev --hostname $WEB_BIND_HOST --port $WEB_PORT"
+  # Master/HMAC/Box secrets remain inherited rather than interpolated into the
+  # command line. dev-process.sh strips them from every process that does not own them.
+  local api_cmd="COMPANION_API_HOST=127.0.0.1 COMPANION_API_PORT=$API_PORT DATABASE_URL=\"$DATABASE_API_URL\" COMPANION_RUNTIME_PRIVATE_URL=\"$RUNTIME_URL\" BETTER_AUTH_URL=\"$API_URL\" BETTER_AUTH_COOKIE_PREFIX=\"$PROJECT\" COMPANION_WEB_URL=\"$WEB_URL\" COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" COMPANION_SKILL_DATABASES_ENABLED=\"$SKILL_DATABASES_ENABLED\" $shared_storage_env $api_email_env bash scripts/dev-process.sh api pnpm --filter @companion/api dev"
+  local worker_cmd="DATABASE_WORKER_URL=\"$DATABASE_WORKER_URL\" COMPANION_WEB_URL=\"$WEB_URL\" $shared_storage_env bash scripts/dev-worker.sh pnpm --filter @companion/worker dev"
+  local runtime_cmd="DATABASE_COMPANION_RUNTIME_URL=\"$DATABASE_COMPANION_RUNTIME_URL\" COMPANION_RUNTIME_HOST=127.0.0.1 COMPANION_RUNTIME_PORT=$RUNTIME_PORT COMPANION_BOX_SIM_PORT=$BOX_SIM_PORT COMPANION_API_URL=\"$API_URL\" $shared_storage_env bash scripts/dev-runtime.sh pnpm --filter @companion/runtime dev"
+  local web_cmd="COMPANION_API_URL=\"$API_URL\" NEXT_PUBLIC_COMPANION_API_URL=\"$API_URL\" bash scripts/dev-process.sh web pnpm --filter @companion/web dev --hostname $WEB_BIND_HOST --port $WEB_PORT"
 
   free_port "$API_PORT" "api"
+  free_port "$RUNTIME_PORT" "runtime"
   free_port "$WEB_PORT" "web"
+  if [ -z "${COMPANION_BOX_API_KEY:-}" ] \
+    && [ "${COMPANION_DEV_BOX_SIM_ENABLED:-true}" != "false" ]; then
+    free_port "$BOX_SIM_PORT" "box-sim"
+  fi
 
   # No `exec`: keep this bash alive so the EXIT trap stops native services
   # after concurrently returns (Ctrl+C → SIGINT → concurrently kills the apps
   # → bash exits → trap → pg_ctl stop / kill minio,mailpit).
   pnpm exec concurrently \
-    --names api,worker,web \
-    --prefix-colors blue,magenta,green \
+    --names api,worker,runtime,web \
+    --prefix-colors blue,magenta,cyan,green \
     --prefix "[{name}]" \
     --kill-others-on-fail \
     --restart-tries 0 \
-    "$api_cmd" "$worker_cmd" "$web_cmd"
+    "$api_cmd" "$worker_cmd" "$runtime_cmd" "$web_cmd"
 }
 
 # ---------------------------------------------------------------------------
@@ -762,6 +809,7 @@ cmd_run() {
   trap 'exit 143' TERM
   check_prerequisites
   ensure_secrets_master_key
+  ensure_runtime_hmac_key
   start_postgres
   start_minio
   start_mailpit

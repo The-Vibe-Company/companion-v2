@@ -652,6 +652,13 @@
       "when": 1788109600000,
       "tag": "0092_companion_runtime_api",
       "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1788196000000,
+      "tag": "0093_companion_runtime_cutover",
+      "breakpoints": true
     }
   ]
 }

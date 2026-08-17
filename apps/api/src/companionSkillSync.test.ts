@@ -64,11 +64,7 @@ describe("syncPublishedSkillToOnlineCompanions", () => {
     });
   });
 
-  it("ignores transitional runtime parameters and never creates a Box client", async () => {
-    const runtimeFactory = vi.fn(() => {
-      throw new Error("the API must not contact Box");
-    });
-
+  it("only uses the durable revision path even when a Box credential exists in the environment", async () => {
     await expect(syncPublishedSkillToOnlineCompanions({
       orgId,
       skillId,
@@ -78,10 +74,8 @@ describe("syncPublishedSkillToOnlineCompanions", () => {
         COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "example.test",
         COMPANION_BOX_API_KEY: "must-not-be-read",
       },
-      runtimeFactory,
     })).resolves.toBeUndefined();
 
-    expect(runtimeFactory).not.toHaveBeenCalled();
     expect(coreMocks.bumpCompanionSkillRevisionV2).toHaveBeenCalledOnce();
   });
 });

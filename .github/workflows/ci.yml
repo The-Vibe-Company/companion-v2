@@ -20,7 +20,12 @@ concurrency:
 env:
   DATABASE_URL: postgres://companion:companion@127.0.0.1:5432/companion
   DATABASE_MIGRATION_URL: postgres://companion:companion@127.0.0.1:5432/companion
-  DATABASE_RUNTIME_URL: postgres://companion_runtime:companion-runtime@127.0.0.1:5432/companion
+  DATABASE_API_URL: postgres://companion_api:companion-api@127.0.0.1:5432/companion
+  DATABASE_WORKER_URL: postgres://companion_worker:companion-worker@127.0.0.1:5432/companion
+  DATABASE_COMPANION_RUNTIME_URL: postgres://companion_runtime_v2:companion-runtime-v2@127.0.0.1:5432/companion
+  DATABASE_API_ROLE: companion_api
+  DATABASE_WORKER_ROLE: companion_worker
+  DATABASE_COMPANION_RUNTIME_ROLE: companion_runtime_v2
 
 jobs:
   scope:
@@ -33,6 +38,7 @@ jobs:
       quality: ${{ steps.scope.outputs.quality }}
       build: ${{ steps.scope.outputs.build }}
       database: ${{ steps.scope.outputs.database }}
+      runtime: ${{ steps.scope.outputs.runtime }}
       browser: ${{ steps.scope.outputs.browser }}
       containers: ${{ steps.scope.outputs.containers }}
       dependencies: ${{ steps.scope.outputs.dependencies }}
@@ -69,7 +75,7 @@ jobs:
           fetch-depth: 0
 
       - name: Test CI scope classifier and local verifier
-        run: node --test scripts/agent-browser-box-center.test.mjs scripts/ci-scope.test.mjs scripts/ci-playwright-policy.test.mjs scripts/ci-gate.test.mjs scripts/verify-change.test.mjs
+        run: node --test scripts/agent-browser-box-center.test.mjs scripts/companion-runtime-canary.test.mjs scripts/companions-env-defaults.test.mjs scripts/railway-config.test.mjs scripts/ci-scope.test.mjs scripts/ci-playwright-policy.test.mjs scripts/ci-gate.test.mjs scripts/verify-change.test.mjs
 
       - name: Validate GitHub Actions workflows
         run: >-
@@ -262,7 +268,7 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:17-alpine
         env:
           POSTGRES_USER: companion
           POSTGRES_PASSWORD: companion
@@ -290,17 +296,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Create NOBYPASSRLS runtime database role
-        run: |
-          docker run --rm --network host postgres:16-alpine \
-            psql "$DATABASE_MIGRATION_URL" -v ON_ERROR_STOP=1 -c \
-            "DO \$\$ BEGIN
-               IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'companion_runtime') THEN
-                 CREATE ROLE companion_runtime LOGIN PASSWORD 'companion-runtime'
-                   NOSUPERUSER NOBYPASSRLS NOINHERIT;
-               END IF;
-             END \$\$;
-             ALTER ROLE companion_runtime NOSUPERUSER NOBYPASSRLS NOINHERIT;"
+      - name: Create separate NOBYPASSRLS application database roles
+        run: bash scripts/ci-create-db-roles.sh
 
       - name: Build API
         run: pnpm --filter @companion/api build
@@ -308,8 +305,7 @@ jobs:
       - name: Apply migrations and runtime grants
         run: pnpm --filter @companion/api migrate
         env:
-          DATABASE_URL: ${{ env.DATABASE_RUNTIME_URL }}
-          DATABASE_RUNTIME_ROLE: companion_runtime
+          DATABASE_URL: ${{ env.DATABASE_MIGRATION_URL }}
 
       - name: Test tenant, Skills, labels, secrets, and RLS
         run: pnpm test:integration
@@ -318,31 +314,27 @@ jobs:
 
       - name: Start API and smoke test
         run: |
-          DATABASE_URL="$DATABASE_RUNTIME_URL" \
-          DATABASE_MIGRATION_URL="$DATABASE_MIGRATION_URL" \
-          DATABASE_RUNTIME_ROLE=companion_runtime \
+          DATABASE_URL="$DATABASE_API_URL" \
           COMPANION_API_PORT=18081 \
           BETTER_AUTH_SECRET=ci-api-smoke-better-auth-secret-with-enough-entropy-for-tests \
           BETTER_AUTH_URL=http://127.0.0.1:18081 \
           COMPANION_API_URL=http://127.0.0.1:18081 \
-          pnpm --filter @companion/api start &
+          bash scripts/dev-process.sh api node apps/api/dist/index.js &
           api_pid=$!
           trap 'kill "$api_pid" 2>/dev/null || true' EXIT
           bash scripts/ci-api-smoke.sh
         env:
           COMPANION_API_URL: http://127.0.0.1:18081
 
-  railway-containers:
-    name: Railway Containers
+  runtime-integration:
+    name: Runtime PostgreSQL & Simulator
     runs-on: ubuntu-latest
     needs: scope
-    if: needs.scope.outputs.containers == 'true'
-    timeout-minutes: 20
-    env:
-      DATABASE_RUNTIME_ROLE: companion_runtime
+    if: needs.scope.outputs.runtime == 'true'
+    timeout-minutes: 25
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:17-alpine
         env:
           POSTGRES_USER: companion
           POSTGRES_PASSWORD: companion
@@ -358,17 +350,50 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Create NOBYPASSRLS runtime database role
-        run: |
-          docker run --rm --network host postgres:16-alpine \
-            psql "$DATABASE_MIGRATION_URL" -v ON_ERROR_STOP=1 -c \
-            "DO \$\$ BEGIN
-               IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'companion_runtime') THEN
-                 CREATE ROLE companion_runtime LOGIN PASSWORD 'companion-runtime'
-                   NOSUPERUSER NOBYPASSRLS NOINHERIT;
-               END IF;
-             END \$\$;
-             ALTER ROLE companion_runtime NOSUPERUSER NOBYPASSRLS NOINHERIT;"
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Create separate NOBYPASSRLS application database roles
+        run: bash scripts/ci-create-db-roles.sh
+
+      - name: Exercise Runtime v2 against PostgreSQL and deterministic Box/Pi
+        run: bash scripts/ci-runtime-integration.sh
+
+  railway-containers:
+    name: Railway Containers
+    runs-on: ubuntu-latest
+    needs: scope
+    if: needs.scope.outputs.containers == 'true'
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: companion
+          POSTGRES_PASSWORD: companion
+          POSTGRES_DB: companion
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U companion -d companion"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Create separate NOBYPASSRLS application database roles
+        run: bash scripts/ci-create-db-roles.sh
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -384,6 +409,19 @@ jobs:
           cache-from: type=gha,scope=railway-api
           cache-to: type=gha,mode=max,scope=railway-api
 
+      - name: Build one-shot release image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/railway/Dockerfile.backend
+          build-args: RAILWAY_SERVICE_NAME=release
+          tags: companion-release:ci
+          load: true
+          cache-from: |
+            type=gha,scope=railway-release
+            type=gha,scope=railway-api
+          cache-to: type=gha,mode=max,scope=railway-release
+
       - name: Build worker image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -394,6 +432,17 @@ jobs:
           load: true
           cache-from: type=gha,scope=railway-worker
           cache-to: type=gha,mode=max,scope=railway-worker
+
+      - name: Build runtime image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/railway/Dockerfile.backend
+          build-args: RAILWAY_SERVICE_NAME=runtime
+          tags: companion-runtime:ci
+          load: true
+          cache-from: type=gha,scope=railway-runtime
+          cache-to: type=gha,mode=max,scope=railway-runtime
 
       - name: Build web image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -424,7 +473,7 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:17-alpine
         env:
           POSTGRES_USER: companion
           POSTGRES_PASSWORD: companion
@@ -438,8 +487,7 @@ jobs:
           --health-retries 20
     env:
       CI_USE_GHA_POSTGRES: "1"
-      DATABASE_URL: postgres://companion_runtime:companion-runtime@127.0.0.1:5432/companion
-      DATABASE_RUNTIME_ROLE: companion_runtime
+      DATABASE_URL: postgres://companion_api:companion-api@127.0.0.1:5432/companion
       COMPANION_API_URL: http://127.0.0.1:13301
       COMPANION_WEB_URL: http://127.0.0.1:13300
       BETTER_AUTH_URL: http://127.0.0.1:13301
@@ -476,17 +524,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Create NOBYPASSRLS runtime database role
-        run: |
-          docker run --rm --network host postgres:16-alpine \
-            psql "$DATABASE_MIGRATION_URL" -v ON_ERROR_STOP=1 -c \
-            "DO \$\$ BEGIN
-               IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'companion_runtime') THEN
-                 CREATE ROLE companion_runtime LOGIN PASSWORD 'companion-runtime'
-                   NOSUPERUSER NOBYPASSRLS NOINHERIT;
-               END IF;
-             END \$\$;
-             ALTER ROLE companion_runtime NOSUPERUSER NOBYPASSRLS NOINHERIT;"
+      - name: Create separate NOBYPASSRLS application database roles
+        run: bash scripts/ci-create-db-roles.sh
 
       - name: Hydrate application build outputs
         run: pnpm exec turbo run build --output-logs=errors-only
@@ -628,6 +667,7 @@ jobs:
       - quality
       - application-build
       - database-integration
+      - runtime-integration
       - railway-containers
       - browser
       - dependency-audit

@@ -6,7 +6,7 @@ import {
   COMPANION_SKILL_MANIFEST,
   companionSkillChanges,
   companionSkillDir,
-} from "@companion/companion-skill";
+} from "./index";
 import { computeLocalSkillStatus, type LocalSkillInstall } from "@companion/core/services";
 import { localSkillIntegrityFilesSchema, type LocalSkillPrompts, type LocalSkillRow } from "@companion/contracts";
 import { packDir, tarGzToZip } from "@companion/skills";

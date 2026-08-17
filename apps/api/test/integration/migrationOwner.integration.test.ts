@@ -5,10 +5,10 @@
  * privilege class catches that otherwise CI-only-superuser blind spot.
  */
 import { randomUUID } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { run as runMigrations } from "../../src/migrate";
 
 const databaseUrl = process.env.DATABASE_MIGRATION_URL ?? process.env.DATABASE_URL;
 if (!databaseUrl?.trim()) {
@@ -19,6 +19,9 @@ const migrationsDir = fileURLToPath(new URL("../../../../packages/db/drizzle/", 
 const suffix = randomUUID().replaceAll("-", "").slice(0, 16);
 const databaseName = `migration_owner_${suffix}`;
 const ownerRole = `migration_owner_${suffix}`;
+const apiRole = `migration_api_${suffix}`;
+const workerRole = `migration_worker_${suffix}`;
+const runtimeRole = `migration_runtime_${suffix}`;
 const ownerPassword = `migration-owner-${suffix}`;
 const adminSql = postgres(databaseUrl, { max: 1 });
 const ownerUrl = new URL(databaseUrl);
@@ -28,36 +31,37 @@ ownerUrl.password = ownerPassword;
 ownerUrl.search = "";
 let ownerSql: ReturnType<typeof postgres> | undefined;
 
-async function replayMigrations(client: ReturnType<typeof postgres>): Promise<void> {
-  const names = (await readdir(migrationsDir))
-    .filter((name) => /^\d{4}_.+\.sql$/.test(name))
-    .sort();
-  for (const name of names) {
-    const statements = (await readFile(`${migrationsDir}/${name}`, "utf8"))
-      .split("--> statement-breakpoint")
-      .map((statement) => statement.trim())
-      .filter(Boolean);
-    await client.begin(async (tx) => {
-      for (const statement of statements) await tx.unsafe(statement);
-    });
-  }
-}
-
 describe("dedicated migration owner", () => {
   beforeAll(async () => {
     await adminSql.unsafe(`
       create role ${ownerRole}
-      login password '${ownerPassword}' nosuperuser nobypassrls noinherit
+      login password '${ownerPassword}' nosuperuser nobypassrls noinherit;
+      create role ${apiRole} login nosuperuser nobypassrls noinherit;
+      create role ${workerRole} login nosuperuser nobypassrls noinherit;
+      create role ${runtimeRole} login nosuperuser nobypassrls noinherit;
     `);
     await adminSql.unsafe(`create database ${databaseName} owner ${ownerRole}`);
+    await runMigrations({
+      env: {
+        DATABASE_MIGRATION_URL: ownerUrl.toString(),
+        DATABASE_API_ROLE: apiRole,
+        DATABASE_WORKER_ROLE: workerRole,
+        DATABASE_COMPANION_RUNTIME_ROLE: runtimeRole,
+        COMPANION_MIGRATIONS_DIR: migrationsDir,
+      },
+    });
     ownerSql = postgres(ownerUrl.toString(), { max: 1 });
-    await replayMigrations(ownerSql);
   }, 120_000);
 
   afterAll(async () => {
     await ownerSql?.end({ timeout: 1 });
     await adminSql.unsafe(`drop database if exists ${databaseName} with (force)`);
-    await adminSql.unsafe(`drop role if exists ${ownerRole}`);
+    await adminSql.unsafe(`
+      drop role if exists ${apiRole};
+      drop role if exists ${workerRole};
+      drop role if exists ${runtimeRole};
+      drop role if exists ${ownerRole};
+    `);
     await adminSql.end({ timeout: 1 });
   });
 

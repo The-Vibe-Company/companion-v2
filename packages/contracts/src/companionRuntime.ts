@@ -248,6 +248,20 @@ export const companionOperationSchema = z.object({
 });
 export type CompanionOperation = z.infer<typeof companionOperationSchema>;
 
+/**
+ * Bounded lifecycle projection carried by ordinary Companion reads. The control plane exposes only
+ * what a client needs to restore durable operation UI; provider checkpoints and request metadata do
+ * not belong on the roster/thread read model.
+ */
+export const companionLatestOperationSchema = z.object({
+  id: z.string().uuid(),
+  source_turn_id: z.string().uuid().nullable(),
+  kind: companionOperationKindSchema,
+  status: companionOperationStatusSchema,
+  error: companionRuntimeSafeErrorSchema.nullable(),
+}).strict();
+export type CompanionLatestOperation = z.infer<typeof companionLatestOperationSchema>;
+
 export const companionOperationAcceptedResponseSchema = z.object({
   operation: companionOperationSchema,
 }).strict();

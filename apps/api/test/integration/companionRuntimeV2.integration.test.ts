@@ -37,7 +37,6 @@ const guardDatabaseName = `runtime_v2_guard_${suffix}`;
 const apiRole = `runtime_v2_api_${suffix}`;
 const workerRole = `runtime_v2_worker_${suffix}`;
 const executorRole = `runtime_v2_exec_${suffix}`;
-const legacyUnionRole = `runtime_v2_union_${suffix}`;
 const unexpectedFunctionRole = `runtime_v2_unexpected_${suffix}`;
 const apiParentRole = `runtime_v2_api_parent_${suffix}`;
 const workerParentRole = `runtime_v2_worker_parent_${suffix}`;
@@ -50,6 +49,9 @@ const runtimeTables = [
   "companion_operations",
   "companion_decision_deliveries",
   "companion_runtime_leases",
+  "companion_runtime_duplicate_cleanups",
+  "companion_runtime_event_projections",
+  "companion_runtime_desktop_requests",
 ] as const;
 
 const runtimeFunctionSignatures = [
@@ -59,6 +61,14 @@ const runtimeFunctionSignatures = [
   "public.companion_runtime_renew_and_authorize(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)",
   "public.companion_runtime_checkpoint(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,text,uuid,text,bigint,timestamp with time zone,integer,integer,integer)",
   "public.companion_runtime_observe_instance(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,bigint,text,public.companion_box_observed_state,public.companion_pi_observed_state,text,integer,bigint,integer,timestamp with time zone)",
+  "public.companion_runtime_get_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)",
+  "public.companion_runtime_get_attempt_terminal_projection(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)",
+  "public.companion_runtime_cas_mcp_oauth(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,uuid,uuid,uuid,text,text,text,text,text,text,text)",
+  "public.companion_runtime_register_duplicate_cleanups(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text[])",
+  "public.companion_runtime_checkpoint_duplicate_cleanup(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text,bigint,public.companion_duplicate_cleanup_status,text)",
+  "public.companion_runtime_authorize_desktop(uuid,uuid,text)",
+  "public.companion_runtime_consume_desktop_request(text,bigint,integer)",
+  "public.companion_runtime_project_event_batch(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)",
   "public.companion_runtime_settle(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text,text,text,public.companion_runtime_error_action)",
   "public.companion_runtime_release_lease(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)",
 ] as const;
@@ -66,7 +76,6 @@ const runtimeHelperFunctionSignatures = [
   "public.companion_runtime_create_lease_row()",
   "public.companion_runtime_assert_v2_mutation()",
   "public.companion_runtime_require_v2_mutation()",
-  "public.companion_runtime_fence_legacy_token()",
   "public.companion_runtime_require_instance_at_commit()",
   "public.companion_runtime_assign_turn_sequence()",
   "public.companion_runtime_assign_operation_intent()",
@@ -77,6 +86,32 @@ const runtimeHelperFunctionSignatures = [
   "public.companion_runtime_reject_operation_snapshot_change()",
   "public.companion_runtime_reject_responder_change()",
   "public.companion_runtime_close_attempt_decisions(uuid,uuid,uuid,text,text,public.companion_runtime_error_action,uuid)",
+  "public.companion_runtime_guard_duplicate_cleanup()",
+  "public.companion_runtime_resume_after_decision_delivery()",
+  "public.companion_api_actor(uuid)",
+  "public.companion_api_require_access(uuid,uuid,text)",
+  "public.companion_api_safe_error(text,text,public.companion_runtime_error_action)",
+  "public.companion_api_turn_json(uuid,uuid,uuid)",
+  "public.companion_api_operation_json(uuid,uuid,uuid)",
+  "public.companion_api_validate_resource_selection(uuid,jsonb,jsonb,jsonb,jsonb)",
+  "public.companion_api_retry_operation_handoff()",
+  "public.companion_api_assign_attempt_retry_id()",
+] as const;
+const companionApiFunctionSignatures = [
+  "public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)",
+  "public.companion_api_update_companion(uuid,uuid,jsonb)",
+  "public.companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)",
+  "public.companion_api_update_member_state(uuid,uuid,boolean,boolean,boolean)",
+  "public.companion_api_mark_thread_read(uuid,uuid)",
+  "public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface)",
+  "public.companion_api_read_runtime(uuid,uuid)",
+  "public.companion_api_list_runtime(uuid)",
+  "public.companion_api_read_thread(uuid,uuid)",
+  "public.companion_api_enqueue_operation(uuid,uuid,uuid,public.companion_operation_kind,public.companion_client_surface)",
+  "public.companion_api_retry_turn(uuid,uuid,uuid,uuid,public.companion_client_surface)",
+  "public.companion_api_cancel_turn(uuid,uuid,uuid)",
+  "public.companion_api_answer_decision(uuid,uuid,text,text,text)",
+  "public.companion_api_bump_skill_revision(uuid,uuid)",
 ] as const;
 const enableFunctionSignature = "public.companion_runtime_enable(bigint,text)";
 
@@ -128,24 +163,6 @@ interface Claim {
 interface GateStatus {
   enabled: boolean;
   gateEpoch: number;
-}
-
-interface LegacyCutoverAcl {
-  apiCanInsertCompanion: boolean;
-  workerCanUpdateCompanion: boolean;
-  unionCanDeleteCompanion: boolean;
-  apiCanClaimDelivery: boolean;
-  workerCanClaimReconcile: boolean;
-  unionCanClaimDelivery: boolean;
-}
-
-interface AtomicCutoverAcl {
-  legacyMutationPrivilegeCount: number;
-  retiredFunctionPrivilegeCount: number;
-  unionV2TablePrivilegeCount: number;
-  defaultTablePrivilegeCount: number;
-  unexpectedV2FunctionPrivilegeCount: number;
-  defaultFunctionPrivilegeCount: number;
 }
 
 interface Authorization {
@@ -214,9 +231,6 @@ let guardDatabaseCreated = false;
 let rolesCreated = false;
 let freshMigrationHadNoLedger = false;
 let freshGate: GateStatus | undefined;
-let legacyAclBeforeCutover: LegacyCutoverAcl | undefined;
-let atomicAclAfterCutoverBeforeGrantHook: AtomicCutoverAcl | undefined;
-let staleLegacyMutationError: string | undefined;
 
 async function applyMigrationFile(client: Sql, name: string): Promise<void> {
   const source = await readFile(`${migrationsDir}/${name}`, "utf8");
@@ -239,27 +253,29 @@ async function replayMigrations(client: Sql, before?: string): Promise<void> {
   for (const migration of await migrationNames(before)) await applyMigrationFile(client, migration);
 }
 
-async function applySplitRuntimeGrants(retiredRole?: string): Promise<void> {
-  if (!runtimeSql) throw new Error("runtime database is not initialized");
+async function applySplitRuntimeGrants(
+  client: Sql | undefined = runtimeSql,
+  preserveCutoverMarker = false,
+): Promise<void> {
+  if (!client) throw new Error("runtime database is not initialized");
   const grants = extractRuntimeRoleGrantBlock(
     await readFile(await resolveRuntimeRoleGrantsFile(), "utf8"),
   );
-  await runtimeSql.begin(async (tx) => {
-    await tx`select set_config('companion.api_role', ${apiRole}, true)`;
-    await tx`select set_config('companion.worker_role', ${workerRole}, true)`;
-    await tx`select set_config('companion.companion_runtime_role', ${executorRole}, true)`;
-    await tx`select set_config('companion.retired_runtime_role', ${retiredRole ?? ""}, true)`;
-    await tx.unsafe(grants);
-  });
-}
-
-async function applyLegacyUnionGrants(): Promise<void> {
-  if (!runtimeSql) throw new Error("runtime database is not initialized");
-  const grants = extractRuntimeRoleGrantBlock(
-    await readFile(await resolveRuntimeRoleGrantsFile(), "utf8"),
-  );
-  await runtimeSql.begin(async (tx) => {
-    await tx`select set_config('companion.runtime_role', ${legacyUnionRole}, true)`;
+  if (preserveCutoverMarker) {
+    await client`select
+      set_config('companion.api_role', ${apiRole}, false),
+      set_config('companion.worker_role', ${workerRole}, false),
+      set_config('companion.companion_runtime_role', ${executorRole}, false),
+      set_config('companion.retired_runtime_role', '', false)`;
+    await client.unsafe(grants);
+    return;
+  }
+  await client.begin(async (tx) => {
+    await tx`select
+      set_config('companion.api_role', ${apiRole}, true),
+      set_config('companion.worker_role', ${workerRole}, true),
+      set_config('companion.companion_runtime_role', ${executorRole}, true),
+      set_config('companion.retired_runtime_role', '', true)`;
     await tx.unsafe(grants);
   });
 }
@@ -415,6 +431,19 @@ async function checkpoint(
     oversizedEventCount?: number | null;
   } = {},
 ): Promise<number | null> {
+  if (claim.workKind === "attempt" && nextCheckpoint === "dispatch_accepted") {
+    if (!runtimeSql) throw new Error("runtime database is not initialized");
+    // Runtime v2 freezes encrypted credential references while material is read, before Pi ACK.
+    // These state-machine fixtures bypass get_material, so model that prerequisite explicitly.
+    await runtimeSql`
+      update companion_turn_attempts
+      set provider_credential_refs = coalesce(provider_credential_refs, '[]'::jsonb),
+          mcp_credential_refs = coalesce(mcp_credential_refs, '[]'::jsonb)
+      where org_id = ${claim.orgId}::uuid
+        and companion_id = ${claim.companionId}::uuid
+        and id = ${claim.workId}::uuid
+    `;
+  }
   const [row] = await asRole(executorRole, (tx) => tx<Array<{ sequence: number | null }>>`
     select public.companion_runtime_checkpoint(
       ${claim.orgId}::uuid, ${claim.companionId}::uuid,
@@ -734,12 +763,14 @@ async function insertActiveTurnAttempt(input: {
       id, org_id, companion_id, turn_id, attempt_number, actor_id,
       runtime_generation, settings_revision, skills_revision, model_id,
       provider_ids, selected_skill_ids, selected_mcp_account_ids,
+      provider_credential_refs, mcp_credential_refs,
       status, checkpoint, dispatch_state, command_id, last_activity_at
     ) values (
       ${attemptId}::uuid, ${orgId}::uuid, ${input.companionId}::uuid, ${turnId}::uuid,
       1, ${actorId}, 1, 1, 1, ${modelId}, ${runtimeSql.json([providerId])},
       ${runtimeSql.json(input.selectedSkillIds ?? [ids.ownerSkill])},
       ${runtimeSql.json(input.selectedMcpAccountIds ?? [])},
+      '[]'::jsonb, '[]'::jsonb,
       'running', 'running', 'accepted', ${randomUUID()}::uuid, now()
     )
   `;
@@ -810,6 +841,7 @@ async function aclSnapshot(roles: readonly string[]): Promise<unknown> {
     }
     for (const signature of [
       ...runtimeFunctionSignatures,
+      ...companionApiFunctionSignatures,
       ...runtimeHelperFunctionSignatures,
       enableFunctionSignature,
     ]) {
@@ -853,10 +885,20 @@ async function aclSnapshot(roles: readonly string[]): Promise<unknown> {
 
 describe("Companion Runtime v2 PostgreSQL contract", () => {
   beforeAll(async () => {
+    await adminSql.unsafe(`
+      create role ${apiRole} login nosuperuser nobypassrls noinherit;
+      create role ${workerRole} login nosuperuser nobypassrls noinherit;
+      create role ${executorRole} login nosuperuser nobypassrls noinherit;
+      create role ${unexpectedFunctionRole} login nosuperuser nobypassrls noinherit;
+      create role ${apiParentRole} nologin nosuperuser nobypassrls noinherit;
+      create role ${workerParentRole} nologin nosuperuser nobypassrls noinherit;
+    `);
+    rolesCreated = true;
     await adminSql.unsafe(`create database "${guardDatabaseName}"`);
     guardDatabaseCreated = true;
     guardSql = postgres(guardUrl.toString(), { max: 1 });
-    await replayMigrations(guardSql, "0090_companion_runtime_v2.sql");
+    await replayMigrations(guardSql, "0093_companion_runtime_cutover.sql");
+    await applySplitRuntimeGrants(guardSql, true);
 
     await guardSql`
       insert into "user" (id, name, email, email_verified)
@@ -871,60 +913,55 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       insert into memberships (org_id, user_id, org_role)
       values (${guardOrg}::uuid, 'runtime-v2-guard-owner', 'owner')
     `;
+    const guardCompanion = randomUUID();
     await guardSql`
       insert into companions (id, org_id, owner_id, name)
-      values (${randomUUID()}::uuid, ${guardOrg}::uuid, 'runtime-v2-guard-owner', 'Legacy row')
+      values (${guardCompanion}::uuid, ${guardOrg}::uuid, 'runtime-v2-guard-owner', 'Cutover guard')
+    `;
+    await guardSql`
+      insert into companion_runtime_instances (org_id, companion_id)
+      values (${guardOrg}::uuid, ${guardCompanion}::uuid)
+    `;
+    await guardSql`
+      insert into companion_legacy_purge_runs (
+        id, phase, inventory_hash, inventory, completed_at
+      ) values (
+        'legacy-companion-purge', 'database_complete', ${"0".repeat(64)}, '{}'::jsonb, now()
+      )
+    `;
+    await guardSql`
+      insert into companion_runtime_pools (org_id, scope)
+      values (${guardOrg}::uuid, 'org')
     `;
 
     await adminSql.unsafe(`create database "${runtimeDatabaseName}"`);
     runtimeDatabaseCreated = true;
-    runtimeSql = postgres(runtimeUrl.toString(), { max: 10 });
-    await replayMigrations(runtimeSql, "0090_companion_runtime_v2.sql");
+    const runtimeMigrationSql = postgres(runtimeUrl.toString(), { max: 1 });
+    await replayMigrations(runtimeMigrationSql, "0093_companion_runtime_cutover.sql");
 
-    await adminSql.unsafe(`
-      create role ${apiRole} login nosuperuser nobypassrls noinherit;
-      create role ${workerRole} login nosuperuser nobypassrls noinherit;
-      create role ${executorRole} login nosuperuser nobypassrls noinherit;
-      create role ${legacyUnionRole} login nosuperuser nobypassrls noinherit;
-      create role ${unexpectedFunctionRole} login nosuperuser nobypassrls noinherit;
-      create role ${apiParentRole} nologin nosuperuser nobypassrls noinherit;
-      create role ${workerParentRole} nologin nosuperuser nobypassrls noinherit;
-    `);
-    rolesCreated = true;
-    await applySplitRuntimeGrants();
-    await applyLegacyUnionGrants();
+    const [ledger] = await runtimeMigrationSql<Array<{ count: number }>>`
+      select count(*)::int as count from companion_legacy_purge_runs
+    `;
+    freshMigrationHadNoLedger = ledger?.count === 0;
+    const [initialGate] = await runtimeMigrationSql<Array<GateStatus>>`
+      select enabled, gate_epoch::int as "gateEpoch"
+      from companion_runtime_control where id = 'runtime-v2'
+    `;
+    freshGate = initialGate;
+
+    await applySplitRuntimeGrants(runtimeMigrationSql, true);
+    await applyMigrationFile(runtimeMigrationSql, "0093_companion_runtime_cutover.sql");
+    await runtimeMigrationSql.end({ timeout: 1 });
+    runtimeSql = postgres(runtimeUrl.toString(), { max: 10 });
     await runtimeSql.unsafe(`
       grant usage on schema public to ${unexpectedFunctionRole};
+      grant execute on all functions in schema public to ${unexpectedFunctionRole};
       alter default privileges
         grant execute on functions to ${unexpectedFunctionRole};
       alter default privileges in schema public
         grant execute on functions to ${unexpectedFunctionRole};
     `);
-
-    [legacyAclBeforeCutover] = await runtimeSql<Array<LegacyCutoverAcl>>`
-      select
-        has_table_privilege(${apiRole}, 'public.companions', 'INSERT')
-          as "apiCanInsertCompanion",
-        has_table_privilege(${workerRole}, 'public.companions', 'UPDATE')
-          as "workerCanUpdateCompanion",
-        has_table_privilege(${legacyUnionRole}, 'public.companions', 'DELETE')
-          as "unionCanDeleteCompanion",
-        has_function_privilege(
-          ${apiRole},
-          'public.companion_claim_delivery_lease(uuid,uuid,uuid,integer)',
-          'EXECUTE'
-        ) as "apiCanClaimDelivery",
-        has_function_privilege(
-          ${workerRole},
-          'public.companion_claim_reconcile_candidates(text,integer,integer,integer,integer)',
-          'EXECUTE'
-        ) as "workerCanClaimReconcile",
-        has_function_privilege(
-          ${legacyUnionRole},
-          'public.companion_claim_delivery_lease(uuid,uuid,uuid,integer)',
-          'EXECUTE'
-        ) as "unionCanClaimDelivery"
-    `;
+    await applySplitRuntimeGrants();
 
     const actors = [ids.ownerA, ids.editorA, ids.revokedA, ids.ownerB];
     for (const [index, actor] of actors.entries()) {
@@ -944,124 +981,6 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
         (${ids.orgA}::uuid, ${ids.editorA}, 'developer'),
         (${ids.orgB}::uuid, ${ids.ownerB}, 'owner')
     `;
-
-    await applyMigrationFile(runtimeSql, "0090_companion_runtime_v2.sql");
-    [atomicAclAfterCutoverBeforeGrantHook] = await runtimeSql<Array<AtomicCutoverAcl>>`
-      select
-        (
-          select count(*)::int
-          from unnest(${[apiRole, workerRole, legacyUnionRole]}::text[]) configured(role)
-          cross join unnest(${[
-            "companions",
-            "companion_runtime_pools",
-            "companion_workspace_access",
-            "companion_member_state",
-            "companion_threads",
-            "companion_transcript_entries",
-            "companion_reconcile_leases",
-          ]}::text[]) protected(table_name)
-          cross join unnest(${["INSERT", "UPDATE", "DELETE"]}::text[]) configured_privilege(name)
-          where has_table_privilege(
-            configured.role,
-            'public.' || protected.table_name,
-            configured_privilege.name
-          )
-        ) as "legacyMutationPrivilegeCount",
-        (
-          select count(*)::int
-          from unnest(${[apiRole, workerRole, legacyUnionRole]}::text[]) configured(role)
-          cross join unnest(${[
-            "public.companion_claim_delivery_lease(uuid,uuid,uuid,integer)",
-            "public.companion_release_delivery_lease(uuid,uuid,uuid)",
-            "public.companion_renew_delivery_lease(uuid,uuid,uuid,integer)",
-            "public.companion_accept_delivery_lease(uuid,uuid,uuid,integer,integer)",
-            "public.companion_expire_tool_runs(uuid,uuid,timestamp with time zone,integer,integer)",
-            "public.companion_claim_reconcile_candidates(text,integer,integer,integer,integer)",
-            "public.companion_settle_reconcile_lease(uuid,uuid,text,text,integer)",
-          ]}::text[]) protected(signature)
-          where has_function_privilege(configured.role, protected.signature, 'EXECUTE')
-        ) as "retiredFunctionPrivilegeCount",
-        (
-          select count(*)::int
-          from unnest(${[...runtimeTables]}::text[]) protected(table_name)
-          cross join unnest(${[
-            "SELECT",
-            "INSERT",
-            "UPDATE",
-            "DELETE",
-            "TRUNCATE",
-            "REFERENCES",
-            "TRIGGER",
-          ]}::text[]) configured_privilege(name)
-          where has_table_privilege(
-            ${legacyUnionRole},
-            'public.' || protected.table_name,
-            configured_privilege.name
-          )
-        ) as "unionV2TablePrivilegeCount",
-        (
-          select count(*)::int
-          from pg_catalog.pg_default_acl defaults
-          cross join lateral pg_catalog.aclexplode(defaults.defaclacl) acl
-          join pg_catalog.pg_roles grantee on grantee.oid = acl.grantee
-          where defaults.defaclrole = (
-              select owner.oid from pg_catalog.pg_roles owner where owner.rolname = current_user
-            )
-            and defaults.defaclnamespace = 'public'::regnamespace
-            and defaults.defaclobjtype = 'r'
-            and grantee.rolname = any(${[apiRole, workerRole, legacyUnionRole]}::text[])
-            and acl.privilege_type in ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
-        ) as "defaultTablePrivilegeCount",
-        (
-          select count(*)::int
-          from unnest(${[
-            ...runtimeFunctionSignatures,
-            ...runtimeHelperFunctionSignatures,
-            enableFunctionSignature,
-          ]}::text[]) protected(signature)
-          where has_function_privilege(
-            ${unexpectedFunctionRole},
-            protected.signature,
-            'EXECUTE'
-          )
-        ) as "unexpectedV2FunctionPrivilegeCount",
-        (
-          select count(*)::int
-          from pg_catalog.pg_default_acl defaults
-          cross join lateral pg_catalog.aclexplode(defaults.defaclacl) acl
-          join pg_catalog.pg_roles grantee on grantee.oid = acl.grantee
-          where defaults.defaclrole = (
-              select owner.oid from pg_catalog.pg_roles owner where owner.rolname = current_user
-            )
-            and defaults.defaclnamespace in (0, 'public'::regnamespace)
-            and defaults.defaclobjtype = 'f'
-            and grantee.rolname = ${unexpectedFunctionRole}
-            and acl.privilege_type = 'EXECUTE'
-        ) as "defaultFunctionPrivilegeCount"
-    `;
-    try {
-      await asRole(apiRole, async (tx) => {
-        await tx`select set_config('app.org_id', ${ids.orgA}, true)`;
-        await tx`select set_config('app.user_id', ${ids.ownerA}, true)`;
-        await tx`
-          insert into companions (id, org_id, owner_id, name)
-          values (${randomUUID()}::uuid, ${ids.orgA}::uuid, ${ids.ownerA}, 'Stale legacy writer')
-        `;
-      });
-    } catch (error) {
-      staleLegacyMutationError = error instanceof Error ? error.message : String(error);
-    }
-    await applySplitRuntimeGrants(legacyUnionRole);
-
-    const [ledger] = await runtimeSql<Array<{ count: number }>>`
-      select count(*)::int as count from companion_legacy_purge_runs
-    `;
-    freshMigrationHadNoLedger = ledger?.count === 0;
-    const [initialGate] = await runtimeSql<Array<GateStatus>>`
-      select enabled, gate_epoch::int as "gateEpoch"
-      from companion_runtime_control where id = 'runtime-v2'
-    `;
-    freshGate = initialGate;
 
     await runtimeSql`
       insert into companion_provider_connections (
@@ -1135,7 +1054,6 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
         apiRole,
         workerRole,
         executorRole,
-        legacyUnionRole,
         unexpectedFunctionRole,
         apiParentRole,
         workerParentRole,
@@ -1146,189 +1064,180 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     await adminSql.end({ timeout: 1 });
   }, 30_000);
 
-  it("admits a fresh empty database without a purge ledger and blocks legacy ownership", async () => {
-    expect(freshMigrationHadNoLedger).toBe(true);
-    expect(freshGate).toEqual({ enabled: false, gateEpoch: 1 });
+  it("blocks final cutover until legacy ownership is gone and retains owner-only purge evidence", async () => {
     if (!guardSql) throw new Error("guard database is not initialized");
 
-    await expect(applyMigrationFile(guardSql, "0090_companion_runtime_v2.sql"))
-      .rejects.toThrow("Runtime v2 requires every legacy Companion row to be purged");
+    await expect(applyMigrationFile(guardSql, "0093_companion_runtime_cutover.sql"))
+      .rejects.toThrow("Runtime v2 final cutover preflight failed");
 
+    const [blocked] = await guardSql<Array<{ poolTable: string | null; poolCount: number }>>`
+      select to_regclass('public.companion_runtime_pools')::text as "poolTable",
+             (select count(*)::int from companion_runtime_pools) as "poolCount"
+    `;
+    expect(blocked).toEqual({ poolTable: "companion_runtime_pools", poolCount: 1 });
+
+    await guardSql`delete from companion_runtime_pools`;
+
+    const [disabledGate] = await guardSql<Array<GateStatus>>`
+      select enabled, gate_epoch::int as "gateEpoch"
+      from companion_runtime_control where id = 'runtime-v2'
+    `;
+    if (!disabledGate) throw new Error("guard runtime gate is missing");
     await guardSql`
-      insert into companion_legacy_purge_runs (
-        id, phase, inventory_hash, inventory, completed_at
-      ) values (
-        'legacy-companion-purge', 'database_complete', ${"0".repeat(64)}, '{}'::jsonb, now()
+      select * from public.companion_runtime_enable(
+        ${disabledGate.gateEpoch}, 'runtime-v2-cutover-guard-test'
       )
     `;
-    await expect(applyMigrationFile(guardSql, "0090_companion_runtime_v2.sql"))
-      .rejects.toThrow("Runtime v2 requires every legacy Companion row to be purged");
-    const [guardState] = await guardSql<Array<{ runtimeTable: string | null; companionCount: number }>>`
-      select to_regclass('public.companion_runtime_control')::text as "runtimeTable",
-             (select count(*)::int from companions) as "companionCount"
+    await expect(applyMigrationFile(guardSql, "0093_companion_runtime_cutover.sql"))
+      .rejects.toThrow("Runtime v2 final cutover preflight failed");
+
+    const [enabledGate] = await guardSql<Array<GateStatus>>`
+      select enabled, gate_epoch::int as "gateEpoch"
+      from companion_runtime_control where id = 'runtime-v2'
     `;
-    expect(guardState).toEqual({ runtimeTable: null, companionCount: 1 });
+    if (!enabledGate) throw new Error("enabled guard runtime gate is missing");
+    await guardSql`
+      select * from public.companion_runtime_disable(
+        ${enabledGate.gateEpoch}, 'runtime-v2-cutover-guard-test'
+      )
+    `;
+    await applyMigrationFile(guardSql, "0093_companion_runtime_cutover.sql");
+
+    const [cutover] = await guardSql<Array<{
+      poolTable: string | null;
+      reconcileTable: string | null;
+      purgeRunCount: number;
+      purgeRunRls: boolean;
+      purgeRunForced: boolean;
+      ownerReadPolicies: number;
+      applicationPrivilegeCount: number;
+    }>>`
+      select
+        to_regclass('public.companion_runtime_pools')::text as "poolTable",
+        to_regclass('public.companion_reconcile_leases')::text as "reconcileTable",
+        (select count(*)::int from companion_legacy_purge_runs) as "purgeRunCount",
+        (select relrowsecurity from pg_class where oid = 'public.companion_legacy_purge_runs'::regclass)
+          as "purgeRunRls",
+        (select relforcerowsecurity from pg_class where oid = 'public.companion_legacy_purge_runs'::regclass)
+          as "purgeRunForced",
+        (
+          select count(*)::int from pg_policies
+          where schemaname = 'public'
+            and tablename in ('companion_legacy_purge_runs', 'companion_legacy_purge_targets')
+            and policyname like '%owner_read_rls'
+        ) as "ownerReadPolicies",
+        (
+          select count(*)::int
+          from unnest(${[apiRole, workerRole, executorRole]}::text[]) configured(role)
+          cross join unnest(${[
+            "companion_legacy_purge_runs",
+            "companion_legacy_purge_targets",
+          ]}::text[]) evidence(table_name)
+          where has_table_privilege(configured.role, 'public.' || evidence.table_name, 'SELECT')
+        ) as "applicationPrivilegeCount"
+    `;
+    expect(cutover).toEqual({
+      poolTable: null,
+      reconcileTable: null,
+      purgeRunCount: 1,
+      purgeRunRls: true,
+      purgeRunForced: true,
+      ownerReadPolicies: 2,
+      applicationPrivilegeCount: 0,
+    });
   });
 
-  it("atomically fences stale legacy writers and downgrades every application role", async () => {
+  it("admits a fresh final cutover without a synthetic purge ledger and removes legacy schema", async () => {
     if (!runtimeSql) throw new Error("runtime database is not initialized");
-    expect(legacyAclBeforeCutover).toEqual({
-      apiCanInsertCompanion: true,
-      workerCanUpdateCompanion: true,
-      unionCanDeleteCompanion: true,
-      apiCanClaimDelivery: true,
-      workerCanClaimReconcile: true,
-      unionCanClaimDelivery: true,
-    });
-    expect(atomicAclAfterCutoverBeforeGrantHook).toEqual({
-      legacyMutationPrivilegeCount: 0,
-      retiredFunctionPrivilegeCount: 0,
-      unionV2TablePrivilegeCount: 0,
-      defaultTablePrivilegeCount: 0,
-      unexpectedV2FunctionPrivilegeCount: 0,
-      defaultFunctionPrivilegeCount: 0,
-    });
-    // 0090 itself removes the pre-existing ACLs before releasing its table locks; the external
-    // grant hook is only the repeatable second line of defense after migration commit.
-    expect(staleLegacyMutationError).toMatch(/permission denied.*companions/i);
+    expect(freshMigrationHadNoLedger).toBe(true);
+    expect(freshGate).toEqual({ enabled: false, gateEpoch: 1 });
 
-    const legacyTables = [
-      "companions",
-      "companion_runtime_pools",
-      "companion_workspace_access",
-      "companion_member_state",
-      "companion_threads",
-      "companion_transcript_entries",
-      "companion_reconcile_leases",
-    ];
-    const applicationRoles = [apiRole, workerRole, executorRole, legacyUnionRole];
-    const tablePrivileges = await runtimeSql<Array<{
-      role: string;
-      table: string;
-      insert: boolean;
-      update: boolean;
-      delete: boolean;
-    }>>`
-      select configured.role, protected.table_name as table,
-             has_table_privilege(configured.role, 'public.' || protected.table_name, 'INSERT') as insert,
-             has_table_privilege(configured.role, 'public.' || protected.table_name, 'UPDATE') as update,
-             has_table_privilege(configured.role, 'public.' || protected.table_name, 'DELETE') as delete
-      from unnest(${applicationRoles}::text[]) configured(role)
-      cross join unnest(${legacyTables}::text[]) protected(table_name)
-      order by configured.role, protected.table_name
-    `;
-    expect(tablePrivileges).toHaveLength(applicationRoles.length * legacyTables.length);
-    expect(tablePrivileges.every((entry) => !entry.insert && !entry.update && !entry.delete))
-      .toBe(true);
-
-    const retiredFunctions = [
+    const legacyFunctions = [
+      "public.companion_accept_delivery_lease(uuid,uuid,uuid,integer,integer)",
       "public.companion_claim_delivery_lease(uuid,uuid,uuid,integer)",
       "public.companion_release_delivery_lease(uuid,uuid,uuid)",
       "public.companion_renew_delivery_lease(uuid,uuid,uuid,integer)",
-      "public.companion_accept_delivery_lease(uuid,uuid,uuid,integer,integer)",
+      "public.companion_refresh_delivery_compat_backfill(integer)",
+      "public.companion_delivery_read_fence(uuid,uuid,text)",
+      "public.companion_delivery_compat_deadline(uuid,uuid,timestamp with time zone)",
+      "public.companion_block_delivery_compat_claim()",
       "public.companion_expire_tool_runs(uuid,uuid,timestamp with time zone,integer,integer)",
       "public.companion_claim_reconcile_candidates(text,integer,integer,integer,integer)",
       "public.companion_settle_reconcile_lease(uuid,uuid,text,text,integer)",
+      "public.companion_finalize_legacy_purge()",
+      "public.companion_runtime_fence_legacy_token()",
     ];
-    const functionPrivileges = await runtimeSql<Array<{
-      role: string;
-      signature: string;
-      execute: boolean;
+    const legacyCompanionColumns = [
+      "box_id", "runtime_state", "daemon_state", "provider_credential_generation",
+      "skills_applied_revision", "skills_applied_at", "skills_last_error",
+      "disk_layout_version", "desktop_available", "last_error", "last_observed_at",
+      "last_started_at", "last_stopped_at",
+    ];
+    const legacyThreadColumns = [
+      "delivered_ordinal", "accepted_delivery_ordinal", "timeout_recovery_ordinal",
+      "timeout_restart_ordinal", "timeout_delivery_ordinal", "pi_log_offset",
+    ];
+    const [shape] = await runtimeSql<Array<{
+      legacyTableCount: number;
+      legacyFunctionCount: number;
+      legacyTypeCount: number;
+      legacyCompanionColumnCount: number;
+      legacyThreadColumnCount: number;
+      retainedLedgerTableCount: number;
     }>>`
-      select configured.role, protected.signature,
-             has_function_privilege(configured.role, protected.signature, 'EXECUTE') as execute
-      from unnest(${applicationRoles}::text[]) configured(role)
-      cross join unnest(${retiredFunctions}::text[]) protected(signature)
-      order by configured.role, protected.signature
+      select
+        (
+          select count(*)::int from unnest(${[
+            "companion_runtime_pools",
+            "companion_reconcile_leases",
+          ]}::text[]) legacy(name)
+          where to_regclass('public.' || legacy.name) is not null
+        ) as "legacyTableCount",
+        (
+          select count(*)::int from unnest(${legacyFunctions}::text[]) legacy(signature)
+          where to_regprocedure(legacy.signature) is not null
+        ) as "legacyFunctionCount",
+        (
+          select count(*)::int from unnest(${[
+            "public.companion_runtime_pool_scope",
+            "public.companion_runtime_state",
+            "public.companion_daemon_state",
+          ]}::text[]) legacy(name)
+          where to_regtype(legacy.name) is not null
+        ) as "legacyTypeCount",
+        (
+          select count(*)::int from information_schema.columns
+          where table_schema = 'public' and table_name = 'companions'
+            and column_name = any(${legacyCompanionColumns}::text[])
+        ) as "legacyCompanionColumnCount",
+        (
+          select count(*)::int from information_schema.columns
+          where table_schema = 'public' and table_name = 'companion_threads'
+            and column_name = any(${legacyThreadColumns}::text[])
+        ) as "legacyThreadColumnCount",
+        (
+          select count(*)::int from unnest(${[
+            "companion_legacy_purge_runs",
+            "companion_legacy_purge_targets",
+          ]}::text[]) evidence(name)
+          where to_regclass('public.' || evidence.name) is not null
+        ) as "retainedLedgerTableCount"
     `;
-    expect(functionPrivileges).toHaveLength(applicationRoles.length * retiredFunctions.length);
-    expect(functionPrivileges.every((entry) => !entry.execute)).toBe(true);
-
-    const deliveryReadFencePrivileges = await runtimeSql<Array<{
-      role: string;
-      execute: boolean;
-    }>>`
-      select configured.role,
-             has_function_privilege(
-               configured.role,
-               'public.companion_delivery_read_fence(uuid,uuid,text)',
-               'EXECUTE'
-             ) as execute
-      from unnest(${applicationRoles}::text[]) configured(role)
-      order by configured.role
-    `;
-    expect(deliveryReadFencePrivileges).toEqual(
-      [...applicationRoles]
-        .sort()
-        .map((role) => ({ role, execute: role === apiRole })),
-    );
-
-    const [retiredUnion] = await runtimeSql<Array<{
-      directConnectGrant: boolean;
-      directSchemaUsageGrant: boolean;
-    }>>`
-      select exists (
-               select 1
-               from pg_database database
-               cross join lateral aclexplode(
-                 coalesce(database.datacl, acldefault('d', database.datdba))
-               ) acl
-               where database.datname = current_database()
-                 and acl.grantee = ${legacyUnionRole}::regrole
-                 and acl.privilege_type = 'CONNECT'
-             ) as "directConnectGrant",
-             exists (
-               select 1
-               from pg_namespace namespace
-               cross join lateral aclexplode(
-                 coalesce(namespace.nspacl, acldefault('n', namespace.nspowner))
-               ) acl
-               where namespace.nspname = 'public'
-                 and acl.grantee = ${legacyUnionRole}::regrole
-                 and acl.privilege_type = 'USAGE'
-             ) as "directSchemaUsageGrant"
-    `;
-    // CONNECT remains effective through PostgreSQL's global PUBLIC default; retiring one login
-    // must not silently revoke that database-wide policy. Its direct grant and all object reach
-    // are gone; operators may additionally ALTER ROLE ... NOLOGIN or drop it.
-    expect(retiredUnion).toEqual({
-      directConnectGrant: false,
-      directSchemaUsageGrant: false,
+    expect(shape).toEqual({
+      legacyTableCount: 0,
+      legacyFunctionCount: 0,
+      legacyTypeCount: 0,
+      legacyCompanionColumnCount: 0,
+      legacyThreadColumnCount: 0,
+      retainedLedgerTableCount: 2,
     });
-
-    // Even a later custom grant cannot resurrect a protocol-1 writer: the row trigger remains a
-    // defense-in-depth fence. The failed transaction rolls this temporary grant back.
-    await expect(runtimeSql.begin(async (tx) => {
-      await tx.unsafe(`grant update on table public.companions to ${apiRole}`);
-      await tx`select set_config('app.org_id', ${ids.orgA}, true)`;
-      await tx`select set_config('app.user_id', ${ids.ownerA}, true)`;
-      await tx.unsafe(`set local role ${apiRole}`);
-      await tx`
-        update companions set name = name
-        where org_id = ${ids.orgA}::uuid and id = ${ids.companionA}::uuid
-      `;
-    })).rejects.toThrow(/legacy Companion mutation is fenced/);
-
-    await expect(asRole(apiRole, async (tx) => {
-      await tx`select set_config('app.org_id', ${ids.orgA}, true)`;
-      await tx`select set_config('app.user_id', ${ids.ownerA}, true)`;
-      await tx`select set_config('app.companion_runtime_protocol', '2', true)`;
-      return tx`
-        update companions set name = name
-        where org_id = ${ids.orgA}::uuid and id = ${ids.companionA}::uuid
-      `;
-    })).rejects.toThrow(/permission denied.*companions/i);
-    await expect(asRole(apiRole, (tx) => tx`
-      select companion_claim_delivery_lease(
-        ${ids.orgA}::uuid, ${ids.companionA}::uuid, ${randomUUID()}::uuid, 60
-      )
-    `)).rejects.toThrow(/permission denied.*companion_claim_delivery_lease/i);
   });
 
   it("scrubs unknown current and default grantees from every Runtime v2 function", async () => {
     if (!runtimeSql) throw new Error("runtime database is not initialized");
     const protectedSignatures = [
       ...runtimeFunctionSignatures,
+      ...companionApiFunctionSignatures,
       ...runtimeHelperFunctionSignatures,
       enableFunctionSignature,
     ];
@@ -1562,7 +1471,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     }
   });
 
-  it("fences Companion-token mutations without blocking ordinary API tokens", async () => {
+  it("rejects Companion-token provenance permanently without blocking ordinary API tokens", async () => {
     if (!runtimeSql) throw new Error("runtime database is not initialized");
     const sql = runtimeSql;
     const humanTokenId = randomUUID();
@@ -1599,15 +1508,16 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
           'cmp_pat_rejected', ${`rejected-${suffix}`}, '[]'::jsonb,
           'companion', ${ids.companionA}, ${expiresAt}
         )
-      `)).rejects.toThrow(/legacy Companion token mutation is fenced/);
+      `)).rejects.toThrow(/api_tokens_source_provenance_check/);
       await expect(asApi((tx) => tx`
         update api_tokens
         set source_type = 'companion', source_agent_id = ${ids.companionA}
         where id = ${humanTokenId}::uuid
-      `)).rejects.toThrow(/legacy Companion token mutation is fenced/);
+      `)).rejects.toThrow(/api_tokens_source_provenance_check/);
 
-      // Seed the retired token shape through the documented owner-only fixture escape hatch.
-      await sql`
+      // The final data constraint has no migration-owner escape hatch: legacy Pi bearer tokens
+      // cannot be recreated after the one-shot purge.
+      await expect(sql`
         insert into api_tokens (
           id, org_id, user_id, name, token_prefix, token_hash, scopes,
           source_type, source_agent_id, expires_at
@@ -1616,11 +1526,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
           'cmp_pat_companion', ${`companion-${suffix}`}, '[]'::jsonb,
           'companion', ${ids.companionA}, ${expiresAt}
         )
-      `;
-      await expect(asApi(async (tx) => {
-        await tx`select set_config('app.companion_runtime_protocol', '2', true)`;
-        return tx`delete from api_tokens where id = ${companionTokenId}::uuid`;
-      })).rejects.toThrow(/legacy Companion token mutation is fenced|permission denied/i);
+      `).rejects.toThrow(/api_tokens_source_provenance_check/);
 
       await asApi((tx) => tx`delete from api_tokens where id = ${humanTokenId}::uuid`);
       const [tokens] = await sql<Array<{ human: number; companion: number; rejected: number }>>`
@@ -1630,7 +1536,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
           count(*) filter (where id = ${rejectedTokenId}::uuid)::int as rejected
         from api_tokens
       `;
-      expect(tokens).toEqual({ human: 0, companion: 1, rejected: 0 });
+      expect(tokens).toEqual({ human: 0, companion: 0, rejected: 0 });
     } finally {
       await sql`
         delete from api_tokens
@@ -1661,7 +1567,7 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     expect(operation).toEqual({ kind: "delete", trigger: "user", status: "pending" });
   });
 
-  it("keeps all seven tables behind FORCE RLS and repeatable split or union grants", async () => {
+  it("keeps all nine runtime tables private and applies repeatable exact three-role grants", async () => {
     if (!runtimeSql) throw new Error("runtime database is not initialized");
     await runtimeSql.unsafe("reset companion.companion_runtime_role");
 
@@ -1688,10 +1594,10 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       select rolname as role, rolcanlogin as login, rolsuper as superuser,
              rolbypassrls as "bypassRls", rolinherit as inherit
       from pg_roles
-      where rolname = any(${[apiRole, workerRole, executorRole, legacyUnionRole]}::text[])
+      where rolname = any(${[apiRole, workerRole, executorRole]}::text[])
       order by rolname
     `;
-    expect(roleRows).toHaveLength(4);
+    expect(roleRows).toHaveLength(3);
     for (const role of roleRows) {
       expect(role).toMatchObject({ login: true, superuser: false, bypassRls: false, inherit: false });
     }
@@ -1724,6 +1630,14 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       expect(split.functions.find((entry) =>
         entry.role === executorRole && entry.signature === signature)?.execute).toBe(true);
       for (const deniedRole of [apiRole, workerRole, "public"]) {
+        expect(split.functions.find((entry) =>
+          entry.role === deniedRole && entry.signature === signature)?.execute).toBe(false);
+      }
+    }
+    for (const signature of companionApiFunctionSignatures) {
+      expect(split.functions.find((entry) =>
+        entry.role === apiRole && entry.signature === signature)?.execute).toBe(true);
+      for (const deniedRole of [workerRole, executorRole, "public"]) {
         expect(split.functions.find((entry) =>
           entry.role === deniedRole && entry.signature === signature)?.execute).toBe(false);
       }
@@ -1763,9 +1677,6 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     await expect(asRole(executorRole, (tx) => tx`
       select * from companion_resolve_api_token('missing')
     `)).rejects.toThrow(/permission denied/);
-    await expect(asRole(executorRole, (tx) => tx`
-      select * from companion_claim_reconcile_candidates('runtime', 1, 1, 1, 1)
-    `)).rejects.toThrow(/permission denied/);
     await expect(asRole(apiRole, (tx) => tx`
       insert into companion_runtime_leases (org_id, companion_id)
       values (${ids.orgA}::uuid, ${ids.companionA}::uuid)
@@ -1776,58 +1687,11 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
     await expect(asRole(executorRole, (tx) => tx`
       update companion_runtime_instances set updated_at = now() where false
     `)).rejects.toThrow(/permission denied/);
-
-    await applyLegacyUnionGrants();
-    const union = await aclSnapshot([legacyUnionRole]) as {
-      tables: Array<Record<string, unknown>>;
-      functions: Array<{ signature: string; execute: boolean | null }>;
-      sequences: Array<{ usage: boolean; select: boolean }>;
-    };
-    expect(union.tables.every((entry) =>
-      entry.select === false && entry.insert === false
-      && entry.update === false && entry.delete === false)).toBe(true);
-    expect(union.sequences.every((entry) => !entry.usage && !entry.select)).toBe(true);
-    for (const signature of runtimeFunctionSignatures) {
-      expect(union.functions.find((entry) => entry.signature === signature)?.execute).toBe(true);
-    }
-    for (const signature of runtimeHelperFunctionSignatures) {
-      expect(union.functions.find((entry) => entry.signature === signature)?.execute).toBe(false);
-    }
-    expect(union.functions.find((entry) =>
-      entry.signature === enableFunctionSignature)?.execute).toBe(false);
-    const [unionDefaults] = await runtimeSql<Array<{
-      tablePrivileges: number;
-      sequencePrivileges: number;
-    }>>`
-      select
-        count(*) filter (
-          where defaults.defaclobjtype = 'r'
-            and acl.privilege_type in ('SELECT', 'INSERT', 'UPDATE', 'DELETE')
-        )::int as "tablePrivileges",
-        count(*) filter (
-          where defaults.defaclobjtype = 'S'
-            and acl.privilege_type in ('USAGE', 'SELECT')
-        )::int as "sequencePrivileges"
-      from pg_catalog.pg_default_acl defaults
-      cross join lateral pg_catalog.aclexplode(defaults.defaclacl) acl
-      join pg_catalog.pg_roles grantee on grantee.oid = acl.grantee
-      where defaults.defaclrole = (
-          select owner.oid from pg_catalog.pg_roles owner where owner.rolname = current_user
-        )
-        and defaults.defaclnamespace = 'public'::regnamespace
-        and grantee.rolname = ${legacyUnionRole}
-    `;
-    expect(unionDefaults).toEqual({ tablePrivileges: 0, sequencePrivileges: 0 });
-
-    // Return the shared fixture to the production split-role topology. Generic function ACL
-    // scrubbing deliberately makes the selected executor exclusive, so union mode removes the
-    // dedicated executor until the split hook is applied again.
-    await applySplitRuntimeGrants(legacyUnionRole);
   });
 
   it("fails closed when the Runtime v2 sentinel exists but its function set is incomplete", async () => {
     if (!runtimeSql) throw new Error("runtime database is not initialized");
-    const roles = [apiRole, workerRole, executorRole, legacyUnionRole, "public"];
+    const roles = [apiRole, workerRole, executorRole, "public"];
     const before = await aclSnapshot(roles);
     const grants = extractRuntimeRoleGrantBlock(
       await readFile(await resolveRuntimeRoleGrantsFile(), "utf8"),

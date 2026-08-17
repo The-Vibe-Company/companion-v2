@@ -1,12 +1,10 @@
-import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  CompanionNotFoundError,
   CompanionPluginConflictError,
   deleteCompanionPlugin,
   listCompanionPlugins,
-  resolveCompanionPluginInjection,
-  saveCompanionOAuthPlugin,
   saveCompanionPlugin,
 } from "@companion/core";
 import { schema } from "@companion/db";
@@ -17,7 +15,8 @@ import {
   type IntegrationFixture,
 } from "./testDatabase";
 
-describe("member-private Companion Plugins", () => {
+/** MCP connections are member-private control-plane records; plaintext only crosses the write. */
+describe("member-private Companion MCP connections", () => {
   let fixture: IntegrationFixture;
   const masterKey = Buffer.alloc(32, 17);
 
@@ -26,9 +25,6 @@ describe("member-private Companion Plugins", () => {
   });
 
   afterEach(async () => {
-    await integrationDb
-      .delete(schema.companions)
-      .where(eq(schema.companions.orgId, fixture.orgA));
     await fixture.cleanup();
   });
 
@@ -36,7 +32,8 @@ describe("member-private Companion Plugins", () => {
     await integrationSql.end();
   });
 
-  it("encrypts labeled accounts, denies admin/cross-tenant reads, and resolves only after runtime access", async () => {
+  it("stores a credential encrypted and never returns it from create or list", async () => {
+    const plaintext = "Bearer plugin-secret-value";
     const account = await saveCompanionPlugin({
       actor: fixture.developer,
       orgId: fixture.orgA,
@@ -47,17 +44,19 @@ describe("member-private Companion Plugins", () => {
         url: "https://mcp.example.test/github",
         args: [],
         credential_name: "Authorization",
-        credential_value: "Bearer plugin-secret-value",
+        credential_value: plaintext,
       },
       masterKey,
       database: integrationDb,
     });
+
     expect(account).toMatchObject({
       provider: "github",
       label: "work",
+      transport: "http",
       connected: true,
     });
-    expect(JSON.stringify(account)).not.toContain("plugin-secret-value");
+    expect(JSON.stringify(account)).not.toContain(plaintext);
 
     const stored = await integrationDb.query.companionMcpAccounts.findFirst({
       where: and(
@@ -66,8 +65,33 @@ describe("member-private Companion Plugins", () => {
       ),
     });
     expect(stored).toBeDefined();
-    expect(JSON.stringify(stored)).not.toContain("plugin-secret-value");
+    expect(stored?.ciphertext).not.toBe(plaintext);
+    expect(JSON.stringify(stored)).not.toContain(plaintext);
     expect(JSON.stringify(stored?.accountConfig)).toContain("COMPANION_MCP_");
+
+    const listed = await listCompanionPlugins({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      database: integrationDb,
+    });
+    expect(listed).toEqual([expect.objectContaining({ id: account.id, label: "work" })]);
+    expect(JSON.stringify(listed)).not.toContain(plaintext);
+  });
+
+  it("keeps connections private from admins and cross-tenant actors", async () => {
+    const account = await saveCompanionPlugin({
+      actor: fixture.developer,
+      orgId: fixture.orgA,
+      plugin: {
+        provider: "github",
+        label: "private",
+        transport: "http",
+        url: "https://mcp.example.test/private",
+        args: [],
+      },
+      masterKey,
+      database: integrationDb,
+    });
 
     await expect(listCompanionPlugins({
       actor: fixture.admin,
@@ -80,59 +104,52 @@ describe("member-private Companion Plugins", () => {
       database: integrationDb,
     })).rejects.toThrow("not a member");
 
-    const companionId = randomUUID();
-    await integrationDb.insert(schema.companions).values({
-      id: companionId,
+    await expect(deleteCompanionPlugin({
+      actor: fixture.admin,
       orgId: fixture.orgA,
-      ownerId: fixture.developer.id,
-      name: "Developer Companion",
-      selectedMcpAccountIds: [account.id],
-    });
-    const emptyCompanionId = randomUUID();
-    await integrationDb.insert(schema.companions).values({
-      id: emptyCompanionId,
-      orgId: fixture.orgA,
-      ownerId: fixture.developer.id,
-      name: "Empty Plugins Companion",
-      selectedMcpAccountIds: [],
-    });
-    await expect(resolveCompanionPluginInjection({
-      actor: fixture.developer,
-      orgId: fixture.orgA,
-      companionId: emptyCompanionId,
-      masterKey,
+      accountId: account.id,
       database: integrationDb,
-    })).resolves.toEqual({ accounts: [], credentials: [] });
-    const injection = await resolveCompanionPluginInjection({
-      actor: fixture.developer,
+    })).rejects.toBeInstanceOf(CompanionNotFoundError);
+    await expect(deleteCompanionPlugin({
+      actor: fixture.outsider,
       orgId: fixture.orgA,
-      companionId,
-      masterKey,
+      accountId: account.id,
       database: integrationDb,
-    });
-    expect(injection.accounts).toHaveLength(1);
-    expect(injection.accounts[0]).toMatchObject({ id: account.id, label: "work" });
-    expect(injection.credentials).toEqual([
-      expect.objectContaining({ value: "Bearer plugin-secret-value" }),
-    ]);
+    })).rejects.toThrow("not a member");
 
-    // Detach from the Companion without disconnecting the member Plugins connection.
-    await integrationDb
-      .update(schema.companions)
-      .set({ selectedMcpAccountIds: [] })
-      .where(eq(schema.companions.id, companionId));
-    await expect(resolveCompanionPluginInjection({
+    expect(await integrationDb.query.companionMcpAccounts.findFirst({
+      where: eq(schema.companionMcpAccounts.id, account.id),
+    })).toBeDefined();
+  });
+
+  it("rejects case-insensitive label collisions and lets the owner delete the account", async () => {
+    const account = await saveCompanionPlugin({
       actor: fixture.developer,
       orgId: fixture.orgA,
-      companionId,
+      plugin: {
+        provider: "github",
+        label: "work",
+        transport: "stdio",
+        command: "github-mcp",
+        args: ["serve"],
+      },
       masterKey,
       database: integrationDb,
-    })).resolves.toEqual({ accounts: [], credentials: [] });
-    await expect(listCompanionPlugins({
+    });
+
+    await expect(saveCompanionPlugin({
       actor: fixture.developer,
       orgId: fixture.orgA,
+      plugin: {
+        provider: "github",
+        label: "WORK",
+        transport: "http",
+        url: "https://mcp.example.test/duplicate",
+        args: [],
+      },
+      masterKey,
       database: integrationDb,
-    })).resolves.toEqual([expect.objectContaining({ id: account.id })]);
+    })).rejects.toBeInstanceOf(CompanionPluginConflictError);
 
     await deleteCompanionPlugin({
       actor: fixture.developer,
@@ -145,168 +162,8 @@ describe("member-private Companion Plugins", () => {
       orgId: fixture.orgA,
       database: integrationDb,
     })).resolves.toEqual([]);
-  });
-
-  it("stores authless HTTP accounts and maps duplicate labels to a conflict", async () => {
-    const account = await saveCompanionPlugin({
-      actor: fixture.developer,
-      orgId: fixture.orgA,
-      plugin: {
-        provider: "github",
-        label: "work",
-        transport: "http",
-        url: "https://mcp.example.test/github/work",
-        args: [],
-      },
-      masterKey,
-      database: integrationDb,
-    });
-    expect(account).toMatchObject({
-      provider: "github",
-      label: "work",
-      transport: "http",
-      endpoint: "https://mcp.example.test/github/work",
-      connected: true,
-    });
-
-    await expect(saveCompanionPlugin({
-      actor: fixture.developer,
-      orgId: fixture.orgA,
-      plugin: {
-        provider: "github",
-        label: "work",
-        transport: "http",
-        url: "https://mcp.example.test/github/work",
-        args: [],
-      },
-      masterKey,
-      database: integrationDb,
-    })).rejects.toBeInstanceOf(CompanionPluginConflictError);
-
-    await deleteCompanionPlugin({
-      actor: fixture.developer,
-      orgId: fixture.orgA,
-      accountId: account.id,
-      database: integrationDb,
-    });
-  });
-
-  it("keeps OAuth grants encrypted and refreshes them before the next Box injection", async () => {
-    const credential = {
-      kind: "oauth" as const,
-      version: 1 as const,
-      serverName: "app.linear/linear" as const,
-      accessToken: "oauth-access-old",
-      refreshToken: "oauth-refresh-secret",
-      accessExpiresAt: new Date(Date.now() - 60_000).toISOString(),
-      scope: "read write",
-      tokenType: "Bearer" as const,
-      tokenEndpoint: "https://mcp.linear.app/token",
-      resource: "https://mcp.linear.app/mcp",
-      client: {
-        clientId: "dynamic-client",
-        clientSecret: null,
-        tokenEndpointAuthMethod: "none" as const,
-      },
-    };
-    const account = await saveCompanionOAuthPlugin({
-      actor: fixture.developer,
-      orgId: fixture.orgA,
-      provider: "linear",
-      label: "work",
-      remoteUrl: "https://mcp.linear.app/mcp",
-      credential,
-      masterKey,
-      database: integrationDb,
-    });
-
-    const stored = await integrationDb.query.companionMcpAccounts.findFirst({
-      where: and(
-        eq(schema.companionMcpAccounts.orgId, fixture.orgA),
-        eq(schema.companionMcpAccounts.id, account.id),
-      ),
-    });
-    expect(JSON.stringify(stored)).not.toContain("oauth-access-old");
-    expect(JSON.stringify(stored)).not.toContain("oauth-refresh-secret");
-    expect(JSON.stringify(account)).not.toContain("oauth-");
-
-    const companionId = randomUUID();
-    await integrationDb.insert(schema.companions).values({
-      id: companionId,
-      orgId: fixture.orgA,
-      ownerId: fixture.developer.id,
-      name: "OAuth Companion",
-      selectedMcpAccountIds: [account.id],
-    });
-    await integrationDb.insert(schema.companionWorkspaceAccess).values({
-      orgId: fixture.orgA,
-      companionId,
-      ownerId: fixture.developer.id,
-      role: "viewer",
-      grantedBy: fixture.developer.id,
-    });
-    const viewerFetch = vi.fn();
-    await expect(resolveCompanionPluginInjection({
-      actor: fixture.admin,
-      orgId: fixture.orgA,
-      companionId,
-      masterKey,
-      database: integrationDb,
-      fetchImpl: viewerFetch as unknown as typeof fetch,
-    })).rejects.toThrow("runtime access requires owner or editor");
-    expect(viewerFetch).not.toHaveBeenCalled();
-
-    const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
-      const body = init?.body as URLSearchParams;
-      expect(body.get("refresh_token")).toBe("oauth-refresh-secret");
-      return Response.json({
-        access_token: "oauth-access-new",
-        refresh_token: "oauth-refresh-rotated",
-        expires_in: 3600,
-      });
-    }) as typeof fetch;
-    const injection = await resolveCompanionPluginInjection({
-      actor: fixture.developer,
-      orgId: fixture.orgA,
-      companionId,
-      masterKey,
-      database: integrationDb,
-      fetchImpl,
-    });
-    expect(injection.accounts).toEqual([
-      expect.objectContaining({
-        id: account.id,
-        url: "https://mcp.linear.app/mcp",
-        headers: { Authorization: expect.stringMatching(/^COMPANION_MCP_/) },
-      }),
-    ]);
-    expect(injection.credentials).toEqual([
-      expect.objectContaining({ value: "Bearer oauth-access-new" }),
-    ]);
-
-    const refreshed = await integrationDb.query.companionMcpAccounts.findFirst({
+    expect(await integrationDb.query.companionMcpAccounts.findFirst({
       where: eq(schema.companionMcpAccounts.id, account.id),
-    });
-    expect(refreshed?.credentialGeneration).not.toBe(stored?.credentialGeneration);
-    expect(JSON.stringify(refreshed)).not.toContain("oauth-access-new");
-    expect(JSON.stringify(refreshed)).not.toContain("oauth-refresh-rotated");
-
-    await expect(saveCompanionOAuthPlugin({
-      actor: fixture.developer,
-      orgId: fixture.orgA,
-      provider: "linear",
-      label: "WORK",
-      remoteUrl: "https://mcp.linear.app/mcp",
-      credential,
-      masterKey,
-      database: integrationDb,
-    })).rejects.toBeInstanceOf(CompanionPluginConflictError);
-
-    await deleteCompanionPlugin({
-      actor: fixture.developer,
-      orgId: fixture.orgA,
-      accountId: account.id,
-      database: integrationDb,
-    });
+    })).toBeUndefined();
   });
 });

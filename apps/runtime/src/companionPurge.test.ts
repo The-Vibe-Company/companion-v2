@@ -18,7 +18,6 @@ import {
   type LegacyPurgeLedgerTarget,
   type LegacyTargetJournal,
 } from "./companionPurge";
-import { MIGRATION_LOCK_CLASS_ID, MIGRATION_LOCK_OBJECT_ID } from "./migrate";
 
 const COMPANION_ID = "123e4567-e89b-42d3-a456-426614174000";
 const ORG_ID = "223e4567-e89b-42d3-a456-426614174001";
@@ -90,8 +89,8 @@ function fakeJournal(events: string[]): LegacyTargetJournal {
 
 describe("legacy Companion purge CLI guards", () => {
   it("shares the exact migrator advisory lock without importing its executable entrypoint", () => {
-    expect(COMPANION_PURGE_LOCK_CLASS_ID).toBe(MIGRATION_LOCK_CLASS_ID);
-    expect(COMPANION_PURGE_LOCK_OBJECT_ID).toBe(MIGRATION_LOCK_OBJECT_ID);
+    expect(COMPANION_PURGE_LOCK_CLASS_ID).toBe(72_401);
+    expect(COMPANION_PURGE_LOCK_OBJECT_ID).toBe(20_260_608);
   });
 
   it("accepts only the three documented invocations", () => {

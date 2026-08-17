@@ -139,6 +139,7 @@ import {
 } from "@companion/core/services";
 import {
   bumpCompanionSkillRevisionV2,
+  deploymentReleaseId,
   describeSkillDatabase,
   executeSkillDatabaseStatement,
   getCurrentSkillDatabaseDeclaration,
@@ -263,7 +264,7 @@ import {
 import { appRouter } from "./trpc";
 import { assertNoCompanionRetarget, assertTargetedSkillUpdate, assertUpdateIsTargeted, parseSkillPublishAction } from "./skillPublishGuards";
 import { buildInlineCompanionManifest, uploadDependencyValues, withResolvedManifestDependencies } from "./skillCompanionManifest";
-import { buildCompanionSkillRow, getCompanionSkillPackage } from "@companion/box-runtime";
+import { buildCompanionSkillRow, getCompanionSkillPackage } from "@companion/companion-skill/package";
 import { parseSkillListQuery } from "./skillListQuery";
 import { registerAgentAuthRoutes } from "./agentAuthRoutes";
 import { registerCompanionRoutes } from "./companionRoutes";
@@ -817,7 +818,10 @@ app.use("*", attachSession);
 registerAgentAuthRoutes(app);
 registerCompanionRoutes(app);
 
-app.get("/health", (c) => c.json({ ok: true }));
+app.get("/health", (c) => c.json({
+  ok: true,
+  release_id: deploymentReleaseId(),
+}));
 
 app.on(["GET", "POST"], "/auth/*", (c) => auth.handler(c.req.raw));
 

@@ -168,6 +168,18 @@ describe("Companions mobile viewport", () => {
     expect(trigger).toContain("height: 44px;");
   });
 
+  it("keeps every interactive thread-header control touch-sized on coarse pointers", () => {
+    for (const selector of [".chat-head .chat-settings", ".chat-head .chat-context-toggle"]) {
+      const iconControls = declarationsFor(selector, COARSE_POINTER)[0];
+      expect(iconControls).toContain("width: 44px;");
+      expect(iconControls).toContain("height: 44px;");
+    }
+
+    const desktop = declarationsFor(".chat-head button.chat-box", COARSE_POINTER)[0];
+    expect(desktop).toContain("min-width: 44px;");
+    expect(desktop).toContain("min-height: 44px;");
+  });
+
   it("sizes every dialog against its scrim instead of the viewport width", () => {
     // `100vw` counts the scrollbar and the overscroll gutter, so a dialog came out wider than what is
     // on screen and the page could be dragged sideways behind it.

@@ -103,10 +103,13 @@ async function applyMigrationFile(client: Sql, name: string): Promise<void> {
   });
 }
 
-async function replayMigrations(client: Sql): Promise<void> {
-  const names = (await readdir(migrationsDir))
+async function migrationFileNames(): Promise<string[]> {
+  return (await readdir(migrationsDir))
     .filter((name) => /^\d{4}_.+\.sql$/.test(name))
     .sort();
+}
+
+async function replayMigrations(client: Sql, names: string[]): Promise<void> {
   for (const name of names) await applyMigrationFile(client, name);
 }
 
@@ -115,12 +118,11 @@ async function applySplitGrants(): Promise<void> {
   const grants = extractRuntimeRoleGrantBlock(
     await readFile(await resolveRuntimeRoleGrantsFile(), "utf8"),
   );
-  await sql.begin(async (tx) => {
-    await tx`select set_config('companion.api_role', ${apiRole}, true)`;
-    await tx`select set_config('companion.worker_role', ${workerRole}, true)`;
-    await tx`select set_config('companion.companion_runtime_role', ${runtimeRole}, true)`;
-    await tx.unsafe(grants);
-  });
+  await sql`select set_config('companion.api_role', ${apiRole}, false)`;
+  await sql`select set_config('companion.worker_role', ${workerRole}, false)`;
+  await sql`select set_config('companion.companion_runtime_role', ${runtimeRole}, false)`;
+  await sql`select set_config('companion.retired_runtime_role', '', false)`;
+  await sql.unsafe(grants);
 }
 
 async function asRuntime<T>(action: (tx: Tx) => Promise<T>): Promise<T> {
@@ -315,15 +317,19 @@ async function authorizeDesktop(input: {
 
 describe("Companion runtime executor PostgreSQL surface", () => {
   beforeAll(async () => {
-    await adminSql.unsafe(`create database "${databaseName}"`);
-    sql = postgres(runtimeUrl.toString(), { max: 4 });
-    await replayMigrations(sql);
     await adminSql.unsafe(`
       create role ${apiRole} login nosuperuser nobypassrls noinherit;
       create role ${workerRole} login nosuperuser nobypassrls noinherit;
       create role ${runtimeRole} login nosuperuser nobypassrls noinherit;
     `);
+    await adminSql.unsafe(`create database "${databaseName}"`);
+    sql = postgres(runtimeUrl.toString(), { max: 1 });
+    const migrations = await migrationFileNames();
+    const cutoverIndex = migrations.findIndex((name) => name.startsWith("0093_"));
+    if (cutoverIndex < 0) throw new Error("Runtime v2 cutover migration is missing");
+    await replayMigrations(sql, migrations.slice(0, cutoverIndex));
     await applySplitGrants();
+    await replayMigrations(sql, migrations.slice(cutoverIndex));
 
     for (const [index, userId] of [
       ids.ownerA, ids.editorA, ids.viewerA, ids.revokedA, ids.ownerB,
@@ -1881,17 +1887,35 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         role: string;
         content: string;
         toolStatus: string | null;
+        decisionExpiresAt: string | null;
       }>>`
-        select role::text as role, content, tool ->> 'status' as "toolStatus"
+        select role::text as role, content, tool ->> 'status' as "toolStatus",
+          decision ->> 'expires_at' as "decisionExpiresAt"
         from companion_transcript_entries
         where companion_id = ${fixture.companionId}::uuid and role <> 'user'
         order by ordinal
       `;
       expect(transcript).toEqual([
-        { role: "assistant", content: "A durable answer", toolStatus: null },
-        { role: "tool", content: "Run check", toolStatus: "ok" },
-        { role: "decision", content: "Choose a direction", toolStatus: null },
+        {
+          role: "assistant",
+          content: "A durable answer",
+          toolStatus: null,
+          decisionExpiresAt: null,
+        },
+        {
+          role: "tool",
+          content: "Run check",
+          toolStatus: "ok",
+          decisionExpiresAt: null,
+        },
+        {
+          role: "decision",
+          content: "Choose a direction",
+          toolStatus: null,
+          decisionExpiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/),
+        },
       ]);
+      expect(Number.isNaN(Date.parse(transcript[2]!.decisionExpiresAt!))).toBe(false);
       const [attempt] = await sql<Array<{
         cursor: string;
         sequence: string;

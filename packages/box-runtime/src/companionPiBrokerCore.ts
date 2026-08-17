@@ -430,8 +430,6 @@ export interface CompanionPiBrokerOptions {
   invocationId: string;
   transport: CompanionPiRpcTransport;
   journal: SegmentedCompanionPiJournal;
-  /** Transitional layout-13 projection. Input is parsed and canonically reserialized first. */
-  appendCompatibilityEvent?: (event: PiJsonObject) => void;
 }
 
 /** One-at-a-time Pi command broker and sole owner of event-to-attempt association. */
@@ -439,7 +437,6 @@ export class CompanionPiBroker {
   readonly #invocationId: string;
   readonly #transport: CompanionPiRpcTransport;
   readonly #journal: SegmentedCompanionPiJournal;
-  readonly #appendCompatibilityEvent: ((event: PiJsonObject) => void) | undefined;
   #activeAttemptId: string | null = null;
   #commandSequence = 0;
   #commandTail: Promise<void> = Promise.resolve();
@@ -450,7 +447,6 @@ export class CompanionPiBroker {
     this.#transport = options.transport;
     this.#journal = options.journal;
     this.#journal.beginInvocation(options.invocationId);
-    this.#appendCompatibilityEvent = options.appendCompatibilityEvent;
   }
 
   get activeAttemptId(): string | null {
@@ -488,7 +484,6 @@ export class CompanionPiBroker {
       kind: "pi_event",
       event: record,
     });
-    this.#appendCompatibilityEvent?.(record);
     if (eventType === "agent_settled" && this.#activeAttemptId === attemptId) {
       this.#activeAttemptId = null;
     }

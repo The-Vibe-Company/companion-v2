@@ -13,6 +13,7 @@ test("documentation-only changes avoid application jobs", () => {
     quality: false,
     build: false,
     database: false,
+    runtime: false,
     browser: false,
     containers: false,
     dependencies: false,
@@ -52,6 +53,21 @@ test("API changes run database, browser, and container checks", () => {
   assert.equal(result.build, true);
   assert.equal(result.browser, true);
   assert.equal(result.containers, true);
+  assert.equal(result.runtime, true);
+});
+
+test("runtime and simulator changes run PostgreSQL, runtime, and container checks", () => {
+  for (const file of [
+    "apps/runtime/src/index.ts",
+    "packages/companion-runtime/src/engine.ts",
+    "packages/box-runtime/src/boxCompanionRuntime.ts",
+    "packages/box-sim/src/server.ts",
+  ]) {
+    const result = classifyFiles([file]);
+    assert.equal(result.database, true, `${file} must exercise PostgreSQL`);
+    assert.equal(result.runtime, true, `${file} must exercise Runtime v2`);
+    assert.equal(result.containers, true, `${file} must exercise the runtime image`);
+  }
 });
 
 test("skill database worker changes run database and container checks", () => {
@@ -157,6 +173,7 @@ test("lockfile, workflow, and CI gate changes force the full pipeline", () => {
     assert.equal(result.database, true);
     assert.equal(result.browser, true);
     assert.equal(result.containers, true);
+    assert.equal(result.runtime, true);
     assert.equal(result.dependencies, true);
   }
 });

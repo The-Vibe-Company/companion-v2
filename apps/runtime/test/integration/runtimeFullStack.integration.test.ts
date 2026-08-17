@@ -1,0 +1,938 @@
+/**
+ * Product promise:
+ * An accepted Companion message is durable independently of the API process, and the dedicated
+ * Runtime process is the only owner of Box/Pi work. Ordered turns, decisions, wake-on-send, lease
+ * takeover, and permanent deletion must therefore survive real process boundaries.
+ *
+ * Why integrated:
+ * This suite starts the production API and Runtime entrypoints, a deterministic HTTP Box provider
+ * whose Pi is a real JSONL child process, and a freshly migrated PostgreSQL database with distinct
+ * API/worker/runtime login roles. Unit ports cannot prove that process death, grants, HTTP contracts,
+ * the Box adapter, and the broker all compose without an in-memory handoff.
+ *
+ * Boundary:
+ * The real worker process is kept alive under its distinct database role and receives no Box/Pi
+ * environment. Browser rendering remains covered by browser:smoke; this suite owns the HTTP
+ * control-plane/runtime behavior beneath that UI.
+ */
+import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { readFile, readdir } from "node:fs/promises";
+import { createServer } from "node:net";
+import { fileURLToPath } from "node:url";
+
+import postgres from "postgres";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+const migrationUrl = process.env.DATABASE_MIGRATION_URL ?? process.env.DATABASE_URL;
+if (!migrationUrl?.trim()) {
+  throw new Error("Runtime full-stack integration requires an explicitly disposable DATABASE_URL");
+}
+
+const repositoryRoot = fileURLToPath(new URL("../../../..", import.meta.url));
+const migrationsDir = fileURLToPath(new URL("../../../../packages/db/drizzle/", import.meta.url));
+const runtimeGrantsFile = fileURLToPath(
+  new URL("../../../../packages/db/runtime-role-grants.sql", import.meta.url),
+);
+const suffix = randomUUID().replaceAll("-", "").slice(0, 16);
+const databaseName = `runtime_e2e_${suffix}`;
+const apiRole = `runtime_e2e_api_${suffix}`;
+const workerRole = `runtime_e2e_worker_${suffix}`;
+const runtimeRole = `runtime_e2e_exec_${suffix}`;
+const rolePassword = `runtime-e2e-${suffix}`;
+const email = `runtime-e2e-${suffix}@example.test`;
+const password = `runtime-e2e-password-${suffix}`;
+const masterKey = Buffer.alloc(32, 37).toString("base64");
+const desktopKey = Buffer.alloc(32, 73).toString("base64");
+const controlToken = `control-${suffix}`;
+const boxApiKey = `box-${suffix}`;
+const releaseId = `runtime-e2e-${suffix}`;
+
+type Sql = ReturnType<typeof postgres>;
+
+interface ManagedProcess {
+  child: ChildProcess;
+  label: string;
+  environment: NodeJS.ProcessEnv;
+  output(): string;
+}
+
+interface TurnRow {
+  id: string;
+  status: string;
+  queueSequence: number;
+  startedAt: Date | null;
+  settledAt: Date | null;
+  errorCode: string | null;
+}
+
+interface OperationRow {
+  id: string;
+  kind: string;
+  status: string;
+  settledAt: Date | null;
+  errorCode: string | null;
+}
+
+interface BoxSimState {
+  boxes: Array<{
+    id: string;
+    state: string;
+    daemon: {
+      status: string;
+      invocationId: string | null;
+      activeAttemptId: string | null;
+      tailCursor: number;
+      acknowledgedCursor: number;
+      counters: {
+        malformedLines: number;
+        oversizedLines: number;
+        unterminatedLines: number;
+        unknownEvents: number;
+        unboundEvents: number;
+        orphanResponses: number;
+      };
+      restartCount: number;
+      scenario: string;
+    };
+  }>;
+  deletions: Array<{ targetId: string; status: string }>;
+  requests: Array<{ surface: string; method: string; path: string }>;
+}
+
+class TerminalWaitError extends Error {}
+
+const adminSql = postgres(migrationUrl, { max: 1 });
+const databaseUrl = databaseRoleUrl(migrationUrl, databaseName);
+const ownerUrl = databaseUrl.toString();
+const apiUrl = databaseRoleUrl(migrationUrl, databaseName, apiRole, rolePassword).toString();
+const workerUrl = databaseRoleUrl(migrationUrl, databaseName, workerRole, rolePassword).toString();
+const runtimeUrl = databaseRoleUrl(migrationUrl, databaseName, runtimeRole, rolePassword).toString();
+
+let databaseCreated = false;
+let rolesCreated = false;
+let databaseSql: Sql | undefined;
+let apiPort = 0;
+let runtimePort = 0;
+let boxPort = 0;
+let apiBase = "";
+let runtimeBase = "";
+let boxBase = "";
+let boxControlBase = "";
+let apiProcess: ManagedProcess | undefined;
+let workerProcess: ManagedProcess | undefined;
+let runtimeProcess: ManagedProcess | undefined;
+let boxProcess: ManagedProcess | undefined;
+let sessionCookie = "";
+let orgId = "";
+let userId = "";
+let companionId = "";
+
+function databaseRoleUrl(
+  source: string,
+  name: string,
+  role?: string,
+  roleSecret?: string,
+): URL {
+  const result = new URL(source);
+  result.pathname = `/${name}`;
+  result.search = "";
+  if (role) {
+    result.username = role;
+    result.password = roleSecret ?? "";
+  }
+  return result;
+}
+
+async function availablePort(): Promise<number> {
+  return await new Promise((resolve, reject) => {
+    const server = createServer();
+    server.unref();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close();
+        reject(new Error("failed to allocate a loopback port"));
+        return;
+      }
+      server.close((error) => error ? reject(error) : resolve(address.port));
+    });
+  });
+}
+
+async function distinctAvailablePorts(count: number): Promise<number[]> {
+  const ports = new Set<number>();
+  while (ports.size < count) ports.add(await availablePort());
+  return [...ports];
+}
+
+async function applyMigrationFile(client: Sql, name: string): Promise<void> {
+  const source = await readFile(`${migrationsDir}/${name}`, "utf8");
+  const statements = source
+    .split("--> statement-breakpoint")
+    .map((statement) => statement.trim())
+    .filter(Boolean);
+  await client.begin(async (tx) => {
+    for (const statement of statements) await tx.unsafe(statement);
+  });
+}
+
+async function migrationFileNames(): Promise<string[]> {
+  return (await readdir(migrationsDir))
+    .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+    .sort();
+}
+
+async function replayMigrations(client: Sql, names: string[]): Promise<void> {
+  for (const name of names) await applyMigrationFile(client, name);
+}
+
+async function applyRuntimeGrants(client: Sql): Promise<void> {
+  const source = await readFile(runtimeGrantsFile, "utf8");
+  const begin = source.indexOf("-- companion-runtime-grants-begin");
+  const end = source.indexOf("-- companion-runtime-grants-end");
+  if (begin < 0 || end <= begin) throw new Error("runtime role grant block is missing");
+  const grants = source.slice(begin + "-- companion-runtime-grants-begin".length, end).trim();
+  await client`select set_config('companion.api_role', ${apiRole}, false)`;
+  await client`select set_config('companion.worker_role', ${workerRole}, false)`;
+  await client`select set_config('companion.companion_runtime_role', ${runtimeRole}, false)`;
+  await client`select set_config('companion.retired_runtime_role', '', false)`;
+  await client.unsafe(grants);
+}
+
+const SAFE_CHILD_ENVIRONMENT_KEYS = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "TERM",
+  "CI",
+  "LANG",
+  "LC_ALL",
+  "TZ",
+  "HOSTNAME",
+  "PNPM_HOME",
+  "COREPACK_HOME",
+  "COREPACK_ENABLE_PROJECT_SPEC",
+  "NODE_OPTIONS",
+  "NO_COLOR",
+  "FORCE_COLOR",
+] as const;
+
+function cleanChildEnvironment(overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const key of SAFE_CHILD_ENVIRONMENT_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) environment[key] = value;
+  }
+  environment.PATH ??= "/usr/local/bin:/usr/bin:/bin";
+  return { ...environment, ...overrides };
+}
+
+function startProcess(label: string, args: string[], overrides: NodeJS.ProcessEnv): ManagedProcess {
+  const environment = cleanChildEnvironment(overrides);
+  const child = spawn("pnpm", args, {
+    cwd: repositoryRoot,
+    env: environment,
+    detached: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let log = "";
+  const append = (chunk: Buffer | string): void => {
+    log = `${log}${String(chunk)}`.slice(-200_000);
+  };
+  child.stdout?.on("data", append);
+  child.stderr?.on("data", append);
+  return { child, label, environment, output: () => log };
+}
+
+async function runProcess(label: string, args: string[], env: NodeJS.ProcessEnv): Promise<void> {
+  const processHandle = startProcess(label, args, env);
+  const code = await new Promise<number | null>((resolve, reject) => {
+    processHandle.child.once("error", reject);
+    processHandle.child.once("exit", resolve);
+  });
+  if (code !== 0) {
+    throw new Error(`${label} exited ${String(code)} (signal=${String(processHandle.child.signalCode)})`);
+  }
+}
+
+async function stopProcess(processHandle: ManagedProcess | undefined, signal: NodeJS.Signals): Promise<void> {
+  if (!processHandle || processHandle.child.exitCode !== null || processHandle.child.signalCode) return;
+  const pid = processHandle.child.pid;
+  if (!pid) return;
+  try {
+    globalThis.process.kill(-pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    return;
+  }
+  await Promise.race([
+    new Promise<void>((resolve) => processHandle.child.once("exit", () => resolve())),
+    new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+  ]);
+  if (processHandle.child.exitCode === null && !processHandle.child.signalCode) {
+    try {
+      globalThis.process.kill(-pid, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  }
+}
+
+async function waitFor<T>(
+  label: string,
+  read: () => Promise<T | null | undefined | false>,
+  timeoutMs = 30_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const value = await read();
+      if (value !== null && value !== undefined && value !== false) return value;
+    } catch (error) {
+      if (error instanceof TerminalWaitError) throw error;
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const detail = lastError instanceof Error ? `: ${lastError.message}` : "";
+  throw new Error(`timed out waiting for ${label}${detail}`);
+}
+
+async function waitForHttp(url: string, processHandle: ManagedProcess): Promise<void> {
+  await waitFor(`${processHandle.label} readiness`, async () => {
+    if (processHandle.child.exitCode !== null || processHandle.child.signalCode) {
+      throw new Error(
+        `${processHandle.label} exited early (exit=${String(processHandle.child.exitCode)}, `
+        + `signal=${String(processHandle.child.signalCode)})`,
+      );
+    }
+    const response = await fetch(url, { signal: AbortSignal.timeout(1_000) });
+    return response.ok;
+  }, 30_000);
+}
+
+function commonApiEnv(): NodeJS.ProcessEnv {
+  return {
+    NODE_ENV: "test",
+    DATABASE_URL: apiUrl,
+    BETTER_AUTH_URL: apiBase,
+    BETTER_AUTH_SECRET: "runtime-e2e-better-auth-secret-32-bytes",
+    BETTER_AUTH_COOKIE_PREFIX: `runtime_e2e_${suffix}`,
+    COMPANION_API_HOST: "127.0.0.1",
+    COMPANION_API_PORT: String(apiPort),
+    COMPANION_API_URL: apiBase,
+    COMPANION_WEB_URL: apiBase,
+    COMPANION_COMPANIONS_ENABLED: "true",
+    COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "example.test",
+    COMPANION_SECRETS_MASTER_KEY: masterKey,
+    COMPANION_RUNTIME_PRIVATE_URL: runtimeBase,
+    COMPANION_RUNTIME_DESKTOP_HMAC_SECRET: desktopKey,
+    COMPANION_RELEASE_ID: releaseId,
+  };
+}
+
+function startApi(): ManagedProcess {
+  return startProcess(
+    "Companion API",
+    ["--filter", "@companion/api", "exec", "tsx", "src/index.ts"],
+    commonApiEnv(),
+  );
+}
+
+function startWorker(): ManagedProcess {
+  return startProcess(
+    "Companion Worker",
+    ["--filter", "@companion/worker", "exec", "tsx", "src/index.ts"],
+    {
+      NODE_ENV: "test",
+      DATABASE_URL: workerUrl,
+      COMPANION_DATABASE_POOL_MAX: "2",
+      COMPANION_BILLING_MODE: "disabled",
+      COMPANION_SKILL_DB_CLEANUP_INTERVAL_MS: "60000",
+    },
+  );
+}
+
+function startRuntime(executorId: string): ManagedProcess {
+  return startProcess(
+    `Companion Runtime ${executorId.slice(0, 8)}`,
+    ["--filter", "@companion/runtime", "exec", "tsx", "src/index.ts"],
+    {
+      NODE_ENV: "test",
+      DATABASE_COMPANION_RUNTIME_URL: runtimeUrl,
+      COMPANION_COMPANIONS_ENABLED: "true",
+      COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "example.test",
+      COMPANION_SECRETS_MASTER_KEY: masterKey,
+      COMPANION_RUNTIME_DESKTOP_HMAC_SECRET: desktopKey,
+      COMPANION_RUNTIME_EXECUTOR_ID: executorId,
+      COMPANION_RUNTIME_HOST: "127.0.0.1",
+      COMPANION_RUNTIME_PORT: String(runtimePort),
+      COMPANION_RUNTIME_SWEEP_INTERVAL_MS: "250",
+      COMPANION_RUNTIME_SHUTDOWN_DRAIN_MS: "100",
+      COMPANION_RELEASE_ID: releaseId,
+      COMPANION_API_URL: apiBase,
+      COMPANION_BOX_API_KEY: boxApiKey,
+      COMPANION_BOX_API_BASE: boxBase,
+      COMPANION_BOX_POLL_INTERVAL_MS: "10",
+      COMPANION_BOX_READY_TIMEOUT_MS: "10000",
+      COMPANION_PI_BROKER_TIMEOUT_MS: "5000",
+      COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS: "10000",
+    },
+  );
+}
+
+async function apiRequest(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  headers.set("origin", apiBase);
+  if (sessionCookie) headers.set("cookie", sessionCookie);
+  if (orgId) headers.set("x-companion-org", orgId);
+  if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
+  return await fetch(`${apiBase}${path}`, {
+    ...init,
+    headers,
+    signal: init.signal ?? AbortSignal.timeout(15_000),
+  });
+}
+
+async function apiJson<T>(path: string, init: RequestInit, status: number): Promise<T> {
+  const response = await apiRequest(path, init);
+  const body = await response.json().catch(() => null) as T | { error?: string } | null;
+  if (response.status !== status) {
+    throw new Error(`${init.method ?? "GET"} ${path} returned ${response.status}: ${JSON.stringify(body)}`);
+  }
+  return body as T;
+}
+
+async function signIn(): Promise<void> {
+  const response = await apiRequest("/auth/sign-in/email", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+  if (!response.ok) throw new Error(`sign-in failed: ${response.status} ${await response.text()}`);
+  const cookieHeaders = (response.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie?.()
+    ?? [response.headers.get("set-cookie") ?? ""];
+  sessionCookie = cookieHeaders
+    .filter(Boolean)
+    .map((cookie) => cookie.split(";", 1)[0])
+    .join("; ");
+  if (!sessionCookie) throw new Error("sign-in returned no session cookie");
+}
+
+function assertProcessAlive(processHandle: ManagedProcess | undefined): asserts processHandle is ManagedProcess {
+  if (
+    !processHandle
+    || processHandle.child.exitCode !== null
+    || processHandle.child.signalCode !== null
+  ) {
+    throw new Error(
+      `${processHandle?.label ?? "process"} is not alive `
+      + `(exit=${String(processHandle?.child.exitCode ?? null)}, `
+      + `signal=${String(processHandle?.child.signalCode ?? null)})`,
+    );
+  }
+}
+
+async function turnRow(turnId: string): Promise<TurnRow | undefined> {
+  const rows = await databaseSql!<TurnRow[]>`
+    select t.id::text, t.status::text, t.queue_sequence::int as "queueSequence",
+      a.started_at as "startedAt", t.settled_at as "settledAt",
+      t.last_error_code as "errorCode"
+    from companion_turns t
+    left join lateral (
+      select attempt.started_at
+      from companion_turn_attempts attempt
+      where attempt.turn_id = t.id
+      order by attempt.attempt_number desc
+      limit 1
+    ) a on true
+    where t.id = ${turnId}::uuid
+  `;
+  return rows[0];
+}
+
+async function waitForTurn(turnId: string, status: string, timeoutMs = 30_000): Promise<TurnRow> {
+  try {
+    return await waitFor(`turn ${turnId} to become ${status}`, async () => {
+      const row = await turnRow(turnId);
+      if (!row) return false;
+      if (["failed", "interrupted", "cancelled"].includes(row.status) && row.status !== status) {
+        throw new TerminalWaitError(
+          `turn became ${row.status} (${row.errorCode ?? "no code"}); ${await turnDiagnostic(turnId)}`,
+        );
+      }
+      return row.status === status ? row : false;
+    }, timeoutMs);
+  } catch (error) {
+    if (error instanceof TerminalWaitError) throw error;
+    throw new Error(`${error instanceof Error ? error.message : "turn wait failed"}; ${await turnDiagnostic(turnId)}`);
+  }
+}
+
+async function turnDiagnostic(turnId: string): Promise<string> {
+  const row = await turnRow(turnId).catch(() => undefined);
+  const [attempt] = await databaseSql!<Array<{
+    status: string;
+    checkpoint: string;
+    cursor: number;
+    dispatchState: string;
+  }>>`
+    select status::text, checkpoint, event_cursor::int as cursor,
+      dispatch_state::text as "dispatchState"
+    from companion_turn_attempts where turn_id = ${turnId}::uuid
+    order by attempt_number desc limit 1
+  `.catch(() => []);
+  const simulator = await simulatorState().catch(() => null);
+  const box = simulator?.boxes[0];
+  const processState = (processHandle: ManagedProcess | undefined) => ({
+    running: Boolean(
+      processHandle
+      && processHandle.child.exitCode === null
+      && processHandle.child.signalCode === null
+    ),
+    exitCode: processHandle?.child.exitCode ?? null,
+    signal: processHandle?.child.signalCode ?? null,
+  });
+  return `turn=${JSON.stringify(row)} attempt=${JSON.stringify(attempt)} `
+    + `box=${JSON.stringify(box ? {
+      id: box.id,
+      state: box.state,
+      daemon: {
+        status: box.daemon.status,
+        invocationId: box.daemon.invocationId,
+        activeAttemptId: box.daemon.activeAttemptId,
+        tailCursor: box.daemon.tailCursor,
+        acknowledgedCursor: box.daemon.acknowledgedCursor,
+        counters: box.daemon.counters,
+        restartCount: box.daemon.restartCount,
+      },
+    } : null)} runtime=${JSON.stringify(processState(runtimeProcess))} `
+    + `worker=${JSON.stringify(processState(workerProcess))}`;
+}
+
+async function waitForOperation(operationId: string, timeoutMs = 30_000): Promise<OperationRow> {
+  return await waitFor(`operation ${operationId}`, async () => {
+    const [row] = await databaseSql!<OperationRow[]>`
+      select id::text, kind::text, status::text, settled_at as "settledAt",
+        last_error_code as "errorCode"
+      from companion_operations where id = ${operationId}::uuid
+    `;
+    if (!row) return false;
+    if (["failed", "interrupted", "cancelled"].includes(row.status)) {
+      throw new Error(`${row.kind} became ${row.status} (${row.errorCode ?? "no code"})`);
+    }
+    return row.status === "succeeded" ? row : false;
+  }, timeoutMs);
+}
+
+async function boxControl<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(`${boxControlBase}${path}`, {
+    ...init,
+    headers: {
+      "content-type": "application/json",
+      "x-box-sim-token": controlToken,
+      ...init.headers,
+    },
+    signal: init.signal ?? AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) throw new Error(`Box simulator control ${path} returned ${response.status}`);
+  return await response.json() as T;
+}
+
+async function simulatorState(): Promise<BoxSimState> {
+  const result = await boxControl<{ state: BoxSimState }>("/state");
+  return result.state;
+}
+
+beforeAll(async () => {
+  [apiPort, runtimePort, boxPort] = await distinctAvailablePorts(3) as [number, number, number];
+  apiBase = `http://127.0.0.1:${apiPort}`;
+  runtimeBase = `http://127.0.0.1:${runtimePort}`;
+  boxBase = `http://127.0.0.1:${boxPort}`;
+  boxControlBase = `${boxBase}/_box-sim`;
+
+  await adminSql.unsafe(`
+    create role ${apiRole} login password '${rolePassword}' nosuperuser nobypassrls noinherit;
+    create role ${workerRole} login password '${rolePassword}' nosuperuser nobypassrls noinherit;
+    create role ${runtimeRole} login password '${rolePassword}' nosuperuser nobypassrls noinherit;
+  `);
+  rolesCreated = true;
+  await adminSql.unsafe(`create database "${databaseName}"`);
+  databaseCreated = true;
+  const migrationNames = await migrationFileNames();
+  const cutoverIndex = migrationNames.findIndex((name) => name.startsWith("0093_"));
+  if (cutoverIndex < 0) throw new Error("Runtime v2 cutover migration is missing");
+  const migrationSql = postgres(ownerUrl, { max: 1 });
+  try {
+    await replayMigrations(migrationSql, migrationNames.slice(0, cutoverIndex));
+    // 0093 verifies a grants nonce bound to this physical backend before destructive cutover.
+    await applyRuntimeGrants(migrationSql);
+    await replayMigrations(migrationSql, migrationNames.slice(cutoverIndex));
+  } finally {
+    await migrationSql.end({ timeout: 1 });
+  }
+  databaseSql = postgres(ownerUrl, { max: 4 });
+
+  await runProcess(
+    "test-user seed",
+    ["--filter", "@companion/api", "exec", "tsx", "src/seed-test-user.ts"],
+    {
+      ...commonApiEnv(),
+      COMPANION_ALLOW_TEST_USER_SEED: "1",
+      COMPANION_SEED_EMAIL: email,
+      COMPANION_SEED_PASSWORD: password,
+      COMPANION_SEED_NAME: "Runtime E2E Owner",
+    },
+  );
+
+  const [identity] = await databaseSql<Array<{ userId: string; orgId: string }>>`
+    select u.id as "userId", m.org_id::text as "orgId"
+    from "user" u join memberships m on m.user_id = u.id
+    where u.email = ${email}
+    order by m.created_at limit 1
+  `;
+  if (!identity) throw new Error("seed did not create a tenant identity");
+  userId = identity.userId;
+  orgId = identity.orgId;
+
+  boxProcess = startProcess(
+    "Box/Pi simulator",
+    ["--filter", "@companion/box-sim", "exec", "tsx", "src/cli.ts"],
+    {
+      BOX_SIM_HOST: "127.0.0.1",
+      BOX_SIM_PORT: String(boxPort),
+      BOX_SIM_API_KEY: boxApiKey,
+      BOX_SIM_CONTROL_TOKEN: controlToken,
+    },
+  );
+  await waitFor("Box simulator readiness", async () => {
+    assertProcessAlive(boxProcess);
+    const response = await fetch(`${boxControlBase}/state`, {
+      headers: { "x-box-sim-token": controlToken },
+      signal: AbortSignal.timeout(1_000),
+    });
+    return response.ok;
+  });
+
+  apiProcess = startApi();
+  await waitForHttp(`${apiBase}/health`, apiProcess);
+  await signIn();
+
+  workerProcess = startWorker();
+  await waitFor("Worker process startup", async () => {
+    assertProcessAlive(workerProcess);
+    return workerProcess.output().includes("GitHub sync supervisor disabled");
+  }, 10_000);
+
+  await apiJson("/v1/companion-providers/anthropic", {
+    method: "PUT",
+    body: JSON.stringify({ auth_method: "api_key", credential: "deterministic-e2e-key" }),
+  }, 200);
+
+  companionId = randomUUID();
+  await databaseSql`
+    insert into companions (
+      id, org_id, owner_id, name, persona, model_id, provider_ids,
+      selected_skill_ids, selected_mcp_account_ids
+    ) values (
+      ${companionId}::uuid, ${orgId}::uuid, ${userId}, 'Runtime full stack',
+      'Reply concisely.', 'claude-sonnet-4-6', '["anthropic"]'::jsonb,
+      '[]'::jsonb, '[]'::jsonb
+    )
+  `;
+  await databaseSql`
+    insert into companion_runtime_instances (org_id, companion_id, health_due_at)
+    values (${orgId}::uuid, ${companionId}::uuid, now() + interval '1 day')
+  `;
+  const [gate] = await databaseSql<Array<{ epoch: string; enabled: boolean }>>`
+    select gate_epoch::text as epoch, enabled from companion_runtime_control where id = 'runtime-v2'
+  `;
+  if (gate && !gate.enabled) {
+    await databaseSql`select * from public.companion_runtime_enable(${gate.epoch}::bigint, 'runtime-e2e')`;
+  }
+
+  runtimeProcess = startRuntime(randomUUID());
+  await waitForHttp(`${runtimeBase}/healthz`, runtimeProcess);
+}, 180_000);
+
+afterAll(async () => {
+  await stopProcess(apiProcess, "SIGTERM").catch(() => undefined);
+  await stopProcess(workerProcess, "SIGTERM").catch(() => undefined);
+  await stopProcess(runtimeProcess, "SIGTERM").catch(() => undefined);
+  await stopProcess(boxProcess, "SIGTERM").catch(() => undefined);
+  await databaseSql?.end({ timeout: 1 });
+  if (databaseCreated) {
+    await adminSql.unsafe(`drop database if exists "${databaseName}" with (force)`);
+  }
+  if (rolesCreated) {
+    await adminSql.unsafe(`drop role if exists ${runtimeRole}, ${workerRole}, ${apiRole}`);
+  }
+  await adminSql.end({ timeout: 1 });
+}, 30_000);
+
+describe("Runtime v2 real-process control plane", () => {
+  it("survives API death and runtime takeover while preserving order, decisions, wake, and delete", async () => {
+    assertProcessAlive(apiProcess);
+    assertProcessAlive(workerProcess);
+    assertProcessAlive(runtimeProcess);
+    assertProcessAlive(boxProcess);
+    expect(apiProcess.environment.COMPANION_BOX_API_KEY).toBeUndefined();
+    expect(workerProcess.environment.COMPANION_BOX_API_KEY).toBeUndefined();
+    expect(apiProcess.environment.BOX_SIM_API_KEY).toBeUndefined();
+    expect(workerProcess.environment.BOX_SIM_API_KEY).toBeUndefined();
+    expect(runtimeProcess.environment.COMPANION_BOX_API_KEY).toBe(boxApiKey);
+    expect(boxProcess.environment.BOX_SIM_API_KEY).toBe(boxApiKey);
+    expect(apiProcess.environment.COMPANION_RELEASE_ID).toBe(releaseId);
+    expect(runtimeProcess.environment.COMPANION_RELEASE_ID).toBe(releaseId);
+    const providerSecretKeys = (environment: NodeJS.ProcessEnv): string[] =>
+      Object.keys(environment).filter((key) =>
+        /(?:^|_)(?:API_KEY|ACCESS_KEY|SECRET_KEY|AUTH_TOKEN)$/.test(key));
+    expect(providerSecretKeys(apiProcess.environment)).toEqual([]);
+    expect(providerSecretKeys(workerProcess.environment)).toEqual([]);
+    expect(Object.keys(apiProcess.environment).filter((key) => key.startsWith("DATABASE_")))
+      .toEqual(["DATABASE_URL"]);
+    expect(Object.keys(workerProcess.environment).filter((key) => key.startsWith("DATABASE_")))
+      .toEqual(["DATABASE_URL"]);
+    expect(Object.keys(runtimeProcess.environment).filter((key) => key.startsWith("DATABASE_")))
+      .toEqual(["DATABASE_COMPANION_RUNTIME_URL"]);
+    const [apiHealth, runtimeHealth] = await Promise.all([
+      apiRequest("/health"),
+      fetch(`${runtimeBase}/healthz`, { signal: AbortSignal.timeout(5_000) }),
+    ]);
+    expect(apiHealth.status).toBe(200);
+    expect(runtimeHealth.status).toBe(200);
+    await expect(apiHealth.json()).resolves.toMatchObject({ release_id: releaseId });
+    await expect(runtimeHealth.json()).resolves.toMatchObject({ release_id: releaseId });
+
+    const coldAcceptedAt = Date.now();
+    const coldMessageId = randomUUID();
+    const cold = await apiJson<{ turn: { id: string; status: string } }>(
+      `/v1/companions/${companionId}/messages`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          client_message_id: coldMessageId,
+          client_surface: "web",
+          content: "Cold-start this Companion and answer once.",
+        }),
+      },
+      202,
+    );
+    expect(Date.now() - coldAcceptedAt).toBeLessThan(1_000);
+    expect(cold.turn.status).toBe("queued");
+
+    // The accepted transaction, not the API process, owns delivery from this point onward.
+    await stopProcess(apiProcess, "SIGKILL");
+    apiProcess = undefined;
+    const coldTerminal = await waitForTurn(cold.turn.id, "succeeded", 45_000);
+    expect(coldTerminal.errorCode).toBeNull();
+    const [coldProjection] = await databaseSql!<Array<{ assistants: number }>>`
+      select count(*) filter (where role = 'assistant')::int as assistants
+      from companion_transcript_entries where companion_id = ${companionId}::uuid
+    `;
+    expect(coldProjection?.assistants).toBeGreaterThanOrEqual(1);
+
+    apiProcess = startApi();
+    await waitForHttp(`${apiBase}/health`, apiProcess);
+    const persisted = await apiJson<{ thread: { entries: Array<{ role: string }> } }>(
+      `/v1/companions/${companionId}/thread`,
+      { method: "GET" },
+      200,
+    );
+    expect(persisted.thread.entries.some((entry) => entry.role === "assistant")).toBe(true);
+
+    const stateAfterCold = await simulatorState();
+    const box = stateAfterCold.boxes[0];
+    if (!box) throw new Error("cold send did not create a Box");
+    expect(box.state).toMatch(/ready|idle|running/);
+    await boxControl(`/boxes/${box.id}/scenario`, {
+      method: "PUT",
+      body: JSON.stringify({ scenario: "ask_user" }),
+    });
+
+    const decisionAccepted = await apiJson<{ turn: { id: string } }>(
+      `/v1/companions/${companionId}/messages`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          client_message_id: randomUUID(),
+          client_surface: "web",
+          content: "Ask me for one deterministic choice before continuing.",
+        }),
+      },
+      202,
+    );
+    await waitForTurn(decisionAccepted.turn.id, "needs_input", 30_000);
+    const [decision] = await databaseSql!<Array<{ requestKey: string }>>`
+      select request_key as "requestKey" from companion_decision_deliveries
+      where turn_id = ${decisionAccepted.turn.id}::uuid and decision_status = 'pending'
+      order by created_at limit 1
+    `;
+    if (!decision) throw new Error("ask_user did not project a durable decision");
+    const beforeTakeover = await simulatorState();
+    const beforeBroker = beforeTakeover.boxes[0]?.daemon;
+    if (!beforeBroker) throw new Error("decision turn lost its broker state");
+    const [attemptsBefore] = await databaseSql!<Array<{ count: number; dispatchCount: number }>>`
+      select count(*)::int as count, max(dispatch_count)::int as "dispatchCount"
+      from companion_turn_attempts
+      where turn_id = ${decisionAccepted.turn.id}::uuid
+    `;
+    expect(attemptsBefore?.count).toBe(1);
+    expect(attemptsBefore?.dispatchCount).toBe(1);
+
+    const takeoverStartedAt = Date.now();
+    await stopProcess(runtimeProcess, "SIGKILL");
+    runtimeProcess = startRuntime(randomUUID());
+    await waitForHttp(`${runtimeBase}/healthz`, runtimeProcess);
+    await apiJson(
+      `/v1/companions/${companionId}/decisions/${encodeURIComponent(decision.requestKey)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ action: "answer", answer: "Continue." }),
+      },
+      202,
+    );
+    await waitForTurn(decisionAccepted.turn.id, "succeeded", 45_000);
+    expect(Date.now() - takeoverStartedAt).toBeLessThan(45_000);
+    const [attemptsAfter] = await databaseSql!<Array<{ count: number; dispatchCount: number }>>`
+      select count(*)::int as count, max(dispatch_count)::int as "dispatchCount"
+      from companion_turn_attempts
+      where turn_id = ${decisionAccepted.turn.id}::uuid
+    `;
+    expect(attemptsAfter?.count).toBe(1);
+    expect(attemptsAfter?.dispatchCount).toBe(1);
+    const afterTakeover = await simulatorState();
+    expect(afterTakeover.boxes[0]?.daemon).toMatchObject({
+      invocationId: beforeBroker.invocationId,
+      activeAttemptId: null,
+    });
+    expect(afterTakeover.boxes[0]?.daemon.tailCursor).toBeGreaterThan(beforeBroker.tailCursor);
+    expect(afterTakeover.boxes[0]?.daemon.acknowledgedCursor)
+      .toBe(afterTakeover.boxes[0]?.daemon.tailCursor);
+
+    await boxControl(`/boxes/${box.id}/scenario`, {
+      method: "PUT",
+      body: JSON.stringify({ scenario: "normal" }),
+    });
+    const concurrent = await Promise.all([
+      apiJson<{ turn: { id: string; queue_sequence: number } }>(
+        `/v1/companions/${companionId}/messages`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            client_message_id: randomUUID(),
+            client_surface: "web",
+            content: "Concurrent message A.",
+          }),
+        },
+        202,
+      ),
+      apiJson<{ turn: { id: string; queue_sequence: number } }>(
+        `/v1/companions/${companionId}/messages`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            client_message_id: randomUUID(),
+            client_surface: "web",
+            content: "Concurrent message B.",
+          }),
+        },
+        202,
+      ),
+    ]);
+    const ordered = [...concurrent].sort((left, right) =>
+      left.turn.queue_sequence - right.turn.queue_sequence);
+    const first = await waitForTurn(ordered[0]!.turn.id, "succeeded", 30_000);
+    const second = await waitForTurn(ordered[1]!.turn.id, "succeeded", 30_000);
+    expect(first.queueSequence).toBeLessThan(second.queueSequence);
+    expect(first.settledAt!.getTime()).toBeLessThanOrEqual(second.startedAt!.getTime());
+
+    const stop = await apiJson<{ operation: { id: string } }>(
+      `/v1/companions/${companionId}/runtime/stop`,
+      {
+        method: "POST",
+        headers: { "idempotency-key": randomUUID() },
+        body: JSON.stringify({}),
+      },
+      202,
+    );
+    await waitForOperation(stop.operation.id, 30_000);
+    await waitFor("Box to archive", async () =>
+      (await simulatorState()).boxes[0]?.state === "archived");
+
+    const wake = await apiJson<{ turn: { id: string } }>(
+      `/v1/companions/${companionId}/messages`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          client_message_id: randomUUID(),
+          client_surface: "web",
+          content: "Wake on this send and answer again.",
+        }),
+      },
+      202,
+    );
+    await waitForTurn(wake.turn.id, "succeeded", 30_000);
+    expect((await simulatorState()).boxes[0]?.state).toMatch(/ready|idle|running/);
+
+    const beforePiRestart = (await simulatorState()).boxes[0]?.daemon;
+    if (!beforePiRestart?.invocationId) throw new Error("wake did not leave an observable Pi invocation");
+    const restartPi = await apiJson<{ operation: { id: string } }>(
+      `/v1/companions/${companionId}/runtime/restart`,
+      {
+        method: "POST",
+        headers: { "idempotency-key": randomUUID() },
+        body: JSON.stringify({ target: "pi" }),
+      },
+      202,
+    );
+    await waitForOperation(restartPi.operation.id, 30_000);
+    const afterPiRestart = (await simulatorState()).boxes[0];
+    expect(afterPiRestart).toMatchObject({
+      id: box.id,
+      state: expect.stringMatching(/ready|idle|running/),
+      daemon: { restartCount: beforePiRestart.restartCount + 1 },
+    });
+    expect(afterPiRestart?.daemon.invocationId).not.toBe(beforePiRestart.invocationId);
+
+    const deletion = await apiJson<{ operation: { id: string } }>(
+      `/v1/companions/${companionId}`,
+      {
+        method: "DELETE",
+        headers: { "idempotency-key": randomUUID() },
+      },
+      202,
+    );
+    await waitFor("delete settlement audit", async () => {
+      const [audit] = await databaseSql!<Array<{ operationId: string | null }>>`
+        select metadata ->> 'operation_id' as "operationId"
+        from audit_log
+        where org_id = ${orgId}::uuid
+          and action = 'companion.deleted'
+          and target_type = 'companion'
+          and target_id = ${companionId}
+        order by created_at desc
+        limit 1
+      `;
+      return audit?.operationId === deletion.operation.id;
+    }, 30_000);
+    await waitFor("permanent Box deletion", async () => {
+      const state = await simulatorState();
+      return state.boxes.length === 0
+        && state.deletions.some((operation) =>
+          operation.targetId === box.id && operation.status === "completed");
+    });
+    const [root] = await databaseSql!<Array<{ count: number }>>`
+      select count(*)::int as count from companions where id = ${companionId}::uuid
+    `;
+    expect(root?.count).toBe(0);
+    assertProcessAlive(workerProcess);
+  }, 180_000);
+});

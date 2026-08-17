@@ -507,6 +507,7 @@ describe("0089 legacy Companion database purge", () => {
   const migrationRole = `companion_purge_owner_${suffix}`;
   const apiRole = `companion_purge_api_${suffix}`;
   const workerRole = `companion_purge_worker_${suffix}`;
+  const runtimeRole = `companion_purge_runtime_${suffix}`;
   const publicRole = `companion_purge_public_${suffix}`;
   let originalFunctionOwner = "";
   const originalTableOwners = new Map<string, string>();
@@ -551,6 +552,7 @@ describe("0089 legacy Companion database purge", () => {
       create role ${migrationRole} login nosuperuser nobypassrls noinherit;
       create role ${apiRole} login nosuperuser nobypassrls noinherit;
       create role ${workerRole} login nosuperuser nobypassrls noinherit;
+      create role ${runtimeRole} login nosuperuser nobypassrls noinherit;
       create role ${publicRole} login nosuperuser nobypassrls noinherit;
     `);
     rolesCreated = true;
@@ -587,6 +589,7 @@ describe("0089 legacy Companion database purge", () => {
     await integrationSql.begin(async (tx) => {
       await tx`select set_config('companion.api_role', ${apiRole}, true)`;
       await tx`select set_config('companion.worker_role', ${workerRole}, true)`;
+      await tx`select set_config('companion.companion_runtime_role', ${runtimeRole}, true)`;
       await tx.unsafe(grants);
     });
   }, 120_000);
@@ -605,7 +608,7 @@ describe("0089 legacy Companion database purge", () => {
             alter table ${integrationSql(table)} owner to ${integrationSql(owner)}
           `;
         }
-        for (const role of [apiRole, workerRole, publicRole, migrationRole]) {
+        for (const role of [apiRole, workerRole, runtimeRole, publicRole, migrationRole]) {
           await integrationSql`drop owned by ${integrationSql(role)}`;
           await integrationSql`drop role ${integrationSql(role)}`;
         }
@@ -663,6 +666,7 @@ describe("0089 legacy Companion database purge", () => {
       migrationCanExecute: boolean;
       apiCanExecute: boolean;
       workerCanExecute: boolean;
+      runtimeCanExecute: boolean;
       publicCanExecute: boolean;
       apiCanSelectLedger: boolean;
       workerCanSelectLedger: boolean;
@@ -681,6 +685,9 @@ describe("0089 legacy Companion database purge", () => {
         has_function_privilege(
           ${workerRole}, 'public.companion_finalize_legacy_purge()', 'EXECUTE'
         ) as "workerCanExecute",
+        has_function_privilege(
+          ${runtimeRole}, 'public.companion_finalize_legacy_purge()', 'EXECUTE'
+        ) as "runtimeCanExecute",
         has_function_privilege(
           ${publicRole}, 'public.companion_finalize_legacy_purge()', 'EXECUTE'
         ) as "publicCanExecute",
@@ -702,9 +709,10 @@ describe("0089 legacy Companion database purge", () => {
       migrationCanExecute: true,
       apiCanExecute: false,
       workerCanExecute: false,
+      runtimeCanExecute: false,
       publicCanExecute: false,
-      apiCanSelectLedger: true,
-      workerCanSelectLedger: true,
+      apiCanSelectLedger: false,
+      workerCanSelectLedger: false,
       publicCanSelectLedger: false,
     });
     expect(functionSecurity!.config).toContain("search_path=pg_catalog, public");
@@ -723,9 +731,9 @@ describe("0089 legacy Companion database purge", () => {
         rolbypassrls as "bypassRls",
         rolinherit as inherit
       from pg_roles
-      where rolname in (${migrationRole}, ${apiRole}, ${workerRole}, ${publicRole})
+      where rolname in (${migrationRole}, ${apiRole}, ${workerRole}, ${runtimeRole}, ${publicRole})
     `;
-    expect(roleRows).toHaveLength(4);
+    expect(roleRows).toHaveLength(5);
     for (const role of roleRows) {
       expect(role).toMatchObject({
         login: true,
@@ -747,16 +755,25 @@ describe("0089 legacy Companion database purge", () => {
       });
 
       for (const role of [apiRole, workerRole]) {
-        await tx.unsafe(`set local role ${role}`);
-        const hidden = await tx`select id from companion_legacy_purge_runs`;
-        expect(hidden).toEqual([]);
-        await tx.unsafe("reset role");
+        await expect(tx.savepoint(async (savepoint) => {
+          await savepoint.unsafe(`set local role ${role}`);
+          await savepoint`select id from companion_legacy_purge_runs`;
+        })).rejects.toThrow(/permission denied/i);
 
         await expect(tx.savepoint(async (savepoint) => {
           await savepoint.unsafe(`set local role ${role}`);
           await callFinalizer(savepoint);
         })).rejects.toThrow(/permission denied/i);
       }
+
+      await expect(tx.savepoint(async (savepoint) => {
+        await savepoint.unsafe(`set local role ${runtimeRole}`);
+        await savepoint`select id from companion_legacy_purge_runs`;
+      })).rejects.toThrow(/permission denied/i);
+      await expect(tx.savepoint(async (savepoint) => {
+        await savepoint.unsafe(`set local role ${runtimeRole}`);
+        await callFinalizer(savepoint);
+      })).rejects.toThrow(/permission denied/i);
 
       await tx.unsafe(`set local role ${migrationRole}`);
       const ownerVisible = await tx`select id from companion_legacy_purge_runs`;
