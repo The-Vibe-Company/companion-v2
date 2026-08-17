@@ -650,7 +650,7 @@ describe("CompanionsApp context panel", () => {
   });
 
   it("keeps a runner's panel open by default on a screen with room for it", async () => {
-    // The panel is where a Companion's screen, routines, and skills live, so a wide screen shows it
+    // The panel is where a Companion's screen and selected skills live, so a wide screen shows it
     // beside the conversation without being asked. What a stored choice says wins over that.
     window.localStorage.removeItem("companions:context-open");
     companionsApi.openCompanionDesktop.mockResolvedValue(

@@ -493,9 +493,9 @@ export function CompanionsApp({
   /**
    * Whether a runner keeps the context panel beside the conversation. It is a preference rather than
    * a property of one Companion, so it survives moving between threads and reloads: an operator who
-   * wants the screen, the routines, and the skills in view wants them for the next Companion too. It
-   * starts closed so server markup and the first client paint agree, and the stored preference — open
-   * unless it was closed — arrives once the client owns the page.
+   * wants the screen and the skills in view wants them for the next Companion too. It starts closed
+   * so server markup and the first client paint agree, and the stored preference — open unless it
+   * was closed — arrives once the client owns the page.
    */
   const [contextOpen, setContextOpen] = useState(false);
   /**

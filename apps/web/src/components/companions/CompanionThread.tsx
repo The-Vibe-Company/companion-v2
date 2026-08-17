@@ -177,10 +177,10 @@ function InterruptedTurnNotice({
  * conversation without any Box contact and gets no composer. Pi's tools and skills stay out of the
  * transcript by design.
  *
- * A runner can open the context panel beside the conversation: the Box screen as a preview, the
- * routines this Companion will keep, and the skills it may stage. It is a second pane rather than a
- * change to the transcript: the primitives keep the conversation, the composer, and their own
- * mechanics untouched whether the panel is open or not.
+ * A runner can open the context panel beside the conversation: the Box screen as a preview and the
+ * skills it may stage. It is a second pane rather than a change to the transcript: the primitives
+ * keep the conversation, the composer, and their own mechanics untouched whether the panel is open
+ * or not.
  */
 export function CompanionThread({
   companion,

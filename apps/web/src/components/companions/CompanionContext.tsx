@@ -8,8 +8,8 @@ import { companionStatus } from "./status";
 export type CompanionContextSkill = { id: string; slug: string };
 
 /**
- * What this Companion has beside its conversation: its screen, the routines it will keep, and the
- * skills it may stage on its Box.
+ * What this Companion has beside its conversation: its screen and the skills it may stage on its
+ * Box.
  *
  * The screen is the live Box desktop Lux drives, framed as a preview rather than a second place to
  * work: pointer events stop at the card, and the caption under it is the same authorized handoff that
@@ -146,24 +146,6 @@ export function CompanionContext({
               </>
             ) : `Send a message to start ${companion.name}.`}
           </p>
-        </section>
-
-        <section className="chat-context__block">
-          {/* The control sits beside the heading, not inside it: a heading is what the section is
-              called, and heading navigation should not read out its buttons. It is here so the
-              section is not a claim without a shape, and disabled because nothing behind it exists. */}
-          <div className="chat-context__titlerow">
-            <h3 className="chat-context__title">Routines</h3>
-            <button
-              type="button"
-              className="iconbtn chat-context__add"
-              aria-label="Add a routine"
-              disabled
-            >
-              <Icon name="plus" size={14} />
-            </button>
-          </div>
-          <p className="chat-context__empty">Routines are coming soon.</p>
         </section>
 
         <section className="chat-context__block">

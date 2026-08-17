@@ -833,6 +833,15 @@ describe("CompanionThread context panel", () => {
     document.body.innerHTML = "";
   });
 
+  it("keeps excluded future product surfaces out of the context panel", async () => {
+    const container = await mount(async () => true, { context: { open: true } });
+    const headings = [...container.querySelectorAll(".chat-context h3")]
+      .map((heading) => heading.textContent);
+
+    expect(headings).toEqual(["Screen", "Skills"]);
+    expect(panel(container)?.textContent).not.toContain("coming soon");
+  });
+
   it("shows a runner the live desktop beside the conversation once the Box is running", async () => {
     const container = await mount(async () => true, {
       context: {
