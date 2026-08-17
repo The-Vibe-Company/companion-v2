@@ -53,9 +53,34 @@ const thread: Thread = {
   read_only: false,
   can_send: true,
   entries: [],
+  active_turn: null,
+  queued_count: 0,
+  interrupted_turn: null,
   pending_count: 0,
   last_message_at: null,
   last_read_ordinal: null,
+};
+
+const interruptedThread: Thread = {
+  ...thread,
+  interrupted_turn: {
+    id: "22222222-2222-4222-8222-222222222222",
+    companion_id: companionId,
+    client_message_id: "33333333-3333-4333-8333-333333333333",
+    status: "interrupted",
+    queue_sequence: 1,
+    latest_attempt: null,
+    replying: false,
+    error: {
+      code: "dispatch_ambiguous",
+      message: "Pi acknowledgement was not confirmed.",
+      action: "retry",
+    },
+    state_changed_at: "2026-08-12T12:00:00.000Z",
+    settled_at: "2026-08-12T12:00:00.000Z",
+    created_at: "2026-08-12T12:00:00.000Z",
+    updated_at: "2026-08-12T12:00:00.000Z",
+  },
 };
 
 const roots: Root[] = [];
@@ -79,6 +104,8 @@ async function mount(
     companion?: Companion;
     thread?: Thread;
     onDesktop?: () => void;
+    onRetryInterrupted?: (turnId: string, retryId: string) => Promise<void>;
+    onCancelInterrupted?: (turnId: string) => Promise<void>;
     context?: Partial<CompanionContextPanel>;
   } = {},
 ) {
@@ -101,6 +128,8 @@ async function mount(
       onSettings: () => {},
       onThread: () => {},
       onDesktop: overrides.onDesktop ?? (() => {}),
+      onRetryInterrupted: overrides.onRetryInterrupted ?? (async () => {}),
+      onCancelInterrupted: overrides.onCancelInterrupted ?? (async () => {}),
     }));
   });
   return container;
@@ -128,6 +157,8 @@ async function mountPolling(initial: Thread) {
         onSettings: () => {},
         onThread: () => {},
         onDesktop: () => {},
+        onRetryInterrupted: async () => {},
+        onCancelInterrupted: async () => {},
       }));
     });
   };
@@ -183,6 +214,77 @@ describe("CompanionThread composer", () => {
   afterEach(() => {
     act(() => roots.splice(0).forEach((root) => root.unmount()));
     document.body.innerHTML = "";
+  });
+
+  it("keeps one retry id across a failed interrupted-turn submission and focuses the error", async () => {
+    const retryIds: string[] = [];
+    const onRetryInterrupted = vi.fn(async (_turnId: string, retryId: string) => {
+      retryIds.push(retryId);
+      throw new Error("Retry could not be scheduled.");
+    });
+    const container = await mount(async () => true, {
+      thread: interruptedThread,
+      onRetryInterrupted,
+    });
+    const retry = () => [...container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent === "Retry turn") as HTMLButtonElement;
+
+    await act(async () => retry().click());
+    const alert = container.querySelector<HTMLElement>(".chat-interruption__error")!;
+    expect(alert.textContent).toContain("Retry could not be scheduled.");
+    expect(document.activeElement).toBe(alert);
+
+    await act(async () => retry().click());
+    expect(retryIds).toHaveLength(2);
+    expect(retryIds[0]).toBe(retryIds[1]);
+    expect(retryIds[0]).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("shows that an interrupted-turn retry was accepted without claiming completion", async () => {
+    const onRetryInterrupted = vi.fn(async () => {});
+    const container = await mount(async () => true, {
+      thread: interruptedThread,
+      onRetryInterrupted,
+    });
+    const retry = [...container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent === "Retry turn") as HTMLButtonElement;
+
+    await act(async () => retry.click());
+
+    expect(onRetryInterrupted).toHaveBeenCalledWith(
+      interruptedThread.interrupted_turn?.id,
+      expect.stringMatching(/^[0-9a-f-]{36}$/),
+    );
+    expect(container.textContent).toContain("Retry accepted. Pi will restart");
+    expect(container.textContent).not.toContain("Retry completed");
+    expect([...container.querySelectorAll("button")]
+      .some((candidate) => candidate.textContent === "Retry turn")).toBe(false);
+  });
+
+  it("disables both actions while Cancel is pending and focuses a recoverable error", async () => {
+    let rejectCancel: (cause: Error) => void = () => {};
+    const onCancelInterrupted = vi.fn(() => new Promise<void>((_resolve, reject) => {
+      rejectCancel = reject;
+    }));
+    const container = await mount(async () => true, {
+      thread: interruptedThread,
+      onCancelInterrupted,
+    });
+    const cancel = [...container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent === "Cancel turn") as HTMLButtonElement;
+
+    act(() => cancel.click());
+    expect(onCancelInterrupted).toHaveBeenCalledWith(interruptedThread.interrupted_turn?.id);
+    expect(container.textContent).toContain("Cancelling…");
+    expect([...container.querySelectorAll<HTMLButtonElement>(".chat-interruption__actions button")]
+      .every((candidate) => candidate.disabled)).toBe(true);
+
+    await act(async () => rejectCancel(new Error("Cancel could not be saved.")));
+    const alert = container.querySelector<HTMLElement>(".chat-interruption__error")!;
+    expect(alert.textContent).toContain("Cancel could not be saved.");
+    expect(document.activeElement).toBe(alert);
+    expect([...container.querySelectorAll("button")]
+      .some((candidate) => candidate.textContent === "Cancel turn")).toBe(true);
   });
 
   it("keeps the typed message when the send fails", async () => {
@@ -333,6 +435,8 @@ describe("CompanionThread composer", () => {
       onSettings: () => {},
       onThread: () => {},
       onDesktop: () => {},
+      onRetryInterrupted: async () => {},
+      onCancelInterrupted: async () => {},
     });
     await act(async () => {
       root.render(render(thread));

@@ -73,5 +73,25 @@ describe("desktop request HMAC", () => {
       signature: `${signature.slice(0, -1)}${signature.endsWith("0") ? "1" : "0"}`,
       nowMs: timestamp * 1_000,
     }, secret)).toBe(false);
+    expect(verifyDesktopRequest({
+      ...request,
+      signature,
+      nowMs: Number.NaN,
+    }, secret)).toBe(false);
+  });
+
+  it("refuses ambiguous paths and undersized secrets", () => {
+    expect(() => canonicalDesktopRequest({
+      method: "POST",
+      pathname: `${DESKTOP_REQUEST_PATH}?org=one`,
+      timestamp,
+      rawBody,
+    })).toThrow();
+    expect(() => signDesktopRequest({
+      method: "POST",
+      pathname: DESKTOP_REQUEST_PATH,
+      timestamp,
+      rawBody,
+    }, Buffer.alloc(31))).toThrow();
   });
 });

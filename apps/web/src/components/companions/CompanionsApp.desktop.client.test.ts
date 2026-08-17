@@ -118,6 +118,9 @@ function thread(overrides: Partial<Thread> = {}): Thread {
     last_message_at: null,
     last_read_ordinal: null,
     ...overrides,
+    active_turn: overrides.active_turn ?? null,
+    queued_count: overrides.queued_count ?? 0,
+    interrupted_turn: overrides.interrupted_turn ?? null,
   };
 }
 
@@ -379,13 +382,13 @@ describe("CompanionsApp Box desktop", () => {
     await clickBoxChip(container);
     expect(container.textContent).toContain("The Box desktop is still starting");
 
-    // An awake thread re-reads itself every couple of seconds. That refresh clears its own load
+    // The PostgreSQL thread projection refreshes in the background. That refresh clears its own load
     // failure, and it must not take this answer with it: a wiped notice reads as nothing happened.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);
     });
 
-    expect(companionsApi.syncCompanionThread).toHaveBeenCalled();
+    expect(companionsApi.getCompanionThread).toHaveBeenCalled();
     expect(container.textContent).toContain("The Box desktop is still starting");
   });
 
@@ -418,7 +421,7 @@ describe("CompanionsApp Box desktop", () => {
     expect(companionsApi.getCompanionThread).toHaveBeenCalled();
   });
 
-  it("re-observes a runner's running Box so the chip cannot go stale", async () => {
+  it("re-reads a runner's projected runtime state without a live Box observation", async () => {
     vi.useFakeTimers();
     let online = true;
     companionsApi.getCompanionRuntime.mockImplementation(async () => online
@@ -433,9 +436,8 @@ describe("CompanionsApp Box desktop", () => {
       await vi.advanceTimersByTimeAsync(15_000);
     });
 
-    expect(companionsApi.getCompanionRuntime).toHaveBeenCalledWith("org-1", companionId, {
-      live: true,
-    });
+    expect(companionsApi.getCompanionRuntime).toHaveBeenCalledWith("org-1", companionId);
+    expect(companionsApi.getCompanionRuntime.mock.calls.some((call) => call.length > 2)).toBe(false);
     expect(companionsApi.startCompanionRuntime).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Asleep");
   });

@@ -109,6 +109,9 @@ const emptyThread: Thread = {
   read_only: false,
   can_send: true,
   entries: [],
+  active_turn: null,
+  queued_count: 0,
+  interrupted_turn: null,
   pending_count: 1,
   last_message_at: null,
   last_read_ordinal: null,
@@ -126,6 +129,7 @@ function controlPlane(options: {
 } = {}) {
   let settled = companionIn(options.initialState ?? "provisioning");
   const runtimeReads: string[] = [];
+  const threadReads: string[] = [];
   const threadSyncs: string[] = [];
   let held = 0;
   let release = () => {};
@@ -157,6 +161,7 @@ function controlPlane(options: {
     }
     if (url.includes("/thread")) {
       if (method === "POST" && url.endsWith("/thread/sync")) threadSyncs.push(url);
+      if (method === "GET") threadReads.push(url);
       return json({ thread: emptyThread });
     }
     return json({});
@@ -165,6 +170,7 @@ function controlPlane(options: {
   return {
     fetchMock,
     runtimeReads,
+    threadReads,
     threadSyncs,
     /** What the wake writes when the Box and Pi are up: the state the chip is waiting for. */
     boxCameUp: () => { settled = companionIn("running"); },
@@ -259,22 +265,24 @@ describe("CompanionsApp while a Companion is starting", () => {
     expect(api.runtimeReads.filter((url) => url.includes("live=true"))).toHaveLength(0);
   });
 
-  it("uses runner thread sync to continue an accepted wake waiting on Box archival", async () => {
+  it("polls an archiving thread through the read model without running legacy continuation", async () => {
     api = controlPlane({ initialState: "stopping" });
     vi.stubGlobal("fetch", api.fetchMock);
     await openThread(companionIn("stopping"));
 
     await wait(5);
 
-    expect(api.threadSyncs.length).toBeGreaterThan(0);
+    expect(api.threadReads.length).toBeGreaterThan(0);
+    expect(api.threadSyncs).toHaveLength(0);
   });
 
-  it("keeps runner thread sync active while a provisioning wake can become reclaimable", async () => {
+  it("polls a provisioning thread without invoking the legacy executor", async () => {
     await openThread(companionIn("provisioning"));
 
     await wait(5);
 
-    expect(api.threadSyncs.length).toBeGreaterThan(0);
+    expect(api.threadReads.length).toBeGreaterThan(0);
+    expect(api.threadSyncs).toHaveLength(0);
   });
 
   it("keeps the Box online when an overtaken read finally answers", async () => {
@@ -306,8 +314,7 @@ describe("CompanionsApp while a Companion is starting", () => {
 
     await wait(30);
 
-    // An online Companion is observed on its own, far slower cadence, so half a minute of it cannot
-    // amount to what watching a pending lifecycle for ten seconds did.
-    expect(api.runtimeReads.length - watched).toBeLessThan(watched);
+    // Stable lifecycle projection falls back to the eight-second read cadence.
+    expect(api.runtimeReads.length - watched).toBeLessThanOrEqual(5);
   });
 });

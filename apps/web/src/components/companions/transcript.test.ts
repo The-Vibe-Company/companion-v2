@@ -9,6 +9,11 @@ import {
   utcDay,
 } from "./transcript";
 
+const companionId = "11111111-1111-4111-8111-111111111111";
+const turnId = "22222222-2222-4222-8222-222222222222";
+const attemptId = "33333333-3333-4333-8333-333333333333";
+const now = "2026-08-12T12:00:00.000Z";
+
 function entry(overrides: Partial<CompanionTranscriptEntry> = {}): CompanionTranscriptEntry {
   return {
     event_id: "msg:1",
@@ -20,14 +25,14 @@ function entry(overrides: Partial<CompanionTranscriptEntry> = {}): CompanionTran
     tool: null,
     decision: null,
     reasoning: null,
-    created_at: "2026-08-12T12:00:00.000Z",
+    created_at: now,
     ...overrides,
   };
 }
 
 function thread(overrides: Partial<CompanionThread> = {}): CompanionThread {
   return {
-    companion_id: "11111111-1111-4111-8111-111111111111",
+    companion_id: companionId,
     viewer_id: "user-1",
     access: "owner",
     read_only: false,
@@ -37,6 +42,64 @@ function thread(overrides: Partial<CompanionThread> = {}): CompanionThread {
     last_message_at: null,
     last_read_ordinal: null,
     ...overrides,
+    // Zod's refined input type permits `undefined`; API responses do not.
+    active_turn: overrides.active_turn ?? null,
+    queued_count: overrides.queued_count ?? 0,
+    interrupted_turn: overrides.interrupted_turn ?? null,
+  };
+}
+
+function activeTurn(
+  status: "starting" | "dispatching" | "running" | "needs_input",
+  replying = false,
+): NonNullable<CompanionThread["active_turn"]> {
+  const accepted = status === "running" && replying;
+  return {
+    id: turnId,
+    companion_id: companionId,
+    client_message_id: "44444444-4444-4444-8444-444444444444",
+    status,
+    queue_sequence: 1,
+    latest_attempt: {
+      id: attemptId,
+      turn_id: turnId,
+      attempt_number: 1,
+      retry_id: null,
+      status,
+      dispatch_state: accepted ? "accepted" : "pending",
+      pi_invocation_id: accepted ? "pi-1" : null,
+      dispatch_accepted_at: accepted ? now : null,
+      error: null,
+      started_at: now,
+      settled_at: null,
+    },
+    replying,
+    error: null,
+    state_changed_at: now,
+    settled_at: null,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+function interruptedTurn(): NonNullable<CompanionThread["interrupted_turn"]> {
+  return {
+    id: turnId,
+    companion_id: companionId,
+    client_message_id: "44444444-4444-4444-8444-444444444444",
+    status: "interrupted",
+    queue_sequence: 1,
+    latest_attempt: null,
+    replying: false,
+    error: {
+      code: "dispatch_ambiguous",
+      message: "Pi acknowledgement was not confirmed.",
+      action: "retry",
+    },
+    state_changed_at: now,
+    settled_at: now,
+    created_at: now,
+    updated_at: now,
   };
 }
 
@@ -84,7 +147,7 @@ describe("transcriptAuthor", () => {
     expect(transcriptAuthor(entry({ author_name: null }), "user-9", "Luna")).toBe("Member");
   });
 
-  it("credits a reply to the Companion and leaves a run note unattributed", () => {
+  it("credits a reply to the Companion and leaves run notes unattributed", () => {
     expect(transcriptAuthor(entry({ role: "assistant" }), "user-1", "Luna")).toBe("Luna");
     expect(transcriptAuthor(entry({ role: "system" }), "user-1", "Luna")).toBeNull();
     expect(transcriptAuthor(entry({ role: "decision" }), "user-1", "Luna")).toBeNull();
@@ -93,266 +156,61 @@ describe("transcriptAuthor", () => {
 
 describe("transcript day keys", () => {
   it("names a day the same way whatever clock produced the key", () => {
-    // Both keys are `YYYY-MM-DD`, so the separator's own label formats identically either way.
     expect(utcDay("2026-08-14T23:30:00.000Z")).toBe("2026-08-14");
     expect(localDay("2026-08-14T23:30:00.000Z")).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
-
 });
 
 describe("replyExpected", () => {
-  it("waits on a running Box whose transcript ends on a member's message", () => {
-    expect(replyExpected({
-      entries: [entry()],
-      awake: true,
-      pendingCount: 0,
-      acceptedDeliveryOrdinal: 0,
-    })).toBe(true);
+  it("shows replying only from the durable ACKed active-turn projection", () => {
+    expect(replyExpected(thread({ active_turn: activeTurn("running", true) }))).toBe(true);
+    expect(replyExpected(thread({
+      entries: [entry({ role: "assistant" })],
+      active_turn: activeTurn("running", true),
+    }))).toBe(true);
   });
 
-  it("does not say replying before Pi accepts an ordinary current turn", () => {
-    expect(replyExpected({
-      entries: [
-        entry(),
-        entry({ event_id: "pi:reply", ordinal: 1, role: "assistant" }),
-        entry({ event_id: "msg:2", ordinal: 2, content: "Held or refused" }),
-      ],
-      awake: true,
-      pendingCount: 0,
-      acceptedDeliveryOrdinal: 0,
-    })).toBe(false);
-  });
-
-  it("does not say replying while a durable tail is still waiting for Pi", () => {
-    expect(replyExpected({
-      entries: [
-        entry(),
-        entry({ event_id: "pi:reply", ordinal: 1, role: "assistant" }),
-        entry({ event_id: "msg:2", ordinal: 2, content: "Wake again" }),
-      ],
-      awake: true,
-      pendingCount: 1,
-    })).toBe(false);
-  });
-
-  it("stops waiting once the reply or the run note lands", () => {
-    expect(replyExpected({
-      entries: [entry(), entry({ event_id: "pi:0", role: "assistant" })],
-      awake: true,
-    })).toBe(false);
-    expect(replyExpected({
-      entries: [entry(), entry({ event_id: "pi:1", role: "system" })],
-      awake: true,
-    })).toBe(false);
-  });
-
-  it("keeps waiting while a permission card is still open mid-turn", () => {
-    expect(replyExpected({
-      entries: [entry(), entry({
-        event_id: "decision:ui-1",
-        role: "decision",
-        decision: {
-          request_id: "ui-1",
-          kind: "shell",
-          name: "bash",
-          title: "ls",
-          detail: null,
-          status: "pending",
-          answer: null,
-          decided_by_id: null,
-          decided_by_name: null,
-          decided_at: null,
-          expires_at: "2026-08-12T12:05:00.000Z",
-        },
-      })],
-      awake: true,
-    })).toBe(true);
-  });
-
-  it("keeps waiting after a permission decision unblocks the same Pi turn", () => {
-    expect(replyExpected({
-      entries: [entry(), entry({
-        event_id: "decision:ui-1",
-        role: "decision",
-        decision: {
-          request_id: "ui-1",
-          kind: "shell",
-          name: "bash",
-          title: "ls",
-          detail: null,
-          status: "allowed",
-          answer: null,
-          decided_by_id: "user-1",
-          decided_by_name: "Owner",
-          decided_at: "2026-08-12T12:00:05.000Z",
-          expires_at: "2026-08-12T12:05:00.000Z",
-        },
-      })],
-      awake: true,
-    })).toBe(true);
-  });
-
-  it("stops waiting when a hung tool is failed closed", () => {
-    expect(replyExpected({
-      entries: [entry(), entry({
-        event_id: "pi:read",
-        role: "tool",
-        tool: {
-          call_id: "call-read",
-          kind: "file",
-          name: "read",
-          title: "/tmp/conductor-cli.png",
-          status: "timeout",
-          detail: "Timed out after 90 seconds without a tool result.",
-          screenshot: null,
-        },
-      })],
-      awake: true,
-    })).toBe(false);
-  });
-
-  it("does not treat user messages stranded after a timed-out tool as an active turn", () => {
-    const timeout = entry({
-      event_id: "pi:read",
-      ordinal: 1,
-      role: "tool",
-      tool: {
-        call_id: "call-read",
-        kind: "file",
-        name: "read",
-        title: "/tmp/conductor-cli.png",
-        status: "timeout",
-        detail: "Timed out after 90 seconds without a tool result.",
-        screenshot: null,
-      },
-    });
-    expect(replyExpected({
-      entries: [
-        entry(),
-        timeout,
-        entry({ event_id: "msg:2", ordinal: 2, content: "Alors ?" }),
-        entry({ event_id: "msg:3", ordinal: 3, content: "Ca va ?" }),
-      ],
-      awake: true,
-    })).toBe(false);
-  });
-
-  it("waits for a fresh user turn after an assistant reply", () => {
-    expect(replyExpected({
-      entries: [
-        entry(),
-        entry({ event_id: "pi:reply", ordinal: 1, role: "assistant" }),
-        entry({ event_id: "msg:2", ordinal: 2, content: "One more thing" }),
-      ],
-      awake: true,
-      pendingCount: 0,
-      acceptedDeliveryOrdinal: 2,
-    })).toBe(true);
-  });
-
-  it("waits once a later tool proves Pi started the recovered turn", () => {
-    expect(replyExpected({
-      entries: [
-        entry(),
-        entry({
-          event_id: "pi:timed-out-read",
-          ordinal: 1,
-          role: "tool",
-          tool: {
-            call_id: "call-timed-out-read",
-            kind: "file",
-            name: "read",
-            title: "/tmp/conductor-cli.png",
-            status: "timeout",
-            detail: "Timed out after 90 seconds without a tool result.",
-            screenshot: null,
-          },
-        }),
-        entry({
-          event_id: "pi:recovered-read",
-          ordinal: 2,
-          role: "tool",
-          tool: {
-            call_id: "call-recovered-read",
-            kind: "file",
-            name: "read",
-            title: "README.md",
-            status: "running",
-            detail: null,
-            screenshot: null,
-          },
-        }),
-        entry({ event_id: "msg:3", ordinal: 3, content: "One more thing" }),
-      ],
-      awake: true,
-      pendingCount: 0,
-      acceptedDeliveryOrdinal: 3,
-    })).toBe(true);
-  });
-
-  it("shows only the accepted recovery turn after an aborted tool", () => {
-    const entries = [
-      entry(),
-      entry({
-        event_id: "pi:read",
-        ordinal: 1,
-        role: "tool",
-        tool: {
-          call_id: "call-read",
-          kind: "file",
-          name: "read",
-          title: "/tmp/conductor-cli.png",
-          status: "timeout",
-          detail: "Timed out after 90 seconds without a tool result.",
-          screenshot: null,
-        },
-      }),
-      entry({ event_id: "msg:2", ordinal: 2, content: "Ca va ?" }),
-    ];
-    expect(replyExpected({ entries, awake: true, pendingCount: 1 })).toBe(false);
-    expect(replyExpected({
-      entries,
-      awake: true,
-      pendingCount: 0,
-      acceptedDeliveryOrdinal: 2,
-    })).toBe(true);
-  });
-
-  it("never waits on a Box that is not running, because nothing has been delivered", () => {
-    expect(replyExpected({ entries: [entry()], awake: false })).toBe(false);
-    expect(replyExpected({ entries: [], awake: true })).toBe(false);
+  it("never infers replying from transcript shape or runtime lifecycle", () => {
+    expect(replyExpected(thread({ entries: [entry()] }))).toBe(false);
+    expect(replyExpected(thread({ active_turn: activeTurn("dispatching") }))).toBe(false);
+    expect(replyExpected(null)).toBe(false);
   });
 });
 
 describe("composerHint", () => {
-  it("explains the keys while nothing is waiting", () => {
+  it("explains the keys while no durable work is waiting", () => {
     expect(composerHint({ thread: thread(), companionName: "Luna", state: "running" }))
       .toBe("Enter sends. Shift + Enter starts a new line.");
   });
 
-  it("counts messages waiting on delivery and explains how to retry saved delivery", () => {
+  it("describes active and later ordered turns", () => {
     expect(composerHint({
-      thread: thread({ pending_count: 1 }),
-      companionName: "Luna",
-      state: "running",
-    })).toBe("1 message waiting for delivery.");
-    expect(composerHint({
-      thread: thread({ pending_count: 2 }),
-      companionName: "Luna",
-      state: "stopped",
-    })).toBe("2 messages saved. Send another message to retry delivery.");
-  });
-
-  it("reports a start already under way without offering another lifecycle action", () => {
-    expect(composerHint({
-      thread: thread({ pending_count: 1 }),
+      thread: thread({ active_turn: activeTurn("starting"), queued_count: 2 }),
       companionName: "Luna",
       state: "provisioning",
-    })).toBe("1 message saved. Luna is starting to deliver.");
+    })).toBe("Luna is starting this turn. 2 later messages are queued.");
     expect(composerHint({
-      thread: thread({ pending_count: 1 }),
+      thread: thread({ active_turn: activeTurn("needs_input"), queued_count: 1 }),
       companionName: "Luna",
       state: "running",
-    })).not.toContain("retry delivery");
+    })).toBe("Answer the request above to continue this turn. 1 later message is queued.");
+  });
+
+  it("explains that interruption blocks the ordered queue", () => {
+    expect(composerHint({
+      thread: thread({ interrupted_turn: interruptedTurn(), queued_count: 2 }),
+      companionName: "Luna",
+      state: "running",
+    })).toBe("Retry or cancel the interrupted turn to continue. 2 later messages are queued behind it.");
+  });
+
+  it("reports saved queued work and lifecycle-only changes without suggesting a retry send", () => {
+    expect(composerHint({
+      thread: thread({ queued_count: 1 }),
+      companionName: "Luna",
+      state: "stopped",
+    })).toBe("1 message is saved and queued.");
+    expect(composerHint({ thread: thread(), companionName: "Luna", state: "stopping" }))
+      .toBe("A runtime change is in progress. Messages remain durable and ordered.");
   });
 });

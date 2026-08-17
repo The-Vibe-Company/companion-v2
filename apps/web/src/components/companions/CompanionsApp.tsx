@@ -28,16 +28,16 @@ import {
   type CompanionProviderSettingsCacheSnapshot,
 } from "@/lib/companionProviderSettingsCache";
 import {
+  cancelCompanionTurn,
   duplicateCompanion,
   getCompanionRuntime,
   getCompanionThread,
   listCompanions,
   listCompanionProviders,
   openCompanionDesktop,
+  retryCompanionTurn,
   sendCompanionMessage,
   setCompanionProvider,
-  startCompanionRuntime,
-  syncCompanionThread,
   updateCompanionMemberState,
 } from "@/lib/companions";
 import { Icon } from "../Icon";
@@ -64,21 +64,11 @@ import { Sidebar } from "../skills/Sidebar";
 import { skillsRouteHref, type SkillsLibrary } from "../skills/route";
 import type { TreeRow } from "../skills/sidebarTree";
 
-/** Awake threads pull Pi events; asleep and Viewer threads only re-read the control plane. */
-const LIVE_POLL_MS = 2_000;
+/** Stable conversations re-read the PostgreSQL projection without keeping the UI noisy. */
 const READ_MODEL_POLL_MS = 8_000;
 /**
- * How often a runner's status chip re-observes the Box it already runs. This read never resumes a
- * Box, and a Viewer never makes it, so the chip stays honest about a Box that stopped underneath it
- * without anyone's Companion being woken to find out.
- */
-const BOX_STATUS_POLL_MS = 15_000;
-/**
- * How often a Companion mid-transition re-reads the lifecycle it is waiting on. Nothing else does:
- * the Box-status poll below starts only once the state is already `running`, and the request that
- * began the transition answers once, before the lifecycle finishes when it outlives a proxy. That
- * left the chip reporting Starting against a Box that was already up, beside a reply Pi had already
- * sent. The same fast cadence begins as soon as a send starts, before its long request can answer.
+ * Active, queued, interrupted, and lifecycle-transitioning work is projected every three seconds.
+ * Every request is PostgreSQL-only; polling never observes or wakes Box.
  */
 const PENDING_POLL_MS = 3_000;
 /**
@@ -89,12 +79,12 @@ const PENDING_POLL_MS = 3_000;
 const LIST_POLL_MS = 45_000;
 /**
  * Where a failing open-thread poll backs off to. The surface keeps trying — a Box mid-wake or a
- * network blip both deserve the retry — but not at the live cadence, which against a dead proxy is
+ * network blip both deserve the retry — but not at the fast cadence, which against a dead proxy is
  * thirty doomed requests a minute queued behind each other.
  */
 const MAX_POLL_BACKOFF_MS = 15_000;
 
-/** Polls skip hidden tabs: nobody is reading, and a backgrounded laptop should not keep a Box warm. */
+/** Polls skip hidden tabs: nobody is reading, so control-plane traffic can wait. */
 function pageHidden(): boolean {
   return typeof document !== "undefined" && document.visibilityState === "hidden";
 }
@@ -448,7 +438,7 @@ export function CompanionsApp({
   const [openedThroughOrdinal, setOpenedThroughOrdinal] = useState<number | null>(null);
   /**
    * Why the last desktop handoff opened nothing. It is kept apart from `threadError` because the
-   * live thread poll clears that one every couple of seconds, which would erase this answer before
+   * thread poll clears that one every few seconds, which would erase this answer before
    * anyone could read it and leave a failed handoff looking like nothing happened at all.
    */
   const [desktopError, setDesktopError] = useState<string | null>(null);
@@ -521,14 +511,16 @@ export function CompanionsApp({
   );
   const canRunOpened = opened !== null && opened.access !== "viewer";
   const openedAwake = opened?.runtime.state === "running";
-  const openedArchiveWait = opened?.runtime.state === "stopping"
-    && opened.runtime.daemon_state === "starting";
-  const openedStartRecovery = opened?.runtime.state === "provisioning"
-    && opened.runtime.daemon_state === "starting";
   // A lifecycle the control plane is still resolving. `error` is not one of these: it is where a
   // failed transition settles, and its reason is already on screen.
   const openedPending = opened?.runtime.state === "provisioning" || opened?.runtime.state === "stopping";
   const sending = sendingCompanionId === openedId;
+  const threadWorkPending = thread?.companion_id === openedId
+    && (
+      thread.active_turn !== null
+      || thread.interrupted_turn !== null
+      || thread.queued_count > 0
+    );
 
   const providerName = (providerId: string) =>
     (providers?.catalog ?? COMPANION_PROVIDER_CATALOG)
@@ -713,8 +705,8 @@ export function CompanionsApp({
     router.push("/companions");
   };
 
-  /** One refresh of the open thread: Pi delivery plus projection when awake, read model otherwise. */
-  const refreshThread = useCallback(async (live: boolean) => {
+  /** One PostgreSQL-only refresh of the open thread and its durable turn projection. */
+  const refreshThread = useCallback(async () => {
     if (!openedId) return;
     // The request id is claimed by the call that actually goes out, not by the tick that asked for
     // one. A tick the queue skips used to claim an id anyway, which invalidated the read already in
@@ -725,9 +717,7 @@ export function CompanionsApp({
       const next = await threadQueueRef.current.run(
         () => {
           requestId = ++threadRequestRef.current;
-          return live
-            ? syncCompanionThread(currentOrg.id, openedId)
-            : getCompanionThread(currentOrg.id, openedId);
+          return getCompanionThread(currentOrg.id, openedId);
         },
         { skipWhenBusy: true },
       );
@@ -745,7 +735,7 @@ export function CompanionsApp({
       if (requestId === threadRequestRef.current) {
         // A timeout, a network failure, or a 5xx is connectivity weather: count it toward the
         // reconnect indicator and back the cadence off — whether or not a transcript loaded yet,
-        // hammering a dead network at the live cadence helps nobody. A stable 4xx is a verdict,
+        // hammering a dead network at the fast cadence helps nobody. A stable 4xx is a verdict,
         // not weather, and its message must reach the reader instead of an eternal quiet
         // "Reconnecting". With no transcript yet, any failure is also the page's failure.
         const status = cause instanceof ApiFetchError ? cause.status : null;
@@ -806,8 +796,7 @@ export function CompanionsApp({
    * control-plane read model — the same list the page was rendered from — so it never contacts a Box
    * and never wakes one, whatever state the Companions in it are in.
    *
-   * The open thread does not depend on this: sending re-reads its Companion, and a runner watching an
-   * awake Box re-reads it every few seconds, and both of those reads now carry the preview.
+   * The open thread does not depend on this: its own PostgreSQL projections are polled separately.
    */
   useEffect(() => {
     const timer = setInterval(() => {
@@ -832,7 +821,7 @@ export function CompanionsApp({
 
   useEffect(() => {
     if (!openedId) return;
-    void refreshThread(false);
+    void refreshThread();
   }, [openedId, refreshThread]);
 
   // Whether the transcript on screen belongs to the open thread, readable from async completions.
@@ -845,26 +834,23 @@ export function CompanionsApp({
 
   useEffect(() => {
     if (!openedId) return;
-    // A runner's thread sync is also the automatic continuation for an accepted wake that is
-    // waiting on Box archival, and retries an abandoned provisioning claim after its stale window.
-    // Viewer reads and an explicit Stop (`stopping`/`stopped`) stay on the control-plane-only path.
-    const live = canRunOpened && (openedAwake || openedArchiveWait || openedStartRecovery);
-    const base = live ? LIVE_POLL_MS : READ_MODEL_POLL_MS;
+    const base = sending || openedPending || threadWorkPending
+      ? PENDING_POLL_MS
+      : READ_MODEL_POLL_MS;
     // Consecutive failures stretch the cadence toward the cap; the first answered poll resets it.
     const interval = Math.min(base * 2 ** Math.min(threadPollFailures, 3), MAX_POLL_BACKOFF_MS);
     const timer = setInterval(() => {
       if (pageHidden()) return;
-      void refreshThread(live);
+      void refreshThread();
     }, interval);
     return () => clearInterval(timer);
   }, [
-    canRunOpened,
-    openedArchiveWait,
-    openedAwake,
     openedId,
-    openedStartRecovery,
+    openedPending,
     refreshThread,
+    sending,
     threadPollFailures,
+    threadWorkPending,
   ]);
 
   // Coming back — the tab re-shown, the network back up — revalidates immediately instead of
@@ -874,7 +860,7 @@ export function CompanionsApp({
     const revalidate = () => {
       if (pageHidden()) return;
       setThreadPollFailures(0);
-      void refreshThread(canRunOpened && (openedAwake || openedArchiveWait || openedStartRecovery));
+      void refreshThread();
     };
     window.addEventListener("online", revalidate);
     document.addEventListener("visibilitychange", revalidate);
@@ -882,21 +868,19 @@ export function CompanionsApp({
       window.removeEventListener("online", revalidate);
       document.removeEventListener("visibilitychange", revalidate);
     };
-  }, [canRunOpened, openedArchiveWait, openedAwake, openedId, openedStartRecovery, refreshThread]);
+  }, [openedId, refreshThread]);
 
   /**
-   * Re-read one Companion; a failed read leaves the current row alone. The control-plane read is the
-   * default, so it is safe for a Viewer and after a failed wake. A live read observes an already
-   * running Box for a runner and still never resumes one.
+   * Re-read one Companion from the control-plane projection; a failed read leaves the row alone.
    */
-  const refreshCompanion = useCallback(async (companionId: string, live = false) => {
+  const refreshCompanion = useCallback(async (companionId: string) => {
     // Reads of one Companion can overlap, and a lifecycle is watched closely enough that they will:
     // an older read that answers late must not put a state the Companion has already left back on
     // screen, which is how a chip that had reached Online would blink back to Starting.
     const readId = (companionReadRef.current.get(companionId) ?? 0) + 1;
     companionReadRef.current.set(companionId, readId);
     try {
-      const latest = await getCompanionRuntime(currentOrg.id, companionId, { live });
+      const latest = await getCompanionRuntime(currentOrg.id, companionId);
       if (companionReadRef.current.get(companionId) !== readId) return;
       replaceCompanion(latest);
     } catch {
@@ -904,70 +888,20 @@ export function CompanionsApp({
     }
   }, [currentOrg.id, replaceCompanion]);
 
-  // Keep the open thread's lifecycle current without requiring a reload. Sending and transitional
-  // states use the fast cadence because a wake is actively changing the projection; otherwise an
-  // asleep or Viewer thread follows the read model and an online runner occasionally observes the
-  // already-running Box. The immediate read is important when a send has just begun: its request can
-  // remain open for the whole wake, so waiting for that POST to settle would leave the chip stale.
-  // A Viewer always takes the control-plane path, and no status read can resume a Box.
+  // Keep lifecycle projection current without touching Box. Durable turn work and transitions use
+  // the same fast cadence as the thread; stable rows settle back to the quiet read cadence.
   useEffect(() => {
     if (!openedId) return;
-    const live = canRunOpened && openedAwake;
-    const interval = sending || openedPending
+    const interval = sending || openedPending || threadWorkPending
       ? PENDING_POLL_MS
-      : live
-        ? BOX_STATUS_POLL_MS
-        : READ_MODEL_POLL_MS;
-    void refreshCompanion(openedId, live);
+      : READ_MODEL_POLL_MS;
+    void refreshCompanion(openedId);
     const timer = setInterval(() => {
       if (pageHidden()) return;
-      void refreshCompanion(openedId, live);
+      void refreshCompanion(openedId);
     }, interval);
     return () => clearInterval(timer);
-  }, [canRunOpened, openedAwake, openedId, openedPending, refreshCompanion, sending]);
-
-  /** The thread already prewarmed since it was opened; typing more must not start a second wake. */
-  const prewarmedRef = useRef<string | null>(null);
-  useEffect(() => {
-    prewarmedRef.current = null;
-  }, [openedId]);
-
-  /**
-   * Typing is the strongest pre-send signal there is, so the first keystroke into an asleep or
-   * retryably-errored Companion starts its wake: by the time Send lands, the 45-65-second cold
-   * start has a head start. One shot per opened thread, never for a Companion mid-transition —
-   * and the server-side claim still refuses anything this surface got wrong about the state.
-   */
-  const openedRuntimeState = opened?.runtime.state;
-  const onComposeIntent = useCallback(() => {
-    if (!openedId || !canRunOpened) return;
-    // `not_created` is the commonest cold start of all: a brand-new Companion whose first message
-    // is being typed right now renders the same Asleep chip and deserves the same head start.
-    const state = openedRuntimeState;
-    if (state !== "stopped" && state !== "error" && state !== "not_created") return;
-    if (prewarmedRef.current === openedId) return;
-    prewarmedRef.current = openedId;
-    const companionId = openedId;
-    // The chip flips to Starting now; the pending-poll cadence takes over from there, so the reader
-    // watches the wake they caused rather than an Asleep chip beside a request nothing reports on.
-    writtenRef.current.add(companionId);
-    setCompanions((current) => current.map((item) => item.id === companionId
-      ? {
-        ...item,
-        runtime: { ...item.runtime, state: "provisioning", daemon_state: "starting" },
-      }
-      : item));
-    void startCompanionRuntime(currentOrg.id, companionId)
-      .then((companion) => replaceCompanion(companion))
-      .catch(() => {
-        // A lost race with another wake or a failed start both leave the truth in the projection;
-        // re-read it rather than guessing, and let a later keystroke try again.
-        prewarmedRef.current = null;
-        void refreshCompanion(companionId);
-      });
-    // Keyed on the state string, not the whole Companion object: this callback rides the transcript
-    // chrome context, and a new identity per poll would re-render the composer every few seconds.
-  }, [canRunOpened, currentOrg.id, openedId, openedRuntimeState, refreshCompanion, replaceCompanion]);
+  }, [openedId, openedPending, refreshCompanion, sending, threadWorkPending]);
 
   /** Resolves false when the message never reached the control plane, so the composer keeps its text. */
   const onSend = async (content: string, clientMessageId: string): Promise<boolean> => {
@@ -976,13 +910,13 @@ export function CompanionsApp({
     setSendingCompanionId(companionId);
     setThreadError(null);
     try {
-      // Sending also delivers the backlog, so it waits for an in-flight sync instead of racing it.
-      // The composer's message id travels with the request, so one submission is one turn however
-      // many times the request itself reaches the control plane.
-      const next = await threadQueueRef.current.run(
+      // The composer's message id travels with the request, so one submission is one durable turn
+      // however many times the HTTP request itself reaches the control plane. Send is the sole wake.
+      const accepted = await threadQueueRef.current.run(
         () => sendCompanionMessage(currentOrg.id, companionId, content, clientMessageId),
         { skipWhenBusy: false },
       );
+      const next = accepted?.thread;
       if (openedIdRef.current === companionId && next?.companion_id === companionId) {
         threadRequestRef.current += 1;
         setThread(next);
@@ -995,13 +929,30 @@ export function CompanionsApp({
       return false;
     } finally {
       setSendingCompanionId((current) => current === companionId ? null : current);
-      // A send can wake this Companion, and it can also fail and record why, so the lifecycle it
-      // leaves behind is re-read from the projection the status chip already uses. Everything the
-      // thread derives from the runtime — the chip, the composer footer, and the
-      // live cadence that projects Pi's reply — then moves off the pre-send state together instead
-      // of waiting for a reload. The read is the control-plane projection, so it never wakes a Box.
+      // A send can schedule a cold start, so re-read its PostgreSQL lifecycle projection now.
       await refreshCompanion(companionId);
     }
+  };
+
+  const onRetryInterrupted = async (turnId: string, retryId: string): Promise<void> => {
+    if (!openedId) throw new Error("This Companion is no longer open.");
+    const companionId = openedId;
+    await retryCompanionTurn(currentOrg.id, companionId, turnId, retryId);
+    if (openedIdRef.current !== companionId) return;
+    // The accepted operation is asynchronous. The existing interrupted projection keeps both
+    // polls fast until the runtime moves the turn forward.
+    void refreshThread();
+    void refreshCompanion(companionId);
+  };
+
+  const onCancelInterrupted = async (turnId: string): Promise<void> => {
+    if (!openedId) throw new Error("This Companion is no longer open.");
+    const companionId = openedId;
+    const accepted = await cancelCompanionTurn(currentOrg.id, companionId, turnId);
+    if (openedIdRef.current !== companionId) return;
+    threadRequestRef.current += 1;
+    setThread(accepted.thread);
+    void refreshCompanion(companionId);
   };
 
   /**
@@ -1080,7 +1031,7 @@ export function CompanionsApp({
       });
     } catch (cause) {
       if (contextJoinRef.current !== joinId) return;
-      // The reason is kept on the panel rather than the thread: the live thread poll clears its own
+      // The reason is kept on the panel rather than the thread: the thread poll clears its own
       // notice every couple of seconds, which would erase this one before it could be read.
       setContextJoin({
         companionId,
@@ -1307,7 +1258,8 @@ export function CompanionsApp({
                 : () => router.push(`/companions/${opened.id}/settings`)}
               onThread={setThread}
               onDesktop={() => void onDesktop()}
-              onComposeIntent={onComposeIntent}
+              onRetryInterrupted={onRetryInterrupted}
+              onCancelInterrupted={onCancelInterrupted}
             />
           </>
         ) : settingsCompanion && providers ? (

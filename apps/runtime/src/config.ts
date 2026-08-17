@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
-import { companionsEnabled } from "@companion/core";
 
-import { DESKTOP_REQUEST_MAX_SKEW_SECONDS } from "./desktopAuth";
+import { DESKTOP_REQUEST_MAX_SKEW_SECONDS } from "@companion/companion-runtime";
+import { companionsEnabled } from "@companion/core";
 
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
 const BOX_TTL_SECONDS = 6 * 60 * 60;

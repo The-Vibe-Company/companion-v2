@@ -35,6 +35,20 @@ import {
   claimCompanionDeletion,
   companionsAvailableToUser,
   companionsEnabled,
+  answerCompanionDecisionV2,
+  cancelCompanionTurnV2,
+  createCompanionV2,
+  duplicateCompanionV2,
+  enqueueCompanionOperationV2,
+  enqueueCompanionTurnV2,
+  getCompanionV2,
+  listCompanionsV2,
+  readCompanionThreadV2,
+  retryCompanionTurnV2,
+  setCompanionWorkspaceShareV2,
+  setCompanionProviderV2,
+  updateCompanionMemberStateV2,
+  updateCompanionV2,
   companionToolRunIsVisual,
   createCompanion,
   decideCompanionDecision,
@@ -72,6 +86,7 @@ import {
 import type { CompanionSettledToolRun } from "@companion/core";
 import {
   createCompanionInputSchema,
+  cancelCompanionTurnInputSchema,
   companionProviderIdSchema,
   companionProviderOAuthCompleteInputSchema,
   companionProviderOAuthStartInputSchema,
@@ -86,8 +101,13 @@ import {
   saveCompanionPluginInputSchema,
   updateCompanionInputSchema,
   updateCompanionMemberStateInputSchema,
+  retryCompanionTurnInputSchema,
 } from "@companion/contracts";
-import { restartCompanionRuntimeInputSchema } from "@companion/contracts/companion-runtime";
+import {
+  COMPANION_OPERATION_IDEMPOTENCY_HEADER,
+  companionOperationRequestIdSchema,
+  restartCompanionRuntimeInputSchema,
+} from "@companion/contracts/companion-runtime";
 import type {
   Companion,
   CompanionDesktop,
@@ -102,6 +122,7 @@ import {
   orgIdFromContext,
   type ApiVariables,
 } from "./context";
+import { mintCompanionDesktop, RuntimeDesktopClientError } from "./runtimeDesktopClient";
 import {
   AsciiBoxCompanionRuntime,
   BoxRuntimeConfigurationError,
@@ -266,8 +287,6 @@ function decodeCompanionProviderOAuthFlow(input: {
   return { orgId: cookie.orgId, ...pending };
 }
 
-type RuntimeFactory = () => CompanionBoxRuntime;
-
 class CompanionAccessForbiddenError extends Error {
   constructor() {
     super("Companions access is not available for this user");
@@ -275,7 +294,14 @@ class CompanionAccessForbiddenError extends Error {
   }
 }
 
+type RuntimeFactory = () => CompanionBoxRuntime;
+
 function errorStatus(error: unknown): number {
+  const databaseCode = error && typeof error === "object" && "code" in error
+    && typeof error.code === "string" ? error.code : null;
+  if (databaseCode === "42501") return 403;
+  if (databaseCode === "P0002" || databaseCode === "02000") return 404;
+  if (["23505", "40001", "55000"].includes(databaseCode ?? "")) return 409;
   if (error instanceof AuthenticationRequiredError) return 401;
   if (error instanceof CompanionAccessForbiddenError) return 403;
   if (error instanceof CompanionNotFoundError) return 404;
@@ -308,11 +334,16 @@ function errorStatus(error: unknown): number {
     if (error.status === 504) return 504;
     return 502;
   }
+  if (error instanceof RuntimeDesktopClientError) {
+    if (error.code === "not_configured") return 503;
+    if (error.code === "forbidden") return 403;
+    return 502;
+  }
   if (error instanceof z.ZodError) return 400;
   return 400;
 }
 
-/** Thread sync observes the control-plane projection and never wakes an unreachable Pi. */
+/** Legacy-only helpers retained until the final stack layer removes unreachable orchestration. */
 function piIsReachable(companion: Companion): boolean {
   return Boolean(companion.runtime.box_id)
     && companion.runtime.state === "running"
@@ -329,15 +360,6 @@ function providerAuthIsCurrent(
     && current.credentialGeneration === companion.runtime.provider_credential_generation;
 }
 
-/**
- * Give the visual run this sync just finished one picture of the Box desktop.
- *
- * Only exact run ids whose settlement won in this sync are offered a frame. One desktop capture can
- * satisfy several visual calls projected from the same Pi chunk, while the database guard keeps
- * every run at one immutable frame. Everything here is best-effort — no desktop, no capture tool, a
- * Box that stopped answering, a frame too large — because the transcript this sync already stored is
- * the thing that mattered, and a run without a picture is still a run.
- */
 async function attachDesktopFrames(input: {
   actor: ReturnType<typeof actorFromContext>;
   orgId: string;
@@ -379,11 +401,6 @@ function routeError(c: Context, error: unknown): Response {
   return jsonError(c, error, errorStatus(error));
 }
 
-/**
- * A lifecycle failure the caller can act on. Configuration and Box/Pi failures answer with the same
- * sanitized line the Companion row keeps, so a red status always comes with its reason; anything
- * else stays on the generic error path rather than returning internal text.
- */
 function runtimeRouteError(c: Context, error: unknown): Response {
   if (!isBoxRuntimeFailure(error)) return routeError(c, error);
   const code = error instanceof BoxRuntimeProviderError ? error.code : undefined;
@@ -397,9 +414,11 @@ function runtimeRouteError(c: Context, error: unknown): Response {
 export function registerCompanionRoutes(
   app: Hono<{ Variables: ApiVariables }>,
   env: NodeJS.ProcessEnv = process.env,
-  runtimeFactory: RuntimeFactory = () => new AsciiBoxCompanionRuntime(env),
+  _legacyRuntimeFactory?: unknown,
 ): void {
   if (!companionsEnabled(env)) return;
+  const runtimeFactory = (_legacyRuntimeFactory as RuntimeFactory | undefined)
+    ?? (() => new AsciiBoxCompanionRuntime(env));
 
   async function tenant<T>(
     c: Context<{ Variables: ApiVariables }>,
@@ -418,10 +437,6 @@ export function registerCompanionRoutes(
       fn({ actor, orgId, database }));
   }
 
-  /**
-   * Resolve the lifecycle caller exactly as `tenant()` does — actor, Companions availability, then
-   * the org — and hand the routes' env and Box adapter factory to the shared lifecycle functions.
-   */
   async function lifecycleContext(
     c: Context<{ Variables: ApiVariables }>,
   ): Promise<CompanionLifecycleContext> {
@@ -448,7 +463,10 @@ export function registerCompanionRoutes(
     return startCompanionRuntime(await lifecycleContext(c), companionId, body, options);
   }
 
-  async function stopRuntime(c: Context<{ Variables: ApiVariables }>, companionId: string): Promise<Companion> {
+  async function stopRuntime(
+    c: Context<{ Variables: ApiVariables }>,
+    companionId: string,
+  ): Promise<Companion> {
     return stopCompanionRuntime(await lifecycleContext(c), companionId);
   }
 
@@ -458,7 +476,6 @@ export function registerCompanionRoutes(
     companionId: string;
     boxId: string;
     runtime: CompanionBoxRuntime;
-    /** A completed wake must surface any Pi refusal instead of silently stranding its current turn. */
     throwOnRefusal?: boolean;
   }): Promise<{ thread: CompanionThread; deliveredOrdinal: number } | null> {
     return deliverCompanionMessagesViaRuntime({
@@ -481,7 +498,7 @@ export function registerCompanionRoutes(
       // keeps chat text off a surface that displays none of it.
       const withLastMessage = c.req.query("preview") !== "false";
       const companions = await tenant(c, ({ actor, orgId, database }) =>
-        listCompanions({ actor, orgId, withLastMessage, database }));
+        listCompanionsV2({ actor, orgId, withLastMessage, database }));
       // The list carries each thread's last line now, so it is chat text and must not sit in a disk
       // cache after the session that read it, the way every other sensitive read here is treated.
       c.header("Cache-Control", "private, no-store");
@@ -495,7 +512,7 @@ export function registerCompanionRoutes(
     try {
       const body = createCompanionInputSchema.parse(await c.req.json());
       const companion = await tenant(c, ({ actor, orgId, database }) =>
-        createCompanion({
+        createCompanionV2({
           actor,
           orgId,
           name: body.name,
@@ -884,6 +901,332 @@ export function registerCompanionRoutes(
       return routeError(c, error);
     }
   });
+
+  app.get("/v1/companions/:id", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const companion = await tenant(c, ({ actor, orgId, database }) =>
+        getCompanionV2({ actor, orgId, companionId, withLastMessage: true, database }));
+      c.header("Cache-Control", "private, no-store");
+      return c.json({ companion });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.patch("/v1/companions/:id/member-state", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const patch = updateCompanionMemberStateInputSchema.parse(await c.req.json());
+      const companion = await tenant(c, ({ actor, orgId, database }) =>
+        updateCompanionMemberStateV2({ actor, orgId, companionId, patch, database }));
+      return c.json({ companion });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companions/:id/duplicate", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const companion = await tenant(c, ({ actor, orgId, database }) =>
+        duplicateCompanionV2({ actor, orgId, companionId, database }));
+      return c.json({ companion }, 201);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.patch("/v1/companions/:id", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const body = updateCompanionInputSchema.parse(await c.req.json());
+      const patch: Record<string, unknown> = {};
+      if (body.name !== undefined) patch.name = body.name;
+      if (body.persona !== undefined) patch.persona = body.persona;
+      if (body.provider_id !== undefined) patch.provider_id = body.provider_id;
+      if (body.model_id !== undefined) patch.model_id = body.model_id;
+      if (body.selected_skill_ids !== undefined) patch.selected_skill_ids = body.selected_skill_ids;
+      if (body.can_write_skills !== undefined) patch.can_write_skills = body.can_write_skills;
+      if (body.selected_mcp_account_ids !== undefined) {
+        patch.selected_mcp_account_ids = body.selected_mcp_account_ids;
+      }
+      const companion = await tenant(c, ({ actor, orgId, database }) =>
+        updateCompanionV2({ actor, orgId, companionId, patch, database }));
+      return c.json({ companion });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.delete("/v1/companions/:id", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const requestId = companionOperationRequestIdSchema.parse(
+        c.req.header(COMPANION_OPERATION_IDEMPOTENCY_HEADER),
+      );
+      const accepted = await tenant(c, ({ orgId, database }) =>
+        enqueueCompanionOperationV2({
+          orgId,
+          companionId,
+          requestId,
+          kind: "delete",
+          clientSurface: "web",
+          database,
+        }));
+      return c.json({ operation: accepted.operation }, 202);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.put("/v1/companions/:id/provider", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const body = setCompanionProviderInputSchema.parse(await c.req.json());
+      const companion = await tenant(c, ({ actor, orgId, database }) =>
+        setCompanionProviderV2({
+          actor,
+          orgId,
+          companionId,
+          providerId: body.provider_id,
+          database,
+        }));
+      return c.json({ companion });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.get("/v1/companions/:id/shares", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const shares = await tenant(c, ({ actor, orgId, database }) =>
+        listCompanionShares({ actor, orgId, companionId, database }));
+      return c.json({ shares });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.put("/v1/companions/:id/shares/workspace", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const body = setCompanionWorkspaceShareInputSchema.parse(await c.req.json());
+      const shares = await tenant(c, ({ actor, orgId, database }) =>
+        setCompanionWorkspaceShareV2({ actor, orgId, companionId, role: body.role, database }));
+      return c.json({ shares });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.get("/v1/companions/:id/thread", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const thread = await tenant(c, ({ actor, orgId, database }) =>
+        readCompanionThreadV2({ actor, orgId, companionId, database }));
+      c.header("Cache-Control", "private, no-store");
+      return c.json({ thread });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companions/:id/messages", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const body = sendCompanionMessageInputSchema.parse(await c.req.json());
+      const accepted = await tenant(c, async ({ actor, orgId, database }) => {
+        const enqueued = await enqueueCompanionTurnV2({
+          actor,
+          orgId,
+          companionId,
+          clientMessageId: body.client_message_id,
+          content: body.content,
+          clientSurface: body.client_surface,
+          database,
+        });
+        const thread = await readCompanionThreadV2({ actor, orgId, companionId, database });
+        return { turn: enqueued.turn, thread };
+      });
+      c.header("Cache-Control", "private, no-store");
+      return c.json(accepted, 202);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  // Kept as a PostgreSQL-only compatibility read for clients that still call the old sync path.
+  app.post("/v1/companions/:id/thread/sync", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const thread = await tenant(c, ({ actor, orgId, database }) =>
+        readCompanionThreadV2({ actor, orgId, companionId, database }));
+      c.header("Cache-Control", "private, no-store");
+      return c.json({ thread, source: "control_plane" as const });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companions/:id/decisions/:requestId", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const requestId = z.string().min(1).max(200).parse(c.req.param("requestId"));
+      const body = decideCompanionDecisionInputSchema.parse(await c.req.json());
+      const thread = await tenant(c, async ({ actor, orgId, database }) => {
+        await answerCompanionDecisionV2({
+          orgId,
+          companionId,
+          requestId,
+          decision: body.action,
+          text: body.action === "answer" ? body.answer : undefined,
+          database,
+        });
+        return readCompanionThreadV2({ actor, orgId, companionId, database });
+      });
+      return c.json({ thread }, 202);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companions/:id/turns/:turnId/retry", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const turnId = companionIdSchema.parse(c.req.param("turnId"));
+      const body = retryCompanionTurnInputSchema.parse(await c.req.json());
+      const accepted = await tenant(c, ({ orgId, database }) => retryCompanionTurnV2({
+        orgId,
+        companionId,
+        turnId,
+        retryId: body.retry_id,
+        clientSurface: "web",
+        database,
+      }));
+      return c.json({ operation: accepted.operation }, 202);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companions/:id/turns/:turnId/cancel", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const turnId = companionIdSchema.parse(c.req.param("turnId"));
+      cancelCompanionTurnInputSchema.parse(await c.req.json().catch(() => ({})));
+      const accepted = await tenant(c, async ({ actor, orgId, database }) => {
+        const turn = await cancelCompanionTurnV2({ orgId, companionId, turnId, database });
+        const thread = await readCompanionThreadV2({ actor, orgId, companionId, database });
+        return { turn, thread };
+      });
+      return c.json(accepted, 202);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.get("/v1/companions/:id/runtime", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const companion = await tenant(c, ({ actor, orgId, database }) =>
+        getCompanionV2({ actor, orgId, companionId, withLastMessage: true, database }));
+      c.header("Cache-Control", "private, no-store");
+      return c.json({ companion, source: "control_plane" as const });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  async function enqueueLifecycle(
+    c: Context<{ Variables: ApiVariables }>,
+    companionId: string,
+    requestId: string,
+    kind: "start" | "stop" | "restart_pi" | "restart_box",
+    clientSurface: "web" | "mobile_web" | "native_mobile" = "web",
+  ) {
+    return tenant(c, ({ orgId, database }) => enqueueCompanionOperationV2({
+      orgId,
+      companionId,
+      requestId,
+      kind,
+      clientSurface,
+      database,
+    }));
+  }
+
+  app.post("/v1/companions/:id/runtime/start", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const body = startCompanionRuntimeInputSchema.parse(await c.req.json().catch(() => ({})));
+      const requestId = companionOperationRequestIdSchema.parse(
+        c.req.header(COMPANION_OPERATION_IDEMPOTENCY_HEADER),
+      );
+      const accepted = await enqueueLifecycle(c, companionId, requestId, "start", body.client_surface);
+      return c.json({ operation: accepted.operation }, 202);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companions/:id/runtime/restart", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const body = restartCompanionRuntimeInputSchema.parse(await c.req.json());
+      const requestId = companionOperationRequestIdSchema.parse(
+        c.req.header(COMPANION_OPERATION_IDEMPOTENCY_HEADER),
+      );
+      const accepted = await enqueueLifecycle(
+        c,
+        companionId,
+        requestId,
+        body.target === "pi" ? "restart_pi" : "restart_box",
+      );
+      return c.json({ operation: accepted.operation }, 202);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companions/:id/runtime/stop", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const requestId = companionOperationRequestIdSchema.parse(
+        c.req.header(COMPANION_OPERATION_IDEMPOTENCY_HEADER),
+      );
+      const accepted = await enqueueLifecycle(c, companionId, requestId, "stop");
+      return c.json({ operation: accepted.operation }, 202);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companions/:id/runtime/desktop", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const resolved = await tenant(c, async ({ actor, orgId, database }) => ({
+        actor,
+        orgId,
+        companion: await getCompanionV2({ actor, orgId, companionId, database }),
+      }));
+      if (resolved.companion.access === "viewer") throw new CompanionRuntimeForbiddenError();
+      const desktop = await mintCompanionDesktop({
+        env,
+        actorId: resolved.actor.id,
+        orgId: resolved.orgId,
+        companionId,
+      });
+      c.header("Cache-Control", "private, no-store");
+      return c.json(desktop);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  // Runtime v2 owns every production Box/Pi call. The injected factory exists only for the legacy
+  // test seam; the final stack layer deletes that seam and the registrations below altogether.
+  if (_legacyRuntimeFactory === undefined) return;
 
   app.get("/v1/companions/:id", async (c) => {
     try {

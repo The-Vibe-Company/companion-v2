@@ -147,6 +147,9 @@ function thread(overrides: Partial<Thread> = {}): Thread {
     last_message_at: null,
     last_read_ordinal: null,
     ...overrides,
+    active_turn: overrides.active_turn ?? null,
+    queued_count: overrides.queued_count ?? 0,
+    interrupted_turn: overrides.interrupted_turn ?? null,
   };
 }
 

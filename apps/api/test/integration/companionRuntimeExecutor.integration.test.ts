@@ -19,6 +19,11 @@ import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  companionOperationSchema,
+  companionTranscriptEntrySchema,
+  companionTurnSchema,
+} from "@companion/contracts";
+import {
   RuntimeDatabaseRoleError,
   verifyRuntimeDatabaseRole,
 } from "@companion/db/runtime-role";
@@ -123,6 +128,21 @@ async function asRuntime<T>(action: (tx: Tx) => Promise<T>): Promise<T> {
   const wrapped = await sql.begin(async (tx) => {
     await tx.unsafe(`set local role ${runtimeRole}`);
     return { value: await action(tx) };
+  });
+  return wrapped.value;
+}
+
+async function asApi<T>(input: {
+  orgId: string;
+  actorId: string;
+  action: (tx: Tx) => PromiseLike<T>;
+}): Promise<T> {
+  if (!sql) throw new Error("runtime executor database is not initialized");
+  const wrapped = await sql.begin(async (tx) => {
+    await tx.unsafe(`set local role ${apiRole}`);
+    await tx`select set_config('app.org_id', ${input.orgId}, true)`;
+    await tx`select set_config('app.user_id', ${input.actorId}, true)`;
+    return { value: await input.action(tx) };
   });
   return wrapped.value;
 }
@@ -474,6 +494,834 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     `;
     await expect(verifyRuntimeDatabaseRole(sql, owner?.name ?? ""))
       .rejects.toBeInstanceOf(RuntimeDatabaseRoleError);
+
+    const apiSignatures = [
+      "public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)",
+      "public.companion_api_update_companion(uuid,uuid,jsonb)",
+      "public.companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)",
+      "public.companion_api_update_member_state(uuid,uuid,boolean,boolean,boolean)",
+      "public.companion_api_mark_thread_read(uuid,uuid)",
+      "public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface)",
+      "public.companion_api_read_runtime(uuid,uuid)",
+      "public.companion_api_list_runtime(uuid)",
+      "public.companion_api_read_thread(uuid,uuid)",
+      "public.companion_api_enqueue_operation(uuid,uuid,uuid,public.companion_operation_kind,public.companion_client_surface)",
+      "public.companion_api_retry_turn(uuid,uuid,uuid,uuid,public.companion_client_surface)",
+      "public.companion_api_cancel_turn(uuid,uuid,uuid)",
+      "public.companion_api_answer_decision(uuid,uuid,text,text,text)",
+      "public.companion_api_bump_skill_revision(uuid,uuid)",
+    ];
+    const apiAcl = await sql<Array<{
+      signature: string;
+      api: boolean;
+      worker: boolean;
+      runtime: boolean;
+    }>>`
+      select signature,
+        has_function_privilege(${apiRole}, signature, 'EXECUTE') as api,
+        has_function_privilege(${workerRole}, signature, 'EXECUTE') as worker,
+        has_function_privilege(${runtimeRole}, signature, 'EXECUTE') as runtime
+      from unnest(${apiSignatures}::text[]) signatures(signature)
+      order by signature
+    `;
+    expect(apiAcl).toHaveLength(apiSignatures.length);
+    expect(apiAcl.every((entry) => entry.api && !entry.worker && !entry.runtime)).toBe(true);
+
+    const [apiIsolation] = await sql<Array<{
+      privateTableReads: number;
+      helperCallable: boolean;
+    }>>`
+      select
+        (
+          select count(*)::int from unnest(array[
+            'companion_runtime_instances', 'companion_turns', 'companion_turn_attempts',
+            'companion_operations', 'companion_decision_deliveries',
+            'companion_runtime_leases'
+          ]) protected(table_name)
+          where has_table_privilege(${apiRole}, 'public.' || protected.table_name, 'SELECT')
+        ) as "privateTableReads",
+        has_function_privilege(
+          ${apiRole}, 'public.companion_api_actor(uuid)', 'EXECUTE'
+        ) as "helperCallable"
+    `;
+    expect(apiIsolation).toEqual({ privateTableReads: 0, helperCallable: false });
+  });
+
+  it("persists API intents atomically, projects exact queue state, and enforces tenant ACLs", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    let duplicateId = "";
+    try {
+      const created = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{
+          companionId: string;
+          settingsRevision: string;
+          skillsRevision: number;
+        }>>`
+          select companion_id::text as "companionId",
+            desired_settings_revision::text as "settingsRevision",
+            skills_revision as "skillsRevision"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'API capability fixture', 'Initial persona',
+            ${null}::text, ${null}::text, ${tx.json([ids.skill])}::jsonb,
+            false, ${tx.json([ids.mcpAccount])}::jsonb
+          )
+        `,
+      });
+      expect(created).toEqual([{
+        companionId: expect.any(String),
+        settingsRevision: "1",
+        skillsRevision: 1,
+      }]);
+      companionId = created[0]!.companionId;
+
+      const [atomicProjection] = await sql<Array<{
+        ownerId: string;
+        runtimeRows: number;
+        providerIds: string[];
+      }>>`
+        select companion.owner_id as "ownerId", companion.provider_ids as "providerIds",
+          (select count(*)::int from companion_runtime_instances instance
+            where instance.org_id = companion.org_id
+              and instance.companion_id = companion.id) as "runtimeRows"
+        from companions companion
+        where companion.org_id = ${ids.orgA}::uuid and companion.id = ${companionId}::uuid
+      `;
+      expect(atomicProjection).toEqual({
+        ownerId: ids.ownerA,
+        runtimeRows: 1,
+        providerIds: [],
+      });
+
+      const [duplicated] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'API capability copy', 'Initial persona',
+            ${null}::text, ${null}::text, '[]'::jsonb,
+            false, '[]'::jsonb, ${companionId}::uuid
+          )
+        `,
+      });
+      duplicateId = duplicated?.companionId ?? "";
+      const [duplicateAudit] = await sql<Array<{
+        action: string;
+        actorId: string | null;
+        metadata: Record<string, unknown>;
+      }>>`
+        select action, actor_id as "actorId", metadata
+        from audit_log
+        where org_id = ${ids.orgA}::uuid and target_id = ${duplicateId}
+      `;
+      expect(duplicateAudit).toEqual({
+        action: "companion.duplicated",
+        actorId: ids.ownerA,
+        metadata: { source_companion_id: companionId },
+      });
+
+      const updated = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{
+          settingsRevision: string;
+          skillsRevision: number;
+          settingsChanged: boolean;
+          skillsChanged: boolean;
+        }>>`
+          select desired_settings_revision::text as "settingsRevision",
+            skills_revision as "skillsRevision", settings_changed as "settingsChanged",
+            skills_changed as "skillsChanged"
+          from public.companion_api_update_companion(
+            ${ids.orgA}::uuid, ${companionId}::uuid,
+            ${tx.json({ name: "API capability renamed", persona: "Updated persona" })}::jsonb
+          )
+        `,
+      });
+      expect(updated).toEqual([{
+        settingsRevision: "2",
+        skillsRevision: 1,
+        settingsChanged: true,
+        skillsChanged: false,
+      }]);
+
+      const [skillBump] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ changed: number }>>`
+          select public.companion_api_bump_skill_revision(
+            ${ids.orgA}::uuid, ${ids.skill}::uuid
+          ) as changed
+        `,
+      });
+      expect(skillBump?.changed).toBe(1);
+      await expect(asApi({
+        orgId: ids.orgA,
+        actorId: ids.editorA,
+        action: (tx) => tx`
+          select public.companion_api_bump_skill_revision(
+            ${ids.orgA}::uuid, ${ids.skill}::uuid
+          )
+        `,
+      })).rejects.toMatchObject({ code: "P0002" });
+
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_set_workspace_access(
+            ${ids.orgA}::uuid, ${companionId}::uuid, 'editor'
+          )
+        `,
+      });
+      const clientMessageId = randomUUID();
+      const enqueue = () => asApi({
+        orgId: ids.orgA,
+        actorId: ids.editorA,
+        action: (tx: Tx) => tx<Array<{
+          turn: Record<string, unknown>;
+          operation: Record<string, unknown>;
+          replayed: boolean;
+        }>>`
+          select * from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
+            'One durable message', 'web'
+          )
+        `,
+      });
+      const first = await enqueue();
+      const replay = await enqueue();
+      expect(first).toHaveLength(1);
+      expect(first[0]?.replayed).toBe(false);
+      expect(first[0]?.turn).toMatchObject({
+        client_message_id: clientMessageId,
+        companion_id: companionId,
+        status: "queued",
+        queue_sequence: 1,
+        latest_attempt: null,
+        replying: false,
+        error: null,
+      });
+      expect(first[0]?.operation).toMatchObject({
+        companion_id: companionId,
+        request_id: clientMessageId,
+        source_turn_id: first[0]?.turn.id,
+        kind: "start",
+        trigger: "turn",
+        status: "pending",
+        queue_sequence: 1,
+        error: null,
+      });
+      expect(companionTurnSchema.safeParse(first[0]?.turn).success).toBe(true);
+      expect(companionOperationSchema.safeParse(first[0]?.operation).success).toBe(true);
+      expect(replay).toEqual([{ ...first[0], replayed: true }]);
+
+      const [allocation] = await sql<Array<{
+        turns: number;
+        messages: number;
+        operations: number;
+        nextTurn: string;
+        nextOperation: string;
+      }>>`
+        select
+          (select count(*)::int from companion_turns where companion_id = ${companionId}::uuid) as turns,
+          (select count(*)::int from companion_transcript_entries
+            where companion_id = ${companionId}::uuid and role = 'user') as messages,
+          (select count(*)::int from companion_operations
+            where companion_id = ${companionId}::uuid) as operations,
+          instance.next_turn_sequence::text as "nextTurn",
+          instance.next_operation_sequence::text as "nextOperation"
+        from companion_runtime_instances instance
+        where instance.companion_id = ${companionId}::uuid
+      `;
+      expect(allocation).toEqual({
+        turns: 1,
+        messages: 1,
+        operations: 1,
+        nextTurn: "2",
+        nextOperation: "2",
+      });
+
+      await sql`
+        update companion_runtime_instances
+        set box_id = 'bx_2345678d', box_state = 'ready', pi_state = 'idle',
+          disk_layout_version = 14, pi_invocation_id = 'pi-api-capability'
+        where companion_id = ${companionId}::uuid
+      `;
+      const ownerRuntime = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{
+          accessRole: string;
+          boxId: string | null;
+          queuedCount: number;
+          activeTurn: unknown;
+        }>>`
+          select access_role as "accessRole", box_id as "boxId",
+            queued_count as "queuedCount", active_turn as "activeTurn"
+          from public.companion_api_read_runtime(${ids.orgA}::uuid, ${companionId}::uuid)
+        `,
+      });
+      expect(ownerRuntime).toEqual([{
+        accessRole: "owner",
+        boxId: "bx_2345678d",
+        queuedCount: 1,
+        activeTurn: null,
+      }]);
+
+      const thread = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.editorA,
+        action: (tx) => tx<Array<{
+          accessRole: string;
+          entries: Array<Record<string, unknown>>;
+          queuedCount: number;
+          interruptedTurn: unknown;
+        }>>`
+          select access_role as "accessRole", entries, queued_count as "queuedCount",
+            interrupted_turn as "interruptedTurn"
+          from public.companion_api_read_thread(${ids.orgA}::uuid, ${companionId}::uuid)
+        `,
+      });
+      expect(thread).toHaveLength(1);
+      expect(thread[0]).toMatchObject({
+        accessRole: "editor",
+        queuedCount: 1,
+        interruptedTurn: null,
+      });
+      expect(thread[0]?.entries).toEqual([expect.objectContaining({
+        event_id: `msg:${clientMessageId}`,
+        ordinal: 0,
+        role: "user",
+        content: "One durable message",
+        author_id: ids.editorA,
+        author_name: null,
+        tool: null,
+        decision: null,
+      })]);
+      const parsedEntry = companionTranscriptEntrySchema.safeParse(thread[0]?.entries[0]);
+      expect(
+        parsedEntry.success,
+        parsedEntry.success
+          ? undefined
+          : `${parsedEntry.error.message}: ${JSON.stringify(thread[0]?.entries[0])}`,
+      ).toBe(true);
+      const [memberState] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.editorA,
+        action: (tx) => tx<Array<{
+          pinnedAt: Date | null;
+          hidden: boolean;
+          lastReadOrdinal: number | null;
+        }>>`
+          select pinned_at as "pinnedAt", hidden,
+            last_read_ordinal as "lastReadOrdinal"
+          from public.companion_api_update_member_state(
+            ${ids.orgA}::uuid, ${companionId}::uuid, true, null, null
+          )
+        `,
+      });
+      expect(memberState).toEqual({
+        pinnedAt: expect.any(Date),
+        hidden: false,
+        lastReadOrdinal: 0,
+      });
+
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_set_workspace_access(
+            ${ids.orgA}::uuid, ${companionId}::uuid, 'viewer'
+          )
+        `,
+      });
+      const viewerRuntime = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.editorA,
+        action: (tx) => tx<Array<{ accessRole: string; boxId: string | null }>>`
+          select access_role as "accessRole", box_id as "boxId"
+          from public.companion_api_read_runtime(${ids.orgA}::uuid, ${companionId}::uuid)
+        `,
+      });
+      expect(viewerRuntime).toEqual([{ accessRole: "viewer", boxId: null }]);
+      const viewerList = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.editorA,
+        action: (tx) => tx<Array<{ companionId: string; accessRole: string; boxId: string | null }>>`
+          select companion_id::text as "companionId", access_role as "accessRole",
+            box_id as "boxId"
+          from public.companion_api_list_runtime(${ids.orgA}::uuid)
+          where companion_id = ${companionId}::uuid
+        `,
+      });
+      expect(viewerList).toEqual([{
+        companionId,
+        accessRole: "viewer",
+        boxId: null,
+      }]);
+      await expect(enqueue()).rejects.toMatchObject({ code: "42501" });
+
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_set_workspace_access(
+            ${ids.orgA}::uuid, ${companionId}::uuid, 'editor'
+          )
+        `,
+      });
+      await expect(asApi({
+        orgId: ids.orgB,
+        actorId: ids.ownerB,
+        action: (tx) => tx`
+          select * from public.companion_api_read_runtime(
+            ${ids.orgB}::uuid, ${companionId}::uuid
+          )
+        `,
+      })).rejects.toMatchObject({ code: "P0002" });
+
+      await sql`
+        delete from memberships where org_id = ${ids.orgA}::uuid and user_id = ${ids.editorA}
+      `;
+      try {
+        await expect(asApi({
+          orgId: ids.orgA,
+          actorId: ids.editorA,
+          action: (tx) => tx`
+            select * from public.companion_api_update_member_state(
+              ${ids.orgA}::uuid, ${companionId}::uuid, true, null, null
+            )
+          `,
+        })).rejects.toMatchObject({ code: "42501" });
+      } finally {
+        await sql`
+          insert into memberships(org_id, user_id, org_role)
+          values (${ids.orgA}::uuid, ${ids.editorA}, 'developer')
+          on conflict (org_id, user_id) do nothing
+        `;
+      }
+
+      await expect(asApi({
+        orgId: ids.orgA,
+        actorId: ids.editorA,
+        action: (tx) => tx`
+          select * from public.companion_api_enqueue_operation(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${randomUUID()}::uuid,
+            'delete', 'web'
+          )
+        `,
+      })).rejects.toMatchObject({ code: "42501" });
+
+      const stopRequestId = randomUUID();
+      const enqueueStop = () => asApi({
+        orgId: ids.orgA,
+        actorId: ids.editorA,
+        action: (tx: Tx) => tx<Array<{ operation: Record<string, unknown>; replayed: boolean }>>`
+          select * from public.companion_api_enqueue_operation(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${stopRequestId}::uuid,
+            'stop', 'web'
+          )
+        `,
+      });
+      const stop = await enqueueStop();
+      expect(stop).toEqual([{
+        operation: expect.objectContaining({
+          request_id: stopRequestId,
+          kind: "stop",
+          status: "pending",
+          queue_sequence: 2,
+        }),
+        replayed: false,
+      }]);
+      expect(await enqueueStop()).toEqual([{ ...stop[0], replayed: true }]);
+
+      const deleteRequestId = randomUUID();
+      const enqueueDelete = () => asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx: Tx) => tx<Array<{ operation: Record<string, unknown>; replayed: boolean }>>`
+          select * from public.companion_api_enqueue_operation(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${deleteRequestId}::uuid,
+            'delete', 'web'
+          )
+        `,
+      });
+      const deletion = await enqueueDelete();
+      expect(deletion[0]).toMatchObject({
+        operation: { request_id: deleteRequestId, kind: "delete", status: "pending" },
+        replayed: false,
+      });
+      expect(await enqueueDelete()).toEqual([{ ...deletion[0], replayed: true }]);
+
+      const audits = await sql<Array<{
+        action: string;
+        actorId: string | null;
+        metadata: Record<string, unknown>;
+      }>>`
+        select action, actor_id as "actorId", metadata
+        from audit_log
+        where org_id = ${ids.orgA}::uuid and target_id = ${companionId}
+        order by created_at, action
+      `;
+      expect(audits.filter((entry) => entry.action === "companion.settings.updated"))
+        .toEqual([expect.objectContaining({
+          actorId: ids.ownerA,
+          metadata: expect.objectContaining({ name: true, persona: true }),
+        })]);
+      expect(audits.filter((entry) => entry.action === "companion.share.workspace.updated"))
+        .toHaveLength(3);
+      expect(audits.filter((entry) => entry.action === "companion.delete.requested"))
+        .toEqual([expect.objectContaining({
+          actorId: ids.ownerA,
+          metadata: { operation_id: deletion[0]?.operation.id },
+        })]);
+    } finally {
+      if (duplicateId) await removeCompanion(duplicateId);
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("hands an explicit retry through restart_pi, preserves the later queue, and cancels safely", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    let claimed: Claim | undefined;
+    try {
+      const [created] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Retry handoff fixture', null, null, null,
+            '[]'::jsonb, false, '[]'::jsonb
+          )
+        `,
+      });
+      if (!created) throw new Error("expected an API-created Companion");
+      companionId = created.companionId;
+      const enqueue = (clientMessageId: string, content: string) => asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx: Tx) => tx<Array<{ turn: Record<string, unknown> }>>`
+          select turn from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
+            ${content}, 'web'
+          )
+        `,
+      });
+      const [first] = await enqueue(randomUUID(), "First ambiguous turn");
+      const [later] = await enqueue(randomUUID(), "Later ordered turn");
+      const firstTurnId = first?.turn.id;
+      const laterTurnId = later?.turn.id;
+      if (typeof firstTurnId !== "string" || typeof laterTurnId !== "string") {
+        throw new Error("expected durable turn ids");
+      }
+
+      await sql`
+        update companion_operations
+        set status = 'cancelled', settled_at = now(), updated_at = now()
+        where companion_id = ${companionId}::uuid and kind = 'start' and status = 'pending'
+      `;
+      await sql`
+        update companion_turns
+        set status = 'interrupted', absolute_deadline_at = now(), settled_at = now(),
+          state_changed_at = now(), last_error_code = 'dispatch_ambiguous',
+          last_error_message = 'Pi acceptance could not be proven.',
+          last_error_action = 'retry', updated_at = now()
+        where id = ${firstTurnId}::uuid
+      `;
+
+      const retryId = randomUUID();
+      const retry = () => asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx: Tx) => tx<Array<{ operation: Record<string, unknown>; replayed: boolean }>>`
+          select * from public.companion_api_retry_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${firstTurnId}::uuid,
+            ${retryId}::uuid, 'web'
+          )
+        `,
+      });
+      const firstRetry = await retry();
+      expect(firstRetry).toEqual([{
+        operation: expect.objectContaining({
+          request_id: retryId,
+          source_turn_id: firstTurnId,
+          kind: "restart_pi",
+          trigger: "user",
+          status: "pending",
+          queue_sequence: 3,
+        }),
+        replayed: false,
+      }]);
+      expect(await retry()).toEqual([{ ...firstRetry[0], replayed: true }]);
+
+      claimed = await claimWork();
+      expect(claimed).toMatchObject({
+        companionId,
+        workKind: "operation",
+        workId: firstRetry[0]?.operation.id,
+      });
+      const turnStatesDuringRecycle = await sql<Array<{
+        id: string;
+        status: string;
+        errorCode: string | null;
+      }>>`
+        select id::text as id, status::text as status, last_error_code as "errorCode"
+        from companion_turns
+        where companion_id = ${companionId}::uuid
+        order by queue_sequence
+      `;
+      expect(turnStatesDuringRecycle).toEqual([
+        { id: firstTurnId, status: "interrupted", errorCode: "dispatch_ambiguous" },
+        { id: laterTurnId, status: "queued", errorCode: null },
+      ]);
+
+      await sql`
+        update companion_operations
+        set checkpoint = 'pi_ready', status = 'succeeded', settled_at = now(), updated_at = now()
+        where id = ${claimed.workId}::uuid and status = 'running'
+      `;
+      await release(claimed);
+      claimed = undefined;
+      const [reopened] = await sql<Array<{
+        status: string;
+        settledAt: Date | null;
+        errorCode: string | null;
+      }>>`
+        select status::text as status, settled_at as "settledAt",
+          last_error_code as "errorCode"
+        from companion_turns where id = ${firstTurnId}::uuid
+      `;
+      expect(reopened).toEqual({ status: "queued", settledAt: null, errorCode: null });
+
+      const attemptId = randomUUID();
+      await sql`
+        insert into companion_turn_attempts(
+          id, org_id, companion_id, turn_id, attempt_number, actor_id,
+          runtime_generation, settings_revision, skills_revision, model_id,
+          provider_ids, selected_skill_ids, selected_mcp_account_ids
+        ) values (
+          ${attemptId}::uuid, ${ids.orgA}::uuid, ${companionId}::uuid,
+          ${firstTurnId}::uuid, 1, ${ids.ownerA}, 1, 1, 1, null,
+          '[]'::jsonb, '[]'::jsonb, '[]'::jsonb
+        )
+      `;
+      const [attempt] = await sql<Array<{ retryId: string | null }>>`
+        select retry_id::text as "retryId" from companion_turn_attempts
+        where id = ${attemptId}::uuid
+      `;
+      expect(attempt?.retryId).toBe(retryId);
+
+      await sql`
+        update companion_turns
+        set status = 'interrupted', absolute_deadline_at = now(), settled_at = now(),
+          state_changed_at = now(), last_error_code = 'dispatch_ambiguous',
+          last_error_message = 'The later turn also needs an explicit choice.',
+          last_error_action = 'retry', updated_at = now()
+        where id = ${laterTurnId}::uuid
+      `;
+      const cancelled = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ turn: Record<string, unknown> }>>`
+          select * from public.companion_api_cancel_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${laterTurnId}::uuid
+          )
+        `,
+      });
+      expect(cancelled).toEqual([{
+        turn: expect.objectContaining({
+          id: laterTurnId,
+          status: "cancelled",
+          error: null,
+          settled_at: expect.any(String),
+        }),
+      }]);
+      expect(companionTurnSchema.safeParse(cancelled[0]?.turn).success).toBe(true);
+      const cancelledReplay = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ turn: Record<string, unknown> }>>`
+          select * from public.companion_api_cancel_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${laterTurnId}::uuid
+          )
+        `,
+      });
+      expect(cancelledReplay).toEqual(cancelled);
+      const [queueState] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ queuedCount: number; interruptedTurn: unknown }>>`
+          select queued_count as "queuedCount", interrupted_turn as "interruptedTurn"
+          from public.companion_api_read_thread(${ids.orgA}::uuid, ${companionId}::uuid)
+        `,
+      });
+      expect(queueState).toEqual({ queuedCount: 1, interruptedTurn: null });
+    } finally {
+      if (claimed) await release(claimed);
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("persists decision answers as a durable outbox and updates the PostgreSQL transcript", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion({ boxReady: true });
+    const requestKey = `question-${randomUUID()}`;
+    const deliveryId = randomUUID();
+    const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
+    try {
+      await sql`
+        update companion_turn_attempts
+        set status = 'needs_input', checkpoint = 'needs_input', updated_at = now()
+        where id = ${fixture.attemptId}::uuid
+      `;
+      await sql`
+        update companion_turns
+        set status = 'needs_input', state_changed_at = now(), updated_at = now()
+        where id = ${fixture.turnId}::uuid
+      `;
+      const decision = {
+        request_id: requestKey,
+        kind: "question",
+        name: "ask_user",
+        title: "Choose a safe direction",
+        detail: "The answer must survive a browser disconnect.",
+        status: "pending",
+        answer: null,
+        decided_by_id: null,
+        decided_by_name: null,
+        decided_at: null,
+        expires_at: expiresAt,
+      };
+      await sql`
+        insert into companion_decision_deliveries(
+          id, org_id, companion_id, turn_id, attempt_id,
+          request_key, request_kind, expires_at
+        ) values (
+          ${deliveryId}::uuid, ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+          ${fixture.turnId}::uuid, ${fixture.attemptId}::uuid,
+          ${requestKey}, 'question', ${expiresAt}
+        )
+      `;
+      await sql`
+        insert into companion_transcript_entries(
+          org_id, companion_id, event_id, ordinal, role, content, decision
+        ) values (
+          ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+          ${`decision:${requestKey}`}, 1, 'decision', ${decision.title}, ${sql.json(decision)}
+        )
+      `;
+      await sql`
+        update companion_threads set next_ordinal = 2, updated_at = now()
+        where companion_id = ${fixture.companionId}::uuid
+      `;
+
+      await expect(asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_answer_decision(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+            ${requestKey}, 'allow', null
+          )
+        `,
+      })).rejects.toMatchObject({ code: "22023" });
+
+      const answer = () => asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx: Tx) => tx<Array<{
+          deliveryId: string;
+          turnId: string;
+          decisionStatus: string;
+          deliveryState: string;
+          respondedAt: Date;
+        }>>`
+          select delivery_id::text as "deliveryId", turn_id::text as "turnId",
+            decision_status::text as "decisionStatus",
+            delivery_state::text as "deliveryState", responded_at as "respondedAt"
+          from public.companion_api_answer_decision(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+            ${requestKey}, 'answer', 'Use the safe path'
+          )
+        `,
+      });
+      const answered = await answer();
+      expect(answered).toEqual([{
+        deliveryId,
+        turnId: fixture.turnId,
+        decisionStatus: "answered",
+        deliveryState: "pending",
+        respondedAt: expect.any(Date),
+      }]);
+      expect(await answer()).toEqual(answered);
+      await expect(asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_answer_decision(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+            ${requestKey}, 'answer', 'A conflicting replay'
+          )
+        `,
+      })).rejects.toMatchObject({ code: "55000" });
+
+      const [projection] = await sql<Array<{
+        actorId: string | null;
+        responseText: string | null;
+        decisionStatus: string;
+        transcriptDecision: Record<string, unknown>;
+      }>>`
+        select delivery.actor_id as "actorId", delivery.response_text as "responseText",
+          delivery.decision_status::text as "decisionStatus",
+          entry.decision as "transcriptDecision"
+        from companion_decision_deliveries delivery
+        join companion_transcript_entries entry
+          on entry.companion_id = delivery.companion_id
+         and entry.decision ->> 'request_id' = delivery.request_key
+        where delivery.id = ${deliveryId}::uuid
+      `;
+      expect(projection).toMatchObject({
+        actorId: ids.ownerA,
+        responseText: "Use the safe path",
+        decisionStatus: "answered",
+        transcriptDecision: {
+          request_id: requestKey,
+          status: "answered",
+          answer: "Use the safe path",
+          decided_by_id: ids.ownerA,
+          decided_by_name: "Runtime executor actor 0",
+          decided_at: expect.any(String),
+        },
+      });
+
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_set_workspace_access(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, 'viewer'
+          )
+        `,
+      });
+      await expect(asApi({
+        orgId: ids.orgA,
+        actorId: ids.viewerA,
+        action: (tx) => tx`
+          select * from public.companion_api_answer_decision(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+            ${requestKey}, 'answer', 'Use the safe path'
+          )
+        `,
+      })).rejects.toMatchObject({ code: "42501" });
+    } finally {
+      await removeCompanion(fixture.companionId);
+    }
   });
 
   it("rejects effective CREATE inherited through PUBLIC in verification and the real grant hook", async () => {

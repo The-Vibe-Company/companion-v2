@@ -87,6 +87,54 @@ describe("Skills Hub runtime-role grants", () => {
     expect(sql).toContain("GRANT EXECUTE ON FUNCTION %s TO %I");
   });
 
+  it("gives only the API role the Runtime v2 intent and projection capabilities", async () => {
+    const sql = await readFile(await resolveRuntimeRoleGrantsFile(), "utf8");
+    expect(sql).toContain("companion_api_functions regprocedure[] := ARRAY[]::regprocedure[]");
+    const apiBlock = sql.slice(
+      sql.indexOf("companion_api_functions := ARRAY["),
+      sql.indexOf("-- A migration owner can carry arbitrary", sql.indexOf("companion_api_functions := ARRAY[")),
+    );
+    for (const signature of [
+      "companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)",
+      "companion_api_update_companion(uuid,uuid,jsonb)",
+      "companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)",
+      "companion_api_update_member_state(uuid,uuid,boolean,boolean,boolean)",
+      "companion_api_mark_thread_read(uuid,uuid)",
+      "companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface)",
+      "companion_api_read_runtime(uuid,uuid)",
+      "companion_api_list_runtime(uuid)",
+      "companion_api_read_thread(uuid,uuid)",
+      "companion_api_enqueue_operation(uuid,uuid,uuid,public.companion_operation_kind,public.companion_client_surface)",
+      "companion_api_retry_turn(uuid,uuid,uuid,uuid,public.companion_client_surface)",
+      "companion_api_cancel_turn(uuid,uuid,uuid)",
+      "companion_api_answer_decision(uuid,uuid,text,text,text)",
+      "companion_api_bump_skill_revision(uuid,uuid)",
+    ]) {
+      expect(apiBlock).toContain(`'public.${signature}'::regprocedure`);
+    }
+    for (const helper of [
+      "companion_api_actor(uuid)",
+      "companion_api_require_access(uuid,uuid,text)",
+      "companion_api_safe_error(text,text,public.companion_runtime_error_action)",
+      "companion_api_turn_json(uuid,uuid,uuid)",
+      "companion_api_operation_json(uuid,uuid,uuid)",
+      "companion_api_validate_resource_selection(uuid,jsonb,jsonb,jsonb,jsonb)",
+      "companion_api_retry_operation_handoff()",
+      "companion_api_assign_attempt_retry_id()",
+    ]) {
+      expect(apiBlock).toContain(`'public.${helper}'::regprocedure`);
+    }
+    const apiGrantLoop = sql.slice(
+      sql.indexOf("FOREACH protected_function IN ARRAY companion_api_functions"),
+      sql.indexOf("-- The skill-secret usage helper", sql.indexOf("FOREACH protected_function IN ARRAY companion_api_functions")),
+    );
+    expect(apiGrantLoop).toContain("REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC");
+    expect(apiGrantLoop).toContain("acl.grantee <> protected_proc.proowner");
+    expect(apiGrantLoop).toContain("GRANT EXECUTE ON FUNCTION %s TO %I', protected_function, api_role");
+    expect(apiGrantLoop).not.toContain("worker_role");
+    expect(apiGrantLoop).not.toContain("companion_runtime_role");
+  });
+
   it("makes the Runtime v2 cutover a one-way downgrade for legacy executors", async () => {
     const sql = await readFile(await resolveRuntimeRoleGrantsFile(), "utf8");
     const sentinel =

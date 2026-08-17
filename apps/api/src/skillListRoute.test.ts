@@ -118,7 +118,7 @@ const dbMocks = vi.hoisted(() => ({
 }));
 
 const coreMocks = vi.hoisted(() => ({
-  bumpCompanionSkillsRevisionForSkill: vi.fn(async () => undefined),
+  bumpCompanionSkillRevisionV2: vi.fn(async () => 1),
 }));
 
 const authMocks = vi.hoisted(() => ({
@@ -681,7 +681,7 @@ describe("POST /v1/skills/:slug/rename", () => {
       }),
     );
     // Boxes stage skills by slug, so a rename marks every selecting Companion as needing a restage.
-    expect(coreMocks.bumpCompanionSkillsRevisionForSkill).toHaveBeenCalledWith(
+    expect(coreMocks.bumpCompanionSkillRevisionV2).toHaveBeenCalledWith(
       expect.objectContaining({ orgId: "org-1", skillId: "skill-1" }),
     );
   });
@@ -705,7 +705,7 @@ describe("POST /v1/skills/:slug/rename", () => {
 
     expect(res.status).toBe(200);
     expect(serviceMocks.renameSkill).toHaveBeenCalledOnce();
-    expect(coreMocks.bumpCompanionSkillsRevisionForSkill).toHaveBeenCalledWith(
+    expect(coreMocks.bumpCompanionSkillRevisionV2).toHaveBeenCalledWith(
       expect.objectContaining({ orgId: "org-1", skillId: "skill-1" }),
     );
   });
@@ -762,7 +762,7 @@ describe("durable Companion Skill invalidations", () => {
 
     expect(res.status).toBe(200);
     expect(service).toHaveBeenCalledOnce();
-    expect(coreMocks.bumpCompanionSkillsRevisionForSkill).toHaveBeenCalledWith(
+    expect(coreMocks.bumpCompanionSkillRevisionV2).toHaveBeenCalledWith(
       expect.objectContaining({ orgId: "org-1", skillId: "skill-1" }),
     );
   });

@@ -51,60 +51,53 @@ export function localDay(iso: string): string {
 }
 
 /**
- * Whether Pi owes this thread a reply. A running Box whose transcript ends on a member's message is
- * working on one, and saying so is the difference between a live thread and one that looks stuck. A
- * transcript ending on a tool or decision is the same promise mid-turn. A timed-out tool is
- * the exception: the control plane aborted that turn, so keeping it in-flight would leave the
- * composer disabled after the tool had already failed closed. It is read from the transcript the
- * reader already has, so it never asks Box anything.
+ * Whether Pi is durably replying. The API computes this only after the active attempt's positive
+ * ACK and clears it at settlement; transcript shape and Box state are never substitutes for it.
  */
-export function replyExpected(input: {
-  entries: readonly CompanionTranscriptEntry[];
-  awake: boolean;
-  /** Messages waiting for Pi rather than a reply. Omit only when judging transcript history alone. */
-  pendingCount?: number;
-  /** Highest prompt proven accepted by Pi's correlated protocol-2 response. */
-  acceptedDeliveryOrdinal?: number | null;
-}): boolean {
-  if (!input.awake) return false;
-  const tail = input.entries[input.entries.length - 1];
-  if (tail?.role === "user") {
-    // A user tail is generation only after the correlated protocol-2 response proves Pi accepted
-    // that exact turn. This also keeps an optimistic local entry quiet while its POST is held or
-    // refused: the preceding thread's zero pending count and older acceptance cannot speak for it.
-    return input.pendingCount === 0
-      && input.acceptedDeliveryOrdinal !== undefined
-      && input.acceptedDeliveryOrdinal !== null
-      && input.acceptedDeliveryOrdinal >= tail.ordinal;
-  }
-  if (tail?.role === "tool") return tail.tool?.status !== "timeout";
-  if (tail?.role === "decision") return true;
-  return false;
+export function replyExpected(thread: CompanionThread | null): boolean {
+  return thread?.active_turn?.replying === true;
 }
 
 /**
- * What the composer says under itself: delivery when messages are waiting, keys otherwise. Delivery
- * is read from the same projected runtime state as the Box status chip, so the footer of a Companion
- * a send has just started never suggests a second lifecycle action, and a Companion still
- * coming up is reported as coming up rather than as one nobody has woken yet.
+ * What the composer says under itself. Turn state comes from PostgreSQL, so the footer can explain
+ * ordered work without inferring anything from a transcript tail or observing Box.
  */
 export function composerHint(input: {
   thread: CompanionThread | null;
   companionName: string;
   state: CompanionRuntimeState;
 }): string {
-  const pending = input.thread?.pending_count ?? 0;
-  if (pending < 1) {
-    // A wake with nothing queued yet is the prewarm a keystroke started: say what the wait is and
-    // roughly how long, so the reader keeps typing instead of wondering whether anything happened.
-    return input.state === "provisioning"
-      ? `${input.companionName} is waking, usually under a minute. Send when ready.`
-      : "Enter sends. Shift + Enter starts a new line.";
+  const interrupted = input.thread?.interrupted_turn;
+  const queued = input.thread?.queued_count ?? 0;
+  if (interrupted) {
+    const waiting = queued > 0
+      ? ` ${queued} later message${queued === 1 ? " is" : "s are"} queued behind it.`
+      : "";
+    return `Retry or cancel the interrupted turn to continue.${waiting}`;
   }
-  const count = `${pending} message${pending === 1 ? "" : "s"}`;
-  if (input.state === "running") return `${count} waiting for delivery.`;
-  if (input.state === "provisioning") {
-    return `${count} saved. ${input.companionName} is starting to deliver.`;
+
+  const active = input.thread?.active_turn;
+  if (active) {
+    const queuedSuffix = queued > 0
+      ? ` ${queued} later message${queued === 1 ? " is" : "s are"} queued.`
+      : "";
+    if (active.status === "starting") {
+      return `${input.companionName} is starting this turn.${queuedSuffix}`;
+    }
+    if (active.status === "dispatching") {
+      return `Sending this turn to ${input.companionName}.${queuedSuffix}`;
+    }
+    if (active.status === "needs_input") {
+      return `Answer the request above to continue this turn.${queuedSuffix}`;
+    }
+    return `${input.companionName} is working on this turn.${queuedSuffix}`;
   }
-  return `${count} saved. Send another message to retry delivery.`;
+
+  if (queued > 0) {
+    return `${queued} message${queued === 1 ? " is" : "s are"} saved and queued.`;
+  }
+  if (input.state === "provisioning" || input.state === "stopping") {
+    return "A runtime change is in progress. Messages remain durable and ordered.";
+  }
+  return "Enter sends. Shift + Enter starts a new line.";
 }

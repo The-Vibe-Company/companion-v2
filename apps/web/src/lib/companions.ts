@@ -1,6 +1,7 @@
 import type {
   Companion,
   CompanionDesktop,
+  CompanionOperation,
   CompanionPluginAccount,
   CompanionPluginOAuthStartInput,
   CompanionPluginOAuthStartResponse,
@@ -11,27 +12,31 @@ import type {
   CompanionShareRole,
   CompanionShares,
   CompanionThread,
+  CancelCompanionTurnAcceptedResponse,
+  SendCompanionMessageAcceptedResponse,
   SaveCompanionProviderInput,
   SaveCompanionPluginInput,
   UpdateCompanionInput,
 } from "@companion/contracts";
-import type { RestartCompanionRuntimeInput } from "@companion/contracts/companion-runtime";
+import {
+  COMPANION_OPERATION_IDEMPOTENCY_HEADER,
+  type RestartCompanionRuntimeInput,
+} from "@companion/contracts/companion-runtime";
 import { apiFetch } from "./apiClient";
 
 function orgHeaders(orgId: string): HeadersInit {
   return { "x-companion-org": orgId };
 }
 
-/**
- * A send or an explicit wake may legitimately ride a cold Box wake, which the API bounds at three
- * minutes and the Next proxy at 210 seconds. The client outlasts the proxy by a hair so the proxy's
- * own 504 — not a client abort — decides the outcome; everything shorter uses apiFetch's default.
- */
-const RUNTIME_WAKE_TIMEOUT_MS = 215_000;
-/** A sync can continue an archive-resume; bounded well under the wake since polling retries it. */
-const THREAD_SYNC_TIMEOUT_MS = 60_000;
-/** Live runtime reads and desktop handoffs run one bounded Box command plus proxy overhead. */
-const BOX_OBSERVE_TIMEOUT_MS = 45_000;
+function operationHeaders(orgId: string, requestId: string): HeadersInit {
+  return {
+    "x-companion-org": orgId,
+    [COMPANION_OPERATION_IDEMPOTENCY_HEADER]: requestId,
+  };
+}
+
+/** A desktop handoff is the only browser request that waits on a private runtime round trip. */
+const DESKTOP_HANDOFF_TIMEOUT_MS = 45_000;
 
 /**
  * Every Companion the caller may read, with each thread's last line projected on. This is the poll
@@ -88,11 +93,19 @@ export async function updateCompanion(
   return result.companion;
 }
 
-export async function deleteCompanion(orgId: string, companionId: string): Promise<void> {
-  await apiFetch(`/v1/companions/${encodeURIComponent(companionId)}`, {
-    method: "DELETE",
-    headers: orgHeaders(orgId),
-  });
+export async function deleteCompanion(
+  orgId: string,
+  companionId: string,
+  requestId: string,
+): Promise<CompanionOperation> {
+  const result = await apiFetch<{ operation: CompanionOperation }>(
+    `/v1/companions/${encodeURIComponent(companionId)}`,
+    {
+      method: "DELETE",
+      headers: operationHeaders(orgId, requestId),
+    },
+  );
+  return result.operation;
 }
 
 export async function updateCompanionMemberState(
@@ -301,30 +314,48 @@ export async function sendCompanionMessage(
   companionId: string,
   content: string,
   clientMessageId: string,
-): Promise<CompanionThread> {
-  const result = await apiFetch<{ thread: CompanionThread }>(
+): Promise<SendCompanionMessageAcceptedResponse> {
+  return apiFetch<SendCompanionMessageAcceptedResponse>(
     `/v1/companions/${encodeURIComponent(companionId)}/messages`,
     {
       method: "POST",
       headers: orgHeaders(orgId),
       body: JSON.stringify({ content, client_message_id: clientMessageId }),
     },
-    { timeoutMs: RUNTIME_WAKE_TIMEOUT_MS },
   );
-  return result.thread;
 }
 
-/** Hands pending messages to Pi and projects new Pi events; only Owner/Editor may call it. */
-export async function syncCompanionThread(
+/**
+ * Retry an interrupted turn. The caller owns the retry id so a repeated HTTP request resolves to
+ * the same durable operation instead of scheduling another Pi recycle.
+ */
+export async function retryCompanionTurn(
   orgId: string,
   companionId: string,
-): Promise<CompanionThread> {
-  const result = await apiFetch<{ thread: CompanionThread }>(
-    `/v1/companions/${encodeURIComponent(companionId)}/thread/sync`,
-    { method: "POST", headers: orgHeaders(orgId), body: "{}" },
-    { timeoutMs: THREAD_SYNC_TIMEOUT_MS },
+  turnId: string,
+  retryId: string,
+): Promise<CompanionOperation> {
+  const result = await apiFetch<{ operation: CompanionOperation }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/turns/${encodeURIComponent(turnId)}/retry`,
+    {
+      method: "POST",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify({ retry_id: retryId }),
+    },
   );
-  return result.thread;
+  return result.operation;
+}
+
+/** Cancel an interrupted turn and return the queue projection after it has been released. */
+export async function cancelCompanionTurn(
+  orgId: string,
+  companionId: string,
+  turnId: string,
+): Promise<CancelCompanionTurnAcceptedResponse> {
+  return apiFetch<CancelCompanionTurnAcceptedResponse>(
+    `/v1/companions/${encodeURIComponent(companionId)}/turns/${encodeURIComponent(turnId)}/cancel`,
+    { method: "POST", headers: orgHeaders(orgId), body: "{}" },
+  );
 }
 
 /**
@@ -343,63 +374,41 @@ export async function decideCompanionDecision(
       headers: orgHeaders(orgId),
       body: JSON.stringify(input),
     },
-    { timeoutMs: BOX_OBSERVE_TIMEOUT_MS },
   );
   return result.thread;
 }
 
 /**
- * Runtime read. The default is the control-plane projection, so it is safe after a failed wake and
- * for a Viewer. `live` observes the Box an Owner or Editor already runs; it never resumes one, so a
- * status read cannot become a wake.
+ * Runtime read. This is always the PostgreSQL projection, including for Owners and Editors; status
+ * polling must never become a Box observation or a wake.
  */
 export async function getCompanionRuntime(
   orgId: string,
   companionId: string,
-  options: { live?: boolean } = {},
 ): Promise<Companion> {
   const result = await apiFetch<{ companion: Companion }>(
-    `/v1/companions/${encodeURIComponent(companionId)}/runtime${options.live ? "?live=true" : ""}`,
+    `/v1/companions/${encodeURIComponent(companionId)}/runtime`,
     { headers: orgHeaders(orgId) },
-    options.live ? { timeoutMs: BOX_OBSERVE_TIMEOUT_MS } : undefined,
   );
   return result.companion;
 }
 
-export async function startCompanionRuntime(
-  orgId: string,
-  companionId: string,
-): Promise<Companion> {
-  const result = await apiFetch<{ companion: Companion }>(
-    `/v1/companions/${encodeURIComponent(companionId)}/runtime/start?intent=message`,
-    {
-      method: "POST",
-      headers: orgHeaders(orgId),
-      // This is the composer's first-keystroke prewarm. It must drain a durable send that loses the
-      // concurrent lifecycle claim to this request, rather than merely leaving Pi online and idle.
-      body: JSON.stringify({ client_surface: "web" }),
-    },
-    { timeoutMs: RUNTIME_WAKE_TIMEOUT_MS },
-  );
-  return result.companion;
-}
-
-/** Restart an already-online Companion without turning the control into an implicit wake. */
+/** Queue an explicit lifecycle operation; completion is observed through PostgreSQL projections. */
 export async function restartCompanionRuntime(
   orgId: string,
   companionId: string,
   input: RestartCompanionRuntimeInput,
-): Promise<Companion> {
-  const result = await apiFetch<{ companion: Companion }>(
+  requestId: string,
+): Promise<CompanionOperation> {
+  const result = await apiFetch<{ operation: CompanionOperation }>(
     `/v1/companions/${encodeURIComponent(companionId)}/runtime/restart`,
     {
       method: "POST",
-      headers: orgHeaders(orgId),
+      headers: operationHeaders(orgId, requestId),
       body: JSON.stringify(input),
     },
-    { timeoutMs: RUNTIME_WAKE_TIMEOUT_MS },
   );
-  return result.companion;
+  return result.operation;
 }
 
 /**
@@ -414,7 +423,7 @@ export async function openCompanionDesktop(
   return apiFetch<CompanionDesktop>(
     `/v1/companions/${encodeURIComponent(companionId)}/runtime/desktop`,
     { method: "POST", headers: orgHeaders(orgId), body: "{}" },
-    { timeoutMs: BOX_OBSERVE_TIMEOUT_MS },
+    { timeoutMs: DESKTOP_HANDOFF_TIMEOUT_MS },
   );
 }
 

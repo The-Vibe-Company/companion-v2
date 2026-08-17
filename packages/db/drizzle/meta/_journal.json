@@ -645,6 +645,13 @@
       "when": 1788023200000,
       "tag": "0091_companion_runtime_executor",
       "breakpoints": true
+    },
+    {
+      "idx": 92,
+      "version": "7",
+      "when": 1788109600000,
+      "tag": "0092_companion_runtime_api",
+      "breakpoints": true
     }
   ]
 }

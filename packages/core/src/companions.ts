@@ -1346,6 +1346,9 @@ function toThread(input: {
     read_only: input.companion.access === "viewer",
     can_send: canWakeCompanion(input.companion.access),
     entries: input.entries,
+    active_turn: null,
+    queued_count: pending.length,
+    interrupted_turn: null,
     pending_count: pending.length,
     accepted_delivery_ordinal: input.row?.acceptedDeliveryOrdinal ?? null,
     last_message_at: input.row?.lastMessageAt?.toISOString()

@@ -96,9 +96,9 @@ body { background: var(--color-canvas); color: var(--color-fg); font-family: var
 .cmprow__line { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .cmprow__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--color-fg); font-weight: 500; }
-.cmprow__time { flex: none; font-size: 11px; color: var(--color-faint); font-variant-numeric: tabular-nums; }
+.cmprow__time { flex: none; font-size: 11px; color: var(--color-muted); font-variant-numeric: tabular-nums; }
 .cmprow__preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: var(--text-xs); color: var(--color-faint); }
+  font-size: var(--text-xs); color: var(--color-muted); }
 .cmprow__unread { flex: none; align-self: flex-end; width: 8px; height: 8px; margin-bottom: 3px;
   border-radius: var(--radius-full); background: var(--color-accent); }
 .cmprow__dot { position: absolute; right: -1px; bottom: -1px; width: 10px; height: 10px; border-radius: var(--radius-full);

@@ -14,7 +14,7 @@ export interface DesktopRequestAuthInput {
   rawBody: Uint8Array;
 }
 
-/** Shared PR6/PR7 wire contract. The URL query is forbidden by the endpoint and is not canonical. */
+/** Canonical private API request. Query strings are forbidden by the desktop endpoint. */
 export function canonicalDesktopRequest(input: DesktopRequestAuthInput): string {
   if (!Number.isSafeInteger(input.timestamp) || input.timestamp < 0) {
     throw new Error("desktop request timestamp must be a non-negative safe integer");
@@ -23,7 +23,11 @@ export function canonicalDesktopRequest(input: DesktopRequestAuthInput): string 
     throw new Error("desktop request id is invalid");
   }
   const method = input.method.toUpperCase();
-  if (!/^[A-Z]+$/.test(method) || !input.pathname.startsWith("/") || /[\r\n]/.test(input.pathname)) {
+  if (
+    !/^[A-Z]+$/.test(method)
+    || !input.pathname.startsWith("/")
+    || /[\r\n?#]/.test(input.pathname)
+  ) {
     throw new Error("desktop request method or pathname is invalid");
   }
   const bodyDigest = createHash("sha256").update(input.rawBody).digest("hex");
@@ -49,6 +53,7 @@ export function verifyDesktopRequest(input: DesktopRequestAuthInput & {
   requireHmacSecret(secret);
   const nowSeconds = Math.floor((input.nowMs ?? Date.now()) / 1_000);
   const maxSkew = input.maxSkewSeconds ?? DESKTOP_REQUEST_MAX_SKEW_SECONDS;
+  if (!Number.isSafeInteger(nowSeconds) || nowSeconds < 0) return false;
   if (!Number.isSafeInteger(maxSkew) || maxSkew < 1) return false;
   if (Math.abs(nowSeconds - input.timestamp) > maxSkew) return false;
   const match = /^v1=([a-f0-9]{64})$/.exec(input.signature);

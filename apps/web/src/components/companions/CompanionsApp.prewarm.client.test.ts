@@ -10,13 +10,7 @@ import type {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CompanionsApp, type CompanionNavigation } from "./CompanionsApp";
 
-/**
- * Typing into an asleep Companion is the send announcing itself, so the wake starts on the first
- * keystroke rather than when Send finally lands — the cold start runs while the message is written.
- * The signal is deliberately narrow: once per opened thread, only from a state a wake may claim
- * (`stopped`, retryable `error`), and never for a Companion mid-transition, whose lifecycle already
- * belongs to someone.
- */
+/** Typing is local draft work. Only an accepted Send may create durable runtime work or wake Box. */
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -102,6 +96,9 @@ const emptyThread: Thread = {
   read_only: false,
   can_send: true,
   entries: [],
+  active_turn: null,
+  queued_count: 0,
+  interrupted_turn: null,
   pending_count: 0,
   last_message_at: null,
   last_read_ordinal: null,
@@ -110,6 +107,7 @@ const emptyThread: Thread = {
 function controlPlane(initial: Companion) {
   const wakes: string[] = [];
   const wakeBodies: unknown[] = [];
+  const messages: unknown[] = [];
   // The claim lands as the wake request does, so runtime reads report the lifecycle in flight even
   // though the wake request itself stays open the way a real one can.
   let settled = initial;
@@ -129,12 +127,16 @@ function controlPlane(initial: Companion) {
       };
       return await new Promise<Response>(() => {});
     }
+    if (method === "POST" && url.endsWith("/messages")) {
+      messages.push(JSON.parse(String(init?.body)));
+      return json({ turn: {}, thread: emptyThread });
+    }
     if (url.includes("/runtime")) return json({ companion: settled });
     if (url.includes("/thread")) return json({ thread: emptyThread });
     if (url.includes("/v1/companions")) return json({ companions: [settled] });
     return json({});
   });
-  return { fetchMock, wakes, wakeBodies };
+  return { fetchMock, wakes, wakeBodies, messages };
 }
 
 const roots: Root[] = [];
@@ -161,17 +163,26 @@ async function openThread(initial: Companion) {
 }
 
 async function type(container: HTMLElement, text: string) {
+  const field = container.querySelector("textarea") as HTMLTextAreaElement | null;
+  expect(field).not.toBeNull();
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
+  await act(async () => {
+    setter?.call(field, text);
+    field!.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+async function send(container: HTMLElement) {
   const field = container.querySelector("textarea");
   expect(field).not.toBeNull();
   await act(async () => {
-    field!.value = text;
-    field!.dispatchEvent(new Event("input", { bubbles: true }));
+    field!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   });
 }
 
 const chip = (container: HTMLElement) => container.querySelector(".chat-box")?.textContent;
 
-describe("CompanionsApp prewarm on typing intent", () => {
+describe("CompanionsApp wake-on-Send boundary", () => {
   let api: ReturnType<typeof controlPlane>;
 
   afterEach(() => {
@@ -185,30 +196,32 @@ describe("CompanionsApp prewarm on typing intent", () => {
     vi.useFakeTimers();
   });
 
-  it("starts one wake on the first keystroke into an asleep Companion", async () => {
+  it("does not prewarm an asleep Companion while a draft is typed", async () => {
     api = controlPlane(companionIn("stopped"));
     vi.stubGlobal("fetch", api.fetchMock);
     const container = await openThread(companionIn("stopped"));
 
     await type(container, "C");
-    expect(api.wakes).toHaveLength(1);
-    expect(api.wakes[0]).toContain("intent=message");
-    expect(api.wakeBodies).toEqual([{ client_surface: "web" }]);
-    // The chip reports the wake the keystroke caused, immediately.
-    expect(chip(container)).toContain("Starting");
+    expect(api.wakes).toHaveLength(0);
+    expect(api.wakeBodies).toHaveLength(0);
+    expect(chip(container)).toContain("Asleep");
 
     await type(container, "Ca va");
     await type(container, "Ca va ?");
-    expect(api.wakes).toHaveLength(1);
+    expect(api.wakes).toHaveLength(0);
+
+    await send(container);
+    expect(api.messages).toHaveLength(1);
+    expect(api.wakes).toHaveLength(0);
   });
 
-  it("prewarms a retryably-errored Companion the same way", async () => {
+  it("does not prewarm a retryably-errored Companion", async () => {
     api = controlPlane(companionIn("error"));
     vi.stubGlobal("fetch", api.fetchMock);
     const container = await openThread(companionIn("error"));
 
     await type(container, "Retry?");
-    expect(api.wakes).toHaveLength(1);
+    expect(api.wakes).toHaveLength(0);
   });
 
   it.each(["running", "stopping"] as const)(

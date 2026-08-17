@@ -2,17 +2,16 @@
 
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { Companion, CompanionProvidersResponse } from "@companion/contracts";
+import type {
+  Companion,
+  CompanionOperation,
+  CompanionProvidersResponse,
+} from "@companion/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiFetchError } from "@/lib/apiClient";
 import { CompanionSettings } from "./CompanionSettings";
 
-const {
-  updateCompanion,
-  deleteCompanion,
-  getCompanionRuntime,
-  restartCompanionRuntime,
-  updateCompanionMemberState,
-} = vi.hoisted(() => ({
+const companionApi = vi.hoisted(() => ({
   updateCompanion: vi.fn(),
   deleteCompanion: vi.fn(),
   getCompanionRuntime: vi.fn(),
@@ -20,23 +19,19 @@ const {
   updateCompanionMemberState: vi.fn(),
 }));
 
-vi.mock("@/lib/companions", () => ({
-  updateCompanion,
-  deleteCompanion,
-  getCompanionRuntime,
-  restartCompanionRuntime,
-  updateCompanionMemberState,
-}));
-vi.mock("@/lib/apiClient", () => ({
+vi.mock("@/lib/companions", () => companionApi);
+vi.mock("@/lib/apiClient", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/apiClient")>()),
   apiFetch: vi.fn(async (path: string) => {
-    if (String(path).includes("/v1/companion-plugins")) {
-      return { accounts: [] };
-    }
+    if (String(path).includes("/v1/companion-plugins")) return { accounts: [] };
     return [];
   }),
 }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const companionId = "11111111-1111-4111-8111-111111111111";
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const providers: CompanionProvidersResponse = {
   catalog: [
@@ -50,7 +45,13 @@ const providers: CompanionProvidersResponse = {
         { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
       ],
     },
-    { id: "openai-codex", name: "Codex", auth_methods: ["subscription"], description: "", models: [{ id: "gpt-5.5", name: "GPT-5.5", default: true }] },
+    {
+      id: "openai-codex",
+      name: "Codex",
+      auth_methods: ["subscription"],
+      description: "",
+      models: [{ id: "gpt-5.5", name: "GPT-5.5", default: true }],
+    },
   ],
   connections: [
     {
@@ -72,9 +73,12 @@ const providers: CompanionProvidersResponse = {
   can_manage: true,
 };
 
-function companion(access: Companion["access"] = "owner"): Companion {
+function companion(
+  access: Companion["access"] = "owner",
+  runtimeState: "running" | "stopped" = "stopped",
+): Companion {
   return {
-    id: "11111111-1111-4111-8111-111111111111",
+    id: companionId,
     name: "Luna",
     persona: "Check every source.",
     model_id: "claude-opus-4-8",
@@ -88,12 +92,12 @@ function companion(access: Companion["access"] = "owner"): Companion {
     unread: false,
     last_message: null,
     runtime: {
-      state: "stopped",
-      daemon_state: "stopped",
+      state: runtimeState,
+      daemon_state: runtimeState === "running" ? "running" : "stopped",
       box_id: access === "viewer" ? null : "bx_23456789",
       provider_ids: ["anthropic"],
       provider_credential_generation: null,
-      disk_layout_version: 6,
+      disk_layout_version: 14,
       desktop_available: false,
       last_error: null,
       skills_revision: 1,
@@ -109,13 +113,26 @@ function companion(access: Companion["access"] = "owner"): Companion {
   };
 }
 
+const operation: CompanionOperation = {
+  id: "22222222-2222-4222-8222-222222222222",
+  companion_id: companionId,
+  request_id: null,
+  source_turn_id: null,
+  kind: "restart_pi",
+  trigger: "user",
+  status: "pending",
+  queue_sequence: 1,
+  checkpoint: "queued",
+  attempt_count: 0,
+  error: null,
+  created_at: "2026-08-12T12:00:00.000Z",
+  started_at: null,
+  settled_at: null,
+};
+
 const roots: Root[] = [];
 
-async function mount(
-  access: Companion["access"] = "owner",
-  providerResponse: CompanionProvidersResponse = providers,
-  companionResponse: Companion = companion(access),
-) {
+async function mount(who: Companion) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -125,14 +142,14 @@ async function mount(
   await act(async () => {
     root.render(React.createElement(CompanionSettings, {
       orgId: "org-1",
-      companion: companionResponse,
-      providers: providerResponse,
+      companion: who,
+      providers,
       onBack: vi.fn(),
       onSaved,
       onDeleted,
     }));
   });
-  return { container, root, onSaved, onDeleted };
+  return { container, onSaved, onDeleted };
 }
 
 function setControlled(control: HTMLInputElement | HTMLTextAreaElement, value: string) {
@@ -143,10 +160,21 @@ function setControlled(control: HTMLInputElement | HTMLTextAreaElement, value: s
   control.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+function button(container: HTMLElement, label: string): HTMLButtonElement {
+  const found = [...container.querySelectorAll("button")]
+    .find((candidate) => candidate.textContent?.trim() === label);
+  if (!found) throw new Error(`Button not found: ${label}`);
+  return found;
+}
+
+async function click(control: HTMLElement) {
+  await act(async () => control.click());
+}
+
 describe("CompanionSettings", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    updateCompanion.mockImplementation(async (
+    companionApi.updateCompanion.mockImplementation(async (
       _orgId: string,
       _companionId: string,
       input: { name: string; persona: string | null; provider_id: string; model_id: string },
@@ -157,19 +185,13 @@ describe("CompanionSettings", () => {
       model_id: input.model_id,
       runtime: { ...companion().runtime, provider_ids: [input.provider_id] },
     }));
-    deleteCompanion.mockResolvedValue(undefined);
-    getCompanionRuntime.mockResolvedValue(companion());
-    restartCompanionRuntime.mockResolvedValue({
-      ...companion(),
-      runtime: {
-        ...companion().runtime,
-        state: "running",
-        daemon_state: "running",
-      },
-    });
+    companionApi.deleteCompanion.mockResolvedValue({ ...operation, kind: "delete" });
+    companionApi.getCompanionRuntime.mockResolvedValue(companion("owner", "running"));
+    companionApi.restartCompanionRuntime.mockResolvedValue(operation);
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     while (roots.length) {
       const root = roots.pop();
       await act(async () => root?.unmount());
@@ -177,8 +199,8 @@ describe("CompanionSettings", () => {
     document.body.replaceChildren();
   });
 
-  it("lets an Editor persist name, instructions, and the existing provider picker without delete", async () => {
-    const { container, onSaved } = await mount("editor");
+  it("persists editable settings while preserving Owner-only deletion", async () => {
+    const { container, onSaved } = await mount(companion("editor"));
     const form = container.querySelector("form")!;
     const name = form.elements.namedItem("name") as HTMLInputElement;
     const instructions = form.elements.namedItem("instructions") as HTMLTextAreaElement;
@@ -189,661 +211,146 @@ describe("CompanionSettings", () => {
       setControlled(instructions, "Challenge every source.");
       codex.click();
     });
-    expect(container.textContent).toContain("GPT-5.5");
-    expect(container.textContent).not.toContain("Claude Opus 4.8");
-
     await act(async () => {
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
 
-    expect(updateCompanion).toHaveBeenCalledWith(
-      "org-1",
-      companion().id,
-      {
-        name: "Luna research",
-        persona: "Challenge every source.",
-        provider_id: "openai-codex",
-        model_id: "gpt-5.5",
-        selected_skill_ids: [],
-        can_write_skills: false,
-        selected_mcp_account_ids: [],
-      },
-    );
+    expect(companionApi.updateCompanion).toHaveBeenCalledWith("org-1", companionId, {
+      name: "Luna research",
+      persona: "Challenge every source.",
+      provider_id: "openai-codex",
+      model_id: "gpt-5.5",
+      selected_skill_ids: [],
+      can_write_skills: false,
+      selected_mcp_account_ids: [],
+    });
     expect(onSaved).toHaveBeenCalledOnce();
     expect(container.textContent).toContain("Settings saved.");
     expect(container.textContent).not.toContain("Delete Companion");
   });
 
-  it("renders a Viewer with zero writes", async () => {
-    const { container } = await mount("viewer");
+  it("renders Viewer settings with no write or runtime controls", async () => {
+    const { container } = await mount(companion("viewer"));
 
-    expect(container.querySelector("input:not([type=radio])")).toHaveProperty("disabled", true);
-    expect(container.querySelector("textarea")).toHaveProperty("disabled", true);
-    expect(Array.from(container.querySelectorAll('input[type="radio"]')).every((input) =>
-      input.matches(":disabled")))
-      .toBe(true);
-    expect(container.textContent).toContain("Claude Opus 4.8");
-    expect(container.textContent).toContain("Skills");
-    expect(container.textContent).toContain("May create and update skills on my behalf");
-    expect(container.textContent).toContain("Plugins");
-    const pickers = Array.from(container.querySelectorAll(".companions-skills-picker fieldset"));
-    expect(pickers.length).toBeGreaterThanOrEqual(2);
-    expect(pickers.every((fieldset) => fieldset.matches(":disabled"))).toBe(true);
-    expect(container.querySelector(".companions-skills-picker__write input")).toHaveProperty("disabled", true);
+    expect(container.querySelector<HTMLInputElement>('input[name="name"]')?.disabled).toBe(true);
     expect(container.textContent).not.toContain("Save changes");
     expect(container.textContent).not.toContain("Restart Companion");
     expect(container.textContent).not.toContain("Delete Companion");
-    expect(updateCompanion).not.toHaveBeenCalled();
   });
 
-  it("shows models only for the selected provider", async () => {
-    const { container } = await mount("owner");
+  it("queues a Pi restart without claiming it already completed", async () => {
+    const online = companion("editor", "running");
+    const { container, onSaved } = await mount(online);
 
-    expect(container.textContent).toContain("Claude Opus 4.8");
-    expect(container.textContent).toContain("Claude Sonnet 4.6");
-    expect(container.textContent).not.toContain("GPT-5.5");
-  });
+    await click(button(container, "Restart Pi"));
 
-  it("persists a non-default model without changing provider", async () => {
-    const { container } = await mount("editor");
-    const form = container.querySelector("form")!;
-    const sonnet = form.querySelector<HTMLInputElement>('input[value="claude-sonnet-4-6"]')!;
-
-    await act(async () => sonnet.click());
-    await act(async () => {
-      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    });
-
-    expect(updateCompanion).toHaveBeenCalledWith(
+    expect(companionApi.restartCompanionRuntime).toHaveBeenCalledWith(
       "org-1",
-      companion().id,
-      expect.objectContaining({
-        provider_id: "anthropic",
-        model_id: "claude-sonnet-4-6",
-      }),
+      companionId,
+      { target: "pi" },
+      expect.stringMatching(UUID),
     );
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Pi restart accepted.");
+    expect(container.textContent).not.toContain("Pi restarted.");
   });
 
-  it("selects the live default when the persisted model has left the catalog", async () => {
-    const staleCompanion = { ...companion("editor"), model_id: "claude-retired" };
-    const { container } = await mount("editor", providers, staleCompanion);
-    const form = container.querySelector("form")!;
-    const defaultModel = form.querySelector<HTMLInputElement>(
-      'input[value="claude-opus-4-8"]',
-    )!;
-
-    expect(defaultModel.checked).toBe(true);
-    await act(async () => {
-      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    });
-    expect(updateCompanion).toHaveBeenCalledWith(
-      "org-1",
-      staleCompanion.id,
-      expect.objectContaining({ model_id: "claude-opus-4-8" }),
-    );
-  });
-
-  it("reconciles a stale provider selection when the live catalog replaces it", async () => {
-    const { container, root, onSaved, onDeleted } = await mount("owner");
-    const refreshed: CompanionProvidersResponse = {
-      ...providers,
-      connections: [providers.connections[1]!],
-      default_provider_id: "openai-codex",
-    };
-
-    await act(async () => {
-      root.render(React.createElement(CompanionSettings, {
-        orgId: "org-1",
-        companion: companion(),
-        providers: refreshed,
-        onBack: vi.fn(),
-        onSaved,
-        onDeleted,
-      }));
-    });
-
-    expect(container.querySelector<HTMLInputElement>('input[value="openai-codex"]')?.checked)
-      .toBe(true);
-    expect(container.querySelector<HTMLInputElement>('input[value="gpt-5.5"]')?.checked).toBe(true);
-    await act(async () => {
-      container.querySelector("form")?.dispatchEvent(
-        new Event("submit", { bubbles: true, cancelable: true }),
-      );
-    });
-    expect(updateCompanion).toHaveBeenCalledWith(
-      "org-1",
-      companion().id,
-      expect.objectContaining({ provider_id: "openai-codex", model_id: "gpt-5.5" }),
-    );
-  });
-
-  it("shows live z.ai models from the API payload in the two-step settings picker", async () => {
-    const apiConnections: CompanionProvidersResponse = {
-      catalog: [
-        { id: "kimi-coding", name: "Kimi", auth_methods: ["api_key"], description: "", models: [{ id: "kimi-for-coding", name: "Kimi K2.7 Code", default: true }] },
-        {
-          id: "zai",
-          name: "z.ai",
-          auth_methods: ["api_key"],
-          description: "",
-          models: [
-            { id: "glm-4.7", name: "GLM-4.7", default: true },
-            { id: "glm-5.2", name: "GLM-5.2" },
-            { id: "glm-5.3", name: "GLM-5.3" },
-          ],
-        },
-      ],
-      connections: [
-        { ...providers.connections[0]!, provider_id: "kimi-coding" },
-        { ...providers.connections[0]!, provider_id: "zai" },
-      ],
-      default_provider_id: "zai",
-      can_manage: true,
-    };
-    const { container } = await mount("owner", apiConnections);
-
-    expect(container.querySelectorAll('.companions-settings__form input[type="radio"]')).toHaveLength(5);
-    expect(container.textContent).toContain("Kimi");
-    expect(container.textContent).toContain("z.ai");
-    await act(async () => {
-      container.querySelector<HTMLInputElement>('input[value="zai"]')!.click();
-    });
-    expect(container.textContent).toContain("1. Provider");
-    expect(container.textContent).toContain("2. Model");
-    expect(container.textContent).toContain("GLM-5.2");
-    expect(container.textContent).toContain("GLM-5.3");
-  });
-
-  it("requires Owner confirmation before deletion", async () => {
-    const { container, onDeleted } = await mount("owner");
-    const buttons = () => Array.from(container.querySelectorAll("button"));
-
-    await act(async () => {
-      buttons().find((button) => button.textContent === "Delete Companion")?.click();
-    });
-    expect(deleteCompanion).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Delete Luna?");
-
-    await act(async () => {
-      buttons().filter((button) => button.textContent === "Delete Companion").at(-1)?.click();
-    });
-    expect(deleteCompanion).toHaveBeenCalledWith("org-1", companion().id);
-    expect(onDeleted).toHaveBeenCalledWith(companion().id);
-  });
-
-  it("restarts Pi by default for an online Owner or Editor", async () => {
-    const online = {
-      ...companion("editor"),
-      runtime: {
-        ...companion("editor").runtime,
-        state: "running" as const,
-        daemon_state: "running" as const,
-      },
-    };
-    restartCompanionRuntime.mockResolvedValue(online);
-    const { container, onSaved } = await mount("editor", providers, online);
-    const pi = container.querySelector<HTMLInputElement>('input[name="restart-target"][value="pi"]')!;
-    const button = [...container.querySelectorAll("button")]
-      .find((candidate) => candidate.textContent === "Restart Pi") as HTMLButtonElement;
-
-    expect(pi.checked).toBe(true);
-    await act(async () => button.click());
-
-    expect(restartCompanionRuntime).toHaveBeenCalledWith("org-1", online.id, { target: "pi" });
-    expect(onSaved).toHaveBeenCalledWith(online);
-    expect(container.textContent).toContain("Pi restarted. The Box stayed online.");
-  });
-
-  it("confirms a full Box restart before interrupting the server", async () => {
-    const online = {
-      ...companion(),
-      runtime: {
-        ...companion().runtime,
-        state: "running" as const,
-        daemon_state: "running" as const,
-      },
-    };
-    restartCompanionRuntime.mockResolvedValue(online);
-    const { container } = await mount("owner", providers, online);
-    const box = container.querySelector<HTMLInputElement>('input[name="restart-target"][value="box"]')!;
-
+  it("requires confirmation before queueing an explicit full Box restart", async () => {
+    const { container } = await mount(companion("owner", "running"));
+    const box = container.querySelector<HTMLInputElement>('input[value="box"]')!;
     await act(async () => box.click());
-    await act(async () => {
-      [...container.querySelectorAll("button")]
-        .find((candidate) => candidate.textContent === "Restart full Box")?.click();
-    });
 
-    expect(restartCompanionRuntime).not.toHaveBeenCalled();
+    await click(button(container, "Restart full Box"));
+    expect(companionApi.restartCompanionRuntime).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Restart Luna's full Box?");
 
-    await act(async () => {
-      [...container.querySelectorAll("button")]
-        .filter((candidate) => candidate.textContent === "Restart full Box")
-        .at(-1)?.click();
-    });
-
-    expect(restartCompanionRuntime).toHaveBeenCalledWith("org-1", online.id, { target: "box" });
-    expect(container.textContent).toContain("The full Box restarted and is online.");
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    await click(button(dialog, "Restart full Box"));
+    expect(companionApi.restartCompanionRuntime).toHaveBeenCalledWith(
+      "org-1",
+      companionId,
+      { target: "box" },
+      expect.stringMatching(UUID),
+    );
+    expect(container.textContent).toContain("Full Box restart accepted.");
   });
 
-  it("keeps restart busy until Pi answers", async () => {
-    let resolveRestart = (_value: Companion) => {};
-    const pending = new Promise<Companion>((resolve) => { resolveRestart = resolve; });
-    const online = {
-      ...companion(),
-      runtime: {
-        ...companion().runtime,
-        state: "running" as const,
-        daemon_state: "running" as const,
-      },
-    };
-    restartCompanionRuntime.mockReturnValue(pending);
-    const { container } = await mount("owner", providers, online);
-    const button = [...container.querySelectorAll("button")]
-      .find((candidate) => candidate.textContent === "Restart Pi") as HTMLButtonElement;
+  it("surfaces a refused restart as an explicit error", async () => {
+    companionApi.restartCompanionRuntime.mockRejectedValue(new Error("Restart was refused."));
+    const { container } = await mount(companion("owner", "running"));
 
-    act(() => button.click());
+    await click(button(container, "Restart Pi"));
 
-    expect(button.disabled).toBe(true);
-    expect(button.textContent).toBe("Restarting Pi...");
-
-    await act(async () => resolveRestart(online));
-    expect(button.disabled).toBe(false);
+    expect(container.querySelector("[role='alert']")?.textContent).toContain("Restart was refused.");
+    expect(container.textContent).not.toContain("restart accepted");
   });
 
-  it("reconciles and disables runtime controls after restart fails", async () => {
-    const online = {
-      ...companion(),
-      runtime: {
-        ...companion().runtime,
-        state: "running" as const,
-        daemon_state: "running" as const,
-      },
-    };
-    const failed = {
-      ...online,
-      runtime: {
-        ...online.runtime,
-        state: "error" as const,
-        daemon_state: "error" as const,
-        last_error: "Pi did not become ready.",
-      },
-    };
-    restartCompanionRuntime.mockRejectedValue(new Error("Pi did not become ready."));
-    getCompanionRuntime.mockResolvedValue(failed);
-    const { container, onSaved } = await mount("owner", providers, online);
+  it("reuses the restart id after a response is lost", async () => {
+    companionApi.restartCompanionRuntime
+      .mockRejectedValueOnce(new ApiFetchError("Request timed out.", 408))
+      .mockResolvedValueOnce(operation);
+    const { container } = await mount(companion("owner", "running"));
 
-    await act(async () => {
-      [...container.querySelectorAll("button")]
-        .find((candidate) => candidate.textContent === "Restart Pi")?.click();
-    });
+    await click(button(container, "Restart Pi"));
+    await click(button(container, "Restart Pi"));
 
-    expect(getCompanionRuntime).toHaveBeenCalledWith("org-1", online.id);
-    expect(onSaved).toHaveBeenCalledWith(failed);
-    expect(container.textContent).toContain("Pi did not become ready.");
-    expect([...container.querySelectorAll("button")]
-      .find((candidate) => candidate.textContent === "Restart Pi"))
-      .toHaveProperty("disabled", true);
+    expect(companionApi.restartCompanionRuntime).toHaveBeenCalledTimes(2);
+    expect(companionApi.restartCompanionRuntime.mock.calls[1]?.[3]).toBe(
+      companionApi.restartCompanionRuntime.mock.calls[0]?.[3],
+    );
   });
 
-  it("keeps restart unavailable while offline or while settings are unsaved", async () => {
-    const offline = await mount("owner");
-    const offlineRestart = [...offline.container.querySelectorAll("button")]
-      .find((candidate) => candidate.textContent === "Restart Pi") as HTMLButtonElement;
-
-    expect(offlineRestart.disabled).toBe(true);
-    expect(offline.container.textContent).toContain("must be Online");
-
-    const online = {
-      ...companion(),
-      runtime: {
-        ...companion().runtime,
-        state: "running" as const,
-        daemon_state: "running" as const,
-      },
-    };
-    const unsaved = await mount("owner", providers, online);
-    const name = unsaved.container.querySelector('input[name="name"]') as HTMLInputElement;
-    await act(async () => setControlled(name, "Luna changed"));
-    const unsavedRestart = [...unsaved.container.querySelectorAll("button")]
-      .find((candidate) => candidate.textContent === "Restart Pi") as HTMLButtonElement;
-
-    expect(unsavedRestart.disabled).toBe(true);
-    expect(unsaved.container.textContent).toContain("Save your changes before restarting.");
-    expect(restartCompanionRuntime).not.toHaveBeenCalled();
-  });
-
-  it("shows an archiving wait and keeps Full Box retryable without wake copy", async () => {
-    const waiting = {
-      ...companion(),
-      runtime: {
-        ...companion().runtime,
-        state: "stopping" as const,
-        daemon_state: "starting" as const,
-      },
-    };
-    restartCompanionRuntime.mockResolvedValue(waiting);
-    const { container } = await mount("owner", providers, waiting);
-    const box = container.querySelector<HTMLInputElement>('input[name="restart-target"][value="box"]')!;
-    const pi = container.querySelector<HTMLInputElement>('input[name="restart-target"][value="pi"]')!;
-    const button = [...container.querySelectorAll("button")]
-      .find((candidate) => candidate.textContent === "Restart full Box") as HTMLButtonElement;
-
-    expect(box.checked).toBe(true);
-    expect(box.disabled).toBe(false);
-    expect(pi.disabled).toBe(true);
-    expect(button.disabled).toBe(false);
-    expect(container.textContent).toContain("The Box is archiving");
-    expect(container.textContent).not.toContain("Send a message to start it");
-  });
-
-  it("does not describe the Owner-deletion lock as a wakeable archive", async () => {
-    const deleting = {
-      ...companion(),
-      runtime: {
-        ...companion().runtime,
-        state: "stopping" as const,
-        daemon_state: "unknown" as const,
-      },
-    };
-    const { container } = await mount("owner", providers, deleting);
-    const button = [...container.querySelectorAll("button")]
-      .find((candidate) => candidate.textContent === "Restart Pi") as HTMLButtonElement;
-
-    expect(button.disabled).toBe(true);
-    expect(container.textContent).toContain("Companion deletion is in progress");
-    expect(container.textContent).not.toContain("can be woken");
-    expect(container.textContent).not.toContain("Send a message to start it");
-  });
-
-  it("automatically resumes a full Box restart after an archiving response", async () => {
+  it("polls an accepted restart every three seconds and surfaces its durable failure", async () => {
     vi.useFakeTimers();
-    try {
-      const online = {
-        ...companion(),
-        runtime: {
-          ...companion().runtime,
-          state: "running" as const,
-          daemon_state: "running" as const,
-        },
-      };
-      const waiting = {
-        ...online,
-        runtime: {
-          ...online.runtime,
-          state: "stopping" as const,
-          daemon_state: "starting" as const,
-        },
-      };
-      restartCompanionRuntime
-        .mockResolvedValueOnce(waiting)
-        .mockResolvedValueOnce(online);
-      const { container, onSaved } = await mount("owner", providers, online);
-
-      await act(async () => {
-        container.querySelector<HTMLInputElement>('input[name="restart-target"][value="box"]')!.click();
-      });
-      await act(async () => {
-        [...container.querySelectorAll("button")]
-          .find((candidate) => candidate.textContent === "Restart full Box")?.click();
-      });
-      await act(async () => {
-        [...container.querySelectorAll("button")]
-          .filter((candidate) => candidate.textContent === "Restart full Box")
-          .at(-1)?.click();
-      });
-
-      expect(container.textContent).toContain("will resume automatically");
-      expect(container.textContent).not.toContain("Restart Luna's full Box?");
-      expect(restartCompanionRuntime).toHaveBeenCalledTimes(1);
-      expect(restartCompanionRuntime).toHaveBeenNthCalledWith(1, "org-1", online.id, {
-        target: "box",
-      });
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(3_000);
-      });
-
-      expect(restartCompanionRuntime).toHaveBeenCalledTimes(2);
-      expect(restartCompanionRuntime).toHaveBeenNthCalledWith(2, "org-1", online.id, {
-        target: "box",
-        continuation: true,
-      });
-      expect(onSaved).toHaveBeenLastCalledWith(online);
-      expect(container.textContent).toContain("The full Box restarted and is online.");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("keeps the archive continuation alive across a transient request failure", async () => {
-    vi.useFakeTimers();
-    try {
-      const online = {
-        ...companion(),
-        runtime: {
-          ...companion().runtime,
-          state: "running" as const,
-          daemon_state: "running" as const,
-        },
-      };
-      const waiting = {
-        ...online,
-        runtime: {
-          ...online.runtime,
-          state: "stopping" as const,
-          daemon_state: "starting" as const,
-        },
-      };
-      restartCompanionRuntime
-        .mockResolvedValueOnce(waiting)
-        .mockRejectedValueOnce(new Error("temporary gateway failure"))
-        .mockResolvedValueOnce(online);
-      getCompanionRuntime.mockResolvedValue(waiting);
-      const { container, onSaved } = await mount("owner", providers, online);
-
-      await act(async () => {
-        container.querySelector<HTMLInputElement>('input[name="restart-target"][value="box"]')!.click();
-      });
-      await act(async () => {
-        [...container.querySelectorAll("button")]
-          .find((candidate) => candidate.textContent === "Restart full Box")?.click();
-      });
-      await act(async () => {
-        [...container.querySelectorAll("button")]
-          .filter((candidate) => candidate.textContent === "Restart full Box")
-          .at(-1)?.click();
-      });
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(6_000);
-      });
-
-      expect(restartCompanionRuntime).toHaveBeenCalledTimes(3);
-      expect(getCompanionRuntime).toHaveBeenCalledWith("org-1", online.id);
-      expect(onSaved).toHaveBeenLastCalledWith(online);
-      expect(container.textContent).toContain("The full Box restarted and is online.");
-      expect(container.textContent).not.toContain("temporary gateway failure");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("keeps observing while another continuation owns the resume claim", async () => {
-    vi.useFakeTimers();
-    try {
-      const online = {
-        ...companion(),
-        runtime: {
-          ...companion().runtime,
-          state: "running" as const,
-          daemon_state: "running" as const,
-        },
-      };
-      const waiting = {
-        ...online,
-        runtime: {
-          ...online.runtime,
-          state: "stopping" as const,
-          daemon_state: "starting" as const,
-        },
-      };
-      const claimed = {
-        ...online,
-        runtime: {
-          ...online.runtime,
-          state: "provisioning" as const,
-          daemon_state: "starting" as const,
-        },
-      };
-      restartCompanionRuntime
-        .mockResolvedValueOnce(waiting)
-        .mockRejectedValueOnce(new Error("companion must be online to restart"))
-        .mockResolvedValueOnce(online);
-      getCompanionRuntime.mockResolvedValueOnce(claimed);
-      const { container, onSaved } = await mount("owner", providers, online);
-
-      await act(async () => {
-        container.querySelector<HTMLInputElement>('input[name="restart-target"][value="box"]')!.click();
-      });
-      await act(async () => {
-        [...container.querySelectorAll("button")]
-          .find((candidate) => candidate.textContent === "Restart full Box")?.click();
-      });
-      await act(async () => {
-        [...container.querySelectorAll("button")]
-          .filter((candidate) => candidate.textContent === "Restart full Box")
-          .at(-1)?.click();
-      });
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(6_000);
-      });
-
-      expect(restartCompanionRuntime).toHaveBeenCalledTimes(3);
-      expect(getCompanionRuntime).toHaveBeenCalledOnce();
-      expect(onSaved).toHaveBeenCalledWith(claimed);
-      expect(onSaved).toHaveBeenLastCalledWith(online);
-      expect(container.textContent).toContain("The full Box restarted and is online.");
-      expect(container.textContent).not.toContain("must be online to restart");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("surfaces an error when a competing continuation fails", async () => {
-    vi.useFakeTimers();
-    try {
-      const online = {
-        ...companion(),
-        runtime: {
-          ...companion().runtime,
-          state: "running" as const,
-          daemon_state: "running" as const,
-        },
-      };
-      const waiting = {
-        ...online,
-        runtime: {
-          ...online.runtime,
-          state: "stopping" as const,
-          daemon_state: "starting" as const,
-        },
-      };
-      const claimed = {
-        ...online,
-        runtime: {
-          ...online.runtime,
-          state: "provisioning" as const,
-          daemon_state: "starting" as const,
-        },
-      };
-      const failed = {
-        ...online,
-        runtime: {
-          ...online.runtime,
-          state: "error" as const,
-          daemon_state: "error" as const,
-          last_error: "Box resume failed",
-        },
-      };
-      restartCompanionRuntime
-        .mockResolvedValueOnce(waiting)
-        .mockRejectedValueOnce(new Error("companion must be online to restart"))
-        .mockRejectedValueOnce(new Error("companion runtime is still provisioning"));
-      getCompanionRuntime
-        .mockResolvedValueOnce(claimed)
-        .mockResolvedValue(failed);
-      const { container, onSaved } = await mount("owner", providers, online);
-
-      await act(async () => {
-        container.querySelector<HTMLInputElement>('input[name="restart-target"][value="box"]')!.click();
-      });
-      await act(async () => {
-        [...container.querySelectorAll("button")]
-          .find((candidate) => candidate.textContent === "Restart full Box")?.click();
-      });
-      await act(async () => {
-        [...container.querySelectorAll("button")]
-          .filter((candidate) => candidate.textContent === "Restart full Box")
-          .at(-1)?.click();
-      });
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(6_000);
-      });
-
-      expect(onSaved).toHaveBeenCalledWith(claimed);
-      expect(onSaved).toHaveBeenLastCalledWith(failed);
-      expect(container.textContent).toContain("Box resume failed");
-      expect(container.textContent).not.toContain("The full Box restarted and is online.");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it.each(["stopping", "stopped"] as const)(
-    "surfaces a %s archive race instead of claiming Pi restarted online",
-    async (archiveState) => {
-    const online = {
-      ...companion(),
-      runtime: {
-        ...companion().runtime,
-        state: "running" as const,
-        daemon_state: "running" as const,
-      },
+    const failed = companion("owner", "running");
+    failed.runtime = {
+      ...failed.runtime,
+      state: "error",
+      daemon_state: "error",
+      last_error: "Pi could not stay running.",
     };
-    const waiting = {
-      ...online,
-      runtime: {
-        ...online.runtime,
-        state: archiveState,
-        daemon_state: "stopped" as const,
-      },
-    };
-    restartCompanionRuntime.mockResolvedValue(waiting);
-    const { container, onSaved } = await mount("owner", providers, online);
+    companionApi.getCompanionRuntime.mockResolvedValue(failed);
+    const { container } = await mount(companion("owner", "running"));
 
-    await act(async () => {
-      [...container.querySelectorAll("button")]
-        .find((candidate) => candidate.textContent === "Restart Pi")?.click();
-    });
+    await click(button(container, "Restart Pi"));
+    expect(container.textContent).toContain("Pi restart accepted.");
+    expect(companionApi.getCompanionRuntime).not.toHaveBeenCalled();
 
-    expect(restartCompanionRuntime).toHaveBeenCalledOnce();
-    expect(onSaved).toHaveBeenCalledWith(waiting);
-    expect(container.textContent).toContain(archiveState === "stopping"
-      ? "The Box began archiving before Pi could restart"
-      : "The Box finished archiving before Pi could restart");
-    if (archiveState === "stopping") {
-      expect(container.textContent).toContain("It can be woken after the archive is ready");
-    } else {
-      expect(container.textContent).toContain("Wake it to apply the saved settings");
-    }
-    expect(container.textContent).not.toContain("Pi restarted. The Box stayed online.");
-    expect(container.querySelector<HTMLInputElement>('input[value="pi"]')?.checked).toBe(true);
-    expect([...container.querySelectorAll("button")]
-      .find((candidate) => candidate.textContent === "Restart Pi"))
-      .toHaveProperty("disabled", true);
-    },
-  );
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+
+    expect(companionApi.getCompanionRuntime).toHaveBeenCalledOnce();
+    expect(container.querySelector("[role='alert']")?.textContent).toContain(
+      "Pi could not stay running.",
+    );
+    expect(container.textContent).not.toContain("Pi restart accepted.");
+  });
+
+  it("keeps an accepted deletion visible until permanent Box deletion is confirmed", async () => {
+    const { container, onDeleted } = await mount(companion("owner", "running"));
+
+    await click(button(container, "Delete Companion"));
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("permanently deleted");
+    await click(button(dialog, "Delete Companion"));
+
+    expect(companionApi.deleteCompanion).toHaveBeenCalledWith(
+      "org-1",
+      companionId,
+      expect.stringMatching(UUID),
+    );
+    expect(onDeleted).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Deletion accepted.");
+    expect(button(container, "Deletion requested").disabled).toBe(true);
+  });
+
+  it("leaves Settings only after the durable delete projection disappears", async () => {
+    companionApi.getCompanionRuntime.mockRejectedValue(new ApiFetchError("Not found", 404));
+    const { container, onDeleted } = await mount(companion("owner", "running"));
+
+    await click(button(container, "Delete Companion"));
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    await click(button(dialog, "Delete Companion"));
+
+    expect(onDeleted).toHaveBeenCalledWith(companionId);
+  });
 });

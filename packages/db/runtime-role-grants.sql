@@ -136,6 +136,7 @@ DECLARE
   -- the v2 lists empty until 0090's sentinel exists. Once it does, the exact casts below remain a
   -- fail-closed contract: a partial or drifted 0090 must fail instead of silently granting a subset.
   companion_runtime_functions regprocedure[] := ARRAY[]::regprocedure[];
+  companion_api_functions regprocedure[] := ARRAY[]::regprocedure[];
   owner_only_runtime_functions regprocedure[] := ARRAY[]::regprocedure[];
   internal_runtime_functions regprocedure[] := ARRAY[]::regprocedure[];
   retired_companion_functions regprocedure[] := ARRAY[]::regprocedure[];
@@ -218,6 +219,39 @@ BEGIN
       ];
       internal_runtime_functions := internal_runtime_functions || ARRAY[
         'public.companion_runtime_guard_duplicate_cleanup()'::regprocedure
+      ];
+    END IF;
+
+    -- 0092 gives only the API login the durable intent/read surface. The worker and dedicated
+    -- executor never receive these functions, and helpers remain migration-owner-only.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)'
+    ) IS NOT NULL THEN
+      companion_api_functions := ARRAY[
+        'public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)'::regprocedure,
+        'public.companion_api_update_companion(uuid,uuid,jsonb)'::regprocedure,
+        'public.companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)'::regprocedure,
+        'public.companion_api_update_member_state(uuid,uuid,boolean,boolean,boolean)'::regprocedure,
+        'public.companion_api_mark_thread_read(uuid,uuid)'::regprocedure,
+        'public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface)'::regprocedure,
+        'public.companion_api_read_runtime(uuid,uuid)'::regprocedure,
+        'public.companion_api_list_runtime(uuid)'::regprocedure,
+        'public.companion_api_read_thread(uuid,uuid)'::regprocedure,
+        'public.companion_api_enqueue_operation(uuid,uuid,uuid,public.companion_operation_kind,public.companion_client_surface)'::regprocedure,
+        'public.companion_api_retry_turn(uuid,uuid,uuid,uuid,public.companion_client_surface)'::regprocedure,
+        'public.companion_api_cancel_turn(uuid,uuid,uuid)'::regprocedure,
+        'public.companion_api_answer_decision(uuid,uuid,text,text,text)'::regprocedure,
+        'public.companion_api_bump_skill_revision(uuid,uuid)'::regprocedure
+      ];
+      internal_runtime_functions := internal_runtime_functions || ARRAY[
+        'public.companion_api_actor(uuid)'::regprocedure,
+        'public.companion_api_require_access(uuid,uuid,text)'::regprocedure,
+        'public.companion_api_safe_error(text,text,public.companion_runtime_error_action)'::regprocedure,
+        'public.companion_api_turn_json(uuid,uuid,uuid)'::regprocedure,
+        'public.companion_api_operation_json(uuid,uuid,uuid)'::regprocedure,
+        'public.companion_api_validate_resource_selection(uuid,jsonb,jsonb,jsonb,jsonb)'::regprocedure,
+        'public.companion_api_retry_operation_handoff()'::regprocedure,
+        'public.companion_api_assign_attempt_retry_id()'::regprocedure
       ];
     END IF;
 
@@ -642,6 +676,31 @@ BEGIN
         function_grantee
       );
     END LOOP;
+  END LOOP;
+
+  -- The API is the sole authority allowed to persist user/runtime intent and read private runtime
+  -- projections. Scrub every inherited/default grantee before installing that exact capability.
+  FOREACH protected_function IN ARRAY companion_api_functions
+  LOOP
+    EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC', protected_function);
+    FOR function_grantee IN
+      SELECT DISTINCT grantee.rolname
+      FROM pg_catalog.pg_proc protected_proc
+      CROSS JOIN LATERAL pg_catalog.aclexplode(
+        COALESCE(protected_proc.proacl, pg_catalog.acldefault('f', protected_proc.proowner))
+      ) acl
+      JOIN pg_catalog.pg_roles grantee ON grantee.oid = acl.grantee
+      WHERE protected_proc.oid = protected_function
+        AND acl.privilege_type = 'EXECUTE'
+        AND acl.grantee <> protected_proc.proowner
+    LOOP
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION %s FROM %I',
+        protected_function,
+        function_grantee
+      );
+    END LOOP;
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', protected_function, api_role);
   END LOOP;
 
   -- The skill-secret usage helper is needed by both process roles.
