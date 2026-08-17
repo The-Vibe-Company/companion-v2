@@ -1,0 +1,3 @@
+{"id":"req-sim-001","type":"prompt","message":"Summarize the example project.","streamingBehavior":"followUp"}
+{"id":"req-sim-002","type":"get_state"}
+{"type":"extension_ui_response","id":"ui-sim-001","value":"Continue"}
