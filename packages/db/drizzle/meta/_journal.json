@@ -666,6 +666,13 @@
       "when": 1788196000000,
       "tag": "0094_companion_runtime_cutover",
       "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1788282400000,
+      "tag": "0095_companion_runtime_desktop_replay_recovery",
+      "breakpoints": true
     }
   ]
 }

@@ -40,6 +40,7 @@ const cleanupRoles: string[] = [];
 const tempDirs: string[] = [];
 const desktopReplayWhen = 1_788_152_800_000;
 const finalCutoverWhen = 1_788_196_000_000;
+const desktopReplayRecoveryWhen = 1_788_282_400_000;
 const desktopReplayTag = "0093_companion_runtime_desktop_replay";
 
 interface Fixture {
@@ -116,6 +117,40 @@ async function migrateThrough0092(databaseUrl: string): Promise<void> {
   }
 }
 
+async function applyMigrationFile(
+  client: ReturnType<typeof postgres>,
+  name: string,
+): Promise<void> {
+  const source = await readFile(join(migrationsDir, name), "utf8");
+  const statements = source
+    .split("--> statement-breakpoint")
+    .map((statement) => statement.trim())
+    .filter(Boolean);
+  await client.begin(async (transaction) => {
+    for (const statement of statements) await transaction.unsafe(statement);
+  });
+}
+
+async function applyHistoricalRuntimeGrantsWithoutDesktopReplay(
+  client: ReturnType<typeof postgres>,
+  fixture: Fixture,
+): Promise<void> {
+  const consumeGrantCast =
+    "        'public.companion_runtime_consume_desktop_request(text,bigint,integer)'::regprocedure,\n";
+  const grants = extractRuntimeRoleGrantBlock(
+    await readFile(await resolveRuntimeRoleGrantsFile(), "utf8"),
+  );
+  if (!grants.includes(consumeGrantCast)) {
+    throw new Error("runtime grants no longer contain the desktop replay function cast");
+  }
+  await client`select
+    set_config('companion.api_role', ${fixture.apiRole}, false),
+    set_config('companion.worker_role', ${fixture.workerRole}, false),
+    set_config('companion.companion_runtime_role', ${fixture.runtimeRole}, false),
+    set_config('companion.retired_runtime_role', '', false)`;
+  await client.unsafe(grants.replace(consumeGrantCast, ""));
+}
+
 async function lastMigration(databaseUrl: string): Promise<number | null> {
   const client = postgres(databaseUrl, { max: 1 });
   try {
@@ -182,10 +217,10 @@ afterAll(async () => {
 }, 30_000);
 
 describe("Runtime v2 final migration protocol", () => {
-  it("applies a fresh database through 0094 and never reapplies grants after cutover", async () => {
+  it("applies a fresh database through recovery 0095 and never reapplies broad grants", async () => {
     const fixture = await createFixture();
     await runMigrations({ env: migrationEnv(fixture) });
-    expect(await lastMigration(fixture.databaseUrl)).toBe(finalCutoverWhen);
+    expect(await lastMigration(fixture.databaseUrl)).toBe(desktopReplayRecoveryWhen);
 
     const client = postgres(fixture.databaseUrl, { max: 1 });
     try {
@@ -207,7 +242,7 @@ describe("Runtime v2 final migration protocol", () => {
     await expect(runMigrations({
       env: { ...migrationEnv(fixture), COMPANION_RUNTIME_GRANTS_FILE: grantsFile },
     })).resolves.toBeUndefined();
-    expect(await lastMigration(fixture.databaseUrl)).toBe(finalCutoverWhen);
+    expect(await lastMigration(fixture.databaseUrl)).toBe(desktopReplayRecoveryWhen);
   }, 120_000);
 
   it("repairs an old 0091/0092 ledger before grants and cutover", async () => {
@@ -228,12 +263,15 @@ describe("Runtime v2 final migration protocol", () => {
       const ledger = await client<Array<{ createdAt: string }>>`
         select created_at::text as "createdAt"
         from drizzle.__drizzle_migrations
-        where created_at in (${desktopReplayWhen}, ${finalCutoverWhen})
+        where created_at in (
+          ${desktopReplayWhen}, ${finalCutoverWhen}, ${desktopReplayRecoveryWhen}
+        )
         order by created_at
       `;
       expect(ledger.map((row) => Number(row.createdAt))).toEqual([
         desktopReplayWhen,
         finalCutoverWhen,
+        desktopReplayRecoveryWhen,
       ]);
       const requestId = `upgrade-${randomUUID()}`;
       await client.unsafe(`set role ${fixture.runtimeRole}`);
@@ -252,6 +290,183 @@ describe("Runtime v2 final migration protocol", () => {
       await client.unsafe("reset role");
     } finally {
       await client.unsafe("reset role").catch(() => undefined);
+      await client.end({ timeout: 1 });
+    }
+  }, 120_000);
+
+  it("repairs a ledger that recorded the old cutover before desktop replay existed", async () => {
+    const fixture = await createFixture();
+    await migrateThrough0092(fixture.databaseUrl);
+    const client = postgres(fixture.databaseUrl, { max: 1 });
+    const dir = await mkdtemp(join(tmpdir(), "companion-cutover-recorded-poison-grants-"));
+    tempDirs.push(dir);
+    const grantsFile = join(dir, "runtime-role-grants.sql");
+    await writeFile(
+      grantsFile,
+      "-- companion-runtime-grants-begin\nDO $$ BEGIN RAISE EXCEPTION 'post-cutover grants ran'; END $$;\n-- companion-runtime-grants-end\n",
+    );
+    try {
+      await applyHistoricalRuntimeGrantsWithoutDesktopReplay(client, fixture);
+      await applyMigrationFile(client, RUNTIME_V2_FINAL_CUTOVER_TAG + ".sql");
+      await client`
+        insert into drizzle.__drizzle_migrations(hash, created_at)
+        values (${"0".repeat(64)}, ${finalCutoverWhen})
+      `;
+
+      const [before] = await client<Array<{
+        replayTable: string | null;
+        consumeFunction: string | null;
+      }>>`
+        select
+          to_regclass('public.companion_runtime_desktop_requests')::text as "replayTable",
+          to_regprocedure(
+            'public.companion_runtime_consume_desktop_request(text,bigint,integer)'
+          )::text as "consumeFunction"
+      `;
+      expect(before).toEqual({ replayTable: null, consumeFunction: null });
+
+      await expect(runMigrations({
+        env: {
+          ...migrationEnv(fixture),
+          COMPANION_RUNTIME_GRANTS_FILE: grantsFile,
+        },
+      })).resolves.toBeUndefined();
+      expect(await lastMigration(fixture.databaseUrl)).toBe(desktopReplayRecoveryWhen);
+
+      const [acl] = await client<Array<{
+        apiExecute: boolean;
+        workerExecute: boolean;
+        runtimeExecute: boolean;
+        nonOwnerExecutors: string[];
+        nonOwnerTableAclCount: number;
+        nonOwnerColumnAclCount: number;
+        runtimeTableSelect: boolean;
+        rowSecurity: boolean;
+        forcedRowSecurity: boolean;
+      }>>`
+        select
+          has_function_privilege(
+            ${fixture.apiRole},
+            'public.companion_runtime_consume_desktop_request(text,bigint,integer)',
+            'EXECUTE'
+          ) as "apiExecute",
+          has_function_privilege(
+            ${fixture.workerRole},
+            'public.companion_runtime_consume_desktop_request(text,bigint,integer)',
+            'EXECUTE'
+          ) as "workerExecute",
+          has_function_privilege(
+            ${fixture.runtimeRole},
+            'public.companion_runtime_consume_desktop_request(text,bigint,integer)',
+            'EXECUTE'
+          ) as "runtimeExecute",
+          (
+            select coalesce(
+              array_agg(coalesce(grantee.rolname, 'PUBLIC'::name) order by acl.grantee),
+              array[]::name[]
+            )
+            from pg_catalog.pg_proc target_proc
+            cross join lateral pg_catalog.aclexplode(
+              coalesce(target_proc.proacl, pg_catalog.acldefault('f', target_proc.proowner))
+            ) acl
+            left join pg_catalog.pg_roles grantee on grantee.oid = acl.grantee
+            where target_proc.oid =
+              'public.companion_runtime_consume_desktop_request(text,bigint,integer)'::regprocedure
+              and acl.privilege_type = 'EXECUTE'
+              and acl.grantee <> target_proc.proowner
+          )::text[] as "nonOwnerExecutors",
+          (
+            select count(*)::int
+            from pg_catalog.pg_class replay_table
+            cross join lateral pg_catalog.aclexplode(
+              coalesce(replay_table.relacl, pg_catalog.acldefault('r', replay_table.relowner))
+            ) acl
+            where replay_table.oid = 'public.companion_runtime_desktop_requests'::regclass
+              and acl.grantee <> replay_table.relowner
+          ) as "nonOwnerTableAclCount",
+          (
+            select count(*)::int
+            from pg_catalog.pg_attribute attribute
+            join pg_catalog.pg_class replay_table on replay_table.oid = attribute.attrelid
+            cross join lateral pg_catalog.aclexplode(attribute.attacl) acl
+            where replay_table.oid = 'public.companion_runtime_desktop_requests'::regclass
+              and attribute.attnum > 0
+              and not attribute.attisdropped
+              and acl.grantee <> replay_table.relowner
+          ) as "nonOwnerColumnAclCount",
+          has_table_privilege(
+            ${fixture.runtimeRole},
+            'public.companion_runtime_desktop_requests',
+            'SELECT'
+          ) as "runtimeTableSelect",
+          table_class.relrowsecurity as "rowSecurity",
+          table_class.relforcerowsecurity as "forcedRowSecurity"
+        from pg_catalog.pg_class table_class
+        where table_class.oid = 'public.companion_runtime_desktop_requests'::regclass
+      `;
+      expect(acl).toEqual({
+        apiExecute: false,
+        workerExecute: false,
+        runtimeExecute: true,
+        nonOwnerExecutors: [fixture.runtimeRole],
+        nonOwnerTableAclCount: 0,
+        nonOwnerColumnAclCount: 0,
+        runtimeTableSelect: false,
+        rowSecurity: true,
+        forcedRowSecurity: true,
+      });
+
+      const requestId = `recorded-cutover-${randomUUID()}`;
+      await client.unsafe(`set role ${fixture.runtimeRole}`);
+      const [first] = await client<Array<{ consumed: boolean }>>`
+        select public.companion_runtime_consume_desktop_request(
+          ${requestId}, floor(extract(epoch from clock_timestamp()))::bigint, 60
+        ) as consumed
+      `;
+      const [replay] = await client<Array<{ consumed: boolean }>>`
+        select public.companion_runtime_consume_desktop_request(
+          ${requestId}, floor(extract(epoch from clock_timestamp()))::bigint, 60
+        ) as consumed
+      `;
+      expect(first?.consumed).toBe(true);
+      expect(replay?.consumed).toBe(false);
+      await client.unsafe("reset role");
+    } finally {
+      await client.unsafe("reset role").catch(() => undefined);
+      await client.end({ timeout: 1 });
+    }
+  }, 120_000);
+
+  it("fails closed when recorded-cutover source ACLs are no longer private", async () => {
+    const fixture = await createFixture();
+    await migrateThrough0092(fixture.databaseUrl);
+    const client = postgres(fixture.databaseUrl, { max: 1 });
+    try {
+      await applyHistoricalRuntimeGrantsWithoutDesktopReplay(client, fixture);
+      await applyMigrationFile(client, RUNTIME_V2_FINAL_CUTOVER_TAG + ".sql");
+      await client`
+        insert into drizzle.__drizzle_migrations(hash, created_at)
+        values (${"1".repeat(64)}, ${finalCutoverWhen})
+      `;
+      await client.unsafe(
+        "grant execute on function public.companion_runtime_claim_work(text,integer,integer,bigint) to public",
+      );
+
+      await expect(runMigrations({ env: migrationEnv(fixture) }))
+        .rejects.toThrow("runtime source ACL is public or delegates grant authority");
+      expect(await lastMigration(fixture.databaseUrl)).toBe(finalCutoverWhen);
+      const [after] = await client<Array<{
+        replayTable: string | null;
+        consumeFunction: string | null;
+      }>>`
+        select
+          to_regclass('public.companion_runtime_desktop_requests')::text as "replayTable",
+          to_regprocedure(
+            'public.companion_runtime_consume_desktop_request(text,bigint,integer)'
+          )::text as "consumeFunction"
+      `;
+      expect(after).toEqual({ replayTable: null, consumeFunction: null });
+    } finally {
       await client.end({ timeout: 1 });
     }
   }, 120_000);
