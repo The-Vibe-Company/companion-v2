@@ -345,7 +345,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     await adminSql.unsafe(`create database "${databaseName}"`);
     const migrationSql = postgres(runtimeUrl.toString(), { max: 1 });
     const migrations = await migrationFileNames();
-    const cutoverIndex = migrations.findIndex((name) => name.startsWith("0093_"));
+    const cutoverIndex = migrations.findIndex((name) => name.startsWith("0094_"));
     if (cutoverIndex < 0) throw new Error("Runtime v2 cutover migration is missing");
     try {
       await replayMigrations(migrationSql, migrations.slice(0, cutoverIndex));
