@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  DESKTOP_REQUEST_ID_HEADER,
   DESKTOP_REQUEST_PATH,
   DESKTOP_SIGNATURE_HEADER,
   DESKTOP_TIMESTAMP_HEADER,
@@ -65,12 +66,15 @@ describe("Runtime desktop private client", () => {
 
     const headers = new Headers(captured.init?.headers);
     const timestamp = Number(headers.get(DESKTOP_TIMESTAMP_HEADER));
+    const requestId = headers.get(DESKTOP_REQUEST_ID_HEADER) ?? "";
     expect(timestamp).toBe(NOW_MS / 1_000);
+    expect(requestId).toMatch(/^[0-9a-f-]{36}$/);
     expect(headers.get("content-type")).toBe("application/json");
     expect(verifyDesktopRequest({
       method: "POST",
       pathname: DESKTOP_REQUEST_PATH,
       timestamp,
+      requestId,
       rawBody: captured.rawBody ?? Buffer.alloc(0),
       signature: headers.get(DESKTOP_SIGNATURE_HEADER) ?? "",
       nowMs: NOW_MS,

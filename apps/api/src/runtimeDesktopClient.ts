@@ -1,4 +1,7 @@
+import { randomUUID } from "node:crypto";
+
 import {
+  DESKTOP_REQUEST_ID_HEADER,
   DESKTOP_REQUEST_PATH,
   DESKTOP_SIGNATURE_HEADER,
   DESKTOP_TIMESTAMP_HEADER,
@@ -90,12 +93,14 @@ export async function mintCompanionDesktop(input: {
     orgId: input.orgId,
   }), "utf8");
   const timestamp = Math.floor((input.now?.() ?? Date.now()) / 1_000);
+  const requestId = randomUUID();
   let signature: string;
   try {
     signature = signDesktopRequest({
       method: "POST",
       pathname: DESKTOP_REQUEST_PATH,
       timestamp,
+      requestId,
       rawBody,
     }, secret);
   } finally {
@@ -108,6 +113,7 @@ export async function mintCompanionDesktop(input: {
       method: "POST",
       headers: {
         "content-type": "application/json",
+        [DESKTOP_REQUEST_ID_HEADER]: requestId,
         [DESKTOP_TIMESTAMP_HEADER]: String(timestamp),
         [DESKTOP_SIGNATURE_HEADER]: signature,
       },
