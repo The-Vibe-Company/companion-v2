@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.70.0");
+    expect(pkg.version).toBe("1.71.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -126,8 +126,8 @@ describe("companion skill package + row", () => {
       desc: "Create or repair manifest v2 with identity, env/secrets, dependency ids, notes, commands, and changelog.",
     });
     const changelog = row.changes.join("\n");
-    expect(changelog).toContain("package assembly moved out of the retired Box lifecycle code");
-    expect(changelog).toContain("without granting delegated clients any Box or Pi access");
+    expect(changelog).toContain("final Runtime v2 API cutover and route registry consolidation");
+    expect(changelog).toContain("outside delegated Skills Hub capabilities");
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
@@ -136,6 +136,11 @@ describe("companion skill package + row", () => {
       ?.changes?.join("\n") ?? "";
     expect(fifoChanges).toContain("anonymous pipe is reported as mode 0660");
     expect(fifoChanges).toContain("named FIFO created at 0600");
+    const packageAssemblyChanges = manifest.metadata?.changelog
+      ?.find((entry) => entry.version === "1.70.0")
+      ?.changes?.join("\n") ?? "";
+    expect(packageAssemblyChanges).toContain("package assembly moved out of the retired Box lifecycle code");
+    expect(packageAssemblyChanges).toContain("without granting delegated clients any Box or Pi access");
     const asyncRuntimeChanges = manifest.metadata?.changelog
       ?.find((entry) => entry.version === "1.69.0")
       ?.changes?.join("\n") ?? "";

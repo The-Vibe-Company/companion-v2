@@ -253,7 +253,7 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       if (url.endsWith("/boxes/bx_23456789") && (!init?.method || init.method === "GET")) {
-        return json({ box });
+        return response({ box: box("ready") });
       }
       if (url.endsWith("/commands") && init?.method === "POST") {
         commandStarted();
@@ -265,7 +265,7 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
     }));
     const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
 
-    const observation = runtime.resumeExistingBox({ boxId: box.id, signal: controller.signal });
+    const observation = runtime.resumeExistingBox({ boxId: "bx_23456789", signal: controller.signal });
     await started;
     const stopped = new Error("runtime handoff");
     controller.abort(stopped);
@@ -283,7 +283,7 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       if (url.endsWith("/commands") && init?.method === "POST") {
         commandCount += 1;
         if (commandCount === 1) {
-          return json({
+          return response({
             success: true,
             exitCode: 0,
             stdout: "active\ncompanion-pi-broker-ready\n",
@@ -299,7 +299,7 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
     }));
     const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
 
-    const status = runtime.piDaemonStatus({ boxId: box.id, signal: controller.signal });
+    const status = runtime.piDaemonStatus({ boxId: "bx_23456789", signal: controller.signal });
     await started;
     const stopped = new Error("runtime handoff");
     controller.abort(stopped);

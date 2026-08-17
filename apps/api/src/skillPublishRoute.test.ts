@@ -128,7 +128,10 @@ vi.mock("@companion/auth", () => ({
   registerAgentCapabilityExecutor: vi.fn(() => () => undefined),
 }));
 
-vi.mock("@companion/db", () => dbMocks);
+vi.mock("@companion/db", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@companion/db")>()),
+  ...dbMocks,
+}));
 vi.mock("@companion/core/services", () => serviceMocks);
 vi.mock("@companion/storage", async (importActual) => ({
   ...await importActual<typeof import("@companion/storage")>(),

@@ -184,7 +184,7 @@ describe("Skills Hub runtime-role grants", () => {
     );
     expect(sql).toContain("companion API, worker, and runtime roles are required");
     expect(sql).toContain("companion API, worker, and dedicated runtime roles must be distinct");
-    expect(sql).toContain("active companion database roles must not have cross-role membership");
+    expect(sql).toContain("active companion database role % must have no role memberships");
     expect(sql).toContain("current_setting('companion.retired_runtime_role', true)");
     expect(sql).toContain("detected_legacy_union_roles");
     expect(sql).toContain("legacy union runtime role detected but not named for retirement");
