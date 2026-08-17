@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { encryptCompanionMcpRuntimeCredential } from "@companion/core";
+import {
+  encryptCompanionMcpRuntimeCredential,
+  type CompanionPluginStoredOAuthCredential,
+} from "@companion/core";
 import {
   RuntimeStoreSerializationError,
   type LeaseFence,
@@ -197,6 +200,50 @@ describe("runtime material provider and Box stager", () => {
     await expect(pipeline.materialProvider.getMaterial({ store, fence }))
       .rejects.toBeInstanceOf(RuntimeStoreSerializationError);
     expect(stageExistingBox).not.toHaveBeenCalled();
+  });
+
+  it("does not enter the OAuth CAS after runtime shutdown aborts a refresh", async () => {
+    const material = workMaterial();
+    const casMcpOauth = vi.fn();
+    const store = {
+      getMaterial: vi.fn(async () => material),
+      casMcpOauth,
+    } as unknown as RuntimeStore;
+    const controller = new AbortController();
+    let finishRefresh!: (credential: ReturnType<typeof oauth>) => void;
+    const refreshOauth = vi.fn(async (
+      _credential: CompanionPluginStoredOAuthCredential,
+      _signal?: AbortSignal,
+    ) =>
+      await new Promise<ReturnType<typeof oauth>>((resolve) => { finishRefresh = resolve; }));
+    const pipeline = createRuntimeMaterialPipeline({
+      masterKey,
+      apiUrl: "https://api.example.test",
+      bundledSkill: {
+        slug: "companion",
+        version: "1.0.0",
+        checksum: `sha256:${"1".repeat(64)}`,
+        archive: Buffer.from("bundled"),
+      },
+      runtime: () => ({ stageExistingBox: vi.fn() }) as unknown as CompanionBoxRuntimeV2,
+      loadSkillArchive: vi.fn(),
+      refreshOauth,
+      uuid: () => nextGeneration,
+      now: () => Date.parse("2027-01-01T00:00:00.000Z"),
+    });
+
+    const reading = pipeline.materialProvider.getMaterial({
+      store,
+      fence,
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(refreshOauth).toHaveBeenCalledOnce());
+    const stopped = new Error("runtime stopped");
+    controller.abort(stopped);
+    finishRefresh(oauth("new-token"));
+
+    await expect(reading).rejects.toBe(stopped);
+    expect(casMcpOauth).not.toHaveBeenCalled();
   });
 
   it.each([

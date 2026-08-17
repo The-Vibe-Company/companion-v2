@@ -124,7 +124,32 @@ function parseStoredOauth(value: unknown): CompanionPluginStoredOAuthCredential 
   if (value.accessExpiresAt !== null && !Number.isFinite(Date.parse(value.accessExpiresAt))) {
     throw new Error("invalid MCP OAuth expiry");
   }
-  return value as unknown as CompanionPluginStoredOAuthCredential;
+  const server = COMPANION_PLUGIN_OAUTH_SERVERS[
+    value.serverName as keyof typeof COMPANION_PLUGIN_OAUTH_SERVERS
+  ];
+  const tokenEndpoint = pinnedRuntimeUrl(value.tokenEndpoint, server.allowedOrigins);
+  const resource = pinnedRuntimeUrl(value.resource, server.allowedOrigins);
+  if (resource !== new URL(server.remoteUrl).toString()) {
+    throw new Error("invalid MCP OAuth resource");
+  }
+  return {
+    ...value,
+    tokenEndpoint,
+    resource,
+  } as unknown as CompanionPluginStoredOAuthCredential;
+}
+
+function pinnedRuntimeUrl(value: string, allowedOrigins: readonly string[]): string {
+  const url = new URL(value);
+  if (
+    url.protocol !== "https:"
+    || url.username
+    || url.password
+    || !allowedOrigins.includes(url.origin)
+  ) {
+    throw new Error("invalid MCP OAuth endpoint");
+  }
+  return url.toString();
 }
 
 function validateMcpCredentialValue(value: unknown): CompanionRuntimeMcpCredential {

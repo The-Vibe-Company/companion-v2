@@ -200,6 +200,7 @@ describe("runtime material resolution", () => {
 
   it("collapses storage and malformed-row details to fixed safe errors", async () => {
     const secretPath = "signed://secret-storage-path?token=never-return";
+    const loadSkillArchive = vi.fn(async () => { throw new Error(secretPath); });
     let error: unknown;
     try {
       await resolveRuntimeResources({
@@ -210,6 +211,7 @@ describe("runtime material resolution", () => {
           mcpMaterial: [],
           skillMaterial: [{
             skill_id: "44444444-4444-4444-8444-444444444444",
+            version_id: "55555555-5555-4555-8555-555555555555",
             slug: "example",
             version: "1.0.0",
             checksum: `sha256:${"0".repeat(64)}`,
@@ -217,7 +219,7 @@ describe("runtime material resolution", () => {
             storage_path: secretPath,
           }],
         },
-        loadSkillArchive: async () => { throw new Error(secretPath); },
+        loadSkillArchive,
         signal: new AbortController().signal,
       });
     } catch (caught) {
@@ -225,6 +227,7 @@ describe("runtime material resolution", () => {
     }
     expect(error).toBeInstanceOf(RuntimeMaterialError);
     expect(String(error)).not.toContain(secretPath);
+    expect(loadSkillArchive).toHaveBeenCalledWith(secretPath, expect.any(AbortSignal));
   });
 });
 

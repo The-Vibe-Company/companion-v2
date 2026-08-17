@@ -3,9 +3,11 @@ import {
   RuntimeInvariantError,
   safeRuntimeError,
 } from "./errors";
+import { mustAbandonRuntimeExecution } from "./executionControl";
 import { runtimeSucceeded, type RuntimeWorkDisposition } from "./handler";
 import type { LeaseSession } from "./leaseSession";
 import type { RuntimeEngineDependencies } from "./ports";
+import { RuntimeStoreIndeterminateError } from "./store";
 import type { DecisionRuntimeClaim, RuntimeAuthorization } from "./types";
 
 interface DecisionContext {
@@ -50,6 +52,7 @@ export async function handleDecision(
           await context.deps.materialProvider.getMaterial({
             store: context.deps.store,
             fence: context.session.fence,
+            signal: context.session.signal,
           }));
         if (
           workMaterial.turnId !== context.claim.turnId
@@ -79,23 +82,34 @@ export async function handleDecision(
         commandId = context.deps.idFactory.uuid();
         await context.session.checkpoint({ nextCheckpoint: "write_intent", commandId });
         let outcome;
+        let providerCallStarted = false;
         try {
-          outcome = await context.session.external(async (signal) =>
-            await context.deps.pi.respondExtensionUi({
-              boxId: runtimeBinding(context).boxId,
+          outcome = await context.session.external(async (signal) => {
+            const currentBinding = runtimeBinding(context);
+            if (
+              currentBinding.boxId !== binding.boxId
+              || currentBinding.invocationId !== binding.invocationId
+            ) {
+              throw new RuntimeStoreIndeterminateError();
+            }
+            providerCallStarted = true;
+            return await context.deps.pi.respondExtensionUi({
+              boxId: binding.boxId,
               commandId: commandId!,
               attemptId: workMaterial.attemptId!,
               response: workMaterial.decisionResponsePayload!,
               signal,
-            }));
-        } catch {
-          await context.session.checkpoint({ nextCheckpoint: "ambiguous", commandId });
+            });
+          });
+        } catch (error) {
+          if (!providerCallStarted || mustAbandonRuntimeExecution(error)) throw error;
+          await checkpointDecisionAmbiguous(context, commandId);
           throw new AmbiguousExternalEffectError("decision_delivery_ambiguous");
         }
         if (outcome.outcome === "ambiguous" || (
           outcome.outcome === "accepted" && outcome.invocationId !== binding.invocationId
         )) {
-          await context.session.checkpoint({ nextCheckpoint: "ambiguous", commandId });
+          await checkpointDecisionAmbiguous(context, commandId);
           throw new AmbiguousExternalEffectError("decision_delivery_ambiguous");
         }
         if (outcome.outcome === "rejected") {
@@ -124,5 +138,17 @@ export async function handleDecision(
           action: "none",
         });
     }
+  }
+}
+
+async function checkpointDecisionAmbiguous(
+  context: DecisionContext,
+  commandId: string,
+): Promise<void> {
+  try {
+    await context.session.checkpoint({ nextCheckpoint: "ambiguous", commandId });
+  } catch (error) {
+    if (mustAbandonRuntimeExecution(error)) throw error;
+    throw new RuntimeStoreIndeterminateError();
   }
 }

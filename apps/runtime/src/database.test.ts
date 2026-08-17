@@ -9,6 +9,8 @@ const validProfile = {
   bypassesRls: false,
   inheritsPrivileges: false,
   hasMemberships: false,
+  hasDatabaseCreatePrivilege: false,
+  hasPublicSchemaCreatePrivilege: false,
   ownsDatabaseOrSchema: false,
   ownsRelations: false,
   ownsFunctionsOrTypes: false,
@@ -32,6 +34,8 @@ describe("runtime database role verification", () => {
     )).resolves.toBeUndefined();
     expect(unsafe).toHaveBeenCalledOnce();
     expect(query).toContain("pg_catalog.pg_auth_members");
+    expect(query).toContain("has_database_privilege");
+    expect(query).toContain("has_schema_privilege");
     expect(query).toContain("has_table_privilege");
     expect(query).toContain("companion_runtime_claim_work");
     expect(query).toContain("companion_runtime_renew_and_authorize");
@@ -43,6 +47,8 @@ describe("runtime database role verification", () => {
     ["a BYPASSRLS role", { bypassesRls: true }],
     ["an inheriting role", { inheritsPrivileges: true }],
     ["a role membership", { hasMemberships: true }],
+    ["database CREATE", { hasDatabaseCreatePrivilege: true }],
+    ["public schema CREATE", { hasPublicSchemaCreatePrivilege: true }],
     ["database or schema ownership", { ownsDatabaseOrSchema: true }],
     ["relation ownership", { ownsRelations: true }],
     ["function or type ownership", { ownsFunctionsOrTypes: true }],

@@ -7,9 +7,9 @@
 
 import {
   COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS,
+  COMPANION_TOOL_KIND_NAME_TABLE,
   COMPANION_TOOL_RUN_TIMEOUT_MS,
 } from "@companion/contracts";
-import { COMPANION_TOOL_KIND_NAME_TABLE } from "@companion/core";
 
 /** Fail closed with the Box extension's own question timeout (5 minutes). Timeout → cancelled. */
 export const COMPANION_DECISION_TIMEOUT_MS = 5 * 60 * 1000;

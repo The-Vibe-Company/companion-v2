@@ -383,7 +383,13 @@ BEGIN
         current_database(),
         companion_runtime_role
       );
+      EXECUTE format(
+        'REVOKE CREATE ON DATABASE %I FROM %I',
+        current_database(),
+        companion_runtime_role
+      );
       EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', companion_runtime_role);
+      EXECUTE format('REVOKE CREATE ON SCHEMA public FROM %I', companion_runtime_role);
       EXECUTE format(
         'ALTER DEFAULT PRIVILEGES IN SCHEMA public
          REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM %I',

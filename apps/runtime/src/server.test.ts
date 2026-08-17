@@ -3,6 +3,7 @@ import { request as httpRequest } from "node:http";
 
 import {
   DESKTOP_REQUEST_PATH,
+  DESKTOP_REQUEST_ID_HEADER,
   DESKTOP_SIGNATURE_HEADER,
   DESKTOP_TIMESTAMP_HEADER,
   signDesktopRequest,
@@ -21,6 +22,12 @@ const ids = {
   actorId: "test-user",
 };
 const openServers: RuntimeHttpServer[] = [];
+let requestIdSequence = 0;
+
+function nextRequestId(): string {
+  requestIdSequence += 1;
+  return `aaaaaaaa-aaaa-4aaa-8aaa-${requestIdSequence.toString().padStart(12, "0")}`;
+}
 
 function healthySnapshot(): RuntimeSchedulerHealthSnapshot {
   return {
@@ -108,10 +115,12 @@ describe("private runtime HTTP server", () => {
     const handle = await start();
     const rawBody = Buffer.from(JSON.stringify(ids), "utf8");
     const timestamp = Math.floor(nowMs / 1_000);
+    const requestId = nextRequestId();
     const signature = signDesktopRequest({
       method: "POST",
       pathname: DESKTOP_REQUEST_PATH,
       timestamp,
+      requestId,
       rawBody,
     }, hmacSecret);
     const response = await fetch(`${handle.server.baseUrl}${DESKTOP_REQUEST_PATH}`, {
@@ -119,6 +128,7 @@ describe("private runtime HTTP server", () => {
       headers: {
         "Content-Type": "application/json",
         [DESKTOP_TIMESTAMP_HEADER]: String(timestamp),
+        [DESKTOP_REQUEST_ID_HEADER]: requestId,
         [DESKTOP_SIGNATURE_HEADER]: signature,
       },
       body: rawBody,
@@ -140,6 +150,7 @@ describe("private runtime HTTP server", () => {
       headers: {
         "Content-Type": "application/json",
         [DESKTOP_TIMESTAMP_HEADER]: String(timestamp),
+        [DESKTOP_REQUEST_ID_HEADER]: requestId,
         [DESKTOP_SIGNATURE_HEADER]: signature,
       },
       body: JSON.stringify({ ...ids, actorId: "44444444-4444-4444-8444-444444444444" }),
@@ -148,15 +159,18 @@ describe("private runtime HTTP server", () => {
     expect(handle.authorizeAndMint).toHaveBeenCalledTimes(1);
 
     const staleTimestamp = timestamp - 31;
+    const staleRequestId = nextRequestId();
     const stale = await fetch(`${handle.server.baseUrl}${DESKTOP_REQUEST_PATH}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         [DESKTOP_TIMESTAMP_HEADER]: String(staleTimestamp),
+        [DESKTOP_REQUEST_ID_HEADER]: staleRequestId,
         [DESKTOP_SIGNATURE_HEADER]: signDesktopRequest({
           method: "POST",
           pathname: DESKTOP_REQUEST_PATH,
           timestamp: staleTimestamp,
+          requestId: staleRequestId,
           rawBody,
         }, hmacSecret),
       },
@@ -164,6 +178,34 @@ describe("private runtime HTTP server", () => {
     });
     expect(stale.status).toBe(401);
     expect(handle.authorizeAndMint).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects replay of a previously authenticated desktop request", async () => {
+    const handle = await start();
+    const rawBody = Buffer.from(JSON.stringify(ids));
+    const timestamp = Math.floor(nowMs / 1_000);
+    const requestId = nextRequestId();
+    const signature = signDesktopRequest({
+      method: "POST",
+      pathname: DESKTOP_REQUEST_PATH,
+      timestamp,
+      requestId,
+      rawBody,
+    }, hmacSecret);
+    const send = async () => await fetch(`${handle.server.baseUrl}${DESKTOP_REQUEST_PATH}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        [DESKTOP_TIMESTAMP_HEADER]: String(timestamp),
+        [DESKTOP_REQUEST_ID_HEADER]: requestId,
+        [DESKTOP_SIGNATURE_HEADER]: signature,
+      },
+      body: rawBody,
+    });
+
+    expect((await send()).status).toBe(200);
+    expect((await send()).status).toBe(401);
+    expect(handle.authorizeAndMint).toHaveBeenCalledOnce();
   });
 
   it("rejects extra desktop fields and never logs or returns provider failure details", async () => {
@@ -232,15 +274,18 @@ function signedDesktop(
   rawBody: Buffer,
   timestamp: number,
 ): Promise<Response> {
+  const requestId = nextRequestId();
   return fetch(`${server.baseUrl}${DESKTOP_REQUEST_PATH}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       [DESKTOP_TIMESTAMP_HEADER]: String(timestamp),
+      [DESKTOP_REQUEST_ID_HEADER]: requestId,
       [DESKTOP_SIGNATURE_HEADER]: signDesktopRequest({
         method: "POST",
         pathname: DESKTOP_REQUEST_PATH,
         timestamp,
+        requestId,
         rawBody,
       }, hmacSecret),
     },

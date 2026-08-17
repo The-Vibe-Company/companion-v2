@@ -43,7 +43,10 @@ export function createRuntimeMaterialPipeline(input: {
   bundledSkill: CompanionRuntimeSkill;
   runtime(): CompanionBoxRuntimeV2;
   loadSkillArchive(storagePath: string, signal: AbortSignal): Promise<Buffer>;
-  refreshOauth?(credential: CompanionPluginStoredOAuthCredential): Promise<CompanionPluginStoredOAuthCredential>;
+  refreshOauth?(
+    credential: CompanionPluginStoredOAuthCredential,
+    signal?: AbortSignal,
+  ): Promise<CompanionPluginStoredOAuthCredential>;
   uuid?: () => string;
   now?: () => number;
 }): RuntimeMaterialPipeline {
@@ -54,10 +57,10 @@ export function createRuntimeMaterialPipeline(input: {
   const now = input.now ?? Date.now;
   const uuid = input.uuid ?? randomUUID;
   const refreshOauth = input.refreshOauth
-    ?? (async (credential) => await refreshCompanionPluginOAuth({ credential }));
+    ?? (async (credential, signal) => await refreshCompanionPluginOAuth({ credential, signal }));
 
   const materialProvider: RuntimeMaterialProvider = {
-    async getMaterial({ store, fence }) {
+    async getMaterial({ store, fence, signal }) {
       const material = await store.getMaterial(fence, RUNTIME_LEASE_SECONDS);
       if (!material) return null;
       const refreshed = new Map<string, CompanionPluginStoredOAuthCredential>();
@@ -76,7 +79,8 @@ export function createRuntimeMaterialPipeline(input: {
           expiresAt === null
           || expiresAt > now() + COMPANION_MCP_OAUTH_REFRESH_SKEW_MS
         ) continue;
-        const active = await refreshOauth(row.decrypted.credential);
+        const active = await refreshOauth(row.decrypted.credential, signal);
+        if (signal?.aborted) throw signal.reason ?? new Error("Runtime material refresh aborted");
         const nextGeneration = uuid();
         const envelope = encryptCompanionMcpRuntimeCredential({
           orgId: fence.orgId,
@@ -84,6 +88,7 @@ export function createRuntimeMaterialPipeline(input: {
           credentialGeneration: nextGeneration,
           credential: active,
         }, input.masterKey);
+        if (signal?.aborted) throw signal.reason ?? new Error("Runtime material refresh aborted");
         const persisted = await store.casMcpOauth(fence, {
           accountId: row.accountId,
           expectedGeneration: row.credentialGeneration,

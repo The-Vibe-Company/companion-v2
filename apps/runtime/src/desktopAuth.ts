@@ -4,11 +4,13 @@ export const DESKTOP_REQUEST_PATH = "/v1/desktop";
 export const DESKTOP_REQUEST_MAX_SKEW_SECONDS = 30;
 export const DESKTOP_SIGNATURE_HEADER = "x-companion-runtime-signature";
 export const DESKTOP_TIMESTAMP_HEADER = "x-companion-runtime-timestamp";
+export const DESKTOP_REQUEST_ID_HEADER = "x-companion-runtime-request-id";
 
 export interface DesktopRequestAuthInput {
   method: string;
   pathname: string;
   timestamp: number;
+  requestId: string;
   rawBody: Uint8Array;
 }
 
@@ -17,12 +19,15 @@ export function canonicalDesktopRequest(input: DesktopRequestAuthInput): string 
   if (!Number.isSafeInteger(input.timestamp) || input.timestamp < 0) {
     throw new Error("desktop request timestamp must be a non-negative safe integer");
   }
+  if (!/^[A-Za-z0-9._:-]{16,128}$/.test(input.requestId)) {
+    throw new Error("desktop request id is invalid");
+  }
   const method = input.method.toUpperCase();
   if (!/^[A-Z]+$/.test(method) || !input.pathname.startsWith("/") || /[\r\n]/.test(input.pathname)) {
     throw new Error("desktop request method or pathname is invalid");
   }
   const bodyDigest = createHash("sha256").update(input.rawBody).digest("hex");
-  return `${method}\n${input.pathname}\n${input.timestamp}\n${bodyDigest}`;
+  return `${method}\n${input.pathname}\n${input.timestamp}\n${input.requestId}\n${bodyDigest}`;
 }
 
 export function signDesktopRequest(

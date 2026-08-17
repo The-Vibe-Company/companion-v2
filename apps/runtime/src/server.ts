@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 
 import {
   DESKTOP_REQUEST_PATH,
+  DESKTOP_REQUEST_ID_HEADER,
   DESKTOP_SIGNATURE_HEADER,
   DESKTOP_TIMESTAMP_HEADER,
   verifyDesktopRequest,
@@ -10,6 +11,7 @@ import {
 
 const DEFAULT_BODY_LIMIT_BYTES = 4 * 1024;
 const DEFAULT_HEALTH_PING_TIMEOUT_MS = 1_000;
+const DEFAULT_DESKTOP_REPLAY_CACHE_SIZE = 10_000;
 
 export interface RuntimeSchedulerHealthSnapshot {
   claimLoopAlive: boolean;
@@ -53,6 +55,7 @@ export interface RuntimeHttpServerOptions {
   now?: () => number;
   bodyLimitBytes?: number;
   healthPingTimeoutMs?: number;
+  desktopReplayCacheSize?: number;
 }
 
 export interface RuntimeHttpServer {
@@ -72,6 +75,11 @@ export function createRuntimeHttpServer(options: RuntimeHttpServerOptions): Runt
     options.healthPingTimeoutMs ?? DEFAULT_HEALTH_PING_TIMEOUT_MS,
     "healthPingTimeoutMs",
   );
+  const desktopReplayCacheSize = positiveInteger(
+    options.desktopReplayCacheSize ?? DEFAULT_DESKTOP_REPLAY_CACHE_SIZE,
+    "desktopReplayCacheSize",
+  );
+  const desktopRequestIds = new Map<string, number>();
   const shutdown = new AbortController();
   let listening = false;
 
@@ -173,22 +181,29 @@ export function createRuntimeHttpServer(options: RuntimeHttpServerOptions): Runt
     }
     const timestampHeader = oneHeader(request, DESKTOP_TIMESTAMP_HEADER);
     const signature = oneHeader(request, DESKTOP_SIGNATURE_HEADER);
+    const requestId = oneHeader(request, DESKTOP_REQUEST_ID_HEADER);
     const timestamp = timestampHeader !== null && /^(0|[1-9][0-9]*)$/.test(timestampHeader)
       ? Number(timestampHeader)
       : Number.NaN;
     if (
       !signature
+      || !requestId
       || !Number.isSafeInteger(timestamp)
       || !verifyDesktopRequest({
         method: request.method ?? "",
         pathname,
         timestamp,
+        requestId,
         rawBody,
         signature,
         nowMs: now(),
         maxSkewSeconds: options.desktopMaxSkewSeconds,
       }, options.desktopHmacSecret)
     ) {
+      sendJson(response, 401, { error: "invalid_runtime_signature" });
+      return;
+    }
+    if (!consumeDesktopRequestId(requestId, timestamp)) {
       sendJson(response, 401, { error: "invalid_runtime_signature" });
       return;
     }
@@ -219,6 +234,18 @@ export function createRuntimeHttpServer(options: RuntimeHttpServerOptions): Runt
       automation: "lux",
       transport: desktop.transport,
     });
+  }
+
+  function consumeDesktopRequestId(requestId: string, timestamp: number): boolean {
+    const nowSeconds = Math.floor(now() / 1_000);
+    for (const [knownId, expiresAt] of desktopRequestIds) {
+      if (expiresAt < nowSeconds) desktopRequestIds.delete(knownId);
+    }
+    if (desktopRequestIds.has(requestId) || desktopRequestIds.size >= desktopReplayCacheSize) {
+      return false;
+    }
+    desktopRequestIds.set(requestId, timestamp + options.desktopMaxSkewSeconds);
+    return true;
   }
 
   return {

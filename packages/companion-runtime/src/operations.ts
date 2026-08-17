@@ -1,4 +1,5 @@
 import { AmbiguousExternalEffectError, RuntimeInvariantError } from "./errors";
+import { mustAbandonRuntimeExecution } from "./executionControl";
 import { runtimeSucceeded, type RuntimeWorkDisposition } from "./handler";
 import type { LeaseSession } from "./leaseSession";
 import type {
@@ -325,6 +326,7 @@ async function stageCapturedResources(context: OperationContext): Promise<Staged
     await context.deps.materialProvider.getMaterial({
       store: context.deps.store,
       fence: context.session.fence,
+      signal: context.session.signal,
     }));
   return await context.session.external(async (signal) =>
     await context.deps.resourceStager.stageExistingBox({
@@ -468,16 +470,21 @@ async function handleStart(context: OperationContext): Promise<RuntimeWorkDispos
           break;
         }
         let result: BoxCreateResult;
+        let providerCallStarted = false;
         try {
-          result = await context.session.external(async (signal) =>
-            await context.deps.box.createGenerationBox({
+          result = await context.session.external(async (signal) => {
+            const deadlineAt = providerCallDeadline(context);
+            providerCallStarted = true;
+            return await context.deps.box.createGenerationBox({
               companionId: context.claim.companionId,
               generation: context.claim.runtimeGeneration,
               ttlSeconds: BOX_WARM_TTL_SECONDS,
-              deadlineAt: providerCallDeadline(context),
+              deadlineAt,
               signal,
-            }));
-        } catch {
+            });
+          });
+        } catch (error) {
+          if (!providerCallStarted || mustAbandonRuntimeExecution(error)) throw error;
           throw new AmbiguousExternalEffectError("box_create_ambiguous");
         }
         let boxId = result.boxId;
@@ -792,14 +799,7 @@ async function handleDelete(context: OperationContext): Promise<RuntimeWorkDispo
           });
           break;
         }
-        let request;
-        try {
-          request = await lifecycle(context, "request_delete", async ({ signal }) =>
-            await context.deps.box.requestPermanentDeletion({ boxId: boxId!, signal }));
-        } catch (error) {
-          if (!isProviderNotFound(error)) throw error;
-          request = { outcome: "absent" } as const;
-        }
+        const request = await requestPermanentDelete(context, boxId);
         if (request.outcome === "absent") {
           await observe(context, { boxState: "absent" });
           break;
@@ -819,9 +819,19 @@ async function handleDelete(context: OperationContext): Promise<RuntimeWorkDispo
         await context.deps.clock.sleep(ABSENCE_CONFIRMATION_INTERVAL_MS, context.session.signal);
         const discovery = await discover(context);
         if (discovery.canonical) {
+          await cleanDuplicates(context, discovery.duplicates);
           await observe(context, {
             boxId: discovery.canonical.id,
             boxState: discovery.canonical.state ?? "unknown",
+          });
+          const request = await requestPermanentDelete(context, discovery.canonical.id);
+          if (request.outcome === "absent") {
+            await observe(context, { boxState: "absent" });
+            break;
+          }
+          await context.session.checkpoint({
+            nextCheckpoint: "provider_delete_requested",
+            providerOperationId: request.operationId,
           });
         } else {
           await observe(context, { boxState: "absent" });
@@ -883,6 +893,19 @@ async function handleDelete(context: OperationContext): Promise<RuntimeWorkDispo
           action: "none",
         });
     }
+  }
+}
+
+async function requestPermanentDelete(
+  context: OperationContext,
+  boxId: string,
+): Promise<Awaited<ReturnType<RuntimeEngineDependencies["box"]["requestPermanentDeletion"]>>> {
+  try {
+    return await lifecycle(context, "request_delete", async ({ signal }) =>
+      await context.deps.box.requestPermanentDeletion({ boxId, signal }));
+  } catch (error) {
+    if (!isProviderNotFound(error)) throw error;
+    return { outcome: "absent" };
   }
 }
 

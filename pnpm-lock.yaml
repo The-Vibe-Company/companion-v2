@@ -494,6 +494,10 @@ importers:
         version: 3.2.7(@types/debug@4.1.13)(@types/node@22.19.20)(happy-dom@20.10.6)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.22.4)(yaml@2.9.0)
 
   packages/companion-runtime:
+    dependencies:
+      '@companion/contracts':
+        specifier: workspace:*
+        version: link:../contracts
     devDependencies:
       '@types/node':
         specifier: ^22.10.2

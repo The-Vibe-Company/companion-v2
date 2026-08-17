@@ -322,6 +322,35 @@ describe("Pi journal validation and projection", () => {
     expect(tools[1]?.tool.call_id).toBe(tools[0]?.tool.call_id);
   });
 
+  it.each([
+    ["webfetch", "browse"],
+    ["execute", "shell"],
+    ["str_replace_editor", "file"],
+  ] as const)("uses the canonical tool catalog for %s", (toolName, kind) => {
+    const page = validatePiJournalRead({
+      value: {
+        events: [{
+          sequence: 1,
+          invocationId: PI_INVOCATION_ID,
+          attemptId: ATTEMPT_ID,
+          kind: "pi_event",
+          event: { type: "tool_execution_start", toolName, toolCallId: "call-1" },
+        }],
+        nextCursor: 1,
+        acknowledgedCursor: 0,
+        hasMore: false,
+      },
+      after: 0n,
+      attemptId: ATTEMPT_ID,
+      invocationId: PI_INVOCATION_ID,
+    });
+
+    expect(classifyPiJournalPage(page).projections[0]).toMatchObject({
+      type: "tool",
+      tool: { kind },
+    });
+  });
+
   it("does not reintroduce exact secrets through synthetic redaction markers", () => {
     const page = validatePiJournalRead({
       value: {
@@ -356,6 +385,39 @@ describe("Pi journal validation and projection", () => {
       typeof value === "bigint" ? value.toString() : value);
     expect(serialized).not.toContain("credential");
     expect(serialized).not.toContain("redacted");
+  });
+
+  it("redacts quoted OAuth JSON fields even when their values have no known token shape", () => {
+    const page = validatePiJournalRead({
+      value: {
+        events: [{
+          sequence: 1,
+          invocationId: PI_INVOCATION_ID,
+          attemptId: ATTEMPT_ID,
+          kind: "pi_event",
+          event: {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: '{"access_token":"plain-opaque-access","clientSecret":"plain-opaque-client"}',
+            },
+          },
+        }],
+        nextCursor: 1,
+        acknowledgedCursor: 0,
+        hasMore: false,
+      },
+      after: 0n,
+      attemptId: ATTEMPT_ID,
+      invocationId: PI_INVOCATION_ID,
+    });
+
+    const serialized = JSON.stringify(
+      classifyPiJournalPage(page).projections,
+      (_key, value) => typeof value === "bigint" ? value.toString() : value,
+    );
+    expect(serialized).not.toContain("plain-opaque");
+    expect(serialized).toContain("[redacted]");
   });
 
   it("refuses to persist a decision request id that contains credential material", () => {

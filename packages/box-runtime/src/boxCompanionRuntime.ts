@@ -2102,7 +2102,10 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     if (!READY_STATES.has(box.state)) {
       throw new BoxRuntimeProviderError(`Box cannot resume from state ${box.state}`, 409);
     }
-    const daemonState = await this.#daemonState(input.boxId, input.signal).catch(() => "stopped" as const);
+    const daemonState = await this.#daemonState(input.boxId, input.signal).catch((error: unknown) => {
+      if (input.signal?.aborted) throw input.signal.reason ?? error;
+      return "stopped" as const;
+    });
     return observation(box, daemonState);
   }
 
@@ -2228,7 +2231,8 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
         state: broker.activeAttemptId === null ? "idle" : "running",
         invocationId: broker.invocationId,
       };
-    } catch {
+    } catch (error) {
+      if (input.signal?.aborted) throw input.signal.reason ?? error;
       return { state: "error", invocationId: null };
     }
   }

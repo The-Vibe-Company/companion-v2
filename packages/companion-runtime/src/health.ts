@@ -34,6 +34,7 @@ export async function handleHealth(
     await context.session.observe({
       runtimeGeneration: context.claim.runtimeGeneration,
       boxState: "absent",
+      piState: "absent",
       observedAt: context.deps.clock.now(),
     });
     return runtimeSucceeded;
@@ -58,6 +59,7 @@ export async function handleHealth(
     piState?: Awaited<ReturnType<RuntimeEngineDependencies["pi"]["piDaemonStatus"]>>["state"];
     piInvocationId?: string;
   } = {};
+  if (boxState === "absent") piObservation = { piState: "absent" };
   if (boxState === "ready" || boxState === "idle" || boxState === "running") {
     try {
       const pi = await retryIdempotentLifecycle({

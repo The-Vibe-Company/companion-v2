@@ -85,15 +85,17 @@ export class RuntimeScheduler {
   }
 
   async shutdown(input: { drainTimeoutMs?: number } = {}): Promise<void> {
-    this.stopClaims();
-    this.#engine.handoffActive();
-    await this.#loopTask?.catch(() => undefined);
-    const drain = Promise.allSettled([...this.#active.values()])
-      .then(async () => await this.#engine.drain());
     const timeout = input.drainTimeoutMs ?? DEFAULT_RUNTIME_DRAIN_TIMEOUT_MS;
     if (!Number.isFinite(timeout) || timeout < 0) {
       throw new TypeError("Runtime drain timeout must be a non-negative finite number");
     }
+    this.stopClaims();
+    this.#engine.handoffActive();
+    const drain = (async () => {
+      await this.#loopTask?.catch(() => undefined);
+      await Promise.allSettled([...this.#active.values()]);
+      await this.#engine.drain();
+    })();
     let timeoutHandle: unknown;
     const deadline = new Promise<void>((resolve) => {
       timeoutHandle = this.#clock.setTimeout(resolve, timeout);

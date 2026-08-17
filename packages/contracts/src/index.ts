@@ -21,3 +21,4 @@ export * from "./agentOperations";
 export * from "./skillDatabase";
 export * from "./companions";
 export * from "./companionPluginCatalog";
+export * from "./companionToolKinds";

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { companionToolRunKind } from "@companion/contracts";
 import {
   genericRuntimeVisibleTextRedactor,
   type RuntimeVisibleTextRedactor,
@@ -295,26 +296,8 @@ function decisionRequestKey(
   return normalized;
 }
 
-const TOOL_NAMES: ReadonlyArray<readonly [
-  "shell" | "file" | "browse" | "computer",
-  ReadonlySet<string>,
-]> = [
-  ["computer", new Set(["computer", "desktop", "screenshot", "click", "type", "scroll", "drag"])],
-  ["browse", new Set(["browse", "browser", "web", "fetch", "search", "navigate", "url", "curl"])],
-  ["shell", new Set(["bash", "sh", "shell", "terminal", "exec", "run", "command", "python", "node", "git"])],
-  ["file", new Set(["file", "read", "write", "edit", "patch", "create", "delete", "glob", "grep", "find", "rg"])],
-];
-
 function toolKind(name: string): "shell" | "file" | "browse" | "computer" | "tool" {
-  const words = name
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter(Boolean);
-  for (const [kind, names] of TOOL_NAMES) {
-    if (words.some((word) => names.has(word))) return kind;
-  }
-  return "tool";
+  return companionToolRunKind(name);
 }
 
 function safeToolMetadata(kind: ReturnType<typeof toolKind>): { name: string; title: string } {

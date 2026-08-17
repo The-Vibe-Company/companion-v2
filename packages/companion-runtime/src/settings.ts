@@ -64,6 +64,7 @@ export async function handleSettings(
       await context.deps.materialProvider.getMaterial({
         store: context.deps.store,
         fence: context.session.fence,
+        signal: context.session.signal,
       }));
     const staged = await context.session.external(async (signal) => {
       // `getMaterial` may have completed a fenced OAuth generation CAS. The

@@ -88,6 +88,7 @@ export * from "./clock";
 export * from "./decision";
 export * from "./engine";
 export * from "./errors";
+export * from "./executionControl";
 export * from "./handler";
 export * from "./health";
 export * from "./leaseSession";

@@ -6,6 +6,7 @@ import {
   BOX_ID,
   PI_INVOCATION_ID,
   MemoryRuntimeStore,
+  TestClock,
   engineDependencies,
   fakePorts,
   operationAuthorization,
@@ -118,6 +119,101 @@ describe("runtime lifecycle operations", () => {
     });
     expect(store.authorization.boxId).toBe(BOX_ID);
     expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
+  });
+
+  it("does not turn authorization loss immediately before create into an ambiguous effect", async () => {
+    const claim = operationClaim({
+      checkpoint: "box_absence_observed",
+      checkpointSequence: 1n,
+    });
+    const authorized = operationAuthorization(claim, {
+      boxId: null,
+      boxState: "absent",
+      piState: "absent",
+      piInvocationId: null,
+    });
+    const store = new MemoryRuntimeStore({ authorization: authorized });
+    const ports = fakePorts(store);
+    let creates = 0;
+    ports.box.createGenerationBox = async () => {
+      creates += 1;
+      return {
+        outcome: "created",
+        boxId: BOX_ID,
+        name: `Companion ${claim.companionId} g1`,
+      };
+    };
+    const renew = store.renewAndAuthorize.bind(store);
+    let creatingRenewals = 0;
+    store.renewAndAuthorize = async () => {
+      const current = await renew();
+      if (current?.workCheckpoint === "creating_box") {
+        creatingRenewals += 1;
+        if (creatingRenewals === 2) {
+          return {
+            ...current,
+            authorized: false,
+            denialCode: "actor_access_revoked",
+          };
+        }
+      }
+      return current;
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("failed");
+    expect(creates).toBe(0);
+    expect(store.settlements[0]?.error?.code).toBe("actor_access_revoked");
+    expect(store.settlements[0]?.error?.code).not.toBe("box_create_ambiguous");
+  });
+
+  it("permanently deletes a generation Box that appears during absence confirmation", async () => {
+    const claim: OperationRuntimeClaim = {
+      ...operationClaim(),
+      clientSurface: null,
+      operationKind: "delete",
+      checkpoint: "box_absence_observed",
+      checkpointSequence: 1n,
+      targetSettingsRevision: null,
+      targetSkillsRevision: null,
+    };
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: null,
+        boxState: "absent",
+        piState: "absent",
+        piInvocationId: null,
+        desiredSettingsRevision: null,
+        skillsRevision: null,
+      }),
+    });
+    const ports = fakePorts(store);
+    const requests: string[] = [];
+    ports.box.findGenerationBoxes = async () => ({
+      name: `Companion ${claim.companionId} g1`,
+      canonical: {
+        id: BOX_ID,
+        name: `Companion ${claim.companionId} g1`,
+        state: "ready",
+      },
+      duplicates: [],
+    });
+    ports.box.requestPermanentDeletion = async ({ boxId }) => {
+      requests.push(boxId);
+      return { outcome: "accepted", operationId: "delete-op-late" };
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({
+      store,
+      ports,
+      clock: new TestClock(),
+    })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(requests).toEqual([BOX_ID]);
+    expect(store.authorization.providerOperationId).toBe("delete-op-late");
+    expect(store.authorization.workCheckpoint).toBe("provider_deleted");
   });
 
   it("deletes a duplicate that appears after deterministic Box naming before staging", async () => {

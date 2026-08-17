@@ -133,6 +133,7 @@ export interface RuntimeMaterialProvider {
   getMaterial(input: {
     store: RuntimeStore;
     fence: LeaseFence;
+    signal?: AbortSignal;
   }): Promise<RuntimeWorkMaterial | null>;
 }
 

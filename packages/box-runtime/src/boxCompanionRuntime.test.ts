@@ -5463,4 +5463,65 @@ describe("AsciiBoxCompanionRuntime", () => {
       String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
   });
+
+  it("propagates abort while probing the daemon during Box resume", async () => {
+    const controller = new AbortController();
+    let commandStarted!: () => void;
+    const started = new Promise<void>((resolve) => { commandStarted = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (url.endsWith("/boxes/bx_23456789") && (!init?.method || init.method === "GET")) {
+        return json({ box });
+      }
+      if (url.endsWith("/commands") && init?.method === "POST") {
+        commandStarted();
+        return await new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+        });
+      }
+      throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    const observation = runtime.resumeExistingBox({ boxId: box.id, signal: controller.signal });
+    await started;
+    const stopped = new Error("runtime handoff");
+    controller.abort(stopped);
+
+    await expect(observation).rejects.toBe(stopped);
+  });
+
+  it("propagates abort while reading broker state for Pi status", async () => {
+    const controller = new AbortController();
+    let brokerStarted!: () => void;
+    const started = new Promise<void>((resolve) => { brokerStarted = resolve; });
+    let commandCount = 0;
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (url.endsWith("/commands") && init?.method === "POST") {
+        commandCount += 1;
+        if (commandCount === 1) {
+          return json({
+            success: true,
+            exitCode: 0,
+            stdout: "active\ncompanion-pi-broker-ready\n",
+            stderr: "",
+          });
+        }
+        brokerStarted();
+        return await new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+        });
+      }
+      throw new Error(`unexpected Box request: ${init?.method ?? "GET"} ${url}`);
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    const status = runtime.piDaemonStatus({ boxId: box.id, signal: controller.signal });
+    await started;
+    const stopped = new Error("runtime handoff");
+    controller.abort(stopped);
+
+    await expect(status).rejects.toBe(stopped);
+  });
 });

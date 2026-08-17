@@ -64,7 +64,7 @@ export function createRuntimeApplication(options: RuntimeApplicationOptions): Ru
   }
 
   async function stopAfterPartialStart(): Promise<void> {
-    await Promise.resolve(options.scheduler.stopClaims()).catch(() => undefined);
+    await Promise.resolve().then(() => options.scheduler.stopClaims()).catch(() => undefined);
     await Promise.allSettled([
       options.server.close(),
       options.scheduler.shutdown({ drainTimeoutMs: options.config.shutdownDrainMs }),

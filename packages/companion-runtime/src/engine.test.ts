@@ -5,7 +5,7 @@ import {
   RuntimeStoreContractError,
   RuntimeStoreIndeterminateError,
 } from "./store";
-import type { DecisionRuntimeClaim } from "./types";
+import type { DecisionRuntimeClaim, HealthRuntimeClaim } from "./types";
 import {
   ATTEMPT_ID,
   BOX_ID,
@@ -95,6 +95,37 @@ function settlementAfterFirstProjectionPage(): unknown {
     nextCursor: 2,
     acknowledgedCursor: 0,
     hasMore: false,
+  };
+}
+
+function healthClaim(): HealthRuntimeClaim {
+  return {
+    ...attemptClaim(),
+    workKind: "health",
+    workId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    actorId: null,
+    clientSurface: null,
+    checkpoint: "observing",
+    checkpointSequence: 0n,
+    turnId: null,
+    turnStatus: null,
+    attemptStatus: null,
+    dispatchState: null,
+    eventCursor: null,
+    unknownEventCount: null,
+    malformedEventCount: null,
+    oversizedEventCount: null,
+    coldStartDeadlineAt: null,
+    inactivityDeadlineAt: null,
+    absoluteDeadlineAt: null,
+    operationKind: null,
+    operationStartedAt: null,
+    operationAttemptCount: null,
+    providerOperationId: null,
+    targetSettingsRevision: null,
+    targetSkillsRevision: null,
+    decisionStatus: null,
+    decisionDeliveryState: null,
   };
 }
 
@@ -382,13 +413,19 @@ describe("RuntimeEngine attempts", () => {
       material: attemptMaterial({ hasVisibleOutput: true }),
     });
     let materialReads = 0;
-    store.getMaterial = async () => {
-      materialReads += 1;
-      throw new Error("credential snapshot changed");
+    const materialProvider = {
+      getMaterial: async () => {
+        materialReads += 1;
+        throw new Error("credential snapshot changed");
+      },
     };
     const ports = fakePorts(store);
 
-    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+    const result = await new RuntimeEngine(engineDependencies({
+      store,
+      ports,
+      materialProvider,
+    })).execute(claim);
 
     expect(result.outcome).toBe("succeeded");
     expect(materialReads).toBe(0);
@@ -513,6 +550,30 @@ describe("RuntimeEngine attempts", () => {
     });
   });
 
+  it("abandons an ambiguous prompt when its durable ambiguity checkpoint is unclassified", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    ports.pi.prompt = async (input) => {
+      ports.promptCalls.push({ attemptId: input.attemptId, message: input.message });
+      return { outcome: "ambiguous", code: "ack_timeout" };
+    };
+    const checkpoint = store.checkpoint.bind(store);
+    store.checkpoint = async (fence, input) => {
+      if (input.nextCheckpoint === "dispatch_ambiguous") {
+        throw new RuntimeStoreContractError();
+      }
+      return await checkpoint(fence, input);
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("fence_lost");
+    expect(ports.promptCalls).toHaveLength(1);
+    expect(store.authorization.workCheckpoint).toBe("dispatch_write_intent");
+    expect(store.settlements).toHaveLength(0);
+  });
+
   it("fails explicitly before dispatch when Pi reports no text capability", async () => {
     const claim = attemptClaim();
     const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
@@ -567,6 +628,45 @@ describe("RuntimeEngine attempts", () => {
       terminalStatus: "failed",
       error: { code: "empty_response" },
     });
+  });
+
+  it("settles a page whose decision request is followed by agent_settled", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    ports.eventReads.push({
+      events: [
+        {
+          sequence: 1,
+          invocationId: PI_INVOCATION_ID,
+          attemptId: ATTEMPT_ID,
+          kind: "pi_event",
+          event: {
+            type: "extension_ui_request",
+            id: "request-1",
+            method: "input",
+            title: "companion:question:ask_user",
+            placeholder: "Choose one",
+          },
+        },
+        {
+          sequence: 2,
+          invocationId: PI_INVOCATION_ID,
+          attemptId: ATTEMPT_ID,
+          kind: "pi_event",
+          event: { type: "agent_settled" },
+        },
+      ],
+      nextCursor: 2,
+      acknowledgedCursor: 0,
+      hasMore: false,
+    });
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(store.authorization.workCheckpoint).toBe("agent_settled");
+    expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
   });
 
   it("persists unknown counters and fails explicitly on a correlated Pi process exit", async () => {
@@ -826,6 +926,24 @@ describe("RuntimeEngine decisions", () => {
     expect(store.settlements[0]?.error?.code).toBe("decision_attempt_mismatch");
   });
 
+  it("revalidates the Box and Pi binding after the decision write-intent checkpoint", async () => {
+    const { claim, store, ports } = decisionSetup();
+    const checkpoint = store.checkpoint.bind(store);
+    store.checkpoint = async (fence, input) => {
+      const result = await checkpoint(fence, input);
+      if (input.nextCheckpoint === "write_intent") {
+        store.authorization.boxId = "bx_2345678b";
+      }
+      return result;
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("fence_lost");
+    expect(ports.decisionCalls).toHaveLength(0);
+    expect(store.settlements).toHaveLength(0);
+  });
+
   it("marks an ambiguous decision interrupted and never replays it on takeover", async () => {
     const first = decisionSetup();
     first.ports.pi.respondExtensionUi = async (input) => {
@@ -860,4 +978,69 @@ describe("RuntimeEngine decisions", () => {
     expect(takeoverResult.outcome).toBe("interrupted");
     expect(takeover.ports.decisionCalls).toHaveLength(0);
   });
+
+  it("abandons the fence when a decision ambiguity checkpoint cannot be classified", async () => {
+    const { claim, store, ports } = decisionSetup();
+    const checkpoint = store.checkpoint.bind(store);
+    store.checkpoint = async (fence, input) => {
+      if (input.nextCheckpoint === "ambiguous") throw new RuntimeStoreContractError();
+      return await checkpoint(fence, input);
+    };
+    ports.pi.respondExtensionUi = async (input) => {
+      ports.decisionCalls.push({ attemptId: input.attemptId });
+      return { outcome: "ambiguous", code: "ack_timeout" };
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("fence_lost");
+    expect(ports.decisionCalls).toEqual([{ attemptId: ATTEMPT_ID }]);
+    expect(store.settlements).toHaveLength(0);
+  });
+});
+
+describe("RuntimeEngine health observation", () => {
+  it.each(["unassigned", "provider_404"] as const)(
+    "clears stale Pi state when the Box is %s",
+    async (scenario) => {
+      const claim = healthClaim();
+      const store = new MemoryRuntimeStore({
+        authorization: attemptAuthorization(attemptClaim(), {
+          authorizationActorId: null,
+          clientSurface: null,
+          workCheckpoint: "observing",
+          workCheckpointSequence: 0n,
+          turnId: null,
+          turnStatus: null,
+          attemptStatus: null,
+          dispatchState: null,
+          eventCursor: null,
+          unknownEventCount: null,
+          malformedEventCount: null,
+          oversizedEventCount: null,
+          coldStartDeadlineAt: null,
+          inactivityDeadlineAt: null,
+          absoluteDeadlineAt: null,
+          operationKind: null,
+          ...(scenario === "unassigned" ? { boxId: null } : {}),
+          boxState: "ready",
+          piState: "running",
+        }),
+      });
+      const ports = fakePorts(store);
+      if (scenario === "provider_404") {
+        ports.box.getStatus = async () => {
+          throw Object.assign(new Error("gone"), { status: 404 });
+        };
+      }
+
+      const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+      expect(result.outcome).toBe("succeeded");
+      expect(store.observations.at(-1)).toMatchObject({
+        boxState: "absent",
+        piState: "absent",
+      });
+    },
+  );
 });

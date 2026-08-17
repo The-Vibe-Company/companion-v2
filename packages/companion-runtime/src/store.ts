@@ -554,7 +554,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
         ...fenceParameters(fence),
         input.expectedSequence.toString(),
         input.piInvocationId,
-        events,
+        JSON.stringify(events),
         input.throughCursor.toString(),
         input.activityAt ?? null,
         input.unknownEventCount,

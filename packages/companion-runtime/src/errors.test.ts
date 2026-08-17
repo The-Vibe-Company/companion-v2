@@ -12,6 +12,17 @@ describe("runtime error safety", () => {
     expect(message.length).toBeLessThanOrEqual(500);
   });
 
+  it.each([
+    '{"access_token":"plain-opaque-access-value"}',
+    "refreshToken='plain-opaque-refresh-value'",
+    '"client_secret": "plain-opaque-client-value"',
+    "api-key=plain-opaque-api-value",
+  ])("redacts credential assignments independent of token shape: %s", (source) => {
+    const message = expurgateRuntimeMessage(source);
+    expect(message).not.toContain("plain-opaque");
+    expect(message).toContain("[redacted]");
+  });
+
   it("replaces unstable error codes", () => {
     expect(safeRuntimeError({ code: "BAD CODE", message: "failed", action: "retry" }).code)
       .toBe("runtime_failure");

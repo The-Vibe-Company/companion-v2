@@ -14,6 +14,8 @@ interface RuntimeRoleProfile {
   bypassesRls: boolean;
   inheritsPrivileges: boolean;
   hasMemberships: boolean;
+  hasDatabaseCreatePrivilege: boolean;
+  hasPublicSchemaCreatePrivilege: boolean;
   ownsDatabaseOrSchema: boolean;
   ownsRelations: boolean;
   ownsFunctionsOrTypes: boolean;
@@ -83,6 +85,10 @@ SELECT
     SELECT 1 FROM pg_catalog.pg_auth_members membership
     WHERE membership.member = role.oid OR membership.roleid = role.oid
   ) AS "hasMemberships",
+  pg_catalog.has_database_privilege(role.oid, current_database(), 'CREATE')
+    AS "hasDatabaseCreatePrivilege",
+  pg_catalog.has_schema_privilege(role.oid, 'public', 'CREATE')
+    AS "hasPublicSchemaCreatePrivilege",
   EXISTS (
     SELECT 1 FROM pg_catalog.pg_database database
     WHERE database.datname = current_database() AND database.datdba = role.oid
@@ -152,6 +158,8 @@ export async function verifyRuntimeDatabaseRole(
     || profile.bypassesRls !== false
     || profile.inheritsPrivileges !== false
     || profile.hasMemberships !== false
+    || profile.hasDatabaseCreatePrivilege !== false
+    || profile.hasPublicSchemaCreatePrivilege !== false
     || profile.ownsDatabaseOrSchema !== false
     || profile.ownsRelations !== false
     || profile.ownsFunctionsOrTypes !== false

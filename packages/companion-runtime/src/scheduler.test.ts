@@ -207,4 +207,35 @@ describe("RuntimeScheduler", () => {
     expect(engine.shutdowns).toBe(0);
     expect(scheduler.snapshot().acceptingClaims).toBe(false);
   });
+
+  it("bounds shutdown while the claim loop is stuck reading the gate", async () => {
+    const base = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(base) });
+    let gateStarted!: () => void;
+    const started = new Promise<void>((resolve) => { gateStarted = resolve; });
+    store.gateStatus = async () => {
+      gateStarted();
+      return await new Promise<never>(() => undefined);
+    };
+    const engine = new HoldingEngine();
+    const clock = new TestClock();
+    const scheduler = new RuntimeScheduler({
+      store,
+      engine,
+      clock,
+      executorId: "scheduler-test",
+      claimsEnabled: true,
+    });
+    scheduler.start();
+    await started;
+
+    const shutdown = scheduler.shutdown({ drainTimeoutMs: 250 });
+    await Promise.resolve();
+    expect([...clock.timers.values()][0]?.milliseconds).toBe(250);
+    clock.runNextTimer();
+    await shutdown;
+
+    expect(engine.handoffs).toBe(1);
+    expect(scheduler.snapshot().acceptingClaims).toBe(false);
+  });
 });

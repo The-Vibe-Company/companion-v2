@@ -513,7 +513,7 @@ async function executeBrokerControl(
       }
       const model = objectRecord(state.model);
       const modelInput = Array.isArray(model?.input)
-        ? [...new Set(model.input.filter((item): item is string => typeof item === "string"))]
+        ? structuredClone(model.input)
         : [];
       return ok(`${JSON.stringify(responseFor(command, {
         invocationId: machine.daemon.invocationId,

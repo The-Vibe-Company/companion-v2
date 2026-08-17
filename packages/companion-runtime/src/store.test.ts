@@ -139,7 +139,7 @@ describe("PostgresRuntimeStore", () => {
     expect(sql.calls[0]?.query).not.toContain("provider_material");
   });
 
-  it("passes event batches as JSON values instead of double-encoded JSON strings", async () => {
+  it("serializes event batches as JSON text for postgres.js jsonb parameters", async () => {
     const sql = new RecordingSql();
     sql.rows = [{
       checkpoint_sequence: "3",
@@ -171,13 +171,13 @@ describe("PostgresRuntimeStore", () => {
       eventCursor: 10n,
       hasVisibleOutput: true,
     });
-    expect(sql.calls[0]?.parameters[10]).toEqual([{
+    expect(JSON.parse(String(sql.calls[0]?.parameters[10]))).toEqual([{
       sequence: "10",
       type: "assistant",
       entry_key: "assistant:10",
       content: "hello",
     }]);
-    expect(typeof sql.calls[0]?.parameters[10]).not.toBe("string");
+    expect(typeof sql.calls[0]?.parameters[10]).toBe("string");
   });
 
   it("maps a lost response from a mutating definer to an indeterminate outcome", async () => {

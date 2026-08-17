@@ -146,4 +146,19 @@ describe("runtime application lifecycle", () => {
     expect(value.scheduler.shutdown).toHaveBeenCalledWith({ drainTimeoutMs: 5 });
     expect(value.closeResources).toHaveBeenCalledOnce();
   });
+
+  it("continues partial-start cleanup when stopClaims throws synchronously", async () => {
+    const value = harness();
+    const startupFailure = new Error("listen failed");
+    vi.mocked(value.server.listen).mockRejectedValueOnce(startupFailure);
+    vi.mocked(value.scheduler.stopClaims).mockImplementationOnce(() => {
+      throw new Error("stop claims failed");
+    });
+
+    await expect(value.application.start()).rejects.toBe(startupFailure);
+
+    expect(value.server.close).toHaveBeenCalledOnce();
+    expect(value.scheduler.shutdown).toHaveBeenCalledOnce();
+    expect(value.closeResources).toHaveBeenCalledOnce();
+  });
 });

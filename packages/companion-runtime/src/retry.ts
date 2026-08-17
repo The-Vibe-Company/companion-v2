@@ -55,11 +55,14 @@ export async function retryIdempotentLifecycle<T>(input: {
   beforeAttempt?: () => Promise<void>;
 }): Promise<T> {
   let lastError: unknown;
-  for (let attempt = 0; attempt <= RUNTIME_RETRY_DELAYS_MS.length; attempt += 1) {
+  const assertBudget = (): void => {
     if (input.signal?.aborted) throw input.signal.reason ?? new Error("Runtime retry aborted");
     if (input.deadlineAt && input.clock.now().getTime() >= input.deadlineAt.getTime()) {
       throw lastError ?? new Error("Runtime retry deadline elapsed");
     }
+  };
+  for (let attempt = 0; attempt <= RUNTIME_RETRY_DELAYS_MS.length; attempt += 1) {
+    assertBudget();
     if (attempt > 0) {
       const delay = jittered(RUNTIME_RETRY_DELAYS_MS[attempt - 1]!, input.jitter());
       const remaining = input.deadlineAt
@@ -67,8 +70,12 @@ export async function retryIdempotentLifecycle<T>(input: {
         : Number.POSITIVE_INFINITY;
       if (remaining <= delay) throw lastError;
       await input.clock.sleep(delay, input.signal);
+      assertBudget();
     }
     await input.beforeAttempt?.();
+    // Hooks commonly renew authorization. They may consume the last deadline budget or abort the
+    // active lease, so recheck both immediately before the provider operation.
+    assertBudget();
     try {
       return await input.operation(input.signal);
     } catch (error) {

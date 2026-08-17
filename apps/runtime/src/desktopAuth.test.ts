@@ -10,6 +10,7 @@ import {
 
 const secret = Buffer.alloc(32, 19);
 const timestamp = 1_800_000_000;
+const requestId = "11111111-1111-4111-8111-111111111111";
 const rawBody = Buffer.from('{"orgId":"org-1"}', "utf8");
 
 describe("desktop request HMAC", () => {
@@ -18,11 +19,13 @@ describe("desktop request HMAC", () => {
       method: "post",
       pathname: DESKTOP_REQUEST_PATH,
       timestamp,
+      requestId,
       rawBody,
     })).toBe([
       "POST",
       DESKTOP_REQUEST_PATH,
       String(timestamp),
+      requestId,
       createHash("sha256").update(rawBody).digest("hex"),
     ].join("\n"));
   });
@@ -32,6 +35,7 @@ describe("desktop request HMAC", () => {
       method: "POST",
       pathname: DESKTOP_REQUEST_PATH,
       timestamp,
+      requestId,
       rawBody,
     };
     const signature = signDesktopRequest(request, secret);

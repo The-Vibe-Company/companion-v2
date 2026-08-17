@@ -1,4 +1,5 @@
 import type { ErrorAction, SafeRuntimeError } from "./types";
+import { redactGenericRuntimeCredentials } from "./credentialRedaction";
 
 const STABLE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const MAX_ERROR_MESSAGE_LENGTH = 500;
@@ -138,20 +139,9 @@ const DENIAL_ERRORS: Record<string, SafeRuntimeError> = {
   },
 };
 
-const SECRET_ASSIGNMENT = /\b(token|api[_-]?key|secret|password|authorization|cookie|credential)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi;
-const BEARER = /\bbearer\s+[a-z0-9._~+/=-]+/gi;
-const JWT = /\beyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\b/g;
-const URL = /\b(?:https?|wss?):\/\/[^\s<>()]+/gi;
-const CREDENTIAL_SHAPE = /\b(?:sk|box|ghp|github_pat|xox[baprs])-[_a-zA-Z0-9-]{8,}\b/g;
-
 export function expurgateRuntimeMessage(value: unknown, fallback = "Runtime execution failed."): string {
   const source = typeof value === "string" ? value : fallback;
-  const scrubbed = source
-    .replace(URL, "[url removed]")
-    .replace(BEARER, "Bearer [redacted]")
-    .replace(SECRET_ASSIGNMENT, (_match, key: string) => `${key}=[redacted]`)
-    .replace(JWT, "[token removed]")
-    .replace(CREDENTIAL_SHAPE, "[credential removed]")
+  const scrubbed = redactGenericRuntimeCredentials(source, () => "[url removed]")
     .replace(/[\r\n\u2028\u2029]+/g, " ")
     .replace(/[\t ]+/g, " ")
     .trim();

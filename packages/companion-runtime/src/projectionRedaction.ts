@@ -1,8 +1,4 @@
-const SECRET_ASSIGNMENT = /\b(token|api[_-]?key|secret|password|authorization|cookie|credential)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi;
-const BEARER = /\bbearer\s+[a-z0-9._~+/=-]+/gi;
-const JWT = /\beyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\b/g;
-const URL_PATTERN = /\b(?:https?|wss?):\/\/[^\s<>()]+/gi;
-const CREDENTIAL_SHAPE = /\b(?:sk|box|ghp|github_pat|xox[baprs])-[_a-zA-Z0-9-]{8,}\b/g;
+import { redactGenericRuntimeCredentials } from "./credentialRedaction";
 
 export type RuntimeVisibleTextRedactor = (value: string) => string;
 
@@ -38,12 +34,7 @@ export function createRuntimeVisibleTextRedactor(
     return exact.some((sensitive) => scrubbed.includes(sensitive)) ? "" : scrubbed;
   };
   return (value) => {
-    const redacted = removeExact(value)
-      .replace(URL_PATTERN, redactUrl)
-      .replace(BEARER, "Bearer [redacted]")
-      .replace(SECRET_ASSIGNMENT, (_match, key: string) => `${key}=[redacted]`)
-      .replace(JWT, "[token removed]")
-      .replace(CREDENTIAL_SHAPE, "[credential removed]");
+    const redacted = redactGenericRuntimeCredentials(removeExact(value), redactUrl);
     // Generic replacements are synthetic text too: a credential may equal "redacted",
     // "credential", or an entire marker. Prove the final result is exact-value-free.
     return removeExact(redacted);

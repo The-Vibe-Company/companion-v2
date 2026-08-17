@@ -227,6 +227,39 @@ describe("semantic Box command shims", () => {
     });
   });
 
+  it("preserves malformed Pi model capabilities so the production adapter rejects them", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    machine.daemon.status = "active";
+    machine.daemon.rpcReady = true;
+    machine.daemon.invocationId = "00000000000000000000000000000001";
+    machine.piController = {
+      start: vi.fn(),
+      restart: vi.fn(),
+      stop: vi.fn(),
+      handleRpc: vi.fn(async (command: Record<string, unknown>) => ({
+        type: "response",
+        command: command.type,
+        id: command.id,
+        success: true,
+        data: { model: { input: ["text", 7, null] } },
+      })),
+      respondExtensionUi: vi.fn(),
+      crash: vi.fn(),
+      setScenario: vi.fn(),
+      dispose: vi.fn(),
+    };
+
+    const result = await executeBoxCommand(machine, brokerShell({
+      id: "runtime-state-malformed",
+      type: "runtime_state",
+    }));
+
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      success: true,
+      data: { modelInput: ["text", 7, null] },
+    });
+  });
+
   it("correlates a Pi event emitted before the prompt acknowledgement", async () => {
     const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "ask_user" });
     machine.daemon.status = "active";

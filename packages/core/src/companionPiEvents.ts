@@ -1,11 +1,16 @@
 import {
   COMPANION_REASONING_MAX_CHARACTERS,
   COMPANION_TOOL_RUN_TIMEOUT_MS,
+  companionToolRunKind,
   type CompanionDecision,
   type CompanionDecisionKind,
   type CompanionToolRun,
   type CompanionToolRunKind,
   type CompanionTranscriptRole,
+} from "@companion/contracts";
+export {
+  COMPANION_TOOL_KIND_NAME_TABLE,
+  companionToolRunKind,
 } from "@companion/contracts";
 
 /** One control-plane transcript entry projected from the Pi RPC log; ordinals are assigned later. */
@@ -151,63 +156,6 @@ function hasToolCall(message: PiMessage): boolean {
 
 function truncate(content: string, limit = MAX_CONTENT_CHARACTERS): string {
   return content.length <= limit ? content : content.slice(0, limit) + TRUNCATION_SUFFIX;
-}
-
-/**
- * Tool names Pi and its harnesses use, grouped by what a run of them touches. Names are matched
- * whole first and then as a word inside a longer name, so `bash` and `run_bash_command` both read as
- * shell while an unfamiliar tool falls through to `tool` rather than being filed under a guess.
- */
-/**
- * The catalog in serializable form, exported because the staged Pi extension embeds it verbatim to
- * pick the longer shell execution deadline in the Box — the in-Box timer and the control-plane
- * settlement must classify a run's kind identically, priority order included.
- */
-export const COMPANION_TOOL_KIND_NAME_TABLE: ReadonlyArray<
-  readonly [CompanionToolRunKind, readonly string[]]
-> = [
-  ["computer", [
-    "computer", "computeruse", "desktop", "lux", "screenshot", "screencapture", "screen",
-    "click", "doubleclick", "rightclick", "type", "key", "press", "scroll", "drag", "mouse",
-    "cursor", "hover", "wait",
-  ]],
-  ["browse", [
-    "browse", "browser", "web", "websearch", "webfetch", "fetch", "search", "navigate", "goto",
-    "openurl", "url", "http", "https", "request", "curl", "crawl", "page",
-  ]],
-  ["shell", [
-    "bash", "sh", "zsh", "shell", "terminal", "exec", "execute", "run", "command", "cmd",
-    "process", "script", "python", "node", "npm", "pnpm", "git",
-  ]],
-  ["file", [
-    "file", "files", "read", "write", "edit", "editor", "patch", "apply", "applypatch", "create",
-    "delete", "remove", "move", "copy", "ls", "list", "dir", "glob", "grep", "find", "rg", "view",
-    "notebook", "strreplace", "replace", "insert", "open",
-  ]],
-];
-
-const TOOL_KIND_NAMES: ReadonlyArray<readonly [CompanionToolRunKind, ReadonlySet<string>]> =
-  COMPANION_TOOL_KIND_NAME_TABLE.map(([kind, names]) => [kind, new Set(names)] as const);
-
-/** Split a tool name into comparable words: `str_replace-editor` and `strReplaceEditor` agree. */
-function toolNameWords(name: string): string[] {
-  return name
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter(Boolean);
-}
-
-export function companionToolRunKind(name: string): CompanionToolRunKind {
-  const collapsed = name.toLowerCase().replace(/[^a-z0-9]/g, "");
-  for (const [kind, names] of TOOL_KIND_NAMES) {
-    if (names.has(collapsed)) return kind;
-  }
-  const words = toolNameWords(name);
-  for (const [kind, names] of TOOL_KIND_NAMES) {
-    if (words.some((word) => names.has(word))) return kind;
-  }
-  return "tool";
 }
 
 /** Runs whose effect is something a reader can see, and therefore worth one frame of the desktop. */

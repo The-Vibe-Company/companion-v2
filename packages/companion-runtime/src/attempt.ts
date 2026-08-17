@@ -1,18 +1,12 @@
 import {
   AmbiguousExternalEffectError,
-  RuntimeHandoffError,
   RuntimeInvariantError,
-  RuntimeShutdownError,
   safeErrorFromUnknown,
   safeRuntimeError,
 } from "./errors";
+import { mustAbandonRuntimeExecution } from "./executionControl";
 import { runtimeSucceeded, type RuntimeWorkDisposition } from "./handler";
-import {
-  LeaseAuthorizationDeniedError,
-  LeaseFenceLostError,
-  LeaseRenewalError,
-  type LeaseSession,
-} from "./leaseSession";
+import type { LeaseSession } from "./leaseSession";
 import { BOX_WARM_TTL_SECONDS } from "./operations";
 import {
   classifyPiJournalPage,
@@ -25,7 +19,6 @@ import type { RuntimeVisibleTextRedactor } from "./projectionRedaction";
 import { retryIdempotentLifecycle } from "./retry";
 import {
   RuntimeStoreIndeterminateError,
-  RuntimeStoreSerializationError,
 } from "./store";
 import type {
   AttemptRuntimeClaim,
@@ -107,6 +100,7 @@ async function material(context: AttemptContext): Promise<RuntimeWorkMaterial> {
     await context.deps.materialProvider.getMaterial({
       store: context.deps.store,
       fence: context.session.fence,
+      signal: context.session.signal,
     }));
   if (
     value.turnId !== context.claim.turnId
@@ -372,21 +366,11 @@ async function consumeEvents(
         },
       };
     }
-    if (classified.needsInput) return { kind: "release" };
     if (classified.settled) {
       return hasVisibleOutput ? runtimeSucceeded : explicitNoResponse();
     }
+    if (classified.needsInput) return { kind: "release" };
   }
-}
-
-function mustAbandonFence(error: unknown): boolean {
-  return error instanceof LeaseFenceLostError
-    || error instanceof LeaseRenewalError
-    || error instanceof LeaseAuthorizationDeniedError
-    || error instanceof RuntimeStoreSerializationError
-    || error instanceof RuntimeStoreIndeterminateError
-    || error instanceof RuntimeHandoffError
-    || error instanceof RuntimeShutdownError;
 }
 
 async function consumeAcceptedAttempt(
@@ -411,7 +395,7 @@ async function consumeAcceptedAttempt(
     }
     return await consumeEvents(context, hasVisibleOutput, redact);
   } catch (error) {
-    if (mustAbandonFence(error)) throw error;
+    if (mustAbandonRuntimeExecution(error)) throw error;
     // Once Pi accepted a prompt, an observation/validation/ACK failure cannot
     // safely be represented as a terminal failure that releases the ordered
     // queue. Preserve the specific safe code when one exists, and require an
@@ -464,27 +448,25 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           commandId,
         });
         let outcome;
+        let providerCallStarted = false;
         try {
-          outcome = await context.session.external(async (signal) =>
-            await context.deps.pi.prompt({
-              boxId: requiredRuntime(context).boxId,
+          outcome = await context.session.external(async (signal) => {
+            providerCallStarted = true;
+            return await context.deps.pi.prompt({
+              boxId: runtime.boxId,
               commandId: commandId!,
               attemptId: context.claim.workId,
               message: workMaterial.promptText!,
               signal,
-            }));
-        } catch {
-          await context.session.checkpoint({
-            nextCheckpoint: "dispatch_ambiguous",
-            commandId,
+            });
           });
+        } catch (error) {
+          if (!providerCallStarted || mustAbandonRuntimeExecution(error)) throw error;
+          await checkpointDispatchAmbiguous(context, commandId);
           throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
         }
         if (outcome.outcome === "ambiguous") {
-          await context.session.checkpoint({
-            nextCheckpoint: "dispatch_ambiguous",
-            commandId,
-          });
+          await checkpointDispatchAmbiguous(context, commandId);
           throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
         }
         if (outcome.outcome === "rejected") {
@@ -505,10 +487,7 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           };
         }
         if (outcome.invocationId !== runtime.piInvocationId) {
-          await context.session.checkpoint({
-            nextCheckpoint: "dispatch_ambiguous",
-            commandId,
-          });
+          await checkpointDispatchAmbiguous(context, commandId);
           throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
         }
         await context.session.checkpoint({
@@ -553,5 +532,22 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           action: "none",
         });
     }
+  }
+}
+
+async function checkpointDispatchAmbiguous(
+  context: AttemptContext,
+  commandId: string,
+): Promise<void> {
+  try {
+    await context.session.checkpoint({
+      nextCheckpoint: "dispatch_ambiguous",
+      commandId,
+    });
+  } catch (error) {
+    if (mustAbandonRuntimeExecution(error)) throw error;
+    // The prompt may already be on Pi. If even the ambiguity checkpoint cannot be classified,
+    // abandon this executor and let takeover inspect durable state; never settle it as replay-safe.
+    throw new RuntimeStoreIndeterminateError();
   }
 }

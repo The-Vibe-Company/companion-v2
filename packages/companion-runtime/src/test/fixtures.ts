@@ -3,6 +3,7 @@ import type {
   RuntimeBoxControl,
   RuntimeEngineDependencies,
   RuntimeEventProjector,
+  RuntimeMaterialProvider,
   RuntimePiControl,
   RuntimeResourceStager,
 } from "../ports";
@@ -319,8 +320,23 @@ export class MemoryRuntimeStore implements RuntimeStore {
     const next = input.expectedSequence + 1n;
     this.authorization.workCheckpointSequence = next;
     this.authorization.workCheckpoint = input.nextCheckpoint;
+    if (input.providerOperationId) {
+      this.authorization.providerOperationId = input.providerOperationId;
+    }
     if (input.piInvocationId) this.authorization.piInvocationId = input.piInvocationId;
     if (input.eventCursor !== undefined) this.authorization.eventCursor = input.eventCursor;
+    if (input.activityAt) {
+      this.authorization.inactivityDeadlineAt = new Date(input.activityAt.getTime() + 10 * 60_000);
+    }
+    if (input.unknownEventCount !== undefined) {
+      this.authorization.unknownEventCount = input.unknownEventCount;
+    }
+    if (input.malformedEventCount !== undefined) {
+      this.authorization.malformedEventCount = input.malformedEventCount;
+    }
+    if (input.oversizedEventCount !== undefined) {
+      this.authorization.oversizedEventCount = input.oversizedEventCount;
+    }
     if (input.nextCheckpoint === "dispatch_write_intent") {
       this.authorization.dispatchState = "write_intent";
       this.authorization.attemptStatus = "dispatching";
@@ -340,7 +356,7 @@ export class MemoryRuntimeStore implements RuntimeStore {
     return next;
   }
 
-  async observeInstance(_fence: LeaseFence, input: RuntimeObservationInput): Promise<bigint | null> {
+  async observeInstance(fence: LeaseFence, input: RuntimeObservationInput): Promise<bigint | null> {
     if (input.expectedSequence !== this.authorization.workCheckpointSequence) return null;
     const previousPiInvocationId = this.authorization.piInvocationId;
     this.observations.push(input);
@@ -376,6 +392,14 @@ export class MemoryRuntimeStore implements RuntimeStore {
       && input.piInvocationId !== undefined
       && input.piInvocationId !== previousPiInvocationId) {
       nextCheckpoint = "settings_applied";
+    } else if (kind === "delete" && current === "box_absence_observed"
+      && !input.boxId && input.boxState === "absent") {
+      nextCheckpoint = "box_absent";
+    } else if (kind === "delete" && current === "waiting_deleted"
+      && input.boxState === "absent") {
+      nextCheckpoint = "provider_deleted";
+    } else if (fence.workKind === "health" && current === "observing") {
+      nextCheckpoint = "observed";
     }
     if (nextCheckpoint) {
       const next = input.expectedSequence + 1n;
@@ -594,13 +618,14 @@ export function engineDependencies(input: {
   store: MemoryRuntimeStore;
   clock?: TestClock;
   ports?: FakePorts;
+  materialProvider?: RuntimeMaterialProvider;
 }): RuntimeEngineDependencies {
   const ports = input.ports ?? fakePorts(input.store);
   return {
     store: input.store,
     box: ports.box,
     pi: ports.pi,
-    materialProvider: {
+    materialProvider: input.materialProvider ?? {
       getMaterial: async () => ({ ...input.store.material }),
     },
     projectionRedactorFactory: {

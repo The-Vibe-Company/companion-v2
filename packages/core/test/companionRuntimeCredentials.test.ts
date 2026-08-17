@@ -106,6 +106,54 @@ describe("Runtime v2 credential material", () => {
     }, masterKey)).toThrow(CompanionRuntimeCredentialError);
   });
 
+  it.each([
+    {
+      label: "an untrusted token endpoint",
+      tokenEndpoint: "https://attacker.invalid/oauth/token",
+      resource: "https://mcp.linear.app/mcp",
+    },
+    {
+      label: "a mismatched resource",
+      tokenEndpoint: "https://mcp.linear.app/oauth/token",
+      resource: "https://mcp.linear.app/other",
+    },
+    {
+      label: "credentials embedded in the endpoint",
+      tokenEndpoint: "https://user:password@mcp.linear.app/oauth/token",
+      resource: "https://mcp.linear.app/mcp",
+    },
+  ])("rejects OAuth material with $label", ({ tokenEndpoint, resource }) => {
+    const envelope = encryptOpaqueValue({
+      orgId,
+      purpose: "companion-mcp-credential",
+      subjectId: `${accountId}:${mcpGeneration}`,
+      value: JSON.stringify({
+        kind: "oauth",
+        version: 1,
+        serverName: "app.linear/linear",
+        accessToken: "opaque-access",
+        refreshToken: "opaque-refresh",
+        accessExpiresAt: "2030-01-01T00:00:00.000Z",
+        scope: "read write",
+        tokenType: "Bearer",
+        tokenEndpoint,
+        resource,
+        client: {
+          clientId: "client-id",
+          clientSecret: null,
+          tokenEndpointAuthMethod: "none",
+        },
+      }),
+    }, masterKey);
+
+    expect(() => decryptCompanionMcpRuntimeCredential({
+      orgId,
+      accountId,
+      credentialGeneration: mcpGeneration,
+      envelope,
+    }, masterKey)).toThrow(expect.objectContaining({ code: "mcp_auth_invalid" }));
+  });
+
   it("rejects malformed plaintext behind a valid envelope with a stable error", () => {
     const envelope = encryptOpaqueValue({
       orgId,
