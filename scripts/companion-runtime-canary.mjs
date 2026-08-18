@@ -79,10 +79,12 @@ function imageExpectedText(raw) {
 }
 
 function releaseId(raw) {
-  const value = required({ COMPANION_CANARY_RELEASE_ID: raw }, "COMPANION_CANARY_RELEASE_ID");
+  const value = String(raw ?? "").trim();
   if (
-    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)
+    !value
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)
     || value === "unknown"
+    || value === "local"
     || value === "local-development"
   ) {
     throw new CompanionCanaryError("invalid_configuration", "release ID is invalid");
@@ -158,7 +160,7 @@ export function loadCompanionCanaryConfig(env = process.env, dependencies = {}) 
     imageUrl,
     imageExpectedText: expectedText,
     runLabel: runLabel(env, dependencies.randomUUID ?? randomUUID),
-    releaseId: releaseId(env.COMPANION_CANARY_RELEASE_ID),
+    releaseId: releaseId(env.COMPANION_CANARY_RELEASE_ID || env.GITHUB_SHA),
     pollIntervalMs: POLL_INTERVAL_MS,
     requestTimeoutMs: REQUEST_TIMEOUT_MS,
     coldReplyTimeoutMs: COLD_REPLY_TIMEOUT_MS,
@@ -606,7 +608,7 @@ export async function main(env = process.env) {
       phase: "configuration",
       status: "not_configured",
       code: safeErrorCode(error),
-      release_id: safeReleaseId(env.COMPANION_CANARY_RELEASE_ID),
+      release_id: safeReleaseId(env.COMPANION_CANARY_RELEASE_ID || env.GITHUB_SHA),
       cleanup: "not_started",
     });
     return 2;

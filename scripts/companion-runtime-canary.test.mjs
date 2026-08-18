@@ -224,12 +224,19 @@ test("configuration resolves the public image fixture without exposing credentia
     })),
     (error) => error instanceof CompanionCanaryError && error.code === "invalid_configuration",
   );
-  for (const sentinel of ["unknown", "local-development"]) {
+  for (const sentinel of ["unknown", "local", "local-development"]) {
     assert.throws(
       () => loadCompanionCanaryConfig(environment({ COMPANION_CANARY_RELEASE_ID: sentinel })),
       (error) => error instanceof CompanionCanaryError && error.code === "invalid_configuration",
     );
   }
+  assert.equal(
+    loadCompanionCanaryConfig(environment({
+      COMPANION_CANARY_RELEASE_ID: "",
+      GITHUB_SHA: "fc2cca3d7b4d23fbd49c9a8c736676f33ce1f5c9",
+    })).releaseId,
+    "fc2cca3d7b4d23fbd49c9a8c736676f33ce1f5c9",
+  );
 });
 
 test("runs cold reply, vision, stop, wake-on-send, and permanent cleanup over the API", async () => {

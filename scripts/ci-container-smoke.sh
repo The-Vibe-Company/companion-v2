@@ -110,7 +110,7 @@ runtime_id="$(docker run -d "${network_args[@]}" "${runtime_publish_args[@]}" \
   -e COMPANION_BOX_API_KEY="$runtime_box_key" \
   -e COMPANION_RUNTIME_DESKTOP_HMAC_SECRET="$runtime_hmac_secret" \
   -e COMPANION_SECRETS_MASTER_KEY=CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk= \
-  -e COMPANION_RELEASE_ID=container-smoke \
+  -e RAILWAY_GIT_COMMIT_SHA=container-smoke \
   -e COMPANION_API_URL="http://${container_peer_host}:18082" \
   -e S3_ENDPOINT=http://127.0.0.1:19000 \
   -e S3_REGION=us-east-1 \
