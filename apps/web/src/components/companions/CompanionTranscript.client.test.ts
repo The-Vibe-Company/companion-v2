@@ -151,6 +151,11 @@ let threads: Thread[] = [];
 
 function mount(
   value: Thread,
+  catalog?: {
+    skills?: Array<{ id: string; label: string }>;
+    plugins?: Array<{ id: string; label: string }>;
+    models?: Array<{ id: string; label: string }>;
+  },
   onSend: (content: string, id: string, files: readonly File[]) => Promise<boolean>
     = async () => true,
 ) {
@@ -164,6 +169,9 @@ function mount(
       thread: value,
       orgId: "org-1",
       busy: false,
+      skills: catalog?.skills,
+      plugins: catalog?.plugins,
+      models: catalog?.models,
       onSend,
       onThread: (next: Thread) => threads.push(next),
     }));
@@ -508,6 +516,93 @@ describe("a permission card in the thread", () => {
     expect(buttonNamed(container, "Allow")).toBeUndefined();
     expect(buttonNamed(container, "Deny")).toBeUndefined();
   });
+
+  it("attributes a config proposal to the Companion and names loaded resources", async () => {
+    const skillId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const unknownId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const container = mount(
+      thread([entry({
+        role: "decision",
+        event_id: "decision:config-1",
+        content: "Add skills",
+        decision: card({
+          request_id: "config-1",
+          kind: "config",
+          name: "config",
+          title: "injected title from Pi",
+          proposal: {
+            kind: "config",
+            add_skill_ids: [skillId, unknownId],
+            persona: "Keep answers short.",
+          },
+        }),
+      })]),
+      { skills: [{ id: skillId, label: "incident-summary" }] },
+    );
+
+    expect(container.textContent).toContain("Luna proposes these changes");
+    expect(container.textContent).toContain("incident-summary");
+    expect(container.textContent).toContain("a resource owned by another member");
+    expect(container.textContent).not.toContain("injected title from Pi");
+    expect(container.textContent).toContain("Persona");
+    const approve = buttonNamed(container, "Approve");
+    expect(approve).toBeDefined();
+    await act(async () => {
+      approve!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(decide).toHaveBeenCalledWith("org-1", companionId, "config-1", { action: "allow" });
+  });
+
+  it("keeps a config card pending and shows the error when approval fails", async () => {
+    decide.mockRejectedValueOnce(new Error("selected Companion Skill is unavailable"));
+    const container = mount(thread([entry({
+      role: "decision",
+      event_id: "decision:config-2",
+      content: "Add a skill",
+      decision: card({
+        request_id: "config-2",
+        kind: "config",
+        name: "config",
+        title: "Add a skill",
+        proposal: {
+          kind: "config",
+          add_skill_ids: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+        },
+      }),
+    })]));
+
+    await act(async () => {
+      buttonNamed(container, "Approve")!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+
+    expect(container.textContent).toContain("selected Companion Skill is unavailable");
+    expect(buttonNamed(container, "Approve")).toBeDefined();
+    expect(threads).toEqual([]);
+  });
+
+  it("sends a plugin connection request to Plugins instead of applying settings", () => {
+    const container = mount(thread([entry({
+      role: "decision",
+      event_id: "decision:config-3",
+      content: "Connect GitHub",
+      decision: card({
+        request_id: "config-3",
+        kind: "config",
+        name: "config",
+        title: "Connect GitHub",
+        proposal: {
+          kind: "config",
+          connect_plugin: { server_name: "github", reason: "Need issues" },
+        },
+      }),
+    })]));
+
+    expect(container.textContent).toContain("Connect");
+    expect(container.textContent).toContain("github");
+    const link = container.querySelector("a[href='/companions?view=plugins']");
+    expect(link?.textContent).toContain("Finish this connection in Plugins");
+  });
 });
 
 describe("Companion thread attachments", () => {
@@ -702,7 +797,7 @@ describe("Companion thread attachments", () => {
   });
 
   it("gives the files back to the composer when the send is refused", async () => {
-    const container = mount(thread([]), async () => false);
+    const container = mount(thread([]), undefined, async () => false);
     const picker = container.querySelector("input[type=file]") as HTMLInputElement;
     act(() => {
       Object.defineProperty(picker, "files", {

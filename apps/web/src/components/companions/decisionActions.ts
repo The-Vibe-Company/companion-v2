@@ -13,13 +13,24 @@ export type DecisionAction =
   | { action: "deny" }
   | { action: "answer"; answer: string };
 
+/** A name this surface already loaded. Config cards never print labels from the Pi payload. */
+export type DecisionNamedResource = { id: string; label: string };
+
 export interface DecisionActions {
   canAct: boolean;
+  companionName: string;
+  skills: readonly DecisionNamedResource[];
+  plugins: readonly DecisionNamedResource[];
+  models: readonly DecisionNamedResource[];
   onDecide: (requestId: string, input: DecisionAction) => Promise<void>;
 }
 
 export const DecisionActionsContext = createContext<DecisionActions>({
   canAct: false,
+  companionName: "Companion",
+  skills: [],
+  plugins: [],
+  models: [],
   onDecide: async () => undefined,
 });
 
