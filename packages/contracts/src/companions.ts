@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+import {
+  companionActiveTurnSchema,
+  companionInterruptedTurnSchema,
+  companionTurnSchema,
+} from "./companionRuntime";
+
 export const companionRuntimeStateSchema = z.enum([
   "not_created",
   "provisioning",
@@ -237,12 +243,14 @@ export const companionSchema = z.object({
    */
   last_message: companionLastMessageSchema.nullable().default(null),
   runtime: z.object({
+    /** Positive runtime identity generation. It is non-secret and safe in control-plane reads. */
+    generation: z.number().int().positive(),
     state: companionRuntimeStateSchema,
     daemon_state: companionDaemonStateSchema,
     box_id: z.string().nullable(),
     provider_ids: z.array(z.string()),
     provider_credential_generation: z.string().uuid().nullable(),
-    disk_layout_version: z.number().int().positive(),
+    disk_layout_version: z.number().int().nonnegative(),
     desktop_available: z.boolean(),
     /**
      * One sanitized line explaining an `error` state, so the surface never shows a bare status
@@ -469,6 +477,13 @@ export const companionThreadSchema = z.object({
   read_only: z.boolean(),
   can_send: z.boolean(),
   entries: z.array(companionTranscriptEntrySchema),
+  /** The one non-terminal turn currently owning Pi, if any. */
+  active_turn: companionActiveTurnSchema.nullable(),
+  /** Exact number of later turns still ordered in PostgreSQL. */
+  queued_count: z.number().int().nonnegative(),
+  /** The queue-blocking ambiguous turn that requires explicit Retry or Cancel, if any. */
+  interrupted_turn: companionInterruptedTurnSchema.nullable(),
+  /** Legacy pending-message count retained while older surfaces move to `queued_count`. */
   pending_count: z.number().int().nonnegative(),
   /** Correlated protocol-2 acceptance; absent while an older API replica serves the read. */
   accepted_delivery_ordinal: z.number().int().nonnegative().nullable().optional(),
@@ -504,10 +519,25 @@ export type CompanionClientSurface = z.infer<typeof companionClientSurfaceSchema
 
 export const sendCompanionMessageInputSchema = z.object({
   content: z.string().trim().min(1).max(16_384),
-  client_message_id: companionClientMessageIdSchema.optional(),
+  client_message_id: companionClientMessageIdSchema,
   client_surface: companionClientSurfaceSchema.default("web"),
 }).strict();
 export type SendCompanionMessageInput = z.infer<typeof sendCompanionMessageInputSchema>;
+
+export const sendCompanionMessageAcceptedResponseSchema = z.object({
+  turn: companionTurnSchema,
+}).strict();
+export type SendCompanionMessageAcceptedResponse = z.infer<
+  typeof sendCompanionMessageAcceptedResponseSchema
+>;
+
+export const cancelCompanionTurnAcceptedResponseSchema = z.object({
+  turn: companionTurnSchema,
+  thread: companionThreadSchema,
+}).strict();
+export type CancelCompanionTurnAcceptedResponse = z.infer<
+  typeof cancelCompanionTurnAcceptedResponseSchema
+>;
 
 export const createCompanionInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -750,55 +780,7 @@ export type SaveCompanionPluginInput = z.infer<typeof saveCompanionPluginInputSc
 
 export const startCompanionRuntimeInputSchema = z.object({
   client_surface: companionClientSurfaceSchema.default("web"),
-  mcp_credentials: z.array(companionMcpCredentialSchema).max(20).default([]),
-  mcp_accounts: z.array(companionMcpAccountSchema).max(50).default([]),
-}).strict().superRefine((input, context) => {
-  const seenEnvironmentKeys = new Set<string>();
-  input.mcp_credentials.forEach((credential, index) => {
-    if (seenEnvironmentKeys.has(credential.env_key)) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["mcp_credentials", index, "env_key"],
-        message: "credential env_key values must be unique",
-      });
-    }
-    seenEnvironmentKeys.add(credential.env_key);
-  });
-
-  const seenAccountIds = new Set<string>();
-  const seenLabels = new Set<string>();
-  input.mcp_accounts.forEach((account, index) => {
-    if (seenAccountIds.has(account.id)) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["mcp_accounts", index, "id"],
-        message: "MCP account ids must be unique",
-      });
-    }
-    if (seenLabels.has(account.label.toLocaleLowerCase("en-US"))) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["mcp_accounts", index, "label"],
-        message: "MCP account labels must be unique",
-      });
-    }
-    seenAccountIds.add(account.id);
-    seenLabels.add(account.label.toLocaleLowerCase("en-US"));
-
-    const referencedKeys = account.transport === "stdio"
-      ? Object.values(account.env)
-      : Object.values(account.headers);
-    referencedKeys.forEach((envKey) => {
-      if (!seenEnvironmentKeys.has(envKey)) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["mcp_accounts", index, account.transport === "stdio" ? "env" : "headers"],
-          message: `MCP environment reference ${envKey} has no matching mcp_credentials entry`,
-        });
-      }
-    });
-  });
-});
+}).strict();
 export type StartCompanionRuntimeInput = z.infer<typeof startCompanionRuntimeInputSchema>;
 
 export const companionProviderErrorSchema = z.object({

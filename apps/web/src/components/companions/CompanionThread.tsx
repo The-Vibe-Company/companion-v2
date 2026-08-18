@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { Companion, CompanionDesktop, CompanionThread as Thread } from "@companion/contracts";
+import { ApiFetchError } from "@/lib/apiClient";
 import { Icon } from "../Icon";
 import { CompanionContext, type CompanionContextSkill } from "./CompanionContext";
 import { CompanionTranscript } from "./CompanionTranscript";
@@ -20,6 +21,121 @@ export interface CompanionContextPanel {
   error: string | null;
   onToggle: () => void;
   onJoin: () => void;
+}
+
+function InterruptedTurnNotice({
+  turn,
+  canAct,
+  onRetry,
+  onCancel,
+}: {
+  turn: NonNullable<Thread["interrupted_turn"]>;
+  canAct: boolean;
+  onRetry: (turnId: string, retryId: string) => Promise<void>;
+  onCancel: (turnId: string) => Promise<void>;
+}) {
+  const titleId = useId();
+  const errorRef = useRef<HTMLParagraphElement>(null);
+  const retryIdRef = useRef<string | null>(null);
+  const [action, setAction] = useState<"retry" | "cancel" | null>(null);
+  const [retryAccepted, setRetryAccepted] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    retryIdRef.current = null;
+    setAction(null);
+    setRetryAccepted(false);
+    setActionError(null);
+  }, [turn.id, turn.latest_attempt?.id]);
+
+  useEffect(() => {
+    if (actionError) errorRef.current?.focus();
+  }, [actionError]);
+
+  const retry = async () => {
+    if (!canAct || action || retryAccepted) return;
+    const retryId = retryIdRef.current ?? crypto.randomUUID();
+    retryIdRef.current = retryId;
+    setAction("retry");
+    setActionError(null);
+    try {
+      await onRetry(turn.id, retryId);
+      setRetryAccepted(true);
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "This turn could not be retried.");
+    } finally {
+      setAction(null);
+    }
+  };
+
+  const cancel = async () => {
+    if (!canAct || action) return;
+    setAction("cancel");
+    setActionError(null);
+    try {
+      await onCancel(turn.id);
+    } catch (cause) {
+      setActionError(cause instanceof ApiFetchError && cause.status === 409
+        ? "The retry has already started, so it cannot be cancelled now. Wait for the turn to refresh."
+        : cause instanceof Error ? cause.message : "This turn could not be cancelled.");
+      setAction(null);
+    }
+  };
+
+  return (
+    <section
+      className="chat-interruption"
+      aria-labelledby={titleId}
+      aria-busy={action !== null || undefined}
+    >
+      <Icon name="alert-triangle" size={18} />
+      <div className="chat-interruption__body">
+        <h2 id={titleId}>Turn interrupted</h2>
+        <p>
+          {turn.error?.message ?? "The runtime lost a confirmed outcome for this turn."} External
+          actions may already have succeeded.
+        </p>
+        {!canAct ? (
+          <p className="chat-interruption__status">
+            An Owner or Editor must retry or cancel this turn before the queue can continue.
+          </p>
+        ) : (
+          <>
+            {retryAccepted ? (
+              <p className="chat-interruption__status" role="status">
+                Retry accepted. Pi will restart before this turn runs again.
+              </p>
+            ) : null}
+            <div className="chat-interruption__actions">
+              {!retryAccepted ? (
+                <button
+                  type="button"
+                  className="cds-btn cds-btn--primary cds-btn--sm"
+                  disabled={action !== null}
+                  onClick={() => void retry()}
+                >
+                  {action === "retry" ? "Requesting retry…" : "Retry turn"}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="cds-btn cds-btn--secondary cds-btn--sm"
+                disabled={action !== null}
+                onClick={() => void cancel()}
+              >
+                {action === "cancel" ? "Cancelling…" : "Cancel turn"}
+              </button>
+            </div>
+          </>
+        )}
+        {actionError ? (
+          <p ref={errorRef} className="chat-interruption__error" role="alert" tabIndex={-1}>
+            {actionError}
+          </p>
+        ) : null}
+      </div>
+    </section>
+  );
 }
 
 /**
@@ -51,7 +167,8 @@ export function CompanionThread({
   onSettings,
   onThread,
   onDesktop,
-  onComposeIntent,
+  onRetryInterrupted,
+  onCancelInterrupted,
 }: {
   companion: Companion;
   thread: Thread | null;
@@ -74,8 +191,8 @@ export function CompanionThread({
   onSettings: (() => void) | null;
   onThread: (thread: Thread) => void;
   onDesktop: () => void;
-  /** Fired as the reader types, so the surface can wake an asleep Box ahead of the send. */
-  onComposeIntent?: () => void;
+  onRetryInterrupted: (turnId: string, retryId: string) => Promise<void>;
+  onCancelInterrupted: (turnId: string) => Promise<void>;
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -94,11 +211,23 @@ export function CompanionThread({
   // A red status without a reason tells an operator nothing. The failure this request saw wins;
   // otherwise the reason recorded on the Companion explains an Error state across reloads.
   const notice = error ?? companion.runtime.last_error;
+  const interruptedTurn = thread?.interrupted_turn ?? null;
+  const previousInterruptedIdRef = useRef<string | null>(null);
 
   // Opening a thread unmounts the list control that was focused, so focus moves to this thread.
   useEffect(() => {
     headingRef.current?.focus();
   }, [companion.id]);
+
+  // Once Retry or Cancel releases the blocked turn, return keyboard users to the place work resumes.
+  useEffect(() => {
+    const previous = previousInterruptedIdRef.current;
+    previousInterruptedIdRef.current = interruptedTurn?.id ?? null;
+    if (!previous || interruptedTurn) return;
+    window.requestAnimationFrame(() => {
+      stageRef.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+    });
+  }, [interruptedTurn]);
 
   /**
    * Whether the panel comes over the conversation rather than sitting beside it. An overlay is
@@ -194,6 +323,7 @@ export function CompanionThread({
           </button>
         ) : (
           <span
+            role="img"
             className={`companions-state companions-state--${status.tone} chat-box`}
             aria-label={boxLabel}
             title={boxLabel}
@@ -229,6 +359,15 @@ export function CompanionThread({
 
       {notice && <div className="companions-error" role="alert">{notice}</div>}
 
+      {interruptedTurn ? (
+        <InterruptedTurnNotice
+          turn={interruptedTurn}
+          canAct={canSend}
+          onRetry={onRetryInterrupted}
+          onCancel={onCancelInterrupted}
+        />
+      ) : null}
+
       {/*
         The conversation and, for a runner, the context panel share the room below the header. A
         narrow screen has room for one of them, so there the panel comes over the conversation and
@@ -251,7 +390,6 @@ export function CompanionThread({
           openedThroughOrdinal={openedThroughOrdinal}
           onSend={onSend}
           onThread={onThread}
-          onComposeIntent={onComposeIntent}
         />
         {showContext && overlay && (
           <button

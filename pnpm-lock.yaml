@@ -55,6 +55,9 @@ importers:
       '@companion/box-runtime':
         specifier: workspace:*
         version: link:../../packages/box-runtime
+      '@companion/companion-runtime':
+        specifier: workspace:*
+        version: link:../../packages/companion-runtime
       '@companion/companion-skill':
         specifier: workspace:*
         version: link:../../packages/companion-skill

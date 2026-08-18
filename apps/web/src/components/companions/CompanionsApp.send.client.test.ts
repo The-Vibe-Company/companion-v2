@@ -79,6 +79,7 @@ const companion: Companion = {
   unread: false,
   last_message: null,
   runtime: {
+    generation: 1,
     state: "running",
     daemon_state: "running",
     box_id: "bx_23456789",
@@ -165,6 +166,7 @@ function controlPlane(
   let delivered = options.watermarkedPostTimeoutTail ? ordinal - 1 : -1;
   let accepted: number | null = null;
   let owed = 0;
+  let lastClientMessageId = "00000000-0000-4000-8000-000000000000";
   let replyReleased = !options.holdReply;
   let dropped = 0;
   let release = () => {};
@@ -175,6 +177,53 @@ function controlPlane(
     headers: { "content-type": "application/json" },
   });
 
+  const projectedTurn = (
+    status: "queued" | "running",
+  ): NonNullable<Thread["active_turn"]> => ({
+    id: "22222222-2222-4222-8222-222222222222",
+    companion_id: companionId,
+    client_message_id: lastClientMessageId,
+    status,
+    queue_sequence: 1,
+    latest_attempt: status === "running" ? {
+      id: "33333333-3333-4333-8333-333333333333",
+      turn_id: "22222222-2222-4222-8222-222222222222",
+      attempt_number: 1,
+      retry_id: null,
+      status: "running",
+      dispatch_state: "accepted",
+      pi_invocation_id: "pi-1",
+      dispatch_accepted_at: "2026-08-15T18:00:00.000Z",
+      error: null,
+      started_at: "2026-08-15T18:00:00.000Z",
+      settled_at: null,
+    } : null,
+    replying: status === "running",
+    error: null,
+    state_changed_at: "2026-08-15T18:00:00.000Z",
+    settled_at: null,
+    created_at: "2026-08-15T18:00:00.000Z",
+    updated_at: "2026-08-15T18:00:00.000Z",
+  });
+
+  const settleReplies = () => {
+    while (replyReleased && owed > 0) {
+      owed -= 1;
+      entries.push({
+        event_id: `pi:${entries.length}`,
+        ordinal: ordinal++,
+        role: "assistant",
+        content: "It's 2026.",
+        author_id: null,
+        author_name: null,
+        tool: null,
+        decision: null,
+        reasoning: null,
+        created_at: new Date().toISOString(),
+      });
+    }
+  };
+
   const thread = (requestedCompanionId = companionId): Thread => {
     const threadEntries = requestedCompanionId === companionId ? entries : [];
     return {
@@ -184,6 +233,9 @@ function controlPlane(
     read_only: false,
     can_send: true,
     entries: threadEntries.map((entry) => ({ ...entry })),
+    active_turn: owed > 0 ? projectedTurn("running") : null,
+    queued_count: threadEntries.filter((entry) => entry.role === "user" && entry.ordinal > delivered).length,
+    interrupted_turn: null,
     pending_count: threadEntries.filter((entry) => entry.role === "user" && entry.ordinal > delivered).length,
     accepted_delivery_ordinal: accepted,
     last_message_at: threadEntries.at(-1)?.created_at ?? null,
@@ -202,6 +254,7 @@ function controlPlane(
         client_message_id?: string;
       };
       sends.push({ content: body.content, clientMessageId: body.client_message_id });
+      lastClientMessageId = body.client_message_id ?? lastClientMessageId;
       const eventId = `msg:${body.client_message_id ?? String(sends.length)}`;
       if (!entries.some((entry) => entry.event_id === eventId)) {
         entries.push({
@@ -234,29 +287,17 @@ function controlPlane(
       }
       if (options.holdSend) await held;
       return json({
-        thread: thread(requestedCompanionId),
-        delivery: options.refuseDelivery ? "pending" : "delivered",
+        turn: projectedTurn("queued"),
       });
     }
     if (method === "POST" && url.endsWith("/thread/sync")) {
-      while (replyReleased && owed > 0) {
-        owed -= 1;
-        entries.push({
-          event_id: `pi:${entries.length}`,
-          ordinal: ordinal++,
-          role: "assistant",
-          content: "It's 2026.",
-          author_id: null,
-          author_name: null,
-          tool: null,
-    decision: null,
-          reasoning: null,
-          created_at: new Date().toISOString(),
-        });
-      }
+      settleReplies();
       return json({ thread: thread(requestedCompanionId), source: "box" });
     }
-    if (url.includes("/thread")) return json({ thread: thread(requestedCompanionId) });
+    if (url.includes("/thread")) {
+      settleReplies();
+      return json({ thread: thread(requestedCompanionId) });
+    }
     if (url.includes("/runtime")) return json({ companion: runtime, source: "control_plane" });
     return json({});
   });
@@ -314,11 +355,11 @@ async function pressEnter(container: HTMLElement) {
   });
 }
 
-/** Let the live thread poll tick, the way an open thread does every couple of seconds. */
+/** Let the active PostgreSQL thread projection poll at its three-second cadence. */
 async function poll(times: number) {
   for (let index = 0; index < times; index += 1) {
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(2_100);
+      await vi.advanceTimersByTimeAsync(3_100);
     });
   }
 }
@@ -380,6 +421,18 @@ describe("CompanionsApp send", () => {
       expect(api.sends[0]?.clientMessageId).toMatch(UUID);
     });
 
+    it("keeps the accepted message visible while its bounded ACK waits for the thread poll", async () => {
+      const container = await openThread();
+      type(container, "Keep this accepted message");
+
+      await pressEnter(container);
+
+      expect(container.querySelectorAll("[data-role='user']")).toHaveLength(1);
+      expect(container.textContent).toContain("Keep this accepted message");
+      expect(container.querySelector("[data-slot='composer-hint']")?.textContent)
+        .toBe("1 message is saved and queued.");
+    });
+
     it("keeps a refused ordinary send pending without claiming Pi is replying", async () => {
       api = controlPlane({ refuseDelivery: true });
       vi.stubGlobal("fetch", api.fetchMock);
@@ -390,7 +443,7 @@ describe("CompanionsApp send", () => {
       await poll(1);
 
       expect(container.querySelector("[data-slot='composer-hint']")?.textContent)
-        .toBe("1 message waiting for delivery.");
+        .toBe("1 message is saved and queued.");
       expect(container.querySelector("[data-slot='companion-replying']")).toBeNull();
     });
 
@@ -410,7 +463,7 @@ describe("CompanionsApp send", () => {
       await poll(1);
 
       expect(container.querySelector("[data-slot='composer-hint']")?.textContent)
-        .toBe("1 message waiting for delivery.");
+        .toBe("1 message is saved and queued.");
       expect(api.entries.some((entry) => entry.role === "assistant")).toBe(false);
       expect(container.textContent).toContain("read /tmp/conductor-cli.png");
       expect(container.textContent).toContain("timed out");

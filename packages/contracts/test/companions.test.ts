@@ -8,6 +8,8 @@ import {
   companionProviderOAuthStartInputSchema,
   companionDesktopSchema,
   companionLastMessageSchema,
+  companionMcpAccountSchema,
+  companionMcpCredentialSchema,
   companionMessageEventId,
   companionSchema,
   companionThreadSchema,
@@ -17,6 +19,7 @@ import {
   createCompanionInputSchema,
   saveCompanionProviderInputSchema,
   saveCompanionPluginInputSchema,
+  sendCompanionMessageAcceptedResponseSchema,
   sendCompanionMessageInputSchema,
   setCompanionWorkspaceShareInputSchema,
   startCompanionRuntimeInputSchema,
@@ -221,76 +224,55 @@ describe("Companion runtime injection contract", () => {
     })).toThrow();
   });
 
-  it("accepts labeled multi-account MCP configuration with transient credential references", () => {
-    const parsed = startCompanionRuntimeInputSchema.parse({
-      client_surface: "mobile_web",
-      mcp_credentials: [
-        { env_key: "GITHUB_PERSONAL", value: "personal-secret" },
-        { env_key: "GITHUB_WORK", value: "work-secret" },
-      ],
-      mcp_accounts: [
-        {
-          id: "github-personal",
-          label: "GitHub personal",
-          transport: "http",
-          url: "https://mcp.example.test/github",
-          headers: { Authorization: "GITHUB_PERSONAL" },
-        },
-        {
-          id: "github-work",
-          label: "GitHub work",
-          transport: "stdio",
-          command: "github-mcp-server",
-          env: { GITHUB_TOKEN: "GITHUB_WORK" },
-        },
-      ],
-    });
-
-    expect(parsed.client_surface).toBe("mobile_web");
-    expect(parsed.mcp_accounts).toHaveLength(2);
-  });
-
-  it("rejects duplicate labels and missing MCP credential references", () => {
-    const result = startCompanionRuntimeInputSchema.safeParse({
-      mcp_credentials: [],
-      mcp_accounts: [
-        {
-          id: "one",
-          label: "Work",
-          transport: "http",
-          url: "https://mcp.example.test/one",
-          headers: { Authorization: "MISSING_TOKEN" },
-        },
-        {
-          id: "two",
-          label: "work",
-          transport: "http",
-          url: "https://mcp.example.test/two",
-        },
-      ],
-    });
-
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error.issues.map((issue) => issue.message)).toEqual(expect.arrayContaining([
-        "MCP account labels must be unique",
-        "MCP environment reference MISSING_TOKEN has no matching mcp_credentials entry",
-      ]));
-    }
+  it("keeps internal MCP material schemas but removes that material from public start", () => {
+    expect(companionMcpCredentialSchema.parse({
+      env_key: "GITHUB_WORK",
+      value: "work-secret",
+    })).toMatchObject({ env_key: "GITHUB_WORK" });
+    expect(companionMcpAccountSchema.parse({
+      id: "github-work",
+      label: "GitHub work",
+      transport: "stdio",
+      command: "github-mcp-server",
+      env: { GITHUB_TOKEN: "GITHUB_WORK" },
+    })).toMatchObject({ transport: "stdio" });
+    expect(startCompanionRuntimeInputSchema.parse({ client_surface: "mobile_web" }))
+      .toEqual({ client_surface: "mobile_web" });
+    expect(() => startCompanionRuntimeInputSchema.parse({
+      client_surface: "web",
+      mcp_credentials: [{ env_key: "GITHUB_WORK", value: "must-not-enter-start" }],
+    })).toThrow();
+    expect(() => startCompanionRuntimeInputSchema.parse({
+      client_surface: "web",
+      mcp_accounts: [{ id: "github-work" }],
+    })).toThrow();
   });
 });
 
 describe("Companion chat contracts", () => {
+  const clientMessageId = "33333333-3333-4333-8333-333333333333";
+
   it("trims one message and rejects empty or oversized content", () => {
-    expect(sendCompanionMessageInputSchema.parse({ content: "  Ship it  " })).toEqual({
+    expect(sendCompanionMessageInputSchema.parse({
+      content: "  Ship it  ",
+      client_message_id: clientMessageId,
+    })).toEqual({
       content: "Ship it",
+      client_message_id: clientMessageId,
       client_surface: "web",
     });
-    expect(() => sendCompanionMessageInputSchema.parse({ content: "   " })).toThrow();
-    expect(() => sendCompanionMessageInputSchema.parse({ content: "x".repeat(16_385) })).toThrow();
+    expect(() => sendCompanionMessageInputSchema.parse({
+      content: "   ",
+      client_message_id: clientMessageId,
+    })).toThrow();
+    expect(() => sendCompanionMessageInputSchema.parse({
+      content: "x".repeat(16_385),
+      client_message_id: clientMessageId,
+    })).toThrow();
     // A thread carries no harness controls, so no client can smuggle tools into a message.
     expect(() => sendCompanionMessageInputSchema.parse({
       content: "Ship it",
+      client_message_id: clientMessageId,
       tools: ["bash"],
     })).toThrow();
   });
@@ -300,16 +282,18 @@ describe("Companion chat contracts", () => {
     // to survive parsing intact and anything that is not one is refused before persistence.
     expect(sendCompanionMessageInputSchema.parse({
       content: "Ship it",
-      client_message_id: "33333333-3333-4333-8333-333333333333",
+      client_message_id: clientMessageId,
     })).toEqual({
       content: "Ship it",
-      client_message_id: "33333333-3333-4333-8333-333333333333",
+      client_message_id: clientMessageId,
       client_surface: "web",
     });
     expect(sendCompanionMessageInputSchema.parse({
       content: "Ship it",
+      client_message_id: clientMessageId,
       client_surface: "native_mobile",
     }).client_surface).toBe("native_mobile");
+    expect(() => sendCompanionMessageInputSchema.parse({ content: "Ship it" })).toThrow();
     expect(() => sendCompanionMessageInputSchema.parse({
       content: "Ship it",
       client_message_id: "pi:512",
@@ -321,6 +305,25 @@ describe("Companion chat contracts", () => {
     // must agree and neither may be able to name an entry the Pi log will claim later.
     expect(companionMessageEventId("33333333-3333-4333-8333-333333333333"))
       .toBe("msg:33333333-3333-4333-8333-333333333333");
+  });
+
+  it("bounds the asynchronous send acknowledgement to the accepted turn", () => {
+    const turn = {
+      id: "22222222-2222-4222-8222-222222222222",
+      companion_id: "11111111-1111-4111-8111-111111111111",
+      client_message_id: clientMessageId,
+      status: "queued",
+      queue_sequence: 1,
+      latest_attempt: null,
+      replying: false,
+      error: null,
+      state_changed_at: "2026-08-17T00:00:00.000Z",
+      settled_at: null,
+      created_at: "2026-08-17T00:00:00.000Z",
+      updated_at: "2026-08-17T00:00:00.000Z",
+    };
+    expect(sendCompanionMessageAcceptedResponseSchema.parse({ turn })).toEqual({ turn });
+    expect(() => sendCompanionMessageAcceptedResponseSchema.parse({ turn, thread: {} })).toThrow();
   });
 
   it("describes one thread per Companion with its run boundary and message authors", () => {
@@ -347,6 +350,9 @@ describe("Companion chat contracts", () => {
         author_name: null,
         created_at: "2026-08-12T12:00:01.000Z",
       }],
+      active_turn: null,
+      queued_count: 0,
+      interrupted_turn: null,
       pending_count: 0,
       last_message_at: "2026-08-12T12:00:00.000Z",
     });
@@ -602,6 +608,7 @@ describe("Companion conversation-list contracts", () => {
     hidden: false,
     unread: false,
     runtime: {
+      generation: 1,
       state: "running",
       daemon_state: "running",
       box_id: "bx_23456789",
@@ -636,6 +643,25 @@ describe("Companion conversation-list contracts", () => {
     expect(withPreview.last_message?.preview).toBe("Drafted the launch note.");
     // A response that carries no preview — every mutation — parses to an explicit null.
     expect(companionSchema.parse(companion).last_message).toBeNull();
+  });
+
+  it("accepts layout zero before a Runtime v2 Box has been installed", () => {
+    expect(companionSchema.parse({
+      ...companion,
+      runtime: { ...companion.runtime, disk_layout_version: 0 },
+    }).runtime.disk_layout_version).toBe(0);
+    expect(() => companionSchema.parse({
+      ...companion,
+      runtime: { ...companion.runtime, disk_layout_version: -1 },
+    })).toThrow();
+  });
+
+  it("requires a positive runtime generation", () => {
+    expect(companionSchema.parse(companion).runtime.generation).toBe(1);
+    expect(() => companionSchema.parse({
+      ...companion,
+      runtime: { ...companion.runtime, generation: 0 },
+    })).toThrow();
   });
 
   it("carries only what a person or Pi said, in one bounded line", () => {

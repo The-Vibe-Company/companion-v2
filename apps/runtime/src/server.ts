@@ -7,7 +7,7 @@ import {
   DESKTOP_SIGNATURE_HEADER,
   DESKTOP_TIMESTAMP_HEADER,
   verifyDesktopRequest,
-} from "./desktopAuth";
+} from "@companion/companion-runtime";
 
 const DEFAULT_BODY_LIMIT_BYTES = 4 * 1024;
 const DEFAULT_HEALTH_PING_TIMEOUT_MS = 1_000;

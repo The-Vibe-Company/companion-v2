@@ -6,6 +6,7 @@ import type {
   CompanionProvidersResponse,
 } from "@companion/contracts";
 import type { RestartCompanionRuntimeInput } from "@companion/contracts/companion-runtime";
+import { ApiFetchError } from "@/lib/apiClient";
 import {
   deleteCompanion,
   getCompanionRuntime,
@@ -28,8 +29,6 @@ import { CompanionSkillsSyncStatus } from "./CompanionSkillsSyncStatus";
 const SKILLS_SYNC_POLL_MS = 3_000;
 /** A stalled apply stops moving on its own; cap the poll instead of reading forever. */
 const SKILLS_SYNC_POLL_MAX_TICKS = 40;
-
-const BOX_RESTART_RETRY_MS = 3_000;
 
 export function CompanionSettings({
   orgId,
@@ -63,9 +62,12 @@ export function CompanionSettings({
   const [confirmingBoxRestart, setConfirmingBoxRestart] = useState(false);
   const [restartTarget, setRestartTarget] = useState<RestartCompanionRuntimeInput["target"]>("pi");
   const [restarting, setRestarting] = useState<RestartCompanionRuntimeInput["target"] | null>(null);
+  const [pendingRestartTarget, setPendingRestartTarget] = useState<
+    RestartCompanionRuntimeInput["target"] | null
+  >(null);
   const [runtimeSnapshot, setRuntimeSnapshot] = useState(companion.runtime);
-  const [runtimeNeedsRefresh, setRuntimeNeedsRefresh] = useState(false);
   const [runtimeMessage, setRuntimeMessage] = useState<string | null>(null);
+  const [deletionRequested, setDeletionRequested] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [hidden, setHidden] = useState(companion.hidden);
@@ -73,23 +75,20 @@ export function CompanionSettings({
   // an apply is in flight on an awake Box a short poll keeps it moving without waking anything.
   const [latest, setLatest] = useState(companion);
   const syncReadRef = useRef(0);
-  const mounted = useRef(true);
+  const deleteRequestIdRef = useRef<string | null>(null);
+  const restartRequestIdRef = useRef<
+    Partial<Record<RestartCompanionRuntimeInput["target"], string>>
+  >({});
+  const onSavedRef = useRef(onSaved);
+  const onDeletedRef = useRef(onDeleted);
+  onSavedRef.current = onSaved;
+  onDeletedRef.current = onDeleted;
   const canEdit = companion.access === "owner" || companion.access === "editor";
   const canDelete = companion.access === "owner";
   const online = runtimeSnapshot.state === "running" && runtimeSnapshot.daemon_state === "running";
-  const deletionLocked = runtimeSnapshot.state === "stopping"
-    && runtimeSnapshot.daemon_state === "unknown";
-  const waitingOnArchive = runtimeSnapshot.state === "stopping" && !deletionLocked;
-  const archiving = waitingOnArchive
-    && runtimeSnapshot.daemon_state === "starting";
 
   useEffect(() => {
     setRuntimeSnapshot(companion.runtime);
-    setRuntimeNeedsRefresh(false);
-    if (
-      companion.runtime.state === "stopping"
-      && companion.runtime.daemon_state === "starting"
-    ) setRestartTarget("box");
   }, [companion.runtime]);
 
   useEffect(() => {
@@ -102,10 +101,51 @@ export function CompanionSettings({
     setLatest(companion);
   }, [companion]);
 
+  const lifecycleActive = pendingRestartTarget !== null
+    || runtimeSnapshot.state === "provisioning"
+    || runtimeSnapshot.state === "stopping";
+  useEffect(() => {
+    if (!lifecycleActive || deletionRequested) return;
+    let active = true;
+    const read = async () => {
+      try {
+        const next = await getCompanionRuntime(orgId, companion.id);
+        if (!active) return;
+        setError(null);
+        setRuntimeSnapshot(next.runtime);
+        setLatest(next);
+        onSavedRef.current(next);
+        if (pendingRestartTarget === null
+          || next.runtime.state === "provisioning"
+          || next.runtime.state === "stopping") return;
+        if (next.runtime.state === "error") {
+          setError(next.runtime.last_error ?? "The accepted restart failed. Retry when it is safe.");
+          setRuntimeMessage(null);
+        } else {
+          setRuntimeMessage(pendingRestartTarget === "pi"
+            ? "Pi restart completed."
+            : "Full Box restart completed.");
+        }
+        setPendingRestartTarget(null);
+      } catch (cause) {
+        if (!active) return;
+        setError(cause instanceof Error
+          ? `Restart status could not be refreshed: ${cause.message}`
+          : "Restart status could not be refreshed.");
+      }
+    };
+    const timer = setInterval(() => void read(), SKILLS_SYNC_POLL_MS);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [companion.id, deletionRequested, lifecycleActive, orgId, pendingRestartTarget]);
+
   const skillsPending = latest.runtime.skills_applied_revision < latest.runtime.skills_revision;
   // A recorded restage failure will not clear on its own — only the next start or save retries it —
   // so it stops the poll rather than reading the same answer forever.
   const skillsApplying = skillsPending
+    && !deletionRequested
     && !latest.runtime.skills_last_error
     && (latest.runtime.state === "provisioning" || latest.runtime.state === "running");
   useEffect(() => {
@@ -127,12 +167,37 @@ export function CompanionSettings({
     return () => clearInterval(interval);
   }, [skillsApplying, orgId, companion.id]);
 
+  // Permanent deletion is asynchronous. Keep this surface until PostgreSQL confirms the row is
+  // gone, so a queued operation is never presented as if external Box deletion already succeeded.
   useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
+    if (!deletionRequested) return;
+    let active = true;
+    const read = async () => {
+      try {
+        const next = await getCompanionRuntime(orgId, companion.id);
+        if (!active) return;
+        setError(null);
+        setRuntimeSnapshot(next.runtime);
+        setLatest(next);
+        onSavedRef.current(next);
+      } catch (cause) {
+        if (!active) return;
+        if (cause instanceof ApiFetchError && cause.status === 404) {
+          onDeletedRef.current(companion.id);
+          return;
+        }
+        setError(cause instanceof Error
+          ? `Deletion is still queued, but its status could not be refreshed: ${cause.message}`
+          : "Deletion is still queued, but its status could not be refreshed.");
+      }
     };
-  }, []);
+    void read();
+    const timer = setInterval(() => void read(), SKILLS_SYNC_POLL_MS);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [companion.id, deletionRequested, orgId]);
 
   const changed = useMemo(
     () =>
@@ -159,7 +224,7 @@ export function CompanionSettings({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!canEdit || !name.trim() || !providerId || !modelId || !changed) return;
+    if (!canEdit || deletionRequested || !name.trim() || !providerId || !modelId || !changed) return;
     setBusy(true);
     setError(null);
     setSaved(false);
@@ -196,131 +261,41 @@ export function CompanionSettings({
     if (!canDelete) return;
     setBusy(true);
     setError(null);
+    const requestId = deleteRequestIdRef.current ?? crypto.randomUUID();
+    deleteRequestIdRef.current = requestId;
     try {
-      await deleteCompanion(orgId, companion.id);
-      onDeleted(companion.id);
+      await deleteCompanion(orgId, companion.id, requestId);
+      deleteRequestIdRef.current = null;
+      setConfirmingDelete(false);
+      setDeletionRequested(true);
+      setRuntimeMessage(
+        "Deletion accepted. This Companion remains visible until its Box is permanently deleted.",
+      );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "This Companion could not be deleted.");
       setConfirmingDelete(false);
+    } finally {
       setBusy(false);
     }
   };
 
   const restart = async (target: RestartCompanionRuntimeInput["target"]) => {
-    if (!canEdit || changed || (!online && !(target === "box" && archiving))) return;
+    if (!canEdit || changed || !online || deletionRequested || pendingRestartTarget !== null) return;
     setBusy(true);
     setRestarting(target);
     setError(null);
     setRuntimeMessage(null);
+    const requestId = restartRequestIdRef.current[target] ?? crypto.randomUUID();
+    restartRequestIdRef.current[target] = requestId;
     try {
-      const continuation = target === "box" && archiving;
-      let updated = continuation
-        ? { ...companion, runtime: runtimeSnapshot }
-        : await restartCompanionRuntime(orgId, companion.id, { target });
-      while (
-        target === "box"
-        && (
-          updated.runtime.state === "stopping"
-          || updated.runtime.state === "provisioning"
-        )
-        && updated.runtime.daemon_state === "starting"
-      ) {
-        const competingResume = updated.runtime.state === "provisioning";
-        setRuntimeSnapshot(updated.runtime);
-        setRuntimeNeedsRefresh(false);
-        onSaved(updated);
-        setConfirmingBoxRestart(false);
-        setRuntimeMessage(competingResume
-          ? "The Box archive is ready. Companion is resuming automatically."
-          : "The Box is still archiving. Companion will resume automatically when the archive is ready.");
-        await new Promise((resolve) => setTimeout(resolve, BOX_RESTART_RETRY_MS));
-        if (!mounted.current) return;
-        try {
-          updated = await restartCompanionRuntime(orgId, companion.id, {
-            target,
-            continuation: true,
-          });
-        } catch (continuationError) {
-          // A continuation response can be lost while the server keeps the accepted restart marker
-          // (or even finishes the restart). Reconcile if possible; when that read also fails, retain
-          // the last confirmed marker and keep polling instead of abandoning automatic resume.
-          let latest: Companion | null = null;
-          try {
-            latest = await getCompanionRuntime(orgId, companion.id);
-          } catch {
-            // The last confirmed `stopping`/`starting` projection remains retryable.
-          }
-          if (!latest) continue;
-          setRuntimeSnapshot(latest.runtime);
-          setRuntimeNeedsRefresh(false);
-          onSaved(latest);
-          if (
-            (
-              latest.runtime.state === "stopping"
-              || latest.runtime.state === "provisioning"
-            )
-            && latest.runtime.daemon_state === "starting"
-          ) {
-            updated = latest;
-            continue;
-          }
-          if (
-            latest.runtime.state === "running"
-            && latest.runtime.daemon_state === "running"
-          ) {
-            updated = latest;
-            break;
-          }
-          throw new Error(
-            latest.runtime.last_error ??
-              (continuationError instanceof Error
-                ? continuationError.message
-                : "This Companion could not be restarted."),
-          );
-        }
-      }
-      if (
-        target === "pi"
-        && (updated.runtime.state === "stopping" || updated.runtime.state === "stopped")
-      ) {
-        setRuntimeSnapshot(updated.runtime);
-        setRuntimeNeedsRefresh(false);
-        onSaved(updated);
-        setRestartTarget("pi");
-        setRuntimeMessage(updated.runtime.state === "stopping"
-          ? "The Box began archiving before Pi could restart. It can be woken after the archive is ready."
-          : "The Box finished archiving before Pi could restart. Wake it to apply the saved settings.");
-        return;
-      }
-      if (
-        target === "box"
-        && (updated.runtime.state !== "running" || updated.runtime.daemon_state !== "running")
-      ) {
-        throw new Error(
-          updated.runtime.last_error ?? "The full Box restart did not return Online.",
-        );
-      }
-      setRuntimeSnapshot(updated.runtime);
-      setRuntimeNeedsRefresh(false);
-      onSaved(updated);
+      await restartCompanionRuntime(orgId, companion.id, { target }, requestId);
+      delete restartRequestIdRef.current[target];
+      setPendingRestartTarget(target);
       setRuntimeMessage(target === "pi"
-        ? "Pi restarted. The Box stayed online."
-        : "The full Box restarted and is online.");
+        ? "Pi restart accepted. It will run after earlier runtime work."
+        : "Full Box restart accepted. It will run after earlier runtime work.");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "This Companion could not be restarted.");
-      setRuntimeNeedsRefresh(true);
-      try {
-        // Restart can persist a corrected stopped/error projection before returning a failure. Read
-        // that projection without live Box access so Settings never keeps advertising an action the
-        // control plane has just proved unavailable.
-        const latest = await getCompanionRuntime(orgId, companion.id);
-        setRuntimeSnapshot(latest.runtime);
-        setRuntimeNeedsRefresh(false);
-        onSaved(latest);
-      } catch {
-        // Keep restart disabled when the projection itself cannot be reconciled. Reopening Settings
-        // creates a fresh view from the roster instead of inviting repeated conflicts.
-      }
     } finally {
       setBusy(false);
       setRestarting(null);
@@ -357,7 +332,7 @@ export function CompanionSettings({
               required
               maxLength={120}
               value={name}
-              disabled={!canEdit || busy}
+              disabled={!canEdit || busy || deletionRequested}
               onChange={(event) => {
                 setName(event.target.value);
                 setSaved(false);
@@ -372,7 +347,7 @@ export function CompanionSettings({
               maxLength={280}
               rows={4}
               value={instructions}
-              disabled={!canEdit || busy}
+              disabled={!canEdit || busy || deletionRequested}
               aria-describedby="companion-instructions-hint"
               onChange={(event) => {
                 setInstructions(event.target.value);
@@ -381,7 +356,7 @@ export function CompanionSettings({
             />
           </label>
           <p className="companions-settings__hint" id="companion-instructions-hint">
-            Applied the next time this Companion starts.
+            Applied after the active turn settles and before the next turn starts.
           </p>
 
           <CompanionProviderModelPicker
@@ -390,7 +365,7 @@ export function CompanionSettings({
             modelId={modelId}
             namePrefix="companion-settings"
             descriptionId="companion-provider-hint"
-            disabled={!canEdit || busy}
+            disabled={!canEdit || busy || deletionRequested}
             onChange={(selection) => {
               setProviderId(selection.providerId);
               setModelId(selection.modelId);
@@ -398,14 +373,14 @@ export function CompanionSettings({
             }}
           />
           <p className="companions-settings__hint" id="companion-provider-hint">
-            If Online, changing provider, model, skills, or plugins recycles Pi. The Box stays online.
+            Provider, model, skills, and plugin changes are applied in order between turns.
           </p>
 
           <CompanionSkillPicker
             orgId={orgId}
             selectedSkillIds={selectedSkillIds}
             canWriteSkills={canWriteSkills}
-            disabled={!canEdit || busy}
+            disabled={!canEdit || busy || deletionRequested}
             footer={<CompanionSkillsSyncStatus companion={latest} />}
             onSelectedSkillIdsChange={(ids) => {
               setSelectedSkillIds(ids);
@@ -420,7 +395,7 @@ export function CompanionSettings({
           <CompanionPluginPicker
             orgId={orgId}
             selectedMcpAccountIds={selectedMcpAccountIds}
-            disabled={!canEdit || busy}
+            disabled={!canEdit || busy || deletionRequested}
             onSelectedMcpAccountIdsChange={(ids) => {
               setSelectedMcpAccountIds(ids);
               setSaved(false);
@@ -432,7 +407,7 @@ export function CompanionSettings({
               <button
                 type="submit"
                 className="cds-btn cds-btn--primary cds-btn--md"
-                disabled={busy || !changed || !name.trim() || !providerId || !modelId}
+                disabled={busy || deletionRequested || !changed || !name.trim() || !providerId || !modelId}
               >
                 {busy ? "Saving..." : "Save changes"}
               </button>
@@ -449,7 +424,7 @@ export function CompanionSettings({
 
             <fieldset
               className="companions-settings__restart-options"
-              disabled={busy || changed || runtimeNeedsRefresh}
+              disabled={busy || changed || deletionRequested || pendingRestartTarget !== null}
               aria-describedby="restart-companion-hint"
             >
               <legend className="sr-only">Restart scope</legend>
@@ -473,35 +448,29 @@ export function CompanionSettings({
                   name="restart-target"
                   value="box"
                   checked={restartTarget === "box"}
-                  disabled={!online && !archiving}
+                  disabled={!online}
                   onChange={() => setRestartTarget("box")}
                 />
                 <span>
                   <strong>Full Box</strong>
-                  <small>Archives and resumes the server, interrupting active work.</small>
+                  <small>Restarts the server and interrupts active work.</small>
                 </span>
               </label>
             </fieldset>
 
             <div className="companions-settings__restart-action">
               <p className="companions-settings__hint" id="restart-companion-hint">
-                {runtimeNeedsRefresh
-                  ? "Runtime status could not be refreshed. Reopen Settings before trying again."
-                  : deletionLocked
-                    ? "Companion deletion is in progress. Runtime controls are unavailable."
-                    : restarting === "box"
-                      ? "Waiting for the Box archive to finish before Companion resumes."
-                      : waitingOnArchive
-                        ? archiving
-                          ? "The Box is archiving. Full Box restart will wait for the archive, then resume it."
-                          : "The Box is archiving. It can be woken after the archive is ready."
-                        : !online
-                          ? "This Companion must be Online before it can restart. Send a message to start it."
-                          : changed
-                            ? "Save your changes before restarting."
-                            : restartTarget === "pi"
-                              ? "Pi restarts with the saved provider, model, skills, and plugins."
-                              : "Full Box restart requires confirmation."}
+                {deletionRequested
+                  ? "Companion deletion is in progress. Runtime controls are unavailable."
+                  : pendingRestartTarget !== null
+                    ? "The accepted restart is still running. Status refreshes every three seconds."
+                  : !online
+                    ? "This Companion must be Online before it can restart. Send a message to start it."
+                    : changed
+                      ? "Save your changes before restarting."
+                      : restartTarget === "pi"
+                        ? "Pi restarts with the saved provider, model, skills, and plugins."
+                        : "Full Box restart requires confirmation."}
               </p>
               <button
                 type="button"
@@ -509,8 +478,9 @@ export function CompanionSettings({
                 disabled={
                   busy
                   || changed
-                  || runtimeNeedsRefresh
-                  || (!online && !(restartTarget === "box" && archiving))
+                  || deletionRequested
+                  || pendingRestartTarget !== null
+                  || !online
                 }
                 onClick={() => {
                   if (restartTarget === "box") setConfirmingBoxRestart(true);
@@ -521,6 +491,8 @@ export function CompanionSettings({
                   ? "Restarting Pi..."
                   : restarting === "box"
                     ? "Restarting Box..."
+                    : pendingRestartTarget !== null
+                      ? "Restart queued..."
                     : restartTarget === "pi"
                       ? "Restart Pi"
                       : "Restart full Box"}
@@ -538,7 +510,7 @@ export function CompanionSettings({
             <button
               type="button"
               className="cds-btn cds-btn--secondary cds-btn--md"
-              disabled={busy}
+              disabled={busy || deletionRequested}
               onClick={async () => {
                 setBusy(true);
                 setError(null);
@@ -564,15 +536,15 @@ export function CompanionSettings({
           <section className="companions-settings__danger" aria-labelledby="delete-companion-title">
             <div>
               <h2 id="delete-companion-title">Delete Companion</h2>
-              <p>Archives its Box and removes it permanently. This cannot be undone.</p>
+              <p>Permanently deletes its Box and transcript. This cannot be undone.</p>
             </div>
             <button
               type="button"
               className="cds-btn cds-btn--danger cds-btn--md"
-              disabled={busy}
+              disabled={busy || deletionRequested}
               onClick={() => setConfirmingDelete(true)}
             >
-              Delete Companion
+              {deletionRequested ? "Deletion requested" : "Delete Companion"}
             </button>
           </section>
         )}
@@ -582,7 +554,7 @@ export function CompanionSettings({
         <Dialog
           icon="trash-2"
           title={`Delete ${companion.name}?`}
-          desc="Its Box will be stopped and archived. This Companion cannot be restored."
+          desc="Its Box, thread, and Companion record will be permanently deleted after runtime confirmation. This cannot be undone."
           onClose={() => setConfirmingDelete(false)}
           closeDisabled={busy}
           className="og-dialog companions-delete-dialog"
@@ -613,7 +585,7 @@ export function CompanionSettings({
         <Dialog
           icon="refresh-cw"
           title={`Restart ${companion.name}'s full Box?`}
-          desc="This stops and archives the server before resuming it. Any active work is interrupted, but the Companion and its saved files remain."
+          desc="This queues a full server restart. Any active work is interrupted, but the Companion and its saved files remain."
           onClose={() => setConfirmingBoxRestart(false)}
           closeDisabled={busy}
           className="og-dialog companions-restart-dialog"

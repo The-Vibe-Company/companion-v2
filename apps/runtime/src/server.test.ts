@@ -7,7 +7,7 @@ import {
   DESKTOP_SIGNATURE_HEADER,
   DESKTOP_TIMESTAMP_HEADER,
   signDesktopRequest,
-} from "./desktopAuth";
+} from "@companion/companion-runtime";
 import {
   createRuntimeHttpServer,
   type RuntimeHttpServer,

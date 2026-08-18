@@ -54,6 +54,7 @@ const companion: Companion = {
   unread: false,
   last_message: null,
   runtime: {
+    generation: 1,
     state: "running",
     daemon_state: "running",
     box_id: "bx_23456789",
@@ -86,6 +87,9 @@ function thread(entries: CompanionTranscriptEntry[], overrides: Partial<Thread> 
     last_message_at: null,
     last_read_ordinal: null,
     ...overrides,
+    active_turn: overrides.active_turn ?? null,
+    queued_count: overrides.queued_count ?? 0,
+    interrupted_turn: overrides.interrupted_turn ?? null,
   };
 }
 

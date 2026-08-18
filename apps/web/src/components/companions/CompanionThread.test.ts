@@ -5,6 +5,62 @@ import { describe, expect, it } from "vitest";
 import { CompanionThread, type CompanionContextPanel } from "./CompanionThread";
 
 const companionId = "11111111-1111-4111-8111-111111111111";
+const turnId = "22222222-2222-4222-8222-222222222222";
+const now = "2026-08-12T12:01:00.000Z";
+
+function activeTurn(
+  status: "starting" | "dispatching" | "running" | "needs_input",
+  replying = false,
+): NonNullable<Thread["active_turn"]> {
+  const accepted = status === "running" && replying;
+  return {
+    id: turnId,
+    companion_id: companionId,
+    client_message_id: "33333333-3333-4333-8333-333333333333",
+    status,
+    queue_sequence: 1,
+    latest_attempt: {
+      id: "44444444-4444-4444-8444-444444444444",
+      turn_id: turnId,
+      attempt_number: 1,
+      retry_id: null,
+      status,
+      dispatch_state: accepted ? "accepted" : "pending",
+      pi_invocation_id: accepted ? "pi-1" : null,
+      dispatch_accepted_at: accepted ? now : null,
+      error: null,
+      started_at: now,
+      settled_at: null,
+    },
+    replying,
+    error: null,
+    state_changed_at: now,
+    settled_at: null,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+function interruptedTurn(): NonNullable<Thread["interrupted_turn"]> {
+  return {
+    id: turnId,
+    companion_id: companionId,
+    client_message_id: "33333333-3333-4333-8333-333333333333",
+    status: "interrupted",
+    queue_sequence: 1,
+    latest_attempt: null,
+    replying: false,
+    error: {
+      code: "dispatch_ambiguous",
+      message: "Pi acknowledgement was not confirmed.",
+      action: "retry",
+    },
+    state_changed_at: now,
+    settled_at: now,
+    created_at: now,
+    updated_at: now,
+  };
+}
 
 function companion(overrides: Partial<Companion> = {}): Companion {
   return {
@@ -22,6 +78,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
     unread: false,
     last_message: null,
     runtime: {
+      generation: 1,
       state: "running",
       daemon_state: "running",
       box_id: "bx_23456789",
@@ -81,6 +138,9 @@ function thread(overrides: Partial<Thread> = {}): Thread {
     last_message_at: "2026-08-12T12:01:20.000Z",
     last_read_ordinal: null,
     ...overrides,
+    active_turn: overrides.active_turn ?? null,
+    queued_count: overrides.queued_count ?? 0,
+    interrupted_turn: overrides.interrupted_turn ?? null,
   };
 }
 
@@ -121,6 +181,8 @@ function render(props: {
     onSettings: () => {},
     onThread: () => {},
     onDesktop: () => {},
+    onRetryInterrupted: async () => {},
+    onCancelInterrupted: async () => {},
   }));
 }
 
@@ -258,32 +320,29 @@ describe("CompanionThread", () => {
     expect(render({})).not.toContain(">Wake<");
   });
 
-  it("tells a runner how to retry saved messages without offering a wake", () => {
-    const markup = render({ companion: asleep, thread: thread({ pending_count: 2 }) });
+  it("reports durable queued messages without offering a wake", () => {
+    const markup = render({ companion: asleep, thread: thread({ queued_count: 2 }) });
 
-    expect(markup).toContain("2 messages saved. Send another message to retry delivery.");
+    expect(markup).toContain("2 messages are saved and queued.");
     expect(markup).not.toContain(">Wake<");
   });
 
-  it("reports whether delivery is waiting on Pi or for startup", () => {
-    // The footer reads the projected runtime the status chip reads, so a Companion a send has just
-    // woken says what its messages are waiting for instead of asking to be woken again.
-    const waiting = thread({ pending_count: 1 });
+  it("reports an active turn from its durable state", () => {
+    const waiting = thread({ active_turn: activeTurn("running", true) });
     const running = render({ thread: waiting });
 
-    expect(running).toContain("1 message waiting for delivery.");
-    expect(running).not.toContain("retry delivery");
+    expect(running).toContain("Luna is working on this turn.");
+    expect(running).toContain("Luna is replying...");
 
     const starting = render({
       companion: companion({
         runtime: { ...companion().runtime, state: "provisioning", daemon_state: "starting" },
       }),
-      thread: waiting,
+      thread: thread({ active_turn: activeTurn("starting") }),
     });
 
     expect(text(starting)).toContain("Starting");
-    expect(starting).toContain("1 message saved. Luna is starting to deliver.");
-    expect(starting).not.toContain("retry delivery");
+    expect(starting).toContain("Luna is starting this turn.");
   });
 
   it("keeps a Viewer's footer read-only even while messages are waiting on a wake", () => {
@@ -301,6 +360,33 @@ describe("CompanionThread", () => {
     expect(markup).toContain("Viewer access is read-only");
     expect(markup).not.toContain("retry delivery");
     expect(markup).not.toContain(">Wake<");
+  });
+
+  it("makes an interrupted turn explicit and actionable for a runner", () => {
+    const markup = render({ thread: thread({ interrupted_turn: interruptedTurn() }) });
+
+    expect(markup).toContain("Turn interrupted");
+    expect(markup).toContain("Pi acknowledgement was not confirmed.");
+    expect(markup).toContain("External actions may already have succeeded.");
+    expect(markup).toContain("Retry turn");
+    expect(markup).toContain("Cancel turn");
+  });
+
+  it("keeps an interrupted turn read-only for a Viewer", () => {
+    const markup = render({
+      companion: companion({ access: "viewer" }),
+      thread: thread({
+        viewer_id: "user-9",
+        access: "viewer",
+        read_only: true,
+        can_send: false,
+        interrupted_turn: interruptedTurn(),
+      }),
+    });
+
+    expect(markup).toContain("An Owner or Editor must retry or cancel this turn");
+    expect(markup).not.toContain("Retry turn");
+    expect(markup).not.toContain("Cancel turn");
   });
 
   it("explains an Error status to a runner with the reason the API recorded", () => {
@@ -465,17 +551,17 @@ describe("CompanionThread", () => {
     expect(markup).toContain("Checking the changelog before answering.");
   });
 
-  it("says a running Box owes a reply while the transcript ends on a member's message", () => {
+  it("shows replying only for a durably acknowledged running attempt", () => {
     const awaiting = thread({
       entries: [thread().entries[0]!],
-      pending_count: 0,
-      accepted_delivery_ordinal: 0,
+      active_turn: activeTurn("running", true),
     });
 
     expect(render({ thread: awaiting })).toContain("is replying...");
-    // A sleeping Box owes nothing until it is woken, and the composer hint says so instead.
-    expect(render({ companion: asleep, thread: awaiting })).not.toContain("is replying...");
-    // A reply that already landed ends the wait.
+    // Box state and transcript shape do not override the durable ACK fact.
+    expect(render({ companion: asleep, thread: awaiting })).toContain("is replying...");
+    expect(render({ thread: thread({ active_turn: activeTurn("dispatching") }) }))
+      .not.toContain("is replying...");
     expect(render({})).not.toContain("is replying...");
   });
 

@@ -113,6 +113,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
       created_at: "2026-08-14T09:05:00.000Z",
     },
     runtime: {
+      generation: 1,
       state: "stopped",
       daemon_state: "stopped",
       box_id: null,
@@ -147,6 +148,9 @@ function thread(overrides: Partial<Thread> = {}): Thread {
     last_message_at: null,
     last_read_ordinal: null,
     ...overrides,
+    active_turn: overrides.active_turn ?? null,
+    queued_count: overrides.queued_count ?? 0,
+    interrupted_turn: overrides.interrupted_turn ?? null,
   };
 }
 

@@ -77,6 +77,7 @@ const asleep: Companion = {
   unread: false,
   last_message: null,
   runtime: {
+    generation: 1,
     state: "stopped",
     daemon_state: "stopped",
     box_id: null,
@@ -110,6 +111,7 @@ function controlPlane(options: { piAcceptsOnWake: boolean; holdSend?: boolean })
   let ordinal = 0;
   let delivered = -1;
   let owed = 0;
+  let lastClientMessageId = "00000000-0000-4000-8000-000000000000";
   let release = () => {};
   const held = new Promise<void>((resolve) => { release = resolve; });
 
@@ -120,6 +122,35 @@ function controlPlane(options: { piAcceptsOnWake: boolean; holdSend?: boolean })
 
   const companion = (): Companion => ({ ...asleep, runtime: { ...runtime } });
 
+  const projectedTurn = (
+    status: "queued" | "running",
+  ): NonNullable<Thread["active_turn"]> => ({
+    id: "22222222-2222-4222-8222-222222222222",
+    companion_id: companionId,
+    client_message_id: lastClientMessageId,
+    status,
+    queue_sequence: 1,
+    latest_attempt: status === "running" ? {
+      id: "33333333-3333-4333-8333-333333333333",
+      turn_id: "22222222-2222-4222-8222-222222222222",
+      attempt_number: 1,
+      retry_id: null,
+      status: "running",
+      dispatch_state: "accepted",
+      pi_invocation_id: "pi-1",
+      dispatch_accepted_at: "2026-08-15T18:00:00.000Z",
+      error: null,
+      started_at: "2026-08-15T18:00:00.000Z",
+      settled_at: null,
+    } : null,
+    replying: status === "running",
+    error: null,
+    state_changed_at: "2026-08-15T18:00:00.000Z",
+    settled_at: null,
+    created_at: "2026-08-15T18:00:00.000Z",
+    updated_at: "2026-08-15T18:00:00.000Z",
+  });
+
   const thread = (): Thread => ({
     companion_id: companionId,
     viewer_id: "user-1",
@@ -127,6 +158,11 @@ function controlPlane(options: { piAcceptsOnWake: boolean; holdSend?: boolean })
     read_only: false,
     can_send: true,
     entries: entries.map((entry) => ({ ...entry })),
+    active_turn: owed > 0 ? projectedTurn("running") : null,
+    queued_count: entries
+      .filter((entry) => entry.role === "user")
+      .filter((entry) => entry.ordinal > delivered).length,
+    interrupted_turn: null,
     pending_count: entries
       .filter((entry) => entry.role === "user" && entry.ordinal > delivered).length,
     last_message_at: entries.at(-1)?.created_at ?? null,
@@ -156,6 +192,24 @@ function controlPlane(options: { piAcceptsOnWake: boolean; holdSend?: boolean })
     owed += pending.length;
   };
 
+  const settleReplies = () => {
+    while (owed > 0) {
+      owed -= 1;
+      entries.push({
+        event_id: `pi:${entries.length}`,
+        ordinal: ordinal++,
+        role: "assistant",
+        content: "On it.",
+        author_id: null,
+        author_name: null,
+        tool: null,
+        decision: null,
+        reasoning: null,
+        created_at: new Date().toISOString(),
+      });
+    }
+  };
+
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
@@ -166,6 +220,7 @@ function controlPlane(options: { piAcceptsOnWake: boolean; holdSend?: boolean })
         client_message_id?: string;
       };
       const eventId = `msg:${body.client_message_id ?? String(entries.length)}`;
+      lastClientMessageId = body.client_message_id ?? lastClientMessageId;
       if (!entries.some((entry) => entry.event_id === eventId)) {
         entries.push({
           event_id: eventId,
@@ -185,33 +240,22 @@ function controlPlane(options: { piAcceptsOnWake: boolean; holdSend?: boolean })
       if (options.holdSend) await held;
       if (options.piAcceptsOnWake) deliverPending();
       return json({
-        thread: thread(),
-        delivery: options.piAcceptsOnWake ? "delivered" : "pending",
+        turn: projectedTurn("queued"),
       });
     }
     if (method === "POST" && url.endsWith("/thread/sync")) {
       deliverPending();
-      while (owed > 0) {
-        owed -= 1;
-        entries.push({
-          event_id: `pi:${entries.length}`,
-          ordinal: ordinal++,
-          role: "assistant",
-          content: "On it.",
-          author_id: null,
-          author_name: null,
-          tool: null,
-    decision: null,
-          reasoning: null,
-          created_at: new Date().toISOString(),
-        });
-      }
+      settleReplies();
       return json({ thread: thread(), source: "box" });
     }
     if (url.includes("/runtime")) {
       return json({ companion: companion(), source: url.includes("live=true") ? "box" : "control_plane" });
     }
-    if (url.includes("/thread")) return json({ thread: thread() });
+    if (url.includes("/thread")) {
+      deliverPending();
+      settleReplies();
+      return json({ thread: thread() });
+    }
     return json({});
   });
 
@@ -300,7 +344,7 @@ describe("CompanionsApp wake on send", () => {
     await send(container, "Draft the launch note");
 
     expect(footer(container)).not.toContain("Wake Luna to deliver.");
-    expect(footer(container)).toContain("1 message waiting for delivery.");
+    expect(footer(container)).toContain("1 message is saved and queued.");
     expect(chip(container)).toContain("Online");
     expect(api.runtimeReads()).toBeGreaterThan(0);
 
@@ -325,7 +369,8 @@ describe("CompanionsApp wake on send", () => {
 
     expect(wakeControls(container)).toHaveLength(0);
     expect(chip(container)).toContain("Online");
-    expect(footer(container)).toContain("Enter sends");
+    // The bounded enqueue ACK is queued; only a later PostgreSQL poll may claim Pi accepted it.
+    expect(footer(container)).toContain("1 message is saved and queued.");
 
     // A woken thread pulls Pi, so the reply arrives on the live cadence instead of on a reload.
     await poll(1);

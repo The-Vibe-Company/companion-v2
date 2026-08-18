@@ -31,6 +31,7 @@ function companion(overrides: {
     unread: false,
     last_message: null,
     runtime: {
+      generation: 1,
       state: overrides.state ?? "stopped",
       daemon_state: "stopped",
       box_id: "bx_23456789",

@@ -76,6 +76,7 @@ const runningCompanion: Companion = {
   unread: false,
   last_message: null,
   runtime: {
+    generation: 1,
     state: "running",
     daemon_state: "running",
     box_id: "bx_23456789",
@@ -103,6 +104,9 @@ const emptyThread: Thread = {
   read_only: false,
   can_send: true,
   entries: [],
+  active_turn: null,
+  queued_count: 1,
+  interrupted_turn: null,
   pending_count: 0,
   last_message_at: null,
   last_read_ordinal: null,
@@ -209,21 +213,21 @@ describe("CompanionsApp when thread polls stop answering", () => {
   it("backs the poll cadence off while failing instead of hammering a dead network", async () => {
     const container = await openThread();
     await wait(4);
-    const syncsBeforeDrop = api.fetchMock.mock.calls
-      .filter(([url]) => String(url).endsWith("/thread/sync")).length;
+    const readsBeforeDrop = api.fetchMock.mock.calls
+      .filter(([url]) => String(url).endsWith("/thread")).length;
 
     api.drop();
     // Second-by-second so each failed poll's state lands before the next timer fires, the way real
     // time does; one sixty-second leap would fire the stale cadence without ever re-arming it.
     for (let second = 0; second < 60; second += 1) await wait(1);
     expect(reconnecting(container)).toContain("Reconnecting");
-    const syncsWhileDown = api.fetchMock.mock.calls
-      .filter(([url]) => String(url).endsWith("/thread/sync")).length - syncsBeforeDrop;
+    const readsWhileDown = api.fetchMock.mock.calls
+      .filter(([url]) => String(url).endsWith("/thread")).length - readsBeforeDrop;
 
     // Sixty seconds at the live cadence would be ~30 requests; the backed-off cadence stays in the
     // single digits without ever stopping entirely.
-    expect(syncsWhileDown).toBeGreaterThan(2);
-    expect(syncsWhileDown).toBeLessThan(15);
+    expect(readsWhileDown).toBeGreaterThan(2);
+    expect(readsWhileDown).toBeLessThan(15);
   });
 
   it("revalidates immediately when the network comes back", async () => {

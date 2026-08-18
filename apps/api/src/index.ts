@@ -138,7 +138,7 @@ import {
   SkillPublicReleaseValidationError,
 } from "@companion/core/services";
 import {
-  bumpCompanionSkillsRevisionForSkill,
+  bumpCompanionSkillRevisionV2,
   describeSkillDatabase,
   executeSkillDatabaseStatement,
   getCurrentSkillDatabaseDeclaration,
@@ -2166,7 +2166,7 @@ app.post("/v1/skills/:slug/rename", async (c) => {
         // Boxes stage the skill under its slug, so a rename changes their effective tree too. This
         // desired-state invalidation is durable even while execution is disabled: otherwise a Box
         // that was current before the kill switch would remain falsely current after re-enable.
-        await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: renamed.id, database });
+        await bumpCompanionSkillRevisionV2({ orgId, skillId: renamed.id, database });
         return renamed;
       },
       true,
@@ -2616,7 +2616,7 @@ app.post("/v1/skills/:slug/archive", async (c) => {
         });
         // Archiving removes the skill from every selector's staged set on its next start. Persist
         // that invalidation while runtime claims are disabled so re-enable cannot miss the restage.
-        await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: archived.id, database });
+        await bumpCompanionSkillRevisionV2({ orgId, skillId: archived.id, database });
       },
       true,
     );
@@ -2635,7 +2635,7 @@ app.post("/v1/skills/:slug/restore", async (c) => {
       c,
       async ({ actor, orgId, database }) => {
         const restored = await restoreSkill({ actor, orgId, slug: c.req.param("slug"), database });
-        await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: restored.id, database });
+        await bumpCompanionSkillRevisionV2({ orgId, skillId: restored.id, database });
       },
       true,
     );

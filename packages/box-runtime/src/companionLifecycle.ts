@@ -577,10 +577,10 @@ export async function startCompanionRuntime(
       waitForArchive,
       mcpCredentials: body.client_surface === "native_mobile"
         ? []
-        : [...mutation.plugins.credentials, ...body.mcp_credentials],
+        : mutation.plugins.credentials,
       mcpAccounts: body.client_surface === "native_mobile"
         ? []
-        : [...mutation.plugins.accounts, ...body.mcp_accounts],
+        : mutation.plugins.accounts,
       skills,
       hubEnv: mutation.hubEnv,
       onArchiveReady: persistStartProgress,

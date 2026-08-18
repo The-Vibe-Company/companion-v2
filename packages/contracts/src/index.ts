@@ -20,5 +20,6 @@ export * from "./github";
 export * from "./agentOperations";
 export * from "./skillDatabase";
 export * from "./companions";
+export * from "./companionRuntime";
 export * from "./companionPluginCatalog";
 export * from "./companionToolKinds";

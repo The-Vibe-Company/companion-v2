@@ -86,6 +86,7 @@ export function createRuntimeKernel(input: CreateRuntimeKernelInput): RuntimeKer
 export * from "./attempt";
 export * from "./clock";
 export * from "./decision";
+export * from "./desktopAuth";
 export * from "./engine";
 export * from "./errors";
 export * from "./executionControl";

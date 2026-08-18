@@ -1457,7 +1457,7 @@
 .chat-box.companions-state--warn {
   border-color: var(--color-warn-line);
   background: var(--color-warn-tint);
-  color: var(--color-warn);
+  color: var(--color-fg);
 }
 
 .chat-box.companions-state--danger {
@@ -1506,6 +1506,76 @@ button.chat-box:focus-visible {
 .chat .companions-error {
   flex: none;
   margin: 12px var(--chat-gutter) 0;
+}
+
+/* An ambiguous turn blocks ordered work until a runner chooses. It is a full-width warning in the
+   conversation flow, not a floating card, so the relationship to the blocked thread stays clear. */
+.chat-interruption {
+  flex: none;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 12px var(--chat-gutter);
+  border-bottom: 1px solid var(--color-warn-line);
+  background: var(--color-warn-tint);
+  color: var(--color-fg);
+}
+
+.chat-interruption > svg {
+  margin-top: 1px;
+  color: var(--color-warn);
+}
+
+.chat-interruption__body {
+  min-width: 0;
+}
+
+.chat-interruption h2,
+.chat-interruption p {
+  margin: 0;
+}
+
+.chat-interruption h2 {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight);
+}
+
+.chat-interruption p {
+  margin-top: 3px;
+  max-width: 76ch;
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+  line-height: var(--leading-relaxed);
+  overflow-wrap: anywhere;
+}
+
+.chat-interruption__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.chat-interruption p.chat-interruption__status {
+  color: var(--color-fg);
+  font-weight: 500;
+}
+
+.chat-interruption p.chat-interruption__error {
+  color: var(--color-danger);
+}
+
+.chat-interruption__error:focus {
+  outline: 2px solid var(--color-accent-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+@media (pointer: coarse) {
+  .chat-interruption__actions .cds-btn {
+    min-height: 44px;
+  }
 }
 
 /* The room below the header, shared by the conversation and the context panel. The conversation is
@@ -1585,7 +1655,7 @@ button.chat-box:focus-visible {
 
 .chat-context__title {
   margin: 0;
-  color: var(--color-faint);
+  color: var(--color-muted);
   font-size: 10px;
   font-weight: 500;
   text-transform: uppercase;
@@ -1678,7 +1748,7 @@ button.chat-box:focus-visible {
   display: flex;
   flex-wrap: wrap;
   gap: 4px 10px;
-  color: var(--color-faint);
+  color: var(--color-muted);
   font-size: var(--text-xs);
 }
 
@@ -1717,7 +1787,7 @@ button.chat-box:focus-visible {
 
 .chat-context__empty {
   margin: 0;
-  color: var(--color-faint);
+  color: var(--color-muted);
   font-size: var(--text-xs);
 }
 
