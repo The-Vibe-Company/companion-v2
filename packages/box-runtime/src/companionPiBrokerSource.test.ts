@@ -62,6 +62,7 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
     const piPath = join(home, "fake-pi.mjs");
     const capturePath = join(home, "pi-commands.ndjson");
     const piPidPath = join(home, "pi.pid");
+    const piArgvPath = join(home, "pi.argv.json");
     const socketPath = join(home, COMPANION_PI_BROKER_SOCKET_PATH);
     mkdirSync(join(runtimeRoot, "state"), { recursive: true, mode: 0o700 });
     mkdirSync(join(runtimeRoot, "logs"), { recursive: true, mode: 0o700 });
@@ -81,11 +82,21 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
         COMPANION_PI_SEGMENT_BYTES: "400",
         FAKE_PI_CAPTURE_PATH: capturePath,
         FAKE_PI_PID_PATH: piPidPath,
+        FAKE_PI_ARGV_PATH: piArgvPath,
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
     processes.push(broker);
     await waitFor(() => existsSync(socketPath));
+
+    // Without --continue, Pi's own CLI always starts a brand-new session even when a Companion
+    // already has one on disk in --session-dir, silently discarding its conversation on every
+    // broker (re)start. Assert the exact argv the broker spawns Pi with so a future regeneration of
+    // the bundled broker source cannot lose this flag unnoticed.
+    await waitFor(() => existsSync(piArgvPath));
+    expect(JSON.parse(readFileSync(piArgvPath, "utf8"))).toEqual([
+      "--mode", "rpc", "--session-dir", join(runtimeRoot, "sessions"), "--continue", "--no-skills",
+    ]);
 
     const prompt = await sendCompanionPiBrokerCommand({
       socketPath,
@@ -200,6 +211,9 @@ import { StringDecoder } from "node:string_decoder";
 const capture = process.env.FAKE_PI_CAPTURE_PATH;
 process.stdout.on("error", () => process.exit(1));
 writeFileSync(process.env.FAKE_PI_PID_PATH, String(process.pid), { mode: 0o600 });
+if (process.env.FAKE_PI_ARGV_PATH) {
+  writeFileSync(process.env.FAKE_PI_ARGV_PATH, JSON.stringify(process.argv.slice(2)), { mode: 0o600 });
+}
 const decoder = new StringDecoder("utf8");
 let buffered = "";
 function send(value) { process.stdout.write(JSON.stringify(value) + "\\n"); }
