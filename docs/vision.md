@@ -1,30 +1,44 @@
 # Companion v2 vision
 
-Companion v2 is the self-hostable Skills Hub and optional Companions control plane for an
-organization. It is a trusted registry for creating, validating, versioning, organizing, sharing,
-installing, and publishing `SKILL.md` packages.
+Companion v2 is a self-hostable Skills Hub with an optional, tightly bounded Companions runtime.
+The Skills Hub remains the product core: organizations create, validate, version, organize, share,
+install, and publish portable `SKILL.md` packages. A hosted Companion is an additional way to use
+that governed library: one named teammate, one durable thread, one persistent box.ascii.dev Box,
+and one Pi daemon that can work asynchronously after the browser closes.
 
-By default Companion does not operate agents. When the `companions` feature is enabled, the API may
-create and resume an isolated box.ascii.dev Box and control a Pi daemon inside it. Pi and its
-sessions execute on Box disk; the Companion services remain a metadata and authorization control
-plane. External coding agents can still use delegated Agent Auth as Skills Hub clients.
+The control plane owns identity, authorization, durable intent, selected Skills and plugins,
+provider connections, transcript projections, and observable outcomes. A dedicated runtime service
+alone contacts Box and Pi. Pi sessions and working files remain on Box disk; ordinary reads and all
+Viewer access remain control-plane-only.
+
+External coding agents continue to use delegated Agent Auth as Skills Hub clients. They are not
+hosted Companions, and their grants do not authorize Companion lifecycle or chat operations.
 
 ## Principles
 
 - Skills are portable files, not opaque hosted behavior.
 - Organization and personal libraries have explicit, predictable ownership.
-- Validation, immutable versions, dependencies, comments, public releases, and install records make reuse trustworthy.
+- Validation, immutable versions, dependencies, comments, public releases, and install records make
+  reuse trustworthy.
 - Labels organize skills without changing access.
-- Secrets remain write-only and are disclosed only through scoped, short-lived grants.
-- Skill Databases provide declared, tenant-scoped state without turning Companion into an execution platform.
-- GitHub sync and the CLI use the same service-layer authorization as the web.
-- The control plane never executes package scripts.
+- Secrets remain write-only and are disclosed only through scoped, short-lived grants or the
+  authorized runtime injection boundary.
+- Skill Databases provide declared, tenant-scoped state without executing package scripts.
+- GitHub sync, the CLI, Agent Auth, and hosted Companions use the same service-layer authorization.
+- A message is durable before wake or delivery; every accepted turn ends in a reply, decision,
+  explicit failure, interruption, or cancellation.
+- Runtime work survives API, browser, and runtime replica failure through durable attempts,
+  operations, leases, checkpoints, and fenced settlement.
+- Ambiguity is visible. Companion never guesses that a prompt was not executed and never silently
+  replays a possibly accepted attempt.
 
-## Non-goals
+## Product boundary
 
-- Control-plane execution of agent code or runtime files, and authoritative storage of Pi runtime
-  files. The gated Companions feature may retain a read-only transcript projection so Viewer reads
-  never wake Box.
-- Persistent Cowork or Project workspaces.
-- Runtime providers other than Box, harnesses other than Pi, prewarming, or deployment management.
-- A generic AI application builder.
+Companions deliberately stop short of the broader Grok Bot vision. This version has no generic
+Projects, multi-Bot teams or handoffs, routines, schedules, proactive jobs, voice, thread
+attachments, or arbitrary computer-provider marketplace. It does not add a generic model platform,
+agent builder, container catalog, deployment manager, or harness selection UI.
+
+Pi is the only harness, box.ascii.dev is the only Box provider, one Companion is always one Box plus
+one Pi plus one thread, and sending a message is the only normal wake action. Full Box restart and
+permanent deletion remain explicit operator actions; automatic recovery is Pi-only.
