@@ -108,6 +108,8 @@ describe("Skills Hub runtime-role grants", () => {
       "companion_api_retry_turn(uuid,uuid,uuid,uuid,public.companion_client_surface)",
       "companion_api_cancel_turn(uuid,uuid,uuid)",
       "companion_api_answer_decision(uuid,uuid,text,text,text)",
+      "companion_api_answer_config_decision(uuid,uuid,text,text)",
+      "companion_api_get_decision(uuid,uuid,text)",
       "companion_api_bump_skill_revision(uuid,uuid)",
     ]) {
       expect(apiBlock).toContain(`'public.${signature}'::regprocedure`);
@@ -119,6 +121,7 @@ describe("Skills Hub runtime-role grants", () => {
       "companion_api_turn_json(uuid,uuid,uuid)",
       "companion_api_operation_json(uuid,uuid,uuid)",
       "companion_api_validate_resource_selection(uuid,jsonb,jsonb,jsonb,jsonb)",
+      "companion_api_config_merge_ids(jsonb,jsonb,jsonb)",
       "companion_api_retry_operation_handoff()",
       "companion_api_assign_attempt_retry_id()",
     ]) {

@@ -41,12 +41,16 @@ import {
   CompanionWriteSkillsForbiddenError,
   companionsAvailableToUser,
   companionsEnabled,
+  companionCatalogModel,
+  getCompanionProviderCatalog,
+  answerCompanionConfigDecisionV2,
   answerCompanionDecisionV2,
   cancelCompanionTurnV2,
   createCompanionV2,
   duplicateCompanionV2,
   enqueueCompanionOperationV2,
   enqueueCompanionTurnV2,
+  getCompanionDecisionV2,
   getCompanionV2,
   listCompanionsV2,
   readCompanionAttachmentV2,
@@ -1154,14 +1158,51 @@ export function registerCompanionRoutes(
       const requestId = z.string().min(1).max(200).parse(c.req.param("requestId"));
       const body = decideCompanionDecisionInputSchema.parse(await c.req.json());
       const thread = await tenant(c, async ({ actor, orgId, database }) => {
-        await answerCompanionDecisionV2({
+        const pending = await getCompanionDecisionV2({
           orgId,
           companionId,
           requestId,
-          decision: body.action,
-          text: body.action === "answer" ? body.answer : undefined,
           database,
         });
+        if (pending.requestKind === "config_proposal") {
+          if (body.action === "answer") {
+            throw new Error("Companion config proposals cannot be answered with free text");
+          }
+          if (body.action === "allow" && pending.proposal?.model_id) {
+            const companion = await getCompanionV2({ actor, orgId, companionId, database });
+            const providerId = companion.runtime.provider_ids[0];
+            const modelId = providerId
+              ? companionCatalogModel(
+                await getCompanionProviderCatalog(),
+                providerId,
+                pending.proposal.model_id,
+              )
+              : undefined;
+            if (!modelId) {
+              throw new CompanionProviderError(
+                "provider_model_invalid",
+                "The selected model is not available for this provider.",
+                providerId ?? null,
+              );
+            }
+          }
+          await answerCompanionConfigDecisionV2({
+            orgId,
+            companionId,
+            requestId,
+            decision: body.action,
+            database,
+          });
+        } else {
+          await answerCompanionDecisionV2({
+            orgId,
+            companionId,
+            requestId,
+            decision: body.action,
+            text: body.action === "answer" ? body.answer : undefined,
+            database,
+          });
+        }
         return projectThreadForHttp(
           await readCompanionThreadV2({ actor, orgId, companionId, database }),
         );

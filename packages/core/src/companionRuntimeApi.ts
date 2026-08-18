@@ -15,16 +15,19 @@ import type {
 } from "@companion/contracts";
 import {
   companionAttachmentUploadSchema,
+  companionConfigProposalSchema,
   companionOperationSchema,
   companionSelectedMcpAccountIdsSchema,
   companionSelectedSkillIdsSchema,
   companionTranscriptEntrySchema,
   companionTurnSchema,
+  type CompanionConfigProposal,
 } from "@companion/contracts";
 import { schema, type Db } from "@companion/db";
 
 import type { ActorContext } from "./services";
 import {
+  CompanionDecisionNotFoundError,
   CompanionDuplicateForbiddenError,
   CompanionProviderError,
   CompanionRuntimeTransitionError,
@@ -646,6 +649,63 @@ export async function answerCompanionDecisionV2(input: {
       ${input.requestId},
       ${input.decision},
       ${input.optionId ?? input.text ?? null}
+    )
+  `);
+}
+
+export type CompanionDecisionRecord = {
+  requestKey: string;
+  requestKind: string;
+  decisionStatus: string;
+  proposal: CompanionConfigProposal | null;
+  expiresAt: string;
+};
+
+export async function getCompanionDecisionV2(input: {
+  orgId: string;
+  companionId: string;
+  requestId: string;
+  database: Db;
+}): Promise<CompanionDecisionRecord> {
+  const result = await input.database.execute(sql`
+    select request_key, request_kind::text as request_kind,
+      decision_status::text as decision_status, proposal, expires_at
+    from public.companion_api_get_decision(
+      ${input.orgId}::uuid,
+      ${input.companionId}::uuid,
+      ${input.requestId}
+    )
+  `);
+  const [row] = rows<{
+    request_key: string;
+    request_kind: string;
+    decision_status: string;
+    proposal: unknown;
+    expires_at: Date | string;
+  }>(result);
+  if (!row) throw new CompanionDecisionNotFoundError();
+  return {
+    requestKey: row.request_key,
+    requestKind: row.request_kind,
+    decisionStatus: row.decision_status,
+    proposal: row.proposal == null ? null : companionConfigProposalSchema.parse(row.proposal),
+    expiresAt: iso(row.expires_at) ?? new Date(row.expires_at).toISOString(),
+  };
+}
+
+export async function answerCompanionConfigDecisionV2(input: {
+  orgId: string;
+  companionId: string;
+  requestId: string;
+  decision: "allow" | "deny";
+  database: Db;
+}): Promise<void> {
+  await input.database.execute(sql`
+    select * from public.companion_api_answer_config_decision(
+      ${input.orgId}::uuid,
+      ${input.companionId}::uuid,
+      ${input.requestId},
+      ${input.decision}
     )
   `);
 }
