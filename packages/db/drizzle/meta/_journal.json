@@ -715,6 +715,13 @@
       "when": 1788800800000,
       "tag": "0101_companion_answer_config_decision",
       "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1788887200000,
+      "tag": "0102_companion_config_catalog",
+      "breakpoints": true
     }
   ]
 }
