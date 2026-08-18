@@ -344,12 +344,23 @@ describe("Box simulator HTTP server", () => {
       data: { attemptId: "attempt-http-1", piAcknowledged: true },
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    // The simulated Pi writes its journal from a real child process, so the acknowledgement only
+    // promises the prompt was accepted. Poll for the first projected line instead of yielding one
+    // macrotask, which is not a synchronization point and loses the race on a loaded machine.
     const readCommand = brokerCommand({ id: "http-read-1", type: "read_events", after: 0 });
-    const read = await (await provider(handle, `/boxes/${created.box.id}/commands`, {
+    const readEvents = async () => await (await provider(handle, `/boxes/${created.box.id}/commands`, {
       method: "POST",
       body: JSON.stringify({ command: readCommand }),
     })).json() as { success: boolean; stdout: string };
+    let read = await readEvents();
+    const journalDeadline = Date.now() + 10_000;
+    while (
+      Date.now() < journalDeadline
+      && !(JSON.parse(read.stdout) as { data: { events: unknown[] } }).data.events.length
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      read = await readEvents();
+    }
     expect(read.success).toBe(true);
     const journal = JSON.parse(read.stdout) as { data: { events: Array<Record<string, unknown>> } };
     expect(journal.data.events).toEqual(expect.arrayContaining([
