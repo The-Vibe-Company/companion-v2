@@ -83,7 +83,7 @@ function companion(
     persona: "Check every source.",
     model_id: "claude-opus-4-8",
     selected_skill_ids: [],
-    can_write_skills: false,
+    can_write_skills: true,
     selected_mcp_account_ids: [],
     owner_id: "user-1",
     access,
@@ -224,18 +224,21 @@ describe("CompanionSettings", () => {
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
 
+    // Skills Hub access is unconditional, so a save never carries a grant field for the database to
+    // refuse and the settings form never offers one.
     expect(companionApi.updateCompanion).toHaveBeenCalledWith("org-1", companionId, {
       name: "Luna research",
       persona: "Challenge every source.",
       provider_id: "openai-codex",
       model_id: "gpt-5.5",
       selected_skill_ids: [],
-      can_write_skills: false,
       selected_mcp_account_ids: [],
     });
     expect(onSaved).toHaveBeenCalledOnce();
     expect(container.textContent).toContain("Settings saved.");
     expect(container.textContent).not.toContain("Delete Companion");
+    expect(container.textContent).not.toContain("Skills Hub API access");
+    expect(container.textContent).not.toContain("grant active");
   });
 
   it("renders Viewer settings with no write or runtime controls", async () => {

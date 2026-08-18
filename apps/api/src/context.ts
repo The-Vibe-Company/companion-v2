@@ -9,7 +9,7 @@ import {
   type ActorContext,
 } from "@companion/core/services";
 import {
-  assertCompanionCanWriteSkills,
+  assertCompanionTokenAuthorized,
   CompanionWriteSkillsForbiddenError,
   EntitlementDeniedError,
 } from "@companion/core";
@@ -22,7 +22,7 @@ export interface ApiVariables {
   tokenActor: ActorContext | null;
   tokenOrgId: string | null;
   tokenScopes: TokenScope[] | null;
-  /** PAT provenance; `companion` means write-on-behalf for `tokenCompanionId`. */
+  /** PAT provenance; `companion` means a Skills Hub token for `tokenCompanionId`. */
   tokenSourceType: string | null;
   tokenCompanionId: string | null;
   programmaticAuthKind: "pat" | "agent" | null;
@@ -175,8 +175,9 @@ export function isAgentRequest(c: Context<{ Variables: ApiVariables }>): boolean
 
 /**
  * Gate a capability for token-authed requests. Cookie sessions (a signed-in human) implicitly
- * hold every scope; a `cmp_pat_…` token must carry the requested scope. Companion write-on-behalf
- * PATs re-check `can_write_skills` on every skills:write use.
+ * hold every scope; a `cmp_pat_…` token must carry the requested scope. A Companion-minted token
+ * additionally re-checks that its Companion still exists for the acting member, so deleting the
+ * Companion or removing the member refuses it immediately.
  */
 export async function requireScope(c: Context<{ Variables: ApiVariables }>, scope: TokenScope): Promise<void> {
   const scopes = c.get("tokenScopes");
@@ -192,17 +193,15 @@ export async function requireScope(c: Context<{ Variables: ApiVariables }>, scop
   )) {
     throw new Error(`token is missing the ${scope} scope`);
   }
-  if (scope === "skills:write") {
-    await requireCompanionWriteSkillsIfNeeded(c);
-  }
+  await requireCompanionTokenStillAuthorized(c);
 }
 
 /**
- * Companion write-on-behalf PATs must still have can_write_skills true at use time. Cookie sessions
- * and ordinary PATs are unaffected. The companions row is FORCE RLS, so the re-check runs in the
- * token owner's tenant context.
+ * A Companion-minted token stays usable only while its Companion is still there for the member it
+ * acts as. Cookie sessions and ordinary PATs are unaffected. The companions row is FORCE RLS, so
+ * the re-check runs in the token owner's tenant context and a lost membership fails closed.
  */
-export async function requireCompanionWriteSkillsIfNeeded(
+export async function requireCompanionTokenStillAuthorized(
   c: Context<{ Variables: ApiVariables }>,
 ): Promise<void> {
   if (c.get("tokenSourceType") !== "companion") return;
@@ -211,7 +210,7 @@ export async function requireCompanionWriteSkillsIfNeeded(
   const actor = c.get("tokenActor");
   if (!companionId || !orgId || !actor) throw new CompanionWriteSkillsForbiddenError();
   await withTenantContext({ orgId, userId: actor.id }, (database) =>
-    assertCompanionCanWriteSkills({ orgId, companionId, database }),
+    assertCompanionTokenAuthorized({ orgId, companionId, database }),
   );
 }
 

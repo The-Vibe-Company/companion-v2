@@ -14,8 +14,8 @@ import { CompanionPluginPicker } from "./CompanionPluginPicker";
 
 /**
  * Creation asks for name, persona, provider/model, which Skills Hub packages this Companion may
- * use, whether it may publish skills on the owner's behalf, and which already-connected MCP
- * plugins it may stage onto its Box.
+ * use, and which already-connected MCP plugins it may stage onto its Box. Skills Hub API access is
+ * unconditional, so there is nothing to choose about it here.
  */
 export function NewCompanionDialog({
   orgId,
@@ -40,7 +40,6 @@ export function NewCompanionDialog({
   const [providerId, setProviderId] = useState(initialProviderId);
   const [modelId, setModelId] = useState(providerDefaultModel(providers, initialProviderId));
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
-  const [canWriteSkills, setCanWriteSkills] = useState(false);
   const [selectedMcpAccountIds, setSelectedMcpAccountIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -65,7 +64,6 @@ export function NewCompanionDialog({
         provider_id: providerId,
         model_id: modelId,
         selected_skill_ids: selectedSkillIds,
-        can_write_skills: canWriteSkills,
         selected_mcp_account_ids: selectedMcpAccountIds,
       }));
     } catch (cause) {
@@ -161,10 +159,8 @@ export function NewCompanionDialog({
             <CompanionSkillPicker
               orgId={orgId}
               selectedSkillIds={selectedSkillIds}
-              canWriteSkills={canWriteSkills}
               disabled={busy}
               onSelectedSkillIdsChange={setSelectedSkillIds}
-              onCanWriteSkillsChange={setCanWriteSkills}
             />
             <CompanionPluginPicker
               orgId={orgId}

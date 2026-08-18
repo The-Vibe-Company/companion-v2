@@ -722,6 +722,13 @@
       "when": 1788887200000,
       "tag": "0102_companion_config_catalog",
       "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1788973600000,
+      "tag": "0103_companion_hub_tokens",
+      "breakpoints": true
     }
   ]
 }

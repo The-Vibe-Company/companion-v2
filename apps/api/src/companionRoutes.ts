@@ -442,7 +442,6 @@ export function registerCompanionRoutes(
           providerId: body.provider_id,
           modelId: body.model_id,
           selectedSkillIds: body.selected_skill_ids,
-          canWriteSkills: body.can_write_skills,
           selectedMcpAccountIds: body.selected_mcp_account_ids,
           database,
         }));
@@ -869,7 +868,6 @@ export function registerCompanionRoutes(
       if (body.provider_id !== undefined) patch.provider_id = body.provider_id;
       if (body.model_id !== undefined) patch.model_id = body.model_id;
       if (body.selected_skill_ids !== undefined) patch.selected_skill_ids = body.selected_skill_ids;
-      if (body.can_write_skills !== undefined) patch.can_write_skills = body.can_write_skills;
       if (body.selected_mcp_account_ids !== undefined) {
         patch.selected_mcp_account_ids = body.selected_mcp_account_ids;
       }

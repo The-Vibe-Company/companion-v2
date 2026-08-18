@@ -31,25 +31,22 @@ async function fetchPickerSkills(orgId: string): Promise<CompanionSkillOption[]>
 
 /**
  * Skills-page language multi-select for which library skills a Companion may stage onto its Box.
- * Native apps never render this control (THE-320 chat-only).
+ * Native apps never render this control (THE-320 chat-only). Publishing rights are not a staging
+ * choice: every Companion may use the whole Skills Hub API from its Box.
  */
 export function CompanionSkillPicker({
   orgId,
   selectedSkillIds,
-  canWriteSkills,
   disabled,
   footer,
   onSelectedSkillIdsChange,
-  onCanWriteSkillsChange,
 }: {
   orgId: string;
   selectedSkillIds: string[];
-  canWriteSkills: boolean;
   disabled?: boolean;
   /** Rendered under the skill list — the Box sync status line in settings. */
   footer?: ReactNode;
   onSelectedSkillIdsChange: (ids: string[]) => void;
-  onCanWriteSkillsChange: (value: boolean) => void;
 }) {
   const [skills, setSkills] = useState<CompanionSkillOption[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -98,19 +95,6 @@ export function CompanionSkillPicker({
         footer={footer}
         onChange={onSelectedSkillIdsChange}
       />
-
-      <label className="companions-skills-picker__write">
-        <input
-          type="checkbox"
-          checked={canWriteSkills}
-          disabled={disabled}
-          onChange={(event) => onCanWriteSkillsChange(event.target.checked)}
-        />
-        <span>
-          <strong>May create and update skills on my behalf</strong>
-          <small>Off by default. When on, skills this Companion publishes appear under your account.</small>
-        </span>
-      </label>
     </div>
   );
 }

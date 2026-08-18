@@ -155,8 +155,8 @@ export class CompanionPluginSelectionError extends Error {
 }
 
 export class CompanionWriteSkillsForbiddenError extends Error {
-  constructor() {
-    super("this Companion is not allowed to create or update skills on your behalf");
+  constructor(message = "this Companion is not allowed to create or update skills on your behalf") {
+    super(message);
     this.name = "CompanionWriteSkillsForbiddenError";
   }
 }
@@ -590,23 +590,30 @@ export async function resolveCompanionSelectedMcpAccountIds(input: {
 }
 
 /**
- * Fail closed when a Companion-sourced PAT attempts skills:write after write-on-behalf was turned off.
+ * Fail closed when a Companion-sourced token is used after the Companion was deleted or the acting
+ * member lost access to it. Skills Hub scopes themselves are not per-Companion state: the minted
+ * token already carries the full set, so the only question at use time is whether this Companion
+ * and this actor still exist together in the organization.
  */
-export async function assertCompanionCanWriteSkills(input: {
+export async function assertCompanionTokenAuthorized(input: {
   orgId: string;
   companionId: string;
   database?: Db;
 }): Promise<void> {
   const database = input.database ?? db;
   const [row] = await database
-    .select({ canWriteSkills: schema.companions.canWriteSkills })
+    .select({ id: schema.companions.id })
     .from(schema.companions)
     .where(and(
       eq(schema.companions.orgId, input.orgId),
       eq(schema.companions.id, input.companionId),
     ))
     .limit(1);
-  if (!row?.canWriteSkills) throw new CompanionWriteSkillsForbiddenError();
+  if (!row) {
+    throw new CompanionWriteSkillsForbiddenError(
+      "this Companion is no longer allowed to use the Skills Hub API on your behalf",
+    );
+  }
 }
 
 async function assertCompanionOwner(input: {

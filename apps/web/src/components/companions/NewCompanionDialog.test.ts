@@ -55,11 +55,12 @@ describe("NewCompanionDialog", () => {
     expect(markup).toContain("Claude");
     expect(markup).toContain("Claude Opus 4.8");
     expect(markup).toContain("Default");
-    // Name + persona text fields, plus write-on-behalf checkbox once a provider is connected.
-    expect(markup.match(/<input/g)?.length).toBeGreaterThanOrEqual(4);
     expect(markup).toContain("Skills");
-    expect(markup).toContain("May create and update skills on my behalf");
     expect(markup).toContain("Plugins");
+    // Skills Hub access is unconditional, so creation offers nothing to toggle about it.
+    expect(markup).not.toContain("Skills Hub API access");
+    expect(markup).not.toContain("grant active");
+    expect(markup).not.toContain('type="checkbox"');
     expect(markup).not.toContain("z.ai");
     expect(markup).not.toContain("GLM-4.7");
   });

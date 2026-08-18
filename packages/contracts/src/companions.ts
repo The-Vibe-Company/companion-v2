@@ -7,6 +7,7 @@ import {
   companionTurnSchema,
 } from "./companionRuntime";
 import { sniffCommentImageMime } from "./skill";
+import type { TokenScope } from "./token";
 
 export const companionRuntimeStateSchema = z.enum([
   "not_created",
@@ -208,6 +209,20 @@ export const companionLastMessageSchema = z.object({
 }).strict();
 export type CompanionLastMessage = z.infer<typeof companionLastMessageSchema>;
 
+/**
+ * Every hosted Companion may use the whole Skills Hub API. There is no per-Companion grant and no
+ * toggle to get wrong: the runtime mints a short-lived token carrying exactly these scopes on every
+ * staging, acting as the member whose settings staged the Box, and each request re-checks that the
+ * Companion still exists and that member still belongs to the organization.
+ */
+export const COMPANION_HUB_TOKEN_SCOPES: readonly TokenScope[] = [
+  "skills:read",
+  "skills:write",
+  "secrets:read",
+  "database:read",
+  "database:write",
+];
+
 export const companionSchema = z.object({
   id: z.string().uuid(),
   name: z.string(),
@@ -221,7 +236,8 @@ export const companionSchema = z.object({
    */
   selected_skill_ids: companionSelectedSkillIdsSchema,
   /**
-   * When true, the Companion may publish and update skills on the owner's behalf. Off by default.
+   * Legacy THE-360 flag, always true now that Skills Hub access is unconditional. Kept on reads so
+   * a surface that still displays it agrees with the token the Box actually receives.
    */
   can_write_skills: z.boolean(),
   /**
@@ -413,8 +429,8 @@ function utf8ByteLength(value: string): number {
 }
 
 /**
- * Structured Companion settings Pi may propose. `.strict()` refuses `hub_access`, `can_write_skills`,
- * `name`, and `provider_id`. `connect_plugin` is exclusive of every other mutation field.
+ * Structured Companion settings Pi may propose. `.strict()` refuses `can_write_skills`, `name`, and
+ * `provider_id`. `connect_plugin` is exclusive of every other mutation field.
  */
 export const companionConfigProposalSchema = z.object({
   kind: z.literal("config"),
@@ -910,7 +926,6 @@ export const createCompanionInputSchema = z.object({
   provider_id: companionProviderIdSchema.optional(),
   model_id: companionModelIdSchema.optional(),
   selected_skill_ids: companionSelectedSkillIdsSchema.optional(),
-  can_write_skills: z.boolean().optional(),
   selected_mcp_account_ids: companionSelectedMcpAccountIdsSchema.optional(),
 }).strict();
 export type CreateCompanionInput = z.infer<typeof createCompanionInputSchema>;
@@ -935,7 +950,6 @@ export const updateCompanionInputSchema = z.object({
   provider_id: companionProviderIdSchema.optional(),
   model_id: companionModelIdSchema.optional(),
   selected_skill_ids: companionSelectedSkillIdsSchema.optional(),
-  can_write_skills: z.boolean().optional(),
   selected_mcp_account_ids: companionSelectedMcpAccountIdsSchema.optional(),
 }).strict().refine(
   (input) =>
@@ -944,7 +958,6 @@ export const updateCompanionInputSchema = z.object({
     || input.provider_id !== undefined
     || input.model_id !== undefined
     || input.selected_skill_ids !== undefined
-    || input.can_write_skills !== undefined
     || input.selected_mcp_account_ids !== undefined,
   "At least one Companion setting is required",
 );

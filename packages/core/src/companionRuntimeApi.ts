@@ -282,7 +282,6 @@ export async function createCompanionV2(input: {
   providerId?: string;
   modelId?: string;
   selectedSkillIds?: string[];
-  canWriteSkills?: boolean;
   selectedMcpAccountIds?: string[];
   sourceCompanionId?: string;
   database: Db;
@@ -310,6 +309,8 @@ export async function createCompanionV2(input: {
       providerId,
     );
   }
+  // Skills Hub access is unconditional, and the legacy flag is pinned true to match the token the
+  // Box receives. Nobody chooses this per Companion any more.
   const result = await input.database.execute(sql`
     select * from public.companion_api_create_companion(
       ${input.orgId}::uuid,
@@ -318,7 +319,7 @@ export async function createCompanionV2(input: {
       ${providerId}::text,
       ${modelId}::text,
       ${JSON.stringify(input.selectedSkillIds ?? [])}::jsonb,
-      ${input.canWriteSkills ?? false}::boolean,
+      true::boolean,
       ${JSON.stringify(input.selectedMcpAccountIds ?? [])}::jsonb,
       ${input.sourceCompanionId ?? null}::uuid
     )
@@ -439,7 +440,6 @@ export async function duplicateCompanionV2(input: {
     providerId,
     modelId: source.model_id,
     selectedSkillIds: source.selected_skill_ids,
-    canWriteSkills: source.can_write_skills,
     selectedMcpAccountIds: source.selected_mcp_account_ids,
     sourceCompanionId: source.id,
     database: input.database,

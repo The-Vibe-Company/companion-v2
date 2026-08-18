@@ -117,7 +117,6 @@ export function CompanionSettings({
     providerSelectedModel(providers, initialProviderId, companion.model_id),
   );
   const [selectedSkillIds, setSelectedSkillIds] = useState(companion.selected_skill_ids);
-  const [canWriteSkills, setCanWriteSkills] = useState(companion.can_write_skills);
   const [selectedMcpAccountIds, setSelectedMcpAccountIds] = useState(
     companion.selected_mcp_account_ids,
   );
@@ -334,13 +333,11 @@ export function CompanionSettings({
       || instructions.trim() !== (companion.persona ?? "")
       || providerId !== (companion.runtime.provider_ids[0] ?? "")
       || modelId !== companion.model_id
-      || canWriteSkills !== companion.can_write_skills
       || selectedSkillIds.length !== companion.selected_skill_ids.length
       || selectedSkillIds.some((id, index) => id !== companion.selected_skill_ids[index])
       || selectedMcpAccountIds.length !== companion.selected_mcp_account_ids.length
       || selectedMcpAccountIds.some((id, index) => id !== companion.selected_mcp_account_ids[index]),
     [
-      canWriteSkills,
       companion,
       instructions,
       modelId,
@@ -364,7 +361,6 @@ export function CompanionSettings({
         provider_id: providerId,
         model_id: modelId,
         selected_skill_ids: selectedSkillIds,
-        can_write_skills: canWriteSkills,
         selected_mcp_account_ids: selectedMcpAccountIds,
       });
       onSaved(updated);
@@ -376,7 +372,6 @@ export function CompanionSettings({
       setProviderId(updatedProviderId);
       setModelId(providerSelectedModel(providers, updatedProviderId, updated.model_id));
       setSelectedSkillIds(updated.selected_skill_ids);
-      setCanWriteSkills(updated.can_write_skills);
       setSelectedMcpAccountIds(updated.selected_mcp_account_ids);
       setSaved(true);
     } catch (cause) {
@@ -510,15 +505,10 @@ export function CompanionSettings({
           <CompanionSkillPicker
             orgId={orgId}
             selectedSkillIds={selectedSkillIds}
-            canWriteSkills={canWriteSkills}
             disabled={!canEdit || busy || deletionActive}
             footer={<CompanionSkillsSyncStatus companion={latest} />}
             onSelectedSkillIdsChange={(ids) => {
               setSelectedSkillIds(ids);
-              setSaved(false);
-            }}
-            onCanWriteSkillsChange={(value) => {
-              setCanWriteSkills(value);
               setSaved(false);
             }}
           />
