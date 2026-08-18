@@ -41,6 +41,7 @@ const tempDirs: string[] = [];
 const desktopReplayWhen = 1_788_152_800_000;
 const finalCutoverWhen = 1_788_196_000_000;
 const desktopReplayRecoveryWhen = 1_788_282_400_000;
+const settingsClaimRevisionsWhen = 1_788_368_800_000;
 const desktopReplayTag = "0093_companion_runtime_desktop_replay";
 
 interface Fixture {
@@ -220,7 +221,7 @@ describe("Runtime v2 final migration protocol", () => {
   it("applies a fresh database through recovery 0095 and never reapplies broad grants", async () => {
     const fixture = await createFixture();
     await runMigrations({ env: migrationEnv(fixture) });
-    expect(await lastMigration(fixture.databaseUrl)).toBe(desktopReplayRecoveryWhen);
+    expect(await lastMigration(fixture.databaseUrl)).toBe(settingsClaimRevisionsWhen);
 
     const client = postgres(fixture.databaseUrl, { max: 1 });
     try {
@@ -242,7 +243,7 @@ describe("Runtime v2 final migration protocol", () => {
     await expect(runMigrations({
       env: { ...migrationEnv(fixture), COMPANION_RUNTIME_GRANTS_FILE: grantsFile },
     })).resolves.toBeUndefined();
-    expect(await lastMigration(fixture.databaseUrl)).toBe(desktopReplayRecoveryWhen);
+    expect(await lastMigration(fixture.databaseUrl)).toBe(settingsClaimRevisionsWhen);
   }, 120_000);
 
   it("repairs an old 0091/0092 ledger before grants and cutover", async () => {
@@ -331,7 +332,7 @@ describe("Runtime v2 final migration protocol", () => {
           COMPANION_RUNTIME_GRANTS_FILE: grantsFile,
         },
       })).resolves.toBeUndefined();
-      expect(await lastMigration(fixture.databaseUrl)).toBe(desktopReplayRecoveryWhen);
+      expect(await lastMigration(fixture.databaseUrl)).toBe(settingsClaimRevisionsWhen);
 
       const [acl] = await client<Array<{
         apiExecute: boolean;

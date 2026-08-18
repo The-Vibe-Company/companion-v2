@@ -423,6 +423,7 @@ describe("Box simulator HTTP server", () => {
     await expect(maintenance.listAllBoxes()).resolves.toContainEqual({
       id: created.box.id,
       name: "Companion maintenance contract",
+      state: "provisioning",
     });
     const deletion = await maintenance.requestPermanentDeletion({ boxId: created.box.id });
     expect(deletion.outcome).toBe("accepted");
