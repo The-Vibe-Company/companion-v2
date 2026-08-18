@@ -6,6 +6,7 @@ import {
   createBoxSimCommandMachine,
   decodeShellQuoted,
   executeBoxCommand,
+  extractBrokerJson,
   extractFifoJson,
   putBoxFile,
 } from "../src/commandShims";
@@ -23,6 +24,13 @@ printf '%s\\n' ${shellQuote(JSON.stringify(command))} > "$fifo"
 printf '%s\\n' 'Pi RPC did not acknowledge prompt' >&2`;
 }
 
+function brokerShell(command: Record<string, unknown>): string {
+  const encoded = Buffer.from(JSON.stringify(command), "utf8").toString("base64");
+  return `broker_socket="$HOME/.companion/runtime/state/pi-broker.sock"
+test -S "$broker_socket"
+COMPANION_PI_BROKER_COMMAND=${shellQuote(encoded)} node <<'COMPANION_PI_BROKER_CLIENT'`;
+}
+
 describe("semantic Box command shims", () => {
   it("classifies every adapter command family by stable semantic markers", () => {
     const commands: Array<[string, ReturnType<typeof classifyBoxCommand>]> = [
@@ -36,9 +44,13 @@ describe("semantic Box command shims", () => {
       ["cat '.part0' > '.target'; rm -f '.part0'", "join-file-parts"],
       ["skills.next base64 --decode tar --extract", "prepare-skills"],
       ["staged_credential_file=x; systemctl --user daemon-reload", "start-or-restart-daemon"],
-      ["companion-pi-rpc-ready companion-pi-rpc-unready", "daemon-state"],
-      [rpcShell({ id: "one", type: "prompt" }), "rpc-command"],
-      ['test -p "$fifo"\nprintf \'%s\\n\' \'{}\' > "$fifo"', "extension-ui-response"],
+      ["companion-pi-broker-ready companion-pi-broker-unready", "daemon-state"],
+      [brokerShell({ id: "one", type: "prompt", attemptId: "attempt-1" }), "rpc-command"],
+      [brokerShell({
+        id: "decision-1",
+        type: "extension_ui_response",
+        response: { id: "question-1", type: "extension_ui_response", value: "yes" },
+      }), "extension-ui-response"],
       ["reset-failed companion-pi-daemon.service; systemctl --user start companion-pi-daemon.service", "heal-daemon"],
       ["companion-pi-journal companion-pi-restarts", "daemon-diagnostics"],
       ['rm -f "$HOME/.companion/runtime/state/providers.env"', "remove-provider-files"],
@@ -54,6 +66,7 @@ describe("semantic Box command shims", () => {
     const payload = { id: "req-1", type: "prompt", message: "don't execute this" };
     expect(decodeShellQuoted(shellQuote("don't"))).toBe("don't");
     expect(extractFifoJson(rpcShell(payload))).toEqual(payload);
+    expect(extractBrokerJson(brokerShell(payload))).toEqual(payload);
   });
 
   it("models credential movement, daemon lifecycle, correlated RPC, and warm probes", async () => {
@@ -92,12 +105,24 @@ describe("semantic Box command shims", () => {
       rpcReady: true,
       invocationId: "00000000000000000000000000000001",
     });
+    putBoxFile(machine, ".companion/runtime/state/providers.env", Buffer.from("TOKEN=refreshed"));
+    const startedAgain = await executeBoxCommand(
+      machine,
+      "staged_credential_file=x; systemctl --user daemon-reload; systemctl --user start companion-pi-daemon.service",
+    );
+    expect(startedAgain.success).toBe(true);
+    expect(machine.daemon).toMatchObject({
+      invocationId: "00000000000000000000000000000001",
+      restartCount: 0,
+    });
+    expect(controller.start).toHaveBeenCalledOnce();
     expect(await executeBoxCommand(machine, "printf companion-pi-warm-ready"))
       .toMatchObject({ success: true, stdout: "companion-pi-warm-ready\n" });
 
-    const rpc = await executeBoxCommand(machine, rpcShell({
+    const rpc = await executeBoxCommand(machine, brokerShell({
       id: "turn-with-apostrophe",
       type: "prompt",
+      attemptId: "turn-with-apostrophe",
       message: "don't repeat",
     }));
     expect(rpc.success).toBe(true);
@@ -108,15 +133,209 @@ describe("semantic Box command shims", () => {
       success: true,
     });
     expect(handleRpc).toHaveBeenCalledWith(expect.objectContaining({ message: "don't repeat" }));
-    expect(machine.daemon.rpcLog).toContain('"id":"turn-with-apostrophe"');
+    expect(machine.daemon.rpcLog).not.toContain('"id":"turn-with-apostrophe"');
+
+    const decision = await executeBoxCommand(machine, brokerShell({
+      id: "decision-1",
+      type: "extension_ui_response",
+      response: { id: "question-1", type: "extension_ui_response", value: "yes" },
+    }));
+    expect(decision.success).toBe(true);
+    expect(JSON.parse(decision.stdout)).toMatchObject({
+      type: "response",
+      command: "extension_ui_response",
+      id: "decision-1",
+      success: true,
+      data: {
+        attemptId: "turn-with-apostrophe",
+        delivered: true,
+      },
+    });
+    expect(controller.respondExtensionUi).toHaveBeenCalledWith({
+      id: "question-1",
+      type: "extension_ui_response",
+      value: "yes",
+    });
 
     expect(await executeBoxCommand(machine, "Pi daemon is still active after stop"))
       .toMatchObject({ success: true });
-    expect(machine.daemon).toMatchObject({ status: "inactive", rpcReady: false, invocationId: null });
+    expect(machine.daemon).toMatchObject({
+      status: "inactive",
+      rpcReady: false,
+      activeAttemptId: null,
+      invocationId: null,
+    });
     expect(machine.volatileFiles.size).toBe(0);
   });
 
-  it("joins virtual file parts and reads byte-offset event chunks without a shell", async () => {
+  it("restarts Pi with the existing volatile credential when no replacement was staged", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    const controller: BoxSimPiController = {
+      start: vi.fn(),
+      restart: vi.fn(),
+      stop: vi.fn(),
+      handleRpc: vi.fn(),
+      respondExtensionUi: vi.fn(),
+      crash: vi.fn(),
+      setScenario: vi.fn(),
+      dispose: vi.fn(),
+    };
+    machine.piController = controller;
+    putBoxFile(machine, ".companion/pi/auth.json", Buffer.from("secret auth"));
+    putBoxFile(machine, ".companion/runtime/state/providers.env", Buffer.from("TOKEN=secret"));
+    const command = (action: "start" | "restart") =>
+      `staged_credential_file=x; systemctl --user daemon-reload; systemctl --user ${action} companion-pi-daemon.service`;
+
+    await expect(executeBoxCommand(machine, command("start"))).resolves.toMatchObject({ success: true });
+    expect(machine.persistentFiles.has(".companion/runtime/state/providers.env")).toBe(false);
+    await expect(executeBoxCommand(machine, command("restart"))).resolves.toMatchObject({ success: true });
+
+    expect(controller.restart).toHaveBeenCalledOnce();
+    expect(machine.volatileFiles.get("run/user/1000/companion/providers.env")?.toString())
+      .toBe("TOKEN=secret");
+    expect(machine.daemon).toMatchObject({
+      status: "active",
+      invocationId: "00000000000000000000000000000002",
+      restartCount: 1,
+    });
+  });
+
+  it("correlates a Pi event emitted before the prompt acknowledgement", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "ask_user" });
+    machine.daemon.status = "active";
+    machine.daemon.rpcReady = true;
+    machine.daemon.invocationId = "00000000000000000000000000000001";
+    machine.piController = {
+      start: vi.fn(),
+      restart: vi.fn(),
+      stop: vi.fn(),
+      handleRpc: vi.fn(async (command: Record<string, unknown>) => {
+        appendPiEvent(machine, {
+          type: "extension_ui_request",
+          id: "question-before-ack",
+          method: "input",
+          title: "companion:question:ask_user",
+        });
+        return {
+          type: "response",
+          command: command.type,
+          id: command.id,
+          success: true,
+        };
+      }),
+      respondExtensionUi: vi.fn(),
+      crash: vi.fn(),
+      setScenario: vi.fn(),
+      dispose: vi.fn(),
+    };
+
+    const result = await executeBoxCommand(machine, brokerShell({
+      id: "prompt-before-ack",
+      type: "prompt",
+      attemptId: "attempt-before-ack",
+      message: "Ask first.",
+    }));
+
+    expect(result.success).toBe(true);
+    expect(machine.daemon.activeAttemptId).toBe("attempt-before-ack");
+    expect(machine.daemon.brokerCounters.unboundEvents).toBe(0);
+    expect(machine.daemon.brokerJournal).toEqual([
+      expect.objectContaining({
+        invocationId: "00000000000000000000000000000001",
+        attemptId: "attempt-before-ack",
+        kind: "pi_event",
+        event: expect.objectContaining({ type: "extension_ui_request" }),
+      }),
+    ]);
+  });
+
+  it.each([
+    ["missing id", { type: "extension_ui_response", value: "yes" }],
+    ["empty id", { type: "extension_ui_response", id: "", value: "yes" }],
+    [
+      "oversized id",
+      { type: "extension_ui_response", id: "x".repeat(257), value: "yes" },
+    ],
+    ["non-finite id", { type: "extension_ui_response", id: Number.POSITIVE_INFINITY, value: "yes" }],
+    ["wrong type", { type: "extension_ui_request", id: "question-1", value: "yes" }],
+  ] as const)("does not deliver a decision with %s", async (_name, response) => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "ask_user" });
+    const respondExtensionUi = vi.fn();
+    machine.daemon.status = "active";
+    machine.daemon.rpcReady = true;
+    machine.daemon.invocationId = "00000000000000000000000000000001";
+    machine.daemon.activeAttemptId = "attempt-question";
+    machine.piController = {
+      start: vi.fn(),
+      restart: vi.fn(),
+      stop: vi.fn(),
+      handleRpc: vi.fn(),
+      respondExtensionUi,
+      crash: vi.fn(),
+      setScenario: vi.fn(),
+      dispose: vi.fn(),
+    };
+
+    const result = await executeBoxCommand(machine, brokerShell({
+      id: "decision-invalid",
+      type: "extension_ui_response",
+      response,
+    }));
+
+    expect(result.success).toBe(true);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      id: "decision-invalid",
+      success: false,
+      error: { code: "invalid_command", ambiguous: false },
+    });
+    expect(respondExtensionUi).not.toHaveBeenCalled();
+  });
+
+  it("bounds read_events pages by encoded bytes without loss or duplication", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    machine.daemon.status = "active";
+    machine.daemon.rpcReady = true;
+    machine.daemon.invocationId = "00000000000000000000000000000001";
+    machine.daemon.activeAttemptId = "attempt-large-events";
+    for (let index = 0; index < 4; index += 1) {
+      appendPiEvent(machine, {
+        type: "message_update",
+        index,
+        delta: "x".repeat(60 * 1024),
+      });
+    }
+
+    const first = await executeBoxCommand(machine, brokerShell({
+      id: "read-large-page-1",
+      type: "read_events",
+      after: 0,
+      limit: 256,
+    }));
+    const firstResponse = JSON.parse(first.stdout) as {
+      data: { events: Array<{ sequence: number }>; nextCursor: number; hasMore: boolean };
+    };
+    expect(Buffer.byteLength(first.stdout, "utf8")).toBeLessThan(256 * 1024);
+    expect(firstResponse.data.events.map((event) => event.sequence)).toEqual([1, 2, 3]);
+    expect(firstResponse.data).toMatchObject({ nextCursor: 3, hasMore: true });
+
+    const second = await executeBoxCommand(machine, brokerShell({
+      id: "read-large-page-2",
+      type: "read_events",
+      after: firstResponse.data.nextCursor,
+      limit: 256,
+    }));
+    const secondResponse = JSON.parse(second.stdout) as {
+      data: { events: Array<{ sequence: number }>; nextCursor: number; hasMore: boolean };
+    };
+    expect(secondResponse.data.events.map((event) => event.sequence)).toEqual([4]);
+    expect(secondResponse.data).toMatchObject({ nextCursor: 4, hasMore: false });
+    expect([
+      ...firstResponse.data.events,
+      ...secondResponse.data.events,
+    ].map((event) => event.sequence)).toEqual([1, 2, 3, 4]);
+  });
+
+  it("joins virtual file parts without invoking a host shell", async () => {
     const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
     putBoxFile(machine, "archive.part0", Buffer.from("abc"));
     putBoxFile(machine, "archive.part1", Buffer.from("def"));
@@ -127,8 +346,10 @@ describe("semantic Box command shims", () => {
     expect(machine.persistentFiles.get("archive")?.toString()).toBe("abcdef");
     expect(machine.persistentFiles.has("archive.part0")).toBe(false);
 
-    appendPiEvent(machine, { type: "one" });
-    appendPiEvent(machine, { type: "two" });
+    machine.daemon.invocationId = "00000000000000000000000000000001";
+    machine.daemon.activeAttemptId = "attempt-legacy-projection";
+    appendPiEvent(machine, { type: "agent_start" });
+    appendPiEvent(machine, { type: "turn_start" });
     const command = "log=pi.rpc.ndjson; offset=4; tail -c x | head -c 262144";
     const read = await executeBoxCommand(machine, command);
     expect(read.stdout.startsWith("4\n")).toBe(true);

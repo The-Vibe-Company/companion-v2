@@ -19,11 +19,20 @@ import {
   runtimeSkillArchivePath,
   type CompanionRuntimeSkill,
 } from "./companionPiInjection";
+import {
+  COMPANION_PI_BROKER_JOURNAL_PATH,
+  COMPANION_PI_BROKER_SCRIPT_PATH,
+  COMPANION_PI_BROKER_SOCKET_PATH,
+  COMPANION_PI_BROKER_SOURCE,
+  type CompanionPiBrokerCounters,
+  type CompanionPiJournalRecord,
+} from "./companionPiBroker";
 
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
 const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
 /** First Pi release whose image resize runs outside the RPC event loop. */
 const MINIMUM_IMAGE_SAFE_PI_VERSION = "0.84.2";
+const MAX_COMPANION_RUNTIME_GENERATION = 2_147_483_647;
 // Layout 5 made the daemon wrapper report its own failures. Layout 6 moves MCP credentials off the
 // snapshotted Box disk and into the user runtime directory. Layout 7 teaches the daemon wrapper to
 // append staged Companion instructions. Layout 8 passes the persisted model through `pi --model`.
@@ -33,8 +42,9 @@ const MINIMUM_IMAGE_SAFE_PI_VERSION = "0.84.2";
 // Pi image decoding could block the event loop. Layout 12 gave shell runs a longer deadline. Layout
 // 13 restores image reads only after verifying Pi includes worker-isolated resizing, and binds RPC
 // readiness to the current systemd invocation; the same 90-second guard aborts a read that does not
-// settle.
-export const COMPANION_PI_DISK_LAYOUT_VERSION = 13;
+// settle. Layout 14 replaces the shell-held FIFO with the supervised Node broker, an owner-only Unix
+// socket, and a segmented acknowledgement journal.
+export const COMPANION_PI_DISK_LAYOUT_VERSION = 14;
 /** Content bytes the provider's file API refuses in one `PUT /boxes/:id/files` body. */
 const BOX_FILE_WRITE_LIMIT_BYTES = 5 * 1024 * 1024;
 /**
@@ -66,9 +76,9 @@ const DESKTOP_FRAME_PATTERN = /^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/]+={
  */
 const PI_DAEMON_ACTIVE_TIMEOUT_MS = 20_000;
 /**
- * Pi acknowledges an RPC command as soon as it accepts or queues it. A FIFO write alone cannot
- * prove that: the daemon wrapper deliberately keeps the FIFO open read/write so its own startup
- * cannot deadlock, which also lets a write finish while a wedged Pi process consumes nothing.
+ * Pi acknowledges an RPC command as soon as it accepts it. The layout-14 broker forwards that
+ * correlated response over its owner-only socket, so a completed Box command proves an application
+ * response rather than merely a successful transport write.
  */
 const PI_RPC_ACCEPT_TIMEOUT_SECONDS = 8;
 /** Labels the diagnostic command prints so each fragment can be recovered from one stdout. */
@@ -248,9 +258,36 @@ export interface CompanionPiEventChunk {
   offset: number;
 }
 
+/** Durable broker cursors and bounded protocol telemetry, observed without sending a command to Pi. */
+export interface CompanionPiBrokerState {
+  invocationId: string;
+  activeAttemptId: string | null;
+  tailCursor: number;
+  acknowledgedCursor: number;
+  counters: CompanionPiBrokerCounters;
+}
+
+/** One monotonic page from the segmented layout-14 event journal. */
+export interface CompanionPiBrokerEventPage {
+  events: CompanionPiJournalRecord[];
+  nextCursor: number;
+  acknowledgedCursor: number;
+  hasMore: boolean;
+}
+
+/** Prompt dispatch never collapses an ambiguous write into a safe negative acknowledgement. */
+export type CompanionPiPromptDispatch =
+  | { outcome: "accepted"; attemptId: string }
+  | { outcome: "refused"; code: string; message: string }
+  | { outcome: "ambiguous"; code: string; message: string };
+
+export type CompanionPiExtensionUiDispatch = CompanionPiPromptDispatch;
+
 export interface CompanionBoxRuntime {
   start(input: {
     companionId: string;
+    /** Runtime v2 Box identity suffix; omitted callers retain the exact legacy name. */
+    runtimeGeneration?: number;
     orgId: string;
     boxId: string | null;
     clientSurface: CompanionClientSurface;
@@ -297,11 +334,14 @@ export interface CompanionBoxRuntime {
   /** Hand one chat message to Pi and wait for its correlated acceptance; never wakes the Box. */
   prompt(input: { boxId: string; message: string; requestId: string }): Promise<void>;
   /**
-   * Unblock a Pi extension UI dialog (Allow / Deny / answer). Writes one `extension_ui_response`
-   * line to the same FIFO the prompt path uses; never creates or resumes a Box.
+   * Unblock a Pi extension UI dialog (Allow / Deny / answer). Sends one correlated
+   * `extension_ui_response` through the same owner-only broker socket as prompts; never creates or
+   * resumes a Box.
    */
   respondExtensionUi(input: {
     boxId: string;
+    /** Runtime v2 fences the decision to the durable attempt; legacy callers omit it. */
+    attemptId?: string;
     response: Record<string, unknown>;
   }): Promise<void>;
   /** Reset the provider's idle clock after Pi accepts a durable message. */
@@ -314,7 +354,7 @@ export interface CompanionBoxRuntime {
     daemonState: "running" | "stopped" | "error";
     detail: string | null;
   }>;
-  /** Read Pi RPC output from `offset` so the control plane can project new events. */
+  /** Legacy byte-log projection retained until the API executor is removed. */
   readEvents(input: { boxId: string; offset: number }): Promise<CompanionPiEventChunk>;
   /**
    * One frame of the running Box desktop as a `data:` image URL, or null when there is no desktop to
@@ -322,6 +362,35 @@ export interface CompanionBoxRuntime {
    * not a lifecycle action: like `desktop`, it never creates or resumes a Box.
    */
   captureDesktopFrame(input: { boxId: string }): Promise<string | null>;
+}
+
+/** Layout-14 protocol used only by the dedicated Runtime v2 service during the stacked cutover. */
+export interface CompanionBoxRuntimeV2 extends CompanionBoxRuntime {
+  /** Dispatch one durable attempt and preserve positive, proven-negative, and ambiguous outcomes. */
+  dispatchPrompt(input: {
+    boxId: string;
+    attemptId: string;
+    message: string;
+    requestId?: string;
+  }): Promise<CompanionPiPromptDispatch>;
+  /** Observe broker invocation/binding/cursors without asking Pi for state. */
+  brokerState(input: { boxId: string }): Promise<CompanionPiBrokerState>;
+  /** Deliver one durable decision without collapsing a lost Box response into a safe refusal. */
+  dispatchExtensionUi(input: {
+    boxId: string;
+    attemptId?: string;
+    requestId?: string;
+    response: Record<string, unknown>;
+  }): Promise<CompanionPiExtensionUiDispatch>;
+  readEvents(input: { boxId: string; offset: number }): Promise<CompanionPiEventChunk>;
+  /** Read the layout-14 journal after an exclusive monotonic cursor. */
+  readEvents(input: {
+    boxId: string;
+    after: number;
+    limit?: number;
+  }): Promise<CompanionPiBrokerEventPage>;
+  /** Acknowledge a journal cursor so the broker may retain or prune closed segments safely. */
+  ackEvents(input: { boxId: string; through: number }): Promise<{ acknowledgedCursor: number }>;
 }
 
 export class BoxRuntimeConfigurationError extends Error {
@@ -465,11 +534,90 @@ function parsePiEventChunk(stdout: string): CompanionPiEventChunk | null {
   return { chunk: stdout.slice(separator + 1), offset };
 }
 
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function brokerSafeCode(value: unknown, fallback: string): string {
+  return typeof value === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(value) ? value : fallback;
+}
+
+function brokerSafeMessage(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback;
+  const collapsed = value.replace(/\s+/g, " ").trim();
+  return collapsed ? collapsed.slice(0, COMPANION_RUNTIME_ERROR_MAX_LENGTH) : fallback;
+}
+
+function nonNegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+function positiveSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) > 0;
+}
+
+function opaqueBrokerId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256;
+}
+
+const BROKER_COUNTER_KEYS = [
+  "malformedLines",
+  "oversizedLines",
+  "unterminatedLines",
+  "unknownEvents",
+  "unboundEvents",
+  "orphanResponses",
+] as const satisfies readonly (keyof CompanionPiBrokerCounters)[];
+
+function parseBrokerCounters(value: unknown): CompanionPiBrokerCounters | null {
+  if (!isJsonObject(value)) return null;
+  const counters = {} as CompanionPiBrokerCounters;
+  for (const key of BROKER_COUNTER_KEYS) {
+    if (!nonNegativeSafeInteger(value[key])) return null;
+    counters[key] = value[key];
+  }
+  return counters;
+}
+
+function parseBrokerJournalRecord(value: unknown): CompanionPiJournalRecord | null {
+  if (
+    !isJsonObject(value)
+    || !positiveSafeInteger(value.sequence)
+    || !opaqueBrokerId(value.invocationId)
+  ) return null;
+  if (value.kind === "pi_event") {
+    if (!opaqueBrokerId(value.attemptId) || !isJsonObject(value.event)) return null;
+    return {
+      sequence: value.sequence,
+      invocationId: value.invocationId,
+      attemptId: value.attemptId,
+      kind: "pi_event",
+      event: value.event,
+    };
+  }
+  if (value.kind !== "pi_process_exit" || !isJsonObject(value.exit)) return null;
+  const code = value.exit.code;
+  const signal = value.exit.signal;
+  if (
+    (code !== null && !Number.isSafeInteger(code))
+    || (signal !== null && (typeof signal !== "string" || signal.length > 32))
+    || (value.attemptId !== null && !opaqueBrokerId(value.attemptId))
+  ) return null;
+  return {
+    sequence: value.sequence,
+    invocationId: value.invocationId,
+    attemptId: value.attemptId,
+    kind: "pi_process_exit",
+    exit: { code: code as number | null, signal: signal as string | null },
+  };
+}
+
 /** Where the layout script is staged on the Box disk so it runs as a file, never as a command. */
 const PI_LAYOUT_SCRIPT_PATH = ".companion/bin/ensure-pi-layout.sh";
 
 function setupScript(installCommand: string | undefined, mcpAdapterPackage: string): string {
   const configuredInstall = installCommand?.trim();
+  const encodedBrokerSource = Buffer.from(COMPANION_PI_BROKER_SOURCE, "utf8").toString("base64");
   const encodedInstallScript = configuredInstall
     ? Buffer.from(`#!/usr/bin/env bash
 set -euo pipefail
@@ -521,17 +669,24 @@ set -euo pipefail
 # is already correct costs one file read and cannot fail on a dependency it does not need.
 layout_marker="$HOME/.companion/runtime/state/pi-layout.version"
 expected_layout=${shellQuote(`${COMPANION_PI_DISK_LAYOUT_VERSION}:${mcpAdapterPackage}:pi>=${MINIMUM_IMAGE_SAFE_PI_VERSION}`)}
-if [ -f "$layout_marker" ] && [ "$(cat "$layout_marker")" = "$expected_layout" ]; then
+if [ -f "$layout_marker" ] \
+  && [ "$(cat "$layout_marker")" = "$expected_layout" ] \
+  && [ -x "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}" ] \
+  && [ -x "$HOME/.companion/bin/pi-daemon" ] \
+  && [ -f "$HOME/.config/systemd/user/companion-pi-daemon.service" ]; then
   exit 0
 fi
 ${ensureInstalled}
 command -v pi >/dev/null 2>&1
-mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/pi/extensions" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.config/systemd/user"
+command -v node >/dev/null 2>&1
+mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/pi/extensions" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}" "$HOME/.config/systemd/user"
+chmod 700 "$HOME/.companion/runtime" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}"
 # Resolve Pi's absolute path now so the daemon does not depend on a login-shell PATH it will never
 # have under the minimal systemd user manager environment.
 pi_bin="$(command -v pi)"
+node_bin="$(command -v node)"
 pi_version="$($pi_bin --version 2>/dev/null || true)"
-node - "$pi_version" ${shellQuote(MINIMUM_IMAGE_SAFE_PI_VERSION)} <<'COMPANION_PI_VERSION'
+"$node_bin" - "$pi_version" ${shellQuote(MINIMUM_IMAGE_SAFE_PI_VERSION)} <<'COMPANION_PI_VERSION'
 const actualText = process.argv[2] ?? "";
 const minimumText = process.argv[3] ?? "";
 const parse = (value) => {
@@ -555,10 +710,15 @@ if (!currentEnough) {
 COMPANION_PI_VERSION
 pi_bin_dir="$(dirname "$pi_bin")"
 PI_CODING_AGENT_DIR="$HOME/.companion/pi" "$pi_bin" install ${shellQuote(mcpAdapterPackage)}
+# The broker is an autonomous ESM program. Encoding it keeps arbitrary JavaScript out of the shell
+# grammar while preserving one identical setup script for Box create and in-place layout repair.
+printf '%s' ${shellQuote(encodedBrokerSource)} | base64 --decode > "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
+chmod 700 "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
 {
   printf '%s\n' '#!/usr/bin/env bash'
   printf '%s\n' 'set -euo pipefail'
   printf 'PI_BIN=%q\n' "$pi_bin"
+  printf 'NODE_BIN=%q\n' "$node_bin"
   printf 'MINIMUM_IMAGE_SAFE_PI_VERSION=%q\n' ${shellQuote(MINIMUM_IMAGE_SAFE_PI_VERSION)}
   printf 'PATH=%q:"$PATH"\n' "$pi_bin_dir"
   printf '%s\n' 'export PATH'
@@ -572,18 +732,18 @@ if [ -f "$stderr_log" ] && [ -n "$(find "$stderr_log" -size +${PI_DAEMON_STDERR_
   mv -f "$stderr_log" "$stderr_log.1" 2>/dev/null || true
 fi
 # Everything this wrapper says from here on lands in the log the control plane reads for the reason a
-# start failed. Redirecting only Pi left every failure before the final 'exec' — a directory it could
-# not create, a FIFO it could not replace, a Pi binary it could not run — in the journal alone, with
-# the log's timestamp untouched, so the wake reported systemd's exit status and no reason.
+# start failed. The broker records Pi's process exit separately in its event journal; this log is the
+# bounded operator diagnostic for failures before the broker can do so.
 exec 2>>"$stderr_log"
 trap 'companion_status=$?; printf "pi-daemon: line %s: %s failed with status %s\\n" "$LINENO" "$BASH_COMMAND" "$companion_status" >&2' ERR
 export PI_CODING_AGENT_DIR="$HOME/.companion/pi"
-fifo="$root/state/pi.rpc.in"
-ready="$root/state/pi.rpc.ready"
-rpc_start="$root/state/pi.rpc.start"
-rm -f "$fifo" "$ready" "$rpc_start"
+broker_socket="$HOME/${COMPANION_PI_BROKER_SOCKET_PATH}"
+broker_journal="$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}"
+rm -f "$broker_socket"
+mkdir -p "$broker_journal"
+chmod 700 "$root" "$root/state" "$root/logs" "$broker_journal"
 pi_version="$("$PI_BIN" --version 2>/dev/null || true)"
-node - "$pi_version" "$MINIMUM_IMAGE_SAFE_PI_VERSION" <<'COMPANION_PI_DAEMON_VERSION'
+"$NODE_BIN" - "$pi_version" "$MINIMUM_IMAGE_SAFE_PI_VERSION" <<'COMPANION_PI_DAEMON_VERSION'
 const actualText = process.argv[2] ?? "";
 const minimumText = process.argv[3] ?? "";
 const parse = (value) => {
@@ -606,45 +766,31 @@ if (!currentEnough) {
   process.exit(1);
 }
 COMPANION_PI_DAEMON_VERSION
-mkfifo -m 600 "$fifo"
-exec 3<>"$fifo"
 if [ -z "\${INVOCATION_ID:-}" ]; then
-  echo 'pi-daemon: systemd invocation id is missing' >&2
+  echo 'pi-broker: systemd invocation id is missing' >&2
   exit 1
 fi
-rpc_start_size=0
-if [ -f "$root/logs/pi.rpc.ndjson" ]; then
-  rpc_start_size="$(wc -c < "$root/logs/pi.rpc.ndjson")"
-fi
-printf '%s %s\n' "$INVOCATION_ID" "$rpc_start_size" > "$rpc_start"
-printf '%s\n' "$INVOCATION_ID" > "$ready"
-skill_args=(--no-skills)
-model_args=()
-if [ -s "$root/state/model.txt" ]; then
-  model_args+=(--model "$(cat "$root/state/model.txt")")
-fi
-if find "$root/skills" -type f -name SKILL.md -print -quit 2>/dev/null | grep -q .; then
-  skill_args+=(--skill "$root/skills")
-fi
-if [ -s "$root/state/instructions.txt" ]; then
-  skill_args+=(--append-system-prompt "$(cat "$root/state/instructions.txt")")
-fi
-pi_args=("\${model_args[@]}" "\${skill_args[@]}")
-# One line per start, so the log always carries this start's timestamp and the invocation it made:
-# a Pi that dies without complaining is then reported as the command it was, not as silence.
-printf 'pi-daemon: starting %s %s\\n' "$PI_BIN" "\${pi_args[*]}" >&2
-exec "$PI_BIN" --mode rpc --session-dir "$root/sessions" "\${pi_args[@]}" <&3 >>"$root/logs/pi.rpc.ndjson" 2>>"$stderr_log"
+export COMPANION_PI_BIN="$PI_BIN"
+export COMPANION_PI_ROOT="$root"
+export COMPANION_PI_INVOCATION_ID="$INVOCATION_ID"
+export COMPANION_PI_SOCKET_PATH="$broker_socket"
+export COMPANION_PI_JOURNAL_PATH="$broker_journal"
+# One line per start leaves an attributable breadcrumb even if the broker dies before it records
+# Pi's process exit. It deliberately contains no arguments, credentials, or provider output.
+printf 'pi-broker: starting invocation %s\\n' "$INVOCATION_ID" >&2
+exec "$NODE_BIN" "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
 COMPANION_PI_DAEMON
 } > "$HOME/.companion/bin/pi-daemon"
 chmod 700 "$HOME/.companion/bin/pi-daemon"
 {
   cat <<'COMPANION_PI_SERVICE_HEAD'
 [Unit]
-Description=Companion Pi daemon
+Description=Companion Pi broker
 After=network-online.target
 
 [Service]
 Type=simple
+UMask=0077
 COMPANION_PI_SERVICE_HEAD
   # Pin the systemd user unit's PATH to the resolved Pi bin directory so the daemon starts without a
   # login-shell PATH, matching the absolute path baked into the wrapper above.
@@ -656,6 +802,7 @@ ExecStart=%h/.companion/bin/pi-daemon
 EnvironmentFile=-%t/companion/providers.env
 Restart=on-failure
 RestartSec=2
+KillMode=control-group
 
 [Install]
 WantedBy=default.target
@@ -733,11 +880,13 @@ const BOX_RUNNABLE_COMMAND = `printf '%s\\n' ${shellQuote(BOX_RUNNABLE_MARKER)}`
  */
 const WARM_DAEMON_READY_COMMAND = `${USER_BUS_ENVIRONMENT}
 companion_pi_invocation="$(systemctl --user show companion-pi-daemon.service -p InvocationID --value 2>/dev/null || true)"
+companion_pi_socket="$HOME/${COMPANION_PI_BROKER_SOCKET_PATH}"
+companion_pi_socket_mode="$(stat -c '%a' "$companion_pi_socket" 2>/dev/null || true)"
 if systemctl --user show-environment >/dev/null 2>&1 &&
   systemctl --user is-active --quiet companion-pi-daemon.service &&
   [ -n "$companion_pi_invocation" ] &&
-  [ -p "$HOME/.companion/runtime/state/pi.rpc.in" ] &&
-  [ "$(cat "$HOME/.companion/runtime/state/pi.rpc.ready" 2>/dev/null || true)" = "$companion_pi_invocation" ] &&
+  [ -S "$companion_pi_socket" ] &&
+  [ "$companion_pi_socket_mode" = 600 ] &&
   [ -f "$XDG_RUNTIME_DIR/companion/providers.env" ]; then
   printf '%s\\n' ${shellQuote(WARM_DAEMON_READY_MARKER)}
 fi`;
@@ -753,8 +902,16 @@ function encodeEnvironmentFile(
   return lines.join("\n").concat(lines.length ? "\n" : "");
 }
 
-function companionBoxName(companionId: string): string {
-  return `Companion ${companionId}`;
+function companionBoxName(companionId: string, runtimeGeneration?: number): string {
+  if (runtimeGeneration === undefined) return `Companion ${companionId}`;
+  if (
+    !Number.isSafeInteger(runtimeGeneration)
+    || runtimeGeneration < 1
+    || runtimeGeneration > MAX_COMPANION_RUNTIME_GENERATION
+  ) {
+    throw new BoxRuntimeConfigurationError("Companion runtime generation must be a positive integer");
+  }
+  return `Companion ${companionId} g${runtimeGeneration}`;
 }
 
 /**
@@ -778,10 +935,14 @@ function isSharedScopeBoxName(name: string): boolean {
  * path, which names a Box only once its id is durable, so it stays adoptable. A shared-scope name is
  * refused whatever id is asked about, because the caller's identifier is not this adapter's to trust.
  */
-function isCompanionOwnBox(box: BoxInfo, companionId: string): boolean {
+function isCompanionOwnBox(
+  box: BoxInfo,
+  companionId: string,
+  runtimeGeneration?: number,
+): boolean {
   const name = box.name?.trim() ?? "";
   if (isSharedScopeBoxName(name)) return false;
-  return name === "" || name === companionBoxName(companionId);
+  return name === "" || name === companionBoxName(companionId, runtimeGeneration);
 }
 
 /**
@@ -901,7 +1062,7 @@ export async function mintBoxDesktopUrl(input: {
   };
 }
 
-export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
+export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   readonly #apiKey: string;
   readonly #baseUrl: string;
   readonly #environment: string | undefined;
@@ -1013,14 +1174,18 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
    * refuses; a Box with no name is not a match here, because a name lookup must not answer with a Box
    * that has yet to be named.
    */
-  async #findCompanionBox(companionId: string): Promise<BoxInfo | null> {
+  async #findCompanionBox(
+    companionId: string,
+    runtimeGeneration?: number,
+  ): Promise<BoxInfo | null> {
     let cursor: string | null = null;
     do {
       const query = new URLSearchParams({ limit: "200", sort: "desc" });
       if (cursor) query.set("cursor", cursor);
       const result = await this.#request<BoxListEnvelope>(`/boxes?${query}`);
       const found = result.boxes.find((candidate) =>
-        (candidate.name?.trim() ?? "") !== "" && isCompanionOwnBox(candidate, companionId));
+        (candidate.name?.trim() ?? "") !== ""
+        && isCompanionOwnBox(candidate, companionId, runtimeGeneration));
       if (found) return found;
       cursor = result.pageInfo?.hasMore ? result.pageInfo.nextCursor : null;
     } while (cursor);
@@ -1033,6 +1198,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
    */
   async #createCompanionBox(input: {
     companionId: string;
+    runtimeGeneration?: number;
     orgId: string;
     onBoxAssigned: (boxId: string) => Promise<void>;
   }): Promise<BoxInfo> {
@@ -1047,6 +1213,9 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
         env: {
           COMPANION_ID: input.companionId,
           COMPANION_ORG_ID: input.orgId,
+          ...(input.runtimeGeneration === undefined
+            ? {}
+            : { COMPANION_RUNTIME_GENERATION: String(input.runtimeGeneration) }),
         },
         setupScript: setupScript(this.#installCommand, this.#mcpAdapterPackage),
       }),
@@ -1058,7 +1227,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
         {
           method: "PATCH",
           body: JSON.stringify({
-            name: companionBoxName(input.companionId),
+            name: companionBoxName(input.companionId, input.runtimeGeneration),
             ttlSeconds: this.#ttlSeconds,
           }),
         },
@@ -1093,10 +1262,16 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
    * name so the replacement Box owns it and no later start re-adopts the broken disk. Both calls are
    * best-effort: a Box the provider will not rename or stop must not keep the Companion un-wakeable.
    */
-  async #retireBox(box: BoxInfo, companionId: string): Promise<void> {
+  async #retireBox(
+    box: BoxInfo,
+    companionId: string,
+    runtimeGeneration?: number,
+  ): Promise<void> {
     await this.#request(`/boxes/${encodeURIComponent(box.id)}`, {
       method: "PATCH",
-      body: JSON.stringify({ name: `Retired ${companionBoxName(companionId)} ${Date.now()}` }),
+      body: JSON.stringify({
+        name: `Retired ${companionBoxName(companionId, runtimeGeneration)} ${Date.now()}`,
+      }),
     }).catch(() => undefined);
     if (!ARCHIVED_STATES.has(box.state)) {
       await this.#request(`/boxes/${encodeURIComponent(box.id)}/stop`, {
@@ -1246,28 +1421,32 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntime {
 companion_pi_state="$(systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true)"
 printf '%s\n' "$companion_pi_state"
 companion_pi_invocation="$(systemctl --user show companion-pi-daemon.service -p InvocationID --value 2>/dev/null || true)"
+companion_pi_socket="$HOME/${COMPANION_PI_BROKER_SOCKET_PATH}"
+companion_pi_socket_mode="$(stat -c '%a' "$companion_pi_socket" 2>/dev/null || true)"
 if [ "$companion_pi_state" = active ] &&
   [ -n "$companion_pi_invocation" ] &&
-  [ -p "$HOME/.companion/runtime/state/pi.rpc.in" ] &&
-  [ "$(cat "$HOME/.companion/runtime/state/pi.rpc.ready" 2>/dev/null || true)" = "$companion_pi_invocation" ]; then
-  printf '%s\n' companion-pi-rpc-ready
+  [ -S "$companion_pi_socket" ] &&
+  [ "$companion_pi_socket_mode" = 600 ]; then
+  printf '%s\n' companion-pi-broker-ready
 else
-  printf '%s\n' companion-pi-rpc-unready
+  printf '%s\n' companion-pi-broker-unready
 fi`,
     );
     const lines = result.stdout.trim().split(/\r?\n/);
     // Exact `active` remains accepted for older Box command fakes. The real probe always prints an
     // RPC marker, and an explicit unready marker prevents systemd Type=simple from becoming Online
-    // before the daemon wrapper has created the FIFO Pi actually consumes.
-    return lines[0] === "active" && !lines.includes("companion-pi-rpc-unready")
+    // before the broker has bound and permissioned the command socket.
+    return lines[0] === "active"
+      && !lines.includes("companion-pi-broker-unready")
+      && !lines.includes("companion-pi-rpc-unready")
       ? "running"
       : "stopped";
   }
 
   /**
    * Wait for the started unit and its RPC input to actually be ready. A successful `start` only
-   * means systemd accepted the job, and Type=simple becomes active before the wrapper creates its
-   * FIFO, so the wait ends only when both signals say Pi can consume a prompt.
+   * means systemd accepted the job, and Type=simple becomes active before the broker binds its
+   * socket, so the wait ends only when both signals say the protocol boundary is ready.
    */
   async #waitDaemonActive(boxId: string): Promise<CompanionDaemonState> {
     const deadline = Date.now() + this.#daemonActiveTimeoutMs;
@@ -1280,9 +1459,9 @@ fi`,
   }
 
   /**
-   * Write one command to Pi and wait for its correlated RPC response in the append-only event log.
-   * The response is Pi's acceptance boundary; successfully writing into the wrapper-held FIFO is
-   * only transport progress and must never advance the durable delivery watermark on its own.
+   * Send one command over the layout-14 owner-only socket and wait for its correlated response.
+   * One connection carries exactly one LF-terminated request and response, so a transport close or
+   * timeout is ambiguous rather than inferred from unrelated output in the event journal.
    */
   async #rpcCommandResponse(input: {
     boxId: string;
@@ -1290,7 +1469,7 @@ fi`,
     responseCommand: string;
     acceptTimeoutSeconds?: number;
   }): Promise<Record<string, unknown> | null> {
-    const serialized = JSON.stringify(input.command);
+    const encodedCommand = Buffer.from(JSON.stringify(input.command), "utf8").toString("base64");
     const acceptTimeoutSeconds = Math.max(
       1,
       Math.min(
@@ -1302,65 +1481,51 @@ fi`,
       input.boxId,
       `set -euo pipefail
 ${USER_BUS_ENVIRONMENT}
-fifo="$HOME/.companion/runtime/state/pi.rpc.in"
-rpc_log="$HOME/.companion/runtime/logs/pi.rpc.ndjson"
-ready="$HOME/.companion/runtime/state/pi.rpc.ready"
-rpc_start="$HOME/.companion/runtime/state/pi.rpc.start"
+broker_socket="$HOME/${COMPANION_PI_BROKER_SOCKET_PATH}"
 systemctl --user is-active --quiet companion-pi-daemon.service
-test -p "$fifo"
-companion_pi_invocation="$(systemctl --user show companion-pi-daemon.service -p InvocationID --value 2>/dev/null || true)"
-[ -n "$companion_pi_invocation" ]
-[ "$(cat "$ready" 2>/dev/null || true)" = "$companion_pi_invocation" ]
-rpc_start_invocation=""
-rpc_start_size=""
-read -r rpc_start_invocation rpc_start_size < "$rpc_start" 2>/dev/null || true
-if [ "$rpc_start_invocation" != "$companion_pi_invocation" ] \
-  || ! [[ "$rpc_start_size" =~ ^[0-9]+$ ]]; then
-  # A layout-13 daemon already running across this deploy predates the marker. Keep it usable; the
-  # whole log is safe because durable request ids are unique. Persist that conservative boundary
-  # once so a late acknowledgement remains visible to every explicit retry on this invocation; the
-  # next natural start replaces it with the exact byte boundary.
-  rpc_start_size=0
-  printf '%s %s\n' "$companion_pi_invocation" "$rpc_start_size" > "$rpc_start"
-fi
-# An earlier request may have timed out after Pi appended the correlated acknowledgement. Reuse
-# that response within this systemd invocation instead of executing the same turn a second time.
-response="$(
-  tail -c "+$((rpc_start_size + 1))" "$rpc_log" 2>/dev/null \
-    | grep -F ${shellQuote('"type":"response"')} \
-    | grep -F ${shellQuote(`"command":"${input.responseCommand}"`)} \
-    | grep -F ${shellQuote(`"id":"${input.command.id}"`)} \
-    | tail -n 1 \
-    || true
-)"
-if [ -n "$response" ]; then
-  printf '%s\n' "$response"
-  exit 0
-fi
-before_size=0
-if [ -f "$rpc_log" ]; then
-  before_size="$(wc -c < "$rpc_log")"
-fi
-printf '%s\\n' ${shellQuote(serialized)} > "$fifo"
-deadline=$((SECONDS + ${acceptTimeoutSeconds}))
-while (( SECONDS < deadline )); do
-  response="$(
-    tail -c "+$((before_size + 1))" "$rpc_log" 2>/dev/null \
-      | grep -F ${shellQuote('"type":"response"')} \
-      | grep -F ${shellQuote(`"command":"${input.responseCommand}"`)} \
-      | grep -F ${shellQuote(`"id":"${input.command.id}"`)} \
-      | tail -n 1 \
-      || true
-  )"
-  if [ -n "$response" ]; then
-    printf '%s\\n' "$response"
-    exit 0
-  fi
-  systemctl --user is-active --quiet companion-pi-daemon.service
-  sleep 0.1
-done
-printf '%s\\n' ${shellQuote(`Pi RPC did not acknowledge ${input.responseCommand}`)} >&2
-exit 1`,
+test -S "$broker_socket"
+[ "$(stat -c '%a' "$broker_socket" 2>/dev/null || true)" = 600 ]
+COMPANION_PI_BROKER_SOCKET="$broker_socket" \
+COMPANION_PI_BROKER_COMMAND=${shellQuote(encodedCommand)} \
+COMPANION_PI_BROKER_TIMEOUT_MS=${acceptTimeoutSeconds * 1_000} \
+node <<'COMPANION_PI_BROKER_CLIENT'
+const net = require("node:net");
+const request = Buffer.from(process.env.COMPANION_PI_BROKER_COMMAND || "", "base64").toString("utf8");
+const timeoutMs = Number(process.env.COMPANION_PI_BROKER_TIMEOUT_MS || "8000");
+let buffer = "";
+let settled = false;
+let timer;
+const socket = net.createConnection({ path: process.env.COMPANION_PI_BROKER_SOCKET });
+const fail = (message) => {
+  if (settled) return;
+  settled = true;
+  if (timer) clearTimeout(timer);
+  socket.destroy();
+  process.stderr.write(message + "\\n");
+  process.exitCode = 1;
+};
+timer = setTimeout(() => fail("Pi broker did not acknowledge the command"), timeoutMs);
+socket.setEncoding("utf8");
+socket.on("connect", () => socket.write(request + "\\n"));
+socket.on("data", (chunk) => {
+  if (settled) return;
+  buffer += chunk;
+  if (Buffer.byteLength(buffer, "utf8") > 262144) {
+    fail("Pi broker response exceeded the safe limit");
+    return;
+  }
+  const newline = buffer.indexOf("\\n");
+  if (newline < 0) return;
+  clearTimeout(timer);
+  settled = true;
+  process.stdout.write(buffer.slice(0, newline) + "\\n");
+  socket.end();
+});
+socket.on("end", () => {
+  if (!settled) fail("Pi broker closed without a response");
+});
+socket.on("error", () => fail("Pi broker command transport failed"));
+COMPANION_PI_BROKER_CLIENT`,
       acceptTimeoutSeconds + 5,
     );
     if (!result.success) return null;
@@ -1754,6 +1919,7 @@ exit 0`,
 
   async start(input: {
     companionId: string;
+    runtimeGeneration?: number;
     orgId: string;
     boxId: string | null;
     clientSurface: CompanionClientSurface;
@@ -1774,6 +1940,8 @@ exit 0`,
     onBoxAssigned: (boxId: string | null) => Promise<void>;
     signal?: AbortSignal;
   }): Promise<CompanionRuntimeStartObservation> {
+    // Validate before any Box read/create so a malformed durable generation cannot leak a resource.
+    companionBoxName(input.companionId, input.runtimeGeneration);
     this.#startSignal = input.signal;
     try {
       return await this.#startBox(input);
@@ -1785,6 +1953,7 @@ exit 0`,
 
   async #startBox(input: {
     companionId: string;
+    runtimeGeneration?: number;
     orgId: string;
     boxId: string | null;
     clientSurface: CompanionClientSurface;
@@ -1809,17 +1978,20 @@ exit 0`,
     // all, and the row is cleared so nothing else — a stop, a live status, a thread sync — reaches
     // that machine either. The Box itself is left untouched: it is not this Companion's to rename or
     // archive, and another Companion's row may still be pointing at it.
-    let box = assigned && isCompanionOwnBox(assigned, input.companionId) ? assigned : null;
+    let box = assigned
+      && isCompanionOwnBox(assigned, input.companionId, input.runtimeGeneration)
+      ? assigned
+      : null;
     const keptAssignment = box !== null;
     if (assigned && !keptAssignment) await input.onBoxAssigned(null);
-    if (!box) box = await this.#findCompanionBox(input.companionId);
+    if (!box) box = await this.#findCompanionBox(input.companionId, input.runtimeGeneration);
     if (box && isBeyondRecovery(box)) {
       if (!allowBoxWake) {
         throw new BoxRuntimeProviderError("Box is no longer online; apply on the next wake", 409);
       }
       // The assigned Box failed setup or died, so the Companion moves onto a new Box instead of
       // failing every future wake against the same broken disk.
-      await this.#retireBox(box, input.companionId);
+      await this.#retireBox(box, input.companionId, input.runtimeGeneration);
       box = null;
     }
     let boxIdPersisted = false;
@@ -1996,6 +2168,7 @@ if systemctl --user show-environment >/dev/null 2>&1; then
   fi
 fi
 rm -f "/run/user/$(id -u)/companion/providers.env" \
+  "$HOME/${COMPANION_PI_BROKER_SOCKET_PATH}" \
   "$HOME/.companion/runtime/state/pi.rpc.in" \
   "$HOME/.companion/runtime/state/pi.rpc.ready" \
   "$HOME/.companion/runtime/state/pi.rpc.start"`,
@@ -2042,42 +2215,171 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
   }
 
   async prompt(input: { boxId: string; message: string; requestId: string }): Promise<void> {
-    const accepted = await this.#rpcCommandAccepted({
+    const dispatched = await this.dispatchPrompt({
       boxId: input.boxId,
-      responseCommand: "prompt",
-      command: {
-        id: input.requestId,
-        type: "prompt",
-        message: input.message,
-        streamingBehavior: "followUp",
-      },
+      attemptId: input.requestId,
+      requestId: input.requestId,
+      message: input.message,
     });
-    if (!accepted) {
+    if (dispatched.outcome !== "accepted") {
       throw new BoxRuntimeProviderError("Pi did not accept the message; wake the Companion and retry", 409);
     }
   }
 
+  async dispatchPrompt(input: {
+    boxId: string;
+    attemptId: string;
+    message: string;
+    requestId?: string;
+  }): Promise<CompanionPiPromptDispatch> {
+    let response: Record<string, unknown> | null;
+    try {
+      response = await this.#rpcCommandResponse({
+        boxId: input.boxId,
+        responseCommand: "prompt",
+        command: {
+          id: input.requestId ?? `companion-dispatch:${randomUUID()}`,
+          type: "prompt",
+          attemptId: input.attemptId,
+          message: input.message,
+        },
+      });
+    } catch {
+      // The Box command can have written the prompt and lost its HTTP response. Conservatively keep
+      // that indistinguishable transport failure out of every automatic replay path.
+      response = null;
+    }
+    if (!response) {
+      return {
+        outcome: "ambiguous",
+        code: "pi_ack_ambiguous",
+        message: "Pi prompt acknowledgement is unavailable",
+      };
+    }
+    if (response.success === true) {
+      const data = isJsonObject(response.data) ? response.data : null;
+      if (data?.piAcknowledged === true && data.attemptId === input.attemptId) {
+        return { outcome: "accepted", attemptId: input.attemptId };
+      }
+      return {
+        outcome: "ambiguous",
+        code: "broker_protocol",
+        message: "Pi broker returned an invalid prompt acknowledgement",
+      };
+    }
+    const error = isJsonObject(response.error) ? response.error : {};
+    const ambiguous = error.ambiguous === true;
+    return {
+      outcome: ambiguous ? "ambiguous" : "refused",
+      code: brokerSafeCode(error.code, ambiguous ? "pi_ack_ambiguous" : "pi_prompt_refused"),
+      message: brokerSafeMessage(
+        error.message,
+        ambiguous ? "Pi prompt acknowledgement is unavailable" : "Pi refused the prompt",
+      ),
+    };
+  }
+
+  async brokerState(input: { boxId: string }): Promise<CompanionPiBrokerState> {
+    const response = await this.#rpcCommandResponse({
+      boxId: input.boxId,
+      responseCommand: "broker_state",
+      command: { id: `companion-broker-state:${randomUUID()}`, type: "broker_state" },
+    });
+    const data = response?.success === true && isJsonObject(response.data) ? response.data : null;
+    const counters = parseBrokerCounters(data?.counters);
+    if (
+      !data
+      || !opaqueBrokerId(data.invocationId)
+      || (data.activeAttemptId !== null && !opaqueBrokerId(data.activeAttemptId))
+      || !nonNegativeSafeInteger(data.tailCursor)
+      || !nonNegativeSafeInteger(data.acknowledgedCursor)
+      || data.acknowledgedCursor > data.tailCursor
+      || !counters
+    ) {
+      throw new BoxRuntimeProviderError("Pi broker state is unavailable", 502);
+    }
+    return {
+      invocationId: data.invocationId,
+      activeAttemptId: data.activeAttemptId,
+      tailCursor: data.tailCursor,
+      acknowledgedCursor: data.acknowledgedCursor,
+      counters,
+    };
+  }
+
   async respondExtensionUi(input: {
     boxId: string;
+    attemptId?: string;
     response: Record<string, unknown>;
   }): Promise<void> {
-    const command = JSON.stringify(input.response);
-    const result = await this.#command(
-      input.boxId,
-      `set -euo pipefail
-${USER_BUS_ENVIRONMENT}
-fifo="$HOME/.companion/runtime/state/pi.rpc.in"
-systemctl --user is-active --quiet companion-pi-daemon.service
-test -p "$fifo"
-printf '%s\\n' ${shellQuote(command)} > "$fifo"`,
-      20,
-    );
-    if (!result.success) {
+    const dispatched = await this.dispatchExtensionUi({
+      ...input,
+      requestId: `companion-decision:${randomUUID()}`,
+    });
+    if (dispatched.outcome !== "accepted") {
       throw new BoxRuntimeProviderError(
         "Pi did not accept the permission response; wake the Companion and retry",
         409,
       );
     }
+  }
+
+  async dispatchExtensionUi(input: {
+    boxId: string;
+    attemptId?: string;
+    requestId?: string;
+    response: Record<string, unknown>;
+  }): Promise<CompanionPiExtensionUiDispatch> {
+    let response: Record<string, unknown> | null;
+    try {
+      response = await this.#rpcCommandResponse({
+        boxId: input.boxId,
+        responseCommand: "extension_ui_response",
+        command: {
+          id: input.requestId ?? `companion-decision:${randomUUID()}`,
+          type: "extension_ui_response",
+          ...(input.attemptId === undefined ? {} : { attemptId: input.attemptId }),
+          response: input.response,
+        },
+      });
+    } catch {
+      response = null;
+    }
+    if (!response) {
+      return {
+        outcome: "ambiguous",
+        code: "decision_delivery_ambiguous",
+        message: "Pi decision acknowledgement is unavailable",
+      };
+    }
+    if (response.success === true) {
+      const data = isJsonObject(response.data) ? response.data : null;
+      if (
+        data?.delivered === true
+        && opaqueBrokerId(data.attemptId)
+        && (input.attemptId === undefined || data.attemptId === input.attemptId)
+      ) {
+        return { outcome: "accepted", attemptId: data.attemptId };
+      }
+      return {
+        outcome: "ambiguous",
+        code: "broker_protocol",
+        message: "Pi broker returned an invalid decision acknowledgement",
+      };
+    }
+    const error = isJsonObject(response.error) ? response.error : {};
+    const ambiguous = error.ambiguous === true;
+    return {
+      outcome: ambiguous ? "ambiguous" : "refused",
+      code: brokerSafeCode(
+        error.code,
+        ambiguous ? "decision_delivery_ambiguous" : "decision_refused",
+      ),
+      message: brokerSafeMessage(
+        error.message,
+        ambiguous ? "Pi decision acknowledgement is unavailable" : "Pi refused the decision",
+      ),
+    };
   }
 
   async refreshTtl(input: { boxId: string }): Promise<void> {
@@ -2138,13 +2440,85 @@ systemctl --user ${initialState === "running" ? "restart" : "start"} companion-p
     };
   }
 
-  /**
-   * Read the next slice of this Box's Pi event log. A log that is missing, unreadable, of unreadable
-   * size, or longer than the read limit is a normal read that returns a chunk and the offset to
-   * resume from, because none of those mean the thread is broken. Only a Box that could not run the
-   * read at all fails, and that failure carries the exit status and the last line the Box printed.
-   */
-  async readEvents(input: { boxId: string; offset: number }): Promise<CompanionPiEventChunk> {
+  async ackEvents(input: {
+    boxId: string;
+    through: number;
+  }): Promise<{ acknowledgedCursor: number }> {
+    const response = await this.#rpcCommandResponse({
+      boxId: input.boxId,
+      responseCommand: "ack_events",
+      command: {
+        id: `companion-ack-events:${randomUUID()}`,
+        type: "ack_events",
+        through: input.through,
+      },
+    });
+    const data = response?.success === true && isJsonObject(response.data) ? response.data : null;
+    if (!data || !nonNegativeSafeInteger(data.acknowledgedCursor)) {
+      throw new BoxRuntimeProviderError("Pi broker event acknowledgement failed", 502);
+    }
+    return { acknowledgedCursor: data.acknowledgedCursor };
+  }
+
+  async readEvents(input: { boxId: string; offset: number }): Promise<CompanionPiEventChunk>;
+  async readEvents(input: {
+    boxId: string;
+    after: number;
+    limit?: number;
+  }): Promise<CompanionPiBrokerEventPage>;
+  async readEvents(input: { boxId: string; offset: number } | {
+    boxId: string;
+    after: number;
+    limit?: number;
+  }): Promise<CompanionPiEventChunk | CompanionPiBrokerEventPage> {
+    if ("after" in input) {
+      const response = await this.#rpcCommandResponse({
+        boxId: input.boxId,
+        responseCommand: "read_events",
+        command: {
+          id: `companion-read-events:${randomUUID()}`,
+          type: "read_events",
+          after: input.after,
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+        },
+      });
+      const data = response?.success === true && isJsonObject(response.data) ? response.data : null;
+      const events = Array.isArray(data?.events)
+        ? data.events.map(parseBrokerJournalRecord)
+        : null;
+      if (
+        !data
+        || !events
+        || events.some((event) => event === null)
+        || !nonNegativeSafeInteger(data.nextCursor)
+        || !nonNegativeSafeInteger(data.acknowledgedCursor)
+        || typeof data.hasMore !== "boolean"
+      ) {
+        throw new BoxRuntimeProviderError("Pi broker event journal could not be read", 502);
+      }
+      let prior = Math.max(input.after, data.acknowledgedCursor);
+      for (const event of events as CompanionPiJournalRecord[]) {
+        if (event.sequence <= prior || event.sequence > data.nextCursor) {
+          throw new BoxRuntimeProviderError("Pi broker event journal is not monotonic", 502);
+        }
+        prior = event.sequence;
+      }
+      if (events.length > 0 && prior !== data.nextCursor) {
+        throw new BoxRuntimeProviderError("Pi broker event cursor does not match its page", 502);
+      }
+      return {
+        events: events as CompanionPiJournalRecord[],
+        nextCursor: data.nextCursor,
+        acknowledgedCursor: data.acknowledgedCursor,
+        hasMore: data.hasMore,
+      };
+    }
+
+    /*
+     * Read the next slice of the transitional compatibility log. A log that is missing, unreadable,
+     * or longer than the read limit is a normal read with a resume offset. Runtime v2 consumes the
+     * monotonic journal branch above; this branch exists only until the legacy API executor leaves.
+     */
     const result = await this.#command(
       input.boxId,
       `set -eu

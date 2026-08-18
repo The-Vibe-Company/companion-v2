@@ -51,9 +51,9 @@ describe("deterministic Box faults", () => {
       occurrence: 2,
       action: { kind: "http", status: 429 },
     });
-    expect((await request(handle, "/boxes", { method: "POST", body: "{}" })).status).toBe(201);
+    expect((await request(handle, "/boxes", { method: "POST", body: "{}" })).status).toBe(202);
     expect((await request(handle, "/boxes", { method: "POST", body: "{}" })).status).toBe(429);
-    expect((await request(handle, "/boxes", { method: "POST", body: "{}" })).status).toBe(201);
+    expect((await request(handle, "/boxes", { method: "POST", body: "{}" })).status).toBe(202);
     expect(handle.simulator.snapshot().boxes.map((box) => box.id)).toEqual([
       "bx_23456789",
       "bx_2345678a",
@@ -61,7 +61,7 @@ describe("deterministic Box faults", () => {
     expect(handle.simulator.snapshot().faults[0]).toMatchObject({ visits: 3, fired: 1 });
 
     await handle.simulator.reset();
-    expect((await request(handle, "/boxes", { method: "POST", body: "{}" })).status).toBe(201);
+    expect((await request(handle, "/boxes", { method: "POST", body: "{}" })).status).toBe(202);
     expect(handle.simulator.snapshot().boxes[0]?.id).toBe("bx_23456789");
   });
 

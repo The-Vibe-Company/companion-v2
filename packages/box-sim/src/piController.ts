@@ -243,8 +243,10 @@ export class PiProcessController implements BoxSimPiController {
       this.#consumeStdout(reader, chunk, generation, invocationId);
     });
     child.stdout.on("end", () => {
-      reader.decoder.end();
-      // Strict LF JSONL: an unterminated final fragment is deliberately not a record.
+      reader.buffer += reader.decoder.end();
+      if (reader.buffer.length > 0) {
+        this.#forwardFault("unterminated", generation, invocationId);
+      }
       reader.buffer = "";
     });
     child.stderr.on("data", (chunk: Buffer) => {
@@ -344,6 +346,19 @@ export class PiProcessController implements BoxSimPiController {
       if (generation !== this.#generation) return;
       if (invocationId !== null && this.#context.currentInvocationId() !== invocationId) return;
       this.#context.appendEvent(event);
+    });
+  }
+
+  #forwardFault(
+    fault: "malformed" | "oversized" | "unterminated",
+    generation: number,
+    invocationId: string | null,
+  ): void {
+    // The fault is value-free, but still belongs only to the invocation that emitted it.
+    setImmediate(() => {
+      if (generation !== this.#generation) return;
+      if (invocationId !== null && this.#context.currentInvocationId() !== invocationId) return;
+      this.#context.appendFault(fault);
     });
   }
 

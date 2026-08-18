@@ -14,6 +14,10 @@ import {
   mintBoxDesktopUrl,
   PI_DAEMON_FAILURE_MESSAGE,
 } from "./boxCompanionRuntime";
+import {
+  COMPANION_PI_BROKER_SCRIPT_PATH,
+  COMPANION_PI_BROKER_SOURCE,
+} from "./companionPiBroker";
 import { companionRuntimeErrorMessage } from "./companionRuntimeError";
 
 const box = {
@@ -36,6 +40,28 @@ function decodedPiInstallScript(layoutScript: string): string {
     .exec(layoutScript)?.[1];
   if (!encoded) throw new Error("layout script did not carry a configured Pi installer");
   return Buffer.from(encoded, "base64").toString("utf8");
+}
+
+/** Recover the standalone layout-14 broker program embedded beside the Pi installer. */
+function decodedPiBrokerSource(layoutScript: string): string {
+  const encoded = /printf '%s' '([A-Za-z0-9+/=]+)' \| base64 --decode > "\$HOME\/\.companion\/bin\/companion-pi-broker\.mjs"/
+    .exec(layoutScript)?.[1];
+  if (!encoded) throw new Error("layout script did not carry the Pi broker program");
+  return Buffer.from(encoded, "base64").toString("utf8");
+}
+
+/** Decode the command the adapter passes to the broker without exposing it as shell text. */
+function decodedPiBrokerCommand(command: string): Record<string, unknown> | null {
+  const encoded = /COMPANION_PI_BROKER_COMMAND='([A-Za-z0-9+/=]+)'/.exec(command)?.[1];
+  if (!encoded) return null;
+  try {
+    const value = JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as unknown;
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function json(value: unknown, status = 200): Response {
@@ -196,6 +222,7 @@ async function boxDiskWithPiDaemon(): Promise<{
   home: string;
   daemon: string;
   stderrLog: string;
+  brokerEnvironment: string;
   argv: string;
   pi: string;
 }> {
@@ -216,10 +243,29 @@ async function boxDiskWithPiDaemon(): Promise<{
   await writeFile(script, await stagedPiLayoutScript());
   const installed = await runOnBoxDisk(`bash ${JSON.stringify(script)}`, home, bin);
   expect(installed.exitCode).toBe(0);
+  // Broker protocol and Pi-child behavior have their own focused tests. This executable records the
+  // wrapper contract and exits so these layout tests never leave a supervised process behind.
+  const broker = join(home, COMPANION_PI_BROKER_SCRIPT_PATH);
+  const brokerEnvironment = join(home, "broker-environment.json");
+  await writeFile(
+    broker,
+    "#!/usr/bin/env node\n"
+    + 'import { writeFileSync } from "node:fs";\n'
+    + `writeFileSync(${JSON.stringify(brokerEnvironment)}, JSON.stringify({\n`
+    + "  bin: process.env.COMPANION_PI_BIN,\n"
+    + "  root: process.env.COMPANION_PI_ROOT,\n"
+    + "  invocation: process.env.COMPANION_PI_INVOCATION_ID,\n"
+    + "  socket: process.env.COMPANION_PI_SOCKET_PATH,\n"
+    + "  journal: process.env.COMPANION_PI_JOURNAL_PATH,\n"
+    + "  codingAgentDir: process.env.PI_CODING_AGENT_DIR,\n"
+    + "}));\n",
+  );
+  await chmod(broker, 0o700);
   return {
     home,
     daemon: join(home, ".companion", "bin", "pi-daemon"),
     stderrLog: join(home, ".companion", "runtime", "logs", "pi.stderr.log"),
+    brokerEnvironment,
     argv,
     pi,
   };
@@ -473,6 +519,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     let fileBody: Record<string, unknown> | undefined;
     const files = new Map<string, string>();
     let createBody: Record<string, unknown> | undefined;
+    let patchBody: Record<string, unknown> | undefined;
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
@@ -484,6 +531,7 @@ describe("AsciiBoxCompanionRuntime", () => {
         return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } }, 202);
       }
       if (url.endsWith("/boxes/bx_23456789") && init?.method === "PATCH") {
+        patchBody = body;
         return json({ box: { ...box, state: "provisioning", setupStatus: "pending" } });
       }
       if (url.endsWith("/files") && init?.method === "PUT") {
@@ -512,6 +560,7 @@ describe("AsciiBoxCompanionRuntime", () => {
 
     const result = await runtime.start({
       companionId: "11111111-1111-4111-8111-111111111111",
+      runtimeGeneration: 7,
       orgId: "22222222-2222-4222-8222-222222222222",
       boxId: null,
       clientSurface: "web",
@@ -549,15 +598,21 @@ describe("AsciiBoxCompanionRuntime", () => {
       env: {
         COMPANION_ID: "11111111-1111-4111-8111-111111111111",
         COMPANION_ORG_ID: "22222222-2222-4222-8222-222222222222",
+        COMPANION_RUNTIME_GENERATION: "7",
       },
     });
-    expect(String(createBody?.setupScript)).toContain("exec \"$PI_BIN\" --mode rpc --session-dir");
-    expect(String(createBody?.setupScript)).toContain("ExecStart=%h/.companion/bin/pi-daemon");
-    expect(String(createBody?.setupScript)).toContain("npm:pi-mcp-adapter@2.12.1");
-    expect(String(createBody?.setupScript)).toContain("--no-skills");
-    expect(String(createBody?.setupScript)).toContain('model_args+=(--model "$(cat "$root/state/model.txt")")');
-    expect(String(createBody?.setupScript)).toContain("--append-system-prompt");
-    expect(String(createBody?.setupScript)).not.toContain("OpenCode");
+    expect(patchBody).toMatchObject({
+      name: "Companion 11111111-1111-4111-8111-111111111111 g7",
+      ttlSeconds: 21_600,
+    });
+    const layoutScript = String(createBody?.setupScript);
+    expect(layoutScript).toContain(`exec "$NODE_BIN" "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"`);
+    expect(layoutScript).toContain("ExecStart=%h/.companion/bin/pi-daemon");
+    expect(layoutScript).toContain("npm:pi-mcp-adapter@2.12.1");
+    expect(layoutScript).toContain("COMPANION_PI_SOCKET_PATH");
+    expect(layoutScript).toContain("COMPANION_PI_JOURNAL_PATH");
+    expect(decodedPiBrokerSource(layoutScript)).toBe(COMPANION_PI_BROKER_SOURCE);
+    expect(layoutScript).not.toContain("OpenCode");
     expect(fileBody).toEqual({
       path: ".companion/runtime/state/providers.env",
       content: "GITHUB_TOKEN_WORK=\"mcp-secret\"\n",
@@ -633,13 +688,115 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(commands).toHaveLength(1);
     expect(commands[0]).toContain("is-active --quiet companion-pi-daemon.service");
     expect(commands[0]).toContain("-p InvocationID --value");
-    expect(commands[0]).toContain("state/pi.rpc.ready");
+    expect(commands[0]).toContain("state/pi-broker.sock");
+    expect(commands[0]).toContain("stat -c '%a'");
+    expect(commands[0]).toContain('[ "$companion_pi_socket_mode" = 600 ]');
     expect(commands[0]).toContain('[ -f "$XDG_RUNTIME_DIR/companion/providers.env" ]');
     expect(commands[0]).not.toContain("systemctl --user start companion-pi-daemon.service");
     expect(commands[0]).not.toContain("systemctl --user restart companion-pi-daemon.service");
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/files"))).toBe(false);
     expect(fetchMock.mock.calls.some(([, init]) =>
       String(JSON.parse(String(init?.body ?? "{}")).command ?? "").includes("skills.next"))).toBe(false);
+  });
+
+  it("keeps a canonical generation-qualified Box assigned during an apply-only start", async () => {
+    const companionId = "11111111-1111-4111-8111-111111111111";
+    const canonical = { ...box, name: `Companion ${companionId} g4` };
+    const assignments: Array<string | null> = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return json({ box: canonical });
+      if (url.endsWith("/commands") && method === "POST") {
+        expect(String(body.command)).toContain("companion-pi-warm-ready");
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: "companion-pi-warm-ready\n",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    const result = await runtime.start({
+      companionId,
+      runtimeGeneration: 4,
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: {},
+      replaceProviderAuth: false,
+      allowBoxWake: false,
+      modelId: "claude-opus-4-8",
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async (boxId) => { assignments.push(boxId); },
+    });
+
+    expect(result).toMatchObject({ boxId: "bx_23456789", staged: false });
+    expect(assignments).toEqual(["bx_23456789"]);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/boxes?"))).toBe(false);
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
+  });
+
+  it("rejects a stale generation name and recovers only the exact generation-qualified Box", async () => {
+    const companionId = "11111111-1111-4111-8111-111111111111";
+    const stale = { ...box, id: "bx_stale123", name: `Companion ${companionId} g3` };
+    const canonical = { ...box, id: "bx_current4", name: `Companion ${companionId} g4` };
+    const assignments: Array<string | null> = [];
+    const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_stale123") && method === "GET") return json({ box: stale });
+      if (url.includes("/boxes?limit=200") && method === "GET") {
+        return json({
+          boxes: [
+            { ...box, id: "bx_legacy00", name: `Companion ${companionId}` },
+            stale,
+            canonical,
+          ],
+        });
+      }
+      if (url.endsWith("/boxes/bx_current4") && method === "GET") return json({ box: canonical });
+      if (url.endsWith("/commands") && method === "POST") {
+        return json({
+          success: true,
+          exitCode: 0,
+          stdout: "companion-pi-warm-ready\n",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    const result = await runtime.start({
+      companionId,
+      runtimeGeneration: 4,
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_stale123",
+      clientSurface: "web",
+      providerAuth: {},
+      replaceProviderAuth: false,
+      allowBoxWake: false,
+      modelId: "claude-opus-4-8",
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+      onBoxAssigned: async (boxId) => { assignments.push(boxId); },
+    });
+
+    expect(result.boxId).toBe("bx_current4");
+    expect(assignments).toEqual([null, "bx_current4"]);
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url).endsWith("/boxes") && init?.method === "POST")).toBe(false);
   });
 
   it("rewrites provider auth and restarts Pi instead of using an idempotent start", async () => {
@@ -1788,25 +1945,26 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(markerIndex).toBeGreaterThan(-1);
     expect(piResolveIndex).toBeGreaterThan(-1);
     expect(markerIndex).toBeLessThan(piResolveIndex);
-    // Layout 13 restores image reads under the bounded execution guard, and keeps shell runs on
-    // their longer deadline, so a warm legacy Pi restarts once and picks both behaviors up.
-    expect(COMPANION_PI_DISK_LAYOUT_VERSION).toBe(13);
+    // Layout 14 retains the bounded image/tool guards while moving command correlation and event
+    // retention behind the owner-only broker boundary.
+    expect(COMPANION_PI_DISK_LAYOUT_VERSION).toBe(14);
     expect(createdSetupScript)
-      .toContain("expected_layout='13:npm:pi-mcp-adapter@2.12.1:pi>=0.84.2'");
+      .toContain("expected_layout='14:npm:pi-mcp-adapter@2.12.1:pi>=0.84.2'");
     expect(createdSetupScript).toContain("or newer is required for bounded image reads");
     // A layout migration reruns a configured pin even when the template already has some `pi`.
     expect(decodedPiInstallScript(createdSetupScript)).toContain(
       "npm install --global @earendil-works/pi-coding-agent@1.2.3",
     );
-    expect(createdSetupScript).toContain("--append-system-prompt");
+    expect(decodedPiBrokerSource(createdSetupScript)).toBe(COMPANION_PI_BROKER_SOURCE);
     // The supervised daemon gets a minimal PATH from the systemd user manager, so Pi is resolved at
     // layout time and pinned both in the wrapper and on the unit.
     expect(createdSetupScript).toContain("pi_bin=\"$(command -v pi)\"");
-    expect(createdSetupScript).toContain("exec \"$PI_BIN\" --mode rpc");
+    expect(createdSetupScript)
+      .toContain(`exec "$NODE_BIN" "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"`);
     expect(createdSetupScript).toContain("Environment=PATH=");
   });
 
-  it("refuses layout 13 before staging the permissive extension when Pi is image-unsafe", async () => {
+  it("refuses layout 14 before staging the permissive extension when Pi is image-unsafe", async () => {
     const scriptSource = await stagedPiLayoutScript();
     const home = await mkdtemp(join(tmpdir(), "companion-old-pi-"));
     const bin = await mkdtemp(join(tmpdir(), "companion-old-pi-bin-"));
@@ -2073,12 +2231,12 @@ describe("AsciiBoxCompanionRuntime", () => {
         if (command.includes("is-active") && !command.includes("companion_label")) {
           probes.push(command);
           // systemd forks ExecStart and returns from `restart` before Type=simple is up. Even its
-          // later `active` answer is not ready until the daemon wrapper has created the RPC FIFO.
+          // later `active` answer is not ready until the broker has bound its owner-only socket.
           const stdout = probes.length === 1
-            ? "activating\ncompanion-pi-rpc-unready\n"
+            ? "activating\ncompanion-pi-broker-unready\n"
             : probes.length === 2
-              ? "active\ncompanion-pi-rpc-unready\n"
-              : "active\ncompanion-pi-rpc-ready\n";
+              ? "active\ncompanion-pi-broker-unready\n"
+              : "active\ncompanion-pi-broker-ready\n";
           return json({
             success: true,
             exitCode: 0,
@@ -2111,7 +2269,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       onBoxAssigned: async () => undefined,
     });
 
-    // The wake does not stop at systemd's early `active`; it succeeds only with the FIFO marker,
+    // The wake does not stop at systemd's early `active`; it succeeds only with the socket marker,
     // and the Box is never replaced or stopped on the way there.
     expect(probes.length).toBeGreaterThanOrEqual(3);
     expect(result).toMatchObject({ runtimeState: "running", daemonState: "running" });
@@ -3066,7 +3224,9 @@ describe("AsciiBoxCompanionRuntime", () => {
         return json({
           success: true,
           exitCode: 0,
-          stdout: '{"type":"response","command":"prompt","success":true,"id":"msg:stop-wake"}\n',
+          stdout: '{"type":"response","command":"prompt","success":true,'
+            + '"id":"msg:stop-wake","data":{"attemptId":"msg:stop-wake",'
+            + '"piAcknowledged":true}}\n',
           stderr: "",
         });
       }
@@ -3669,7 +3829,7 @@ describe("AsciiBoxCompanionRuntime", () => {
 
     expect(retired).toHaveLength(1);
     expect(created).toHaveLength(1);
-    expect(created[0]).toContain("exec \"$PI_BIN\" --mode rpc --session-dir");
+    expect(created[0]).toContain(`exec "$NODE_BIN" "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"`);
     expect(String(created[0])).not.toContain("bx_broken00");
     expect(result.boxId).toBe("bx_23456789");
     expect(result.runtimeState).toBe("running");
@@ -4203,7 +4363,7 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(commands.some((command) => command.includes(RUNTIME_PROVIDER_FILE))).toBe(true);
   });
 
-  it("writes one JSONL prompt into the Pi FIFO without touching Box lifecycle", async () => {
+  it("sends one correlated prompt through the owner-only broker socket without touching Box lifecycle", async () => {
     const commands: string[] = [];
     const fetchMock = vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
@@ -4214,7 +4374,8 @@ describe("AsciiBoxCompanionRuntime", () => {
         return json({
           success: true,
           exitCode: 0,
-          stdout: '{"type":"response","command":"prompt","success":true,"id":"msg:1"}\n',
+          stdout: '{"type":"response","command":"prompt","success":true,"id":"msg:1",'
+            + '"data":{"attemptId":"msg:1","piAcknowledged":true}}\n',
           stderr: "",
         });
       }
@@ -4234,22 +4395,199 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(commands[0]).toContain('export XDG_RUNTIME_DIR="$companion_user_runtime_dir"');
     expect(commands[0]).not.toContain("${XDG_RUNTIME_DIR:-");
     expect(commands[0]).toContain("is-active --quiet companion-pi-daemon.service");
-    expect(commands[0]).toContain("state/pi.rpc.in");
-    expect(commands[0]).toContain("state/pi.rpc.ready");
-    expect(commands[0]).toContain("state/pi.rpc.start");
-    expect(commands[0]).toContain("-p InvocationID --value");
-    expect(commands[0]).toContain("logs/pi.rpc.ndjson");
-    expect(commands[0]).toContain("rpc_start_size + 1");
-    expect(commands[0]).toContain(
-      "Persist that conservative boundary",
-    );
-    expect(commands[0]).toContain("instead of executing the same turn a second time");
-    expect(commands[0]).toContain(
-      '{"id":"msg:1","type":"prompt","message":"Summarize the incident","streamingBehavior":"followUp"}',
-    );
-    expect(commands[0]).toContain('"command":"prompt"');
-    expect(commands[0]).toContain('"id":"msg:1"');
+    expect(commands[0]).toContain("state/pi-broker.sock");
+    expect(commands[0]).toContain("test -S \"$broker_socket\"");
+    expect(commands[0]).toContain("stat -c '%a'");
+    expect(decodedPiBrokerCommand(commands[0]!)).toEqual({
+      id: "msg:1",
+      type: "prompt",
+      attemptId: "msg:1",
+      message: "Summarize the incident",
+    });
+    expect(commands[0]).not.toContain("streamingBehavior");
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("keeps proven prompt refusal distinct from every ambiguous Box transport outcome", async () => {
+    let outcome: "refused" | "reject" | "http-503" = "refused";
+    const fetchMock = vi.fn(async (_rawUrl: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      const command = decodedPiBrokerCommand(String(body.command));
+      if (outcome === "reject") throw new Error("connection lost after command submit");
+      if (outcome === "http-503") return json({ message: "provider response was lost" }, 503);
+      return json({
+        success: true,
+        exitCode: 0,
+        stdout: JSON.stringify({
+          id: command?.id,
+          type: "response",
+          command: "prompt",
+          success: false,
+          error: { code: "pi_not_idle", message: "Pi is not idle with an empty queue", ambiguous: false },
+        }) + "\n",
+        stderr: "",
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+    const input = {
+      boxId: "bx_23456789",
+      attemptId: "attempt-1",
+      requestId: "dispatch-1",
+      message: "Do this once",
+    };
+
+    await expect(runtime.dispatchPrompt(input)).resolves.toEqual({
+      outcome: "refused",
+      code: "pi_not_idle",
+      message: "Pi is not idle with an empty queue",
+    });
+    outcome = "reject";
+    await expect(runtime.dispatchPrompt({ ...input, requestId: "dispatch-2" })).resolves.toEqual({
+      outcome: "ambiguous",
+      code: "pi_ack_ambiguous",
+      message: "Pi prompt acknowledgement is unavailable",
+    });
+    outcome = "http-503";
+    await expect(runtime.dispatchPrompt({ ...input, requestId: "dispatch-3" })).resolves.toEqual({
+      outcome: "ambiguous",
+      code: "pi_ack_ambiguous",
+      message: "Pi prompt acknowledgement is unavailable",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps decision delivery acceptance, refusal, and lost Box responses distinct", async () => {
+    let outcome: "accepted" | "refused" | "reject" = "accepted";
+    vi.stubGlobal("fetch", vi.fn(async (_rawUrl: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      const command = decodedPiBrokerCommand(String(body.command));
+      if (outcome === "reject") throw new Error("connection lost after decision write");
+      const result = outcome === "accepted"
+        ? { success: true, data: { attemptId: "attempt-1", delivered: true } }
+        : {
+            success: false,
+            error: {
+              code: "no_active_attempt",
+              message: "no active Pi attempt can receive a decision",
+              ambiguous: false,
+            },
+          };
+      return json({
+        success: true,
+        exitCode: 0,
+        stdout: `${JSON.stringify({
+          id: command?.id,
+          type: "response",
+          command: "extension_ui_response",
+          ...result,
+        })}\n`,
+        stderr: "",
+      });
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+    const input = {
+      boxId: "bx_23456789",
+      attemptId: "attempt-1",
+      requestId: "decision-1",
+      response: { id: "question-1", type: "extension_ui_response", value: "yes" },
+    };
+
+    await expect(runtime.dispatchExtensionUi(input)).resolves.toEqual({
+      outcome: "accepted",
+      attemptId: "attempt-1",
+    });
+    outcome = "refused";
+    await expect(runtime.dispatchExtensionUi({ ...input, requestId: "decision-2" })).resolves.toEqual({
+      outcome: "refused",
+      code: "no_active_attempt",
+      message: "no active Pi attempt can receive a decision",
+    });
+    outcome = "reject";
+    await expect(runtime.dispatchExtensionUi({ ...input, requestId: "decision-3" })).resolves.toEqual({
+      outcome: "ambiguous",
+      code: "decision_delivery_ambiguous",
+      message: "Pi decision acknowledgement is unavailable",
+    });
+  });
+
+  it("reads, observes, and acknowledges the segmented broker journal with correlated commands", async () => {
+    const commands: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_rawUrl: string | URL | Request, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      const command = decodedPiBrokerCommand(String(body.command));
+      if (!command) throw new Error("missing broker command");
+      commands.push(command);
+      const data = command.type === "broker_state"
+        ? {
+            invocationId: "invocation-1",
+            activeAttemptId: "attempt-1",
+            tailCursor: 8,
+            acknowledgedCursor: 6,
+            counters: {
+              malformedLines: 1,
+              oversizedLines: 2,
+              unterminatedLines: 3,
+              unknownEvents: 4,
+              unboundEvents: 5,
+              orphanResponses: 6,
+            },
+          }
+        : command.type === "read_events"
+          ? {
+              events: [{
+                sequence: 7,
+                invocationId: "invocation-1",
+                attemptId: "attempt-1",
+                kind: "pi_event",
+                event: { type: "agent_settled" },
+              }],
+              nextCursor: 7,
+              acknowledgedCursor: 6,
+              hasMore: true,
+            }
+          : { acknowledgedCursor: 7 };
+      return json({
+        success: true,
+        exitCode: 0,
+        stdout: `${JSON.stringify({
+          id: command.id,
+          type: "response",
+          command: command.type,
+          success: true,
+          data,
+        })}\n`,
+        stderr: "",
+      });
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.brokerState({ boxId: "bx_23456789" })).resolves.toMatchObject({
+      invocationId: "invocation-1",
+      activeAttemptId: "attempt-1",
+      tailCursor: 8,
+      acknowledgedCursor: 6,
+    });
+    await expect(runtime.readEvents({ boxId: "bx_23456789", after: 6, limit: 1 }))
+      .resolves.toEqual({
+        events: [{
+          sequence: 7,
+          invocationId: "invocation-1",
+          attemptId: "attempt-1",
+          kind: "pi_event",
+          event: { type: "agent_settled" },
+        }],
+        nextCursor: 7,
+        acknowledgedCursor: 6,
+        hasMore: true,
+      });
+    await expect(runtime.ackEvents({ boxId: "bx_23456789", through: 7 }))
+      .resolves.toEqual({ acknowledgedCursor: 7 });
+    expect(commands).toEqual([
+      expect.objectContaining({ type: "broker_state" }),
+      expect.objectContaining({ type: "read_events", after: 6, limit: 1 }),
+      expect.objectContaining({ type: "ack_events", through: 7 }),
+    ]);
   });
 
   it("refreshes the Box idle clock to six hours after a successful message", async () => {
@@ -4290,8 +4628,9 @@ describe("AsciiBoxCompanionRuntime", () => {
       if (url.endsWith("/commands") && method === "POST") {
         const command = String(body.command);
         commands.push(command);
-        if (command.includes('"type":"get_state"')) {
-          const id = command.match(/"id":"([^"]+)"/)?.[1];
+        const brokerCommand = decodedPiBrokerCommand(command);
+        if (brokerCommand?.type === "get_state") {
+          const id = brokerCommand.id;
           return json({
             success: true,
             exitCode: 0,
@@ -4314,18 +4653,17 @@ describe("AsciiBoxCompanionRuntime", () => {
     const healed = await runtime.healPiDaemon({ boxId: "bx_23456789" });
 
     expect(healed).toEqual({ daemonState: "running", detail: null });
-    // `active` is process state, not proof that Pi consumes its FIFO. The correlated get_state
+    // `active` is process state, not proof that the broker can reach Pi. The correlated get_state
     // response is the acceptance proof, and a daemon that supplies it stays untouched.
     expect(commands).toHaveLength(2);
     expect(commands[0]).toContain("is-active companion-pi-daemon.service");
-    expect(commands[1]).toContain('"type":"get_state"');
-    expect(commands[1]).toContain('"command":"get_state"');
+    expect(decodedPiBrokerCommand(commands[1]!)).toMatchObject({ type: "get_state" });
     expect(commands.some((command) => command.includes("reset-failed"))).toBe(false);
     expect(commands.some((command) =>
       command.includes("start companion-pi-daemon.service"))).toBe(false);
   });
 
-  it("restarts a systemd-active daemon that does not consume its RPC FIFO", async () => {
+  it("restarts a systemd-active broker that cannot obtain a correlated Pi response", async () => {
     const commands: string[] = [];
     let healthProbes = 0;
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
@@ -4335,15 +4673,16 @@ describe("AsciiBoxCompanionRuntime", () => {
       if (url.endsWith("/commands") && method === "POST") {
         const command = String(body.command);
         commands.push(command);
-        if (command.includes('"type":"get_state"')) {
+        const brokerCommand = decodedPiBrokerCommand(command);
+        if (brokerCommand?.type === "get_state") {
           healthProbes += 1;
-          // Reproduce THE-370: the wrapper-held FIFO takes the bytes, but Pi never emits the
-          // correlated response that says it accepted the command. The replacement then proves
+          // Reproduce THE-370 at the new boundary: the broker socket accepts transport bytes, but Pi
+          // never emits the correlated response. The replacement then proves
           // readiness before healing returns and delivery retries its prompt.
           if (healthProbes === 1) {
             return json({ success: false, exitCode: 1, stdout: "", stderr: "not acknowledged" });
           }
-          const id = command.match(/"id":"([^"]+)"/)?.[1];
+          const id = brokerCommand.id;
           return json({
             success: true,
             exitCode: 0,
@@ -4393,9 +4732,10 @@ describe("AsciiBoxCompanionRuntime", () => {
       if (url.endsWith("/commands") && method === "POST") {
         const command = String(body.command);
         commands.push(command);
-        if (command.includes('"type":"get_state"')) {
+        const brokerCommand = decodedPiBrokerCommand(command);
+        if (brokerCommand?.type === "get_state") {
           healthProbes += 1;
-          const id = command.match(/"id":"([^"]+)"/)?.[1];
+          const id = brokerCommand.id;
           return json({
             success: true,
             exitCode: 0,
@@ -4441,8 +4781,9 @@ describe("AsciiBoxCompanionRuntime", () => {
       if (url.endsWith("/commands") && method === "POST") {
         const command = String(body.command);
         commands.push(command);
-        if (command.includes('"type":"get_state"')) {
-          const id = command.match(/"id":"([^"]+)"/)?.[1];
+        const brokerCommand = decodedPiBrokerCommand(command);
+        if (brokerCommand?.type === "get_state") {
+          const id = brokerCommand.id;
           return json({
             success: true,
             exitCode: 0,
@@ -4499,9 +4840,9 @@ describe("AsciiBoxCompanionRuntime", () => {
       if (url.endsWith("/commands") && method === "POST") {
         const command = String(body.command);
         commands.push(command);
-        if (command.includes('"type":"get_state"')) {
+        if (decodedPiBrokerCommand(command)?.type === "get_state") {
           rpcTimeouts.push(Number(body.timeoutSeconds));
-          return json({ success: false, exitCode: 1, stdout: "", stderr: "FIFO not ready" });
+          return json({ success: false, exitCode: 1, stdout: "", stderr: "broker not ready" });
         }
         if (command.includes("is-active")) {
           stateProbes += 1;
@@ -4528,7 +4869,8 @@ describe("AsciiBoxCompanionRuntime", () => {
       daemonState: "error",
       detail: "Pi daemon became active but did not become ready to accept messages",
     });
-    expect(commands.some((command) => command.includes('"type":"get_state"'))).toBe(true);
+    expect(commands.some((command) => decodedPiBrokerCommand(command)?.type === "get_state"))
+      .toBe(true);
     // The missing acknowledgement is bounded by the replacement-readiness time left, rather than
     // spending the normal eight-second acceptance window after the 20ms test deadline expired.
     expect(rpcTimeouts.length).toBeGreaterThan(0);
@@ -4602,23 +4944,26 @@ describe("AsciiBoxCompanionRuntime", () => {
     expect(result).toEqual({ chunk: "{\"type\":\"agent_settled\"}\n", offset: 0 });
   });
 
-  /**
-   * The wrapper systemd runs is a shell script, and the wake that failed in production failed inside
-   * it: the unit reported `exit 1` and an auto-restart, and every account of the reason was empty.
-   * These run the installed wrapper the way the unit does, so what it writes down when it cannot
-   * reach Pi is behavior rather than intention.
+  /** The systemd wrapper is exercised against a real layout disk, with only the broker executable
+   * replaced by a bounded recorder so no child process can survive the test.
    */
-  describe("starting the Pi daemon against a real disk", () => {
-    it("records the Pi invocation it made so a silent death is still attributable", async () => {
+  describe("starting the Pi broker wrapper against a real disk", () => {
+    it("passes the invocation and private runtime paths to the staged broker", async () => {
       const disk = await boxDiskWithPiDaemon();
 
       const started = await runOnBoxDisk(`bash ${JSON.stringify(disk.daemon)}`, disk.home);
 
       expect(started.exitCode).toBe(0);
-      // Pi ran with the isolated agent directory, the Companion session directory, and no ambient
-      // skills, and the wrapper wrote that invocation down before handing over to it.
-      expect(await readFile(disk.argv, "utf8")).toContain("--mode rpc");
-      expect(await reportedStderrLine(disk.stderrLog)).toMatch(/^pi-daemon: starting \S+pi --no-skills$/);
+      expect(JSON.parse(await readFile(disk.brokerEnvironment, "utf8"))).toEqual({
+        bin: disk.pi,
+        root: join(disk.home, ".companion", "runtime"),
+        invocation: "test-invocation",
+        socket: join(disk.home, ".companion", "runtime", "state", "pi-broker.sock"),
+        journal: join(disk.home, ".companion", "runtime", "events"),
+        codingAgentDir: join(disk.home, ".companion", "pi"),
+      });
+      expect(await reportedStderrLine(disk.stderrLog))
+        .toBe("pi-broker: starting invocation test-invocation");
     });
 
     it("rejects a Pi binary downgraded after the layout marker was written", async () => {
@@ -4641,9 +4986,9 @@ describe("AsciiBoxCompanionRuntime", () => {
       // the wrapper said went to the journal alone, and the log kept an older start's timestamp, so
       // the freshness window dropped it too and the wake reported an exit status with no reason.
       const disk = await boxDiskWithPiDaemon();
-      // Something at the FIFO path the wrapper cannot replace. Any pre-`exec` failure has the same
+      // Something at the socket path the wrapper cannot replace. Any pre-`exec` failure has the same
       // shape; this one needs no permission the test user might already have.
-      await mkdir(join(disk.home, ".companion", "runtime", "state", "pi.rpc.in", "held"), {
+      await mkdir(join(disk.home, ".companion", "runtime", "state", "pi-broker.sock", "held"), {
         recursive: true,
       });
       // The freshness window compares one file's timestamp against another clock reading, so the
@@ -4662,7 +5007,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       // line and the command that failed rather than only the status systemd recorded.
       const reported = await reportedStderrLine(disk.stderrLog);
       expect(reported).toContain("pi-daemon: line");
-      expect(reported).toContain('rm -f "$fifo"');
+      expect(reported).toContain('rm -f "$broker_socket"');
       expect(reported).toContain("failed with status 1");
       // And it is this start's line: the log was written now, so the freshness window keeps it.
       expect((await stat(disk.stderrLog)).mtimeMs).toBeGreaterThanOrEqual(attemptedAt);
@@ -4690,7 +5035,7 @@ describe("AsciiBoxCompanionRuntime", () => {
       expect(rolled).toContain("old crash reasons");
       // The live log carries this start and nothing older, so it starts over well under the ceiling.
       const kept = await readFile(disk.stderrLog, "utf8");
-      expect(kept).toContain("pi-daemon: starting");
+      expect(kept).toContain("pi-broker: starting");
       expect(kept).not.toContain("old crash reasons");
     });
   });

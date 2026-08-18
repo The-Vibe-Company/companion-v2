@@ -3,12 +3,20 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import {
+  appendPiEvent,
+  appendPiFault,
+  createBoxSimCommandMachine,
+} from "../src/commandShims";
 import { PiProcessController } from "../src/piController";
 import type { PiScenarioName } from "../src/scenarios";
 
 const PI_PROCESS_PATH = fileURLToPath(new URL("../src/pi-process.mjs", import.meta.url));
 const DELAYED_CLOSE_PROCESS_PATH = fileURLToPath(
   new URL("./fixtures/delayed-close-child.mjs", import.meta.url),
+);
+const PI_UNTERMINATED_PROCESS_PATH = fileURLToPath(
+  new URL("./fixtures/pi-unterminated.mjs", import.meta.url),
 );
 const liveControllers: PiProcessController[] = [];
 const liveChildren: ChildProcessWithoutNullStreams[] = [];
@@ -270,6 +278,38 @@ describe("PiProcessController", () => {
     });
   });
 
+  it("counts an unterminated final fragment without retaining its raw content", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "box-sim-test", scenario: "normal" });
+    machine.daemon.invocationId = "00000000000000000000000000000001";
+    const controller = new PiProcessController({
+      boxId: "box-sim-test",
+      appendEvent: (event) => appendPiEvent(machine, event),
+      appendFault: (fault) => appendPiFault(machine, fault),
+      currentInvocationId: () => machine.daemon.invocationId,
+    }, {
+      processPath: PI_UNTERMINATED_PROCESS_PATH,
+      rpcTimeoutMs: 2_000,
+      stopTimeoutMs: 1_000,
+    });
+    liveControllers.push(controller);
+
+    await controller.start();
+    await controller.waitForExit();
+    await waitFor(() => machine.daemon.brokerCounters.unterminatedLines > 0 ? true : null);
+
+    expect(machine.daemon.brokerCounters).toMatchObject({
+      unterminatedLines: 1,
+      malformedLines: 0,
+    });
+    expect(machine.daemon.brokerJournal).toEqual([]);
+    expect(controller.stderr).not.toContain("sensitive-fragment-marker");
+    expect(JSON.stringify({
+      counters: machine.daemon.brokerCounters,
+      journal: machine.daemon.brokerJournal,
+      stderr: controller.stderr,
+    })).not.toContain("sensitive-fragment-marker");
+  });
+
   it("returns correlated command errors and rejects unsupported scenario names", async () => {
     const harness = await controllerHarness("normal");
     const response = await harness.controller.handleRpc({ id: "future-1", type: "future_command" });
@@ -290,6 +330,7 @@ describe("PiProcessController", () => {
     const controller = new PiProcessController({
       boxId: "box-sim-delayed-close",
       appendEvent: (event) => events.push(event),
+      appendFault: () => undefined,
       currentInvocationId: () => "00000000000000000000000000000001",
     }, {
       processPath: DELAYED_CLOSE_PROCESS_PATH,
@@ -331,6 +372,7 @@ interface RawHarness {
 interface ControllerHarness {
   controller: PiProcessController;
   events: Array<Record<string, unknown> | string>;
+  faults: string[];
 }
 
 function spawnRawPi(scenario: PiScenarioName): RawHarness {
@@ -351,9 +393,11 @@ async function controllerHarness(
   oversizedBytes?: number,
 ): Promise<ControllerHarness> {
   const events: Array<Record<string, unknown> | string> = [];
+  const faults: string[] = [];
   const controller = new PiProcessController({
     boxId: "box-sim-test",
     appendEvent: (event) => events.push(event),
+    appendFault: (fault) => faults.push(fault),
     currentInvocationId: () => "00000000000000000000000000000001",
   }, {
     scenario,
@@ -363,7 +407,7 @@ async function controllerHarness(
   });
   liveControllers.push(controller);
   await controller.start();
-  return { controller, events };
+  return { controller, events, faults };
 }
 
 function acceptedPrompt(controller: PiProcessController, id: string): Promise<Record<string, unknown>> {

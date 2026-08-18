@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   COMPANION_PROVIDER_CATALOG,
   companionModelIdSchema,
+  companionModelInputSchema,
   type CompanionProviderDefinition,
 } from "@companion/contracts";
 
@@ -26,6 +27,7 @@ export const COMPANION_PI_PROVIDER_IDS = {
 const piModelSchema = z.object({
   id: companionModelIdSchema,
   name: z.string().trim().min(1).max(200),
+  input: z.array(companionModelInputSchema).max(2).optional(),
 }).passthrough();
 
 type CatalogModels = CompanionProviderDefinition["models"];
@@ -86,7 +88,11 @@ function normalizePiModels(providerId: string, value: unknown): CatalogModels {
     if (key !== model.id) {
       throw new Error(`pi.dev model key ${key} does not match id ${model.id}`);
     }
-    return { id: model.id, name: model.name };
+    return {
+      id: model.id,
+      name: model.name,
+      ...(model.input === undefined ? {} : { input: [...model.input] }),
+    };
   });
   if (models.length === 0) throw new Error(`pi.dev returned no models for ${providerId}`);
 

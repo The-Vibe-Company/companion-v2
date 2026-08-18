@@ -384,11 +384,7 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
         response,
         point: "box.create",
         operation: () => simulator.createBox({
-          ...(typeof body.name === "string" ? { name: body.name } : {}),
           ...(typeof body.ttlSeconds === "number" ? { ttlSeconds: body.ttlSeconds } : {}),
-          ...(typeof body.desktopAvailable === "boolean"
-            ? { desktopAvailable: body.desktopAvailable }
-            : {}),
           ...(typeof body.setupScript === "string" ? { setupScript: body.setupScript } : {}),
           ...(body.env && typeof body.env === "object" && !Array.isArray(body.env)
             ? { env: body.env as Record<string, unknown> }
@@ -396,7 +392,7 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
           ...(typeof body.environment === "string" ? { environment: body.environment } : {}),
           ...(typeof body.noEnv === "boolean" ? { noEnv: body.noEnv } : {}),
         }),
-        respond: (box) => sendJson(response, 201, {
+        respond: (box) => sendJson(response, 202, {
           ok: true,
           type: "box.created",
           status: box.state,

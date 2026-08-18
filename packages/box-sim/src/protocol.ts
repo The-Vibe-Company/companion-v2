@@ -70,6 +70,7 @@ export interface BoxSimPiController {
 export interface BoxSimPiControllerContext {
   readonly boxId: string;
   appendEvent(event: Record<string, unknown> | string): void;
+  appendFault(fault: "malformed" | "oversized" | "unterminated"): void;
   currentInvocationId(): string | null;
 }
 
@@ -170,6 +171,17 @@ export interface BoxSimStateSnapshot {
       status: "inactive" | "active" | "failed";
       invocationId: string | null;
       rpcReady: boolean;
+      activeAttemptId: string | null;
+      tailCursor: number;
+      acknowledgedCursor: number;
+      counters: {
+        malformedLines: number;
+        oversizedLines: number;
+        unterminatedLines: number;
+        unknownEvents: number;
+        unboundEvents: number;
+        orphanResponses: number;
+      };
       restartCount: number;
       scenario: string;
       rpcLogBytes: number;

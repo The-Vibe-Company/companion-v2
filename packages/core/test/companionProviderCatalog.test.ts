@@ -26,8 +26,8 @@ describe("Companion pi.dev provider catalog", () => {
       const providerId = providerIdFromUrl(input);
       if (providerId === "zai") {
         return jsonResponse({
-          "glm-4.7": { id: "glm-4.7", name: "GLM-4.7" },
-          "glm-5.2": { id: "glm-5.2", name: "GLM-5.2" },
+          "glm-4.7": { id: "glm-4.7", name: "GLM-4.7", input: ["text", "image"] },
+          "glm-5.2": { id: "glm-5.2", name: "GLM-5.2", input: ["text"] },
           "glm-5.3": { id: "glm-5.3", name: "GLM-5.3" },
         });
       }
@@ -46,9 +46,40 @@ describe("Companion pi.dev provider catalog", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(COMPANION_PROVIDER_CATALOG.length);
     expect(catalog.find((provider) => provider.id === "zai")?.models)
       .toEqual(expect.arrayContaining([
-        expect.objectContaining({ id: "glm-5.2" }),
+        expect.objectContaining({ id: "glm-5.2", input: ["text"] }),
         expect.objectContaining({ id: "glm-5.3" }),
       ]));
+    expect(catalog.find((provider) => provider.id === "zai")?.models)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: "glm-4.7", input: ["text", "image"] }),
+      ]));
+  });
+
+  it("keeps live model capabilities constrained by the shared Companion input schema", async () => {
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const providerId = providerIdFromUrl(input);
+      if (providerId === "zai") {
+        return jsonResponse({
+          "future-audio": {
+            id: "future-audio",
+            name: "Future audio",
+            input: ["text", "audio"],
+          },
+        });
+      }
+      const id = `${providerId}-live`;
+      return jsonResponse({ [id]: { id, name: `${providerId} live`, input: ["text"] } });
+    }) as typeof fetch;
+
+    const catalog = await getCompanionProviderCatalog({
+      fetchImpl,
+      cache: new CompanionProviderCatalogCache(),
+    });
+
+    expect(catalog.find((provider) => provider.id === "zai")?.models)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ id: "glm-4.7" })]));
+    expect(catalog.find((provider) => provider.id === "zai")?.models)
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ id: "future-audio" })]));
   });
 
   it("serves last-known models after a failed refresh, then bundled pins on a cold failure", async () => {

@@ -6,11 +6,14 @@
   "exports": {
     ".": "./src/index.ts",
     "./boxCompanionRuntime": "./src/boxCompanionRuntime.ts",
+    "./companionPiBroker": "./src/companionPiBroker.ts",
     "./companionSkillPackage": "./src/companionSkillPackage.ts"
   },
   "scripts": {
+    "broker:generate": "node scripts/generate-companion-pi-broker.mjs",
+    "broker:check": "node scripts/generate-companion-pi-broker.mjs --check",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "pnpm broker:check && vitest run"
   },
   "dependencies": {
     "@companion/companion-skill": "workspace:*",
@@ -24,6 +27,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "esbuild": "0.27.7",
     "typescript": "^5.7.2",
     "vitest": "3.2.7"
   }

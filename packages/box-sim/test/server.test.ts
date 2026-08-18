@@ -194,14 +194,24 @@ describe("Box simulator HTTP server", () => {
     const createdResponse = await provider(handle, "/boxes", {
       method: "POST",
       body: JSON.stringify({
+        name: "caller-controlled-name-must-be-ignored",
+        desktopAvailable: false,
         ttlSeconds: 300,
         setupScript: "super-secret-setup-script",
         env: { SECRET_TOKEN: "never-project-me" },
       }),
     });
-    expect(createdResponse.status).toBe(201);
-    const created = await createdResponse.json() as { box: { id: string; state: string } };
-    expect(created.box).toMatchObject({ id: "bx_23456789", state: "provisioning" });
+    expect(createdResponse.status).toBe(202);
+    const created = await createdResponse.json() as {
+      box: { id: string; name: string; state: string; desktopAvailable: boolean };
+    };
+    expect(created.box).toMatchObject({
+      id: "bx_23456789",
+      name: "box-sim-23456789",
+      state: "provisioning",
+      desktopAvailable: true,
+    });
+    expect(created.box.name).not.toBe("caller-controlled-name-must-be-ignored");
 
     const first = await (await provider(handle, `/boxes/${created.box.id}`)).json() as {
       box: { state: string };
@@ -314,15 +324,12 @@ describe("Box simulator HTTP server", () => {
     });
     expect(await started.json()).toMatchObject({ success: true, exitCode: 0 });
 
-    const payload = JSON.stringify({ id: "http-turn-1", type: "prompt", message: "hello simulator" });
-    const quoted = `'${payload.replaceAll("'", "'\"'\"'")}'`;
-    const promptCommand = [
-      "set -euo pipefail",
-      'fifo="$HOME/.companion/runtime/state/pi.rpc.in"',
-      "rpc_start_size=0",
-      `printf '%s\\n' ${quoted} > "$fifo"`,
-      "printf 'Pi RPC did not acknowledge prompt' >&2",
-    ].join("\n");
+    const promptCommand = brokerCommand({
+      id: "http-turn-1",
+      type: "prompt",
+      attemptId: "attempt-http-1",
+      message: "hello simulator",
+    });
     const prompted = await provider(handle, `/boxes/${created.box.id}/commands`, {
       method: "POST",
       body: JSON.stringify({ command: promptCommand, timeoutSeconds: 10 }),
@@ -334,17 +341,23 @@ describe("Box simulator HTTP server", () => {
       command: "prompt",
       id: "http-turn-1",
       success: true,
+      data: { attemptId: "attempt-http-1", piAcknowledged: true },
     });
 
-    const readCommand = "log=pi.rpc.ndjson; offset=0; tail -c x | head -c 262144";
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const readCommand = brokerCommand({ id: "http-read-1", type: "read_events", after: 0 });
     const read = await (await provider(handle, `/boxes/${created.box.id}/commands`, {
       method: "POST",
       body: JSON.stringify({ command: readCommand }),
     })).json() as { success: boolean; stdout: string };
     expect(read.success).toBe(true);
-    expect(read.stdout.startsWith("0\n")).toBe(true);
-    expect(read.stdout).toContain('"id":"http-turn-1"');
-    expect(handle.simulator.snapshot().boxes[0]?.daemon.rpcLogBytes).toBeGreaterThan(0);
+    const journal = JSON.parse(read.stdout) as { data: { events: Array<Record<string, unknown>> } };
+    expect(journal.data.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ attemptId: "attempt-http-1", kind: "pi_event" }),
+    ]));
+    expect(journal.data.events).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: expect.objectContaining({ type: "response" }) }),
+    ]));
   });
 
   it("requires target-specific confirmation and tracks deletion deterministically", async () => {
@@ -449,3 +462,8 @@ describe("Box simulator HTTP server", () => {
       .toMatchObject({ box: { state: "archived" } });
   });
 });
+
+function brokerCommand(command: Record<string, unknown>): string {
+  const encoded = Buffer.from(JSON.stringify(command), "utf8").toString("base64");
+  return `COMPANION_PI_BROKER_COMMAND='${encoded}' node <<'COMPANION_PI_BROKER_CLIENT'`;
+}

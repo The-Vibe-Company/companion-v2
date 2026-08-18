@@ -30,6 +30,10 @@ export const companionModelIdSchema = z.string().trim().min(1).max(200).refine(
 );
 export type CompanionModelId = z.infer<typeof companionModelIdSchema>;
 
+/** Input modalities reported by Pi's model catalog. */
+export const companionModelInputSchema = z.enum(["text", "image"]);
+export type CompanionModelInput = z.infer<typeof companionModelInputSchema>;
+
 export const COMPANION_PROVIDER_CATALOG = [
   {
     id: "anthropic",
@@ -111,7 +115,12 @@ export const COMPANION_PROVIDER_CATALOG = [
   name: string;
   auth_methods: readonly CompanionProviderAuthMethod[];
   description: string;
-  models: ReadonlyArray<{ id: string; name: string; default?: true }>;
+  models: ReadonlyArray<{
+    id: string;
+    name: string;
+    default?: true;
+    input?: readonly CompanionModelInput[];
+  }>;
 }>;
 
 export function companionProviderDefaultModel(providerId: string): string | undefined {
@@ -135,6 +144,7 @@ export const companionProviderDefinitionSchema = z.object({
     id: companionModelIdSchema,
     name: z.string(),
     default: z.literal(true).optional(),
+    input: z.array(companionModelInputSchema).max(2).optional(),
   }).strict()).min(1),
 });
 export type CompanionProviderDefinition = z.infer<typeof companionProviderDefinitionSchema>;
