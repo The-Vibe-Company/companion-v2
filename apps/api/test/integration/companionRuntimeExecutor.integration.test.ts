@@ -2263,6 +2263,123 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
+  it("stores config proposals, rejects the generic answer path, and builds a confirm response", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion();
+    const proposal = {
+      kind: "config",
+      add_skill_ids: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+    };
+    try {
+      await expect(sql`
+        insert into companion_decision_deliveries(
+          org_id, companion_id, turn_id, attempt_id, request_key, request_kind, expires_at
+        ) values (
+          ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+          ${fixture.turnId}::uuid, ${fixture.attemptId}::uuid,
+          'config-missing-proposal', 'config_proposal', now() + interval '5 minutes'
+        )
+      `).rejects.toMatchObject({ code: "23514" });
+      await expect(sql`
+        insert into companion_decision_deliveries(
+          org_id, companion_id, turn_id, attempt_id, request_key, request_kind, expires_at, proposal
+        ) values (
+          ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+          ${fixture.turnId}::uuid, ${fixture.attemptId}::uuid,
+          'question-with-proposal', 'question', now() + interval '5 minutes',
+          ${sql.json(proposal)}
+        )
+      `).rejects.toMatchObject({ code: "23514" });
+
+      const claim = await claimWork();
+      const expiresAt = new Date(Date.now() + 5 * 60_000).toISOString();
+      const decision = {
+        request_id: "config-1",
+        kind: "config",
+        name: "config",
+        title: "Add the search skill",
+        detail: "Add the search skill",
+        status: "pending",
+        answer: null,
+        decided_by_id: null,
+        decided_by_name: null,
+        decided_at: null,
+        expires_at: expiresAt,
+        proposal,
+      };
+      const events = [{
+        sequence: "1",
+        type: "decision",
+        entry_key: "decision:1",
+        request_key: "config-1",
+        request_kind: "config_proposal",
+        content: decision.title,
+        proposal,
+        decision,
+        expires_at: expiresAt,
+      }];
+      await asRuntime((tx) => tx`
+        select * from public.companion_runtime_project_event_batch(
+          ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+          ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+          'attempt', ${claim.workId}::uuid, ${claim.checkpointSequence}::bigint,
+          ${`pi-${fixture.attemptId}`}, ${tx.json(events)}, 1, now(), 0, 0, 0
+        )
+      `);
+      const [stored] = await sql<Array<{ kind: string; proposal: unknown }>>`
+        select request_kind::text as kind, proposal
+        from companion_decision_deliveries
+        where attempt_id = ${fixture.attemptId}::uuid and request_key = 'config-1'
+      `;
+      expect(stored).toEqual({ kind: "config_proposal", proposal });
+      const [transcript] = await sql<Array<{ proposal: unknown }>>`
+        select decision -> 'proposal' as proposal
+        from companion_transcript_entries
+        where companion_id = ${fixture.companionId}::uuid and role = 'decision'
+      `;
+      expect(transcript?.proposal).toEqual(proposal);
+
+      await expect(asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_answer_decision(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+            'config-1', 'allow', null
+          )
+        `,
+      })).rejects.toMatchObject({ code: "22023" });
+
+      await release(claim);
+      await sql`
+        update companion_decision_deliveries
+        set decision_status = 'allowed', actor_id = ${ids.ownerA},
+          responded_at = now(), updated_at = now()
+        where attempt_id = ${fixture.attemptId}::uuid and request_key = 'config-1'
+      `;
+      const decisionClaim = await claimWork();
+      expect(decisionClaim.workKind).toBe("decision");
+      const response = await asRuntime((tx) => tx<Array<{
+        kind: string;
+        payload: Record<string, unknown>;
+      }>>`
+        select decision_request_kind::text as kind, decision_response_payload as payload
+        from public.companion_runtime_get_material(
+          ${decisionClaim.orgId}::uuid, ${decisionClaim.companionId}::uuid,
+          ${decisionClaim.claimToken}::uuid, ${decisionClaim.claimEpoch}::bigint,
+          ${decisionClaim.gateEpoch}::bigint, ${executorId}, 'decision',
+          ${decisionClaim.workId}::uuid, 30
+        )
+      `);
+      expect(response).toEqual([{
+        kind: "config_proposal",
+        payload: { type: "extension_ui_response", id: "config-1", confirmed: true },
+      }]);
+    } finally {
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
   it("rejects effective CREATE inherited through PUBLIC in verification and the real grant hook", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     await sql.unsafe(`grant create on database "${databaseName}" to public`);

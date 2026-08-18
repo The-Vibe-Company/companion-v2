@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   COMPANION_PERMISSION_BROKER_EXTENSION_FILE,
   COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE,
+  parseCompanionDecisionTitle,
 } from "./companionPermissionBroker";
 
 describe("Companion Pi interaction extension", () => {
@@ -33,6 +34,15 @@ describe("Companion Pi interaction extension", () => {
       'if (event.toolName === "ask_user") return undefined',
     );
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).not.toContain("runtime.abortTurn");
+  });
+
+  it("accepts config proposal titles without treating them as questions", () => {
+    expect(parseCompanionDecisionTitle("companion:config:propose_config")).toEqual({
+      kind: "config",
+      name: "propose_config",
+    });
+    expect(parseCompanionDecisionTitle("companion:question:ask_user")?.kind).toBe("question");
+    expect(parseCompanionDecisionTitle("companion:hub:write")).toBeNull();
   });
 
   it("classifies shell runs with the control plane's own catalog, priority order included", () => {

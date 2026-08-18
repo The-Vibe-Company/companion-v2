@@ -229,7 +229,9 @@ address before the same transaction persists their rows, so an accepted turn alw
 already exist. `GET /v1/companions/:id/attachments/:attachmentId` serves those bytes, re-authorizing
 on every request and contacting only PostgreSQL and object storage. Thread reads add the active turn,
 queued count, interruption state, and each entry's attachment metadata — never a storage key or URL. Existing lifecycle paths
-persist operations and return `202`; decision answers are durable and runtime-delivered. New explicit
+persist operations and return `202`; decision answers are durable and runtime-delivered. Config
+proposals (`kind: config` plus a bounded `proposal` object) are a distinct decision kind: the
+existing answer route refuses them until a dedicated apply path exists. New explicit
 actions are:
 
 - `POST /v1/companions/:id/turns/:turnId/retry` with a unique `retry_id`;

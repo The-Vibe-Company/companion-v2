@@ -556,4 +556,144 @@ describe("Pi journal validation and projection", () => {
       createRuntimeVisibleTextRedactor([secret]),
     )).toThrow(PiProjectionSecurityError);
   });
+
+  it("projects a valid config proposal and ignores malformed, oversized, redacted, or mis-method ones", () => {
+    const proposal = {
+      kind: "config" as const,
+      add_skill_ids: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+    };
+    const summary = "Add the search skill";
+    const now = new Date("2026-08-18T12:00:00.000Z");
+    const secret = "opaque-config-secret";
+    const validMessage = JSON.stringify({ summary, proposal });
+    const page = validatePiJournalRead({
+      value: {
+        events: [
+          {
+            sequence: 1,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "extension_ui_request",
+              id: "config-1",
+              method: "confirm",
+              title: "companion:config:propose_config",
+              message: validMessage,
+            },
+          },
+          {
+            sequence: 2,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "extension_ui_request",
+              id: "config-bad-json",
+              method: "confirm",
+              title: "companion:config:propose_config",
+              message: "{not-json",
+            },
+          },
+          {
+            sequence: 3,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "extension_ui_request",
+              id: "config-wrong-method",
+              method: "input",
+              title: "companion:config:propose_config",
+              message: validMessage,
+            },
+          },
+          {
+            sequence: 4,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "extension_ui_request",
+              id: "config-mixed",
+              method: "confirm",
+              title: "companion:config:propose_config",
+              message: JSON.stringify({
+                summary,
+                proposal: { kind: "config", add_skill_ids: proposal.add_skill_ids, connect_plugin: { server_name: "linear" } },
+              }),
+            },
+          },
+          {
+            sequence: 5,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "extension_ui_request",
+              id: "config-secret",
+              method: "confirm",
+              title: "companion:config:propose_config",
+              message: JSON.stringify({
+                summary: `Add ${secret}`,
+                proposal,
+              }),
+            },
+          },
+          {
+            sequence: 6,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "extension_ui_request",
+              id: "config-hub",
+              method: "confirm",
+              title: "companion:config:propose_config",
+              message: JSON.stringify({
+                summary,
+                proposal: { kind: "config", add_skill_ids: proposal.add_skill_ids, can_write_skills: true },
+              }),
+            },
+          },
+        ],
+        nextCursor: 6,
+        acknowledgedCursor: 0,
+        hasMore: false,
+      },
+      after: 0n,
+      attemptId: ATTEMPT_ID,
+      invocationId: PI_INVOCATION_ID,
+    });
+
+    const classified = classifyPiJournalPage(
+      page,
+      now,
+      createRuntimeVisibleTextRedactor([secret]),
+    );
+
+    expect(classified.unknownEvents).toBe(5);
+    expect(classified.needsInput).toBe(true);
+    expect(classified.projections).toEqual([
+      expect.objectContaining({
+        type: "decision",
+        entry_key: "decision:1",
+        request_key: "config-1",
+        request_kind: "config_proposal",
+        content: summary,
+        proposal,
+        decision: expect.objectContaining({
+          kind: "config",
+          name: "config",
+          title: summary,
+          status: "pending",
+          proposal,
+        }),
+      }),
+    ]);
+    const serialized = JSON.stringify(classified.projections, (_key, value) =>
+      typeof value === "bigint" ? value.toString() : value);
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain("can_write_skills");
+  });
 });

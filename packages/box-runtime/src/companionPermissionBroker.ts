@@ -24,16 +24,16 @@ export const COMPANION_PERMISSION_BROKER_EXTENSION_FILE = "companion-permission-
 
 /** Title the extension puts on extension_ui_request events: `companion:<kind>:<tool>`. */
 export const COMPANION_DECISION_TITLE_PATTERN =
-  /^companion:(shell|file|question):([A-Za-z0-9._-]{1,120})$/;
+  /^companion:(shell|file|question|config):([A-Za-z0-9._-]{1,120})$/;
 
 export function parseCompanionDecisionTitle(title: string): {
-  kind: "shell" | "file" | "question";
+  kind: "shell" | "file" | "question" | "config";
   name: string;
 } | null {
   const match = COMPANION_DECISION_TITLE_PATTERN.exec(title.trim());
   if (!match) return null;
   return {
-    kind: match[1] as "shell" | "file" | "question",
+    kind: match[1] as "shell" | "file" | "question" | "config",
     name: match[2]!,
   };
 }

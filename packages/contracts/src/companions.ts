@@ -361,10 +361,10 @@ export type CompanionToolRun = z.infer<typeof companionToolRunSchema>;
 
 /**
  * What a permission card is asking about. Shell and file edits need Allow / Deny; a question needs
- * an answer. Browse and computer stay ungated — they already surface through THE-352 chips and the
- * Computer panel rather than a broker card.
+ * an answer; a config proposal needs Owner/Editor confirmation. Browse and computer stay ungated —
+ * they already surface through THE-352 chips and the Computer panel rather than a broker card.
  */
-export const companionDecisionKindSchema = z.enum(["shell", "file", "question"]);
+export const companionDecisionKindSchema = z.enum(["shell", "file", "question", "config"]);
 export type CompanionDecisionKind = z.infer<typeof companionDecisionKindSchema>;
 
 /** A card is `pending` until Allow / Deny / answer, or until the fail-closed timeout expires. */
@@ -376,6 +376,96 @@ export const companionDecisionStatusSchema = z.enum([
   "expired",
 ]);
 export type CompanionDecisionStatus = z.infer<typeof companionDecisionStatusSchema>;
+
+/** Upper bound stored on `companion_decision_deliveries.proposal` and enforced before projection. */
+export const COMPANION_CONFIG_PROPOSAL_MAX_BYTES = 16_384;
+/** Each add/remove/attach/detach list is a bounded set of already-known resource ids. */
+export const COMPANION_CONFIG_PROPOSAL_MAX_IDS = 20;
+/** Human-readable confirm copy Pi puts next to the structured proposal. */
+export const COMPANION_CONFIG_PROPOSAL_SUMMARY_MAX_CHARACTERS = 300;
+export const COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS = [
+  "linear",
+  "github",
+  "notion",
+] as const;
+export const companionConfigProposalConnectProviderSchema = z.enum(
+  COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS,
+);
+export type CompanionConfigProposalConnectProvider =
+  z.infer<typeof companionConfigProposalConnectProviderSchema>;
+
+const companionConfigProposalIdListSchema = z.array(z.string().uuid()).max(
+  COMPANION_CONFIG_PROPOSAL_MAX_IDS,
+);
+
+function utf8ByteLength(value: string): number {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x7f) bytes += 1;
+    else if (code <= 0x7ff) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff) {
+      bytes += 4;
+      index += 1;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+/**
+ * Structured Companion settings Pi may propose. `.strict()` refuses `hub_access`, `can_write_skills`,
+ * `name`, and `provider_id`. `connect_plugin` is exclusive of every other mutation field.
+ */
+export const companionConfigProposalSchema = z.object({
+  kind: z.literal("config"),
+  add_skill_ids: companionConfigProposalIdListSchema.optional(),
+  remove_skill_ids: companionConfigProposalIdListSchema.optional(),
+  attach_plugin_ids: companionConfigProposalIdListSchema.optional(),
+  detach_plugin_ids: companionConfigProposalIdListSchema.optional(),
+  model_id: companionModelIdSchema.optional(),
+  persona: companionPersonaSchema.optional(),
+  connect_plugin: z.object({
+    server_name: companionConfigProposalConnectProviderSchema,
+    reason: z.string().trim().min(1).max(280).optional(),
+  }).strict().optional(),
+}).strict().superRefine((proposal, context) => {
+  if (utf8ByteLength(JSON.stringify(proposal)) > COMPANION_CONFIG_PROPOSAL_MAX_BYTES) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "config proposal exceeds 16 KiB",
+    });
+  }
+  const mutationKeys = [
+    "add_skill_ids",
+    "remove_skill_ids",
+    "attach_plugin_ids",
+    "detach_plugin_ids",
+    "model_id",
+    "persona",
+  ] as const;
+  const hasMutation = mutationKeys.some((key) => proposal[key] !== undefined);
+  if (proposal.connect_plugin !== undefined && hasMutation) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["connect_plugin"],
+      message: "a plugin connection request cannot be mixed with other config changes",
+    });
+  }
+  if (!hasMutation && proposal.connect_plugin === undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "a config proposal must include at least one change",
+    });
+  }
+});
+export type CompanionConfigProposal = z.infer<typeof companionConfigProposalSchema>;
+
+/** Pi `extension_ui_request` message for `companion:config:<op>`: confirm copy plus the proposal. */
+export const companionConfigProposalMessageSchema = z.object({
+  summary: z.string().trim().min(1).max(COMPANION_CONFIG_PROPOSAL_SUMMARY_MAX_CHARACTERS),
+  proposal: companionConfigProposalSchema,
+}).strict();
+export type CompanionConfigProposalMessage = z.infer<typeof companionConfigProposalMessageSchema>;
 
 /**
  * One permission request Pi blocked on, projected from an `extension_ui_request` in the RPC log.
@@ -398,7 +488,24 @@ export const companionDecisionSchema = z.object({
   decided_by_name: z.string().nullable(),
   decided_at: z.string().datetime().nullable(),
   expires_at: z.string().datetime(),
-}).strict();
+  /** Present only on `kind: "config"` cards; null on shell, file, and question cards. */
+  proposal: companionConfigProposalSchema.nullable().default(null),
+}).strict().superRefine((decision, context) => {
+  if (decision.kind === "config" && decision.proposal === null) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["proposal"],
+      message: "a config card carries the proposed settings",
+    });
+  }
+  if (decision.kind !== "config" && decision.proposal !== null) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["proposal"],
+      message: "only a config card may carry a settings proposal",
+    });
+  }
+});
 export type CompanionDecision = z.infer<typeof companionDecisionSchema>;
 
 /** Owner/Editor answer to a pending permission card. Viewers are refused before this is parsed. */

@@ -278,7 +278,12 @@ function decodeMaterial(row: Record<string, unknown>): RuntimeWorkMaterial {
     throw new RuntimeStoreContractError();
   }
   const requestKind = row.decision_request_kind;
-  if (requestKind !== null && requestKind !== "question" && requestKind !== "confirmation") {
+  if (
+    requestKind !== null
+    && requestKind !== "question"
+    && requestKind !== "confirmation"
+    && requestKind !== "config_proposal"
+  ) {
     throw new RuntimeStoreContractError();
   }
   const decisionPayload = row.decision_response_payload;
