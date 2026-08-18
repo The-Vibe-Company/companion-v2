@@ -80,6 +80,23 @@ describe("databaseRuntimeRoles", () => {
     ).toEqual({
       apiRole: "companion_api",
       workerRole: "companion_worker",
+      companionRuntimeRole: null,
+      legacySingleRole: false,
+      retiredRuntimeRole: null,
+    });
+  });
+
+  it("accepts an optional, distinct Companion runtime role after the API/worker split", () => {
+    expect(
+      databaseRuntimeRoles({
+        DATABASE_API_ROLE: "companion_api",
+        DATABASE_WORKER_ROLE: "companion_worker",
+        DATABASE_COMPANION_RUNTIME_ROLE: "companion_runtime_v2",
+      }),
+    ).toEqual({
+      apiRole: "companion_api",
+      workerRole: "companion_worker",
+      companionRuntimeRole: "companion_runtime_v2",
       legacySingleRole: false,
       retiredRuntimeRole: null,
     });
@@ -95,8 +112,26 @@ describe("databaseRuntimeRoles", () => {
     ).toEqual({
       apiRole: "companion_api",
       workerRole: "companion_worker",
+      companionRuntimeRole: null,
       legacySingleRole: false,
       retiredRuntimeRole: "companion_runtime",
+    });
+  });
+
+  it("keeps the active runtime and retired union login separate during cutover", () => {
+    expect(
+      databaseRuntimeRoles({
+        DATABASE_API_ROLE: "companion_api",
+        DATABASE_WORKER_ROLE: "companion_worker",
+        DATABASE_COMPANION_RUNTIME_ROLE: "companion_runtime_v2",
+        DATABASE_RETIRED_RUNTIME_ROLE: "companion_runtime_v1",
+      }),
+    ).toEqual({
+      apiRole: "companion_api",
+      workerRole: "companion_worker",
+      companionRuntimeRole: "companion_runtime_v2",
+      legacySingleRole: false,
+      retiredRuntimeRole: "companion_runtime_v1",
     });
   });
 
@@ -104,6 +139,7 @@ describe("databaseRuntimeRoles", () => {
     expect(databaseRuntimeRoles({ DATABASE_RUNTIME_ROLE: "companion_runtime" })).toEqual({
       apiRole: "companion_runtime",
       workerRole: "companion_runtime",
+      companionRuntimeRole: "companion_runtime",
       legacySingleRole: true,
       retiredRuntimeRole: null,
     });
@@ -113,6 +149,9 @@ describe("databaseRuntimeRoles", () => {
     expect(() => databaseRuntimeRoles({ DATABASE_API_ROLE: "companion_api" })).toThrow(
       "DATABASE_API_ROLE and DATABASE_WORKER_ROLE must be configured together",
     );
+    expect(() =>
+      databaseRuntimeRoles({ DATABASE_COMPANION_RUNTIME_ROLE: "companion_runtime_v2" }),
+    ).toThrow("DATABASE_API_ROLE and DATABASE_WORKER_ROLE must be configured together");
     expect(() =>
       databaseRuntimeRoles({
         DATABASE_API_ROLE: "companion_runtime",
@@ -128,6 +167,29 @@ describe("databaseRuntimeRoles", () => {
     ).toThrow("DATABASE_RUNTIME_ROLE cannot be combined");
     expect(() =>
       databaseRuntimeRoles({
+        DATABASE_API_ROLE: "companion_api",
+        DATABASE_WORKER_ROLE: "companion_worker",
+        DATABASE_COMPANION_RUNTIME_ROLE: "companion_runtime_v2",
+        DATABASE_RETIRED_RUNTIME_ROLE: "companion_runtime_v2",
+      }),
+    ).toThrow("DATABASE_RETIRED_RUNTIME_ROLE must be distinct from every active database role");
+    expect(() =>
+      databaseRuntimeRoles({
+        DATABASE_API_ROLE: "companion_api",
+        DATABASE_WORKER_ROLE: "companion_worker",
+        DATABASE_COMPANION_RUNTIME_ROLE: "companion_api",
+      }),
+    ).toThrow("DATABASE_COMPANION_RUNTIME_ROLE must be distinct");
+    expect(() =>
+      databaseRuntimeRoles({
+        DATABASE_API_ROLE: "companion_api",
+        DATABASE_WORKER_ROLE: "companion_worker",
+        DATABASE_RUNTIME_ROLE: "companion_runtime",
+        DATABASE_COMPANION_RUNTIME_ROLE: "companion_runtime_v2",
+      }),
+    ).toThrow("DATABASE_RUNTIME_ROLE cannot be combined");
+    expect(() =>
+      databaseRuntimeRoles({
         DATABASE_RETIRED_RUNTIME_ROLE: "companion_runtime",
       }),
     ).toThrow("DATABASE_RETIRED_RUNTIME_ROLE requires");
@@ -136,6 +198,14 @@ describe("databaseRuntimeRoles", () => {
   it.each([
     ["DATABASE_API_ROLE", { DATABASE_API_ROLE: "Companion", DATABASE_WORKER_ROLE: "companion_worker" }],
     ["DATABASE_WORKER_ROLE", { DATABASE_API_ROLE: "companion_api", DATABASE_WORKER_ROLE: " worker" }],
+    [
+      "DATABASE_COMPANION_RUNTIME_ROLE",
+      {
+        DATABASE_API_ROLE: "companion_api",
+        DATABASE_WORKER_ROLE: "companion_worker",
+        DATABASE_COMPANION_RUNTIME_ROLE: "runtime-role",
+      },
+    ],
     [
       "DATABASE_RETIRED_RUNTIME_ROLE",
       {

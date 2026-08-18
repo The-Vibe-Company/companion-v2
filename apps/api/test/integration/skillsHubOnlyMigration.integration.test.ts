@@ -36,11 +36,19 @@ describe("Skills Hub-only database migration", () => {
           where n.nspname = 'public'
             and (
               p.proname like 'companion%skill_run%'
-              or p.proname like 'companion_run_%'
+              or p.proname ~ '^companion_run_'
               or p.proname in ('companion_reject_run_snapshot_update', 'companion_detach_deleted_run_config')
               or p.proname like 'companion%project%'
               or p.proname like 'companion%model_provider%'
               or p.proname like 'companion%sandbox%'
+            )
+            -- Runtime v2 projects correlated broker events and terminal attempt state. Those
+            -- verbs contain the English word "project" but are unrelated to the removed generic
+            -- Projects product. Keep the historical-runtime assertion exact instead of treating
+            -- every future use of "projection" as a resurrected Project function.
+            and p.proname not in (
+              'companion_runtime_get_attempt_terminal_projection',
+              'companion_runtime_project_event_batch'
             )
         ) as "runtimeFunctions",
         (

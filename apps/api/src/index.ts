@@ -2163,7 +2163,9 @@ app.post("/v1/skills/:slug/rename", async (c) => {
           title: body.title,
           database,
         });
-        // Boxes stage the skill under its slug, so a rename changes their effective tree too.
+        // Boxes stage the skill under its slug, so a rename changes their effective tree too. This
+        // desired-state invalidation is durable even while execution is disabled: otherwise a Box
+        // that was current before the kill switch would remain falsely current after re-enable.
         await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: renamed.id, database });
         return renamed;
       },
@@ -2612,8 +2614,8 @@ app.post("/v1/skills/:slug/archive", async (c) => {
         const archived = await archiveSkill({
           actor, orgId, slug: c.req.param("slug"), reason: body.reason, database,
         });
-        // Archiving removes the skill from every selector's staged set on its next start, so those
-        // Companions are no longer up to date.
+        // Archiving removes the skill from every selector's staged set on its next start. Persist
+        // that invalidation while runtime claims are disabled so re-enable cannot miss the restage.
         await bumpCompanionSkillsRevisionForSkill({ orgId, skillId: archived.id, database });
       },
       true,

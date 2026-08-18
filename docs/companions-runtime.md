@@ -170,6 +170,14 @@ Box and permanently deletes duplicates, preventing a crash after provider create
 untracked machine. A provider create without an idempotency key is therefore recovered by name, not
 blindly repeated.
 
+The Box adapter/provider contract gives a create request and exact-name list visibility a hard
+upper bound of three minutes from the durable `creating_box` write intent. A deployment that cannot
+uphold that bound must keep Runtime v2 disabled. When Delete preempts an ambiguous create, an absent
+name is rejected until that horizon has elapsed; runtime then requires two exact-name absence
+observations at least thirty seconds apart. If either observation finds a Box, its id becomes the
+canonical id and permanent deletion is mandatory before retirement. The real-provider canary
+continuously exercises this assumption.
+
 Known-idempotent lifecycle calls retry network failures, `429`, and `5xx` responses up to five times
 with jittered backoff of 1, 2, 5, 10, and 30 seconds. A provider operation id is retained whenever
 the API returns one.

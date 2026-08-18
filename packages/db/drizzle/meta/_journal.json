@@ -631,6 +631,13 @@
       "when": 1787850400000,
       "tag": "0089_legacy_companion_purge",
       "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1787936800000,
+      "tag": "0090_companion_runtime_v2",
+      "breakpoints": true
     }
   ]
 }

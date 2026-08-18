@@ -39,6 +39,7 @@ export function databaseRuntimeRole(env: NodeJS.ProcessEnv = process.env): strin
 export interface DatabaseRuntimeRoles {
   apiRole: string;
   workerRole: string;
+  companionRuntimeRole: string | null;
   legacySingleRole: boolean;
   retiredRuntimeRole: string | null;
 }
@@ -54,23 +55,50 @@ function databaseRole(name: string, configured: string | undefined): string | nu
 export function databaseRuntimeRoles(env: NodeJS.ProcessEnv = process.env): DatabaseRuntimeRoles | null {
   const apiRole = databaseRole("DATABASE_API_ROLE", env.DATABASE_API_ROLE);
   const workerRole = databaseRole("DATABASE_WORKER_ROLE", env.DATABASE_WORKER_ROLE);
+  const companionRuntimeRole = databaseRole(
+    "DATABASE_COMPANION_RUNTIME_ROLE",
+    env.DATABASE_COMPANION_RUNTIME_ROLE,
+  );
   const legacyRole = databaseRuntimeRole(env);
   const retiredRuntimeRole = databaseRole(
     "DATABASE_RETIRED_RUNTIME_ROLE",
     env.DATABASE_RETIRED_RUNTIME_ROLE,
   );
 
-  if (apiRole !== null || workerRole !== null) {
+  if (apiRole !== null || workerRole !== null || companionRuntimeRole !== null) {
     if (legacyRole !== null) {
-      throw new Error("DATABASE_RUNTIME_ROLE cannot be combined with DATABASE_API_ROLE or DATABASE_WORKER_ROLE");
+      throw new Error(
+        "DATABASE_RUNTIME_ROLE cannot be combined with DATABASE_API_ROLE, DATABASE_WORKER_ROLE, or DATABASE_COMPANION_RUNTIME_ROLE",
+      );
     }
     if (apiRole === null || workerRole === null) {
-      throw new Error("DATABASE_API_ROLE and DATABASE_WORKER_ROLE must be configured together");
+      throw new Error(
+        "DATABASE_API_ROLE and DATABASE_WORKER_ROLE must be configured together before DATABASE_COMPANION_RUNTIME_ROLE",
+      );
     }
     if (apiRole === workerRole) {
       throw new Error("DATABASE_API_ROLE and DATABASE_WORKER_ROLE must be distinct");
     }
-    return { apiRole, workerRole, legacySingleRole: false, retiredRuntimeRole };
+    if (companionRuntimeRole === apiRole || companionRuntimeRole === workerRole) {
+      throw new Error(
+        "DATABASE_COMPANION_RUNTIME_ROLE must be distinct from DATABASE_API_ROLE and DATABASE_WORKER_ROLE",
+      );
+    }
+    if (
+      retiredRuntimeRole !== null &&
+      (retiredRuntimeRole === apiRole ||
+        retiredRuntimeRole === workerRole ||
+        retiredRuntimeRole === companionRuntimeRole)
+    ) {
+      throw new Error("DATABASE_RETIRED_RUNTIME_ROLE must be distinct from every active database role");
+    }
+    return {
+      apiRole,
+      workerRole,
+      companionRuntimeRole,
+      legacySingleRole: false,
+      retiredRuntimeRole,
+    };
   }
 
   if (retiredRuntimeRole !== null) {
@@ -82,6 +110,7 @@ export function databaseRuntimeRoles(env: NodeJS.ProcessEnv = process.env): Data
   return {
     apiRole: legacyRole,
     workerRole: legacyRole,
+    companionRuntimeRole: legacyRole,
     legacySingleRole: true,
     retiredRuntimeRole: null,
   };
@@ -196,6 +225,14 @@ async function applyRuntimeRoleGrants(
 ): Promise<void> {
   const source = await readFile(grantsFile, "utf8");
   const grantBlock = extractRuntimeRoleGrantBlock(source);
+  // Establish the custom GUC even when the optional role is absent. Besides making RESET portable,
+  // this prevents a pooled migration connection from retaining an earlier split-role value when a
+  // later invocation deliberately uses migration-first or legacy-union mode.
+  await client`select set_config(
+    'companion.companion_runtime_role',
+    ${runtimeRoles.legacySingleRole ? "" : (runtimeRoles.companionRuntimeRole ?? "")},
+    false
+  )`;
   if (runtimeRoles.legacySingleRole) {
     await client`select set_config('companion.runtime_role', ${runtimeRoles.apiRole}, false)`;
   } else {
@@ -210,6 +247,7 @@ async function applyRuntimeRoleGrants(
   } finally {
     await client.unsafe("reset companion.api_role").catch(() => undefined);
     await client.unsafe("reset companion.worker_role").catch(() => undefined);
+    await client.unsafe("reset companion.companion_runtime_role").catch(() => undefined);
     await client.unsafe("reset companion.retired_runtime_role").catch(() => undefined);
     await client.unsafe("reset companion.runtime_role").catch(() => undefined);
   }
@@ -291,7 +329,15 @@ export async function run(): Promise<void> {
       await applyRuntimeRoleGrants(client, runtimeRoles, grantsFile);
       const roleSummary = runtimeRoles.legacySingleRole
         ? runtimeRoles.apiRole
-        : `API ${runtimeRoles.apiRole} and worker ${runtimeRoles.workerRole}`;
+        : [
+            `API ${runtimeRoles.apiRole}`,
+            `worker ${runtimeRoles.workerRole}`,
+            runtimeRoles.companionRuntimeRole
+              ? `Companion runtime ${runtimeRoles.companionRuntimeRole}`
+              : null,
+          ]
+            .filter((role): role is string => role !== null)
+            .join(", ");
       console.log(`Runtime database grants applied to ${roleSummary}`);
     }
     await client`select pg_advisory_unlock(${MIGRATION_LOCK_CLASS_ID}, ${MIGRATION_LOCK_OBJECT_ID})`;

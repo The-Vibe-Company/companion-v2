@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 process.env.COMPANION_SECRETS_MASTER_KEY ??= Buffer.alloc(32, 7).toString("base64");
 
@@ -10,7 +10,7 @@ const serviceMocks = vi.hoisted(() => {
     addComment: noop,
     assertCommentTarget: noop,
     addOrgAccessDomain: noop,
-    archiveSkill: noop,
+    archiveSkill: vi.fn(async () => ({ id: "skill-1" })),
     assignLabel: noop,
     authorizePublicSkillPackageForSession: vi.fn(),
     buildDependencyPlan: noop,
@@ -29,7 +29,7 @@ const serviceMocks = vi.hoisted(() => {
     getOnboardingState: noop,
     getSkillBySlug: vi.fn(),
     getSkillDependencies: noop,
-    restoreSkill: noop,
+    restoreSkill: vi.fn(async () => ({ id: "skill-1" })),
     getSkillFilterPreferences: noop,
     getOrgSettings: noop,
     getSkillNamingPolicy: vi.fn(),
@@ -642,7 +642,13 @@ describe("POST /v1/skills/:slug/rename", () => {
     serviceMocks.resolveApiToken.mockImplementation(async (token: string) => tokenFor(token));
   });
 
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("renames a skill through the explicit service mutation", async () => {
+    vi.stubEnv("COMPANION_COMPANIONS_ENABLED", "true");
+    vi.stubEnv("COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS", "example.test");
     serviceMocks.renameSkill.mockResolvedValue({
       ok: true,
       id: "skill-1",
@@ -680,6 +686,30 @@ describe("POST /v1/skills/:slug/rename", () => {
     );
   });
 
+  it("keeps the durable restage invalidation when Companions are disabled", async () => {
+    vi.stubEnv("COMPANION_COMPANIONS_ENABLED", "false");
+    vi.stubEnv("COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS", "example.test");
+    serviceMocks.renameSkill.mockResolvedValue({
+      ok: true,
+      id: "skill-1",
+      old_slug: "skill-creator",
+      slug: "skill-creator-and-eval",
+      title: "Skill Creator and Eval",
+    });
+
+    const res = await app.request("/v1/skills/skill-creator/rename", {
+      method: "POST",
+      headers: { Authorization: "Bearer write-only", "content-type": "application/json" },
+      body: JSON.stringify({ newSlug: "skill-creator-and-eval" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(serviceMocks.renameSkill).toHaveBeenCalledOnce();
+    expect(coreMocks.bumpCompanionSkillsRevisionForSkill).toHaveBeenCalledWith(
+      expect.objectContaining({ orgId: "org-1", skillId: "skill-1" }),
+    );
+  });
+
   it("validates the new slug before calling the service", async () => {
     const res = await app.request("/v1/skills/skill-creator/rename", {
       method: "POST",
@@ -700,6 +730,41 @@ describe("POST /v1/skills/:slug/rename", () => {
 
     expect(res.status).toBe(400);
     expect(serviceMocks.renameSkill).not.toHaveBeenCalled();
+  });
+});
+
+describe("durable Companion Skill invalidations", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubEnv("COMPANION_COMPANIONS_ENABLED", "false");
+    vi.stubEnv("COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS", "example.test");
+    serviceMocks.resolveApiToken.mockImplementation(async (token: string) => tokenFor(token));
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it.each([
+    { action: "archive", service: serviceMocks.archiveSkill },
+    { action: "restore", service: serviceMocks.restoreSkill },
+  ])("marks selected Companions stale after $action while execution is disabled", async ({
+    action,
+    service,
+  }) => {
+    service.mockResolvedValueOnce({ id: "skill-1" });
+
+    const res = await app.request(`/v1/skills/skill-creator/${action}`, {
+      method: "POST",
+      headers: { Authorization: "Bearer write-only", "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    expect(res.status).toBe(200);
+    expect(service).toHaveBeenCalledOnce();
+    expect(coreMocks.bumpCompanionSkillsRevisionForSkill).toHaveBeenCalledWith(
+      expect.objectContaining({ orgId: "org-1", skillId: "skill-1" }),
+    );
   });
 });
 

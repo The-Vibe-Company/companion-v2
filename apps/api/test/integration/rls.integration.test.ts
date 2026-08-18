@@ -41,12 +41,17 @@ describe("Skills Hub PostgreSQL isolation", () => {
   let personalSlug: string;
   let orgSlug: string;
   let otherOrgSlug: string;
+  let runtimeV2Cutover = false;
   const companionId = randomUUID();
   const deliveryFenceCompanionId = randomUUID();
 
   beforeAll(async () => {
     const [ownerRow] = await integrationSql<Array<{ current_user: string }>>`select current_user`;
     functionOwner = ownerRow!.current_user;
+    const [cutover] = await integrationSql<Array<{ installed: boolean }>>`
+      select to_regprocedure('public.companion_runtime_gate_status()') is not null as installed
+    `;
+    runtimeV2Cutover = cutover?.installed ?? false;
     fixture = await createIntegrationFixture();
     personalSlug = `private-${fixture.suffix}`;
     orgSlug = `org-${fixture.suffix}`;
@@ -179,6 +184,23 @@ describe("Skills Hub PostgreSQL isolation", () => {
   });
 
   it("fences legacy transcript delivery against protocol-2 claims during rollout", async () => {
+    if (runtimeV2Cutover) {
+      await expect(integrationSql.begin(async (tx) => {
+        await tx.unsafe(`set local role ${apiRole}`);
+        await tx`
+          select set_config('app.org_id', ${fixture.orgA}, true),
+                 set_config('app.user_id', ${fixture.owner.id}, true),
+                 set_config('app.companion_delivery_protocol', '2', true)
+        `;
+        await tx`
+          select companion_claim_delivery_lease(
+            ${fixture.orgA}, ${deliveryFenceCompanionId}, ${randomUUID()}, 600
+          )
+        `;
+      })).rejects.toThrow(/permission denied.*companion_claim_delivery_lease/i);
+      return;
+    }
+
     const firstClaim = randomUUID();
     const claimed = await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${apiRole}`);
@@ -538,6 +560,24 @@ describe("Skills Hub PostgreSQL isolation", () => {
   });
 
   it("enforces the workspace-only Companion ACL in PostgreSQL (no per-member overrides)", async () => {
+    if (runtimeV2Cutover) {
+      await expect(integrationSql.begin(async (tx) => {
+        await tx.unsafe(`set local role ${apiRole}`);
+        await tx`
+          select set_config('app.org_id', ${fixture.orgA}, true),
+                 set_config('app.user_id', ${fixture.owner.id}, true)
+        `;
+        await tx`
+          insert into companion_workspace_access (
+            org_id, companion_id, owner_id, role, granted_by
+          ) values (
+            ${fixture.orgA}, ${companionId}, ${fixture.owner.id}, 'viewer', ${fixture.owner.id}
+          )
+        `;
+      })).rejects.toThrow(/permission denied.*companion_workspace_access/i);
+      return;
+    }
+
     const initiallyVisible = await integrationSql.begin(async (tx) => {
       await tx.unsafe(`set local role ${apiRole}`);
       await tx`select set_config('app.org_id', ${fixture.orgA}, true), set_config('app.user_id', ${fixture.admin.id}, true)`;
@@ -677,6 +717,24 @@ describe("Skills Hub PostgreSQL isolation", () => {
   });
 
   it("lets a runner settle a tool run and attach its frame while a Viewer cannot", async () => {
+    if (runtimeV2Cutover) {
+      await expect(integrationSql.begin(async (tx) => {
+        await tx.unsafe(`set local role ${apiRole}`);
+        await tx`
+          select set_config('app.org_id', ${fixture.orgA}, true),
+                 set_config('app.user_id', ${fixture.owner.id}, true)
+        `;
+        await tx`
+          insert into companion_transcript_entries (
+            org_id, companion_id, event_id, ordinal, role, content
+          ) values (
+            ${fixture.orgA}, ${companionId}, 'retired-runtime-write', 2, 'tool', ''
+          )
+        `;
+      })).rejects.toThrow(/permission denied.*companion_transcript_entries/i);
+      return;
+    }
+
     const running = JSON.stringify({
       call_id: "call-1",
       kind: "shell",
@@ -767,6 +825,24 @@ describe("Skills Hub PostgreSQL isolation", () => {
   });
 
   it("lets a Viewer invoke only fail-closed timeout recovery under forced RLS", async () => {
+    if (runtimeV2Cutover) {
+      await expect(integrationSql.begin(async (tx) => {
+        await tx.unsafe(`set local role ${apiRole}`);
+        await tx`
+          select set_config('app.org_id', ${fixture.orgA}, true),
+                 set_config('app.user_id', ${fixture.owner.id}, true)
+        `;
+        await tx`
+          insert into companion_workspace_access (
+            org_id, companion_id, owner_id, role, granted_by
+          ) values (
+            ${fixture.orgA}, ${companionId}, ${fixture.owner.id}, 'viewer', ${fixture.owner.id}
+          )
+        `;
+      })).rejects.toThrow(/permission denied.*companion_workspace_access/i);
+      return;
+    }
+
     const running = JSON.stringify({
       call_id: "call-viewer-timeout",
       kind: "file",

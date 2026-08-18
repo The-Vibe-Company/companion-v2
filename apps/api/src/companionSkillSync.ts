@@ -1,6 +1,7 @@
 import {
   bumpCompanionSkillsRevisionForSkill,
   claimCompanionRuntimeStart,
+  companionsEnabled,
   listCompanionRuntimeSkillPackages,
   listOnlineCompanionsForSkillSync,
   resolveCompanionPluginInjection,
@@ -31,10 +32,13 @@ export async function syncPublishedSkillToOnlineCompanions(input: {
   runtimeFactory?: () => CompanionBoxRuntime;
 }): Promise<void> {
   const env = input.env ?? process.env;
+  const runtimeEnabled = companionsEnabled(env);
   // Every selector — Online or asleep — now needs a restage; the desired-revision bump is what
   // makes the settings UI read "pending" until the package actually lands (on this push for Online
-  // Boxes, on the next wake for asleep ones). If the bump itself fails, stop: the publish already
-  // committed, and pushing unbumped packages would record nothing either way.
+  // Boxes, on the next wake for asleep ones). The bump remains mandatory while runtime execution
+  // is disabled; the kill switch suppresses Box contact, not durable desired-state invalidation.
+  // If the bump itself fails, stop: the publish already committed, and pushing unbumped packages
+  // would record nothing either way.
   const targets = await withTenantContext(
     { orgId: input.orgId, userId: input.actor.id },
     async (database) => {
@@ -43,6 +47,7 @@ export async function syncPublishedSkillToOnlineCompanions(input: {
         skillId: input.skillId,
         database,
       });
+      if (!runtimeEnabled) return [];
       return listOnlineCompanionsForSkillSync({
         orgId: input.orgId,
         skillId: input.skillId,
