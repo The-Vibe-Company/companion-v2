@@ -296,10 +296,11 @@ Configure these workflow secrets for the dedicated account:
 - `COMPANION_CANARY_IMAGE_EXPECTED_TEXT`, that exact 4–64 character OCR code. The prompt never
   includes it, and the vision phase fails unless the durable assistant reply contains it;
 - `COMPANION_CANARY_RELEASE_ID`, the immutable API/runtime deployment identifier targeted by the
-  canary. Configure the same value as `COMPANION_RELEASE_ID` on API and runtime; the canary compares
-  the API `/health` value before login. Do not use the workflow checkout SHA unless it is also the
-  deployed release. Runtime `/healthz` exposes the same non-secret value for private operational
-  verification.
+  canary. Prefer the git commit SHA that Railway deployed: API `/health` and runtime `/healthz`
+  advertise that SHA via platform-injected `RAILWAY_GIT_COMMIT_SHA`. After a merge to `main`, the
+  workflow checkout SHA for that commit is the deployed release, so the canary workflow may omit the
+  secret and use `github.sha`. An explicit secret still overrides when targeting a specific SHA. The
+  canary compares the API `/health` value before login.
 
 Rotate the OCR fixture and expected text whenever the image leaks into a prompt, log, or test
 artifact. The expected value is comparison-only configuration and must never be interpolated into

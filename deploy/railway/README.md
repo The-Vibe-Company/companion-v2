@@ -222,9 +222,10 @@ keep its currently deployed purge-capable release disabled and postpone this rel
 
 ## Health and operations
 
-- API readiness: `/health`.
+- API readiness: `/health`. The JSON `release_id` is the deployed git commit SHA from Railway's
+  injected `RAILWAY_GIT_COMMIT_SHA` (no operator-managed release pin).
 - Runtime readiness: `/healthz`, healthy only when PostgreSQL responds, the claim loop is alive, and
-  the last two-second sweep is fresh.
+  the last two-second sweep is fresh. It exposes the same automatic `release_id`.
 - Worker and web: Railway process state plus the configured web healthcheck.
 - Runtime draining: keep Railway `drainingSeconds` at 30 or more and
   `COMPANION_RUNTIME_SHUTDOWN_DRAIN_MS` below the fixed 30-second lease (default 25 seconds).

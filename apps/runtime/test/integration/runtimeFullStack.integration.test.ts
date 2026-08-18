@@ -395,7 +395,7 @@ function commonApiEnv(): NodeJS.ProcessEnv {
     COMPANION_SECRETS_MASTER_KEY: masterKey,
     COMPANION_RUNTIME_PRIVATE_URL: runtimeBase,
     COMPANION_RUNTIME_DESKTOP_HMAC_SECRET: desktopKey,
-    COMPANION_RELEASE_ID: releaseId,
+    RAILWAY_GIT_COMMIT_SHA: releaseId,
   };
 }
 
@@ -437,7 +437,7 @@ function startRuntime(executorId: string): ManagedProcess {
       COMPANION_RUNTIME_PORT: String(runtimePort),
       COMPANION_RUNTIME_SWEEP_INTERVAL_MS: "250",
       COMPANION_RUNTIME_SHUTDOWN_DRAIN_MS: "100",
-      COMPANION_RELEASE_ID: releaseId,
+      RAILWAY_GIT_COMMIT_SHA: releaseId,
       COMPANION_API_URL: apiBase,
       COMPANION_BOX_API_KEY: boxApiKey,
       COMPANION_BOX_API_BASE: boxBase,
@@ -820,8 +820,10 @@ describe("Runtime v2 real-process control plane", () => {
     expect(workerProcess.environment.BOX_SIM_API_KEY).toBeUndefined();
     expect(runtimeProcess.environment.COMPANION_BOX_API_KEY).toBe(boxApiKey);
     expect(boxProcess.environment.BOX_SIM_API_KEY).toBe(boxApiKey);
-    expect(apiProcess.environment.COMPANION_RELEASE_ID).toBe(releaseId);
-    expect(runtimeProcess.environment.COMPANION_RELEASE_ID).toBe(releaseId);
+    expect(apiProcess.environment.RAILWAY_GIT_COMMIT_SHA).toBe(releaseId);
+    expect(runtimeProcess.environment.RAILWAY_GIT_COMMIT_SHA).toBe(releaseId);
+    expect(apiProcess.environment.COMPANION_RELEASE_ID).toBeUndefined();
+    expect(runtimeProcess.environment.COMPANION_RELEASE_ID).toBeUndefined();
     const providerSecretKeys = (environment: NodeJS.ProcessEnv): string[] =>
       Object.keys(environment).filter((key) =>
         /(?:^|_)(?:API_KEY|ACCESS_KEY|SECRET_KEY|AUTH_TOKEN)$/.test(key));
