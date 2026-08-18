@@ -4,10 +4,12 @@ import { RuntimeEngine } from "./engine";
 import { RuntimeHealth } from "./health";
 import type { RuntimeProcessLog } from "./logging";
 import type {
+  RuntimeAttachmentStager,
   RuntimeBoxControl,
   RuntimeEventProjector,
   RuntimeIdFactory,
   RuntimeMaterialProvider,
+  RuntimeOutboxHarvester,
   RuntimePiControl,
   RuntimeProjectionRedactorFactory,
   RuntimeResourceStager,
@@ -26,6 +28,8 @@ export interface CreateRuntimeKernelInput {
   box: RuntimeBoxControl;
   pi: RuntimePiControl;
   resourceStager: RuntimeResourceStager;
+  attachmentStager: RuntimeAttachmentStager;
+  outboxHarvester: RuntimeOutboxHarvester;
   materialProvider?: RuntimeMaterialProvider;
   projectionRedactorFactory?: RuntimeProjectionRedactorFactory;
   eventProjector?: RuntimeEventProjector;
@@ -60,6 +64,8 @@ export function createRuntimeKernel(input: CreateRuntimeKernelInput): RuntimeKer
       forMaterial: () => genericRuntimeVisibleTextRedactor,
     },
     resourceStager: input.resourceStager,
+    attachmentStager: input.attachmentStager,
+    outboxHarvester: input.outboxHarvester,
     eventProjector: input.eventProjector ?? storeEventProjector,
     idFactory: input.idFactory ?? { uuid: randomUUID },
     clock,

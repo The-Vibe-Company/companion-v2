@@ -348,9 +348,12 @@ export async function run(input?: { env?: NodeJS.ProcessEnv }): Promise<void> {
       } else {
         console.log("Runtime v2 final cutover is already recorded; skipping pre-cutover grants");
       }
-      if (finalCutoverPending && !runtimeRoles) {
+      // Required whether or not the cutover is still pending: post-cutover migrations now DROP and
+      // CREATE functions, which discards their ACLs, so a run without role variables would leave the
+      // executor unable to call the surface it needs and report success.
+      if (!runtimeRoles) {
         throw new Error(
-          "Runtime v2 final cutover requires DATABASE_API_ROLE, DATABASE_WORKER_ROLE, and DATABASE_COMPANION_RUNTIME_ROLE; set DATABASE_RETIRED_RUNTIME_ROLE as well when upgrading a legacy union role",
+          "Runtime v2 migrations require DATABASE_API_ROLE, DATABASE_WORKER_ROLE, and DATABASE_COMPANION_RUNTIME_ROLE; set DATABASE_RETIRED_RUNTIME_ROLE as well when upgrading a legacy union role",
         );
       }
     }
@@ -369,6 +372,21 @@ export async function run(input?: { env?: NodeJS.ProcessEnv }): Promise<void> {
     }
     if (phases.hasFinalCutover) {
       await migrate(database, { migrationsFolder });
+      if (runtimeRoles) {
+        // The pre-cutover pass grants the surface that existed at 0093, and it is skipped entirely
+        // once the cutover is recorded. Everything applied after it is therefore invisible to it,
+        // and a post-cutover migration that has to DROP + CREATE a function — a changed return type
+        // or parameter list cannot be replaced in place — resets that function's ACL outright.
+        //
+        // This runs unconditionally rather than only when this invocation applied something. The
+        // hook is idempotent, and gating it on "did this run apply a migration" would make a deploy
+        // that died between the migration and the grant unrepairable: every later run would see
+        // nothing left to apply and skip the repair forever, leaving the executor permanently
+        // without EXECUTE on the functions it needs.
+        const grantsFile = await resolveRuntimeRoleGrantsFile({ env });
+        await applyRuntimeRoleGrants(client, runtimeRoles, grantsFile);
+        console.log("Runtime database grants verified after the post-cutover migrations");
+      }
     }
     console.log("Drizzle migrations applied");
     await client`select pg_advisory_unlock(${MIGRATION_LOCK_CLASS_ID}, ${MIGRATION_LOCK_OBJECT_ID})`;

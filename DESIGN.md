@@ -403,9 +403,13 @@ the thread.
 
 The transcript keeps day boundaries and one member-private `New` divider, neither inside a turn.
 Loading uses static skeleton lines. A reply keeps Copy as its one ordinary action, always reachable
-without hover. The composer is one field with its send control and one hint line, with no toolbar:
-attachments, dictation/voice, slash commands, mentions, model picker, tool controls, routines,
-schedules, and multi-Bot handoffs do not belong here. Sending is the only normal wake action; typing
+without hover. The composer is one field with its send control, one attach control, and one hint line, with no
+toolbar: dictation/voice, slash commands, mentions, model picker, tool controls, routines,
+schedules, and multi-Bot handoffs do not belong here. Attaching is part of saying something, so the
+attach control sits inside the field at its leading edge, opposite Send; staged files read as chips
+above the field, and a refused file says why in one line directly beneath those chips rather than in
+a dialog. The hint line below the field keeps its own job: it says why Send is unavailable,
+including when a message carries files but no words. Sending is the only normal wake action; typing
 does not prewarm. A Viewer gets the same PostgreSQL-backed transcript with a read-only note in place
 of the composer. Empty threads state what happens next instead of greeting the reader, and the
 workspace sidebar remains the conversation list.
@@ -466,4 +470,6 @@ Don't:
 - Do not prettify ids, states, roles, scopes, env vars, hostnames, resource addresses, or model names.
 - Do not let healthy state shout. Do not let broken state hide.
 - Do not show a Wake action, keystroke prewarm, multi-Bot handoff, routine, schedule, voice,
-  attachment, harness picker, or deployment control.
+  harness picker, or deployment control.
+- Do not build a file library, a file manager, or any attachment surface outside the message it was
+  sent with. Files belong to the message; there is no place to browse them.

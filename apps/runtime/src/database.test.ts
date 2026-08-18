@@ -14,7 +14,7 @@ const validProfile = {
   ownsDatabaseOrSchema: false,
   ownsRelations: false,
   ownsFunctionsOrTypes: false,
-  protectedRelationCount: 10,
+  protectedRelationCount: 11,
   hasPublicRelationPrivileges: false,
   requiredFunctionsReady: true,
   ownsRequiredFunctions: false,

@@ -203,6 +203,7 @@ function controlPlane(options: { piAcceptsOnWake: boolean; holdSend?: boolean })
         author_name: null,
         tool: null,
         decision: null,
+        attachments: [],
         reasoning: null,
         created_at: new Date().toISOString(),
       });
@@ -230,6 +231,7 @@ function controlPlane(options: { piAcceptsOnWake: boolean; holdSend?: boolean })
           author_name: null,
           tool: null,
     decision: null,
+    attachments: [],
           reasoning: null,
           created_at: new Date().toISOString(),
         });

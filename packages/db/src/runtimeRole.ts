@@ -48,7 +48,8 @@ WITH runtime_role AS (
     ('public.companion_runtime_settle(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text,text,text,public.companion_runtime_error_action)'),
     ('public.companion_runtime_release_lease(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)'),
     ('public.companion_runtime_authorize_desktop(uuid,uuid,text)'),
-    ('public.companion_runtime_consume_desktop_request(text,bigint,integer)')
+    ('public.companion_runtime_consume_desktop_request(text,bigint,integer)'),
+    ('public.companion_runtime_record_attempt_outputs(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,jsonb,timestamp with time zone)')
 ), required_functions AS (
   SELECT signature, pg_catalog.to_regprocedure(signature) AS oid
   FROM required
@@ -74,7 +75,8 @@ WITH runtime_role AS (
       'companion_runtime_leases',
       'companion_runtime_duplicate_cleanups',
       'companion_runtime_event_projections',
-      'companion_runtime_desktop_requests'
+      'companion_runtime_desktop_requests',
+      'companion_message_attachments'
     ]::text[])
 )
 SELECT
@@ -165,7 +167,7 @@ export async function verifyRuntimeDatabaseRole(
     || profile.ownsDatabaseOrSchema !== false
     || profile.ownsRelations !== false
     || profile.ownsFunctionsOrTypes !== false
-    || profile.protectedRelationCount !== 10
+    || profile.protectedRelationCount !== 11
     || profile.hasPublicRelationPrivileges !== false
     || profile.requiredFunctionsReady !== true
     || profile.ownsRequiredFunctions !== false

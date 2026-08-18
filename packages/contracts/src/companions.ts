@@ -6,6 +6,7 @@ import {
   companionLatestOperationSchema,
   companionTurnSchema,
 } from "./companionRuntime";
+import { sniffCommentImageMime } from "./skill";
 
 export const companionRuntimeStateSchema = z.enum([
   "not_created",
@@ -418,6 +419,238 @@ export type DecideCompanionDecisionInput = z.infer<typeof decideCompanionDecisio
  */
 export const COMPANION_REASONING_MAX_CHARACTERS = 16_000;
 
+/**
+ * Where one transcript attachment came from. `user_upload` is a file a member sent with a message and
+ * the runtime stages read-only on the Box; `pi_output` is an image Pi produced and left in its outbox
+ * during a turn. The two kinds are stored in one table and separated by this discriminator, because a
+ * reader must never be able to mistake something Pi wrote for something a member vouched for.
+ */
+export const companionAttachmentKindSchema = z.enum(["user_upload", "pi_output"]);
+export type CompanionAttachmentKind = z.infer<typeof companionAttachmentKindSchema>;
+
+/** How many files one send may carry, and how large each may be. */
+export const COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT = 5;
+export const COMPANION_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+
+/**
+ * How much Pi may hand back from one turn. Harvesting is bounded before any transfer starts, so a Box
+ * that fills its outbox cannot turn one reply into an unbounded read: at most ten files, each within
+ * the per-file ceiling.
+ *
+ * The total below is the product of those two, so it is a restatement rather than an independent
+ * third bound — today no set that satisfies both can exceed it. It is enforced anyway, in TypeScript
+ * and in SQL, because the count and the per-file ceiling are the numbers people raise, and the total
+ * is the one anybody sizing a process or a bucket reasons about. Keep the SQL literals in
+ * `0098`/`0099` in step with it.
+ */
+export const COMPANION_OUTPUT_ATTACHMENT_MAX_COUNT = 10;
+export const COMPANION_OUTPUT_ATTACHMENT_TOTAL_MAX_BYTES = COMPANION_OUTPUT_ATTACHMENT_MAX_COUNT
+  * COMPANION_ATTACHMENT_MAX_BYTES;
+
+/** Images a member may send and the only types Pi may hand back. */
+export const COMPANION_ATTACHMENT_IMAGE_MIME_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+] as const;
+
+/**
+ * Documents a member may send. Pi reads these off the Box disk, so the list is exactly the formats a
+ * coding agent can open without a converter, and every one of them is either magic-byte identifiable
+ * (PDF) or required to be valid UTF-8 text.
+ */
+export const COMPANION_ATTACHMENT_DOCUMENT_MIME_TYPES = [
+  "application/pdf",
+  "text/csv",
+  "text/plain",
+  "text/markdown",
+  "application/json",
+] as const;
+
+export const COMPANION_ATTACHMENT_MIME_TYPES = [
+  ...COMPANION_ATTACHMENT_IMAGE_MIME_TYPES,
+  ...COMPANION_ATTACHMENT_DOCUMENT_MIME_TYPES,
+] as const;
+
+export const companionAttachmentContentTypeSchema = z.enum(COMPANION_ATTACHMENT_MIME_TYPES);
+export type CompanionAttachmentContentType = z.infer<typeof companionAttachmentContentTypeSchema>;
+
+export function isCompanionAttachmentImage(contentType: string): boolean {
+  return (COMPANION_ATTACHMENT_IMAGE_MIME_TYPES as readonly string[]).includes(contentType);
+}
+
+const COMPANION_ATTACHMENT_EXTENSION_TO_MIME: Record<string, CompanionAttachmentContentType> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".pdf": "application/pdf",
+  ".csv": "text/csv",
+  ".txt": "text/plain",
+  ".md": "text/markdown",
+  ".markdown": "text/markdown",
+  ".json": "application/json",
+};
+
+/**
+ * The type a client claims for one part, used only to refuse an obviously unsupported file before its
+ * bytes are read. The stored type always comes from `sniffCompanionAttachmentMime` instead, so a
+ * declared type is never what gets persisted or served back.
+ */
+export function declaredCompanionAttachmentContentType(
+  file: { type: string; name: string },
+): CompanionAttachmentContentType | null {
+  const declared = file.type.split(";")[0]?.trim().toLowerCase() ?? "";
+  if ((COMPANION_ATTACHMENT_MIME_TYPES as readonly string[]).includes(declared)) {
+    return declared as CompanionAttachmentContentType;
+  }
+  const extension = file.name.toLowerCase().match(/\.[^.]+$/)?.[0];
+  if (extension && extension in COMPANION_ATTACHMENT_EXTENSION_TO_MIME) {
+    return COMPANION_ATTACHMENT_EXTENSION_TO_MIME[extension]!;
+  }
+  return null;
+}
+
+/**
+ * True when the bytes are well-formed UTF-8 carrying no control character a text file has any business
+ * containing (tab, newline, and carriage return are the exceptions). A disguised binary therefore
+ * cannot be stored as `text/plain` and staged for Pi to read, and a document that does reach the Box
+ * is one Pi can open as text.
+ *
+ * This walks the bytes rather than decoding them: the package is a dependency-free contract shared by
+ * the API, the runtime, and the browser bundle, so it may not assume a `TextDecoder`.
+ */
+export function isUtf8TextAttachment(bytes: Uint8Array): boolean {
+  for (let index = 0; index < bytes.length;) {
+    const byte = bytes[index]!;
+    if (byte < 0x80) {
+      if (byte === 0x7f) return false;
+      if (byte < 0x20 && byte !== 0x09 && byte !== 0x0a && byte !== 0x0d) return false;
+      index += 1;
+      continue;
+    }
+    // Sequence length plus the smallest code point it may legally encode, so overlong forms,
+    // surrogates, and truncated tails are all refused instead of silently replaced.
+    let length: number;
+    let codePoint: number;
+    if (byte >= 0xc2 && byte <= 0xdf) {
+      length = 2;
+      codePoint = byte & 0x1f;
+    } else if (byte >= 0xe0 && byte <= 0xef) {
+      length = 3;
+      codePoint = byte & 0x0f;
+    } else if (byte >= 0xf0 && byte <= 0xf4) {
+      length = 4;
+      codePoint = byte & 0x07;
+    } else {
+      return false;
+    }
+    if (index + length > bytes.length) return false;
+    for (let offset = 1; offset < length; offset += 1) {
+      const continuation = bytes[index + offset]!;
+      if ((continuation & 0xc0) !== 0x80) return false;
+      codePoint = (codePoint << 6) | (continuation & 0x3f);
+    }
+    const minimum = length === 2 ? 0x80 : length === 3 ? 0x800 : 0x10000;
+    if (codePoint < minimum || codePoint > 0x10ffff) return false;
+    if (codePoint >= 0xd800 && codePoint <= 0xdfff) return false;
+    index += length;
+  }
+  return true;
+}
+
+/**
+ * Resolve the type one attachment will be stored and served as, from its bytes alone.
+ *
+ * Images and PDFs are identified by magic numbers, so a fake extension cannot smuggle a different
+ * format past the allowlist. The text formats have no magic number to check, so the declared type is
+ * honored only for bytes that are well-formed UTF-8 text. `null` means the bytes are not one of the
+ * supported attachment formats and must be refused before anything is stored.
+ */
+export function sniffCompanionAttachmentMime(
+  bytes: Uint8Array,
+  declared: CompanionAttachmentContentType | null,
+): CompanionAttachmentContentType | null {
+  const image = sniffCommentImageMime(bytes);
+  if (image) return image;
+  // PDF: "%PDF-"
+  if (
+    bytes.length >= 5
+    && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46
+    && bytes[4] === 0x2d
+  ) return "application/pdf";
+  if (declared === null || declared === "application/pdf" || isCompanionAttachmentImage(declared)) {
+    return null;
+  }
+  return isUtf8TextAttachment(bytes) ? declared : null;
+}
+
+/** The longest stored filename. Long enough to stay recognizable, short enough to name in a prompt. */
+export const COMPANION_ATTACHMENT_FILENAME_MAX_CHARACTERS = 80;
+
+/**
+ * The exact charset a stored attachment filename may use. It is enforced here, in a database CHECK,
+ * and by the sanitizer below, because the name is interpolated into a Box path and into the prompt
+ * suffix that tells Pi where the file is: a charset this narrow leaves nothing to quote or escape.
+ */
+export const COMPANION_ATTACHMENT_FILENAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
+
+/**
+ * Reduce a client-supplied filename to the stored one, once, at upload. Everything downstream — the
+ * Box path, the prompt suffix, the read route's `Content-Disposition` — uses this result verbatim
+ * rather than sanitizing again, so there is one rule and one place it is applied.
+ */
+export function sanitizeCompanionAttachmentFilename(input: {
+  filename: string;
+  position: number;
+  contentType: CompanionAttachmentContentType;
+}): string {
+  const normalized = input.filename.normalize("NFC").replaceAll(/[^A-Za-z0-9._-]/g, "_")
+    // A leading dot would stage a dotfile Pi's own tooling hides from an ordinary listing.
+    .replace(/^[.\-_]+/, "")
+    .slice(0, COMPANION_ATTACHMENT_FILENAME_MAX_CHARACTERS);
+  if (COMPANION_ATTACHMENT_FILENAME_PATTERN.test(normalized)) return normalized;
+  const extension = Object.entries(COMPANION_ATTACHMENT_EXTENSION_TO_MIME)
+    .find(([, mime]) => mime === input.contentType)?.[0] ?? "";
+  return `file-${input.position}${extension}`;
+}
+
+/**
+ * One file carried by a transcript entry. The payload is deliberately metadata only: the storage key
+ * and any URL that could reach object storage directly stay server-side, and a reader fetches bytes
+ * through the attachment route, which re-authorizes on every single request.
+ */
+export const companionAttachmentSchema = z.object({
+  id: z.string().uuid(),
+  kind: companionAttachmentKindSchema,
+  content_type: companionAttachmentContentTypeSchema,
+  byte_size: z.number().int().positive().max(COMPANION_ATTACHMENT_MAX_BYTES),
+  filename: z.string().regex(COMPANION_ATTACHMENT_FILENAME_PATTERN),
+  /** Stable order within its entry, so a re-read renders the same files in the same places. */
+  position: z.number().int().nonnegative(),
+}).strict();
+export type CompanionAttachment = z.infer<typeof companionAttachmentSchema>;
+
+/**
+ * One already-stored attachment as the control plane hands it to the durable enqueue. This never
+ * crosses the wire to a browser: it carries the storage key and the content digest the idempotent
+ * replay compares, both of which stay server-side.
+ */
+export const companionAttachmentUploadSchema = z.object({
+  storage_key: z.string().min(1).max(512).refine((value) => !/[\r\n]/.test(value), {
+    message: "storage key must be a single line",
+  }),
+  content_type: companionAttachmentContentTypeSchema,
+  byte_size: z.number().int().positive().max(COMPANION_ATTACHMENT_MAX_BYTES),
+  /** Lowercase hex sha256 of the exact stored bytes; also the tail of the content-addressed key. */
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  filename: z.string().regex(COMPANION_ATTACHMENT_FILENAME_PATTERN),
+  position: z.number().int().nonnegative().max(COMPANION_OUTPUT_ATTACHMENT_MAX_COUNT - 1),
+}).strict();
+export type CompanionAttachmentUpload = z.infer<typeof companionAttachmentUploadSchema>;
+
 export const companionTranscriptEntrySchema = z.object({
   event_id: z.string().min(1).max(200),
   ordinal: z.number().int().nonnegative(),
@@ -440,6 +673,12 @@ export const companionTranscriptEntrySchema = z.object({
   tool: companionToolRunSchema.nullable().default(null),
   /** Set on exactly the `decision` entries; every other role carries null. */
   decision: companionDecisionSchema.nullable().default(null),
+  /**
+   * Files this entry carries, in stable order. A member message carries what was sent with it; the
+   * assistant outputs entry carries what Pi left in its outbox during that turn. Every other entry
+   * carries an empty list, and the default keeps older projections parseable.
+   */
+  attachments: z.array(companionAttachmentSchema).default([]),
   created_at: z.string().datetime(),
 }).superRefine((entry, ctx) => {
   if ((entry.role === "tool") !== (entry.tool !== null)) {
@@ -461,6 +700,27 @@ export const companionTranscriptEntrySchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["reasoning"],
       message: "only a reply carries reasoning",
+    });
+  }
+  const expectedAttachmentKind = entry.role === "user"
+    ? "user_upload"
+    : entry.role === "assistant"
+      ? "pi_output"
+      : null;
+  if (entry.attachments.some((attachment) => attachment.kind !== expectedAttachmentKind)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["attachments"],
+      message: "a member message carries uploads and a reply carries Pi outputs; no other role may",
+    });
+  }
+  if (
+    entry.attachments.some((attachment, index) => attachment.position !== index)
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["attachments"],
+      message: "attachment positions must be dense and ordered from zero",
     });
   }
 });

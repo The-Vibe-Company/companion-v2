@@ -116,8 +116,9 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
 ## Explicit exclusions
 
 - Generic Projects and skill runs, multi-Bot orchestration, Bot-to-Bot handoffs, group Bot chats,
-  routines, schedules, proactive jobs, voice, thread attachments/artifacts, and a new navigation or
-  visual language.
+  routines, schedules, proactive jobs, voice, and a new navigation or visual language.
+- A file library, file versioning, or any artifact surface outside a thread. Chat files themselves
+  are in scope: bounded image and document uploads on a message, and bounded images Pi hands back.
 - Harnesses other than Pi, runtime providers other than box.ascii.dev, generic provider/model
   marketplaces, Box pools, container catalogs, deployment management, and arbitrary application
   automation platforms.

@@ -88,6 +88,15 @@ describe("PostgresRuntimeStore", () => {
       mcp_material: [],
       model_input: null,
       has_visible_output: true,
+      attachments: [{
+        id: "3f1d8a52-0c47-4e3b-9a19-7bd0c5e4a611",
+        storage_key: "companion-attachments/org/companion/message/0-" + "a".repeat(64),
+        content_type: "image/png",
+        byte_size: 2048,
+        sha256: "a".repeat(64),
+        filename: "chart.png",
+        position: 0,
+      }],
       credential_snapshot_matches: true,
     }];
     const store = new PostgresRuntimeStore(sql);
@@ -98,10 +107,96 @@ describe("PostgresRuntimeStore", () => {
       turnId: TURN_ID,
       attemptId: ATTEMPT_ID,
       hasVisibleOutput: true,
+      attachments: [{ filename: "chart.png", contentType: "image/png", position: 0 }],
     });
     expect(sql.calls[0]?.query).toContain("public.companion_runtime_get_material(");
     expect(sql.calls[0]?.query).toContain("attempt_id");
     expect(sql.calls[0]?.query).toContain("has_visible_output");
+    expect(sql.calls[0]?.query).toContain("attachments");
+  });
+
+  it("refuses staging material whose names, digests, or ordering drifted from the contract", async () => {
+    const base = {
+      turn_id: TURN_ID,
+      attempt_id: ATTEMPT_ID,
+      message_event_id: MESSAGE_EVENT_ID,
+      prompt_text: "hello",
+      decision_request_kind: null,
+      decision_response_payload: null,
+      provider_material: [],
+      skill_material: [],
+      mcp_material: [],
+      model_input: null,
+      has_visible_output: true,
+      credential_snapshot_matches: true,
+    };
+    const attachment = {
+      id: "3f1d8a52-0c47-4e3b-9a19-7bd0c5e4a611",
+      storage_key: "companion-attachments/org/companion/message/0-" + "a".repeat(64),
+      content_type: "image/png",
+      byte_size: 2048,
+      sha256: "a".repeat(64),
+      filename: "chart.png",
+      position: 0,
+    };
+    for (const drifted of [
+      { ...attachment, filename: "../escape.png" },
+      { ...attachment, sha256: "not-a-digest" },
+      { ...attachment, content_type: "application/zip" },
+      { ...attachment, byte_size: 20 * 1024 * 1024 },
+      { ...attachment, position: 3 },
+    ]) {
+      const sql = new RecordingSql();
+      sql.rows = [{ ...base, attachments: [drifted] }];
+      const store = new PostgresRuntimeStore(sql);
+      await expect(
+        store.getMaterial({ ...fence, workKind: "attempt", workId: ATTEMPT_ID }, 30),
+      ).rejects.toThrow();
+    }
+  });
+
+  it("hands the harvested outputs to the definer as a jsonb array, not a JSON string", async () => {
+    const sql = new RecordingSql();
+    sql.rows = [{ recorded: 1, has_visible_output: true }];
+    const store = new PostgresRuntimeStore(sql);
+
+    const result = await store.recordAttemptOutputs(
+      { ...fence, workKind: "attempt", workId: ATTEMPT_ID },
+      {
+        attachments: [{
+          storageKey: `companion-attachments/org/companion/outputs/attempt/0-${"d".repeat(64)}`,
+          contentType: "image/png",
+          byteSize: 512,
+          sha256: "d".repeat(64),
+          filename: "plot.png",
+        }],
+        activityAt: new Date("2026-08-18T12:00:00.000Z"),
+      },
+    );
+
+    expect(result).toEqual({ recorded: 1, hasVisibleOutput: true });
+    expect(sql.calls[0]?.query).toContain("public.companion_runtime_record_attempt_outputs(");
+    // Pre-stringifying arrives as a JSON *string*, whose jsonb_typeof is not `array`, and the
+    // definer refuses it. The driver serializes the array itself.
+    const attachments = sql.calls[0]?.parameters?.[8];
+    expect(Array.isArray(attachments)).toBe(true);
+    expect(attachments).toEqual([expect.objectContaining({
+      filename: "plot.png",
+      content_type: "image/png",
+      byte_size: 512,
+      position: 0,
+    })]);
+  });
+
+  it("returns null when the harvest fence is stale rather than inventing a result", async () => {
+    const sql = new RecordingSql();
+    sql.rows = [];
+    const store = new PostgresRuntimeStore(sql);
+
+    await expect(store.recordAttemptOutputs(
+      { ...fence, workKind: "attempt", workId: ATTEMPT_ID },
+      { attachments: [], activityAt: new Date("2026-08-18T12:00:00.000Z") },
+    )).resolves.toBeNull();
   });
 
   it("rejects material whose dispatch-time credential snapshot changed", async () => {
@@ -119,6 +214,7 @@ describe("PostgresRuntimeStore", () => {
       checkpoint: "agent_settled",
       event_cursor: "42",
       has_visible_output: true,
+      outputs_harvested: false,
     }];
     const store = new PostgresRuntimeStore(sql);
 
@@ -132,6 +228,7 @@ describe("PostgresRuntimeStore", () => {
       checkpoint: "agent_settled",
       eventCursor: 42n,
       hasVisibleOutput: true,
+      outputsHarvested: false,
     });
     expect(sql.calls[0]?.query).toContain(
       "public.companion_runtime_get_attempt_terminal_projection(",

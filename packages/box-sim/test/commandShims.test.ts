@@ -401,6 +401,95 @@ describe("semantic Box command shims", () => {
 
   });
 
+  it("classifies and applies every attachment and outbox command the adapter emits", async () => {
+    // The classifier's regexes are the contract between the real adapter and this simulator. If the
+    // adapter's emitted command drifts, these must fail rather than every command falling through
+    // to the unknown-command branch, which would leave the runtime suites green and blind.
+    const directory = "attachments/66666666-6666-4666-8666-666666666666";
+    const commands = {
+      prepare: `set -e; cd "$HOME"; rm -rf ${shellQuote(directory)}; mkdir -p ${shellQuote(directory)}`,
+      lock: `set -e; cd "$HOME"; chmod -R a-w ${shellQuote(directory)}`,
+      clear: `set -e; dir="$HOME/outbox"; mkdir -p "$dir"; find "$dir" -mindepth 1 -delete`,
+    };
+    expect(classifyBoxCommand(commands.prepare)).toBe("prepare-attachments");
+    expect(classifyBoxCommand(commands.lock)).toBe("lock-attachments");
+    expect(classifyBoxCommand(commands.clear)).toBe("clear-outbox");
+
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    putBoxFile(machine, `${directory}/0-stale.png`, Buffer.from("stale"));
+    putBoxFile(machine, "outbox/left-over.png", Buffer.from("left over"));
+
+    // Preparing replaces the directory, so a retried attempt stages what it was given and nothing
+    // a previous one left behind.
+    expect(await executeBoxCommand(machine, commands.prepare)).toMatchObject({ success: true });
+    expect([...machine.persistentFiles.keys()]).not.toContain(`${directory}/0-stale.png`);
+    expect(await executeBoxCommand(machine, commands.lock)).toMatchObject({ success: true });
+
+    expect(await executeBoxCommand(machine, commands.clear)).toMatchObject({ success: true });
+    expect([...machine.persistentFiles.keys()].some((path) => path.startsWith("outbox/")))
+      .toBe(false);
+    expect(machine.unknownCommandDigests).toHaveLength(0);
+  });
+
+  it("lets the same message be staged twice, because the lock spares the directory", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    const directory = "attachments/66666666-6666-4666-8666-666666666666";
+    const prepare = `set -e; cd "$HOME"; rm -rf ${shellQuote("attachments")}; mkdir -p ${shellQuote(directory)}`;
+    const lockFilesOnly = `set -e; cd "$HOME"; find ${shellQuote(directory)} -type f -exec chmod a-w {} +`;
+    const lockRecursively = `set -e; cd "$HOME"; chmod -R a-w ${shellQuote(directory)}`;
+
+    expect(await executeBoxCommand(machine, prepare)).toMatchObject({ success: true });
+    putBoxFile(machine, `${directory}/0-chart.png`, Buffer.from("png"));
+    expect(await executeBoxCommand(machine, lockFilesOnly)).toMatchObject({ success: true });
+
+    // A retry of the same turn must be able to clear what the previous attempt staged.
+    expect(await executeBoxCommand(machine, prepare)).toMatchObject({ success: true });
+
+    // A recursive lock is what would break it, and the simulator now says so rather than modelling
+    // chmod as a no-op that could never reproduce the failure.
+    putBoxFile(machine, `${directory}/0-chart.png`, Buffer.from("png"));
+    expect(await executeBoxCommand(machine, lockRecursively)).toMatchObject({ success: true });
+    expect(await executeBoxCommand(machine, prepare)).toMatchObject({ success: false });
+  });
+
+  it("lists the outbox as a sentinel-bracketed manifest and reads it back in chunks", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    const bytes = Buffer.from("an image that spans two chunks".repeat(4));
+    putBoxFile(machine, "outbox/plot.png", bytes);
+    const listCommand = [
+      'dir="$HOME/outbox"',
+      "printf '%s\\n' 'companion-outbox-manifest-begin'",
+      "printf '%s\\n' 'companion-outbox-manifest-end'",
+    ].join("\n");
+
+    expect(classifyBoxCommand(listCommand)).toBe("list-outbox");
+    const listed = await executeBoxCommand(machine, listCommand);
+    const line = listed.stdout.split("\n").find((entry) => entry.includes(" "))!;
+    const [manifestDigest, size, encodedName] = line.split(" ");
+    expect(Buffer.from(encodedName!, "base64").toString("utf8")).toBe("plot.png");
+    expect(Number(size)).toBe(bytes.byteLength);
+    expect(manifestDigest).toMatch(/^[a-f0-9]{64}$/);
+
+    const chunkCommand = (skip: number, size_: number) => [
+      "set -e",
+      `name="$(printf '%s' '${encodedName}' | base64 -d)"`,
+      "printf '%s\\n' 'companion-outbox-chunk-begin'",
+      `dd if="$HOME/outbox/$name" bs=${size_} skip=${skip} count=1 2>/dev/null | base64 -w0`,
+      "printf '\\n%s\\n' 'companion-outbox-chunk-end'",
+    ].join("\n");
+    expect(classifyBoxCommand(chunkCommand(0, 16))).toBe("read-outbox-chunk");
+
+    const first = await executeBoxCommand(machine, chunkCommand(0, 16));
+    const body = first.stdout.split("\n").filter(Boolean)[1]!;
+    expect(Buffer.from(body, "base64").equals(bytes.subarray(0, 16))).toBe(true);
+
+    // The mangling hook is what lets a test prove the chunked protocol detects a truncated body.
+    machine.mangleOutboxChunkBytes = 4;
+    const mangled = await executeBoxCommand(machine, chunkCommand(0, 16));
+    const mangledBody = mangled.stdout.split("\n").filter(Boolean)[1]!;
+    expect(Buffer.from(mangledBody, "base64").byteLength).toBe(4);
+  });
+
   it("fails closed on unknown commands and records only their digest", async () => {
     const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
     const syntheticSecret = ["simulated", "credential", "771"].join("-");

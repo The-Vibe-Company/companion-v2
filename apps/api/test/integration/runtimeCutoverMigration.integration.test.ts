@@ -226,7 +226,7 @@ afterAll(async () => {
 }, 30_000);
 
 describe("Runtime v2 final migration protocol", () => {
-  it("applies a fresh database through recovery 0095 and never reapplies broad grants", async () => {
+  it("applies a fresh database through recovery 0095 and repairs post-cutover grants every run", async () => {
     const fixture = await createFixture();
     await runMigrations({ env: migrationEnv(fixture) });
     expect(await lastMigration(fixture.databaseUrl)).toBe(await expectedLastMigrationWhen());
@@ -248,10 +248,17 @@ describe("Runtime v2 final migration protocol", () => {
       grantsFile,
       "-- companion-runtime-grants-begin\nDO $$ BEGIN RAISE EXCEPTION 'post-cutover grants ran'; END $$;\n-- companion-runtime-grants-end\n",
     );
+    // The post-cutover repair pass runs on every invocation, including one that applies nothing:
+    // gating it on "this run applied a migration" would make a deploy that died between the
+    // migration and the grant unrepairable. The poisoned file proves the hook was read.
     await expect(runMigrations({
       env: { ...migrationEnv(fixture), COMPANION_RUNTIME_GRANTS_FILE: grantsFile },
-    })).resolves.toBeUndefined();
+    })).rejects.toThrow(/post-cutover grants ran/);
     expect(await lastMigration(fixture.databaseUrl)).toBe(await expectedLastMigrationWhen());
+
+    // With the real hook it is idempotent, so a no-op run still succeeds and still leaves the
+    // executor surface granted.
+    await expect(runMigrations({ env: migrationEnv(fixture) })).resolves.toBeUndefined();
   }, 120_000);
 
   it("repairs an old 0091/0092 ledger before grants and cutover", async () => {
@@ -334,12 +341,21 @@ describe("Runtime v2 final migration protocol", () => {
       `;
       expect(before).toEqual({ replayTable: null, consumeFunction: null });
 
+      // This run does apply post-cutover migrations, and one of them has to DROP + CREATE a
+      // function whose return type changed -- which resets that function's ACL. The runner
+      // therefore re-runs the grants hook, so this run needs the real one.
+      await expect(runMigrations({ env: migrationEnv(fixture) })).resolves.toBeUndefined();
+      expect(await lastMigration(fixture.databaseUrl)).toBe(await expectedLastMigrationWhen());
+
+      // The repair pass is unconditional, so even a no-op run reads the hook. Proven with the
+      // poisoned file, then repeated with the real one so the ACL assertions below still hold.
       await expect(runMigrations({
         env: {
           ...migrationEnv(fixture),
           COMPANION_RUNTIME_GRANTS_FILE: grantsFile,
         },
-      })).resolves.toBeUndefined();
+      })).rejects.toThrow(/post-cutover grants ran/);
+      await expect(runMigrations({ env: migrationEnv(fixture) })).resolves.toBeUndefined();
       expect(await lastMigration(fixture.databaseUrl)).toBe(await expectedLastMigrationWhen());
 
       const [acl] = await client<Array<{

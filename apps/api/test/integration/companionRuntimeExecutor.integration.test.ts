@@ -169,6 +169,15 @@ async function asApplicationRoleWithForgedProtocol<T>(input: {
   return wrapped.value;
 }
 
+async function asOwnerV2<T>(action: (tx: Tx) => PromiseLike<T>): Promise<T> {
+  if (!sql) throw new Error("runtime executor database is not initialized");
+  const wrapped = await sql.begin(async (tx) => {
+    await tx`select set_config('app.companion_runtime_protocol', '2', true)`;
+    return { value: await action(tx) };
+  });
+  return wrapped.value;
+}
+
 async function createCompanion(input: {
   actorId?: string;
   boxReady?: boolean;
@@ -351,6 +360,11 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       await replayMigrations(migrationSql, migrations.slice(0, cutoverIndex));
       await applySplitGrants(migrationSql);
       await replayMigrations(migrationSql, migrations.slice(cutoverIndex));
+      // The two-phase migration runner re-applies the grants hook after the post-cutover phase, for
+      // the same reason it is needed here: a migration that has to DROP + CREATE a function resets
+      // that function's ACL, so grants taken before the phase describe a surface that no longer
+      // exists. Mirroring production ordering is what makes this suite's ACL assertions meaningful.
+      await applySplitGrants(migrationSql);
     } finally {
       await migrationSql.end();
     }
@@ -495,7 +509,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'companion_runtime_control', 'companion_runtime_instances', 'companion_turns',
             'companion_turn_attempts', 'companion_operations', 'companion_decision_deliveries',
             'companion_runtime_leases', 'companion_runtime_duplicate_cleanups',
-            'companion_runtime_event_projections', 'companion_runtime_desktop_requests'
+            'companion_runtime_event_projections', 'companion_runtime_desktop_requests',
+            'companion_message_attachments'
           ]) protected(table_name)
           where has_table_privilege(${runtimeRole}, 'public.' || protected.table_name, 'SELECT')
         ) as "privateTableReads",
@@ -508,7 +523,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'public.companion_runtime_checkpoint_duplicate_cleanup(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text,bigint,public.companion_duplicate_cleanup_status,text)',
             'public.companion_runtime_authorize_desktop(uuid,uuid,text)',
             'public.companion_runtime_consume_desktop_request(text,bigint,integer)',
-            'public.companion_runtime_project_event_batch(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)'
+            'public.companion_runtime_project_event_batch(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)',
+            'public.companion_runtime_record_attempt_outputs(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,jsonb,timestamp with time zone)'
           ]) protected(signature)
           where has_function_privilege(${runtimeRole}, protected.signature, 'EXECUTE')
         ) as "callableFunctions",
@@ -516,7 +532,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           ${runtimeRole}, 'public.companion_runtime_guard_duplicate_cleanup()', 'EXECUTE'
         ) as "helperCallable"
     `;
-    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 8, helperCallable: false });
+    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 9, helperCallable: false });
     await expect(asRuntime((tx) => tx`select * from companion_turn_attempts`))
       .rejects.toThrow(/permission denied/i);
 
@@ -537,7 +553,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       "public.companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)",
       "public.companion_api_update_member_state(uuid,uuid,boolean,boolean,boolean)",
       "public.companion_api_mark_thread_read(uuid,uuid)",
-      "public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface)",
+      "public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface,jsonb)",
+      "public.companion_api_read_attachment(uuid,uuid,uuid)",
       "public.companion_api_read_runtime(uuid,uuid)",
       "public.companion_api_list_runtime(uuid)",
       "public.companion_api_read_thread(uuid,uuid)",
@@ -810,7 +827,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           select turn, replayed
           from public.companion_api_enqueue_turn(
             ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
-            'Capability-backed send', 'web'
+            'Capability-backed send', 'web', '[]'::jsonb
           )
         `,
       });
@@ -820,6 +837,343 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       }]);
     } finally {
       if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("carries a send's attachments through replay, projection, and the executor's material", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const created = await asApi({
+      orgId: ids.orgA,
+      actorId: ids.ownerA,
+      action: (tx) => tx<Array<{ companionId: string }>>`
+        select companion_id::text as "companionId"
+        from public.companion_api_create_companion(
+          ${ids.orgA}::uuid, 'Attachment fixture', null,
+          ${null}::text, ${null}::text, ${tx.json([])}::jsonb,
+          false, ${tx.json([])}::jsonb
+        )
+      `,
+    });
+    const companionId = created[0]!.companionId;
+    try {
+    const clientMessageId = randomUUID();
+    const attachments = [
+      {
+        storage_key: `companion-attachments/${ids.orgA}/${companionId}/${clientMessageId}/0-${"a".repeat(64)}`,
+        content_type: "image/png",
+        byte_size: 2048,
+        sha256: "a".repeat(64),
+        filename: "chart.png",
+        position: 0,
+      },
+      {
+        storage_key: `companion-attachments/${ids.orgA}/${companionId}/${clientMessageId}/1-${"b".repeat(64)}`,
+        content_type: "application/pdf",
+        byte_size: 4096,
+        sha256: "b".repeat(64),
+        filename: "report.pdf",
+        position: 1,
+      },
+    ];
+    type AttachmentInput = (typeof attachments)[number];
+    const enqueue = (list: AttachmentInput[]) => asApi({
+      orgId: ids.orgA,
+      actorId: ids.ownerA,
+      action: (tx) => tx<Array<{ replayed: boolean }>>`
+        select replayed from public.companion_api_enqueue_turn(
+          ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
+          'Look at these', 'web', ${tx.json(list)}::jsonb
+        )
+      `,
+    });
+
+    expect((await enqueue(attachments))[0]?.replayed).toBe(false);
+    // Identical bytes are the same intent however many times the request arrives, and no second row
+    // is written for them.
+    expect((await enqueue(attachments))[0]?.replayed).toBe(true);
+    const [rowCount] = await sql<Array<{ count: number }>>`
+      select count(*)::int as count from companion_message_attachments
+      where companion_id = ${companionId}::uuid
+    `;
+    expect(rowCount?.count).toBe(2);
+
+    // A different file at the same position is a different message, and says so.
+    await expect(enqueue([{ ...attachments[0]!, sha256: "c".repeat(64) }, attachments[1]!]))
+      .rejects.toMatchObject({ code: "23505" });
+    await expect(enqueue([attachments[0]!])).rejects.toMatchObject({ code: "23505" });
+
+    // The reader's projection carries metadata and an id, and never a storage key.
+    const thread = await asApi({
+      orgId: ids.orgA,
+      actorId: ids.ownerA,
+      action: (tx) => tx<Array<{ entries: Array<Record<string, unknown>> }>>`
+        select entries from public.companion_api_read_thread(
+          ${ids.orgA}::uuid, ${companionId}::uuid
+        )
+      `,
+    });
+    const projected = thread[0]!.entries[0]!.attachments as Array<Record<string, unknown>>;
+    expect(projected).toEqual([
+      expect.objectContaining({
+        kind: "user_upload",
+        content_type: "image/png",
+        filename: "chart.png",
+        byte_size: 2048,
+        position: 0,
+      }),
+      expect.objectContaining({ content_type: "application/pdf", filename: "report.pdf", position: 1 }),
+    ]);
+    expect(JSON.stringify(projected)).not.toContain("companion-attachments/");
+
+    // The read route re-authorizes on every request: an Editor may read, a non-member may not.
+    const attachmentId = projected[0]!.id as string;
+    const asset = await asApi({
+      orgId: ids.orgA,
+      actorId: ids.ownerA,
+      action: (tx) => tx<Array<{ storage_key: string; filename: string }>>`
+        select storage_key, filename from public.companion_api_read_attachment(
+          ${ids.orgA}::uuid, ${companionId}::uuid, ${attachmentId}::uuid
+        )
+      `,
+    });
+    expect(asset[0]?.storage_key).toBe(attachments[0]!.storage_key);
+    await expect(asApi({
+      orgId: ids.orgA,
+      actorId: ids.ownerB,
+      action: (tx) => tx`
+        select * from public.companion_api_read_attachment(
+          ${ids.orgA}::uuid, ${companionId}::uuid, ${attachmentId}::uuid
+        )
+      `,
+    })).rejects.toThrow();
+    await expect(asApi({
+      orgId: ids.orgB,
+      actorId: ids.ownerB,
+      action: (tx) => tx`
+        select * from public.companion_api_read_attachment(
+          ${ids.orgB}::uuid, ${companionId}::uuid, ${attachmentId}::uuid
+        )
+      `,
+    })).rejects.toMatchObject({ code: "P0002" });
+
+    // A Viewer reads and downloads attachments -- that is the whole point of a shared thread, and
+    // this read is PostgreSQL plus object storage, so it never wakes the Box.
+    await asApi({
+      orgId: ids.orgA,
+      actorId: ids.ownerA,
+      action: (tx) => tx`
+        select * from public.companion_api_set_workspace_access(
+          ${ids.orgA}::uuid, ${companionId}::uuid, 'viewer'::public.companion_share_role
+        )
+      `,
+    });
+    const viewerRead = await asApi({
+      orgId: ids.orgA,
+      actorId: ids.viewerA,
+      action: (tx) => tx<Array<{ filename: string }>>`
+        select filename from public.companion_api_read_attachment(
+          ${ids.orgA}::uuid, ${companionId}::uuid, ${attachmentId}::uuid
+        )
+      `,
+    });
+    expect(viewerRead[0]?.filename).toBe("chart.png");
+
+    // A Viewer still cannot send, so the same share does not open the upload path.
+    await expect(enqueue(attachments)).resolves.toBeDefined();
+    await expect(asApi({
+      orgId: ids.orgA,
+      actorId: ids.viewerA,
+      action: (tx) => tx`
+        select * from public.companion_api_enqueue_turn(
+          ${ids.orgA}::uuid, ${companionId}::uuid, ${randomUUID()}::uuid,
+          'viewer send', 'web', ${tx.json(attachments)}::jsonb
+        )
+      `,
+    })).rejects.toMatchObject({ code: "42501" });
+
+    // Revoking the workspace share takes the bytes away at the next request, not at the next cache
+    // expiry -- nothing signed or long-lived was ever minted.
+    await asApi({
+      orgId: ids.orgA,
+      actorId: ids.ownerA,
+      action: (tx) => tx`
+        select * from public.companion_api_set_workspace_access(
+          ${ids.orgA}::uuid, ${companionId}::uuid, null::public.companion_share_role
+        )
+      `,
+    });
+    await expect(asApi({
+      orgId: ids.orgA,
+      actorId: ids.viewerA,
+      action: (tx) => tx`
+        select * from public.companion_api_read_attachment(
+          ${ids.orgA}::uuid, ${companionId}::uuid, ${attachmentId}::uuid
+        )
+      `,
+    })).rejects.toMatchObject({ code: "P0002" });
+
+    // A key outside this tenant's own prefix is refused before any row is written.
+    await expect(enqueue([{
+      ...attachments[0]!,
+      storage_key: `companion-attachments/${ids.orgB}/${companionId}/${clientMessageId}/0-${"a".repeat(64)}`,
+    }])).rejects.toMatchObject({ code: "22023" });
+
+    // Removing the entry removes its files and schedules exactly those objects for deletion.
+    await asOwnerV2((tx) => tx`
+      delete from companion_transcript_entries
+      where companion_id = ${companionId}::uuid
+    `);
+    const queued = await sql<Array<{ storage_key: string }>>`
+      select storage_key from skill_database_object_deletions
+      where org_id = ${ids.orgA}::uuid and storage_key like ${`companion-attachments/${ids.orgA}/${companionId}/%`}
+      order by storage_key
+    `;
+    expect(queued.map((row) => row.storage_key))
+      .toEqual(attachments.map((attachment) => attachment.storage_key).sort());
+    } finally {
+      await removeCompanion(companionId);
+    }
+  });
+
+  it("records Pi's outputs once and makes an image-only turn a visible output", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion({ boxReady: true });
+    await asOwnerV2((tx) => tx`
+      update companion_turn_attempts
+      set checkpoint = 'agent_settled', event_cursor = 4
+      where id = ${fixture.attemptId}::uuid
+    `);
+    const claim = await claimWork();
+    try {
+    expect(claim.workKind).toBe("attempt");
+
+    const outputs = [{
+      storage_key: `companion-attachments/${ids.orgA}/${fixture.companionId}/outputs/${fixture.attemptId}/0-${"d".repeat(64)}`,
+      content_type: "image/png",
+      byte_size: 512,
+      sha256: "d".repeat(64),
+      filename: "plot.png",
+      position: 0,
+    }];
+    const record = () => asRuntime((tx) => tx<Array<{ recorded: number; has_visible_output: boolean }>>`
+      select recorded, has_visible_output
+      from public.companion_runtime_record_attempt_outputs(
+        ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+        ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+        'attempt', ${claim.workId}::uuid, ${tx.json(outputs)}::jsonb, now()
+      )
+    `);
+
+    const first = await record();
+    // Pi said nothing at all, so the image is the whole reply: without this entry the turn would
+    // settle `empty_response`.
+    expect(first[0]).toEqual({ recorded: 1, has_visible_output: true });
+
+    // A call that committed and lost its answer is repeated. It must change nothing.
+    const replay = await record();
+    expect(replay[0]).toEqual({ recorded: 1, has_visible_output: true });
+    const [rows] = await sql<Array<{ count: number }>>`
+      select count(*)::int as count from companion_message_attachments
+      where companion_id = ${fixture.companionId}::uuid and kind = 'pi_output'
+    `;
+    expect(rows?.count).toBe(1);
+    const entries = await sql<Array<{ event_id: string; ordinal: number; content: string }>>`
+      select event_id, ordinal, content from companion_transcript_entries
+      where companion_id = ${fixture.companionId}::uuid and role = 'assistant'
+    `;
+    expect(entries).toEqual([{
+      event_id: `v2:${fixture.attemptId}:outputs`,
+      ordinal: 1,
+      content: "",
+    }]);
+
+    // The reader's projection is what the browser parses, so the outputs entry has to carry its
+    // files as `pi_output` on an assistant entry, in dense order, with no storage key.
+    const thread = await asApi({
+      orgId: ids.orgA,
+      actorId: ids.ownerA,
+      action: (tx) => tx<Array<{ entries: Array<Record<string, unknown>> }>>`
+        select entries from public.companion_api_read_thread(
+          ${ids.orgA}::uuid, ${fixture.companionId}::uuid
+        )
+      `,
+    });
+    const outputsEntry = thread[0]!.entries
+      .find((entry) => entry.event_id === `v2:${fixture.attemptId}:outputs`)!;
+    expect(outputsEntry.role).toBe("assistant");
+    expect(outputsEntry.attachments).toEqual([expect.objectContaining({
+      kind: "pi_output",
+      content_type: "image/png",
+      filename: "plot.png",
+      position: 0,
+    })]);
+    expect(JSON.stringify(outputsEntry)).not.toContain("companion-attachments/");
+
+    // A takeover reads the harvest as already done and does not repeat it.
+    const terminal = await asRuntime((tx) => tx<Array<{ outputs_harvested: boolean }>>`
+      select outputs_harvested from public.companion_runtime_get_attempt_terminal_projection(
+        ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+        ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+        'attempt', ${claim.workId}::uuid
+      )
+    `);
+    expect(terminal[0]?.outputs_harvested).toBe(true);
+
+    // A succeeded turn proves Pi settled it; the harvest does not weaken that.
+    const settled = await asRuntime((tx) => tx<Array<{ settled: boolean }>>`
+      select public.companion_runtime_settle(
+        ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+        ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+        'attempt', ${claim.workId}::uuid, 'succeeded', null, null, null
+      ) as settled
+    `);
+    expect(settled[0]?.settled).toBe(true);
+    } finally {
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
+  it("refuses attempt outputs that are not bounded images", async () => {
+    const fixture = await createCompanion({ boxReady: true });
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    await asOwnerV2((tx) => tx`
+      update companion_turn_attempts
+      set checkpoint = 'agent_settled', event_cursor = 4
+      where id = ${fixture.attemptId}::uuid
+    `);
+    const claim = await claimWork();
+    try {
+    const valid = {
+      storage_key: `companion-attachments/${ids.orgA}/${fixture.companionId}/outputs/${fixture.attemptId}/0-${"d".repeat(64)}`,
+      content_type: "image/png",
+      byte_size: 512,
+      sha256: "d".repeat(64),
+      filename: "plot.png",
+      position: 0,
+    };
+    const record = (list: (typeof valid)[]) =>
+      asRuntime((tx) => tx`
+        select * from public.companion_runtime_record_attempt_outputs(
+          ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+          ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+          'attempt', ${claim.workId}::uuid, ${tx.json(list)}::jsonb, now()
+        )
+      `);
+
+    // A document, an oversized file, a bad digest, and a name that could traverse are all refused
+    // before anything is written.
+    await expect(record([{ ...valid, content_type: "application/pdf" }]))
+      .rejects.toMatchObject({ code: "22023" });
+    await expect(record([{ ...valid, byte_size: 20 * 1024 * 1024 }]))
+      .rejects.toMatchObject({ code: "22023" });
+    await expect(record([{ ...valid, sha256: "not-a-digest" }]))
+      .rejects.toMatchObject({ code: "22023" });
+    await expect(record([{ ...valid, filename: "../escape.png" }]))
+      .rejects.toMatchObject({ code: "22023" });
+    await expect(record(Array.from({ length: 11 }, (_unused, index) => ({ ...valid, position: index }))))
+      .rejects.toMatchObject({ code: "22023" });
+    } finally {
+      await removeCompanion(fixture.companionId);
     }
   });
 
@@ -1000,7 +1354,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         }>>`
           select * from public.companion_api_enqueue_turn(
             ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
-            'One durable message', 'web'
+            'One durable message', 'web', '[]'::jsonb
           )
         `,
       });
@@ -1385,7 +1739,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         }>>`
           select * from public.companion_api_enqueue_turn(
             ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
-            'Already warm, no wake needed', 'web'
+            'Already warm, no wake needed', 'web', '[]'::jsonb
           )
         `,
       });
@@ -1402,7 +1756,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         action: (tx: Tx) => tx<Array<{ turn: Record<string, unknown>; replayed: boolean }>>`
           select turn, replayed from public.companion_api_enqueue_turn(
             ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
-            'Already warm, no wake needed', 'web'
+            'Already warm, no wake needed', 'web', '[]'::jsonb
           )
         `,
       });
@@ -1480,7 +1834,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         }>>`
           select * from public.companion_api_enqueue_turn(
             ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
-            'Stale observation still needs a start', 'web'
+            'Stale observation still needs a start', 'web', '[]'::jsonb
           )
         `,
       });
@@ -1536,7 +1890,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         }>>`
           select turn, replayed from public.companion_api_enqueue_turn(
             ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
-            ${content}, ${surface}::companion_client_surface
+            ${content}, ${surface}::companion_client_surface, '[]'::jsonb
           )
         `,
       });
@@ -1594,7 +1948,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         action: (tx: Tx) => tx<Array<{ turn: Record<string, unknown> }>>`
           select turn from public.companion_api_enqueue_turn(
             ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
-            ${content}, 'web'
+            ${content}, 'web', '[]'::jsonb
           )
         `,
       });

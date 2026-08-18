@@ -12,6 +12,8 @@ export type IdempotentLifecycleCall =
   | "apply_runtime_settings"
   | "request_delete"
   | "poll_delete"
+  | "stage_attachments"
+  | "clear_outbox"
   | "ack_events";
 
 export type NonRetryableRuntimeCall = "create_box" | "prompt" | "decision";

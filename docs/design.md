@@ -93,6 +93,11 @@ Runtime state is explicit and durable:
   plus checkpoints. Multiple operations may wait; one may run per Companion.
 - `companion_runtime_leases` owns the claim token, attempt epoch, executor id, and expiry used to
   fence every checkpoint and settlement.
+- `companion_message_attachments` owns the files one transcript entry carries: `user_upload` for what
+  a member sent, `pi_output` for an image Pi handed back, plus the content-addressed storage key,
+  resolved content type, size, digest, sanitized filename, and position. Deleting a row journals its
+  storage key into the durable object-deletion outbox in the same transaction, so an object cannot
+  outlive the entry, the Companion, or the tenant.
 
 All rows are org-scoped and force-RLS-enabled. API, worker, and runtime use distinct
 `NOSUPERUSER NOBYPASSRLS NOINHERIT` roles. Runtime claims, renewals, checkpoints, and settlements use
@@ -219,7 +224,11 @@ The feature gate requires both `COMPANION_COMPANIONS_ENABLED=true` and the exist
 email-domain allowlist. Without both, routes and navigation are absent and runtime claims are off.
 
 `POST /v1/companions/:id/messages` persists message plus turn and returns `202` without Box contact.
-Thread reads add the active turn, queued count, and interruption state. Existing lifecycle paths
+It also accepts multipart: up to five files of at most 10 MB each are stored under their content
+address before the same transaction persists their rows, so an accepted turn always names files that
+already exist. `GET /v1/companions/:id/attachments/:attachmentId` serves those bytes, re-authorizing
+on every request and contacting only PostgreSQL and object storage. Thread reads add the active turn,
+queued count, interruption state, and each entry's attachment metadata — never a storage key or URL. Existing lifecycle paths
 persist operations and return `202`; decision answers are durable and runtime-delivered. New explicit
 actions are:
 
@@ -269,8 +278,10 @@ them.
 ## Explicit exclusions
 
 No generic Projects or skill runs, multi-Bot coordination, group Bot chat, handoffs, routines,
-schedules, proactive jobs, voice, thread attachments/artifacts, second harness, second Box provider,
-Box pool, generic provider marketplace, container catalog, deployment manager, or AI app builder.
+schedules, proactive jobs, voice, file library, file versioning, artifact surface outside a thread,
+second harness, second Box provider, Box pool, generic provider marketplace, container catalog,
+deployment manager, or AI app builder. Bounded chat files are in scope: uploads on a message and
+images Pi hands back from a turn.
 No SSE, Box-to-control-plane push agent, detached API executor, automatic Full Box recovery,
 automatic ambiguous-prompt replay, or global learned model-capability table.
 

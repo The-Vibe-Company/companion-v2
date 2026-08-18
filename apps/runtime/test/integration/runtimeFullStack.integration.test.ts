@@ -723,6 +723,10 @@ beforeAll(async () => {
     // 0094 verifies a grants nonce bound to this physical backend before destructive cutover.
     await applyRuntimeGrants(migrationSql);
     await replayMigrations(migrationSql, migrationNames.slice(cutoverIndex));
+    // The two-phase migration runner re-applies the grants hook after the post-cutover phase, and
+    // this suite must start the real Runtime process against the same ACLs: a post-cutover
+    // migration that DROP + CREATEs a function resets that function's grant.
+    await applyRuntimeGrants(migrationSql);
   } finally {
     await migrationSql.end({ timeout: 1 });
   }

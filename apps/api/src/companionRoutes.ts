@@ -1,7 +1,15 @@
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Context, Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
+import {
+  companionAttachmentKey,
+  deleteStorageObject,
+  getSkillArchive,
+  isStoragePreconditionFailure,
+  putSkillArchive,
+} from "@companion/storage";
 import {
   COMPANION_PLUGIN_OAUTH_SERVERS,
   CompanionNotFoundError,
@@ -41,6 +49,7 @@ import {
   enqueueCompanionTurnV2,
   getCompanionV2,
   listCompanionsV2,
+  readCompanionAttachmentV2,
   readCompanionThreadV2,
   retryCompanionTurnV2,
   setCompanionWorkspaceShareV2,
@@ -59,10 +68,18 @@ import {
   setDefaultCompanionProvider,
 } from "@companion/core";
 import {
+  COMPANION_ATTACHMENT_MAX_BYTES,
+  COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT,
+  type CompanionAttachmentUpload,
   type CompanionRuntimeSafeError,
   type CompanionThread,
   type CompanionTurn,
+  type SendCompanionMessageInput,
   createCompanionInputSchema,
+  declaredCompanionAttachmentContentType,
+  isCompanionAttachmentImage,
+  sanitizeCompanionAttachmentFilename,
+  sniffCompanionAttachmentMime,
   cancelCompanionTurnInputSchema,
   companionProviderIdSchema,
   companionProviderOAuthCompleteInputSchema,
@@ -96,6 +113,7 @@ import {
 import { mintCompanionDesktop, RuntimeDesktopClientError } from "./runtimeDesktopClient";
 
 const companionIdSchema = z.string().uuid();
+
 const COMPANION_PLUGIN_OAUTH_FLOW_PURPOSE = "companion-mcp-oauth-flow";
 const COMPANION_PLUGIN_OAUTH_TTL_MS = 10 * 60_000;
 const COMPANION_PROVIDER_OAUTH_FLOW_PURPOSE = "companion-provider-oauth-flow";
@@ -345,6 +363,27 @@ function routeError(c: Context, error: unknown): Response {
     }, errorStatus(error) as never);
   }
   return jsonError(c, error, errorStatus(error));
+}
+
+/**
+ * The largest multipart send body the API will read. It is the attachment budget plus room for the
+ * form's own framing, so a request that would only be refused later is refused before it is buffered.
+ */
+const COMPANION_MESSAGE_UPLOAD_LIMIT_BYTES = 64 * 1024 * 1024;
+
+/**
+ * True for a failure raised by the object-storage client rather than by this route's own validation.
+ * The AWS SDK stamps `$metadata` on every error it produces, which is what distinguishes it from a
+ * `ZodError`, a domain error, or a database error.
+ */
+function isStorageFailure(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "$metadata" in error;
+}
+
+/** One text field of a multipart send, or null when the part is absent or is a file. */
+function formField(form: FormData, name: string): string | undefined {
+  const value = form.get(name);
+  return typeof value === "string" ? value : undefined;
 }
 
 export function registerCompanionRoutes(
@@ -912,26 +951,200 @@ export function registerCompanionRoutes(
     }
   });
 
-  app.post("/v1/companions/:id/messages", async (c) => {
+  app.post(
+    "/v1/companions/:id/messages",
+    // Authenticate and, for a multipart send, authorize the Companion before the body-reading limit
+    // middleware runs. A chunked request carries no Content-Length, so that middleware buffers the
+    // entire body before it can measure it -- authorizing afterwards would let any authenticated
+    // caller cost this process 64 MB of heap per in-flight request against a Companion they cannot
+    // even see. A text-only send skips the extra read entirely.
+    async (c, next) => {
+      try {
+        actorFromContext(c);
+        if ((c.req.header("content-type") ?? "").includes("multipart/form-data")) {
+          const companionId = companionIdSchema.parse(c.req.param("id"));
+          const companion = await tenant(c, ({ actor, orgId, database }) =>
+            getCompanionV2({ actor, orgId, companionId, database }));
+          if (companion.access === "viewer") throw new CompanionRuntimeForbiddenError();
+        }
+      } catch (error) {
+        return routeError(c, error);
+      }
+      await next();
+    },
+    // Five files at ten megabytes each, plus multipart overhead. A text-only send is orders of
+    // magnitude under this and takes the JSON branch below.
+    bodyLimit({
+      maxSize: COMPANION_MESSAGE_UPLOAD_LIMIT_BYTES,
+      onError: (c) => jsonError(c, "message exceeds the 64 MB upload limit", 413),
+    }),
+    async (c) => {
+      const createdKeys: Array<{ key: string; etag?: string }> = [];
+      try {
+        const companionId = companionIdSchema.parse(c.req.param("id"));
+        const contentType = c.req.header("content-type") ?? "";
+        let attachments: CompanionAttachmentUpload[] = [];
+        let body: SendCompanionMessageInput;
+
+        if (contentType.includes("multipart/form-data")) {
+          // Access was already decided by the middleware above, before the body was read. Resolve
+          // the tenant again here for the key prefix; it is a cheap header/session read.
+          const authorized = { orgId: await orgIdFromContext(c) };
+
+          const form = await c.req.formData();
+          body = sendCompanionMessageInputSchema.parse({
+            content: formField(form, "content") ?? "",
+            client_message_id: formField(form, "client_message_id"),
+            ...(formField(form, "client_surface")
+              ? { client_surface: formField(form, "client_surface") }
+              : {}),
+          });
+          const files = form.getAll("file")
+            .filter((part): part is Exclude<typeof part, string> => typeof part !== "string");
+          if (files.length > COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT) {
+            throw new Error(
+              `a message carries at most ${COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT} attachments`,
+            );
+          }
+
+          // Object writes happen outside any database transaction: a slow upload must not hold a
+          // pooled connection open, and the enqueue below only persists metadata.
+          for (const [position, file] of files.entries()) {
+            if (file.size === 0) throw new Error("an attached file is empty");
+            if (file.size > COMPANION_ATTACHMENT_MAX_BYTES) {
+              throw new Error("each attachment must be 10 MB or smaller");
+            }
+            const bytes = Buffer.from(await file.arrayBuffer());
+            // The stored type comes from the bytes, never from the declared MIME or the extension,
+            // so a disguised file is refused before it is stored or staged for Pi to read.
+            const resolved = sniffCompanionAttachmentMime(
+              bytes,
+              declaredCompanionAttachmentContentType({ type: file.type, name: file.name }),
+            );
+            if (!resolved) {
+              throw new Error("attachments must be PNG, JPEG, WebP, GIF, PDF, CSV, text, Markdown, or JSON");
+            }
+            const sha256 = createHash("sha256").update(bytes).digest("hex");
+            const key = companionAttachmentKey({
+              kind: "message",
+              orgId: authorized.orgId,
+              companionId,
+              clientMessageId: body.client_message_id,
+              position,
+              sha256,
+            });
+            try {
+              const etag = await putSkillArchive({
+                key,
+                body: bytes,
+                contentType: resolved,
+                preventOverwrite: true,
+              });
+              // Remember the exact version this request wrote. If a concurrent request for the same
+              // client_message_id adopts this key and commits a row for it, the delete below no
+              // longer matches and is refused rather than stranding that row.
+              createdKeys.push({ key, ...(etag ? { etag } : {}) });
+            } catch (error) {
+              // The object already exists. Because the key is the digest of these exact bytes, it
+              // holds the same content -- almost always this request's own replay, whose turn is
+              // already accepted. Adopt it, and never schedule it for cleanup: deleting it would
+              // destroy the live bytes of an accepted message.
+              if (!isStoragePreconditionFailure(error)) throw error;
+            }
+            attachments.push({
+              storage_key: key,
+              content_type: resolved,
+              byte_size: bytes.length,
+              sha256,
+              filename: sanitizeCompanionAttachmentFilename({
+                filename: file.name,
+                position,
+                contentType: resolved,
+              }),
+              position,
+            });
+          }
+        } else {
+          body = sendCompanionMessageInputSchema.parse(await c.req.json());
+        }
+
+        const accepted = await tenant(c, async ({ actor, orgId, database }) => {
+          const { turn } = await enqueueCompanionTurnV2({
+            actor,
+            orgId,
+            companionId,
+            clientMessageId: body.client_message_id,
+            content: body.content,
+            clientSurface: body.client_surface,
+            attachments,
+            database,
+          });
+          return { turn };
+        });
+        c.header("Cache-Control", "private, no-store");
+        return c.json(accepted, 202);
+      } catch (error) {
+        // The turn did not persist, so objects this request created belong to nothing.
+        //
+        // Two independent rules keep this from destroying an accepted message's bytes, because the
+        // key is the digest of the content and is therefore identical to the key an accepted turn
+        // already owns. First, the PUT above is create-only, so a key that already existed is never
+        // in `createdKeys`. Second -- in case a self-hosted object store ignores the conditional
+        // header -- a replay conflict is never cleaned up at all: that error means a turn with this
+        // client_message_id is already accepted, and these are its files.
+        if (databaseErrorCode(error) !== "23505") {
+          await Promise.allSettled(createdKeys.map((created) => deleteStorageObject({
+            key: created.key,
+            ...(created.etag ? { ifMatch: created.etag } : {}),
+          })));
+        }
+        // An object-storage failure names the bucket, and a connection failure names the internal
+        // endpoint. Neither belongs in a reply to a member, so a storage fault answers with a fixed
+        // line while the underlying error stays in this process's logs.
+        if (isStorageFailure(error)) {
+          return c.json({ ok: false, error: "the attachments could not be stored" }, 502);
+        }
+        return routeError(c, error);
+      }
+    },
+  );
+
+  /**
+   * Serve one attachment to a reader who may read the thread. This is a PostgreSQL-plus-object-storage
+   * read: it never wakes, observes, or otherwise contacts the Box, so a Viewer opening a thread costs
+   * a sleeping Companion nothing.
+   */
+  app.get("/v1/companions/:id/attachments/:attachmentId", async (c) => {
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
-      const body = sendCompanionMessageInputSchema.parse(await c.req.json());
-      const accepted = await tenant(c, async ({ actor, orgId, database }) => {
-        const { turn } = await enqueueCompanionTurnV2({
-          actor,
-          orgId,
-          companionId,
-          clientMessageId: body.client_message_id,
-          content: body.content,
-          clientSurface: body.client_surface,
-          database,
-        });
-        return { turn };
+      const attachmentId = companionIdSchema.parse(c.req.param("attachmentId"));
+      const asset = await tenant(c, ({ actor, orgId, database }) =>
+        readCompanionAttachmentV2({ actor, orgId, companionId, attachmentId, database }));
+      const bytes = await getSkillArchive({ key: asset.storageKey });
+      return new Response(bytes, {
+        headers: {
+          "Content-Type": asset.contentType,
+          // Access is re-decided on every request, so a cached copy must not outlive the access that
+          // fetched it. An image still renders; it is simply revalidated.
+          "Cache-Control": "private, no-cache",
+          // User-uploaded and Pi-produced bytes alike: never let a browser sniff them into a type
+          // that could execute.
+          "X-Content-Type-Options": "nosniff",
+          // An image belongs inline in the thread; anything else is a file the reader asked for.
+          "Content-Disposition": isCompanionAttachmentImage(asset.contentType)
+            ? `inline; filename="${asset.filename}"`
+            : `attachment; filename="${asset.filename}"`,
+        },
       });
-      c.header("Cache-Control", "private, no-store");
-      return c.json(accepted, 202);
     } catch (error) {
-      return routeError(c, error);
+      // An unreadable thread, an unknown attachment, and a cross-tenant id are deliberately
+      // indistinguishable to the request that asked for the bytes. The message is fixed rather than
+      // the underlying one: object-storage errors name the storage key and the internal endpoint,
+      // neither of which a reader may learn.
+      return c.json(
+        { ok: false, error: "attachment not found" },
+        errorStatus(error) === 403 ? 403 : 404,
+      );
     }
   });
 

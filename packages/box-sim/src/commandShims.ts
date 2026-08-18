@@ -19,6 +19,11 @@ export type BoxSimCommandKind =
   | "daemon-diagnostics"
   | "remove-provider-files"
   | "stop-daemon"
+  | "prepare-attachments"
+  | "lock-attachments"
+  | "clear-outbox"
+  | "list-outbox"
+  | "read-outbox-chunk"
   | "unsupported";
 
 export interface BoxSimBrokerCounters {
@@ -69,6 +74,13 @@ export interface BoxSimCommandMachine {
   layoutInstalled: boolean;
   extensionDirectoryCreated: boolean;
   unknownCommandDigests: string[];
+  /**
+   * Truncate every outbox chunk to this many raw bytes before encoding it, simulating the command
+   * transport's demonstrated habit of mangling large bodies. Null leaves the transport honest.
+   */
+  mangleOutboxChunkBytes: number | null;
+  /** Directories whose write bit was cleared; their entries can no longer be unlinked. */
+  readOnlyDirectories: Set<string>;
   piController?: BoxSimPiController;
 }
 
@@ -96,6 +108,8 @@ export function createBoxSimCommandMachine(input: {
     layoutInstalled: false,
     extensionDirectoryCreated: false,
     unknownCommandDigests: [],
+    mangleOutboxChunkBytes: null,
+    readOnlyDirectories: new Set<string>(),
   };
 }
 
@@ -299,6 +313,15 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
   if (command.includes("state/skill-archives") && command.includes("companion-provider-auth-present")) {
     return "clear-skill-archives";
   }
+  if (command.includes("companion-outbox-manifest-begin")) return "list-outbox";
+  if (command.includes("companion-outbox-chunk-begin")) return "read-outbox-chunk";
+  if (command.includes('dir="$HOME/outbox"') && command.includes("find \"$dir\" -mindepth 1 -delete")) {
+    return "clear-outbox";
+  }
+  if (/rm -rf ['"]attachments/.test(command) && command.includes("mkdir -p")) {
+    return "prepare-attachments";
+  }
+  if (command.includes("chmod a-w") || command.includes("chmod -R a-w")) return "lock-attachments";
   if (command.trim() === 'mkdir -p "$HOME/.companion/bin"') return "mkdir-pi-bin";
   if (command.includes("ensure-pi-layout.sh") && /^\s*bash\s/.test(command)) return "install-layout";
   if (command.trim() === 'mkdir -p "$HOME/.companion/pi/extensions"') return "mkdir-extensions";
@@ -311,6 +334,35 @@ function ok(stdout = ""): BoxSimCommandResult {
 
 function failed(stderr: string, exitCode = 1, stdout = ""): BoxSimCommandResult {
   return { success: false, exitCode, stdout, stderr };
+}
+
+/** The staged attachment directory a prepare command names, relative to the Box home. */
+function attachmentDirectory(command: string): string | null {
+  const match = /rm -rf ('(?:[^']|'"'"')*')/.exec(command);
+  return match?.[1] ? decodeShellQuoted(match[1]) : null;
+}
+
+/** The directory a lock command applies `chmod a-w` to. */
+function lockedAttachmentDirectory(command: string): string | null {
+  const match = /chmod (?:-R )?a-w ('(?:[^']|'"'"')*')|find ('(?:[^']|'"'"')*') -type f/.exec(command);
+  const quoted = match?.[1] ?? match?.[2];
+  return quoted ? decodeShellQuoted(quoted) : null;
+}
+
+/** The file, chunk index, and chunk size one outbox read command asks for. */
+function outboxChunkRequest(
+  command: string,
+): { name: string; index: number; chunkBytes: number } | null {
+  const encoded = /base64 -d\b[\s\S]*?'([A-Za-z0-9+/]+={0,2})'/.exec(command)
+    ?? /'([A-Za-z0-9+/]+={0,2})' \| base64 -d/.exec(command);
+  const chunk = /bs=(\d+)/.exec(command);
+  const skip = /skip=(\d+)/.exec(command);
+  if (!encoded?.[1] || !chunk?.[1] || !skip?.[1]) return null;
+  return {
+    name: Buffer.from(encoded[1], "base64").toString("utf8"),
+    index: Number(skip[1]),
+    chunkBytes: Number(chunk[1]),
+  };
 }
 
 /** Decode the exact POSIX single-quote form emitted by boxCompanionRuntime's shellQuote helper. */
@@ -788,6 +840,72 @@ export async function executeBoxCommand(
       machine.daemon.activeAttemptId = null;
       machine.volatileFiles.clear();
       return ok();
+    case "prepare-attachments": {
+      // The staging root is replaced, not added to, so a retried attempt stages exactly what it was
+      // given. A directory whose write bit was cleared cannot have its entries unlinked, which is
+      // what makes a re-stage fail on a real Box -- model that rather than deleting unconditionally.
+      const directory = attachmentDirectory(command);
+      if (!directory) return failed("simulated attachment directory is unreadable");
+      for (const locked of machine.readOnlyDirectories) {
+        if (locked === directory || locked.startsWith(`${directory}/`)) {
+          return failed(`rm: cannot remove '${locked}': Permission denied`);
+        }
+      }
+      for (const path of [...machine.persistentFiles.keys()]) {
+        if (path.startsWith(`${directory}/`)) machine.persistentFiles.delete(path);
+      }
+      return ok();
+    }
+    case "lock-attachments": {
+      // `chmod a-w` over files only leaves the directory writable; a recursive chmod would also
+      // clear the directory's own write bit, which is the case this models.
+      const directory = lockedAttachmentDirectory(command);
+      if (directory && !command.includes("-type f")) machine.readOnlyDirectories.add(directory);
+      return ok();
+    }
+    case "clear-outbox":
+      for (const path of [...machine.persistentFiles.keys()]) {
+        if (path.startsWith("outbox/")) machine.persistentFiles.delete(path);
+      }
+      return ok();
+    case "list-outbox": {
+      const lines = [...machine.persistentFiles.entries()]
+        .filter(([path]) => path.startsWith("outbox/") && !path.slice(7).includes("/"))
+        .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+        .map(([path, bytes]) => [
+          sha256(bytes),
+          String(bytes.byteLength),
+          Buffer.from(path.slice("outbox/".length), "utf8").toString("base64"),
+        ].join(" "));
+      return ok([
+        "companion-outbox-manifest-begin",
+        ...lines,
+        "companion-outbox-manifest-end",
+        "",
+      ].join("\n"));
+    }
+    case "read-outbox-chunk": {
+      const request = outboxChunkRequest(command);
+      if (!request) return failed("simulated outbox chunk request is unreadable");
+      const bytes = machine.persistentFiles.get(`outbox/${request.name}`);
+      // `dd` on a missing file writes nothing and this shim answers the same way, so the caller's
+      // whole-file digest check is what reports the loss.
+      const slice = bytes
+        ? bytes.subarray(
+            request.index * request.chunkBytes,
+            (request.index + 1) * request.chunkBytes,
+          )
+        : Buffer.alloc(0);
+      const encoded = machine.mangleOutboxChunkBytes === null
+        ? slice.toString("base64")
+        : slice.subarray(0, machine.mangleOutboxChunkBytes).toString("base64");
+      return ok([
+        "companion-outbox-chunk-begin",
+        encoded,
+        "companion-outbox-chunk-end",
+        "",
+      ].join("\n"));
+    }
     case "unsupported": {
       const digest = sha256(command);
       machine.unknownCommandDigests.push(digest);

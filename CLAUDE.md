@@ -23,10 +23,12 @@ one persistent box.ascii.dev Box, one Pi daemon, and one durable chat thread. Re
   settings apply, or delete.
 
 Do not introduce generic Projects or skill runs, multi-Bot orchestration, agent-to-agent handoffs,
-routines, schedules, voice, thread attachments/artifacts, another agent harness, another Box
-provider, or a deployment platform. Pi remains the only harness and box.ascii.dev the only runtime
-provider. Keep the existing Companions feature flag and email-domain allowlist; do not add flags
-that can enable an excluded product surface.
+routines, schedules, voice, another agent harness, another Box provider, or a deployment platform.
+Chat files are in scope and bounded: a member may attach images and documents to a message, and Pi
+may hand back images it leaves in its outbox. Nothing else is an artifact — there is no file
+library, no versioning, and no artifact surface outside the thread the file was sent in. Pi remains
+the only harness and box.ascii.dev the only runtime provider. Keep the existing Companions feature
+flag and email-domain allowlist; do not add flags that can enable an excluded product surface.
 
 ## Architecture anchors
 
@@ -86,9 +88,10 @@ and runtime database URL only to `apps/runtime` without changing the published w
 
 ## Companions Runtime v2 contract
 
-- An Owner/Editor send persists the message and turn atomically and returns `202` in under one
-  second outside load. Sending is the only normal wake action; there is no Wake button and no
-  first-keystroke prewarm.
+- An Owner/Editor send persists the message, its attachments, and the turn atomically and returns
+  `202` in under one second outside load; a send carrying files is bounded by the upload it performs
+  first. Sending is the only normal wake action; there is no Wake button and no first-keystroke
+  prewarm.
 - Turn states are
   `queued → starting → dispatching → running ↔ needs_input → succeeded|failed|interrupted|cancelled`.
   “Companion is replying…” is true only after Pi acknowledges the current attempt and before its

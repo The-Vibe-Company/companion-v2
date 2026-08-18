@@ -552,6 +552,39 @@ export class BoxSimulator {
     record.box.updatedTick = this.#nextTick();
   }
 
+  /**
+   * Put files in Pi's outbox, as if Pi had produced them during a turn. This is the deterministic
+   * stand-in for an agent deciding to show the user an image, so a harvest can be driven exactly.
+   */
+  seedOutbox(boxId: string, files: { name: string; base64: string }[]): number {
+    const machine = this.#record(boxId).machine;
+    for (const file of files) {
+      if (typeof file?.name !== "string" || !file.name || file.name.includes("/")) {
+        throw new BoxSimHttpError(400, "invalid_outbox_file", "outbox file name is invalid");
+      }
+      if (typeof file.base64 !== "string") {
+        throw new BoxSimHttpError(400, "invalid_outbox_file", "outbox file bytes are invalid");
+      }
+      putBoxFile(machine, `outbox/${file.name}`, Buffer.from(file.base64, "base64"));
+    }
+    this.#record(boxId).box.updatedTick = this.#nextTick();
+    return files.length;
+  }
+
+  /**
+   * Truncate every outbox chunk the Box returns, reproducing the command transport's habit of
+   * mangling large bodies. Null restores an honest transport.
+   */
+  setOutboxTransportMangling(boxId: string, mangleChunkBytes: number | null): void {
+    if (
+      mangleChunkBytes !== null
+      && (!Number.isSafeInteger(mangleChunkBytes) || mangleChunkBytes < 0)
+    ) {
+      throw new BoxSimHttpError(400, "invalid_mangling", "mangleChunkBytes must be null or >= 0");
+    }
+    this.#record(boxId).machine.mangleOutboxChunkBytes = mangleChunkBytes;
+  }
+
   /** Local test hook. Unlike the control snapshot, this may expose virtual file contents. */
   commandMachine(boxId: string): BoxSimCommandMachine {
     return this.#record(boxId).machine;

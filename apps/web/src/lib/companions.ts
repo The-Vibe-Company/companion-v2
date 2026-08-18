@@ -314,15 +314,36 @@ export async function sendCompanionMessage(
   companionId: string,
   content: string,
   clientMessageId: string,
+  files: readonly File[] = [],
 ): Promise<SendCompanionMessageAcceptedResponse> {
-  return apiFetch<SendCompanionMessageAcceptedResponse>(
-    `/v1/companions/${encodeURIComponent(companionId)}/messages`,
-    {
+  const path = `/v1/companions/${encodeURIComponent(companionId)}/messages`;
+  if (files.length === 0) {
+    return apiFetch<SendCompanionMessageAcceptedResponse>(path, {
       method: "POST",
       headers: orgHeaders(orgId),
       body: JSON.stringify({ content, client_message_id: clientMessageId }),
-    },
+    });
+  }
+  // A send carrying files uploads them inside this request, so the accepted turn and the files it
+  // names are durable together. That trades the sub-second text ACK for however long the upload
+  // takes, which is why the deadline below is the upload's rather than the ordinary one.
+  const form = new FormData();
+  form.set("content", content);
+  form.set("client_message_id", clientMessageId);
+  for (const file of files) form.append("file", file, file.name);
+  return apiFetch<SendCompanionMessageAcceptedResponse>(
+    path,
+    { method: "POST", headers: orgHeaders(orgId), body: form },
+    { timeoutMs: COMPANION_ATTACHMENT_UPLOAD_TIMEOUT_MS },
   );
+}
+
+/** How long a send may spend uploading before the composer gives the draft back. */
+const COMPANION_ATTACHMENT_UPLOAD_TIMEOUT_MS = 120_000;
+
+/** Where one stored attachment's bytes are read from. Re-authorized on every single request. */
+export function companionAttachmentUrl(companionId: string, attachmentId: string): string {
+  return `/v1/companions/${encodeURIComponent(companionId)}/attachments/${encodeURIComponent(attachmentId)}`;
 }
 
 /**

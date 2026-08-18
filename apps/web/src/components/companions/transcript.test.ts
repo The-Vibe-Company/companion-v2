@@ -24,6 +24,7 @@ function entry(overrides: Partial<CompanionTranscriptEntry> = {}): CompanionTran
     author_name: "Ada",
     tool: null,
     decision: null,
+    attachments: [],
     reasoning: null,
     created_at: now,
     ...overrides,

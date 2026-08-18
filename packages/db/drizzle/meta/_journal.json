@@ -687,6 +687,20 @@
       "when": 1788455200000,
       "tag": "0097_companion_runtime_warm_send_dispatch",
       "breakpoints": true
+    },
+    {
+      "idx": 98,
+      "version": "7",
+      "when": 1788541600000,
+      "tag": "0098_companion_message_attachments",
+      "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1788628000000,
+      "tag": "0099_companion_attempt_outputs",
+      "breakpoints": true
     }
   ]
 }

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { COMPANION_SKILL_KEY, companionSkillDir } from "@companion/companion-skill";
 import { getCompanionSkillPackage } from "@companion/companion-skill/package";
 import {
@@ -15,13 +15,25 @@ import {
   RUNTIME_LEASE_SECONDS,
   RuntimeStoreSerializationError,
   createRuntimeVisibleTextRedactor,
+  type RuntimeAttachmentStager,
   type RuntimeMaterialProvider,
+  type RuntimeOutboxHarvester,
+  type RuntimeOutputAttachment,
   type RuntimeProjectionRedactorFactory,
   type RuntimeResourceStager,
   type RuntimeStore,
   type RuntimeWorkMaterial,
 } from "@companion/companion-runtime";
+import {
+  COMPANION_ATTACHMENT_MAX_BYTES,
+  COMPANION_OUTPUT_ATTACHMENT_MAX_COUNT,
+  COMPANION_OUTPUT_ATTACHMENT_TOTAL_MAX_BYTES,
+  isCompanionAttachmentImage,
+  sanitizeCompanionAttachmentFilename,
+  sniffCompanionAttachmentMime,
+} from "@companion/contracts";
 import { packDir } from "@companion/skills";
+import { companionAttachmentKey } from "@companion/storage";
 
 import {
   assertRuntimeMaterialSnapshot,
@@ -35,6 +47,8 @@ export interface RuntimeMaterialPipeline {
   materialProvider: RuntimeMaterialProvider;
   projectionRedactorFactory: RuntimeProjectionRedactorFactory;
   resourceStager: RuntimeResourceStager;
+  attachmentStager: RuntimeAttachmentStager;
+  outboxHarvester: RuntimeOutboxHarvester;
 }
 
 export function createRuntimeMaterialPipeline(input: {
@@ -43,6 +57,15 @@ export function createRuntimeMaterialPipeline(input: {
   bundledSkill: CompanionRuntimeSkill;
   runtime(): CompanionBoxRuntimeV2;
   loadSkillArchive(storagePath: string, signal: AbortSignal): Promise<Buffer>;
+  /** Object-storage read for one chat attachment. Same bucket, deliberately a separate seam. */
+  loadAttachment(storageKey: string, signal: AbortSignal): Promise<Buffer>;
+  /** Store one harvested image under its content address and answer with the key it landed on. */
+  storeAttachment(input: {
+    key: string;
+    bytes: Buffer;
+    contentType: string;
+    signal: AbortSignal;
+  }): Promise<void>;
   refreshOauth?(
     credential: CompanionPluginStoredOAuthCredential,
     signal?: AbortSignal,
@@ -205,7 +228,142 @@ export function createRuntimeMaterialPipeline(input: {
       };
     },
   };
-  return { materialProvider, projectionRedactorFactory, resourceStager };
+  const attachmentStager: RuntimeAttachmentStager = {
+    async stageAttachments(stage) {
+      const files = [];
+      for (const attachment of stage.material.attachments) {
+        const bytes = await input.loadAttachment(attachment.storageKey, stage.signal);
+        // The digest is checked against what the control plane accepted, not against what object
+        // storage happened to return. A truncated read, a rewritten object, or the wrong key all
+        // fail here rather than being staged and described to Pi as the member's file.
+        const digest = createHash("sha256").update(bytes).digest("hex");
+        if (bytes.byteLength !== attachment.byteSize || digest !== attachment.sha256) {
+          throw new RuntimeMaterialError("runtime_material_invalid");
+        }
+        files.push({
+          position: attachment.position,
+          filename: attachment.filename,
+          contentType: attachment.contentType,
+          bytes,
+        });
+      }
+      // Object-storage reads above are asynchronous. Recheck the immutable ref tuples at the final
+      // point before Box contact, exactly as resource staging does, so no local mutation crosses
+      // into the Box unnoticed.
+      assertRuntimeMaterialSnapshot({
+        material: stage.material,
+        authorization: stage.authorization,
+      });
+      return await input.runtime().stageAttachments({
+        boxId: stage.boxId,
+        messageId: messageIdFromEventId(stage.messageEventId),
+        files,
+        signal: stage.signal,
+      });
+    },
+  };
+  const outboxHarvester: RuntimeOutboxHarvester = {
+    async clearOutbox({ boxId, signal }) {
+      await input.runtime().clearOutbox({ boxId, signal });
+    },
+    async harvestOutbox(harvest) {
+      const listed = await input.runtime().listOutbox({
+        boxId: harvest.boxId,
+        deadlineAt: harvest.deadlineAt,
+        signal: harvest.signal,
+      });
+      // Bound before anything is transferred: a Box that filled its outbox must not be able to turn
+      // one reply into an unbounded read. What is dropped here is reported as incomplete rather than
+      // silently forgotten.
+      const eligible = listed.filter((entry) =>
+        entry.byteSize > 0 && entry.byteSize <= COMPANION_ATTACHMENT_MAX_BYTES);
+      const selected = eligible.slice(0, COMPANION_OUTPUT_ATTACHMENT_MAX_COUNT);
+      let incomplete = selected.length < listed.length;
+
+      const attachments: RuntimeOutputAttachment[] = [];
+      let total = 0;
+      for (const entry of selected) {
+        if (now() >= harvest.deadlineAt.getTime()) {
+          incomplete = true;
+          break;
+        }
+        if (total + entry.byteSize > COMPANION_OUTPUT_ATTACHMENT_TOTAL_MAX_BYTES) {
+          incomplete = true;
+          continue;
+        }
+        // Reading one file off the Box and storing it are one unit of work, and both are external.
+        // By this point Pi has settled and any reply it produced is already durable, so a failure
+        // in either costs exactly one image: the harvest keeps whatever it has already stored and
+        // reports the shortfall, rather than discarding a partial set and orphaning its objects.
+        try {
+          const file = await input.runtime().readOutboxFile({
+            boxId: harvest.boxId,
+            entry,
+            deadlineAt: harvest.deadlineAt,
+            signal: harvest.signal,
+          });
+          // Pi hands back images and nothing else, and the type comes from the bytes rather than
+          // from whatever extension Pi happened to choose.
+          const contentType = sniffCompanionAttachmentMime(file.bytes, null);
+          if (!contentType || !isCompanionAttachmentImage(contentType)) {
+            incomplete = true;
+            continue;
+          }
+          const sha256 = createHash("sha256").update(file.bytes).digest("hex");
+          const key = companionAttachmentKey({
+            kind: "output",
+            orgId: harvest.orgId,
+            companionId: harvest.companionId,
+            attemptId: harvest.attemptId,
+            position: attachments.length,
+            sha256,
+          });
+          await input.storeAttachment({
+            key,
+            bytes: file.bytes,
+            contentType,
+            signal: harvest.signal,
+          });
+          total += file.bytes.byteLength;
+          attachments.push({
+            storageKey: key,
+            contentType,
+            byteSize: file.bytes.byteLength,
+            sha256,
+            filename: sanitizeCompanionAttachmentFilename({
+              filename: entry.name,
+              position: attachments.length,
+              contentType,
+            }),
+          });
+        } catch {
+          incomplete = true;
+          continue;
+        }
+      }
+      return { attachments, incomplete };
+    },
+  };
+  return {
+    materialProvider,
+    projectionRedactorFactory,
+    resourceStager,
+    attachmentStager,
+    outboxHarvester,
+  };
+}
+
+const MESSAGE_EVENT_ID_PATTERN
+  = /^msg:([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/;
+
+/**
+ * The staging directory is named after the client message id the turn owns, so a retry rewrites the
+ * same paths and two turns never share a directory. The event id is the durable spelling of that id.
+ */
+function messageIdFromEventId(messageEventId: string): string {
+  const messageId = MESSAGE_EVENT_ID_PATTERN.exec(messageEventId)?.[1];
+  if (!messageId) throw new RuntimeMaterialError("runtime_material_invalid");
+  return messageId;
 }
 
 let bundledSkillPromise: Promise<CompanionRuntimeSkill> | null = null;

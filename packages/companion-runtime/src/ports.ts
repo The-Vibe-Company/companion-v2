@@ -10,6 +10,7 @@ import type {
   ModelInputCapability,
   PiObservedState,
   RuntimeAuthorization,
+  RuntimeOutputAttachment,
   RuntimeWorkMaterial,
 } from "./types";
 
@@ -164,6 +165,57 @@ export interface RuntimeResourceStager {
   }>;
 }
 
+/** Where one attachment landed on the Box, as the prompt suffix will name it to Pi. */
+export interface StagedRuntimeAttachment {
+  position: number;
+  filename: string;
+  contentType: string;
+  byteSize: number;
+  path: string;
+}
+
+/**
+ * Fetch a turn's uploaded files and land them read-only on the Box.
+ *
+ * This runs before the dispatch write intent is checkpointed, so a failure here is a proven
+ * negative: no prompt was written, the turn fails with a retryable code, and a retry re-stages the
+ * same paths idempotently.
+ */
+export interface RuntimeAttachmentStager {
+  stageAttachments(input: {
+    orgId: string;
+    companionId: string;
+    boxId: string;
+    messageEventId: string;
+    /** The files to stage live on the material; passing them twice would let the two disagree. */
+    material: RuntimeWorkMaterial;
+    authorization: RuntimeAuthorization;
+    signal: AbortSignal;
+  }): Promise<StagedRuntimeAttachment[]>;
+}
+
+/**
+ * Pi's outbox: the one place on the Box where an image it produced becomes something the thread can
+ * show.
+ *
+ * Both halves are bounded and neither may fail a turn. Clearing runs before dispatch so one attempt's
+ * leftovers are never attributed to the next turn. Harvesting runs after Pi settles and before the
+ * turn does; `incomplete` says some file could not be read whole, which is a degradation to log, not
+ * a reply to retract.
+ */
+export interface RuntimeOutboxHarvester {
+  clearOutbox(input: { boxId: string; signal: AbortSignal }): Promise<void>;
+  harvestOutbox(input: {
+    orgId: string;
+    companionId: string;
+    boxId: string;
+    attemptId: string;
+    /** Wall-clock bound for the whole harvest; whatever is complete by then is what gets recorded. */
+    deadlineAt: Date;
+    signal: AbortSignal;
+  }): Promise<{ attachments: RuntimeOutputAttachment[]; incomplete: boolean }>;
+}
+
 export interface RuntimeEventProjector {
   projectEventBatch(input: {
     store: RuntimeStore;
@@ -194,6 +246,8 @@ export interface RuntimeEngineDependencies {
   materialProvider: RuntimeMaterialProvider;
   projectionRedactorFactory: RuntimeProjectionRedactorFactory;
   resourceStager: RuntimeResourceStager;
+  attachmentStager: RuntimeAttachmentStager;
+  outboxHarvester: RuntimeOutboxHarvester;
   eventProjector: RuntimeEventProjector;
   idFactory: RuntimeIdFactory;
   clock: RuntimeClock;

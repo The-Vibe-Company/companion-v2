@@ -64,7 +64,8 @@ DECLARE
     'companion_runtime_event_projections',
     'companion_runtime_desktop_requests',
     'companion_legacy_purge_runs',
-    'companion_legacy_purge_targets'
+    'companion_legacy_purge_targets',
+    'companion_message_attachments'
   ];
   api_capability_managed_tables regclass[] := ARRAY[
     'public.companions'::regclass,
@@ -421,7 +422,6 @@ BEGIN
         'public.companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)'::regprocedure,
         'public.companion_api_update_member_state(uuid,uuid,boolean,boolean,boolean)'::regprocedure,
         'public.companion_api_mark_thread_read(uuid,uuid)'::regprocedure,
-        'public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface)'::regprocedure,
         'public.companion_api_read_runtime(uuid,uuid)'::regprocedure,
         'public.companion_api_list_runtime(uuid)'::regprocedure,
         'public.companion_api_read_thread(uuid,uuid)'::regprocedure,
@@ -440,6 +440,40 @@ BEGIN
         'public.companion_api_validate_resource_selection(uuid,jsonb,jsonb,jsonb,jsonb)'::regprocedure,
         'public.companion_api_retry_operation_handoff()'::regprocedure,
         'public.companion_api_assign_attempt_retry_id()'::regprocedure
+      ];
+
+      -- 0098 changed companion_api_enqueue_turn's parameter list and added the attachment surface.
+      -- Name whichever signature this database actually has: historical-migration replays and a
+      -- migration-first deploy must both stay fail-closed rather than error on a cast to a function
+      -- that does not exist yet. companion_runtime_get_material keeps its argument list, so its
+      -- existing cast above still resolves after the return type changed.
+      IF pg_catalog.to_regprocedure(
+        'public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface,jsonb)'
+      ) IS NOT NULL THEN
+        companion_api_functions := companion_api_functions || ARRAY[
+          'public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface,jsonb)'::regprocedure,
+          'public.companion_api_read_attachment(uuid,uuid,uuid)'::regprocedure
+        ];
+        internal_runtime_functions := internal_runtime_functions || ARRAY[
+          'public.companion_api_assert_message_attachments(uuid,uuid,jsonb)'::regprocedure,
+          'public.companion_api_message_attachment_intent(jsonb)'::regprocedure,
+          'public.companion_api_stored_attachment_intent(uuid,uuid,text)'::regprocedure,
+          'public.companion_enqueue_attachment_object_deletion()'::regprocedure
+        ];
+      ELSE
+        companion_api_functions := companion_api_functions || ARRAY[
+          'public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface)'::regprocedure
+        ];
+      END IF;
+    END IF;
+
+    -- 0099 adds the executor's harvest recorder. It is resolved on its own sentinel so a database
+    -- stopped at 0098 still grants a complete, self-consistent surface.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_runtime_record_attempt_outputs(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,jsonb,timestamp with time zone)'
+    ) IS NOT NULL THEN
+      companion_runtime_functions := companion_runtime_functions || ARRAY[
+        'public.companion_runtime_record_attempt_outputs(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,jsonb,timestamp with time zone)'::regprocedure
       ];
     END IF;
 

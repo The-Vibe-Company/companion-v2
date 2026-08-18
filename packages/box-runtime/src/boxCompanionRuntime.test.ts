@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { COMPANION_RUNTIME_ERROR_MAX_LENGTH } from "@companion/core";
 
@@ -6,9 +7,12 @@ import {
   BOX_PROVIDER_STATES,
   BoxRuntimeConfigurationError,
   BoxRuntimeProviderError,
+  COMPANION_OUTBOX_INSTRUCTIONS,
   composeDaemonFailureDetail,
+  composedInstructions,
   mintBoxDesktopUrl,
   observedBoxStateFromProvider,
+  parseOutboxManifest,
 } from "./boxCompanionRuntime";
 
 afterEach(() => {
@@ -387,6 +391,394 @@ function runtimeClient(): AsciiBoxCompanionRuntime {
     COMPANION_BOX_DESKTOP_MINT_BUDGET_MS: "10",
   });
 }
+
+describe("staged Companion instructions", () => {
+  it("always tells Pi how to show an image, with or without a persona", () => {
+    expect(composedInstructions("Answer briefly.")).toBe(
+      `Answer briefly.\n\n${COMPANION_OUTBOX_INSTRUCTIONS}\n`,
+    );
+    expect(composedInstructions(null)).toBe(`${COMPANION_OUTBOX_INSTRUCTIONS}\n`);
+    expect(composedInstructions("   ")).toBe(`${COMPANION_OUTBOX_INSTRUCTIONS}\n`);
+  });
+});
+
+describe("Pi outbox manifest", () => {
+  const digest = "a".repeat(64);
+
+  function manifest(...lines: string[]): string {
+    return [
+      "companion-outbox-manifest-begin",
+      ...lines,
+      "companion-outbox-manifest-end",
+      "",
+    ].join("\n");
+  }
+
+  it("reads one entry per file and decodes its name", () => {
+    const encoded = Buffer.from("plot 1.png", "utf8").toString("base64");
+    expect(parseOutboxManifest(manifest(`${digest} 2048 ${encoded}`))).toEqual([{
+      name: "plot 1.png",
+      encodedName: encoded,
+      byteSize: 2048,
+      sha256: digest,
+    }]);
+  });
+
+  it("ignores a shell banner outside the sentinels rather than reading it as content", () => {
+    const encoded = Buffer.from("ok.png", "utf8").toString("base64");
+    const stdout = ["motd: welcome", manifest(`${digest} 10 ${encoded}`), "bye"].join("\n");
+    expect(parseOutboxManifest(stdout)).toHaveLength(1);
+  });
+
+  it("drops a line it cannot parse and a name that could escape the outbox", () => {
+    expect(parseOutboxManifest(manifest(
+      "not a manifest line",
+      `${digest} 10 ${Buffer.from("../escape.png", "utf8").toString("base64")}`,
+      `${digest} 10 ${Buffer.from("nested/deep.png", "utf8").toString("base64")}`,
+    ))).toEqual([]);
+  });
+
+  it("reports a zero-byte file rather than hiding it", () => {
+    // Dropping it here would make a failed or truncated Pi write invisible to everyone. The
+    // harvester filters it and counts it as a shortfall instead.
+    expect(parseOutboxManifest(manifest(
+      `${digest} 0 ${Buffer.from("empty.png", "utf8").toString("base64")}`,
+    ))).toEqual([expect.objectContaining({ name: "empty.png", byteSize: 0 })]);
+  });
+
+  it("refuses a response whose sentinels are missing", () => {
+    expect(() => parseOutboxManifest("companion-outbox-manifest-begin\n")).toThrow(
+      BoxRuntimeProviderError,
+    );
+  });
+});
+
+describe("Pi outbox transfer", () => {
+  const bytes = Buffer.from("a PNG that spans more than one chunk".repeat(40), "utf8");
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  const encodedName = Buffer.from("plot.png", "utf8").toString("base64");
+
+  function stubOutboxTransport(
+    options: { truncateChunkTo?: number; timeouts?: number[] } = {},
+  ) {
+    const commands: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (!url.endsWith("/commands")) throw new Error(`unexpected Box request: ${url}`);
+      const sent = JSON.parse(String(init?.body)) as { command: string; timeoutSeconds: number };
+      const command = sent.command;
+      commands.push(command);
+      options.timeouts?.push(sent.timeoutSeconds);
+      const chunk = /bs=(\d+)/.exec(command);
+      const skip = /skip=(\d+)/.exec(command);
+      if (!chunk?.[1] || !skip?.[1]) throw new Error("not a chunk read");
+      const size = Number(chunk[1]);
+      const slice = bytes.subarray(Number(skip[1]) * size, (Number(skip[1]) + 1) * size);
+      const body = options.truncateChunkTo === undefined
+        ? slice
+        : slice.subarray(0, options.truncateChunkTo);
+      return response(commandResult([
+        "companion-outbox-chunk-begin",
+        body.toString("base64"),
+        "companion-outbox-chunk-end",
+        "",
+      ].join("\n")));
+    }));
+    return commands;
+  }
+
+  it("reassembles a file from its chunks and proves it against the manifest digest", async () => {
+    stubOutboxTransport();
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    const file = await runtime.readOutboxFile({
+      boxId: "bx_23456789",
+      entry: { name: "plot.png", encodedName, byteSize: bytes.byteLength, sha256: digest },
+    });
+
+    expect(file.bytes.equals(bytes)).toBe(true);
+  });
+
+  it("gives up on a file whose chunks keep arriving truncated instead of storing them", async () => {
+    // The command transport has a demonstrated habit of mangling large bodies. A short chunk still
+    // decodes as valid base64, so only the whole-file digest catches it.
+    const commands = stubOutboxTransport({ truncateChunkTo: 16 });
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.readOutboxFile({
+      boxId: "bx_23456789",
+      entry: { name: "plot.png", encodedName, byteSize: bytes.byteLength, sha256: digest },
+    })).rejects.toThrow(BoxRuntimeProviderError);
+    expect(commands.length).toBeGreaterThan(0);
+  });
+
+  it("never lets a Pi-chosen filename reach a shell", async () => {
+    const commands = stubOutboxTransport();
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+    const hostile = Buffer.from("a\"; rm -rf ~; echo \".png", "utf8").toString("base64");
+
+    await runtime.readOutboxFile({
+      boxId: "bx_23456789",
+      entry: { name: "ignored", encodedName: hostile, byteSize: bytes.byteLength, sha256: digest },
+    }).catch(() => undefined);
+
+    // The command carries the name as base64 and decodes it on the Box, so nothing quotable travels.
+    expect(commands[0]).toContain(hostile);
+    expect(commands[0]).not.toContain("rm -rf ~");
+  });
+
+  it("recovers a chunk that arrives mangled once, without abandoning the file", async () => {
+    // Truncation is the transport's known failure mode, and a short chunk still decodes as valid
+    // base64 -- so the retry has to be driven by the whole-file digest, and it has to actually retry.
+    let firstChunkReads = 0;
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const command = (JSON.parse(String(init?.body)) as { command: string }).command;
+      const size = Number(/bs=(\d+)/.exec(command)![1]);
+      const skip = Number(/skip=(\d+)/.exec(command)![1]);
+      const slice = bytes.subarray(skip * size, (skip + 1) * size);
+      const mangled = skip === 0 && ++firstChunkReads === 1;
+      return response(commandResult([
+        "companion-outbox-chunk-begin",
+        (mangled ? slice.subarray(0, 8) : slice).toString("base64"),
+        "companion-outbox-chunk-end",
+        "",
+      ].join("\n")));
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    const file = await runtime.readOutboxFile({
+      boxId: "bx_23456789",
+      entry: { name: "plot.png", encodedName, byteSize: bytes.byteLength, sha256: digest },
+    });
+
+    expect(file.bytes.equals(bytes)).toBe(true);
+    expect(firstChunkReads).toBe(2);
+  });
+
+  it("stops reading once the harvest budget is spent", async () => {
+    // The budget has to bound the retries, not just the gaps between chunks: three 120s command
+    // attempts on one hung chunk would otherwise hold a settled turn far past it.
+    const commands = stubOutboxTransport();
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.readOutboxFile({
+      boxId: "bx_23456789",
+      entry: { name: "plot.png", encodedName, byteSize: bytes.byteLength, sha256: digest },
+      deadlineAt: new Date(Date.now() - 1),
+    })).rejects.toThrow(BoxRuntimeProviderError);
+    expect(commands).toHaveLength(0);
+  });
+
+  it("shrinks a read's own timeout to what is left of the budget", async () => {
+    // Checking the deadline between attempts is not enough: an attempt that starts one second inside
+    // it would still run a 120s command, so a hung read holds the settled turn -- and its
+    // "replying..." state -- two minutes past the bound the caller derived from its lease authority.
+    const timeouts: number[] = [];
+    stubOutboxTransport({ timeouts });
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await runtime.readOutboxFile({
+      boxId: "bx_23456789",
+      entry: { name: "plot.png", encodedName, byteSize: bytes.byteLength, sha256: digest },
+      deadlineAt: new Date(Date.now() + 8_000),
+    });
+
+    expect(timeouts.length).toBeGreaterThan(0);
+    for (const timeout of timeouts) expect(timeout).toBeLessThanOrEqual(8);
+  });
+
+  it("refuses an entry whose encoded name is not base64", async () => {
+    stubOutboxTransport();
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.readOutboxFile({
+      boxId: "bx_23456789",
+      entry: { name: "x", encodedName: "not base64!", byteSize: 1, sha256: digest },
+    })).rejects.toThrow(BoxRuntimeProviderError);
+  });
+});
+
+describe("Pi outbox maintenance", () => {
+  function stubCommands(result: { success: boolean } = { success: true }) {
+    const commands: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      if (!url.endsWith("/commands")) throw new Error(`unexpected Box request: ${url}`);
+      commands.push((JSON.parse(String(init?.body)) as { command: string }).command);
+      return result.success
+        ? response(commandResult())
+        : response({ success: false, exitCode: 1, stdout: "", stderr: "refused" });
+    }));
+    return commands;
+  }
+
+  it("creates the outbox and empties it, so a harvest can only find this turn's files", async () => {
+    const commands = stubCommands();
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await runtime.clearOutbox({ boxId: "bx_23456789" });
+
+    // mkdir before delete: a Box provisioned before the outbox existed gains it here rather than
+    // needing a forced restage.
+    expect(commands[0]).toContain('mkdir -p "$dir"');
+    expect(commands[0]).toContain('find "$dir" -mindepth 1 -delete');
+  });
+
+  it("fails loudly when the Box will not empty its outbox", async () => {
+    stubCommands({ success: false });
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.clearOutbox({ boxId: "bx_23456789" }))
+      .rejects.toThrow(BoxRuntimeProviderError);
+  });
+
+  it("fails loudly when the Box will not list its outbox", async () => {
+    stubCommands({ success: false });
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await expect(runtime.listOutbox({ boxId: "bx_23456789" }))
+      .rejects.toThrow(BoxRuntimeProviderError);
+  });
+});
+
+describe("staged Companion attachments", () => {
+  it("replaces the message directory, writes each file, and makes them read-only", async () => {
+    const commands: string[] = [];
+    const files: Array<{ path: string; encoding?: string }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (url.endsWith("/commands")) {
+        commands.push(body.command as string);
+        return response(commandResult());
+      }
+      if (url.endsWith("/files")) {
+        files.push({ path: body.path as string, encoding: body.encoding as string | undefined });
+        return response({ ok: true });
+      }
+      throw new Error(`unexpected Box request: ${url}`);
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    const staged = await runtime.stageAttachments({
+      boxId: "bx_23456789",
+      messageId: "66666666-6666-4666-8666-666666666666",
+      files: [{
+        position: 0,
+        filename: "chart.png",
+        contentType: "image/png",
+        bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+      }],
+    });
+
+    expect(staged).toEqual([{
+      position: 0,
+      filename: "chart.png",
+      contentType: "image/png",
+      byteSize: 4,
+      path: "~/attachments/66666666-6666-4666-8666-666666666666/0-chart.png",
+    }]);
+    // The whole staging root is replaced, so a previous message's files cannot accumulate.
+    expect(commands[0]).toContain("rm -rf 'attachments'");
+    expect(commands[0]).toContain("mkdir -p 'attachments/66666666-6666-4666-8666-666666666666'");
+    expect(commands.at(-1)).toContain("chmod a-w");
+    // Binary bytes cannot travel as a UTF-8 body, so the write is base64 whatever its size.
+    expect(files).toEqual([{
+      path: "attachments/66666666-6666-4666-8666-666666666666/0-chart.png",
+      encoding: "base64",
+    }]);
+  });
+
+  it("sends a payload whose base64 body would exceed the write limit as numbered parts", async () => {
+    // The provider's limit is on the request body, and base64 is four bytes per three. A 4 MB
+    // attachment is under the raw limit but over it once encoded, so it must take the parts path.
+    const files: string[] = [];
+    const commands: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (url.endsWith("/commands")) {
+        commands.push(body.command as string);
+        return response(commandResult());
+      }
+      files.push(body.path as string);
+      // Nothing this adapter sends may exceed the provider's body limit once encoded.
+      expect((body.content as string).length).toBeLessThan(5 * 1024 * 1024);
+      return response({ ok: true });
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await runtime.stageAttachments({
+      boxId: "bx_23456789",
+      messageId: "66666666-6666-4666-8666-666666666666",
+      files: [{
+        position: 0,
+        filename: "big.png",
+        contentType: "image/png",
+        bytes: Buffer.alloc(4 * 1024 * 1024, 7),
+      }],
+    });
+
+    expect(files.filter((path) => path.includes(".part"))).not.toHaveLength(0);
+    expect(commands.some((command) => command.includes("cat ") && command.includes(".part0")))
+      .toBe(true);
+  });
+
+  it("locks the files without locking the directory it must clear on the next stage", async () => {
+    const commands: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (url.endsWith("/commands")) {
+        commands.push(body.command as string);
+        return response(commandResult());
+      }
+      return response({ ok: true });
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+
+    await runtime.stageAttachments({
+      boxId: "bx_23456789",
+      messageId: "66666666-6666-4666-8666-666666666666",
+      files: [{
+        position: 0,
+        filename: "chart.png",
+        contentType: "image/png",
+        bytes: Buffer.from([0x89, 0x50]),
+      }],
+    });
+
+    // A recursive chmod would clear the directory's own write bit, and unlinking an entry needs
+    // write on its directory -- so the next retry's `rm -rf` would fail and the message would
+    // become permanently unsendable on a non-root Box user.
+    const lock = commands.at(-1)!;
+    expect(lock).toContain("-type f -exec chmod a-w");
+    expect(lock).not.toContain("chmod -R a-w");
+    // The staging root is replaced, so an earlier message's files cannot accumulate on the disk.
+    expect(commands[0]).toContain("rm -rf 'attachments'");
+  });
+
+  it("refuses a message id or filename outside the stored charset", async () => {
+    const runtime = new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test" });
+    const file = {
+      position: 0,
+      filename: "chart.png",
+      contentType: "image/png",
+      bytes: Buffer.alloc(1),
+    };
+
+    await expect(runtime.stageAttachments({
+      boxId: "bx_23456789",
+      messageId: "../escape",
+      files: [file],
+    })).rejects.toThrow(BoxRuntimeProviderError);
+    await expect(runtime.stageAttachments({
+      boxId: "bx_23456789",
+      messageId: "66666666-6666-4666-8666-666666666666",
+      files: [{ ...file, filename: "../escape.png" }],
+    })).rejects.toThrow(BoxRuntimeProviderError);
+  });
+});
 
 function box(state: "archived" | "ready" | "archiving" | "idle") {
   return {
