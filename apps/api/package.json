@@ -9,6 +9,7 @@
     "build": "tsup && node scripts/copy-migrations.cjs",
     "migrate": "node dist/migrate.js",
     "cutover": "node dist/cutover.js",
+    "companion-purge": "node dist/companionPurge.js",
     "start": "node dist/migrate.js && node dist/index.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",

@@ -42,6 +42,10 @@ if docker run --rm companion-api:ci node dist/cutover.js; then
   echo "dist/cutover.js exited 0 without a command; the entrypoint did not run" >&2
   exit 1
 fi
+if docker run --rm companion-api:ci node dist/companionPurge.js; then
+  echo "dist/companionPurge.js exited 0 without a command; the entrypoint did not run" >&2
+  exit 1
+fi
 
 docker run --rm "${network_args[@]}" \
   -e DATABASE_URL="$container_api_url" \

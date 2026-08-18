@@ -624,6 +624,13 @@
       "when": 1787764000000,
       "tag": "0088_companion_delivery_lease",
       "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1787850400000,
+      "tag": "0089_legacy_companion_purge",
+      "breakpoints": true
     }
   ]
 }

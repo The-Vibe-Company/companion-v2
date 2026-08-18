@@ -165,6 +165,56 @@ uses. Take a PostgreSQL backup first.
 If a new Project or run row appears between steps 2 and 4, the final verification fails with the
 remaining counts rather than reporting success; stop web and API traffic and re-run step 4.
 
+## Runtime v2 legacy Companion purge
+
+Migration `0089_legacy_companion_purge.sql` installs a durable provider-deletion ledger and the
+narrow database finalizer used by the Runtime v2 cutover. The command is an offline API-image
+entrypoint; the API server itself still never contacts Box. Run it once before any Runtime v2 schema
+or executor is enabled.
+
+1. Take a PostgreSQL backup. Deploy/scale every web, API, and worker replica with
+   `COMPANION_COMPANIONS_ENABLED=false`, then let in-flight legacy requests drain. The command
+   deliberately rejects an unset or true flag, including a true flag paired with an empty email
+   allowlist.
+
+2. Provide the migration-owner URL as `DATABASE_MIGRATION_URL` and the Box administrative
+   credentials as `COMPANION_BOX_API_KEY` plus the deployment's `COMPANION_BOX_API_BASE` when it is
+   not the default. The command refuses to fall back to the ordinary API database URL and shares the
+   migrator advisory lock, so do not run a deploy migration concurrently.
+
+3. Save the read-only inventory and inspect every target:
+
+   ```bash
+   node dist/companionPurge.js report
+   node dist/companionPurge.js purge --dry-run
+   ```
+
+   The union contains every non-null Box id in `companions` or the retired runtime pools plus every
+   provider Box whose name exactly matches one of the three historical formats or its
+   `Retired ... <digits>` form. Generation-qualified Runtime v2 names and other near-matches are
+   printed as excluded and are never deleted.
+
+4. Permanently delete the reported legacy estate:
+
+   ```bash
+   node dist/companionPurge.js purge --confirm-delete-all-companions
+   ```
+
+   For each Box the command writes intent first, sends the provider's exact irreversible-delete
+   confirmation header, saves the returned deletion operation id, and polls
+   `pending|processing|blocked|completed`. A DELETE `404` is recorded as already absent. `blocked`, a
+   poll `404`, malformed provider data, or any other provider error stops before legacy ownership is
+   removed. Re-run the same command after correction: a saved operation is polled rather than
+   deleted twice, and a request interrupted before its operation id was saved follows the accepted
+   `404 = absent` cutover rule.
+
+5. Only when every ledger target is `completed` or `absent`, a short locked transaction removes
+   legacy Companions, runtime pools, workspace access, member state, threads, transcript entries,
+   reconcile leases, and PATs with `source_type='companion'`. It preserves organizations, users,
+   memberships, provider connections, MCP accounts, Skills and Skill Databases, secrets, billing,
+   human/Agent Auth PATs, and `audit_log`. The final report retains every provider operation id in
+   the durable ledger and must show zero legacy database rows and no exact legacy provider Box.
+
 ## Shared configuration
 
 Configure public API/web origins, Better Auth secret/cookie prefix, PostgreSQL role URLs, S3 credentials, and email. Configure `COMPANION_SECRETS_MASTER_KEY` for skill secrets. Optional integrations use GitHub App, Stripe, and PostHog variables documented in `.env.example`.
