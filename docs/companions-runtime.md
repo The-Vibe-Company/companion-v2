@@ -423,6 +423,34 @@ logged.
 Provider connections and MCP accounts survive the Runtime v2 cutover. Legacy Companion rows and
 Box disks do not.
 
+### Skills Hub API access
+
+Skills Hub access is unconditional and not configurable. There is no per-Companion grant, no toggle,
+and nothing for an Owner or for Pi to change: every hosted Companion may call the Skills Hub API from
+its Box, always with the same scopes — skills read and write, secret reads, and Skill Database read
+and write. Secret reads include the retrieval grant/redeem path, so a Box may obtain the secret
+values that its acting member could obtain. `secrets:write` and `public-skills:install` are excluded:
+a Companion never rewrites the workspace's secrets and never installs public packages on its own
+authority.
+
+Access is not a stored credential. Every staging calls `companion_runtime_mint_hub_token` under the
+fenced claim: it issues a `source_type = 'companion'` token acting as the settings actor with the
+Box's six-hour warm TTL, revokes the Companion's previous token, and returns the plaintext once. The
+runtime injects it as `COMPANION_DELEGATION_TOKEN` in `providers.env`, which is tmpfs-only, never
+snapshotted, and erased on stop; the bundled Companion skill's client already prefers that variable,
+so no client change is needed. `COMPANION_API_URL` is staged as `<origin>/v1` to match it. Native
+mobile stages no token, and a Companion whose settings actor has left the organization gets none.
+
+Every request re-checks that the Companion still exists for the acting member, so deleting the
+Companion or removing that member refuses the live token at once — the token itself is never the
+authority. It reaches only Skills Hub routes: skills, secrets, and Skill Database. `/v1/companions*`
+stays cookie-only, and a Companion-sourced token can never mint or revoke a token. This is not the
+permanently unsupported Pi bearer token: it is ephemeral, rotated on every staging, and dies with the
+Companion or the membership behind it.
+
+The legacy `can_write_skills` column is pinned true and no longer a decision: it stays only because
+operation snapshots and projections already read it.
+
 ## Reads, polling, and desktop
 
 The following always read PostgreSQL only:

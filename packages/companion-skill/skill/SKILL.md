@@ -80,6 +80,21 @@ short expiry or explicit revocation. Use the shortest TTL practical and revoke t
 workspace is archived. Never place either credential in argv, prompts, repositories, logs, fixtures,
 or ordinary output.
 
+### On a hosted Companion Box
+
+A hosted Companion never runs `delegate` and never starts device approval. The runtime mints the
+token itself at every start and stages it as `COMPANION_DELEGATION_TOKEN`, so env mode is already in
+force and the ordinary skill commands work unchanged. It carries skills read and write, secret reads,
+and Skill Database read and write, and it acts as the member whose settings staged the Box, so
+anything published or read lands under that member's account. Treat that as their authority, not
+yours: do the work they asked for, and nothing else.
+
+There is no way to widen it from inside the Box, and no scope to request. A refusal means the
+workspace itself refuses — the Companion was deleted, or that member no longer belongs to the
+organization. Report the refusal instead of retrying it. Never copy the value anywhere, never write
+it to `credentials.json` or any other file, and never repeat it in chat. It rotates on every start
+and is gone when the Box stops.
+
 Resolve the active workspace before any network call:
 
 1. If `COMPANION_DELEGATION_TOKEN` is set, require `COMPANION_API_URL` and
@@ -1350,7 +1365,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.75.0","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.76.0","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 
