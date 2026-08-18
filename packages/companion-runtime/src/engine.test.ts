@@ -12,6 +12,7 @@ import {
   BOX_ID,
   COMMAND_ID,
   COMPANION_ID,
+  MESSAGE_EVENT_ID,
   ORG_ID,
   PI_INVOCATION_ID,
   TURN_ID,
@@ -23,6 +24,40 @@ import {
   MemoryRuntimeStore,
   TestClock,
 } from "./test/fixtures";
+
+function imageAttachment() {
+  return {
+    id: "9f2a1c40-1b2c-4d3e-8f11-0a1b2c3d4e5f",
+    storageKey: `companion-attachments/org/companion/message/0-${"a".repeat(64)}`,
+    contentType: "image/png",
+    byteSize: 2048,
+    sha256: "a".repeat(64),
+    filename: "chart.png",
+    position: 0,
+  };
+}
+
+function documentAttachment() {
+  return {
+    id: "9f2a1c40-1b2c-4d3e-8f11-0a1b2c3d4e60",
+    storageKey: `companion-attachments/org/companion/message/1-${"b".repeat(64)}`,
+    contentType: "application/pdf",
+    byteSize: 4096,
+    sha256: "b".repeat(64),
+    filename: "report.pdf",
+    position: 1,
+  };
+}
+
+function harvestedImage() {
+  return {
+    storageKey: `companion-attachments/org/companion/outputs/attempt/0-${"c".repeat(64)}`,
+    contentType: "image/png",
+    byteSize: 512,
+    sha256: "c".repeat(64),
+    filename: "plot.png",
+  };
+}
 
 function assistantAndSettlementPage(): unknown {
   return {
@@ -763,6 +798,288 @@ describe("RuntimeEngine attempts", () => {
 
     expect(result.outcome).toBe("failed");
     expect(store.settlements[0]?.error?.code).toBe("actor_access_revoked");
+  });
+
+  it("stages attachments, names them in the prompt, and empties the outbox first", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim),
+      material: attemptMaterial({ attachments: [imageAttachment(), documentAttachment()] }),
+    });
+    const ports = fakePorts(store);
+    const brokerState = ports.pi.brokerState;
+    ports.pi.brokerState = async (input) => ({
+      ...await brokerState(input),
+      modelInput: ["text", "image"],
+    });
+    ports.eventReads.push(assistantAndSettlementPage());
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(ports.stagedAttachments).toEqual([{
+      messageEventId: MESSAGE_EVENT_ID,
+      filenames: ["chart.png", "report.pdf"],
+    }]);
+    // The outbox is emptied before the prompt is written, so nothing a previous attempt left
+    // behind can be harvested as this turn's output.
+    expect(ports.log.indexOf("clear-outbox")).toBeLessThan(ports.log.indexOf("stage-attachments"));
+    const message = ports.promptCalls[0]?.message ?? "";
+    expect(message.startsWith("Hello from a durable turn")).toBe(true);
+    expect(message).toContain("The user attached 2 files, staged read-only at:");
+    expect(message).toContain("1. ~/attachments/");
+    expect(message).toContain("chart.png (image/png, 2048 bytes)");
+    expect(message).toContain("report.pdf (application/pdf, 4096 bytes)");
+  });
+
+  it("refuses an image before any Box write when the model cannot see one", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim),
+      material: attemptMaterial({ attachments: [imageAttachment()] }),
+    });
+    const ports = fakePorts(store);
+    const original = ports.pi.brokerState;
+    ports.pi.brokerState = async (input) => ({ ...await original(input), modelInput: ["text"] });
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("failed");
+    expect(ports.promptCalls).toHaveLength(0);
+    expect(ports.stagedAttachments).toHaveLength(0);
+    expect(ports.log).not.toContain("clear-outbox");
+    expect(store.settlements[0]?.error).toMatchObject({
+      code: "model_image_input_unsupported",
+      action: "switch_model",
+    });
+  });
+
+  it("sends a document to a text-only model without demanding image capability", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim),
+      material: attemptMaterial({ attachments: [documentAttachment()] }),
+    });
+    const ports = fakePorts(store);
+    const original = ports.pi.brokerState;
+    ports.pi.brokerState = async (input) => ({ ...await original(input), modelInput: ["text"] });
+    ports.eventReads.push(assistantAndSettlementPage());
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    expect((await engine.execute(claim)).outcome).toBe("succeeded");
+    expect(ports.promptCalls).toHaveLength(1);
+  });
+
+  it("fails a turn whose attachments cannot be staged, and never dispatches it", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim),
+      material: attemptMaterial({ attachments: [imageAttachment()] }),
+    });
+    const ports = fakePorts(store);
+    const brokerState = ports.pi.brokerState;
+    ports.pi.brokerState = async (input) => ({
+      ...await brokerState(input),
+      modelInput: ["text", "image"],
+    });
+    ports.attachmentStager.stageAttachments = async () => {
+      throw new Error("object storage is unreachable");
+    };
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    // Failed, not interrupted: no dispatch intent exists, so the negative is proven and the
+    // ordered queue is released rather than blocked behind an explicit Retry.
+    expect(result.outcome).toBe("failed");
+    expect(ports.promptCalls).toHaveLength(0);
+    expect(store.checkpoints).toHaveLength(0);
+    expect(store.settlements[0]?.error).toMatchObject({
+      code: "attachment_staging_failed",
+      action: "retry",
+    });
+  });
+
+  it("harvests Pi's outbox once, before settling, and empties it afterwards", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    ports.eventReads.push(assistantAndSettlementPage());
+    ports.harvestedOutputs.push(harvestedImage());
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(store.recordedOutputs).toEqual([[harvestedImage()]]);
+    expect(ports.log.indexOf("harvest-outbox")).toBeLessThan(ports.log.lastIndexOf("clear-outbox"));
+    expect(ports.log.lastIndexOf("clear-outbox")).toBeLessThan(ports.log.lastIndexOf("ack"));
+  });
+
+  it("succeeds on a turn whose only visible output is a harvested image", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    // Pi settled without saying anything, so without the harvest this would be `empty_response`.
+    ports.eventReads.push(settlementOnlyPage());
+    ports.harvestedOutputs.push(harvestedImage());
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    expect((await engine.execute(claim)).outcome).toBe("succeeded");
+    expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
+  });
+
+  it("commits the harvest durably before it acknowledges Pi's cursor", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    ports.eventReads.push(assistantAndSettlementPage());
+    ports.harvestedOutputs.push(harvestedImage());
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    expect((await engine.execute(claim)).outcome).toBe("succeeded");
+    // Durable before external, and settlement last: moving the record after the ACK would let a
+    // takeover ACK a cursor for images no row remembers.
+    expect(ports.log.indexOf("record-outputs")).toBeGreaterThan(ports.log.indexOf("harvest-outbox"));
+    expect(ports.log.indexOf("record-outputs")).toBeLessThan(ports.log.lastIndexOf("ack"));
+    expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
+  });
+
+  it("abandons rather than settling when the fence is lost during the harvest commit", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    ports.eventReads.push(assistantAndSettlementPage());
+    ports.harvestedOutputs.push(harvestedImage());
+    store.recordOutputsFenceLost = true;
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    // A lease lost between Pi settling and the harvest commit is the window this feature adds.
+    // Settling from that state would write a terminal the new holder cannot see.
+    expect(result.outcome).not.toBe("succeeded");
+    expect(store.settlements).toEqual([]);
+  });
+
+  it("abandons when the harvest commit itself is indeterminate", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    ports.eventReads.push(assistantAndSettlementPage());
+    ports.harvestedOutputs.push(harvestedImage());
+    store.recordOutputsFailure = new RuntimeStoreIndeterminateError();
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).not.toBe("succeeded");
+    expect(store.settlements).toEqual([]);
+  });
+
+  it("records a partial harvest and logs the shortfall under its stable code", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    ports.eventReads.push(assistantAndSettlementPage());
+    ports.harvestedOutputs.push(harvestedImage());
+    ports.harvestFailure = { incomplete: true };
+    const logged: Array<Record<string, unknown>> = [];
+    const engine = new RuntimeEngine(engineDependencies({
+      store,
+      ports,
+      log: { error: () => {}, warn: (record) => logged.push(record) },
+    }));
+
+    expect((await engine.execute(claim)).outcome).toBe("succeeded");
+    // The images that did come back are kept, and the operator-facing code the runbook tells people
+    // to grep for is emitted.
+    expect(store.recordedOutputs).toEqual([[harvestedImage()]]);
+    expect(logged).toEqual([expect.objectContaining({
+      event: "outbox_harvest_failed",
+      attempt_id: ATTEMPT_ID,
+      recovered: 1,
+    })]);
+  });
+
+  it("fails a turn whose outbox cannot be emptied, and never dispatches it", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    ports.outboxHarvester.clearOutbox = async () => {
+      throw new Error("the Box refused to empty its outbox");
+    };
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    // Without a clear, a later harvest could attribute a previous attempt's leftovers to this turn,
+    // so the turn fails before any dispatch intent exists and the queue is released.
+    expect(result.outcome).toBe("failed");
+    expect(store.checkpoints).toHaveLength(0);
+    expect(ports.promptCalls).toHaveLength(0);
+    expect(store.settlements[0]?.error).toMatchObject({
+      code: "outbox_clear_failed",
+      action: "retry",
+    });
+  });
+
+  it("keeps a durable reply when the harvest fails, and marks the harvest done anyway", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    ports.eventReads.push(assistantAndSettlementPage());
+    ports.harvestFailure = { incomplete: true, throws: true };
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(store.recordedOutputs).toEqual([[]]);
+    expect(store.outputsHarvested).toBe(true);
+  });
+
+  it("does not harvest again after taking over an attempt that already harvested", async () => {
+    const claim = attemptClaim({
+      checkpoint: "agent_settled",
+      checkpointSequence: 8n,
+      attemptStatus: "running",
+      turnStatus: "running",
+      dispatchState: "accepted",
+      eventCursor: 4n,
+      inactivityDeadlineAt: new Date("2026-08-16T12:10:00.000Z"),
+    });
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(claim),
+      material: attemptMaterial({ hasVisibleOutput: true }),
+    });
+    store.outputsHarvested = true;
+    const ports = fakePorts(store);
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    expect((await engine.execute(claim)).outcome).toBe("succeeded");
+    expect(ports.log).not.toContain("harvest-outbox");
+    expect(store.recordedOutputs).toHaveLength(0);
+  });
+
+  it("never harvests an attempt whose Pi process exited", async () => {
+    const claim = attemptClaim({
+      checkpoint: "process_exited",
+      checkpointSequence: 8n,
+      attemptStatus: "running",
+      turnStatus: "running",
+      dispatchState: "accepted",
+      eventCursor: 4n,
+      inactivityDeadlineAt: new Date("2026-08-16T12:10:00.000Z"),
+    });
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    expect((await engine.execute(claim)).outcome).toBe("failed");
+    expect(ports.log).not.toContain("harvest-outbox");
   });
 
   it("does no external work after a stale lease fence", async () => {

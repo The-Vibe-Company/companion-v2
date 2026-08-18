@@ -1271,6 +1271,111 @@ export const companionTranscriptEntries = pgTable(
     ),
   }),
 );
+
+export const companionAttachmentKindEnum = pgEnum("companion_attachment_kind", [
+  "user_upload",
+  "pi_output",
+]);
+
+/**
+ * Files one transcript entry carries.
+ *
+ * `user_upload` is what a member sent with a message; the runtime stages those read-only on the Box
+ * before dispatching the prompt. `pi_output` is an image Pi left in its outbox during a turn, moved
+ * here so it can be read the way every other part of the thread is read. Both kinds live in one
+ * table so they share one RLS boundary, one purge path, and one projection — but the discriminator
+ * is never optional, because a reader must never mistake something Pi produced for something a
+ * member vouched for.
+ *
+ * Bytes live in object storage; this row holds the key. Removing the row is what schedules the
+ * object for deletion, so an attachment cannot outlive the entry, the Companion, or the tenant it
+ * belongs to.
+ */
+export const companionMessageAttachments = pgTable(
+  "companion_message_attachments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    companionId: uuid("companion_id").notNull(),
+    entryEventId: text("entry_event_id").notNull(),
+    kind: companionAttachmentKindEnum("kind").notNull(),
+    /** Object-storage key. Content-addressed, so a retried upload lands on the same object. */
+    storageKey: text("storage_key").notNull(),
+    /** Resolved from the stored bytes at upload, never from what a client declared. */
+    contentType: text("content_type").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    sha256: text("sha256").notNull(),
+    filename: text("filename").notNull(),
+    position: integer("position").notNull(),
+    createdAt: now(),
+  },
+  (t) => ({
+    companionOrgFk: foreignKey({
+      columns: [t.orgId, t.companionId],
+      foreignColumns: [companions.orgId, companions.id],
+      name: "companion_message_attachments_companion_fk",
+    }),
+    entryFk: foreignKey({
+      columns: [t.companionId, t.entryEventId],
+      foreignColumns: [companionTranscriptEntries.companionId, companionTranscriptEntries.eventId],
+      name: "companion_message_attachments_entry_fk",
+    }),
+    // The unique constraint below is already a btree on exactly these columns in this order, so it
+    // serves every lookup an extra index could; a second one would only double write cost.
+    orderedPosition: unique("companion_message_attachments_position_uq").on(
+      t.companionId,
+      t.entryEventId,
+      t.position,
+    ),
+    // Two rows sharing one key would mean two rows owning the same bytes, and purging either would
+    // strand the other.
+    ownedObject: unique("companion_message_attachments_storage_key_uq").on(t.storageKey),
+    storageKeyShape: check(
+      "companion_message_attachments_storage_key_check",
+      sql`${t.storageKey} ~ '^[A-Za-z0-9][A-Za-z0-9/._-]*$'
+        and char_length(${t.storageKey}) between 1 and 512`,
+    ),
+    allowedContentType: check(
+      "companion_message_attachments_content_type_check",
+      sql`${t.contentType} in (
+        'image/png', 'image/jpeg', 'image/webp', 'image/gif',
+        'application/pdf', 'text/csv', 'text/plain', 'text/markdown', 'application/json'
+      )`,
+    ),
+    // Pi hands back images only; a document stored as a Pi output would mean the harvest read
+    // something it was never allowed to read.
+    outputImageOnly: check(
+      "companion_message_attachments_output_image_check",
+      sql`${t.kind}::text <> 'pi_output' or ${t.contentType} in (
+        'image/png', 'image/jpeg', 'image/webp', 'image/gif'
+      )`,
+    ),
+    boundedSize: check(
+      "companion_message_attachments_byte_size_check",
+      sql`${t.byteSize} between 1 and 10485760`,
+    ),
+    contentDigest: check(
+      "companion_message_attachments_sha256_check",
+      sql`${t.sha256} ~ '^[0-9a-f]{64}$'`,
+    ),
+    // The name is interpolated into a Box path and into the prompt suffix naming that path, so the
+    // charset leaves nothing to quote, escape, or traverse.
+    safeFilename: check(
+      "companion_message_attachments_filename_check",
+      sql`${t.filename} ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$'`,
+    ),
+    boundedPosition: check(
+      "companion_message_attachments_position_check",
+      sql`${t.position} between 0 and 9`,
+    ),
+    entryEventShape: check(
+      "companion_message_attachments_entry_event_check",
+      sql`char_length(${t.entryEventId}) between 1 and 200 and ${t.entryEventId} !~ E'[\\n\\r]'`,
+    ),
+  }),
+);
 /**
  * Workspace-level Pi provider credentials. Ciphertext is envelope-encrypted and only decrypted
  * immediately before it is delivered to the selected Companion's Box.

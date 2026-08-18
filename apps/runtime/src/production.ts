@@ -10,7 +10,9 @@ import {
   createJsonRuntimeProcessLog,
   PostgresRuntimeStore,
   type CreateRuntimeKernelInput,
+  type RuntimeAttachmentStager,
   type RuntimeBoxControl,
+  type RuntimeOutboxHarvester,
   type RuntimePiControl,
   type RuntimeResourceStager,
   type RuntimeStore,
@@ -19,6 +21,7 @@ import {
   createStorageClient,
   getSkillArchive,
   getStorageConfig,
+  putSkillArchive,
 } from "@companion/storage";
 
 import { createRuntimeBoxControl, createRuntimePiControl } from "./boxAdapters";
@@ -41,6 +44,13 @@ import {
 
 export interface RuntimeArchiveStorage {
   load(storagePath: string, signal: AbortSignal): Promise<Buffer>;
+  /** Store one harvested attachment. Skill archives are read-only, so this is write-only. */
+  store(input: {
+    key: string;
+    bytes: Buffer;
+    contentType: string;
+    signal: AbortSignal;
+  }): Promise<void>;
   close(): void | Promise<void>;
 }
 
@@ -74,6 +84,9 @@ const defaultFactories: RuntimeProductionFactories = {
         client,
         config,
       }),
+      store: async ({ key, bytes, contentType, signal }) => {
+        await putSkillArchive({ key, body: bytes, contentType, signal, client, config });
+      },
       close: () => client.destroy(),
     };
   },
@@ -110,6 +123,8 @@ export async function buildProductionRuntimeService(
         box: disabledBoxControl,
         pi: disabledPiControl,
         resourceStager: disabledResourceStager,
+        attachmentStager: disabledAttachmentStager,
+        outboxHarvester: disabledOutboxHarvester,
         executorId: config.executorId,
         concurrency: config.concurrency,
         sweepIntervalMs: config.sweepIntervalMs,
@@ -141,6 +156,18 @@ export async function buildProductionRuntimeService(
         if (!storage) throw new Error("runtime archive storage is closed");
         return await storage.load(storagePath, signal);
       },
+      // Chat attachments live in the same bucket as skill archives and are read through the same
+      // client, but they are a distinct seam so a test can fail one without touching the other.
+      loadAttachment: async (storageKey, signal) => {
+        const storage = archiveStorage;
+        if (!storage) throw new Error("runtime archive storage is closed");
+        return await storage.load(storageKey, signal);
+      },
+      storeAttachment: async (stored) => {
+        const storage = archiveStorage;
+        if (!storage) throw new Error("runtime archive storage is closed");
+        await storage.store(stored);
+      },
     });
     const adapters = { lifecycle, runtime: freshRuntime };
     const kernel = factories.createKernel({
@@ -150,6 +177,8 @@ export async function buildProductionRuntimeService(
       materialProvider: material.materialProvider,
       projectionRedactorFactory: material.projectionRedactorFactory,
       resourceStager: material.resourceStager,
+      attachmentStager: material.attachmentStager,
+      outboxHarvester: material.outboxHarvester,
       executorId: config.executorId,
       concurrency: config.concurrency,
       sweepIntervalMs: config.sweepIntervalMs,
@@ -264,4 +293,13 @@ const disabledPiControl: RuntimePiControl = {
 
 const disabledResourceStager: RuntimeResourceStager = {
   stageExistingBox: async () => runtimeDisabled(),
+};
+
+const disabledAttachmentStager: RuntimeAttachmentStager = {
+  stageAttachments: async () => runtimeDisabled(),
+};
+
+const disabledOutboxHarvester: RuntimeOutboxHarvester = {
+  clearOutbox: async () => runtimeDisabled(),
+  harvestOutbox: async () => runtimeDisabled(),
 };

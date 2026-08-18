@@ -57,6 +57,7 @@ describe("production runtime composition", () => {
     const createBoxRuntime = vi.fn(() => ({} as CompanionBoxRuntimeV2));
     const createArchiveStorage = vi.fn(() => ({
       load: vi.fn(),
+      store: vi.fn(),
       close: vi.fn(),
     } as RuntimeArchiveStorage));
     const loadBundledSkill = vi.fn();
@@ -126,6 +127,7 @@ describe("production runtime composition", () => {
       createBoxRuntime,
       createArchiveStorage: () => ({
         load: vi.fn(async () => Buffer.from("archive")),
+        store: vi.fn(async () => undefined),
         close: storageClose,
       }),
       loadBundledSkill: vi.fn(async () => ({

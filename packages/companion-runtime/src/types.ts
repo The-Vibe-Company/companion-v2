@@ -307,6 +307,23 @@ export interface RuntimeSettlementInput {
 export type DecisionRequestKind = "question" | "confirmation";
 export type ModelInputCapability = "text" | "image";
 
+/**
+ * One file a claimed turn has to stage on the Box before its prompt is dispatched.
+ *
+ * The storage key travels because only apps/runtime holds object-storage credentials, and the digest
+ * travels with it so the bytes that come back can be proven to be the bytes the control plane
+ * accepted. Neither ever reaches a browser, a prompt, or an error message.
+ */
+export interface RuntimeAttachment {
+  id: string;
+  storageKey: string;
+  contentType: string;
+  byteSize: number;
+  sha256: string;
+  filename: string;
+  position: number;
+}
+
 /** Sensitive values remain opaque to this package and are never included in errors or health. */
 export interface RuntimeWorkMaterial {
   turnId: string | null;
@@ -320,6 +337,20 @@ export interface RuntimeWorkMaterial {
   mcpMaterial: Record<string, unknown>[];
   modelInput: ModelInputCapability[] | null;
   hasVisibleOutput: boolean;
+  /** Files the member sent with this turn's message, in stable order. Empty for every other work kind. */
+  attachments: RuntimeAttachment[];
+}
+
+/**
+ * One image harvested from Pi's outbox and already stored under its content address, as the control
+ * plane is asked to record it. It carries no id: the row does not exist until this is recorded.
+ */
+export interface RuntimeOutputAttachment {
+  storageKey: string;
+  contentType: string;
+  byteSize: number;
+  sha256: string;
+  filename: string;
 }
 
 export const DUPLICATE_CLEANUP_STATUSES = [

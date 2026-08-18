@@ -4,6 +4,7 @@ import { z } from "zod";
 import type {
   Companion,
   CompanionAccess,
+  CompanionAttachmentUpload,
   CompanionClientSurface,
   CompanionOperation,
   CompanionOperationKind,
@@ -13,6 +14,7 @@ import type {
   CompanionTurn,
 } from "@companion/contracts";
 import {
+  companionAttachmentUploadSchema,
   companionOperationSchema,
   companionSelectedMcpAccountIdsSchema,
   companionSelectedSkillIdsSchema,
@@ -530,15 +532,25 @@ export async function enqueueCompanionTurnV2(input: {
   clientMessageId: string;
   content: string;
   clientSurface: CompanionClientSurface;
+  /**
+   * Files already stored in object storage under their content address. They land in the same
+   * transaction as the message and the turn, so a claimable turn always finds every file the runtime
+   * has to stage. A replay compares them by content, not by row id or key, which is what makes
+   * re-uploading identical bytes the same intent rather than a conflict.
+   */
+  attachments?: CompanionAttachmentUpload[];
   database: Db;
 }): Promise<{ turn: CompanionTurn; operation: CompanionOperation | null; replayed: boolean }> {
+  const attachments = (input.attachments ?? []).map((attachment) =>
+    companionAttachmentUploadSchema.parse(attachment));
   const result = await input.database.execute(sql`
     select * from public.companion_api_enqueue_turn(
       ${input.orgId}::uuid,
       ${input.companionId}::uuid,
       ${input.clientMessageId}::uuid,
       ${input.content},
-      ${input.clientSurface}::companion_client_surface
+      ${input.clientSurface}::companion_client_surface,
+      ${JSON.stringify(attachments)}::jsonb
     )
   `);
   const [row] = rows<{ turn: unknown; operation: unknown; replayed: boolean }>(result);
@@ -547,6 +559,52 @@ export async function enqueueCompanionTurnV2(input: {
     turn: companionTurnSchema.parse(row.turn),
     operation: parseOperation(row.operation),
     replayed: row.replayed,
+  };
+}
+
+export interface CompanionAttachmentAsset {
+  storageKey: string;
+  contentType: string;
+  byteSize: number;
+  filename: string;
+  kind: "user_upload" | "pi_output";
+}
+
+/**
+ * Resolve one attachment's stored bytes for a reader who may read its thread.
+ *
+ * Access is decided on this call and no other: nothing signed or long-lived is ever handed out, so a
+ * reader who loses access stops being able to fetch the file at the next request rather than at the
+ * next cache expiry. The storage key never leaves the server.
+ */
+export async function readCompanionAttachmentV2(input: {
+  actor: ActorContext;
+  orgId: string;
+  companionId: string;
+  attachmentId: string;
+  database: Db;
+}): Promise<CompanionAttachmentAsset> {
+  const result = await input.database.execute(sql`
+    select * from public.companion_api_read_attachment(
+      ${input.orgId}::uuid,
+      ${input.companionId}::uuid,
+      ${input.attachmentId}::uuid
+    )
+  `);
+  const [row] = rows<{
+    storage_key: string;
+    content_type: string;
+    byte_size: number | string;
+    filename: string;
+    kind: "user_upload" | "pi_output";
+  }>(result);
+  if (!row) throw new Error("companion attachment is unavailable");
+  return {
+    storageKey: row.storage_key,
+    contentType: row.content_type,
+    byteSize: integer(row.byte_size),
+    filename: row.filename,
+    kind: row.kind,
   };
 }
 

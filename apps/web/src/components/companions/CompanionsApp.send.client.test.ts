@@ -144,6 +144,7 @@ function controlPlane(
             screenshot: null,
           },
           decision: null,
+          attachments: [],
           reasoning: null,
           created_at: "2026-08-15T18:00:00.000Z",
         },
@@ -156,6 +157,7 @@ function controlPlane(
           author_name: null,
           tool: null,
           decision: null,
+          attachments: [],
           reasoning: null,
           created_at: `2026-08-15T18:0${index + 1}:00.000Z`,
         })),
@@ -222,6 +224,7 @@ function controlPlane(
         author_name: null,
         tool: null,
         decision: null,
+        attachments: [],
         reasoning: null,
         created_at: new Date().toISOString(),
       });
@@ -268,6 +271,7 @@ function controlPlane(
           author_name: null,
           tool: null,
     decision: null,
+    attachments: [],
           reasoning: null,
           created_at: new Date().toISOString(),
         });

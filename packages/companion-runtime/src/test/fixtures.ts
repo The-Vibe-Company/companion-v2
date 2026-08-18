@@ -1,9 +1,11 @@
 import type { RuntimeClock } from "../clock";
 import type {
+  RuntimeAttachmentStager,
   RuntimeBoxControl,
   RuntimeEngineDependencies,
   RuntimeEventProjector,
   RuntimeMaterialProvider,
+  RuntimeOutboxHarvester,
   RuntimePiControl,
   RuntimeResourceStager,
 } from "../ports";
@@ -23,6 +25,7 @@ import type {
   RuntimeCheckpointInput,
   RuntimeClaim,
   RuntimeObservationInput,
+  RuntimeOutputAttachment,
   RuntimeSettlementInput,
   RuntimeWorkMaterial,
 } from "../types";
@@ -250,6 +253,7 @@ export function attemptMaterial(overrides: Partial<RuntimeWorkMaterial> = {}): R
     mcpMaterial: [],
     modelInput: null,
     hasVisibleOutput: false,
+    attachments: [],
     ...overrides,
   };
 }
@@ -427,6 +431,7 @@ export class MemoryRuntimeStore implements RuntimeStore {
     checkpoint: "agent_settled" | "process_exited";
     eventCursor: bigint;
     hasVisibleOutput: boolean;
+    outputsHarvested: boolean;
   } | null> {
     const checkpoint = this.authorization.workCheckpoint;
     if (
@@ -436,6 +441,32 @@ export class MemoryRuntimeStore implements RuntimeStore {
     return {
       checkpoint,
       eventCursor: this.authorization.eventCursor,
+      hasVisibleOutput: this.material.hasVisibleOutput,
+      outputsHarvested: this.outputsHarvested,
+    };
+  }
+
+  /** What a recorded harvest committed, so a test can assert it happened exactly once. */
+  outputsHarvested = false;
+  recordedOutputs: RuntimeOutputAttachment[][] = [];
+  recordOutputsFailure: Error | null = null;
+  /** Set to model the fence being lost between Pi settling and the harvest commit. */
+  recordOutputsFenceLost = false;
+  /** Ordered effect log shared with the fake ports, so a test can assert durable-before-external. */
+  effectLog: string[] = [];
+
+  async recordAttemptOutputs(_fence: LeaseFence, input: {
+    attachments: RuntimeOutputAttachment[];
+    activityAt: Date;
+  }): Promise<{ recorded: number; hasVisibleOutput: boolean } | null> {
+    this.effectLog.push("record-outputs");
+    if (this.recordOutputsFailure) throw this.recordOutputsFailure;
+    if (this.recordOutputsFenceLost) return null;
+    this.recordedOutputs.push(input.attachments);
+    this.outputsHarvested = true;
+    if (input.attachments.length > 0) this.material.hasVisibleOutput = true;
+    return {
+      recorded: input.attachments.length,
       hasVisibleOutput: this.material.hasVisibleOutput,
     };
   }
@@ -470,7 +501,10 @@ export class MemoryRuntimeStore implements RuntimeStore {
     this.authorization.unknownEventCount = input.unknownEventCount;
     this.authorization.malformedEventCount = input.malformedEventCount;
     this.authorization.oversizedEventCount = input.oversizedEventCount;
+    // Mirrors companion_runtime_project_event_batch: a page whose decision is followed by a
+    // settlement or a process exit is not waiting for input, it is finished.
     this.authorization.attemptStatus = input.events.some((event) => event.type === "decision")
+      && !input.events.some((event) => event.type === "settled" || event.type === "process_exit")
       ? "needs_input"
       : "running";
     this.authorization.turnStatus = this.authorization.attemptStatus;
@@ -532,18 +566,32 @@ export interface FakePorts {
   box: RuntimeBoxControl;
   pi: RuntimePiControl;
   resourceStager: RuntimeResourceStager;
+  attachmentStager: RuntimeAttachmentStager;
+  outboxHarvester: RuntimeOutboxHarvester;
   eventProjector: RuntimeEventProjector;
   log: string[];
   promptCalls: { attemptId: string; message: string }[];
   decisionCalls: { attemptId: string }[];
   eventReads: unknown[];
+  stagedAttachments: { messageEventId: string; filenames: string[] }[];
+  harvestedOutputs: RuntimeOutputAttachment[];
+  /** `throws` models an unreadable outbox; `incomplete` alone models a partial harvest. */
+  harvestFailure: { incomplete: boolean; throws?: boolean } | null;
+  clearedOutboxes: string[];
 }
 
 export function fakePorts(store: MemoryRuntimeStore): FakePorts {
   const log: string[] = [];
+  // One ordered log across ports and store, so a test can prove the durable record commits before
+  // the external ACK rather than merely that both happened.
+  store.effectLog = log;
   const promptCalls: FakePorts["promptCalls"] = [];
   const decisionCalls: FakePorts["decisionCalls"] = [];
   const eventReads: unknown[] = [];
+  const stagedAttachments: FakePorts["stagedAttachments"] = [];
+  const harvestedOutputs: RuntimeOutputAttachment[] = [];
+  const clearedOutboxes: string[] = [];
+  const harvest: { failure: { incomplete: boolean; throws?: boolean } | null } = { failure: null };
   const box: RuntimeBoxControl = {
     findGenerationBoxes: async ({ companionId, generation }) => ({
       name: `Companion ${companionId} g${generation.toString()}`,
@@ -624,7 +672,57 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
       });
     },
   };
-  return { box, pi, resourceStager, eventProjector, log, promptCalls, decisionCalls, eventReads };
+  const attachmentStager: RuntimeAttachmentStager = {
+    stageAttachments: async (input) => {
+      log.push("stage-attachments");
+      stagedAttachments.push({
+        messageEventId: input.messageEventId,
+        filenames: input.material.attachments.map((attachment) => attachment.filename),
+      });
+      return input.material.attachments.map((attachment) => ({
+        position: attachment.position,
+        filename: attachment.filename,
+        contentType: attachment.contentType,
+        byteSize: attachment.byteSize,
+        path: `~/attachments/${input.messageEventId.slice(4)}/${attachment.position}-${attachment.filename}`,
+      }));
+    },
+  };
+  const outboxHarvester: RuntimeOutboxHarvester = {
+    clearOutbox: async ({ boxId }) => {
+      log.push("clear-outbox");
+      clearedOutboxes.push(boxId);
+    },
+    harvestOutbox: async () => {
+      log.push("harvest-outbox");
+      if (harvest.failure?.throws) throw new Error("outbox read failed");
+      return {
+        attachments: [...harvestedOutputs],
+        incomplete: harvest.failure?.incomplete ?? false,
+      };
+    },
+  };
+  return {
+    box,
+    pi,
+    resourceStager,
+    attachmentStager,
+    outboxHarvester,
+    eventProjector,
+    log,
+    promptCalls,
+    decisionCalls,
+    eventReads,
+    stagedAttachments,
+    harvestedOutputs,
+    get harvestFailure() {
+      return harvest.failure;
+    },
+    set harvestFailure(value: { incomplete: boolean; throws?: boolean } | null) {
+      harvest.failure = value;
+    },
+    clearedOutboxes,
+  };
 }
 
 export function engineDependencies(input: {
@@ -646,6 +744,8 @@ export function engineDependencies(input: {
       forMaterial: () => (value) => value,
     },
     resourceStager: ports.resourceStager,
+    attachmentStager: ports.attachmentStager,
+    outboxHarvester: ports.outboxHarvester,
     eventProjector: ports.eventProjector,
     idFactory: { uuid: () => COMMAND_ID },
     clock: input.clock ?? new TestClock(),

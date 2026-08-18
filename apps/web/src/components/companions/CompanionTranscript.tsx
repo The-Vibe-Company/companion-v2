@@ -8,6 +8,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ClipboardEvent as ReactClipboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
@@ -20,16 +21,23 @@ import {
   type AppendMessage,
   type AssistantRuntime,
 } from "@assistant-ui/react";
-import { ArrowUpIcon } from "lucide-react";
+import { ArrowUpIcon, PaperclipIcon, XIcon } from "lucide-react";
 import type {
   Companion,
   CompanionThread as Thread,
   CompanionTranscriptEntry,
 } from "@companion/contracts";
-import { companionMessageEventId } from "@companion/contracts";
+import {
+  COMPANION_ATTACHMENT_MAX_BYTES,
+  COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT,
+  companionMessageEventId,
+  declaredCompanionAttachmentContentType,
+  sanitizeCompanionAttachmentFilename,
+} from "@companion/contracts";
 import { Thread as AssistantThread } from "@/components/assistant-ui/thread";
 import { cn } from "@/lib/utils";
 import { decideCompanionDecision } from "../../lib/companions";
+import { AttachmentContext, AttachmentList, readableSize } from "./AttachmentCard";
 import { DecisionActionsContext, type DecisionAction } from "./decisionActions";
 import { DecisionToolCard } from "./DecisionToolCard";
 import { ToolRunCard } from "./ToolRunCard";
@@ -37,6 +45,7 @@ import { composerHint, localDay, replyExpected, utcDay } from "./transcript";
 import {
   COMPANION_DECISION_TOOL_NAME,
   COMPANION_TOOL_NAME,
+  attachmentsOf,
   groupTranscriptEntries,
   toThreadMessageLike,
   useStableEntries,
@@ -82,6 +91,12 @@ interface TranscriptChrome {
   empty: boolean;
   replying: boolean;
   hint: string;
+  /** Files staged for the next send, in the order they will be staged on the Box. */
+  attachments: readonly File[];
+  /** One line saying why a file was refused, cleared as soon as another is accepted. */
+  attachmentError: string | null;
+  onAttach: (files: FileList | readonly File[] | null) => void;
+  onRemoveAttachment: (index: number) => void;
   onSendPress: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   onSendClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
 }
@@ -196,6 +211,8 @@ function AssistantFrame({ children }: { children: ReactNode }) {
       <Separators message={message} />
       <PassageLead message={message} />
       {children}
+      {/* Files come after the words that introduced them, which is the order they happened in. */}
+      {message && <AttachmentList attachments={attachmentsOf(message)} />}
     </>
   );
 }
@@ -212,8 +229,26 @@ function UserFrame({ children }: { children: ReactNode }) {
           wrapper would make that percentage resolve against the bubble's own text. */}
       <div className={cn("flex w-full flex-col items-end", message?.sending && "opacity-60")}>
         {children}
+        {message && <AttachmentList attachments={attachmentsOf(message)} />}
       </div>
+      <UploadStatus message={message} />
     </div>
+  );
+}
+
+/**
+ * An upload can run for up to two minutes, and the only sighted cue is a dimmed bubble. `aria-busy`
+ * marks the region as changing; it does not announce anything. A text send acknowledges in under a
+ * second, so announcing that would be noise — this speaks only while files are actually in flight.
+ */
+function UploadStatus({ message }: { message: TranscriptMessage | undefined }) {
+  const count = message?.sending ? attachmentsOf(message).length : 0;
+  return (
+    <span className="sr-only" role="status">
+      {count > 0
+        ? `Uploading ${count} ${count === 1 ? "file" : "files"} with your message...`
+        : ""}
+    </span>
   );
 }
 
@@ -236,6 +271,47 @@ function appendedText(message: AppendMessage): string {
     .map((part) => part.type === "text" ? part.text : "")
     .join("")
     .trim();
+}
+
+/**
+ * Decide which dropped, pasted, or picked files this composer will carry, and say why the rest were
+ * refused. Every rule here is stated again by the API and by a database constraint; refusing early is
+ * how a member finds out before spending an upload on it, not how the bound is enforced.
+ */
+function acceptAttachments(
+  staged: readonly File[],
+  incoming: readonly File[],
+): { files: File[]; error: string | null } {
+  const files = [...staged];
+  let error: string | null = null;
+  for (const file of incoming) {
+    if (files.length >= COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT) {
+      error = `A message can carry at most ${COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT} files.`;
+      break;
+    }
+    if (file.size === 0) {
+      error = `${file.name} is empty.`;
+      continue;
+    }
+    if (file.size > COMPANION_ATTACHMENT_MAX_BYTES) {
+      error = `${file.name} is larger than ${readableSize(COMPANION_ATTACHMENT_MAX_BYTES)}.`;
+      continue;
+    }
+    if (!declaredCompanionAttachmentContentType({ type: file.type, name: file.name })) {
+      error = `${file.name} is not an image, PDF, CSV, text, Markdown, or JSON file.`;
+      continue;
+    }
+    files.push(file);
+  }
+  // A mixed batch still says what it refused: accepting the good files is not a reason to leave
+  // someone wondering where the others went.
+  return { files, error };
+}
+
+/** A stable identity for one draft, so a resend of the same message reuses its turn id. */
+function draftSignature(content: string, files: readonly File[]): string {
+  return [content, ...files.map((file) => `${file.name}:${file.size}:${file.lastModified}`)]
+    .join("\u0000");
 }
 
 /** A failed send keeps its text: restore the draft unless something newer was typed meanwhile. */
@@ -263,7 +339,7 @@ export function CompanionTranscript({
   lastReadOrdinal?: number | null;
   /** The newest ordinal the thread held when it was opened, so the divider cannot chase new arrivals. */
   openedThroughOrdinal?: number | null;
-  onSend: (content: string, clientMessageId: string) => Promise<boolean>;
+  onSend: (content: string, clientMessageId: string, files: readonly File[]) => Promise<boolean>;
   /** Replace the thread after a permission card is decided, without a full poll cycle. */
   onThread: (thread: Thread) => void;
 }) {
@@ -278,7 +354,18 @@ export function CompanionTranscript({
    * moment a send confirms and only reused for the identical draft, so two different messages are
    * still two turns.
    */
-  const pendingSendRef = useRef<{ content: string; clientMessageId: string } | null>(null);
+  const pendingSendRef = useRef<{ signature: string; clientMessageId: string } | null>(null);
+  /**
+   * Files staged for the next send. They are held here rather than in the composer because the
+   * composer belongs to assistant-ui and only carries text; a send takes both together, and a
+   * refused send hands both back.
+   */
+  const [attachments, setAttachments] = useState<readonly File[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const attachmentsRef = useRef<readonly File[]>([]);
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
   /**
    * The message this composer just sent, shown before the control plane answers. It already carries
    * the event id the control plane will store it under, so the saved entry replaces it rather than
@@ -335,15 +422,18 @@ export function CompanionTranscript({
     // programmatic one, so one message is never sent twice.
     if (!content || !canSend || inFlight.current) return;
     inFlight.current = true;
+    const files = attachmentsRef.current;
     // One submission, one id: whatever happens to the request, the control plane can only ever store
     // the turn it names once. A draft restored after a send that never confirmed keeps the id its
     // first attempt named, so retrying the same text resolves to the durable turn rather than a
-    // second copy of it; anything else is a new message and gets a fresh id.
+    // second copy of it; anything else is a new message and gets a fresh id. The files count as part
+    // of the message, so changing them makes it a different one.
+    const signature = draftSignature(content, files);
     const remembered = pendingSendRef.current;
-    const clientMessageId = remembered && remembered.content === content
+    const clientMessageId = remembered && remembered.signature === signature
       ? remembered.clientMessageId
       : crypto.randomUUID();
-    pendingSendRef.current = { content, clientMessageId };
+    pendingSendRef.current = { signature, clientMessageId };
     setOutgoing({
       event_id: companionMessageEventId(clientMessageId),
       ordinal: Number.MAX_SAFE_INTEGER,
@@ -354,20 +444,67 @@ export function CompanionTranscript({
       author_name: null,
       tool: null,
       decision: null,
+      // Named, not fetchable: the ids here are local and the bytes are still being uploaded, so the
+      // card shows the files as chips until the saved entry replaces this one.
+      attachments: files.flatMap((file, position) => {
+        const contentType = declaredCompanionAttachmentContentType({
+          type: file.type,
+          name: file.name,
+        });
+        // The declared type is only a guess until the server sniffs the bytes, but it is the same
+        // guess `acceptAttachments` already accepted, and the name is the one that will be stored --
+        // so the chip does not rewrite itself when the saved projection replaces this entry.
+        if (!contentType) return [];
+        return [{
+          id: `pending-${clientMessageId}-${position}`,
+          kind: "user_upload" as const,
+          content_type: contentType,
+          byte_size: file.size,
+          filename: sanitizeCompanionAttachmentFilename({
+            filename: file.name,
+            position,
+            contentType,
+          }),
+          position,
+        }];
+      }),
       created_at: new Date().toISOString(),
     });
     let saved = false;
     try {
-      saved = await onSend(content, clientMessageId);
-      if (saved) pendingSendRef.current = null;
-      else restoreDraft(runtimeRef.current, content);
+      saved = await onSend(content, clientMessageId, files);
+      if (saved) {
+        pendingSendRef.current = null;
+        // Remove exactly the files this send carried. An upload can take up to two minutes, and a
+        // file picked while it was in flight belongs to the next message, not to this one.
+        setAttachments((current) => current.filter((file) => !files.includes(file)));
+        setAttachmentError(null);
+      } else {
+        restoreDraft(runtimeRef.current, content);
+      }
     } finally {
       inFlight.current = false;
       // A bounded send ACK carries only the turn. Keep the accepted message visible until the
-      // thread projection contains its durable event id; a failed send still restores the draft.
+      // thread projection contains its durable event id; a failed send still restores the draft and
+      // the files it named, so nothing has to be picked again.
       if (!saved) setOutgoing(null);
     }
   }, [canSend, onSend, viewerId]);
+
+  const onAttach = useCallback((incoming: FileList | readonly File[] | null) => {
+    if (!incoming) return;
+    const accepted = acceptAttachments(
+      attachmentsRef.current,
+      Array.from(incoming as ArrayLike<File>),
+    );
+    setAttachments(accepted.files);
+    setAttachmentError(accepted.error);
+  }, []);
+
+  const onRemoveAttachment = useCallback((index: number) => {
+    setAttachments((current) => current.filter((_, position) => position !== index));
+    setAttachmentError(null);
+  }, []);
 
   const runtime = useExternalStoreRuntime({
     messages,
@@ -417,11 +554,13 @@ export function CompanionTranscript({
   const replying = replyExpected(thread);
   const loading = thread === null;
   const empty = thread !== null && messages.length === 0;
-  const hint = composerHint({
-    thread,
-    companionName: companion.name,
-    state: companion.runtime.state,
-  });
+  const hint = attachments.length > 0
+    ? `Add a message to send ${attachments.length === 1 ? "this file" : "these files"}.`
+    : composerHint({
+      thread,
+      companionName: companion.name,
+      state: companion.runtime.state,
+    });
 
   const chrome = useMemo<TranscriptChrome>(() => ({
     companionName: companion.name,
@@ -430,24 +569,34 @@ export function CompanionTranscript({
     empty,
     replying,
     hint,
+    attachments,
+    attachmentError,
+    onAttach,
+    onRemoveAttachment,
     onSendPress: sendOnPress,
     onSendClick: swallowClickAfterPress,
   }), [
+    attachmentError,
+    attachments,
     canSend,
     companion.name,
     empty,
     hint,
     loading,
+    onAttach,
+    onRemoveAttachment,
     replying,
     sendOnPress,
     swallowClickAfterPress,
   ]);
 
   const decisions = useMemo(() => ({ canAct: canSend, onDecide }), [canSend, onDecide]);
+  const attachmentContext = useMemo(() => ({ companionId: companion.id }), [companion.id]);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <DecisionActionsContext.Provider value={decisions}>
+        <AttachmentContext.Provider value={attachmentContext}>
         <MessagesContext.Provider value={messagesById}>
           <ChromeContext.Provider value={chrome}>
             <AssistantThread
@@ -461,6 +610,7 @@ export function CompanionTranscript({
             />
           </ChromeContext.Provider>
         </MessagesContext.Provider>
+        </AttachmentContext.Provider>
       </DecisionActionsContext.Provider>
     </AssistantRuntimeProvider>
   );
@@ -524,9 +674,93 @@ function Trailer() {
   );
 }
 
+/** The files staged for the next send, above the field they will be sent from. */
+function ComposerAttachments() {
+  const { attachments, attachmentError, onRemoveAttachment } = useChrome();
+  // Focus has to move after the removal commits, not during the click: at capacity the attach
+  // control is still disabled in the render the click happened in, and a disabled button cannot
+  // take focus -- which is exactly when a keyboard reader is most likely to be removing a file.
+  const restoreFocus = useRef(false);
+  useEffect(() => {
+    if (!restoreFocus.current) return;
+    restoreFocus.current = false;
+    document.querySelector<HTMLButtonElement>("[data-slot=composer-attach]")?.focus();
+  }, [attachments]);
+  if (attachments.length === 0 && !attachmentError) return null;
+  return (
+    <div className="mb-1.5">
+      {/* Announced: a file added by paste or drop has no other confirmation, and the paste handler
+          consumes the event so nothing else reports it. */}
+      {attachments.length > 0 && (
+        <ul
+          data-slot="composer-attachments"
+          aria-live="polite"
+          aria-label={`${attachments.length} file${attachments.length === 1 ? "" : "s"} attached`}
+          className="flex flex-wrap gap-1.5"
+        >
+          {attachments.map((file, index) => (
+            // The same file can legitimately be staged twice, so position is part of the identity.
+            <li
+              key={`${index}:${file.name}:${file.size}:${file.lastModified}`}
+              className="border-border bg-card flex min-w-0 items-center gap-1.5 rounded-lg border py-1 pe-1 ps-2 text-xs"
+            >
+              <PaperclipIcon aria-hidden="true" className="size-3.5 shrink-0" />
+              <span className="max-w-40 truncate" title={file.name}>{file.name}</span>
+              <span className="text-muted-foreground shrink-0 tabular-nums">
+                {readableSize(file.size)}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  // Removing the last chip unmounts this list, so hand focus to the control that
+                  // put the file here rather than dropping the reader onto the document body.
+                  restoreFocus.current = true;
+                  onRemoveAttachment(index);
+                }}
+                aria-label={`Remove ${file.name}`}
+                className="text-muted-foreground hover:text-foreground hover:bg-muted grid size-6 shrink-0 place-items-center rounded transition-colors"
+              >
+                <XIcon className="size-3.5" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {/* `alert` rather than `status`: this line mounts in response to the reader's own action, and
+          a politely-announced live region that did not exist a moment ago is usually not read. */}
+      {attachmentError && (
+        <p data-slot="composer-attachment-error" role="alert" className="text-destructive mt-1 text-xs">
+          {attachmentError}
+        </p>
+      )}
+    </div>
+  );
+}
+
 /** The composer, or — for a Viewer — the line that says why there is none. */
 function Footer() {
-  const { canSend, companionName, hint, onSendPress, onSendClick } = useChrome();
+  const {
+    attachments,
+    canSend,
+    companionName,
+    hint,
+    onAttach,
+    onSendPress,
+    onSendClick,
+  } = useChrome();
+  const fileInput = useRef<HTMLInputElement | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const atCapacity = attachments.length >= COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT;
+
+  // A screenshot pasted straight into the field is the shortest path from "look at this" to a sent
+  // file, so a paste that carries files is an attach rather than a no-op that drops them.
+  const onPaste = useCallback((event: ReactClipboardEvent<HTMLDivElement>) => {
+    const files = Array.from(event.clipboardData?.files ?? []);
+    if (files.length === 0) return;
+    event.preventDefault();
+    onAttach(files);
+  }, [onAttach]);
+
   if (!canSend) {
     return (
       <footer className="border-border text-muted-foreground shrink-0 border-t px-(--chat-gutter) py-3 text-xs">
@@ -536,12 +770,64 @@ function Footer() {
   }
   return (
     <ComposerPrimitive.Root className="border-border bg-background shrink-0 border-t px-(--chat-gutter) pt-2.5 pb-[max(14px,env(safe-area-inset-bottom,0px))]">
-      <div className="mx-auto w-full max-w-(--thread-max-width)">
+      <div
+        data-slot="composer-root"
+        className="mx-auto w-full max-w-(--thread-max-width)"
+        onPaste={onPaste}
+        onDragOver={(event) => {
+          if (!event.dataTransfer.types.includes("Files")) return;
+          event.preventDefault();
+          setDragging(true);
+        }}
+        // `dragleave` bubbles, so moving the pointer from the composer into the chips, the field,
+        // or a button would otherwise clear the highlight and the next `dragover` would set it
+        // again -- a blink exactly when it is meant to be a steady "this drop will be accepted".
+        onDragLeave={(event) => {
+          const next = event.relatedTarget;
+          if (next instanceof Node && event.currentTarget.contains(next)) return;
+          setDragging(false);
+        }}
+        onDrop={(event) => {
+          setDragging(false);
+          if (!event.dataTransfer.files.length) return;
+          event.preventDefault();
+          onAttach(event.dataTransfer.files);
+        }}
+      >
+        <ComposerAttachments />
         {/* The field and its send control are one object, so the composer reads as one place to type. */}
         <div
           data-slot="composer-field"
-          className="border-input focus-within:border-ring bg-card flex items-end gap-2 rounded-2xl border py-1.5 pe-1.5 ps-3"
+          className={cn(
+            "border-input focus-within:border-ring bg-card flex items-end gap-2 rounded-2xl border py-1.5 pe-1.5 ps-1.5",
+            dragging && "border-ring bg-muted",
+          )}
         >
+          <input
+            ref={fileInput}
+            type="file"
+            multiple
+            hidden
+            // The picker offers the same set the API accepts; the bytes still decide the stored type.
+            accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,text/csv,text/plain,text/markdown,application/json,.md,.markdown"
+            onChange={(event) => {
+              onAttach(event.target.files);
+              // Clearing the input is what lets the same file be picked twice in a row.
+              event.target.value = "";
+            }}
+          />
+          <button
+            type="button"
+            data-slot="composer-attach"
+            onClick={() => fileInput.current?.click()}
+            disabled={atCapacity}
+            aria-label={atCapacity
+              ? `A message can carry at most ${COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT} files`
+              : "Attach files"}
+            className="text-muted-foreground hover:text-foreground hover:bg-muted disabled:hover:bg-transparent pointer-coarse:size-11 grid size-8 shrink-0 place-items-center self-end rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <PaperclipIcon className="size-4" />
+          </button>
           <ComposerPrimitive.Input
             className="text-foreground max-h-42 min-h-8 flex-1 resize-none overscroll-contain bg-transparent py-1 outline-none"
             placeholder={`Message ${companionName}`}

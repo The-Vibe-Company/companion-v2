@@ -20,6 +20,7 @@ const contextMocks = vi.hoisted(() => ({
 
 const coreMocks = vi.hoisted(() => ({
   answerCompanionDecisionV2: vi.fn(),
+  readCompanionAttachmentV2: vi.fn(),
   cancelCompanionTurnV2: vi.fn(),
   createCompanionV2: vi.fn(),
   duplicateCompanionV2: vi.fn(),
@@ -37,6 +38,17 @@ const coreMocks = vi.hoisted(() => ({
 
 const desktopMocks = vi.hoisted(() => ({
   mintCompanionDesktop: vi.fn(),
+}));
+
+const storageMocks = vi.hoisted(() => ({
+  putSkillArchive: vi.fn(),
+  getSkillArchive: vi.fn(),
+  deleteStorageObject: vi.fn(),
+}));
+
+vi.mock("@companion/storage", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@companion/storage")>()),
+  ...storageMocks,
 }));
 
 vi.mock("./context", async (importOriginal) => ({
@@ -257,6 +269,16 @@ describe("Companions Runtime v2 API", () => {
     });
     coreMocks.cancelCompanionTurnV2.mockResolvedValue(cancelledTurn);
     coreMocks.answerCompanionDecisionV2.mockResolvedValue(undefined);
+    coreMocks.readCompanionAttachmentV2.mockResolvedValue({
+      storageKey: `companion-attachments/${ORG_ID}/${COMPANION_ID}/${MESSAGE_ID}/0-${"a".repeat(64)}`,
+      contentType: "image/png",
+      byteSize: 4,
+      filename: "chart.png",
+      kind: "user_upload",
+    });
+    storageMocks.putSkillArchive.mockResolvedValue(null);
+    storageMocks.deleteStorageObject.mockResolvedValue(undefined);
+    storageMocks.getSkillArchive.mockResolvedValue(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     desktopMocks.mintCompanionDesktop.mockResolvedValue({
       desktop_url: "https://desktop.example.test/session",
       provisioning: false,
@@ -376,6 +398,300 @@ describe("Companions Runtime v2 API", () => {
       clientSurface: "mobile_web",
     }));
     expect(coreMocks.readCompanionThreadV2).not.toHaveBeenCalled();
+  });
+
+  it("stores a multipart send's files under their content address before the turn", async () => {
+    const app = appWithRoutes();
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01]);
+    const form = new FormData();
+    form.set("content", "Look at this");
+    form.set("client_message_id", MESSAGE_ID);
+    form.append("file", new File([png], "Q3 chart.PNG", { type: "image/png" }));
+    form.append("file", new File(["a,b\n1,2\n"], "rows.csv", { type: "text/csv" }));
+
+    const response = await app.request(new Request(
+      `http://localhost/v1/companions/${COMPANION_ID}/messages`,
+      { method: "POST", body: form },
+    ));
+
+    expect(response.status).toBe(202);
+    expect(storageMocks.putSkillArchive).toHaveBeenCalledTimes(2);
+    const attachments = coreMocks.enqueueCompanionTurnV2.mock.calls[0]?.[0].attachments;
+    expect(attachments).toEqual([
+      expect.objectContaining({
+        content_type: "image/png",
+        filename: "Q3_chart.PNG",
+        byte_size: png.byteLength,
+        position: 0,
+      }),
+      expect.objectContaining({ content_type: "text/csv", filename: "rows.csv", position: 1 }),
+    ]);
+    // Content-addressed: the key ends in the digest of the exact bytes, so a retried send lands on
+    // the same object instead of orphaning one.
+    expect(attachments?.[0].storage_key).toBe(
+      `companion-attachments/${ORG_ID}/${COMPANION_ID}/${MESSAGE_ID}/0-${attachments[0].sha256}`,
+    );
+    expect(storageMocks.deleteStorageObject).not.toHaveBeenCalled();
+  });
+
+  it("refuses a file whose bytes are not the type it claims, before storing anything", async () => {
+    const app = appWithRoutes();
+    const form = new FormData();
+    form.set("content", "Look at this");
+    form.set("client_message_id", MESSAGE_ID);
+    form.append("file", new File(["not a png at all"], "fake.png", { type: "image/png" }));
+
+    const response = await app.request(new Request(
+      `http://localhost/v1/companions/${COMPANION_ID}/messages`,
+      { method: "POST", body: form },
+    ));
+
+    expect(response.status).toBe(400);
+    expect(storageMocks.putSkillArchive).not.toHaveBeenCalled();
+    expect(coreMocks.enqueueCompanionTurnV2).not.toHaveBeenCalled();
+  });
+
+  it("removes the objects it just stored when the turn does not persist", async () => {
+    const app = appWithRoutes();
+    coreMocks.enqueueCompanionTurnV2.mockRejectedValueOnce(new Error("queue is closed"));
+    const form = new FormData();
+    form.set("content", "Look at this");
+    form.set("client_message_id", MESSAGE_ID);
+    form.append("file", new File([new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d])], "a.pdf"));
+
+    const response = await app.request(new Request(
+      `http://localhost/v1/companions/${COMPANION_ID}/messages`,
+      { method: "POST", body: form },
+    ));
+
+    expect(response.status).toBe(400);
+    expect(storageMocks.deleteStorageObject).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a Viewer's multipart send before it reads or stores a single byte", async () => {
+    const app = appWithRoutes();
+    coreMocks.getCompanionV2.mockResolvedValue({ ...companion, access: "viewer" });
+    const form = new FormData();
+    form.set("content", "Look at this");
+    form.set("client_message_id", MESSAGE_ID);
+    form.append("file", new File([new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d])], "a.pdf"));
+
+    const response = await app.request(new Request(
+      `http://localhost/v1/companions/${COMPANION_ID}/messages`,
+      { method: "POST", body: form },
+    ));
+
+    expect(response.status).toBe(403);
+    expect(storageMocks.putSkillArchive).not.toHaveBeenCalled();
+    expect(coreMocks.enqueueCompanionTurnV2).not.toHaveBeenCalled();
+  });
+
+  it("never deletes an object it did not create when the replay conflicts", async () => {
+    const app = appWithRoutes();
+    // The key is the digest of the bytes, so a conflicting replay computes the very same key as the
+    // accepted turn that already owns it. Deleting it would destroy a live message's attachment.
+    storageMocks.putSkillArchive.mockRejectedValueOnce(
+      Object.assign(new Error("PreconditionFailed"), { name: "PreconditionFailed" }),
+    );
+    coreMocks.enqueueCompanionTurnV2.mockRejectedValueOnce(
+      Object.assign(new Error("client_message_id was reused with different message intent"), {
+        code: "23505",
+      }),
+    );
+    const form = new FormData();
+    form.set("content", "Look at this");
+    form.set("client_message_id", MESSAGE_ID);
+    form.append("file", new File([new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d])], "a.pdf"));
+
+    const response = await app.request(new Request(
+      `http://localhost/v1/companions/${COMPANION_ID}/messages`,
+      { method: "POST", body: form },
+    ));
+
+    expect(response.status).toBe(409);
+    expect(storageMocks.deleteStorageObject).not.toHaveBeenCalled();
+  });
+
+  it("leaves an accepted turn's objects alone even if the store ignores create-only", async () => {
+    const app = appWithRoutes();
+    // A self-hosted object store that ignores `If-None-Match: *` would let the PUT succeed and put
+    // the key in the cleanup list. A replay conflict must still never delete it.
+    storageMocks.putSkillArchive.mockResolvedValueOnce(null);
+    coreMocks.enqueueCompanionTurnV2.mockRejectedValueOnce(
+      Object.assign(new Error("client_message_id was reused with different message intent"), {
+        code: "23505",
+      }),
+    );
+    const form = new FormData();
+    form.set("content", "Look at this");
+    form.set("client_message_id", MESSAGE_ID);
+    form.append("file", new File([new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d])], "a.pdf"));
+
+    const response = await app.request(new Request(
+      `http://localhost/v1/companions/${COMPANION_ID}/messages`,
+      { method: "POST", body: form },
+    ));
+
+    expect(response.status).toBe(409);
+    expect(storageMocks.putSkillArchive).toHaveBeenCalled();
+    expect(storageMocks.deleteStorageObject).not.toHaveBeenCalled();
+  });
+
+  it("stores each attachment create-only so a retry cannot overwrite accepted bytes", async () => {
+    const app = appWithRoutes();
+    const form = new FormData();
+    form.set("content", "Look at this");
+    form.set("client_message_id", MESSAGE_ID);
+    form.append("file", new File([new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d])], "a.pdf"));
+
+    await app.request(new Request(
+      `http://localhost/v1/companions/${COMPANION_ID}/messages`,
+      { method: "POST", body: form },
+    ));
+
+    expect(storageMocks.putSkillArchive).toHaveBeenCalledWith(
+      expect.objectContaining({ preventOverwrite: true }),
+    );
+  });
+
+  it("decides Companion access before the body-reading limit middleware runs", async () => {
+    const app = appWithRoutes();
+    coreMocks.getCompanionV2.mockResolvedValue({ ...companion, access: "viewer" });
+    const form = new FormData();
+    form.set("content", "Look at this");
+    form.set("client_message_id", MESSAGE_ID);
+    form.append("file", new File([new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d])], "a.pdf"));
+
+    const response = await app.request(new Request(
+      `http://localhost/v1/companions/${COMPANION_ID}/messages`,
+      { method: "POST", body: form },
+    ));
+
+    // A chunked multipart request carries no Content-Length, so the body limit can only measure it
+    // by buffering the whole 64 MB first. Refusing in the middleware ahead of it is what keeps an
+    // unauthorized caller from costing this process that heap.
+    expect(response.status).toBe(403);
+    expect(coreMocks.getCompanionV2).toHaveBeenCalled();
+    expect(storageMocks.putSkillArchive).not.toHaveBeenCalled();
+    expect(coreMocks.enqueueCompanionTurnV2).not.toHaveBeenCalled();
+  });
+
+  it("refuses too many files and an empty file before storing anything", async () => {
+    const app = appWithRoutes();
+    const pdf = () => new File([new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d])], "a.pdf");
+
+    for (const files of [
+      [pdf(), pdf(), pdf(), pdf(), pdf(), pdf()],
+      [new File([], "empty.pdf")],
+    ]) {
+      const form = new FormData();
+      form.set("content", "Look at this");
+      form.set("client_message_id", MESSAGE_ID);
+      for (const file of files) form.append("file", file);
+      const response = await app.request(new Request(
+        `http://localhost/v1/companions/${COMPANION_ID}/messages`,
+        { method: "POST", body: form },
+      ));
+      expect(response.status).toBe(400);
+    }
+    expect(storageMocks.putSkillArchive).not.toHaveBeenCalled();
+    expect(coreMocks.enqueueCompanionTurnV2).not.toHaveBeenCalled();
+  });
+
+  it("refuses a file over the per-attachment ceiling without reading its bytes", async () => {
+    const app = appWithRoutes();
+    // A real body: the size the route checks is the one the multipart parser reports, so a stubbed
+    // `size` on a File does not survive the round trip and would not exercise this bound at all.
+    const form = new FormData();
+    form.set("content", "Look at this");
+    form.set("client_message_id", MESSAGE_ID);
+    form.append("file", new File([new Uint8Array(10 * 1024 * 1024 + 1)], "big.bin"));
+
+    const response = await app.request(new Request(
+      `http://localhost/v1/companions/${COMPANION_ID}/messages`,
+      { method: "POST", body: form },
+    ));
+
+    expect(response.status).toBe(400);
+    expect(storageMocks.putSkillArchive).not.toHaveBeenCalled();
+    expect(coreMocks.enqueueCompanionTurnV2).not.toHaveBeenCalled();
+  });
+
+  it("lets a Viewer read an attachment without contacting the Box", async () => {
+    const app = appWithRoutes();
+    coreMocks.getCompanionV2.mockResolvedValue({ ...companion, access: "viewer" });
+
+    const response = await app.request(
+      `http://localhost/v1/companions/${COMPANION_ID}/attachments/88888888-8888-4888-8888-888888888888`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(desktopMocks.mintCompanionDesktop).not.toHaveBeenCalled();
+  });
+
+  it("keeps the storage key out of the response when the object cannot be read", async () => {
+    const app = appWithRoutes();
+    storageMocks.getSkillArchive.mockRejectedValue(
+      new Error("object not found: companion-attachments/org/companion/message/0-digest"),
+    );
+
+    const response = await app.request(
+      `http://localhost/v1/companions/${COMPANION_ID}/attachments/88888888-8888-4888-8888-888888888888`,
+    );
+    const body = await response.text();
+
+    expect(response.status).toBe(404);
+    expect(body).not.toContain("companion-attachments/");
+  });
+
+  it("serves an attachment after re-authorizing, and never lets it be cached past that", async () => {
+    const app = appWithRoutes();
+    const attachmentId = "88888888-8888-4888-8888-888888888888";
+
+    const response = await app.request(
+      `http://localhost/v1/companions/${COMPANION_ID}/attachments/${attachmentId}`,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/png");
+    expect(response.headers.get("cache-control")).toBe("private, no-cache");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("content-disposition")).toBe('inline; filename="chart.png"');
+    expect(coreMocks.readCompanionAttachmentV2).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: COMPANION_ID,
+      attachmentId,
+    }));
+  });
+
+  it("offers a document as a download rather than rendering it in the thread", async () => {
+    const app = appWithRoutes();
+    coreMocks.readCompanionAttachmentV2.mockResolvedValue({
+      storageKey: "companion-attachments/org/companion/message/0-digest",
+      contentType: "application/pdf",
+      byteSize: 5,
+      filename: "report.pdf",
+      kind: "user_upload",
+    });
+
+    const response = await app.request(
+      `http://localhost/v1/companions/${COMPANION_ID}/attachments/88888888-8888-4888-8888-888888888888`,
+    );
+
+    expect(response.headers.get("content-disposition")).toBe('attachment; filename="report.pdf"');
+  });
+
+  it("makes an unreadable thread and an unknown attachment indistinguishable", async () => {
+    const app = appWithRoutes();
+    coreMocks.readCompanionAttachmentV2.mockRejectedValue(
+      Object.assign(new Error("Companion not found"), { code: "P0002" }),
+    );
+
+    const response = await app.request(
+      `http://localhost/v1/companions/${COMPANION_ID}/attachments/88888888-8888-4888-8888-888888888888`,
+    );
+
+    expect(response.status).toBe(404);
+    expect(storageMocks.getSkillArchive).not.toHaveBeenCalled();
   });
 
   it("delegates a repeated client_message_id unchanged and returns the same durable turn", async () => {

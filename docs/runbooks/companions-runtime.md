@@ -222,6 +222,27 @@ write/ACK outcome is ambiguous, warn that earlier external effects may have succ
 Retry/Cancel only. Retry creates a new attempt and recycles Pi; it does not restart the Box. Never
 manually mark an ambiguous attempt queued.
 
+### A turn's attachments failed
+
+Attachment codes are deliberately distinct, because they mean different things about what happened:
+
+- `model_image_input_unsupported` (action `switch_model`): the turn carried an image and Pi reported
+  a text-only model. Nothing reached the Box. Change the Companion's model and retry; do not attempt
+  to convert or strip the image on the member's behalf.
+- `attachment_staging_failed` (action `retry`): object storage or the Box file API refused the
+  staging writes until the bounded retries were exhausted. No prompt was dispatched, so this is a
+  proven negative — the queue is released and a retry rewrites the identical paths. Check object
+  storage reachability from the runtime before advising a retry loop.
+- `outbox_harvest_failed`: the turn itself succeeded and its reply is durable; only some of the
+  images Pi left behind could be read back. It is a runtime process log (`event`,
+  `companion_id`, `attempt_id`, `recovered`), not a persisted attempt error -- a succeeded attempt
+  carries no error -- so search the runtime logs rather than the turn row. Never reclassify this as a
+  failed turn. Look for a Box command-transport problem or an outbox file rewritten while being read.
+
+A member reporting a missing image on a succeeded turn is the third case, not the first two. The
+outbox is emptied before every dispatch, so an image that never appeared was never harvested rather
+than attributed to a later turn.
+
 ### Box lifecycle/provider outage
 
 The runtime retries only idempotent lifecycle calls on network, 429, and 5xx failures. For create,

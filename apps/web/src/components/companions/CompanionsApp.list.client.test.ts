@@ -695,6 +695,7 @@ describe("CompanionsApp conversation list", () => {
         author_name: null,
         tool: null,
         decision: null,
+        attachments: [],
         reasoning: null,
         created_at: "2026-08-14T09:05:00.000Z",
       }],
@@ -735,6 +736,7 @@ describe("CompanionsApp conversation list", () => {
     author_name: null,
     tool: null,
     decision: null,
+    attachments: [],
     reasoning: null,
     created_at: `2026-08-14T09:0${ordinal}:00.000Z`,
   });

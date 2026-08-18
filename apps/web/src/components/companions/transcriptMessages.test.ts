@@ -60,6 +60,7 @@ function entry(overrides: Partial<CompanionTranscriptEntry> = {}): CompanionTran
     author_name: null,
     tool: null,
     decision: null,
+    attachments: [],
     created_at: "2026-08-12T12:00:00.000Z",
     ...overrides,
   };
@@ -480,6 +481,55 @@ describe("holding message identity across polls", () => {
 
     expect(next[0]).toBe(first[0]);
     expect(next[1]).not.toBe(first[1]);
+  });
+
+  it("notices a message whose files were replaced by the stored ones", () => {
+    // A pending send names files with local `pending-` ids; the saved projection replaces them with
+    // fetchable ones. If identity did not move, the thread would keep showing the local chips.
+    const pending = entry({
+      role: "user",
+      content: "Look at this",
+      author_id: "user-1",
+      attachments: [{
+        id: "pending-1-0",
+        kind: "user_upload" as const,
+        content_type: "image/png" as const,
+        byte_size: 12,
+        filename: "chart.png",
+        position: 0,
+      }],
+    });
+    const { seen, update } = renderHook(useStableEntries, [pending]);
+    const first = seen[0]![0]!;
+
+    update([{
+      ...pending,
+      attachments: [{ ...pending.attachments[0]!, id: "7c1f0b52-8a2e-4c3d-9f10-0b1c2d3e4f50" }],
+    }]);
+
+    expect(seen.at(-1)![0]).not.toBe(first);
+  });
+
+  it("keeps a message whose files did not move", () => {
+    const sent = entry({
+      role: "user",
+      content: "Look at this",
+      author_id: "user-1",
+      attachments: [{
+        id: "7c1f0b52-8a2e-4c3d-9f10-0b1c2d3e4f50",
+        kind: "user_upload" as const,
+        content_type: "image/png" as const,
+        byte_size: 12,
+        filename: "chart.png",
+        position: 0,
+      }],
+    });
+    const { seen, update } = renderHook(useStableEntries, [sent]);
+    const first = seen[0]![0]!;
+
+    update([{ ...sent, attachments: [{ ...sent.attachments[0]! }] }]);
+
+    expect(seen.at(-1)![0]).toBe(first);
   });
 
   it("notices a reply that gained its reasoning", () => {

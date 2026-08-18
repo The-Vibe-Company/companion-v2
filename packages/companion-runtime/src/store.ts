@@ -13,9 +13,17 @@ import {
   type RuntimeCheckpointInput,
   type RuntimeClaim,
   type RuntimeObservationInput,
+  type RuntimeAttachment,
+  type RuntimeOutputAttachment,
   type RuntimeSettlementInput,
   type RuntimeWorkMaterial,
 } from "./types";
+import {
+  COMPANION_ATTACHMENT_FILENAME_PATTERN,
+  COMPANION_ATTACHMENT_MAX_BYTES,
+  COMPANION_ATTACHMENT_MIME_TYPES,
+  COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT,
+} from "@companion/contracts";
 import type { RuntimePiProjection } from "./piEvents";
 
 export const RUNTIME_LEASE_SECONDS = 30 as const;
@@ -44,7 +52,17 @@ export interface RuntimeStore {
     checkpoint: "agent_settled" | "process_exited";
     eventCursor: bigint;
     hasVisibleOutput: boolean;
+    /** True once this attempt's outbox harvest committed, so a takeover does not repeat it. */
+    outputsHarvested: boolean;
   } | null>;
+  /**
+   * Record what Pi left in its outbox, atomically with the durable fact that the harvest happened.
+   * Returns null when the fence is stale; the caller abandons rather than settling from stale state.
+   */
+  recordAttemptOutputs(fence: LeaseFence, input: {
+    attachments: RuntimeOutputAttachment[];
+    activityAt: Date;
+  }): Promise<{ recorded: number; hasVisibleOutput: boolean } | null>;
   projectEventBatch(fence: LeaseFence, input: {
     expectedSequence: bigint;
     piInvocationId: string;
@@ -167,6 +185,14 @@ function booleanResult(rows: Record<string, unknown>[], key: string): boolean {
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MESSAGE_EVENT_ID_PATTERN = /^msg:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const BOX_ID_PATTERN = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const ATTACHMENT_STORAGE_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9/._-]{0,511}$/;
+/**
+ * The decode boundary enforces the contract's own bounds rather than a copy of them: the runtime
+ * writes these names into Box paths and into the prompt that tells Pi where to find them, so the
+ * check has to be the same rule the API and the database CHECK apply, not a second one that can drift.
+ */
+const ATTACHMENT_CONTENT_TYPES = new Set<string>(COMPANION_ATTACHMENT_MIME_TYPES);
 
 function nullableText(row: Record<string, unknown>, key: string): string | null {
   const value = row[key];
@@ -189,6 +215,55 @@ function objectArray(row: Record<string, unknown>, key: string): Record<string, 
     throw new RuntimeStoreContractError();
   }
   return value as Record<string, unknown>[];
+}
+
+/**
+ * Decode the staging list. Every bound the database already enforces is re-checked here, because the
+ * runtime writes these names into Box paths and into the prompt that tells Pi where to find them:
+ * whatever crosses that boundary is validated on this side of it too, not merely trusted.
+ */
+function decodeAttachments(row: Record<string, unknown>): RuntimeAttachment[] {
+  const value = row.attachments;
+  if (!Array.isArray(value) || value.length > COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT) {
+    throw new RuntimeStoreContractError();
+  }
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new RuntimeStoreContractError();
+    }
+    const attachment = entry as Record<string, unknown>;
+    const id = nullableUuidText(attachment, "id");
+    const storageKey = nullableText(attachment, "storage_key");
+    const contentType = nullableText(attachment, "content_type");
+    const sha256 = nullableText(attachment, "sha256");
+    const filename = nullableText(attachment, "filename");
+    const byteSize = attachment.byte_size;
+    const position = attachment.position;
+    if (
+      id === null
+      || storageKey === null
+      || !ATTACHMENT_STORAGE_KEY_PATTERN.test(storageKey)
+      || contentType === null
+      || !ATTACHMENT_CONTENT_TYPES.has(contentType)
+      || sha256 === null
+      || !SHA256_PATTERN.test(sha256)
+      || filename === null
+      || !COMPANION_ATTACHMENT_FILENAME_PATTERN.test(filename)
+      || !Number.isSafeInteger(byteSize)
+      || (byteSize as number) < 1
+      || (byteSize as number) > COMPANION_ATTACHMENT_MAX_BYTES
+      || position !== index
+    ) throw new RuntimeStoreContractError();
+    return {
+      id,
+      storageKey,
+      contentType,
+      byteSize: byteSize as number,
+      sha256,
+      filename,
+      position: index,
+    };
+  });
 }
 
 function decodeMaterial(row: Record<string, unknown>): RuntimeWorkMaterial {
@@ -234,6 +309,7 @@ function decodeMaterial(row: Record<string, unknown>): RuntimeWorkMaterial {
     mcpMaterial: objectArray(row, "mcp_material"),
     modelInput: modelInput as RuntimeWorkMaterial["modelInput"],
     hasVisibleOutput: row.has_visible_output,
+    attachments: decodeAttachments(row),
   };
 }
 
@@ -241,17 +317,20 @@ function decodeAttemptTerminalProjection(row: Record<string, unknown>): {
   checkpoint: "agent_settled" | "process_exited";
   eventCursor: bigint;
   hasVisibleOutput: boolean;
+  outputsHarvested: boolean;
 } {
   const checkpoint = row.checkpoint;
   const eventCursor = row.event_cursor;
   const hasVisibleOutput = row.has_visible_output;
+  const outputsHarvested = row.outputs_harvested;
   if (
     (checkpoint !== "agent_settled" && checkpoint !== "process_exited")
     || typeof eventCursor !== "string"
     || !/^[1-9][0-9]*$/.test(eventCursor)
     || typeof hasVisibleOutput !== "boolean"
+    || typeof outputsHarvested !== "boolean"
   ) throw new RuntimeStoreContractError();
-  return { checkpoint, eventCursor: BigInt(eventCursor), hasVisibleOutput };
+  return { checkpoint, eventCursor: BigInt(eventCursor), hasVisibleOutput, outputsHarvested };
 }
 
 function duplicateCleanup(row: Record<string, unknown>): DuplicateCleanup {
@@ -497,7 +576,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
       const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
         SELECT turn_id, attempt_id, message_event_id, prompt_text, decision_request_kind,
                decision_response_payload, provider_material, skill_material, mcp_material,
-               model_input, has_visible_output, credential_snapshot_matches
+               model_input, has_visible_output, attachments, credential_snapshot_matches
         FROM public.companion_runtime_get_material(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
@@ -512,10 +591,11 @@ export class PostgresRuntimeStore implements RuntimeStore {
     checkpoint: "agent_settled" | "process_exited";
     eventCursor: bigint;
     hasVisibleOutput: boolean;
+    outputsHarvested: boolean;
   } | null> {
     return await mapped(async () => {
       const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
-        SELECT checkpoint, event_cursor::text AS event_cursor, has_visible_output
+        SELECT checkpoint, event_cursor::text AS event_cursor, has_visible_output, outputs_harvested
         FROM public.companion_runtime_get_attempt_terminal_projection(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid
@@ -524,6 +604,40 @@ export class PostgresRuntimeStore implements RuntimeStore {
       if (rows.length === 0) return null;
       return decodeAttemptTerminalProjection(one(rows, "attempt terminal projection"));
     });
+  }
+
+  async recordAttemptOutputs(fence: LeaseFence, input: {
+    attachments: RuntimeOutputAttachment[];
+    activityAt: Date;
+  }): Promise<{ recorded: number; hasVisibleOutput: boolean } | null> {
+    return await mapped(async () => {
+      // The driver serializes an array parameter to JSON for a jsonb column, exactly as the event
+      // projector's batch does. Pre-stringifying it here would arrive as a JSON *string* instead.
+      const attachments = input.attachments.map((attachment, position) => ({
+        storage_key: attachment.storageKey,
+        content_type: attachment.contentType,
+        byte_size: attachment.byteSize,
+        sha256: attachment.sha256,
+        filename: attachment.filename,
+        position,
+      }));
+      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+        SELECT recorded, has_visible_output
+        FROM public.companion_runtime_record_attempt_outputs(
+          $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
+          $6::text, $7::public.companion_runtime_work_kind, $8::uuid,
+          $9::jsonb, $10::timestamptz
+        )
+      `, [...fenceParameters(fence), attachments, input.activityAt]);
+      if (rows.length === 0) return null;
+      const row = one(rows, "attempt outputs");
+      if (
+        !Number.isSafeInteger(row.recorded)
+        || (row.recorded as number) < 0
+        || typeof row.has_visible_output !== "boolean"
+      ) throw new RuntimeStoreContractError();
+      return { recorded: row.recorded as number, hasVisibleOutput: row.has_visible_output };
+    }, true);
   }
 
   async projectEventBatch(fence: LeaseFence, input: {

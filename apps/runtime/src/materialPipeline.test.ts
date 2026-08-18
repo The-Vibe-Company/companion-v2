@@ -73,6 +73,7 @@ function workMaterial(): RuntimeWorkMaterial {
     }],
     modelInput: null,
     hasVisibleOutput: false,
+    attachments: [],
   };
 }
 
@@ -122,6 +123,8 @@ describe("runtime material provider and Box stager", () => {
       },
       runtime: () => ({ stageExistingBox }) as unknown as CompanionBoxRuntimeV2,
       loadSkillArchive: vi.fn(),
+      loadAttachment: vi.fn(),
+      storeAttachment: vi.fn(),
       refreshOauth: async () => oauth("new-token"),
       uuid: () => nextGeneration,
       now: () => Date.parse("2027-01-01T00:00:00.000Z"),
@@ -190,6 +193,8 @@ describe("runtime material provider and Box stager", () => {
       },
       runtime: () => ({ stageExistingBox }) as unknown as CompanionBoxRuntimeV2,
       loadSkillArchive: vi.fn(),
+      loadAttachment: vi.fn(),
+      storeAttachment: vi.fn(),
       refreshOauth: async () => oauth("new-token"),
       uuid: () => nextGeneration,
       now: () => Date.parse("2027-01-01T00:00:00.000Z"),
@@ -225,6 +230,8 @@ describe("runtime material provider and Box stager", () => {
       },
       runtime: () => ({ stageExistingBox: vi.fn() }) as unknown as CompanionBoxRuntimeV2,
       loadSkillArchive: vi.fn(),
+      loadAttachment: vi.fn(),
+      storeAttachment: vi.fn(),
       refreshOauth,
       uuid: () => nextGeneration,
       now: () => Date.parse("2027-01-01T00:00:00.000Z"),
@@ -319,6 +326,8 @@ describe("runtime material provider and Box stager", () => {
       },
       runtime: () => ({ stageExistingBox }) as unknown as CompanionBoxRuntimeV2,
       loadSkillArchive,
+      loadAttachment: vi.fn(),
+      storeAttachment: vi.fn(),
     });
 
     await expect(pipeline.resourceStager.stageExistingBox({

@@ -14,8 +14,9 @@ import {
   validatePiJournalRead,
   type PiBrokerCounters,
 } from "./piEvents";
-import type { RuntimeEngineDependencies } from "./ports";
+import type { RuntimeEngineDependencies, StagedRuntimeAttachment } from "./ports";
 import type { RuntimeVisibleTextRedactor } from "./projectionRedaction";
+import { isCompanionAttachmentImage } from "@companion/contracts";
 import { retryIdempotentLifecycle } from "./retry";
 import {
   RuntimeStoreIndeterminateError,
@@ -23,9 +24,44 @@ import {
 import type {
   AttemptRuntimeClaim,
   ModelInputCapability,
+  RuntimeAttachment,
   RuntimeAuthorization,
+  RuntimeOutputAttachment,
   RuntimeWorkMaterial,
 } from "./types";
+
+/**
+ * How long the whole outbox harvest may take. It is generous enough for ten images over a slow Box
+ * command transport and short enough that a turn's reply is never held behind a stuck read.
+ */
+const OUTBOX_HARVEST_BUDGET_MS = 90_000;
+
+/**
+ * How much of the turn's remaining authority the harvest leaves for recording its results and
+ * settling. Spending the last of it on images would settle a finished turn `interrupted`.
+ */
+const OUTBOX_HARVEST_SETTLE_RESERVE_MS = 15_000;
+
+/** A turn carrying an image requires a model that can actually see it. */
+export function attachmentsIncludeImage(attachments: readonly RuntimeAttachment[]): boolean {
+  return attachments.some((attachment) => isCompanionAttachmentImage(attachment.contentType));
+}
+
+/**
+ * Tell Pi where the member's files are, in one deterministic block appended to their message.
+ *
+ * It is composed rather than stored: the transcript keeps what the member wrote, and the 16 KB
+ * message cap stays exactly what it was. Every value interpolated here is already reduced to a
+ * charset with no quoting, escaping, or newline in it, so the suffix cannot be steered by a filename.
+ */
+export function attachmentPromptSuffix(staged: readonly StagedRuntimeAttachment[]): string {
+  if (staged.length === 0) return "";
+  const lines = staged.map((attachment, index) =>
+    `${index + 1}. ${attachment.path} (${attachment.contentType}, ${attachment.byteSize} bytes)`);
+  const plural = staged.length === 1 ? "file" : "files";
+  return `\n\n--- The user attached ${staged.length} ${plural}, staged read-only at:\n`
+    + `${lines.join("\n")}\n`;
+}
 
 interface AttemptContext {
   claim: AttemptRuntimeClaim;
@@ -239,6 +275,12 @@ async function finishDurableTerminal(
       action: "restart_pi",
     });
   }
+  // Pi exited rather than settling, so it produced no reply and left nothing worth reading back.
+  // The outbox is emptied before the next dispatch either way.
+  let hasVisibleOutput = terminal.hasVisibleOutput;
+  if (terminal.checkpoint === "agent_settled" && !terminal.outputsHarvested) {
+    hasVisibleOutput = await harvestOutputs(context, hasVisibleOutput);
+  }
   // The terminal projection contains no credential material. Revalidate immediately before the
   // broker effect, then ACK the cursor even if credentials rotated after Pi produced the result.
   await ackEvents(context, terminal.eventCursor);
@@ -255,7 +297,86 @@ async function finishDurableTerminal(
       },
     };
   }
-  return terminal.hasVisibleOutput ? runtimeSucceeded : explicitNoResponse();
+  return hasVisibleOutput ? runtimeSucceeded : explicitNoResponse();
+}
+
+/**
+ * Move what Pi left in its outbox into the transcript, before the turn settles.
+ *
+ * A failure here is a degradation and never a failed turn: by this point Pi has settled and any
+ * reply it produced is already durable, so retracting the turn over an unreadable image would be
+ * worse than losing the image. Whatever completed inside the budget is recorded, the harvest is
+ * marked done so a takeover does not repeat it, and the shortfall is logged under a stable code
+ * rather than persisted — a succeeded attempt carries no error by construction.
+ */
+async function harvestOutputs(
+  context: AttemptContext,
+  hasVisibleOutput: boolean,
+): Promise<boolean> {
+  const runtime = requiredRuntime(context);
+  const auth = authorization(context);
+  // Clamp the harvest to the authority that still exists. Pi has settled and its reply is durable,
+  // but the executor must still reauthorize to record and settle, and a deadline that expires mid
+  // harvest is denied as `interrupted` -- which would block the ordered queue on a turn that
+  // actually finished. Harvesting inside the remaining budget keeps the settle reachable.
+  const budgetEnd = context.deps.clock.now().getTime() + OUTBOX_HARVEST_BUDGET_MS;
+  const authorityEnd = Math.min(
+    auth.inactivityDeadlineAt?.getTime() ?? Number.POSITIVE_INFINITY,
+    auth.absoluteDeadlineAt?.getTime() ?? Number.POSITIVE_INFINITY,
+  );
+  // Leave room for the record and the settle themselves; a harvest that consumes the last
+  // millisecond of authority has bought an image at the cost of the turn.
+  const deadlineAt = new Date(Number.isFinite(authorityEnd)
+    ? Math.min(budgetEnd, authorityEnd - OUTBOX_HARVEST_SETTLE_RESERVE_MS)
+    : budgetEnd);
+  if (deadlineAt.getTime() <= context.deps.clock.now().getTime()) {
+    // No authority left to spend on images. The reply is already durable; settle it.
+    return hasVisibleOutput;
+  }
+  let harvested: { attachments: RuntimeOutputAttachment[]; incomplete: boolean };
+  try {
+    harvested = await context.session.external(async (signal) =>
+      await context.deps.outboxHarvester.harvestOutbox({
+        orgId: context.claim.orgId,
+        companionId: context.claim.companionId,
+        boxId: runtime.boxId,
+        attemptId: context.claim.workId,
+        deadlineAt,
+        signal,
+      }));
+  } catch (error) {
+    if (mustAbandonRuntimeExecution(error)) throw error;
+    harvested = { attachments: [], incomplete: true };
+  }
+  if (harvested.incomplete) {
+    context.deps.log?.warn({
+      ts: context.deps.clock.now().toISOString(),
+      event: "outbox_harvest_failed",
+      companion_id: context.claim.companionId,
+      attempt_id: context.claim.workId,
+      recovered: harvested.attachments.length,
+    });
+  }
+
+  // The record and the durable "already harvested" fact are one transaction, so a takeover either
+  // sees the whole harvest or none of it.
+  const recorded = await context.session.fencedMutation(async () =>
+    await context.deps.store.recordAttemptOutputs(context.session.fence, {
+      attachments: harvested.attachments,
+      activityAt: context.deps.clock.now(),
+    }));
+
+  // Emptying the outbox is maintenance, not correctness: the pre-dispatch clear is what guarantees
+  // one attempt's leftovers never reach the next turn, so a failure here is deliberately silent.
+  if (harvested.attachments.length > 0) {
+    try {
+      await context.session.external(async (signal) =>
+        await context.deps.outboxHarvester.clearOutbox({ boxId: runtime.boxId, signal }));
+    } catch (error) {
+      if (mustAbandonRuntimeExecution(error)) throw error;
+    }
+  }
+  return recorded.hasVisibleOutput || hasVisibleOutput;
 }
 
 async function consumeEvents(
@@ -367,7 +488,10 @@ async function consumeEvents(
       };
     }
     if (classified.settled) {
-      return hasVisibleOutput ? runtimeSucceeded : explicitNoResponse();
+      // Loop instead of settling here. The next reauthorize reads `agent_settled` from the row this
+      // projection just wrote and goes through `finishDurableTerminal`, so the live path and a
+      // takeover run the identical harvest-then-settle sequence rather than two similar ones.
+      continue;
     }
     if (classified.needsInput) return { kind: "release" };
   }
@@ -431,6 +555,12 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
         const state = await brokerState(context);
         const runtime = requiredRuntime(context);
         requireModelInputCapability(state.modelInput, "text");
+        // A turn carrying an image is refused here, against Pi's live report of what the selected
+        // model accepts, and before a single byte reaches the Box. The member gets `switch_model`
+        // instead of a reply that silently ignored what they sent.
+        if (attachmentsIncludeImage(workMaterial.attachments)) {
+          requireModelInputCapability(state.modelInput, "image");
+        }
         if (
           state.invocationId !== runtime.piInvocationId
           || state.activeAttemptId !== null
@@ -442,6 +572,9 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
             action: "restart_pi",
           });
         }
+        await clearOutbox(context);
+        const promptText = workMaterial.promptText!
+          + attachmentPromptSuffix(await stageAttachments(context, workMaterial));
         commandId = context.deps.idFactory.uuid();
         await context.session.checkpoint({
           nextCheckpoint: "dispatch_write_intent",
@@ -456,7 +589,7 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
               boxId: runtime.boxId,
               commandId: commandId!,
               attemptId: context.claim.workId,
-              message: workMaterial.promptText!,
+              message: promptText,
               signal,
             });
           });
@@ -532,6 +665,81 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           action: "none",
         });
     }
+  }
+}
+
+/**
+ * Land this turn's uploaded files on the Box, before the dispatch write intent exists.
+ *
+ * Everything about the ordering is deliberate. Staging happens after Pi is confirmed idle and before
+ * any dispatch intent is checkpointed, so an exhausted retry here is a proven negative: no prompt was
+ * written, the turn settles `failed` with a retryable code rather than `interrupted`, and the queue
+ * is released instead of blocked. A retry rewrites the identical paths, so replaying is free of
+ * external side effects to reason about.
+ */
+async function stageAttachments(
+  context: AttemptContext,
+  material: RuntimeWorkMaterial,
+): Promise<StagedRuntimeAttachment[]> {
+  if (material.attachments.length === 0) return [];
+  const auth = authorization(context);
+  try {
+    return await retryIdempotentLifecycle({
+      call: "stage_attachments",
+      clock: context.deps.clock,
+      jitter: context.deps.jitter,
+      signal: context.session.signal,
+      deadlineAt: auth.absoluteDeadlineAt ?? undefined,
+      operation: async () => await context.session.external(async (signal) =>
+        await context.deps.attachmentStager.stageAttachments({
+          orgId: context.claim.orgId,
+          companionId: context.claim.companionId,
+          boxId: requiredRuntime(context).boxId,
+          messageEventId: material.messageEventId!,
+          material,
+          authorization: authorization(context),
+          signal,
+        })),
+    });
+  } catch (error) {
+    if (mustAbandonRuntimeExecution(error)) throw error;
+    throw new RuntimeInvariantError({
+      code: "attachment_staging_failed",
+      message: "The files attached to this message could not be staged on the Companion's Box.",
+      action: "retry",
+    });
+  }
+}
+
+/**
+ * Empty Pi's outbox before this attempt's prompt is written.
+ *
+ * This is what makes a harvest attributable: whatever is in the outbox after Pi settles was produced
+ * by this turn, not left over from a previous one that failed, was cancelled, or was retried. It runs
+ * as an idempotent lifecycle call and, when exhausted, fails the turn the same way staging does —
+ * before any dispatch intent exists, so the negative is proven and the queue is released.
+ */
+async function clearOutbox(context: AttemptContext): Promise<void> {
+  try {
+    await retryIdempotentLifecycle({
+      call: "clear_outbox",
+      clock: context.deps.clock,
+      jitter: context.deps.jitter,
+      signal: context.session.signal,
+      deadlineAt: authorization(context).absoluteDeadlineAt ?? undefined,
+      operation: async () => await context.session.external(async (signal) =>
+        await context.deps.outboxHarvester.clearOutbox({
+          boxId: requiredRuntime(context).boxId,
+          signal,
+        })),
+    });
+  } catch (error) {
+    if (mustAbandonRuntimeExecution(error)) throw error;
+    throw new RuntimeInvariantError({
+      code: "outbox_clear_failed",
+      message: "The Companion's Box could not clear its outbox before this turn.",
+      action: "retry",
+    });
   }
 }
 

@@ -218,7 +218,7 @@ export function CompanionThread({
   /** The last ordinal the thread held when it was opened, so the divider stays where reading did. */
   openedThroughOrdinal?: number | null;
   onBack: () => void;
-  onSend: (content: string, clientMessageId: string) => Promise<boolean>;
+  onSend: (content: string, clientMessageId: string, files: readonly File[]) => Promise<boolean>;
   /** Null for a Viewer: read-only settings remain available from the workspace list, not the thread. */
   onSettings: (() => void) | null;
   onThread: (thread: Thread) => void;

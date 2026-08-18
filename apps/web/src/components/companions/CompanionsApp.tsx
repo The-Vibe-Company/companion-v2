@@ -23,7 +23,12 @@ import type {
   CompanionTranscriptEntry,
   CompanionTurn,
 } from "@companion/contracts";
-import { COMPANION_PROVIDER_CATALOG, companionMessageEventId } from "@companion/contracts";
+import {
+  COMPANION_PROVIDER_CATALOG,
+  companionMessageEventId,
+  declaredCompanionAttachmentContentType,
+  sanitizeCompanionAttachmentFilename,
+} from "@companion/contracts";
 import type { OrgVM } from "@/lib/types";
 import { ApiFetchError } from "@/lib/apiClient";
 import {
@@ -115,10 +120,33 @@ function mergeCompanion(previous: Companion, next: Companion): Companion {
 }
 
 /** Keep a committed send visible while the PostgreSQL thread poll catches up with its bounded ACK. */
+/** What the accepted send carried, so its chips survive the swap to the durable entry. */
+function acceptedAttachments(
+  files: readonly File[],
+  clientMessageId: string,
+): CompanionTranscriptEntry["attachments"] {
+  return files.flatMap((file, position) => {
+    const contentType = declaredCompanionAttachmentContentType({
+      type: file.type,
+      name: file.name,
+    });
+    if (!contentType) return [];
+    return [{
+      id: `pending-${clientMessageId}-${position}`,
+      kind: "user_upload" as const,
+      content_type: contentType,
+      byte_size: file.size,
+      filename: sanitizeCompanionAttachmentFilename({ filename: file.name, position, contentType }),
+      position,
+    }];
+  });
+}
+
 function projectAcceptedMessage(input: {
   thread: Thread;
   turn: CompanionTurn;
   content: string;
+  attachments?: CompanionTranscriptEntry["attachments"];
 }): Thread {
   const eventId = companionMessageEventId(input.turn.client_message_id);
   const alreadyProjected = input.thread.entries.some((entry) => entry.event_id === eventId);
@@ -134,6 +162,9 @@ function projectAcceptedMessage(input: {
         author_name: null,
         tool: null,
         decision: null,
+        // The 202 carries the turn, not the stored files, so this stands in with what the send
+        // carried. Without it the just-sent message loses its chips until the next poll.
+        attachments: input.attachments ?? [],
         created_at: input.turn.created_at,
       } satisfies CompanionTranscriptEntry];
 
@@ -951,7 +982,11 @@ export function CompanionsApp({
   }, [openedId, openedPending, refreshCompanion, sending, threadWorkPending]);
 
   /** Resolves false when the message never reached the control plane, so the composer keeps its text. */
-  const onSend = async (content: string, clientMessageId: string): Promise<boolean> => {
+  const onSend = async (
+    content: string,
+    clientMessageId: string,
+    files: readonly File[] = [],
+  ): Promise<boolean> => {
     if (!openedId) return false;
     const companionId = openedId;
     setSendingCompanionId(companionId);
@@ -964,6 +999,7 @@ export function CompanionsApp({
         companionId,
         content,
         clientMessageId,
+        files,
       );
       if (openedIdRef.current === companionId && accepted?.turn.companion_id === companionId) {
         // The POST is newer than every thread snapshot that started before its 202. Retire those
@@ -972,7 +1008,12 @@ export function CompanionsApp({
         // claim a fresh request id even while the retired read is still unwinding.
         threadRequestRef.current += 1;
         setThread((current) => current?.companion_id === companionId
-          ? projectAcceptedMessage({ thread: current, turn: accepted.turn, content })
+          ? projectAcceptedMessage({
+            thread: current,
+            turn: accepted.turn,
+            content,
+            attachments: acceptedAttachments(files, clientMessageId),
+          })
           : current);
       }
       return true;

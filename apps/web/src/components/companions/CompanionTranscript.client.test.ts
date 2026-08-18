@@ -29,7 +29,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const decide = vi.fn(async (): Promise<Thread> => nextThread);
-vi.mock("../../lib/companions", () => ({
+vi.mock("../../lib/companions", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/companions")>()),
   decideCompanionDecision: (...args: unknown[]) => decide(...(args as [])),
 }));
 
@@ -106,6 +107,7 @@ function entry(overrides: Partial<CompanionTranscriptEntry>): CompanionTranscrip
     author_name: null,
     tool: null,
     decision: null,
+    attachments: [],
     created_at: "2026-08-12T12:01:00.000Z",
     ...overrides,
   };
@@ -146,7 +148,11 @@ const roots: Root[] = [];
 /** Every thread the component handed back, so the decided-card refresh can be observed. */
 let threads: Thread[] = [];
 
-function mount(value: Thread) {
+function mount(
+  value: Thread,
+  onSend: (content: string, id: string, files: readonly File[]) => Promise<boolean>
+    = async () => true,
+) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -157,11 +163,30 @@ function mount(value: Thread) {
       thread: value,
       orgId: "org-1",
       busy: false,
-      onSend: async () => true,
+      onSend,
       onThread: (next: Thread) => threads.push(next),
     }));
   });
   return container;
+}
+
+/** One attachment as the thread projection carries it. */
+function attachment(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "7c1f0b52-8a2e-4c3d-9f10-0b1c2d3e4f50",
+    kind: "user_upload" as const,
+    content_type: "image/png" as const,
+    byte_size: 2048,
+    filename: "chart.png",
+    position: 0,
+    ...overrides,
+  };
+}
+
+function fileList(files: File[]): FileList {
+  return Object.assign(files, {
+    item: (index: number) => files[index] ?? null,
+  }) as unknown as FileList;
 }
 
 function buttonNamed(container: HTMLElement, name: string): HTMLButtonElement | undefined {
@@ -481,5 +506,222 @@ describe("a permission card in the thread", () => {
     expect(container.textContent).toContain("Waiting for an Owner or Editor");
     expect(buttonNamed(container, "Allow")).toBeUndefined();
     expect(buttonNamed(container, "Deny")).toBeUndefined();
+  });
+});
+
+describe("Companion thread attachments", () => {
+  it("shows an uploaded image inline and a document as a download, both in the message", () => {
+    const container = mount(thread([
+      entry({
+        role: "user",
+        event_id: "msg:1",
+        content: "Look at these",
+        author_id: "user-1",
+        attachments: [
+          attachment(),
+          attachment({
+            id: "7c1f0b52-8a2e-4c3d-9f10-0b1c2d3e4f51",
+            content_type: "application/pdf",
+            filename: "report.pdf",
+            byte_size: 4096,
+            position: 1,
+          }),
+        ],
+      }),
+    ]));
+
+    const image = container.querySelector("img");
+    // The bytes come from a route that re-authorizes on every request, not from a signed URL.
+    expect(image?.getAttribute("src"))
+      .toBe(`/v1/companions/${companionId}/attachments/7c1f0b52-8a2e-4c3d-9f10-0b1c2d3e4f50`);
+    expect(image?.getAttribute("alt")).toBe("chart.png");
+    const download = [...container.querySelectorAll("a[download]")]
+      .find((link) => link.getAttribute("download") === "report.pdf");
+    expect(download?.getAttribute("href"))
+      .toBe(`/v1/companions/${companionId}/attachments/7c1f0b52-8a2e-4c3d-9f10-0b1c2d3e4f51`);
+    expect(container.textContent).toContain("report.pdf");
+  });
+
+  it("renders an image Pi handed back inside the reply it belongs to", () => {
+    const container = mount(thread([
+      entry({
+        role: "assistant",
+        event_id: "v2:attempt:outputs",
+        content: "",
+        attachments: [attachment({ kind: "pi_output", filename: "plot.png" })],
+      }),
+    ]));
+
+    expect(container.querySelector("img")?.getAttribute("alt")).toBe("plot.png");
+  });
+
+  it("stages picked files as removable chips and refuses the ones it cannot send", () => {
+    const container = mount(thread([]));
+    const picker = container.querySelector("input[type=file]") as HTMLInputElement;
+
+    act(() => {
+      Object.defineProperty(picker, "files", {
+        configurable: true,
+        value: fileList([
+          new File(["png"], "chart.png", { type: "image/png" }),
+          new File(["zip"], "archive.zip", { type: "application/zip" }),
+        ]),
+      });
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    const chips = container.querySelector("[data-slot=composer-attachments]");
+    expect(chips?.textContent).toContain("chart.png");
+    expect(chips?.textContent ?? "").not.toContain("archive.zip");
+    expect(container.querySelector("[data-slot=composer-attachment-error]")?.textContent ?? "")
+      .toContain("archive.zip");
+
+    const remove = [...container.querySelectorAll("button")]
+      .find((button) => button.getAttribute("aria-label") === "Remove chart.png");
+    click(remove!);
+    expect(container.querySelector("[data-slot=composer-attachments]")).toBeNull();
+  });
+
+  it("says why Send is still disabled while only files are staged", () => {
+    const container = mount(thread([]));
+    const picker = container.querySelector("input[type=file]") as HTMLInputElement;
+
+    act(() => {
+      Object.defineProperty(picker, "files", {
+        configurable: true,
+        value: fileList([new File(["png"], "chart.png", { type: "image/png" })]),
+      });
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    // A message must carry text, so a disabled Send needs to be an explained one.
+    expect(container.querySelector("[data-slot=composer-hint]")?.textContent)
+      .toContain("Add a message to send this file.");
+  });
+
+  it("keeps the attach control reachable and out of the tab order for the raw input", () => {
+    const container = mount(thread([]));
+    const picker = container.querySelector("input[type=file]") as HTMLInputElement;
+
+    // A visually hidden but focusable input is a tab stop that opens an OS dialog on Enter.
+    expect(picker.hidden).toBe(true);
+    expect(container.querySelector("[data-slot=composer-attach]")).not.toBeNull();
+  });
+
+  it("keeps focus on the attach control after the last chip is removed", () => {
+    const container = mount(thread([]));
+    const picker = container.querySelector("input[type=file]") as HTMLInputElement;
+    act(() => {
+      Object.defineProperty(picker, "files", {
+        configurable: true,
+        value: fileList([new File(["png"], "chart.png", { type: "image/png" })]),
+      });
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    const remove = [...container.querySelectorAll("button")]
+      .find((button) => button.getAttribute("aria-label") === "Remove chart.png");
+    click(remove!);
+
+    // Removing the last chip unmounts the list; focus must not fall to the document body.
+    expect(document.activeElement).toBe(container.querySelector("[data-slot=composer-attach]"));
+  });
+
+  it("restores focus to the attach control even when the composer was at capacity", () => {
+    const container = mount(thread([]));
+    const picker = container.querySelector("input[type=file]") as HTMLInputElement;
+    const image = (name: string) => new File(["png"], name, { type: "image/png" });
+    act(() => {
+      Object.defineProperty(picker, "files", {
+        configurable: true,
+        value: fileList([image("a.png"), image("b.png"), image("c.png"), image("d.png"), image("e.png")]),
+      });
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    // At capacity the attach control is disabled, so focusing it during the click would silently
+    // fail and drop a keyboard reader onto the document body.
+    const attach = container.querySelector<HTMLButtonElement>("[data-slot=composer-attach]")!;
+    expect(attach.disabled).toBe(true);
+
+    const remove = [...container.querySelectorAll("button")]
+      .find((button) => button.getAttribute("aria-label") === "Remove a.png");
+    click(remove!);
+
+    expect(attach.disabled).toBe(false);
+    expect(document.activeElement).toBe(attach);
+  });
+
+  it("announces a refused file rather than only showing it", () => {
+    const container = mount(thread([]));
+    const picker = container.querySelector("input[type=file]") as HTMLInputElement;
+    act(() => {
+      Object.defineProperty(picker, "files", {
+        configurable: true,
+        value: fileList([new File(["zip"], "archive.zip", { type: "application/zip" })]),
+      });
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    expect(container.querySelector("[data-slot=composer-attachment-error]")?.getAttribute("role"))
+      .toBe("alert");
+  });
+
+  it("names a file that has no stored bytes yet instead of rendering a broken image", () => {
+    const container = mount(thread([
+      entry({
+        role: "user",
+        event_id: "msg:pending",
+        content: "Look at this",
+        author_id: "user-1",
+        attachments: [attachment({ id: "pending-1-0" })],
+      }),
+    ]));
+
+    // A synthetic id is not a uuid, so the read route would 404 and the member would see the
+    // browser's broken-image glyph on their own message until the next poll.
+    expect(container.querySelector("[data-slot=companion-attachments] img")).toBeNull();
+    expect(container.querySelector("[data-slot=companion-attachments]")?.textContent)
+      .toContain("chart.png");
+  });
+
+  it("refuses a file larger than one message may carry", () => {
+    const container = mount(thread([]));
+    const picker = container.querySelector("input[type=file]") as HTMLInputElement;
+    const oversized = new File(["x"], "huge.png", { type: "image/png" });
+    Object.defineProperty(oversized, "size", { value: 11 * 1024 * 1024 });
+
+    act(() => {
+      Object.defineProperty(picker, "files", { configurable: true, value: fileList([oversized]) });
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    expect(container.querySelector("[data-slot=composer-attachments]")).toBeNull();
+    expect(container.querySelector("[data-slot=composer-attachment-error]")?.textContent ?? "")
+      .toContain("huge.png");
+  });
+
+  it("gives the files back to the composer when the send is refused", async () => {
+    const container = mount(thread([]), async () => false);
+    const picker = container.querySelector("input[type=file]") as HTMLInputElement;
+    act(() => {
+      Object.defineProperty(picker, "files", {
+        configurable: true,
+        value: fileList([new File(["png"], "chart.png", { type: "image/png" })]),
+      });
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    const field = container.querySelector("textarea") as HTMLTextAreaElement;
+    await act(async () => {
+      field.value = "Look at this";
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+
+    // A refused send must not cost the member the files they picked.
+    expect(container.querySelector("[data-slot=composer-attachments]")?.textContent)
+      .toContain("chart.png");
   });
 });

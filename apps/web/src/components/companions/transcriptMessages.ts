@@ -1,5 +1,6 @@
 import { useMemo, useRef } from "react";
 import type {
+  CompanionAttachment,
   CompanionDecision,
   CompanionToolRun,
   CompanionTranscriptEntry,
@@ -262,6 +263,19 @@ function partsOf(entry: CompanionTranscriptEntry): MessagePart[] {
 }
 
 /**
+ * The files one grouped message carries, in transcript order.
+ *
+ * They are deliberately not message parts. assistant-ui's user role accepts only text, image, audio,
+ * file, and data parts, and the two shapes that could carry a file want its bytes inline — which is
+ * exactly what a per-request authorized read route exists to avoid. So the thread renders them from
+ * the entries themselves, in the frame around the message, which also keeps one component
+ * responsible for both directions.
+ */
+export function attachmentsOf(group: TranscriptMessage): readonly CompanionAttachment[] {
+  return group.entries.flatMap((entry) => entry.attachments);
+}
+
+/**
  * One grouped message as assistant-ui reads it. The empty-text fallback is there for a `system`
  * note, which the runtime refuses unless it carries exactly one text part; an assistant message
  * drops empty text again on its way in, and a turn with nothing to show cannot be projected anyway.
@@ -311,6 +325,11 @@ export function useStableEntries(
         && kept.decision?.status === entry.decision?.status
         && kept.decision?.answer === entry.decision?.answer
         && kept.decision?.decided_by_id === entry.decision?.decided_by_id
+        // Attachments are written once with the entry and never move afterwards, so identity by
+        // count and id is total: an entry that gains a file is a different entry.
+        && kept.attachments.length === entry.attachments.length
+        && kept.attachments.every((attachment, index) =>
+          attachment.id === entry.attachments[index]?.id)
         && kept.created_at === entry.created_at;
       const value = unchanged ? kept : entry;
       next.set(entry.event_id, value);

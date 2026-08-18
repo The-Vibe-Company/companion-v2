@@ -35,8 +35,10 @@ hosted Companions, and their grants do not authorize Companion lifecycle or chat
 ## Product boundary
 
 Companions deliberately stop short of the broader Grok Bot vision. This version has no generic
-Projects, multi-Bot teams or handoffs, routines, schedules, proactive jobs, voice, thread
-attachments, or arbitrary computer-provider marketplace. It does not add a generic model platform,
+Projects, multi-Bot teams or handoffs, routines, schedules, proactive jobs, voice, file library,
+artifact surface, or arbitrary computer-provider marketplace. A message may carry files and a turn
+may hand images back, because showing a teammate something is part of talking to them; nothing
+about that becomes a store of files with a life of its own. It does not add a generic model platform,
 agent builder, container catalog, deployment manager, or harness selection UI.
 
 Pi is the only harness, box.ascii.dev is the only Box provider, one Companion is always one Box plus

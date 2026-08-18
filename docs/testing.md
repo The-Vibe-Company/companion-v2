@@ -132,8 +132,8 @@ APP_URL=http://127.0.0.1:<port> pnpm browser:smoke
 
 Changed Companion paths need focused manual `agent-browser` checks. Verify truthful status,
 PostgreSQL-only Viewer reads, queue count, input-needed cards, interrupted Retry/Cancel copy, explicit
-Full Box confirmation, and no excluded attachment, voice, routine, schedule, multi-Bot, harness, or
-deployment chrome.
+Full Box confirmation, attachment chips and inline images inside the message they belong to, and no
+excluded voice, routine, schedule, multi-Bot, harness, deployment, or file-library chrome.
 
 ## Change verification
 

@@ -8,6 +8,8 @@ describe("createRuntimeKernel", () => {
       box: {} as never,
       pi: {} as never,
       resourceStager: {} as never,
+      attachmentStager: {} as never,
+      outboxHarvester: {} as never,
       executorId: "executor-test",
       claimsEnabled: true,
     })).toThrow("Runtime claims require a credential-aware projection redactor");

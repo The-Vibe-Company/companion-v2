@@ -328,6 +328,28 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
       sendJson(response, 200, { ok: true, type: "box-sim.scenario", boxId, scenario });
       return;
     }
+    const outboxMatch = /^\/boxes\/([^/]+)\/outbox$/.exec(pathname);
+    if (request.method === "PUT" && outboxMatch) {
+      const boxId = decodePathSegment(outboxMatch[1]!);
+      const files = Array.isArray(body.files) ? body.files : [];
+      const seeded = simulator.seedOutbox(
+        boxId,
+        files as { name: string; base64: string }[],
+      );
+      sendJson(response, 200, { ok: true, type: "box-sim.outbox.seeded", boxId, seeded });
+      return;
+    }
+    const outboxTransportMatch = /^\/boxes\/([^/]+)\/outbox-transport$/.exec(pathname);
+    if (request.method === "PUT" && outboxTransportMatch) {
+      const boxId = decodePathSegment(outboxTransportMatch[1]!);
+      const mangle = body.mangleChunkBytes;
+      simulator.setOutboxTransportMangling(
+        boxId,
+        typeof mangle === "number" ? mangle : null,
+      );
+      sendJson(response, 200, { ok: true, type: "box-sim.outbox.transport", boxId });
+      return;
+    }
     const deletionMatch = /^\/deletion-operations\/([^/]+)$/.exec(pathname);
     if (request.method === "PUT" && deletionMatch) {
       const allowed = new Set(["pending", "processing", "blocked", "completed"]);

@@ -149,11 +149,16 @@ available, and explicit interruption when prompt delivery is ambiguous.
 
 1. authenticate and authorize Owner/Editor;
 2. validate `client_message_id` and input;
-3. insert or resolve the durable transcript message and turn in one transaction;
-4. return the turn and `202`.
+3. for a multipart send, store each attachment under its content address before the transaction;
+4. insert or resolve the durable transcript message, its attachment rows, and the turn in one
+   transaction;
+5. return the turn and `202`.
 
-It never creates a Box, observes Pi, opens a runtime lease, or waits for delivery. The expected HTTP
-acknowledgement is under one second outside load; runtime should claim new work within five seconds.
+It never creates a Box, observes Pi, opens a runtime lease, or waits for delivery. For a text send
+the expected HTTP acknowledgement is under one second outside load. A send carrying files is bounded
+by the upload instead: the request stores up to five files of at most 10 MB each before it answers,
+so its acknowledgement is the transfer time plus the same sub-second durable write. Runtime should
+claim new work within five seconds either way.
 
 Sending is the sole normal wake path. There is no Wake button and no first-keystroke prewarm. A cold
 send moves through durable start/dispatch checkpoints and finishes or fails explicitly within three
@@ -280,6 +285,78 @@ visible and expurgated. “Companion is replying…” is true only after positi
 `needs_input` or a terminal state; queued, starting, dispatching, interrupted, cancelled, or settled
 turns never show it.
 
+## Attachments
+
+A message may carry files, and a turn may hand images back. Both directions are bounded, both are
+stored in object storage and referenced from PostgreSQL, and neither is readable without passing the
+same Companion ACL the thread itself passes.
+
+**Upload.** A multipart send carries at most five files of at most 10 MB each: images (PNG, JPEG,
+WebP, GIF) and documents (PDF, CSV, plain text, Markdown, JSON). The stored content type is resolved
+from the bytes — magic numbers for images and PDF, well-formed UTF-8 for the text formats — never
+from the declared MIME type or the extension, so a disguised file is refused before anything is
+stored. The filename is reduced once, at upload, to `[A-Za-z0-9][A-Za-z0-9._-]{0,79}`, and that
+stored name is what every later path, prompt line, and download header uses.
+
+Objects are content-addressed:
+
+```text
+companion-attachments/{org}/{companion}/{client-message-id}/{position}-{sha256}
+companion-attachments/{org}/{companion}/outputs/{attempt-id}/{index}-{sha256}
+```
+
+A retried send therefore re-uploads identical bytes to identical keys, so the `PUT` is idempotent and
+leaves no orphan. The durable replay compares `(position, content_type, byte_size, filename, sha256)`
+and ignores row ids and keys: identical bytes are the same intent, and a different file at the same
+position raises the existing `client_message_id was reused with different message intent` conflict. A
+send whose transaction does not commit deletes exactly the keys that request wrote.
+
+**Staging.** Before dispatch, and after Pi is confirmed idle, runtime downloads each file, verifies
+its digest against what the control plane accepted, and writes it read-only to
+`~/attachments/<client-message-id>/<position>-<filename>`. A turn carrying an image first requires
+`image` in Pi's live `get_state.model.input`; a text-only model fails the turn with `switch_model`
+before a single byte reaches the Box. Staging is retried as an idempotent lifecycle call and, when
+those retries are exhausted, fails the turn with `attachment_staging_failed` and action `retry` —
+never `interrupted`, because no dispatch intent exists yet and the queue must be released. A retry
+rewrites the same paths.
+
+The prompt Pi receives is the member's message plus a deterministic suffix naming each staged path,
+its content type, and its size. The suffix is composed at dispatch and never stored, so the
+transcript keeps what the member wrote and the 16 KB message cap is unchanged.
+
+**Outputs.** `~/outbox` and one constant instruction paragraph telling Pi to drop an image there are
+added within layout 14 rather than as a new layout version: the runtime creates and empties the
+directory before every dispatch, so a Box provisioned before this change gains it on its next turn
+without a forced restage, and the attempt state machine's layout gate is unchanged.
+
+After `agent_settled`, and before the turn settles, runtime harvests at most ten images of at most
+10 MB each, records them under a new assistant entry `v2:<attempt-id>:outputs`, and marks the durable
+`outputs_harvested_at` fact on the attempt in the same transaction. It is a column rather than a new
+checkpoint so that the attempt transition matrix, the `succeeded` terminal proof, and the executor's
+takeover equality check all stay exactly as they were; a takeover reads the fact through the same
+terminal projection it already reads and skips a harvest that already committed. That entry makes a
+turn that produced only an image a visible output rather than `empty_response`.
+
+A harvest failure is a degradation, not a turn failure: a reply already projected durably never
+becomes a failure. The shortfall is emitted as the stable `outbox_harvest_failed` process log rather
+than persisted on the attempt, because a succeeded attempt carries no error by construction. The
+outbox is emptied before dispatch as well as after harvest, so one attempt's leftovers are never
+attributed to the next turn.
+
+Emptying it is the one part of this that is not attachment-specific. It runs on **every** dispatch,
+including turns with no attachments and Companions nobody has ever sent a file to, because
+attribution has to hold before anyone knows whether this turn will produce an image. So
+`outbox_clear_failed` — action `retry`, raised before dispatch like `attachment_staging_failed`, and
+therefore also a proven negative that releases the queue — is the code to expect when a Box's disk is
+full, read-only, or otherwise unwritable, and it will present as *every* send failing rather than as
+an attachment problem. Triage it as Box disk health, not as an attachment bug.
+
+**Reads and purge.** `GET /v1/companions/:id/attachments/:attachmentId` re-authorizes on every
+request and answers `private, no-cache` with `nosniff`; a Viewer may read and download attachments,
+and no read path ever contacts Box. Removing an attachment row — by deleting the entry, the
+Companion, or the tenant — journals its storage key into the durable object-deletion outbox inside
+the same transaction, so the bytes are either scheduled for removal or the delete did not happen.
+
 ## Model capability and errors
 
 The Pi model catalog's `input` field is preserved through normalization. A model without image input
@@ -390,7 +467,8 @@ secret payloads.
 
 Acceptance bounds:
 
-- API send acknowledgement under one second outside load;
+- API send acknowledgement under one second outside load for a text send, and transfer time plus
+  that same bound for a send carrying files;
 - runtime claim under five seconds;
 - cold start success or explicit failure under three minutes;
 - replica takeover under 45 seconds;
@@ -404,7 +482,9 @@ Production cutover, kill-switch, purge, incident, rollback, and canary procedure
 ## Explicit exclusions
 
 Runtime v2 adds no generic Projects/skill runs, multi-Bot team or handoff, group Bot chat, routine,
-schedule, proactive task, voice, attachment/artifact, alternate harness, alternate Box provider,
-pool, generic model/provider marketplace, container catalog, deployment platform, or AI app builder.
+schedule, proactive task, voice, file library, file versioning, artifact surface outside a thread,
+alternate harness, alternate Box provider, pool, generic model/provider marketplace, container
+catalog, deployment platform, or AI app builder. Bounded chat attachments are in scope and are
+specified above.
 It adds no SSE, Box push bearer, detached API executor, automatic Full Box repair, automatic replay
 after ambiguous dispatch, or global learned capability table.

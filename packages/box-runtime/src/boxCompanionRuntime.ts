@@ -1,5 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
+import {
+  COMPANION_ATTACHMENT_FILENAME_PATTERN,
+  COMPANION_ATTACHMENT_MAX_BYTES,
+  COMPANION_OUTPUT_ATTACHMENT_MAX_COUNT,
+} from "@companion/contracts";
 import type {
   CompanionClientSurface,
   CompanionDaemonState,
@@ -241,6 +246,159 @@ export interface CompanionDesktopMint {
 /** Transient environment value inherited by Pi for one labeled MCP account. */
 export type McpRuntimeCredential = CompanionMcpCredential;
 
+/** One attachment's bytes plus the already-sanitized name they are stored under. */
+export interface CompanionAttachmentFile {
+  position: number;
+  filename: string;
+  contentType: string;
+  bytes: Buffer;
+}
+
+/** Where one staged attachment landed, as the prompt suffix will name it to Pi. */
+export interface CompanionStagedAttachment {
+  position: number;
+  filename: string;
+  contentType: string;
+  byteSize: number;
+  path: string;
+}
+
+/**
+ * Where a turn's uploaded files are staged. One directory per message keeps a retry rewriting the
+ * same paths and keeps one turn's files from being mistaken for another's.
+ */
+export const COMPANION_ATTACHMENT_DIRECTORY = "attachments";
+
+/** Where Pi drops an image it wants the thread to show. Emptied before every dispatch. */
+export const COMPANION_OUTBOX_DIRECTORY = "outbox";
+
+/**
+ * The paragraph appended to a Companion's staged instructions, telling Pi how to show something.
+ *
+ * It is constant and composed rather than stored, so it applies to every Companion without an owner
+ * having to write it into a persona and without it consuming any of the persona's 280 characters.
+ */
+export const COMPANION_OUTBOX_INSTRUCTIONS = [
+  "Showing images: to show the user an image, save it as a PNG, JPEG, WebP, or GIF file in",
+  "~/outbox. Everything left there when you finish a turn is attached to your reply in the chat,",
+  `then removed. Files larger than ${COMPANION_ATTACHMENT_MAX_BYTES / (1024 * 1024)} MB,`,
+  `non-image files, and anything beyond the first ${COMPANION_OUTPUT_ATTACHMENT_MAX_COUNT} files`,
+  "are ignored. ~/outbox is not storage: use it only for what you want the user to see now.",
+].join(" ");
+
+/**
+ * How much of one outbox file travels per command. The command transport carries a base64 body, and
+ * a smaller chunk is a cheaper retry when one arrives mangled; a larger one is fewer round trips
+ * inside the harvest's wall-clock budget. 512 KiB is roughly 700 KB of base64 per response.
+ */
+const OUTBOX_CHUNK_BYTES = 512 * 1024;
+
+/** Sentinels that bracket a harvest response, so a shell banner cannot be read as file content. */
+const OUTBOX_MANIFEST_BEGIN = "companion-outbox-manifest-begin";
+const OUTBOX_MANIFEST_END = "companion-outbox-manifest-end";
+const OUTBOX_CHUNK_BEGIN = "companion-outbox-chunk-begin";
+const OUTBOX_CHUNK_END = "companion-outbox-chunk-end";
+
+const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/** Bytes a base64 body occupies for a payload of `bytes`, padding included. */
+function base64Length(bytes: number): number {
+  return Math.ceil(bytes / 3) * 4;
+}
+
+/** How many times one chunk may be re-read before its file is abandoned. Never the whole turn. */
+const OUTBOX_CHUNK_ATTEMPTS = 3;
+
+/** The shortest command budget worth issuing; below it the caller's deadline check abandons the read. */
+const OUTBOX_COMMAND_FLOOR_SECONDS = 5;
+
+/**
+ * A command timeout bounded by whatever is left of the harvest budget. Without it the budget is
+ * advisory: an attempt starting a millisecond inside the deadline still runs its full timeout, so a
+ * hung manifest plus one hung chunk hold a settled turn — and its "replying…" state — minutes past
+ * the bound the caller computed from the remaining lease authority.
+ */
+function outboxCommandSeconds(deadlineAt: Date | undefined, ceiling: number): number {
+  if (!deadlineAt) return ceiling;
+  const remaining = Math.ceil((deadlineAt.getTime() - Date.now()) / 1000);
+  return Math.max(OUTBOX_COMMAND_FLOOR_SECONDS, Math.min(ceiling, remaining));
+}
+
+/**
+ * The body between two sentinels, or null when either is missing or the response is out of order.
+ * Anything outside the sentinels is a shell banner, a warning, or truncation, and is never content.
+ */
+function sliceBetweenSentinels(stdout: string, begin: string, end: string): string | null {
+  return sliceBetweenSentinelLines(stdout, begin, end)?.join("") ?? null;
+}
+
+/**
+ * Parse one outbox manifest. Every line is validated before it is believed: an unparseable line, an
+ * implausible size, or a name that could escape the outbox is dropped rather than transferred.
+ */
+export function parseOutboxManifest(stdout: string): CompanionOutboxEntry[] {
+  const body = sliceBetweenSentinelLines(stdout, OUTBOX_MANIFEST_BEGIN, OUTBOX_MANIFEST_END);
+  if (body === null) {
+    throw new BoxRuntimeProviderError("Box returned an unreadable Pi outbox manifest", 502);
+  }
+  const entries: CompanionOutboxEntry[] = [];
+  for (const line of body) {
+    const match = /^([0-9a-f]{64}) ([0-9]{1,10}) ([A-Za-z0-9+/]+={0,2})$/.exec(line.trim());
+    if (!match) continue;
+    const byteSize = Number(match[2]);
+    // A zero-byte file is reported rather than dropped here: dropping it silently would leave a
+    // failed or truncated write invisible to both the member and the operator. The harvester
+    // filters it and counts it as a shortfall.
+    if (!Number.isSafeInteger(byteSize) || byteSize < 0) continue;
+    const name = Buffer.from(match[3]!, "base64").toString("utf8");
+    // A name is a single path segment on the Box and nothing else. This is defence in depth: the
+    // read command decodes the same base64 rather than interpolating the name, so nothing here can
+    // reach a shell either way.
+    if (!name || name.length > 255 || name.includes("/") || name === "." || name === "..") continue;
+    entries.push({ name, encodedName: match[3]!, byteSize, sha256: match[1]! });
+  }
+  return entries;
+}
+
+/**
+ * The staged instructions file: the owner's persona, then the constant paragraph that tells Pi how
+ * to show an image. Composing it here rather than storing it keeps the paragraph out of every
+ * persona, out of the 280-character persona budget, and identical for every Companion.
+ */
+export function composedInstructions(persona?: string | null): string {
+  const written = persona?.trim() ?? "";
+  return written
+    ? `${written}\n\n${COMPANION_OUTBOX_INSTRUCTIONS}\n`
+    : `${COMPANION_OUTBOX_INSTRUCTIONS}\n`;
+}
+
+/** The manifest's lines between its sentinels, kept separate rather than joined. */
+function sliceBetweenSentinelLines(stdout: string, begin: string, end: string): string[] | null {
+  const lines = stdout.split(/\r?\n/);
+  const first = lines.indexOf(begin);
+  const last = lines.lastIndexOf(end);
+  if (first < 0 || last <= first) return null;
+  return lines.slice(first + 1, last);
+}
+
+/** One file Pi left in its outbox, as the manifest describes it before any of it is transferred. */
+export interface CompanionOutboxEntry {
+  /** The file's own name on the Box, decoded from the manifest. Never interpolated into a command. */
+  name: string;
+  /** Base64 of that name; this is what a read command carries, so no shell quoting is required. */
+  encodedName: string;
+  byteSize: number;
+  sha256: string;
+}
+
+export interface CompanionOutboxFile {
+  entry: CompanionOutboxEntry;
+  bytes: Buffer;
+}
+
+const ATTACHMENT_MESSAGE_ID_PATTERN
+  = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
 export interface CompanionRuntimeObservation {
   boxId: string;
   runtimeState: CompanionRuntimeState;
@@ -327,6 +485,35 @@ export interface CompanionBoxRuntimeV2 {
     state: "idle" | "running" | "stopped" | "error";
     invocationId: string | null;
   }>;
+  /**
+   * Land one turn's uploaded files read-only under `~/attachments/<message>/`, replacing whatever a
+   * previous attempt of the same turn left there. It never starts Pi, dispatches, or touches
+   * anything else on the disk, and it is idempotent so a retry rewrites the same paths.
+   */
+  stageAttachments(input: {
+    boxId: string;
+    messageId: string;
+    files: CompanionAttachmentFile[];
+    signal?: AbortSignal;
+  }): Promise<CompanionStagedAttachment[]>;
+  /** Empty Pi's outbox and make sure it exists, so a harvest can only ever find this turn's files. */
+  clearOutbox(input: { boxId: string; signal?: AbortSignal }): Promise<void>;
+  /** Describe what Pi left behind, cheaply and completely, before anything is transferred. */
+  listOutbox(input: {
+    boxId: string;
+    deadlineAt?: Date;
+    signal?: AbortSignal;
+  }): Promise<CompanionOutboxEntry[]>;
+  /**
+   * Read one outbox file back whole. The bytes are verified against the digest the manifest reported,
+   * so a file rewritten mid-read or a chunk mangled in transit is detected rather than stored.
+   */
+  readOutboxFile(input: {
+    boxId: string;
+    entry: CompanionOutboxEntry;
+    deadlineAt?: Date;
+    signal?: AbortSignal;
+  }): Promise<CompanionOutboxFile>;
   /** Dispatch one durable attempt and preserve positive, proven-negative, and ambiguous outcomes. */
   dispatchPrompt(input: {
     boxId: string;
@@ -1463,6 +1650,30 @@ exit 0`,
       await this.#putFile(boxId, path, content);
       return;
     }
+    await this.#writeFileParts(boxId, path, payload);
+  }
+
+  /**
+   * Land raw bytes on the Box disk. A member's attachment is arbitrary binary — a PNG, a PDF — so it
+   * cannot travel as a UTF-8 body at all; the file API's base64 encoding is what makes the transfer
+   * lossless. Oversized payloads take the same numbered-parts path as a text write, because each
+   * part is decoded to raw bytes on the Box and concatenating raw parts reproduces the file exactly.
+   */
+  async #writeBinaryFile(boxId: string, path: string, payload: Buffer): Promise<void> {
+    // The provider's limit applies to the request body, and this body is base64 -- four bytes per
+    // three. Comparing the raw length would send a 4 MB attachment as a 5.6 MB body and be refused,
+    // so the encoded size is what decides between one PUT and numbered parts.
+    if (base64Length(payload.byteLength) < BOX_FILE_WRITE_LIMIT_BYTES) {
+      await this.#putFile(boxId, path, payload.toString("base64"), {
+        encoding: "base64",
+        timeoutMs: BOX_FILE_PART_TIMEOUT_MS,
+      });
+      return;
+    }
+    await this.#writeFileParts(boxId, path, payload);
+  }
+
+  async #writeFileParts(boxId: string, path: string, payload: Buffer): Promise<void> {
     const parts: string[] = [];
     for (let offset = 0; offset < payload.byteLength; offset += BOX_FILE_PART_BYTES) {
       const part = `${path}.part${parts.length}`;
@@ -1653,7 +1864,7 @@ exit 0`,
     await this.#writeFile(
       input.boxId,
       ".companion/runtime/state/instructions.txt",
-      input.instructions?.trim() ? `${input.instructions.trim()}\n` : "",
+      composedInstructions(input.instructions),
     );
     await this.#writeFile(
       input.boxId,
@@ -1894,6 +2105,238 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     } finally {
       this.#stagingSignal = undefined;
     }
+  }
+
+  async stageAttachments(input: {
+    boxId: string;
+    messageId: string;
+    files: CompanionAttachmentFile[];
+    signal?: AbortSignal;
+  }): Promise<CompanionStagedAttachment[]> {
+    // The identifiers below are interpolated into a shell command and a Pi-visible path. They are
+    // already constrained by a contract, a database CHECK, and the runtime's row decoder; asserting
+    // them once more here is what makes this method safe to call from anywhere, not just from the
+    // one caller that happens to have validated them.
+    if (!ATTACHMENT_MESSAGE_ID_PATTERN.test(input.messageId)) {
+      throw new BoxRuntimeProviderError("Companion attachment message id is invalid", 400);
+    }
+    if (input.files.some((file) =>
+      !COMPANION_ATTACHMENT_FILENAME_PATTERN.test(file.filename)
+      || !Number.isSafeInteger(file.position)
+      || file.position < 0
+      || file.position > 9)) {
+      throw new BoxRuntimeProviderError("Companion attachment name or position is invalid", 400);
+    }
+
+    this.#stagingSignal = input.signal;
+    try {
+      const directory = `${COMPANION_ATTACHMENT_DIRECTORY}/${input.messageId}`;
+      // The whole staging root is replaced, not just this message's directory. Staged files are
+      // only needed for the turn that named them in its prompt, so keeping them would grow a
+      // persistent disk by up to 50 MB per attachment-bearing send with nothing to reclaim it.
+      // Replacing rather than adding is also what makes a retry idempotent: a second attempt of the
+      // same turn stages exactly the files this call was given and nothing a previous one left.
+      const prepared = await this.#command(
+        input.boxId,
+        `set -e; cd "$HOME"; rm -rf ${shellQuote(COMPANION_ATTACHMENT_DIRECTORY)};`
+        + ` mkdir -p ${shellQuote(directory)}`,
+        60,
+        input.signal,
+      );
+      if (!prepared.success) {
+        throw new BoxRuntimeProviderError(
+          `Box could not prepare the attachment directory${commandFailureDetail(prepared)}`,
+          502,
+        );
+      }
+
+      const staged: CompanionStagedAttachment[] = [];
+      for (const file of input.files) {
+        const relative = `${directory}/${file.position}-${file.filename}`;
+        await this.#writeBinaryFile(input.boxId, relative, file.bytes);
+        staged.push({
+          position: file.position,
+          filename: file.filename,
+          contentType: file.contentType,
+          byteSize: file.bytes.byteLength,
+          path: `~/${relative}`,
+        });
+      }
+      if (staged.length > 0) {
+        // The files are read-only; the directory deliberately is not. Clearing the write bit on the
+        // directory too would mean the next `rm -rf` above could not unlink its own entries on a
+        // non-root Box user, so every re-stage of the same message -- every retry, every takeover
+        // that re-enters `starting` -- would fail with EACCES and the message would become
+        // permanently unsendable.
+        const locked = await this.#command(
+          input.boxId,
+          `set -e; cd "$HOME"; find ${shellQuote(directory)} -type f -exec chmod a-w {} +`,
+          60,
+          input.signal,
+        );
+        if (!locked.success) {
+          throw new BoxRuntimeProviderError(
+            `Box could not make the staged attachments read-only${commandFailureDetail(locked)}`,
+            502,
+          );
+        }
+      }
+      return staged;
+    } finally {
+      this.#stagingSignal = undefined;
+    }
+  }
+
+  async clearOutbox(input: { boxId: string; signal?: AbortSignal }): Promise<void> {
+    const cleared = await this.#command(
+      input.boxId,
+      `set -e; dir="$HOME/${COMPANION_OUTBOX_DIRECTORY}"; mkdir -p "$dir";`
+      + ` find "$dir" -mindepth 1 -delete`,
+      60,
+      input.signal,
+    );
+    if (!cleared.success) {
+      throw new BoxRuntimeProviderError(
+        `Box could not clear the Pi outbox${commandFailureDetail(cleared)}`,
+        502,
+      );
+    }
+  }
+
+  async listOutbox(input: {
+    boxId: string;
+    deadlineAt?: Date;
+    signal?: AbortSignal;
+  }): Promise<CompanionOutboxEntry[]> {
+    // One line per file: digest, size, and the name base64-encoded. Encoding the name is what lets a
+    // later read command carry it without any of Pi's chosen characters reaching a shell.
+    const listed = await this.#command(
+      input.boxId,
+      `dir="$HOME/${COMPANION_OUTBOX_DIRECTORY}"
+`
+      + `printf '%s\n' ${shellQuote(OUTBOX_MANIFEST_BEGIN)}
+`
+      + `if [ -d "$dir" ]; then
+`
+      + `  find "$dir" -mindepth 1 -maxdepth 1 -type f -print0 2>/dev/null | sort -z | while IFS= read -r -d '' file; do
+`
+      + `    printf '%s %s %s\n' "$(sha256sum "$file" | cut -c1-64)" "$(stat -c '%s' "$file")" "$(printf '%s' "$(basename "$file")" | base64 -w0)"
+`
+      + `  done
+`
+      + `fi
+`
+      + `printf '%s\n' ${shellQuote(OUTBOX_MANIFEST_END)}`,
+      outboxCommandSeconds(input.deadlineAt, 60),
+      input.signal,
+    );
+    if (!listed.success) {
+      throw new BoxRuntimeProviderError(
+        `Box could not list the Pi outbox${commandFailureDetail(listed)}`,
+        502,
+      );
+    }
+    return parseOutboxManifest(listed.stdout);
+  }
+
+  async readOutboxFile(input: {
+    boxId: string;
+    entry: CompanionOutboxEntry;
+    deadlineAt?: Date;
+    signal?: AbortSignal;
+  }): Promise<CompanionOutboxFile> {
+    if (!BASE64_PATTERN.test(input.entry.encodedName) || input.entry.encodedName.length === 0) {
+      throw new BoxRuntimeProviderError("Companion outbox entry name is invalid", 400);
+    }
+    const chunks = Math.ceil(input.entry.byteSize / OUTBOX_CHUNK_BYTES);
+    const parts: Buffer[] = [];
+    for (let index = 0; index < chunks; index += 1) {
+      parts.push(await this.#readOutboxChunk({
+        boxId: input.boxId,
+        encodedName: input.entry.encodedName,
+        index,
+        expectedLength: Math.min(
+          OUTBOX_CHUNK_BYTES,
+          input.entry.byteSize - index * OUTBOX_CHUNK_BYTES,
+        ),
+        ...(input.deadlineAt ? { deadlineAt: input.deadlineAt } : {}),
+        ...(input.signal ? { signal: input.signal } : {}),
+      }));
+    }
+    const bytes = Buffer.concat(parts);
+    // The whole-file digest is checked against the manifest, not against the chunks: that is what
+    // catches a file Pi rewrote between the listing and the read, which no per-chunk check can see.
+    if (
+      bytes.byteLength !== input.entry.byteSize
+      || createHash("sha256").update(bytes).digest("hex") !== input.entry.sha256
+    ) {
+      throw new BoxRuntimeProviderError(
+        "Companion outbox file changed while it was being read",
+        409,
+      );
+    }
+    return { entry: input.entry, bytes };
+  }
+
+  /**
+   * One chunk, bracketed by sentinels so a shell banner or a trailing newline cannot be mistaken for
+   * content. A mangled body is retried a bounded number of times before the file is abandoned; the
+   * transport has a demonstrated history of truncating large command output, which is exactly what
+   * the per-chunk length and digest here detect.
+   */
+  async #readOutboxChunk(input: {
+    boxId: string;
+    encodedName: string;
+    index: number;
+    expectedLength: number;
+    deadlineAt?: Date;
+    signal?: AbortSignal;
+  }): Promise<Buffer> {
+    const { boxId, encodedName, index } = input;
+    let lastDetail = "";
+    for (let attempt = 0; attempt < OUTBOX_CHUNK_ATTEMPTS; attempt += 1) {
+      // The budget bounds the retries too. Without this one hung chunk could hold a settled turn --
+      // and its "replying..." state -- for three command timeouts past the whole harvest budget.
+      if (input.deadlineAt && Date.now() >= input.deadlineAt.getTime()) {
+        throw new BoxRuntimeProviderError("Companion outbox read exceeded its budget", 504);
+      }
+      const read = await this.#command(
+        boxId,
+        `set -e
+`
+        + `name="$(printf '%s' '${encodedName}' | base64 -d)"
+`
+        + `printf '%s\n' ${shellQuote(OUTBOX_CHUNK_BEGIN)}
+`
+        + `dd if="$HOME/${COMPANION_OUTBOX_DIRECTORY}/$name" bs=${OUTBOX_CHUNK_BYTES}`
+        + ` skip=${index} count=1 2>/dev/null | base64 -w0
+`
+        + `printf '\n%s\n' ${shellQuote(OUTBOX_CHUNK_END)}`,
+        outboxCommandSeconds(input.deadlineAt, 120),
+        input.signal,
+      );
+      if (!read.success) {
+        lastDetail = commandFailureDetail(read);
+        continue;
+      }
+      const encoded = sliceBetweenSentinels(read.stdout, OUTBOX_CHUNK_BEGIN, OUTBOX_CHUNK_END);
+      if (encoded === null || !BASE64_PATTERN.test(encoded)) {
+        lastDetail = ": chunk body was truncated or mangled in transit";
+        continue;
+      }
+      const decoded = Buffer.from(encoded, "base64");
+      // A short body still decodes as valid base64, so the length the manifest implies is the only
+      // per-chunk detector of the transport's known truncation -- and the one the retry acts on.
+      if (decoded.byteLength !== input.expectedLength) {
+        lastDetail = ": chunk arrived short of the length its manifest entry implies";
+        continue;
+      }
+      return decoded;
+    }
+    throw new BoxRuntimeProviderError(
+      `Box could not return chunk ${index} of a Pi outbox file${lastDetail}`,
+      502,
+    );
   }
 
   async startPiDaemon(input: { boxId: string; signal?: AbortSignal }): Promise<{
