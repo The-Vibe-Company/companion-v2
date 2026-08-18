@@ -2,7 +2,7 @@
 
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { Companion, CompanionThread as Thread } from "@companion/contracts";
+import type { Companion, CompanionOperation, CompanionThread as Thread } from "@companion/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiFetchError } from "@/lib/apiClient";
 import { CompanionThread, type CompanionContextPanel } from "./CompanionThread";
@@ -43,6 +43,7 @@ const companion: Companion = {
     last_observed_at: null,
     last_started_at: null,
     last_stopped_at: null,
+    latest_operation: null,
   },
   created_at: "2026-08-12T12:00:00.000Z",
   updated_at: "2026-08-12T12:00:00.000Z",
@@ -58,7 +59,6 @@ const thread: Thread = {
   active_turn: null,
   queued_count: 0,
   interrupted_turn: null,
-  pending_count: 0,
   last_message_at: null,
   last_read_ordinal: null,
 };
@@ -85,6 +85,23 @@ const interruptedThread: Thread = {
   },
 };
 
+const retryOperation: CompanionOperation = {
+  id: "44444444-4444-4444-8444-444444444444",
+  companion_id: companionId,
+  request_id: "55555555-5555-4555-8555-555555555555",
+  source_turn_id: interruptedThread.interrupted_turn!.id,
+  kind: "restart_pi",
+  trigger: "user",
+  status: "pending",
+  queue_sequence: 2,
+  checkpoint: "queued",
+  attempt_count: 0,
+  error: null,
+  created_at: "2026-08-12T12:01:00.000Z",
+  started_at: null,
+  settled_at: null,
+};
+
 const roots: Root[] = [];
 
 /** A closed context panel: what these cases render unless one asks for it open. */
@@ -106,7 +123,7 @@ async function mount(
     companion?: Companion;
     thread?: Thread;
     onDesktop?: () => void;
-    onRetryInterrupted?: (turnId: string, retryId: string) => Promise<void>;
+    onRetryInterrupted?: (turnId: string, retryId: string) => Promise<CompanionOperation>;
     onCancelInterrupted?: (turnId: string) => Promise<void>;
     context?: Partial<CompanionContextPanel>;
   } = {},
@@ -130,7 +147,7 @@ async function mount(
       onSettings: () => {},
       onThread: () => {},
       onDesktop: overrides.onDesktop ?? (() => {}),
-      onRetryInterrupted: overrides.onRetryInterrupted ?? (async () => {}),
+      onRetryInterrupted: overrides.onRetryInterrupted ?? (async () => retryOperation),
       onCancelInterrupted: overrides.onCancelInterrupted ?? (async () => {}),
     }));
   });
@@ -138,7 +155,11 @@ async function mount(
 }
 
 /** A mounted thread whose read model can be replaced, the way each poll replaces it in the app. */
-async function mountPolling(initial: Thread) {
+async function mountPolling(
+  initial: Thread,
+  onRetryInterrupted: (turnId: string, retryId: string) => Promise<CompanionOperation> =
+    async () => retryOperation,
+) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -159,7 +180,7 @@ async function mountPolling(initial: Thread) {
         onSettings: () => {},
         onThread: () => {},
         onDesktop: () => {},
-        onRetryInterrupted: async () => {},
+        onRetryInterrupted,
         onCancelInterrupted: async () => {},
       }));
     });
@@ -195,6 +216,13 @@ async function send(container: HTMLElement) {
 
 function sendButton(container: HTMLElement) {
   return container.querySelector("button[aria-label='Send message']") as HTMLButtonElement;
+}
+
+function button(container: HTMLElement, label: string): HTMLButtonElement {
+  const found = [...container.querySelectorAll("button")]
+    .find((candidate) => candidate.textContent?.trim() === label);
+  if (!found) throw new Error(`Button not found: ${label}`);
+  return found;
 }
 
 /** A finger landing on a control, which is the moment iOS starts resolving a tap. */
@@ -243,7 +271,7 @@ describe("CompanionThread composer", () => {
   });
 
   it("keeps Cancel available after an interrupted-turn retry is durably accepted", async () => {
-    const onRetryInterrupted = vi.fn(async () => {});
+    const onRetryInterrupted = vi.fn(async () => retryOperation);
     const onCancelInterrupted = vi.fn(async () => {});
     const container = await mount(async () => true, {
       thread: interruptedThread,
@@ -277,7 +305,7 @@ describe("CompanionThread composer", () => {
     });
     const container = await mount(async () => true, {
       thread: interruptedThread,
-      onRetryInterrupted: async () => {},
+      onRetryInterrupted: async () => retryOperation,
       onCancelInterrupted,
     });
 
@@ -294,6 +322,56 @@ describe("CompanionThread composer", () => {
     expect(document.activeElement).toBe(alert);
     expect([...container.querySelectorAll("button")]
       .some((candidate) => candidate.textContent === "Cancel turn")).toBe(true);
+  });
+
+  it("restores Retry and Cancel after an accepted Pi retry fails, then accepts a fresh retry", async () => {
+    const failedCompanion: Companion = {
+      ...companion,
+      runtime: {
+        ...companion.runtime,
+        latest_operation: {
+          id: retryOperation.id,
+          source_turn_id: interruptedThread.interrupted_turn!.id,
+          kind: "restart_pi",
+          status: "failed",
+          error: {
+            code: "pi_crash_loop",
+            message: "Pi could not stay running.",
+            action: "restart_pi",
+          },
+        },
+      },
+    };
+    const retryIds: string[] = [];
+    const onRetryInterrupted = vi.fn(async (_turnId: string, retryId: string) => {
+      retryIds.push(retryId);
+      return {
+        ...retryOperation,
+        id: retryIds.length === 1
+          ? retryOperation.id
+          : "66666666-6666-4666-8666-666666666666",
+        request_id: retryId,
+      };
+    });
+    const { container, poll } = await mountPolling(interruptedThread, onRetryInterrupted);
+
+    await act(async () => button(container, "Retry turn").click());
+    expect(container.textContent).toContain("Retry accepted. Pi will restart");
+
+    await poll(interruptedThread, failedCompanion);
+
+    expect(container.textContent).toContain("Pi could not stay running.");
+    expect(container.querySelector("[role='alert']")?.textContent).toContain("Turn interrupted");
+    const retry = [...container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent === "Retry turn") as HTMLButtonElement;
+    expect(retry).toBeTruthy();
+    expect([...container.querySelectorAll("button")]
+      .some((candidate) => candidate.textContent === "Cancel turn")).toBe(true);
+
+    await act(async () => retry.click());
+    expect(onRetryInterrupted).toHaveBeenCalledTimes(2);
+    expect(retryIds[1]).not.toBe(retryIds[0]);
+    expect(container.textContent).toContain("Retry accepted. Pi will restart");
   });
 
   it("disables both actions while Cancel is pending and focuses a recoverable error", async () => {
@@ -341,9 +419,8 @@ describe("CompanionThread composer", () => {
   });
 
   it("reuses the message id when a restored draft is sent again", async () => {
-    // THE-341: a send that wakes an asleep Companion persists the turn before the wake it waits on, so
-    // a request that dies mid-wake still left it durable. Pressing Enter on the restored draft must
-    // name that same turn rather than mint a second one, or the durable message is stored twice.
+    // THE-341: a response can be lost after the turn becomes durable. Pressing Enter on the restored
+    // draft must name that same turn rather than mint a second one.
     const ids: string[] = [];
     let answer = false;
     const container = await mount(async (_content, clientMessageId) => {
@@ -471,7 +548,7 @@ describe("CompanionThread composer", () => {
       onSettings: () => {},
       onThread: () => {},
       onDesktop: () => {},
-      onRetryInterrupted: async () => {},
+      onRetryInterrupted: async () => retryOperation,
       onCancelInterrupted: async () => {},
     });
     await act(async () => {
@@ -754,6 +831,15 @@ describe("CompanionThread context panel", () => {
   afterEach(() => {
     act(() => roots.splice(0).forEach((root) => root.unmount()));
     document.body.innerHTML = "";
+  });
+
+  it("keeps excluded future product surfaces out of the context panel", async () => {
+    const container = await mount(async () => true, { context: { open: true } });
+    const headings = [...container.querySelectorAll(".chat-context h3")]
+      .map((heading) => heading.textContent);
+
+    expect(headings).toEqual(["Screen", "Skills"]);
+    expect(panel(container)?.textContent).not.toContain("coming soon");
   });
 
   it("shows a runner the live desktop beside the conversation once the Box is running", async () => {

@@ -16,6 +16,7 @@ import { useRouter } from "next/navigation";
 import type {
   Companion,
   CompanionDesktop,
+  CompanionOperation,
   CompanionPluginAccount,
   CompanionProvidersResponse,
   CompanionThread as Thread,
@@ -59,7 +60,6 @@ import { CompanionThread } from "./CompanionThread";
 import { NewCompanionDialog } from "./NewCompanionDialog";
 import { ShareCompanionDialog } from "./ShareCompanionDialog";
 import { companionStatus } from "./status";
-import { createThreadQueue } from "./threadQueue";
 import { Onboarding } from "../org/Onboarding";
 import { useOrgActions } from "../org/useOrgActions";
 import { Sidebar } from "../skills/Sidebar";
@@ -80,9 +80,9 @@ const PENDING_POLL_MS = 3_000;
  */
 const LIST_POLL_MS = 45_000;
 /**
- * Where a failing open-thread poll backs off to. The surface keeps trying — a Box mid-wake or a
- * network blip both deserve the retry — but not at the fast cadence, which against a dead proxy is
- * thirty doomed requests a minute queued behind each other.
+ * Where a failing open-thread poll backs off to. The surface keeps trying through transient
+ * control-plane failures, but not at the fast cadence, which against a dead proxy would be thirty
+ * doomed requests a minute.
  */
 const MAX_POLL_BACKOFF_MS = 15_000;
 
@@ -154,7 +154,6 @@ function projectAcceptedMessage(input: {
     active_turn: activeTurn,
     queued_count: queuedCount,
     interrupted_turn: interruptedTurn,
-    pending_count: queuedCount + (activeTurn ? 1 : 0) + (interruptedTurn ? 1 : 0),
     last_message_at: alreadyProjected ? input.thread.last_message_at : input.turn.created_at,
   };
 }
@@ -494,9 +493,9 @@ export function CompanionsApp({
   /**
    * Whether a runner keeps the context panel beside the conversation. It is a preference rather than
    * a property of one Companion, so it survives moving between threads and reloads: an operator who
-   * wants the screen, the routines, and the skills in view wants them for the next Companion too. It
-   * starts closed so server markup and the first client paint agree, and the stored preference — open
-   * unless it was closed — arrives once the client owns the page.
+   * wants the screen and the skills in view wants them for the next Companion too. It starts closed
+   * so server markup and the first client paint agree, and the stored preference — open unless it
+   * was closed — arrives once the client owns the page.
    */
   const [contextOpen, setContextOpen] = useState(false);
   /**
@@ -533,7 +532,8 @@ export function CompanionsApp({
   const contextJoinRef = useRef(0);
   /** Newest runtime read per Companion, so a slower one cannot answer over it. */
   const companionReadRef = useRef(new Map<string, number>());
-  const threadQueueRef = useRef(createThreadQueue());
+  /** The current PostgreSQL thread read; duplicate poll ticks skip it, but sends never wait on it. */
+  const threadReadRef = useRef<{ companionId: string; requestId: number } | null>(null);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
   const searchRef = useRef<HTMLInputElement>(null);
   const movedFocusRef = useRef<string | null>(null);
@@ -755,19 +755,17 @@ export function CompanionsApp({
   /** One PostgreSQL-only refresh of the open thread and its durable turn projection. */
   const refreshThread = useCallback(async () => {
     if (!openedId) return;
-    // The request id is claimed by the call that actually goes out, not by the tick that asked for
-    // one. A tick the queue skips used to claim an id anyway, which invalidated the read already in
-    // flight and threw its answer away — including the one payload that carries where this reader
-    // left off, so a first read slower than one poll silently lost the divider for good.
-    let requestId = threadRequestRef.current;
+    const currentRead = threadReadRef.current;
+    if (currentRead?.companionId === openedId && currentRead.requestId === threadRequestRef.current) {
+      return;
+    }
+    // The request id is claimed only by the call that actually goes out. A duplicate polling tick
+    // must not invalidate the read already in flight, including the payload that carries where this
+    // reader left off.
+    const requestId = ++threadRequestRef.current;
+    threadReadRef.current = { companionId: openedId, requestId };
     try {
-      const next = await threadQueueRef.current.run(
-        () => {
-          requestId = ++threadRequestRef.current;
-          return getCompanionThread(currentOrg.id, openedId);
-        },
-        { skipWhenBusy: true },
-      );
+      const next = await getCompanionThread(currentOrg.id, openedId);
       if (next && requestId === threadRequestRef.current) {
         setThread(next);
         setThreadError(null);
@@ -792,6 +790,8 @@ export function CompanionsApp({
           setThreadError(cause instanceof Error ? cause.message : "This thread could not be loaded.");
         }
       }
+    } finally {
+      if (threadReadRef.current?.requestId === requestId) threadReadRef.current = null;
     }
   }, [currentOrg.id, openedId]);
 
@@ -959,11 +959,18 @@ export function CompanionsApp({
     try {
       // The composer's message id travels with the request, so one submission is one durable turn
       // however many times the HTTP request itself reaches the control plane. Send is the sole wake.
-      const accepted = await threadQueueRef.current.run(
-        () => sendCompanionMessage(currentOrg.id, companionId, content, clientMessageId),
-        { skipWhenBusy: false },
+      const accepted = await sendCompanionMessage(
+        currentOrg.id,
+        companionId,
+        content,
+        clientMessageId,
       );
       if (openedIdRef.current === companionId && accepted?.turn.companion_id === companionId) {
+        // The POST is newer than every thread snapshot that started before its 202. Retire those
+        // reads before projecting the accepted turn so a slow pre-send GET cannot make the saved
+        // message and queue count disappear until the next poll. The next polling tick is free to
+        // claim a fresh request id even while the retired read is still unwinding.
+        threadRequestRef.current += 1;
         setThread((current) => current?.companion_id === companionId
           ? projectAcceptedMessage({ thread: current, turn: accepted.turn, content })
           : current);
@@ -981,15 +988,19 @@ export function CompanionsApp({
     }
   };
 
-  const onRetryInterrupted = async (turnId: string, retryId: string): Promise<void> => {
+  const onRetryInterrupted = async (
+    turnId: string,
+    retryId: string,
+  ): Promise<CompanionOperation> => {
     if (!openedId) throw new Error("This Companion is no longer open.");
     const companionId = openedId;
-    await retryCompanionTurn(currentOrg.id, companionId, turnId, retryId);
-    if (openedIdRef.current !== companionId) return;
+    const operation = await retryCompanionTurn(currentOrg.id, companionId, turnId, retryId);
+    if (openedIdRef.current !== companionId) return operation;
     // The accepted operation is asynchronous. The existing interrupted projection keeps both
     // polls fast until the runtime moves the turn forward.
     void refreshThread();
     void refreshCompanion(companionId);
+    return operation;
   };
 
   const onCancelInterrupted = async (turnId: string): Promise<void> => {

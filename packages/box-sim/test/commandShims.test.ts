@@ -7,21 +7,12 @@ import {
   decodeShellQuoted,
   executeBoxCommand,
   extractBrokerJson,
-  extractFifoJson,
   putBoxFile,
 } from "../src/commandShims";
 import type { BoxSimPiController } from "../src/protocol";
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\"'\"'")}'`;
-}
-
-function rpcShell(command: Record<string, unknown>): string {
-  return `set -euo pipefail
-fifo="$HOME/.companion/runtime/state/pi.rpc.in"
-rpc_start_size=0
-printf '%s\\n' ${shellQuote(JSON.stringify(command))} > "$fifo"
-printf '%s\\n' 'Pi RPC did not acknowledge prompt' >&2`;
 }
 
 function brokerShell(command: Record<string, unknown>): string {
@@ -51,12 +42,9 @@ describe("semantic Box command shims", () => {
         type: "extension_ui_response",
         response: { id: "question-1", type: "extension_ui_response", value: "yes" },
       }), "extension-ui-response"],
-      ["reset-failed companion-pi-daemon.service; systemctl --user start companion-pi-daemon.service", "heal-daemon"],
       ["companion-pi-journal companion-pi-restarts", "daemon-diagnostics"],
       ['rm -f "$HOME/.companion/runtime/state/providers.env"', "remove-provider-files"],
       ["Pi daemon is still active after stop", "stop-daemon"],
-      ["log=pi.rpc.ndjson; offset=0; head -c 262144", "read-events"],
-      ["mktemp -t companion-frame; printf 'data:%s;base64'", "capture-desktop-frame"],
     ];
     for (const [command, kind] of commands) expect(classifyBoxCommand(command)).toBe(kind);
     expect(classifyBoxCommand("uname -a")).toBe("unsupported");
@@ -65,7 +53,6 @@ describe("semantic Box command shims", () => {
   it("round-trips the adapter's POSIX quoting, including apostrophes", () => {
     const payload = { id: "req-1", type: "prompt", message: "don't execute this" };
     expect(decodeShellQuoted(shellQuote("don't"))).toBe("don't");
-    expect(extractFifoJson(rpcShell(payload))).toEqual(payload);
     expect(extractBrokerJson(brokerShell(payload))).toEqual(payload);
   });
 
@@ -159,7 +146,6 @@ describe("semantic Box command shims", () => {
       },
     });
     expect(handleRpc).toHaveBeenCalledWith(expect.objectContaining({ message: "don't repeat" }));
-    expect(machine.daemon.rpcLog).not.toContain('"id":"turn-with-apostrophe"');
 
     const decision = await executeBoxCommand(machine, brokerShell({
       id: "decision-1",
@@ -215,6 +201,9 @@ describe("semantic Box command shims", () => {
 
     await expect(executeBoxCommand(machine, command("start"))).resolves.toMatchObject({ success: true });
     expect(machine.persistentFiles.has(".companion/runtime/state/providers.env")).toBe(false);
+    machine.daemon.activeAttemptId = "attempt-before-restart";
+    appendPiEvent(machine, { type: "turn_start" });
+    expect(machine.daemon).toMatchObject({ brokerAcknowledgedCursor: 0 });
     await expect(executeBoxCommand(machine, command("restart"))).resolves.toMatchObject({ success: true });
 
     expect(controller.restart).toHaveBeenCalledOnce();
@@ -224,6 +213,10 @@ describe("semantic Box command shims", () => {
       status: "active",
       invocationId: "00000000000000000000000000000002",
       restartCount: 1,
+      activeAttemptId: null,
+      // The old event and the process-exit record belong to the retired invocation. A real layout-14
+      // broker acknowledges both before accepting commands for the replacement process.
+      brokerAcknowledgedCursor: 2,
     });
   });
 
@@ -406,21 +399,6 @@ describe("semantic Box command shims", () => {
     expect(machine.persistentFiles.get("archive")?.toString()).toBe("abcdef");
     expect(machine.persistentFiles.has("archive.part0")).toBe(false);
 
-    machine.daemon.invocationId = "00000000000000000000000000000001";
-    machine.daemon.activeAttemptId = "attempt-legacy-projection";
-    appendPiEvent(machine, { type: "agent_start" });
-    appendPiEvent(machine, { type: "turn_start" });
-    const command = "log=pi.rpc.ndjson; offset=4; tail -c x | head -c 262144";
-    const read = await executeBoxCommand(machine, command);
-    expect(read.stdout.startsWith("4\n")).toBe(true);
-    expect(Buffer.byteLength(read.stdout.slice(2))).toBe(
-      Buffer.byteLength(machine.daemon.rpcLog) - 4,
-    );
-    const rewound = await executeBoxCommand(
-      machine,
-      "log=pi.rpc.ndjson; offset=99999; tail -c x | head -c 262144",
-    );
-    expect(rewound.stdout).toBe(`0\n${machine.daemon.rpcLog}`);
   });
 
   it("fails closed on unknown commands and records only their digest", async () => {

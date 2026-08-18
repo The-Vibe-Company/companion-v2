@@ -184,8 +184,6 @@ export interface BoxSimStateSnapshot {
       };
       restartCount: number;
       scenario: string;
-      rpcLogBytes: number;
-      rpcLogSha256: string;
       stderrSha256: string;
       unknownCommandDigests: string[];
     };

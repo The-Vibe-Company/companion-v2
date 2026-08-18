@@ -227,7 +227,7 @@ describe("Box simulator HTTP server", () => {
       body: JSON.stringify({ name: "Companion test", ttlSeconds: 21_600 }),
     });
     expect(await patched.json()).toMatchObject({
-      type: "box.info",
+      type: "box.updated",
       box: { name: "Companion test", ttlSeconds: 21_600 },
     });
     expect(await (await provider(handle, "/boxes?limit=200&sort=desc")).json()).toMatchObject({
@@ -423,6 +423,7 @@ describe("Box simulator HTTP server", () => {
     await expect(maintenance.listAllBoxes()).resolves.toContainEqual({
       id: created.box.id,
       name: "Companion maintenance contract",
+      state: "provisioning",
     });
     const deletion = await maintenance.requestPermanentDeletion({ boxId: created.box.id });
     expect(deletion.outcome).toBe("accepted");

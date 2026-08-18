@@ -83,6 +83,10 @@ describe("production runtime composition", () => {
 
     expect(db.verifyRole).toHaveBeenCalledOnce();
     expect(kernelInput).toMatchObject({ claimsEnabled: false, store });
+    expect(kernelInput?.log).toEqual(expect.objectContaining({
+      error: expect.any(Function),
+      warn: expect.any(Function),
+    }));
     expect(createLifecycle).not.toHaveBeenCalled();
     expect(createBoxRuntime).not.toHaveBeenCalled();
     expect(createArchiveStorage).not.toHaveBeenCalled();
@@ -159,6 +163,10 @@ describe("production runtime composition", () => {
       materialProvider: expect.any(Object),
       projectionRedactorFactory: expect.any(Object),
       resourceStager: expect.any(Object),
+      log: expect.objectContaining({
+        error: expect.any(Function),
+        warn: expect.any(Function),
+      }),
     });
     expect(boxEnv).toEqual({
       COMPANION_BOX_API_KEY: "box-secret",

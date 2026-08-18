@@ -108,6 +108,7 @@ function companion(
       last_observed_at: null,
       last_started_at: null,
       last_stopped_at: null,
+      latest_operation: null,
     },
     created_at: "2026-08-12T12:00:00.000Z",
     updated_at: "2026-08-12T12:00:00.000Z",
@@ -188,7 +189,14 @@ describe("CompanionSettings", () => {
     }));
     companionApi.deleteCompanion.mockResolvedValue({ ...operation, kind: "delete" });
     companionApi.getCompanionRuntime.mockResolvedValue(companion("owner", "running"));
-    companionApi.restartCompanionRuntime.mockResolvedValue(operation);
+    companionApi.restartCompanionRuntime.mockImplementation(async (
+      _orgId: string,
+      _companionId: string,
+      input: { target: "pi" | "box" },
+    ): Promise<CompanionOperation> => ({
+      ...operation,
+      kind: input.target === "pi" ? "restart_pi" : "restart_box",
+    }));
   });
 
   afterEach(async () => {
@@ -301,6 +309,65 @@ describe("CompanionSettings", () => {
     );
   });
 
+  it("presents a running restart replay as in progress instead of newly accepted", async () => {
+    vi.useFakeTimers();
+    const runningReplay: CompanionOperation = {
+      ...operation,
+      status: "running",
+      checkpoint: "restarting_pi",
+      attempt_count: 1,
+      started_at: "2026-08-12T12:00:01.000Z",
+    };
+    const runningProjection = companion("owner", "running");
+    runningProjection.runtime = {
+      ...runningProjection.runtime,
+      latest_operation: {
+        id: runningReplay.id,
+        source_turn_id: null,
+        kind: "restart_pi",
+        status: "running",
+        error: null,
+      },
+    };
+    companionApi.getCompanionRuntime.mockResolvedValue(runningProjection);
+    companionApi.restartCompanionRuntime
+      .mockRejectedValueOnce(new ApiFetchError("Request timed out.", 408))
+      .mockResolvedValueOnce(runningReplay);
+    const { container } = await mount(companion("owner", "running"));
+
+    await click(button(container, "Restart Pi"));
+    await click(button(container, "Restart Pi"));
+
+    expect(container.textContent).toContain("Pi restart is in progress.");
+    expect(container.textContent).not.toContain("Pi restart accepted.");
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+
+    expect(container.textContent).toContain("Pi restart is in progress.");
+    expect(container.textContent).not.toContain("Pi restart completed.");
+  });
+
+  it("presents a succeeded restart replay as completed instead of newly accepted", async () => {
+    const succeededReplay: CompanionOperation = {
+      ...operation,
+      status: "succeeded",
+      checkpoint: "pi_restarted",
+      attempt_count: 1,
+      started_at: "2026-08-12T12:00:01.000Z",
+      settled_at: "2026-08-12T12:00:02.000Z",
+    };
+    companionApi.restartCompanionRuntime
+      .mockRejectedValueOnce(new ApiFetchError("Request timed out.", 408))
+      .mockResolvedValueOnce(succeededReplay);
+    const { container } = await mount(companion("owner", "running"));
+
+    await click(button(container, "Restart Pi"));
+    await click(button(container, "Restart Pi"));
+
+    expect(container.textContent).toContain("Pi restart completed.");
+    expect(container.textContent).not.toContain("Pi restart accepted.");
+  });
+
   it("polls an accepted restart every three seconds and surfaces its durable failure", async () => {
     vi.useFakeTimers();
     const failed = companion("owner", "running");
@@ -345,6 +412,19 @@ describe("CompanionSettings", () => {
   });
 
   it("keeps an accepted deletion visible until permanent Box deletion is confirmed", async () => {
+    const deleting = companion("owner", "running");
+    deleting.runtime = {
+      ...deleting.runtime,
+      state: "stopping",
+      latest_operation: {
+        id: operation.id,
+        source_turn_id: null,
+        kind: "delete",
+        status: "pending",
+        error: null,
+      },
+    };
+    companionApi.getCompanionRuntime.mockResolvedValue(deleting);
     const { container, onDeleted } = await mount(companion("owner", "running"));
 
     await click(button(container, "Delete Companion"));
@@ -360,6 +440,41 @@ describe("CompanionSettings", () => {
     expect(onDeleted).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Deletion accepted.");
     expect(button(container, "Deletion requested").disabled).toBe(true);
+  });
+
+  it("surfaces a failed deletion replay without announcing a new acceptance", async () => {
+    const failedReplay: CompanionOperation = {
+      ...operation,
+      kind: "delete",
+      status: "failed",
+      checkpoint: "waiting_deleted",
+      attempt_count: 1,
+      error: {
+        code: "box_delete_failed",
+        message: "The Box could not be deleted.",
+        action: "retry",
+      },
+      started_at: "2026-08-12T12:00:01.000Z",
+      settled_at: "2026-08-12T12:00:02.000Z",
+    };
+    companionApi.deleteCompanion
+      .mockRejectedValueOnce(new ApiFetchError("Request timed out.", 408))
+      .mockResolvedValueOnce(failedReplay);
+    const { container } = await mount(companion("owner", "running"));
+
+    await click(button(container, "Delete Companion"));
+    await click(button(document.querySelector<HTMLElement>('[role="dialog"]')!, "Delete Companion"));
+    await click(button(container, "Delete Companion"));
+    await click(button(document.querySelector<HTMLElement>('[role="dialog"]')!, "Delete Companion"));
+
+    expect(companionApi.deleteCompanion.mock.calls[1]?.[2]).toBe(
+      companionApi.deleteCompanion.mock.calls[0]?.[2],
+    );
+    expect(container.querySelector("[role='alert']")?.textContent).toContain(
+      "The Box could not be deleted.",
+    );
+    expect(container.textContent).not.toContain("Deletion accepted.");
+    expect(button(container, "Retry Delete").disabled).toBe(false);
   });
 
   it("clears a transient deletion polling error after a successful refresh", async () => {
@@ -381,6 +496,68 @@ describe("CompanionSettings", () => {
     expect(container.textContent).toContain("Deletion accepted.");
   });
 
+  it("replaces the local deletion acceptance when the durable operation fails", async () => {
+    const failed = companion("owner", "running");
+    failed.runtime = {
+      ...failed.runtime,
+      state: "error",
+      daemon_state: "error",
+      latest_operation: {
+        id: operation.id,
+        source_turn_id: null,
+        kind: "delete",
+        status: "failed",
+        error: {
+          code: "box_delete_failed",
+          message: "The Box could not be deleted.",
+          action: "retry",
+        },
+      },
+    };
+    companionApi.getCompanionRuntime.mockResolvedValue(failed);
+    const { container } = await mount(companion("owner", "running"));
+
+    await click(button(container, "Delete Companion"));
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    await click(button(dialog, "Delete Companion"));
+
+    expect(container.querySelector("[role='alert']")?.textContent).toContain(
+      "The Box could not be deleted.",
+    );
+    expect(container.textContent).not.toContain("Deletion accepted.");
+    expect(button(container, "Retry Delete").disabled).toBe(false);
+  });
+
+  it("restores a failed deletion after reload with an actionable Retry Delete", async () => {
+    const reloaded = companion("owner", "running");
+    reloaded.runtime = {
+      ...reloaded.runtime,
+      state: "error",
+      daemon_state: "error",
+      latest_operation: {
+        id: operation.id,
+        source_turn_id: null,
+        kind: "delete",
+        status: "interrupted",
+        error: {
+          code: "box_delete_interrupted",
+          message: "Deletion was interrupted before Box confirmation.",
+          action: "retry",
+        },
+      },
+    };
+
+    const { container } = await mount(reloaded);
+
+    expect(container.querySelector("[role='alert']")?.textContent).toContain(
+      "Deletion was interrupted before Box confirmation.",
+    );
+    const retryDelete = button(container, "Retry Delete");
+    expect(retryDelete.disabled).toBe(false);
+    await click(retryDelete);
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  });
+
   it("leaves Settings only after the durable delete projection disappears", async () => {
     companionApi.getCompanionRuntime.mockRejectedValue(new ApiFetchError("Not found", 404));
     const { container, onDeleted } = await mount(companion("owner", "running"));
@@ -390,5 +567,73 @@ describe("CompanionSettings", () => {
     await click(button(dialog, "Delete Companion"));
 
     expect(onDeleted).toHaveBeenCalledWith(companionId);
+  });
+
+  it("restores a running restart operation and its polling after reload", async () => {
+    vi.useFakeTimers();
+    const reloaded = companion("owner", "running");
+    reloaded.runtime = {
+      ...reloaded.runtime,
+      state: "provisioning",
+      latest_operation: {
+        id: operation.id,
+        source_turn_id: null,
+        kind: "restart_box",
+        status: "running",
+        error: null,
+      },
+    };
+    companionApi.getCompanionRuntime.mockResolvedValue(reloaded);
+
+    const { container } = await mount(reloaded);
+    expect(container.textContent).toContain("Full Box restart is in progress");
+    expect(button(container, "Restart queued...").disabled).toBe(true);
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(companionApi.getCompanionRuntime).toHaveBeenCalled();
+  });
+
+  it("restores a running stop operation and its polling after reload", async () => {
+    vi.useFakeTimers();
+    const reloaded = companion("owner", "running");
+    reloaded.runtime = {
+      ...reloaded.runtime,
+      state: "stopping",
+      latest_operation: {
+        id: operation.id,
+        source_turn_id: null,
+        kind: "stop",
+        status: "running",
+        error: null,
+      },
+    };
+    companionApi.getCompanionRuntime.mockResolvedValue(reloaded);
+
+    const { container } = await mount(reloaded);
+    expect(container.textContent).toContain("Stop is in progress");
+
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(companionApi.getCompanionRuntime).toHaveBeenCalled();
+  });
+
+  it("restores deletion polling and disabled controls after reload", async () => {
+    const reloaded = companion("owner", "running");
+    reloaded.runtime = {
+      ...reloaded.runtime,
+      state: "stopping",
+      latest_operation: {
+        id: operation.id,
+        source_turn_id: null,
+        kind: "delete",
+        status: "pending",
+        error: null,
+      },
+    };
+    companionApi.getCompanionRuntime.mockResolvedValue(reloaded);
+
+    const { container } = await mount(reloaded);
+    expect(container.textContent).toContain("Deletion is queued");
+    expect(button(container, "Deletion requested").disabled).toBe(true);
+    expect(companionApi.getCompanionRuntime).toHaveBeenCalled();
   });
 });

@@ -9,6 +9,7 @@ const OUTPUT_KEYS = [
   "quality",
   "build",
   "database",
+  "runtime",
   "browser",
   "containers",
   "dependencies",
@@ -99,18 +100,42 @@ export function classifyFiles(files, { forceFull = false } = {}) {
         (!isTestFile(file) &&
           matchesAny(file, [
             "apps/api/",
+            "apps/runtime/",
             "apps/worker/",
             "packages/auth/",
             "packages/billing/",
             "packages/contracts/",
             "packages/core/",
             "packages/db/",
+            "packages/box-runtime/",
+            "packages/box-sim/",
+            "packages/companion-runtime/",
             "packages/email/",
             "packages/skills/",
             "packages/storage/",
             "scripts/ci-rsc-smoke.sh",
             "docker-compose.yml",
           ]))),
+    );
+  const runtime =
+    full ||
+    uniqueFiles.some((file) =>
+      !isDocumentation(file) &&
+      (file.startsWith("apps/api/test/integration/")
+        || file.startsWith("apps/runtime/test/integration/")
+        || (!isTestFile(file) && matchesAny(file, [
+          "apps/api/",
+          "apps/runtime/",
+          "packages/box-runtime/",
+          "packages/box-sim/",
+          "packages/companion-runtime/",
+          "packages/companion-skill/",
+          "packages/contracts/",
+          "packages/core/",
+          "packages/db/",
+          "scripts/ci-container-smoke.sh",
+          "scripts/ci-runtime-integration.sh",
+        ]))),
     );
   const browser =
     full ||
@@ -152,7 +177,7 @@ export function classifyFiles(files, { forceFull = false } = {}) {
           ])),
     );
 
-  return { docs, design, quality, build, database, browser, containers, dependencies, skill, full };
+  return { docs, design, quality, build, database, runtime, browser, containers, dependencies, skill, full };
 }
 
 function readArguments(argv) {

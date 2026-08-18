@@ -152,22 +152,6 @@ CREATE INDEX companion_runtime_event_projections_cursor_idx
   ON public.companion_runtime_event_projections(attempt_id, broker_sequence);
 --> statement-breakpoint
 
--- HMAC request ids are global to the private runtime endpoint. Keeping their short-lived replay
--- window in PostgreSQL makes consumption atomic across replicas and durable across restarts.
-CREATE TABLE public.companion_runtime_desktop_requests (
-  request_id text PRIMARY KEY,
-  expires_at timestamp with time zone NOT NULL,
-  created_at timestamp with time zone DEFAULT now() NOT NULL,
-  CONSTRAINT companion_runtime_desktop_requests_id_check
-    CHECK (request_id ~ '^[A-Za-z0-9._:-]{16,128}$'),
-  CONSTRAINT companion_runtime_desktop_requests_expiry_check
-    CHECK (expires_at > created_at - interval '5 minutes')
-);
---> statement-breakpoint
-CREATE INDEX companion_runtime_desktop_requests_expiry_idx
-  ON public.companion_runtime_desktop_requests(expires_at);
---> statement-breakpoint
-
 ALTER TABLE public.companion_runtime_duplicate_cleanups ENABLE ROW LEVEL SECURITY;
 --> statement-breakpoint
 ALTER TABLE public.companion_runtime_duplicate_cleanups FORCE ROW LEVEL SECURITY;
@@ -175,10 +159,6 @@ ALTER TABLE public.companion_runtime_duplicate_cleanups FORCE ROW LEVEL SECURITY
 ALTER TABLE public.companion_runtime_event_projections ENABLE ROW LEVEL SECURITY;
 --> statement-breakpoint
 ALTER TABLE public.companion_runtime_event_projections FORCE ROW LEVEL SECURITY;
---> statement-breakpoint
-ALTER TABLE public.companion_runtime_desktop_requests ENABLE ROW LEVEL SECURITY;
---> statement-breakpoint
-ALTER TABLE public.companion_runtime_desktop_requests FORCE ROW LEVEL SECURITY;
 --> statement-breakpoint
 CREATE POLICY companion_runtime_duplicate_cleanups_function_owner_rls
   ON public.companion_runtime_duplicate_cleanups FOR ALL
@@ -193,17 +173,6 @@ CREATE POLICY companion_runtime_duplicate_cleanups_function_owner_rls
 --> statement-breakpoint
 CREATE POLICY companion_runtime_event_projections_function_owner_rls
   ON public.companion_runtime_event_projections FOR ALL
-  USING (current_user = pg_get_userbyid((
-    SELECT p.proowner FROM pg_catalog.pg_proc p
-    WHERE p.oid = 'public.companion_runtime_claim_work(text,integer,integer,bigint)'::regprocedure
-  )))
-  WITH CHECK (current_user = pg_get_userbyid((
-    SELECT p.proowner FROM pg_catalog.pg_proc p
-    WHERE p.oid = 'public.companion_runtime_claim_work(text,integer,integer,bigint)'::regprocedure
-  )));
---> statement-breakpoint
-CREATE POLICY companion_runtime_desktop_requests_function_owner_rls
-  ON public.companion_runtime_desktop_requests FOR ALL
   USING (current_user = pg_get_userbyid((
     SELECT p.proowner FROM pg_catalog.pg_proc p
     WHERE p.oid = 'public.companion_runtime_claim_work(text,integer,integer,bigint)'::regprocedure
@@ -901,48 +870,6 @@ BEGIN
 
   RETURN QUERY SELECT v_cleanup.box_id, v_cleanup.status,
                       v_cleanup.provider_operation_id, v_cleanup.checkpoint_sequence;
-END
-$$;
---> statement-breakpoint
-
-CREATE FUNCTION public.companion_runtime_consume_desktop_request(
-  p_request_id text,
-  p_timestamp bigint,
-  p_max_skew_seconds integer
-)
-RETURNS boolean
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog, public
-SET row_security = on
-AS $$
-DECLARE
-  v_now timestamp with time zone := clock_timestamp();
-  v_now_seconds bigint;
-BEGIN
-  IF p_request_id IS NULL OR p_request_id !~ '^[A-Za-z0-9._:-]{16,128}$'
-     OR p_timestamp IS NULL OR p_timestamp NOT BETWEEN 0 AND 253402300799
-     OR p_max_skew_seconds IS NULL OR p_max_skew_seconds NOT BETWEEN 1 AND 300 THEN
-    RETURN false;
-  END IF;
-  v_now_seconds := floor(extract(epoch FROM v_now))::bigint;
-  IF abs(v_now_seconds - p_timestamp) > p_max_skew_seconds THEN
-    RETURN false;
-  END IF;
-
-  DELETE FROM public.companion_runtime_desktop_requests request
-  WHERE request.expires_at <= v_now;
-  INSERT INTO public.companion_runtime_desktop_requests(request_id, expires_at, created_at)
-  VALUES (
-    p_request_id,
-    GREATEST(
-      to_timestamp(p_timestamp + p_max_skew_seconds),
-      v_now + interval '1 second'
-    ),
-    v_now
-  )
-  ON CONFLICT (request_id) DO NOTHING;
-  RETURN FOUND;
 END
 $$;
 --> statement-breakpoint
@@ -1742,8 +1669,6 @@ REVOKE ALL ON TABLE public.companion_runtime_duplicate_cleanups FROM PUBLIC;
 --> statement-breakpoint
 REVOKE ALL ON TABLE public.companion_runtime_event_projections FROM PUBLIC;
 --> statement-breakpoint
-REVOKE ALL ON TABLE public.companion_runtime_desktop_requests FROM PUBLIC;
---> statement-breakpoint
 REVOKE ALL ON FUNCTION public.companion_runtime_guard_duplicate_cleanup() FROM PUBLIC;
 --> statement-breakpoint
 REVOKE ALL ON FUNCTION public.companion_runtime_resume_after_decision_delivery() FROM PUBLIC;
@@ -1771,9 +1696,6 @@ REVOKE ALL ON FUNCTION public.companion_runtime_checkpoint_duplicate_cleanup(
 ) FROM PUBLIC;
 --> statement-breakpoint
 REVOKE ALL ON FUNCTION public.companion_runtime_authorize_desktop(uuid, uuid, text) FROM PUBLIC;
---> statement-breakpoint
-REVOKE ALL ON FUNCTION public.companion_runtime_consume_desktop_request(text, bigint, integer)
-  FROM PUBLIC;
 --> statement-breakpoint
 REVOKE ALL ON FUNCTION public.companion_runtime_project_event_batch(
   uuid, uuid, uuid, bigint, bigint, text, public.companion_runtime_work_kind, uuid,

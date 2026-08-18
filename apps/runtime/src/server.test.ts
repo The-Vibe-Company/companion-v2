@@ -57,6 +57,7 @@ async function start(input: {
     host: "127.0.0.1",
     port: 0,
     sweepIntervalMs: 2_000,
+    releaseId: "production-2026-08-17.3",
     desktopHmacSecret: hmacSecret,
     desktopMaxSkewSeconds: 30,
     health: {
@@ -100,6 +101,7 @@ describe("private runtime HTTP server", () => {
       last_sweep_completed_at: new Date(nowMs - 50).toISOString(),
       claim_loop_error_at: null,
       active_count: 2,
+      release_id: "production-2026-08-17.3",
     });
 
     handle.setSnapshot({
@@ -296,6 +298,7 @@ describe("private runtime HTTP server", () => {
       host: "127.0.0.1",
       port: 0,
       sweepIntervalMs: 2_000,
+      releaseId: "production-2026-08-17.3",
       desktopHmacSecret: null,
       desktopMaxSkewSeconds: 30,
       health: { ping: async () => undefined, snapshot: healthySnapshot },

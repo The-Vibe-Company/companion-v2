@@ -1598,7 +1598,7 @@ button.chat-box:focus-visible {
   flex-direction: column;
 }
 
-/* What this Companion has beside its conversation: its screen, its routines, its skills. */
+/* What this Companion has beside its conversation: its screen and selected skills. */
 .chat-context {
   flex: none;
   width: 300px;
@@ -2141,6 +2141,17 @@ button.chat-box:focus-visible {
   /* Back and header actions are thumb targets; the head grows rather than the controls shrinking. */
   .chat-head .chat-back {
     width: 44px;
+    min-height: 44px;
+  }
+
+  .chat-head .chat-settings,
+  .chat-head .chat-context-toggle {
+    width: 44px;
+    height: 44px;
+  }
+
+  .chat-head button.chat-box {
+    min-width: 44px;
     min-height: 44px;
   }
 

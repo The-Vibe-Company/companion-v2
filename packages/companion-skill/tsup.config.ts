@@ -7,7 +7,7 @@ export default defineConfig({
   target: "node20",
   outDir: "skill/scripts",
   outExtension: () => ({ js: ".mjs" }),
-  noExternal: ["@auth/agent", "@companion/contracts", "fflate", "yaml"],
+  noExternal: ["@auth/agent", "@companion/contracts", "fflate", "yaml", "zod"],
   banner: {
     js: 'import { createRequire as __companionCreateRequire } from "node:module"; const require = __companionCreateRequire(import.meta.url);',
   },

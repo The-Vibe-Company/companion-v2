@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { RuntimeEngine } from "./engine";
+import type { RuntimeProcessLog } from "./logging";
 import type { RuntimePiControl } from "./ports";
 import {
   RuntimeStoreContractError,
@@ -996,6 +997,80 @@ describe("RuntimeEngine decisions", () => {
     expect(result.outcome).toBe("fence_lost");
     expect(ports.decisionCalls).toEqual([{ attemptId: ATTEMPT_ID }]);
     expect(store.settlements).toHaveLength(0);
+  });
+});
+
+describe("RuntimeEngine process error logs", () => {
+  function capturingLog(): { log: RuntimeProcessLog; records: Record<string, unknown>[] } {
+    const records: Record<string, unknown>[] = [];
+    return {
+      records,
+      log: {
+        error(record) { records.push({ level: "error", ...record }); },
+        warn(record) { records.push({ level: "warn", ...record }); },
+      },
+    };
+  }
+
+  it("logs the original Box failure when the persisted error is the generic fallback", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    ports.pi.brokerState = async () => {
+      throw new Error("Pi is not installed; configure COMPANION_PI_INSTALL_COMMAND");
+    };
+    const captured = capturingLog();
+    const engine = new RuntimeEngine(engineDependencies({ store, ports, log: captured.log }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("failed");
+    expect(store.settlements[0]?.error?.code).toBe("runtime_execution_failed");
+    expect(captured.records).toEqual([expect.objectContaining({
+      level: "error",
+      event: "runtime.work.failed",
+      companionId: COMPANION_ID,
+      workKind: "attempt",
+      genericFallback: true,
+      thrown: expect.objectContaining({
+        name: "Error",
+        message: "Pi is not installed; configure COMPANION_PI_INSTALL_COMMAND",
+      }),
+      persisted: expect.objectContaining({
+        code: "runtime_execution_failed",
+        message: "Runtime execution failed.",
+      }),
+    })]);
+  });
+
+  it("logs an indeterminate store wrap instead of disappearing as a silent fence loss", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    const checkpoint = store.checkpoint.bind(store);
+    store.checkpoint = async (fence, input) => {
+      await checkpoint(fence, input);
+      throw new RuntimeStoreIndeterminateError(
+        new Error("settings claim has an impossible nullable shape"),
+      );
+    };
+    const captured = capturingLog();
+    const engine = new RuntimeEngine(engineDependencies({ store, ports, log: captured.log }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("fence_lost");
+    expect(captured.records).toEqual([expect.objectContaining({
+      level: "error",
+      event: "runtime.work.fence_lost",
+      reason: "indeterminate_store",
+      thrown: expect.objectContaining({
+        name: "RuntimeStoreIndeterminateError",
+        causes: [expect.objectContaining({
+          message: "settings claim has an impossible nullable shape",
+        })],
+      }),
+    })]);
   });
 });
 

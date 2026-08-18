@@ -6,8 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./boxCompanionRuntime": "./src/boxCompanionRuntime.ts",
-    "./companionPiBroker": "./src/companionPiBroker.ts",
-    "./companionSkillPackage": "./src/companionSkillPackage.ts"
+    "./companionPiBroker": "./src/companionPiBroker.ts"
   },
   "scripts": {
     "broker:generate": "node scripts/generate-companion-pi-broker.mjs",
@@ -16,13 +15,8 @@
     "test": "pnpm broker:check && vitest run"
   },
   "dependencies": {
-    "@companion/companion-skill": "workspace:*",
     "@companion/contracts": "workspace:*",
     "@companion/core": "workspace:*",
-    "@companion/db": "workspace:*",
-    "@companion/skills": "workspace:*",
-    "@companion/storage": "workspace:*",
-    "drizzle-orm": "^0.45.2",
     "zod": "^3.24.1"
   },
   "devDependencies": {

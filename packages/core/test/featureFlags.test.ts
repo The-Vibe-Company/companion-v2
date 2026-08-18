@@ -3,9 +3,9 @@ import {
   COMPANIONS_ALLOWED_EMAIL_DOMAINS_ENV,
   COMPANIONS_FEATURE_FLAG,
   companionsAllowedEmailDomains,
+  companionsApiConfig,
   companionsAvailableToUser,
   companionsEnabled,
-  companionsRuntimeConfig,
   warnIfCompanionsMisconfigured,
 } from "../src/featureFlags";
 
@@ -92,71 +92,43 @@ describe("companionsAvailableToUser", () => {
   );
 });
 
-describe("companionsRuntimeConfig", () => {
-  it("applies safe defaults and reports no missing secrets when the flag is off", () => {
-    const config = companionsRuntimeConfig({});
+describe("companionsApiConfig", () => {
+  it("reports no missing API secrets when the flag is off", () => {
+    const config = companionsApiConfig({});
     expect(config.enabled).toBe(false);
     expect(config.missingRequired).toEqual([]);
-    expect(config.boxApiBase).toBe("https://ascii.dev/api/box/v1");
-    expect(config.boxTtlSeconds).toBe(21_600);
-    expect(config.boxPollIntervalMs).toBe(1_000);
-    expect(config.boxReadyTimeoutMs).toBe(120_000);
-    expect(config.piMcpAdapterPackage).toBe("npm:pi-mcp-adapter@2.12.1");
-    expect(config.boxEnvironment).toBeUndefined();
-    expect(config.piInstallCommand).toBeUndefined();
   });
 
-  it("never treats optional Box/Pi secrets as missing while the flag is off", () => {
+  it("does not inspect runtime-only Box configuration", () => {
     expect(
-      companionsRuntimeConfig({ [COMPANIONS_FEATURE_FLAG]: "false" }).missingRequired,
+      companionsApiConfig({
+        ...enabledEnv,
+        COMPANION_BOX_API_KEY: "",
+        COMPANION_BOX_API_BASE: "",
+        COMPANION_SECRETS_MASTER_KEY: "master-key",
+      }).missingRequired,
     ).toEqual([]);
   });
 
   it("treats a true master flag without an allowlist as disabled", () => {
-    const config = companionsRuntimeConfig({ [COMPANIONS_FEATURE_FLAG]: "true" });
+    const config = companionsApiConfig({ [COMPANIONS_FEATURE_FLAG]: "true" });
     expect(config.enabled).toBe(false);
     expect(config.missingRequired).toEqual([]);
   });
 
-  it("lists the required secrets once the flag and allowlist enable Companions", () => {
-    expect(companionsRuntimeConfig(enabledEnv).missingRequired).toEqual([
-      "COMPANION_BOX_API_KEY",
+  it("lists only API-owned secrets once the flag and allowlist enable Companions", () => {
+    expect(companionsApiConfig(enabledEnv).missingRequired).toEqual([
       "COMPANION_SECRETS_MASTER_KEY",
     ]);
   });
 
-  it("clears the required list once every secret is present", () => {
-    const config = companionsRuntimeConfig({
+  it("clears the required list once the API secret is present", () => {
+    const config = companionsApiConfig({
       ...enabledEnv,
-      COMPANION_BOX_API_KEY: "box-key",
       COMPANION_SECRETS_MASTER_KEY: "master-key",
     });
     expect(config.enabled).toBe(true);
     expect(config.missingRequired).toEqual([]);
-  });
-
-  it("normalizes and overrides optional Box/Pi values", () => {
-    const config = companionsRuntimeConfig({
-      COMPANION_BOX_API_BASE: "https://box.example.com/api/v1///",
-      COMPANION_BOX_ENVIRONMENT: "staging",
-      COMPANION_BOX_TTL_SECONDS: "600",
-      COMPANION_BOX_POLL_INTERVAL_MS: "250",
-      COMPANION_BOX_READY_TIMEOUT_MS: "60000",
-      COMPANION_PI_INSTALL_COMMAND: "pi install",
-      COMPANION_PI_MCP_ADAPTER_PACKAGE: "npm:pi-mcp-adapter@9.9.9",
-    });
-    expect(config.boxApiBase).toBe("https://box.example.com/api/v1");
-    expect(config.boxEnvironment).toBe("staging");
-    expect(config.boxTtlSeconds).toBe(600);
-    expect(config.boxPollIntervalMs).toBe(250);
-    expect(config.boxReadyTimeoutMs).toBe(60_000);
-    expect(config.piInstallCommand).toBe("pi install");
-    expect(config.piMcpAdapterPackage).toBe("npm:pi-mcp-adapter@9.9.9");
-  });
-
-  it("falls back to the default TTL when the override is not a positive integer", () => {
-    expect(companionsRuntimeConfig({ COMPANION_BOX_TTL_SECONDS: "nope" }).boxTtlSeconds).toBe(21_600);
-    expect(companionsRuntimeConfig({ COMPANION_BOX_TTL_SECONDS: "-5" }).boxTtlSeconds).toBe(21_600);
   });
 });
 
@@ -172,7 +144,6 @@ describe("warnIfCompanionsMisconfigured", () => {
     const missing = warnIfCompanionsMisconfigured(
       {
         ...enabledEnv,
-        COMPANION_BOX_API_KEY: "box-key",
         COMPANION_SECRETS_MASTER_KEY: "master-key",
       },
       log,
@@ -184,9 +155,9 @@ describe("warnIfCompanionsMisconfigured", () => {
   it("warns exactly once with the missing secrets when the flag is on", () => {
     const log = vi.fn();
     const missing = warnIfCompanionsMisconfigured(enabledEnv, log);
-    expect(missing).toEqual(["COMPANION_BOX_API_KEY", "COMPANION_SECRETS_MASTER_KEY"]);
+    expect(missing).toEqual(["COMPANION_SECRETS_MASTER_KEY"]);
     expect(log).toHaveBeenCalledTimes(1);
-    expect(log.mock.calls[0]?.[0]).toContain("COMPANION_BOX_API_KEY");
+    expect(log.mock.calls[0]?.[0]).not.toContain("COMPANION_BOX_API_KEY");
     expect(log.mock.calls[0]?.[0]).toContain("COMPANION_SECRETS_MASTER_KEY");
   });
 });

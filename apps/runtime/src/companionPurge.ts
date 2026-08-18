@@ -1,8 +1,8 @@
 /**
  * One-shot legacy Companion cutover command.
  *
- * This is an offline maintenance entrypoint, not part of the API server. It owns the deliberately
- * narrow bridge between the legacy control-plane rows and Box's permanent-delete operation API:
+ * This is an offline maintenance entrypoint owned by the runtime package, not part of the runtime
+ * daemon. It owns the deliberately narrow bridge between legacy rows and Box's permanent-delete API:
  * provider deletion is durably journalled and completed first; one short SQL function then removes
  * every legacy row atomically. See the Runtime v2 cutover runbook in deploy/railway/README.md.
  */

@@ -1,7 +1,8 @@
-import type {
-  BoxRuntimeLifecycleClient,
-  CompanionBoxRuntimeV2,
-  BoxState,
+import {
+  observedBoxStateFromProvider,
+  type BoxRuntimeLifecycleClient,
+  type CompanionBoxRuntimeV2,
+  type BoxState,
 } from "@companion/box-runtime";
 import type {
   BrokerWriteOutcome,
@@ -54,7 +55,7 @@ export function createRuntimeBoxControl(options: RuntimeBoxAdapterOptions): Runt
     },
     async getStatus(input) {
       const observed = await options.runtime().existingBoxStatus(input);
-      return { state: observedBoxState(observed.state) };
+      return { state: observedBoxStateFromProvider(observed.state) };
     },
     async setTtl(input) {
       await options.runtime().refreshTtl(input);
@@ -163,39 +164,24 @@ function brokerState(
   };
 }
 
-function observedBoxState(state: BoxState): Awaited<ReturnType<RuntimeBoxControl["getStatus"]>>["state"] {
-  switch (state) {
-    case "init": return "initializing";
-    case "provisioning":
-    case "cloning": return "provisioning";
-    case "provisioned":
-    case "ready": return "ready";
-    case "idle": return "idle";
-    case "running": return "running";
-    case "archiving": return "archiving";
-    case "archived": return "archived";
-    case "error": return "error";
-  }
-}
-
 function normalizeDiscovery(input: {
   name: string;
-  canonical: { id: string; name?: string } | null;
-  duplicates: Array<{ id: string; name?: string }>;
+  canonical: { id: string; name?: string; state?: BoxState } | null;
+  duplicates: Array<{ id: string; name?: string; state?: BoxState }>;
 }): {
   name: string;
-  canonical: { id: string; name: string } | null;
-  duplicates: Array<{ id: string; name: string }>;
+  canonical: { id: string; name: string; state?: ReturnType<typeof observedBoxStateFromProvider> } | null;
+  duplicates: Array<{ id: string; name: string; state?: ReturnType<typeof observedBoxStateFromProvider> }>;
 } {
+  const named = (box: { id: string; name?: string; state?: BoxState }) => ({
+    id: box.id,
+    name: box.name ?? input.name,
+    ...(box.state ? { state: observedBoxStateFromProvider(box.state) } : {}),
+  });
   return {
     name: input.name,
-    canonical: input.canonical
-      ? { id: input.canonical.id, name: input.canonical.name ?? input.name }
-      : null,
-    duplicates: input.duplicates.map((box) => ({
-      id: box.id,
-      name: box.name ?? input.name,
-    })),
+    canonical: input.canonical ? named(input.canonical) : null,
+    duplicates: input.duplicates.map(named),
   };
 }
 

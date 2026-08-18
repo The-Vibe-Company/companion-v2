@@ -9,10 +9,13 @@ import type {
   RuntimeEngineDependencies,
 } from "./ports";
 import { retryIdempotentLifecycle, type IdempotentLifecycleCall } from "./retry";
+import {
+  activateRuntimeSettings,
+  type StagedRuntimeSettings,
+} from "./settingsActivation";
 import type {
   DuplicateCleanup,
   OperationRuntimeClaim,
-  PiObservedState,
   RuntimeAuthorization,
 } from "./types";
 
@@ -26,12 +29,6 @@ interface OperationContext {
   claim: OperationRuntimeClaim;
   session: LeaseSession;
   deps: RuntimeEngineDependencies;
-}
-
-interface StagedRuntimeResources {
-  diskLayoutVersion: 14;
-  appliedSettingsRevision: bigint;
-  appliedSkillsRevision: number | null;
 }
 
 function isProviderNotFound(error: unknown): boolean {
@@ -304,7 +301,7 @@ async function waitForReadyBox(context: OperationContext): Promise<void> {
   }
 }
 
-async function stageCapturedResources(context: OperationContext): Promise<StagedRuntimeResources> {
+async function stageCapturedResources(context: OperationContext): Promise<StagedRuntimeSettings> {
   const authorization = requiredAuthorization(context.session);
   if (
     authorization.clientSurface === null
@@ -345,7 +342,7 @@ async function stageCapturedResources(context: OperationContext): Promise<Staged
 
 async function observeStagedResources(
   context: OperationContext,
-  staged: StagedRuntimeResources,
+  staged: StagedRuntimeSettings,
 ): Promise<void> {
   await observe(context, {
     diskLayoutVersion: staged.diskLayoutVersion,
@@ -354,42 +351,6 @@ async function observeStagedResources(
       ? {}
       : { appliedSkillsRevision: staged.appliedSkillsRevision }),
   });
-}
-
-async function restartPiForSettings(
-  context: OperationContext,
-  previousInvocationId: string | null,
-): Promise<{ state: "idle"; invocationId: string }> {
-  let result: { state: PiObservedState; invocationId: string | null } = await lifecycle(
-    context,
-    "restart_pi",
-    async ({ signal }) =>
-      await context.deps.pi.restartPiDaemon({ boxId: requiredBoxId(context.session), signal }),
-  );
-  for (;;) {
-    if (result.state === "error" || result.state === "absent") {
-      throw new RuntimeInvariantError({
-        code: "pi_start_failed",
-        message: "Pi failed while activating updated settings.",
-        action: "restart_pi",
-      });
-    }
-    if (
-      result.state === "idle"
-      && result.invocationId
-      && result.invocationId !== previousInvocationId
-    ) {
-      return { state: "idle", invocationId: result.invocationId };
-    }
-    requirePollingBudget(
-      context,
-      "pi_restart_deadline_exceeded",
-      "Pi did not expose a new idle invocation for updated settings before the deadline.",
-    );
-    await context.deps.clock.sleep(PROVIDER_POLL_INTERVAL_MS, context.session.signal);
-    result = await lifecycle(context, "get_status", async ({ signal }) =>
-      await context.deps.pi.piDaemonStatus({ boxId: requiredBoxId(context.session), signal }));
-  }
 }
 
 async function startAndObservePi(context: OperationContext): Promise<void> {
@@ -746,18 +707,44 @@ async function handleApplySettings(context: OperationContext): Promise<RuntimeWo
         await context.session.checkpoint({ nextCheckpoint: "applying_settings" });
         break;
       case "applying_settings": {
-        const staged = await stageCapturedResources(context);
-        const pi = await restartPiForSettings(context, authorization.piInvocationId);
+        if (authorization.targetSettingsRevision === null) {
+          throw new RuntimeInvariantError({
+            code: "runtime_resource_snapshot_missing",
+            message: "The captured runtime resource snapshot is incomplete.",
+            action: "none",
+          });
+        }
+        const activated = await activateRuntimeSettings({
+          expectedSettingsRevision: authorization.targetSettingsRevision,
+          expectedSkillsRevision: authorization.clientSurface === "native_mobile"
+            ? null
+            : authorization.targetSkillsRevision,
+          previousPiInvocationId: authorization.piInvocationId,
+          deadlineAt: workDeadline(context),
+          clock: context.deps.clock,
+          signal: context.session.signal,
+          stage: async () => await stageCapturedResources(context),
+          restartPi: async () => await lifecycle(context, "restart_pi", async ({ signal }) =>
+            await context.deps.pi.restartPiDaemon({
+              boxId: requiredBoxId(context.session),
+              signal,
+            })),
+          observePi: async () => await lifecycle(context, "get_status", async ({ signal }) =>
+            await context.deps.pi.piDaemonStatus({
+              boxId: requiredBoxId(context.session),
+              signal,
+            })),
+        });
         // Pi activation atomically moves the staged provider environment into user-runtime tmpfs.
         // Publish the revisions only together with proof of the new idle invocation; a takeover
         // before this observation safely repeats the idempotent stage + Pi restart sequence.
         await observe(context, {
-          piState: pi.state,
-          piInvocationId: pi.invocationId,
-          appliedSettingsRevision: staged.appliedSettingsRevision,
-          ...(staged.appliedSkillsRevision === null
+          piState: activated.piState,
+          piInvocationId: activated.piInvocationId,
+          appliedSettingsRevision: activated.appliedSettingsRevision,
+          ...(activated.appliedSkillsRevision === null
             ? {}
-            : { appliedSkillsRevision: staged.appliedSkillsRevision }),
+            : { appliedSkillsRevision: activated.appliedSkillsRevision }),
         });
         break;
       }

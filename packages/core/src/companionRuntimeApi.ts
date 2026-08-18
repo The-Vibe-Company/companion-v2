@@ -107,6 +107,28 @@ function parseOperation(value: unknown): CompanionOperation | null {
   return companionOperationSchema.parse(value);
 }
 
+function projectedOperation(
+  operation: CompanionOperation | null,
+  viewer: boolean,
+): Companion["runtime"]["latest_operation"] {
+  if (!operation) return null;
+  return {
+    id: operation.id,
+    source_turn_id: operation.source_turn_id,
+    kind: operation.kind,
+    status: operation.status,
+    error: operation.error
+      ? viewer
+        ? {
+            code: "runtime_unavailable",
+            message: "Companion runtime needs attention.",
+            action: "none",
+          }
+        : operation.error
+      : null,
+  };
+}
+
 function projectedRuntimeState(
   row: RuntimeReadRow,
   latestOperation: CompanionOperation | null,
@@ -193,6 +215,7 @@ export function projectCompanionRuntimeV2(
           : companion.runtime.skills_last_error
         : null,
       last_observed_at: lastObservedAt,
+      latest_operation: projectedOperation(latestOperation, row.access_role === "viewer"),
     },
   };
 }
@@ -493,8 +516,6 @@ export async function readCompanionThreadV2(input: {
     active_turn: activeTurn?.status === "interrupted" ? null : activeTurn,
     queued_count: queuedCount,
     interrupted_turn: interruptedTurn?.status === "interrupted" ? interruptedTurn : null,
-    pending_count: queuedCount + (activeTurn ? 1 : 0) + (interruptedTurn ? 1 : 0),
-    accepted_delivery_ordinal: null,
     last_message_at: iso(row.last_message_at),
     last_read_ordinal: row.previous_last_read_ordinal === null
       ? null

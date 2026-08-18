@@ -18,6 +18,7 @@ import {
 const workspaces = [
   { name: "@companion/api", path: "apps/api" },
   { name: "@companion/web", path: "apps/web" },
+  { name: "@companion/runtime", path: "apps/runtime" },
   { name: "@companion/core", path: "packages/core" },
   { name: "@companion/db", path: "packages/db" },
 ];
@@ -207,10 +208,19 @@ test("root configuration changes force the full monorepo and every CI lane", () 
   assert.equal(quality.args.includes("--filter"), false);
   assert.deepEqual(plan.deferredGates.map(({ id }) => id), [
     "database",
+    "runtime",
     "browser",
     "containers",
     "dependencies",
   ]);
+});
+
+test("a Runtime v2 change selects runtime and requires its PostgreSQL simulator gate", () => {
+  const plan = createVerificationPlan(["apps/runtime/src/index.ts"], { workspaces });
+  assert.deepEqual(plan.workspaceNames, ["@companion/runtime"]);
+  assert.ok(plan.deferredGates.some(({ id }) => id === "runtime"));
+  assert.ok(plan.deferredGates.some(({ id }) => id === "database"));
+  assert.ok(plan.deferredGates.some(({ id }) => id === "containers"));
 });
 
 test("an unmapped source change falls back to full quality checks", () => {

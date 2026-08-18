@@ -16,12 +16,9 @@ export type BoxSimCommandKind =
   | "daemon-state"
   | "rpc-command"
   | "extension-ui-response"
-  | "heal-daemon"
   | "daemon-diagnostics"
   | "remove-provider-files"
   | "stop-daemon"
-  | "read-events"
-  | "capture-desktop-frame"
   | "unsupported";
 
 export interface BoxSimBrokerCounters {
@@ -60,7 +57,6 @@ export interface BoxSimDaemonMachine {
   brokerCounters: BoxSimBrokerCounters;
   restartCount: number;
   scenario: string;
-  rpcLog: string;
   stderrLog: string;
 }
 
@@ -72,7 +68,6 @@ export interface BoxSimCommandMachine {
   daemon: BoxSimDaemonMachine;
   layoutInstalled: boolean;
   extensionDirectoryCreated: boolean;
-  desktopFrameDataUrl: string | null;
   unknownCommandDigests: string[];
   piController?: BoxSimPiController;
 }
@@ -96,12 +91,10 @@ export function createBoxSimCommandMachine(input: {
       brokerCounters: emptyBrokerCounters(),
       restartCount: 0,
       scenario: input.scenario,
-      rpcLog: "",
       stderrLog: "",
     },
     layoutInstalled: false,
     extensionDirectoryCreated: false,
-    desktopFrameDataUrl: null,
     unknownCommandDigests: [],
   };
 }
@@ -179,8 +172,6 @@ export function appendPiEvent(
     kind: "pi_event",
     event: structuredClone(event),
   });
-  // Layout 14 keeps this canonical projection only for the legacy byte-offset reader.
-  machine.daemon.rpcLog += `${serialized}\n`;
   if (eventType === "agent_settled" && machine.daemon.activeAttemptId === activeAttemptId) {
     machine.daemon.activeAttemptId = null;
   }
@@ -275,22 +266,9 @@ export function appendPiProcessExit(
 
 /** Classify only known adapter commands. Unknown strings are never delegated to a host shell. */
 export function classifyBoxCommand(command: string): BoxSimCommandKind {
-  if (command.includes("pi.rpc.ndjson") && command.includes("offset=") && command.includes("head -c")) {
-    return "read-events";
-  }
-  if (command.includes("mktemp -t companion-frame") && command.includes("data:%s;base64")) {
-    return "capture-desktop-frame";
-  }
   const brokerCommand = extractBrokerJson(command);
   if (brokerCommand?.type === "extension_ui_response") return "extension-ui-response";
   if (brokerCommand) return "rpc-command";
-  // Layouts 13 and earlier remain recognized so the simulator can replay captured legacy commands.
-  if (command.includes("Pi RPC did not acknowledge") && command.includes("rpc_start_size")) {
-    return "rpc-command";
-  }
-  if (command.includes('> "$fifo"') && command.includes("test -p \"$fifo\"")) {
-    return "extension-ui-response";
-  }
   if (command.includes("companion-pi-journal") && command.includes("companion-pi-restarts")) {
     return "daemon-diagnostics";
   }
@@ -300,18 +278,12 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
   ) {
     return "daemon-state";
   }
-  if (command.includes("companion-pi-rpc-ready") && command.includes("companion-pi-rpc-unready")) {
-    return "daemon-state";
-  }
   if (command.includes("companion-pi-warm-ready")) return "warm-daemon-ready";
   if (command.includes("companion-box-runnable")) return "box-runnable";
   if (command.includes("staged_credential_file=") && command.includes("systemctl --user daemon-reload")) {
     return "start-or-restart-daemon";
   }
   if (command.includes("Pi daemon is still active after stop")) return "stop-daemon";
-  if (command.includes("reset-failed companion-pi-daemon.service") && command.includes("systemctl --user")) {
-    return "heal-daemon";
-  }
   if (command.includes('rm -f "$HOME/.companion/runtime/state/providers.env"')) {
     return "remove-provider-files";
   }
@@ -346,29 +318,6 @@ export function decodeShellQuoted(value: string): string | null {
   const trimmed = value.trim();
   if (trimmed.length < 2 || !trimmed.startsWith("'") || !trimmed.endsWith("'")) return null;
   return trimmed.slice(1, -1).split("'\"'\"'").join("'");
-}
-
-/** Pull the JSON value from the adapter's one `printf ... > "$fifo"` line. */
-export function extractFifoJson(command: string): Record<string, unknown> | null {
-  const prefix = "printf '%s\\n' ";
-  const suffix = '> "$fifo"';
-  const line = command.split(/\r?\n/).find((candidate) => {
-    const trimmed = candidate.trim();
-    return trimmed.startsWith(prefix) && trimmed.endsWith(suffix);
-  });
-  if (!line) return null;
-  const trimmed = line.trim();
-  const quoted = trimmed.slice(prefix.length, -suffix.length).trim();
-  const decoded = decodeShellQuoted(quoted);
-  if (decoded === null) return null;
-  try {
-    const parsed = JSON.parse(decoded) as unknown;
-    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : null;
-  } catch {
-    return null;
-  }
 }
 
 /** Pull the base64-encoded JSON command from layout 14's owner-only socket client. */
@@ -416,6 +365,11 @@ async function startDaemon(machine: BoxSimCommandMachine, restart: boolean): Pro
   }
   machine.daemon.status = "active";
   machine.daemon.invocationId = nextInvocationId(machine);
+  // Match SegmentedCompanionPiJournal.beginInvocation(): a new broker invocation cannot resume
+  // the attempt bound by its predecessor, so its remaining records are retired before Pi can emit
+  // anything for the new invocation. Without this, the simulator poisons an explicit Retry with a
+  // permanently non-empty broker queue even though the production broker starts cleanly.
+  machine.daemon.brokerAcknowledgedCursor = brokerTailCursor(machine);
   machine.daemon.rpcReady = true;
   machine.daemon.activeAttemptId = null;
   try {
@@ -797,18 +751,15 @@ export async function executeBoxCommand(
     case "start-or-restart-daemon":
       return startDaemon(machine, command.includes("systemctl --user restart"));
     case "daemon-state": {
-      const layout14 = command.includes("companion-pi-broker-ready");
-      const marker = layout14
-        ? machine.daemon.rpcReady ? "companion-pi-broker-ready" : "companion-pi-broker-unready"
-        : machine.daemon.rpcReady ? "companion-pi-rpc-ready" : "companion-pi-rpc-unready";
+      const marker = machine.daemon.rpcReady
+        ? "companion-pi-broker-ready"
+        : "companion-pi-broker-unready";
       return ok(`${machine.daemon.status === "active" ? "active" : machine.daemon.status}\n${marker}\n`);
     }
     case "rpc-command":
       return executeRpc(machine, command);
     case "extension-ui-response":
       return executeExtensionResponse(machine, command);
-    case "heal-daemon":
-      return startDaemon(machine, machine.daemon.status === "active");
     case "daemon-diagnostics": {
       const status = machine.daemon.status;
       const lines = [
@@ -837,15 +788,6 @@ export async function executeBoxCommand(
       machine.daemon.activeAttemptId = null;
       machine.volatileFiles.clear();
       return ok();
-    case "read-events": {
-      const requested = Number.parseInt(/\boffset=(\d+)/.exec(command)?.[1] ?? "0", 10);
-      const log = Buffer.from(machine.daemon.rpcLog, "utf8");
-      const offset = requested > log.byteLength ? 0 : requested;
-      const chunk = log.subarray(offset, offset + 262_144);
-      return ok(Buffer.concat([Buffer.from(`${offset}\n`, "utf8"), chunk]).toString("utf8"));
-    }
-    case "capture-desktop-frame":
-      return ok(machine.desktopFrameDataUrl ? `${machine.desktopFrameDataUrl}\n` : "");
     case "unsupported": {
       const digest = sha256(command);
       machine.unknownCommandDigests.push(digest);

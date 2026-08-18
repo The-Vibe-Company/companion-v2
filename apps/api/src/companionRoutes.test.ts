@@ -99,6 +99,7 @@ const companion = {
     last_observed_at: NOW,
     last_started_at: NOW,
     last_stopped_at: null,
+    latest_operation: null,
   },
   created_at: NOW,
   updated_at: NOW,
@@ -152,28 +153,65 @@ const thread = {
   active_turn: null,
   queued_count: 1,
   interrupted_turn: null,
-  pending_count: 1,
-  accepted_delivery_ordinal: null,
   last_message_at: NOW,
   last_read_ordinal: null,
 };
 
+const operatorTurnError = {
+  code: "provider_account_revoked",
+  message: "Provider account acct_internal_42 rejected credential generation 17.",
+  action: "reconnect_provider" as const,
+};
+
+const operatorAttemptError = {
+  code: "pi_process_crashed",
+  message: "Pi exited after reading /root/.config/provider-private.json.",
+  action: "restart_pi" as const,
+};
+
+const interruptedTurn = {
+  ...turn,
+  status: "interrupted" as const,
+  latest_attempt: {
+    id: "77777777-7777-4777-8777-777777777777",
+    turn_id: TURN_ID,
+    attempt_number: 1,
+    retry_id: null,
+    status: "interrupted" as const,
+    dispatch_state: "ambiguous" as const,
+    pi_invocation_id: "pi-invocation-operator-only",
+    dispatch_accepted_at: null,
+    error: operatorAttemptError,
+    started_at: NOW,
+    settled_at: NOW,
+  },
+  error: operatorTurnError,
+  settled_at: NOW,
+};
+
+function threadWithInterruptedTurn(access: "owner" | "editor" | "viewer") {
+  return {
+    ...thread,
+    access,
+    read_only: access === "viewer",
+    can_send: access !== "viewer",
+    interrupted_turn: interruptedTurn,
+  };
+}
+
 function registerCompanionRoutes(
   app: Hono<{ Variables: ApiVariables }>,
   env: NodeJS.ProcessEnv = {},
-  runtimeFactory?: unknown,
 ): void {
   registerCompanionRoutesImpl(app, {
     COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "example.test",
     ...env,
-  }, runtimeFactory);
+  });
 }
 
-function appWithRoutes(runtimeFactory: unknown = vi.fn(() => {
-  throw new Error("the API must never create a Box runtime");
-})) {
+function appWithRoutes() {
   const app = new Hono<{ Variables: ApiVariables }>();
-  registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" }, runtimeFactory);
+  registerCompanionRoutes(app, { COMPANION_COMPANIONS_ENABLED: "true" });
   return app;
 }
 
@@ -246,36 +284,83 @@ describe("Companions Runtime v2 API", () => {
     expect(coreMocks.listCompanionsV2).not.toHaveBeenCalled();
   });
 
-  it("serves list, detail, thread, sync, and runtime projections from PostgreSQL only", async () => {
-    const runtimeFactory = vi.fn(() => {
-      throw new Error("Box must not be read");
-    });
-    const app = appWithRoutes(runtimeFactory);
+  it("serves list, detail, thread, and runtime projections from PostgreSQL only", async () => {
+    const app = appWithRoutes();
 
     const responses = await Promise.all([
       app.request("/v1/companions"),
       app.request(`/v1/companions/${COMPANION_ID}`),
       app.request(`/v1/companions/${COMPANION_ID}/thread`),
-      app.request(`/v1/companions/${COMPANION_ID}/thread/sync`, { method: "POST" }),
-      app.request(`/v1/companions/${COMPANION_ID}/runtime?live=true`),
+      app.request(`/v1/companions/${COMPANION_ID}/runtime`),
     ]);
 
-    expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200, 200]);
-    expect(await responses[4]!.json()).toEqual({ companion, source: "control_plane" });
+    expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200]);
+    expect(await responses[3]!.json()).toEqual({ companion });
     expect(coreMocks.listCompanionsV2).toHaveBeenCalledWith(expect.objectContaining({
       withLastMessage: true,
     }));
     expect(coreMocks.getCompanionV2).toHaveBeenCalledTimes(2);
-    expect(coreMocks.readCompanionThreadV2).toHaveBeenCalledTimes(2);
-    expect(runtimeFactory).not.toHaveBeenCalled();
+    expect(coreMocks.readCompanionThreadV2).toHaveBeenCalledOnce();
     for (const response of responses) {
       expect(response.headers.get("cache-control")).toBe("private, no-store");
     }
   });
 
+  it("replaces Viewer turn and attempt diagnostics with one generic non-actionable error", async () => {
+    const viewerThread = threadWithInterruptedTurn("viewer");
+    coreMocks.readCompanionThreadV2.mockResolvedValue(viewerThread);
+
+    const response = await appWithRoutes().request(
+      `/v1/companions/${COMPANION_ID}/thread`,
+    );
+    const payload = await response.json() as { thread: typeof viewerThread };
+
+    expect(response.status).toBe(200);
+    expect(payload.thread.interrupted_turn.error).toEqual({
+      code: "runtime_unavailable",
+      message: "Companion runtime needs attention.",
+      action: "none",
+    });
+    expect(payload.thread.interrupted_turn.latest_attempt?.error).toEqual({
+      code: "runtime_unavailable",
+      message: "Companion runtime needs attention.",
+      action: "none",
+    });
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain(operatorTurnError.code);
+    expect(serialized).not.toContain(operatorTurnError.message);
+    expect(serialized).not.toContain(operatorAttemptError.code);
+    expect(serialized).not.toContain(operatorAttemptError.message);
+  });
+
+  it.each(["owner", "editor"] as const)(
+    "preserves full actionable thread diagnostics for %s access",
+    async (access) => {
+      const operatorThread = threadWithInterruptedTurn(access);
+      coreMocks.readCompanionThreadV2.mockResolvedValue(operatorThread);
+
+      const response = await appWithRoutes().request(
+        `/v1/companions/${COMPANION_ID}/thread`,
+      );
+      const payload = await response.json() as { thread: typeof operatorThread };
+
+      expect(response.status).toBe(200);
+      expect(payload.thread.interrupted_turn.error).toEqual(operatorTurnError);
+      expect(payload.thread.interrupted_turn.latest_attempt?.error).toEqual(operatorAttemptError);
+    },
+  );
+
+  it("does not expose the retired thread sync route", async () => {
+    const response = await appWithRoutes().request(
+      `/v1/companions/${COMPANION_ID}/thread/sync`,
+      { method: "POST" },
+    );
+    expect(response.status).toBe(404);
+    expect(coreMocks.readCompanionThreadV2).not.toHaveBeenCalled();
+  });
+
   it("persists a send through the v2 enqueue boundary and returns only a bounded 202 ACK", async () => {
-    const runtimeFactory = vi.fn();
-    const app = appWithRoutes(runtimeFactory);
+    const app = appWithRoutes();
     const response = await app.request(jsonPost(`/v1/companions/${COMPANION_ID}/messages`, {
       content: "Summarize the incident",
       client_message_id: MESSAGE_ID,
@@ -291,7 +376,6 @@ describe("Companions Runtime v2 API", () => {
       clientSurface: "mobile_web",
     }));
     expect(coreMocks.readCompanionThreadV2).not.toHaveBeenCalled();
-    expect(runtimeFactory).not.toHaveBeenCalled();
   });
 
   it("delegates a repeated client_message_id unchanged and returns the same durable turn", async () => {
@@ -384,8 +468,7 @@ describe("Companions Runtime v2 API", () => {
     ["restart Pi", `/v1/companions/${COMPANION_ID}/runtime/restart`, "POST", { target: "pi" }, "restart_pi"],
     ["restart Box", `/v1/companions/${COMPANION_ID}/runtime/restart`, "POST", { target: "box" }, "restart_box"],
   ])("accepts %s as a durable operation", async (_label, path, method, body, kind) => {
-    const runtimeFactory = vi.fn();
-    const app = appWithRoutes(runtimeFactory);
+    const app = appWithRoutes();
     const response = await app.request(path, {
       method,
       headers: {
@@ -404,7 +487,6 @@ describe("Companions Runtime v2 API", () => {
       kind,
       requestId: RETRY_ID,
     }));
-    expect(runtimeFactory).not.toHaveBeenCalled();
   });
 
   it("rejects lifecycle work without a caller-owned idempotency key", async () => {
@@ -473,8 +555,7 @@ describe("Companions Runtime v2 API", () => {
   });
 
   it("mints an Owner desktop through the private Runtime client only", async () => {
-    const runtimeFactory = vi.fn();
-    const response = await appWithRoutes(runtimeFactory).request(
+    const response = await appWithRoutes().request(
       `/v1/companions/${COMPANION_ID}/runtime/desktop`,
       { method: "POST" },
     );
@@ -490,6 +571,5 @@ describe("Companions Runtime v2 API", () => {
       orgId: ORG_ID,
       companionId: COMPANION_ID,
     }));
-    expect(runtimeFactory).not.toHaveBeenCalled();
   });
 });

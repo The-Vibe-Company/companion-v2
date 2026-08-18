@@ -1,4 +1,5 @@
 import type { RuntimeClock } from "./clock";
+import type { RuntimeProcessLog } from "./logging";
 import type { PiBrokerCounters, RuntimePiProjection } from "./piEvents";
 import type { RuntimeVisibleTextRedactor } from "./projectionRedaction";
 import type { RuntimeStore } from "./store";
@@ -199,6 +200,8 @@ export interface RuntimeEngineDependencies {
   jitter: () => number;
   executorId: string;
   eventPollIntervalMs?: number;
+  /** Process logs for failures. Absent in unit tests unless a test captures them. */
+  log?: RuntimeProcessLog;
 }
 
 export const storeMaterialProvider: RuntimeMaterialProvider = {

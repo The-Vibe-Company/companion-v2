@@ -45,10 +45,14 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
     id: `pre-tenant-outsider-${suffix}`,
     email: `outsider-${suffix}@other.test`,
   };
-  const rlsRole = `companion_pretenant_${suffix.replaceAll("-", "").slice(0, 20)}`;
+  const roleSuffix = suffix.replaceAll("-", "").slice(0, 16);
+  const apiRole = `companion_pretenant_api_${roleSuffix}`;
+  const workerRole = `companion_pretenant_worker_${roleSuffix}`;
+  const companionRuntimeRole = `companion_pretenant_runtime_${roleSuffix}`;
+  const processRoles = [apiRole, workerRole, companionRuntimeRole];
   const rlsPassword = `pretenant-${suffix}`;
   const rlsUrl = new URL(databaseUrl);
-  rlsUrl.username = rlsRole;
+  rlsUrl.username = apiRole;
   rlsUrl.password = rlsPassword;
   let runtimeRoleSql: ReturnType<typeof postgres> | undefined;
   const invitationToken = `invite-${suffix}`;
@@ -217,14 +221,15 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
           ${JSON.stringify({ workspaceId: { eq: orgA } })}
         )
     `;
-    await sql.unsafe(`
-      create role ${rlsRole}
-      login password '${rlsPassword}' nosuperuser nobypassrls noinherit
-    `);
+    await sql.unsafe(`create role ${apiRole} login password '${rlsPassword}' nosuperuser nobypassrls noinherit`);
+    await sql.unsafe(`create role ${workerRole} login nosuperuser nobypassrls noinherit`);
+    await sql.unsafe(`create role ${companionRuntimeRole} login nosuperuser nobypassrls noinherit`);
     const grantsFile = await resolveRuntimeRoleGrantsFile();
     const grantBlock = extractRuntimeRoleGrantBlock(await readFile(grantsFile, "utf8"));
     await sql.begin(async (tx) => {
-      await tx`select set_config('companion.runtime_role', ${rlsRole}, true)`;
+      await tx`select set_config('companion.api_role', ${apiRole}, true)`;
+      await tx`select set_config('companion.worker_role', ${workerRole}, true)`;
+      await tx`select set_config('companion.companion_runtime_role', ${companionRuntimeRole}, true)`;
       await tx.unsafe(grantBlock);
     });
     runtimeRoleSql = postgres(rlsUrl.toString(), { max: 4 });
@@ -234,8 +239,8 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
     await runtimeRoleSql?.end({ timeout: 1 });
     await sql`delete from organizations where id in (${orgA}::uuid, ${orgB}::uuid)`;
     await sql`delete from "user" where id in (${owner.id}, ${colleague.id}, ${outsider.id})`;
-    await sql.unsafe(`drop owned by ${rlsRole}`);
-    await sql.unsafe(`drop role ${rlsRole}`);
+    for (const role of processRoles) await sql.unsafe(`drop owned by ${role}`);
+    for (const role of processRoles) await sql.unsafe(`drop role ${role}`);
     await sql.end();
   });
 
@@ -252,9 +257,15 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
         rolinherit as inherit,
         rolcanlogin as "canLogin"
       from pg_roles
-      where rolname = ${rlsRole}
+      where rolname = any(${processRoles}::text[])
+      order by rolname
     `;
-    expect(attributes).toEqual([{ superuser: false, bypassRls: false, inherit: false, canLogin: true }]);
+    expect(attributes).toEqual(processRoles.map(() => ({
+      superuser: false,
+      bypassRls: false,
+      inherit: false,
+      canLogin: true,
+    })));
 
     const result = await withRuntimeRole(async (tx) => {
       const context = await tx<{ orgId: string | null; userId: string | null }[]>`
@@ -284,6 +295,61 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
     expect(result).toEqual({
       context: { orgId: null, userId: null },
       counts: { organizations: 0, memberships: 0, invitations: 0, apiTokens: 0, skills: 0, billing: 0 },
+    });
+  });
+
+  it("keeps API, worker, and runtime capabilities mutually exclusive", async () => {
+    const [capabilities] = await sql<{
+      apiOwnsApi: boolean;
+      apiOwnsWorker: boolean;
+      apiOwnsRuntime: boolean;
+      workerOwnsApi: boolean;
+      workerOwnsWorker: boolean;
+      workerOwnsRuntime: boolean;
+      runtimeOwnsApi: boolean;
+      runtimeOwnsWorker: boolean;
+      runtimeOwnsRuntime: boolean;
+      apiReadsPrivateRuntime: boolean;
+      workerReadsPrivateRuntime: boolean;
+      runtimeReadsPrivateRuntime: boolean;
+      apiReadsAuth: boolean;
+      workerReadsAuth: boolean;
+      runtimeReadsAuth: boolean;
+    }[]>`
+      select
+        has_function_privilege(${apiRole}, 'public.companion_list_user_orgs(text)', 'EXECUTE') as "apiOwnsApi",
+        has_function_privilege(${apiRole}, 'public.companion_claim_github_sync_destinations(text,integer,integer)', 'EXECUTE') as "apiOwnsWorker",
+        has_function_privilege(${apiRole}, 'public.companion_runtime_get_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)', 'EXECUTE') as "apiOwnsRuntime",
+        has_function_privilege(${workerRole}, 'public.companion_list_user_orgs(text)', 'EXECUTE') as "workerOwnsApi",
+        has_function_privilege(${workerRole}, 'public.companion_claim_github_sync_destinations(text,integer,integer)', 'EXECUTE') as "workerOwnsWorker",
+        has_function_privilege(${workerRole}, 'public.companion_runtime_get_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)', 'EXECUTE') as "workerOwnsRuntime",
+        has_function_privilege(${companionRuntimeRole}, 'public.companion_list_user_orgs(text)', 'EXECUTE') as "runtimeOwnsApi",
+        has_function_privilege(${companionRuntimeRole}, 'public.companion_claim_github_sync_destinations(text,integer,integer)', 'EXECUTE') as "runtimeOwnsWorker",
+        has_function_privilege(${companionRuntimeRole}, 'public.companion_runtime_get_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)', 'EXECUTE') as "runtimeOwnsRuntime",
+        has_table_privilege(${apiRole}, 'public.companion_turns', 'SELECT') as "apiReadsPrivateRuntime",
+        has_table_privilege(${workerRole}, 'public.companion_turns', 'SELECT') as "workerReadsPrivateRuntime",
+        has_table_privilege(${companionRuntimeRole}, 'public.companion_turns', 'SELECT') as "runtimeReadsPrivateRuntime",
+        has_table_privilege(${apiRole}, 'public.user', 'SELECT') as "apiReadsAuth",
+        has_table_privilege(${workerRole}, 'public.user', 'SELECT') as "workerReadsAuth",
+        has_table_privilege(${companionRuntimeRole}, 'public.user', 'SELECT') as "runtimeReadsAuth"
+    `;
+
+    expect(capabilities).toEqual({
+      apiOwnsApi: true,
+      apiOwnsWorker: false,
+      apiOwnsRuntime: false,
+      workerOwnsApi: false,
+      workerOwnsWorker: true,
+      workerOwnsRuntime: false,
+      runtimeOwnsApi: false,
+      runtimeOwnsWorker: false,
+      runtimeOwnsRuntime: true,
+      apiReadsPrivateRuntime: false,
+      workerReadsPrivateRuntime: false,
+      runtimeReadsPrivateRuntime: false,
+      apiReadsAuth: true,
+      workerReadsAuth: false,
+      runtimeReadsAuth: false,
     });
   });
 
@@ -616,7 +682,7 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
   });
 
   it("resolves Stripe tenant correlation and scans due billing work without a tenant GUC", async () => {
-    const result = await withRuntimeRole(async (tx) => {
+    const apiResult = await withRuntimeRole(async (tx) => {
       const bySubscription = await tx<{ orgId: string | null }[]>`
         select companion_billing_org_for_stripe_event(${`sub-a-${suffix}`}, null)::text as "orgId"
       `;
@@ -626,14 +692,17 @@ describe("pre-tenant PostgreSQL RLS boundary", () => {
       const unknown = await tx<{ orgId: string | null }[]>`
         select companion_billing_org_for_stripe_event(${`missing-${suffix}`}, null)::text as "orgId"
       `;
-      const candidates = await tx<{ orgId: string }[]>`
+      return { bySubscription, byCustomer, unknown };
+    });
+    const candidates = await sql.begin(async (tx) => {
+      await tx.unsafe(`set local role ${workerRole}`);
+      return tx<{ orgId: string }[]>`
         select org_id::text as "orgId"
         from companion_list_billing_sync_candidates(clock_timestamp(), false, 10)
       `;
-      return { bySubscription, byCustomer, unknown, candidates };
     });
 
-    expect(result).toEqual({
+    expect({ ...apiResult, candidates }).toEqual({
       bySubscription: [{ orgId: orgA }],
       byCustomer: [{ orgId: orgB }],
       unknown: [{ orgId: null }],

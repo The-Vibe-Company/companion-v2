@@ -15,14 +15,14 @@ FROM tooling AS pruner
 
 ARG RAILWAY_SERVICE_NAME
 
-RUN case "${RAILWAY_SERVICE_NAME}" in \
-      api|worker) ;; \
-      *) echo "RAILWAY_SERVICE_NAME must be api or worker" >&2; exit 1 ;; \
-    esac
-
 COPY . .
 
-RUN turbo prune "@companion/${RAILWAY_SERVICE_NAME}" --docker
+RUN case "${RAILWAY_SERVICE_NAME}" in \
+      api|worker|runtime) package="${RAILWAY_SERVICE_NAME}" ;; \
+      release) package="api" ;; \
+      *) echo "RAILWAY_SERVICE_NAME must be api, worker, runtime, or release" >&2; exit 1 ;; \
+    esac \
+  && turbo prune "@companion/${package}" --docker
 
 FROM tooling AS dependencies
 
@@ -38,8 +38,13 @@ ARG RAILWAY_SERVICE_NAME
 COPY --from=pruner /app/out/full/ .
 COPY --from=pruner /app/tsconfig.base.json ./tsconfig.base.json
 
-RUN pnpm --filter "@companion/${RAILWAY_SERVICE_NAME}" build \
-  && pnpm --filter "@companion/${RAILWAY_SERVICE_NAME}" deploy --prod --no-optional /release
+RUN case "${RAILWAY_SERVICE_NAME}" in \
+      api|worker|runtime) package="${RAILWAY_SERVICE_NAME}" ;; \
+      release) package="api" ;; \
+      *) echo "RAILWAY_SERVICE_NAME must be api, worker, runtime, or release" >&2; exit 1 ;; \
+    esac \
+  && pnpm --filter "@companion/${package}" build \
+  && pnpm --filter "@companion/${package}" deploy --prod --no-optional /release
 
 FROM node:${NODE_VERSION}-bookworm-slim AS runner
 

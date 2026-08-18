@@ -1,11 +1,10 @@
 # Companion v2 architecture — Skills Hub and optional Companions
 
-This document is the authoritative Runtime v2 target architecture for the stacked rollout.
-Companion is always a Skills Hub. Behind the existing Companions feature gate, it also hosts named,
-persistent Box/Pi teammates through a dedicated runtime service. The runtime is intentionally
-narrower than a generic agent platform: one Companion is one Box, one Pi daemon, and one durable
-thread. Until the cutover PR completes, legacy code may remain for deployability but must not expand
-its product surface or be treated as the target design.
+This document describes the as-built Runtime v2 architecture. Companion is always a Skills Hub.
+Behind the existing Companions feature gate, it also hosts named, persistent Box/Pi teammates
+through a dedicated runtime service. The runtime is intentionally narrower than a generic agent
+platform: one Companion is one Box, one Pi daemon, and one durable thread. The guarded final cutover
+removed the legacy executor surface; it must not be reintroduced.
 
 ## System shape
 
@@ -98,6 +97,10 @@ Runtime state is explicit and durable:
 All rows are org-scoped and force-RLS-enabled. API, worker, and runtime use distinct
 `NOSUPERUSER NOBYPASSRLS NOINHERIT` roles. Runtime claims, renewals, checkpoints, and settlements use
 narrow worker-style `SECURITY DEFINER` functions; it receives no general auth or tenant-data grant.
+The API keeps RLS-scoped `SELECT` on `companions`, workspace access, member state, threads, and
+transcript projections, but their `INSERT`, `UPDATE`, and `DELETE` paths exist only behind the
+tenant- and actor-scoped `companion_api_*` capability functions. The worker has no hosted Companion
+table access, including provider-connection or member-MCP metadata.
 
 One `(companion_id, client_message_id)` produces exactly one turn. The transaction that stores the
 user message also stores that turn. A duplicate POST resolves to the same row. A retry names a new
@@ -113,7 +116,9 @@ queued → starting → dispatching → running ↔ needs_input
 
 Only one attempt is active per Companion. Later turns remain queued in durable order. An interrupted
 turn blocks the queue until Owner/Editor Retry or Cancel. Settings revisions accepted during a turn
-apply after its settlement and before the next turn.
+apply after its settlement and before the next turn. On a warm Box, configuration is published as
+applied only after runtime stages the exact snapshot, restarts Pi, and observes a different idle Pi
+invocation; takeover repeats those idempotent steps if their final observation was lost.
 
 ## Dedicated runtime execution
 
@@ -251,14 +256,15 @@ is confirmed may PostgreSQL remove legacy Companions, pools, shares, member stat
 transcripts, and leases. Provider connections, MCP accounts, Skills, secrets, organizations, users,
 billing, and audit rows survive.
 
-Old runtime columns may remain temporarily only to keep each stacked PR deployable. They receive no
-history backfill and are removed with every old executor, watermark, pool, reconciler, function, and
-grant after seven green canary days, no open P0/P1 runtime issue, and an empty purge report.
+The stacked rollout temporarily retained old runtime columns without backfilling them. The final
+migration removes those columns together with every old executor, watermark, pool, reconciler,
+mutating purge function, and legacy grant. The release process admits that migration only after
+seven green canary days, no open P0/P1 runtime issue, and an empty purge report. The
+provider-operation ledger remains owner-readable cutover evidence.
 
-The feature flag stays disabled between purge and the asynchronous API/web cutover. Schema and
-runtime-service layers in that interval are deployable only as a fenced, non-activatable rollout;
-the legacy executor must not be re-enabled against v2 rows. Once cut over, rollback uses the kill
-switch rather than a legacy binary.
+The feature flag remained disabled between purge and the asynchronous API/web cutover. Once v2 rows
+exist, rollback uses the kill switch rather than a legacy binary; no legacy executor may process
+them.
 
 ## Explicit exclusions
 
@@ -274,3 +280,5 @@ Self-hosted deployments run PostgreSQL, S3-compatible storage, email, API, worke
 Only runtime receives `COMPANION_BOX_API_KEY`; its desktop endpoint binds a private network. API,
 worker, and runtime use separate database credentials and least-privilege grants. Conductor and CI
 must start the same four-process topology with the deterministic Box/Pi simulator where applicable.
+The as-built operational sequence, including the owner-only gate transition and rollback boundary,
+is documented in `docs/runbooks/companions-runtime.md`.

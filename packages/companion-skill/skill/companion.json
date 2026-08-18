@@ -1,7 +1,7 @@
 {
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.69.0",
+  "version": "1.71.0",
   "icon": "boxes",
   "title": "Companion",
   "description": "Manage and safely install SKILL.md packages through delegated Agent Auth, including pinned public releases, publishing, updates, dependencies, secrets, hosted Skill Databases, local install tracking, and Companion self-update.",
@@ -28,6 +28,24 @@
       "evals/evals.json"
     ],
     "changelog": [
+      {
+        "version": "1.71.0",
+        "date": "2026-08-17",
+        "changes": [
+          "Refreshes the bundled Agent Auth client after the final Runtime v2 API cutover and route registry consolidation.",
+          "Keeps hosted Companion turns, lifecycle operations, desktop access, Box, and Pi outside delegated Skills Hub capabilities.",
+          "No change to Companion skill commands, permissions, or installation behavior."
+        ]
+      },
+      {
+        "version": "1.70.0",
+        "date": "2026-08-17",
+        "changes": [
+          "Refreshes the bundled Agent Auth client after ownership of Companion package assembly moved out of the retired Box lifecycle code.",
+          "Keeps package serving and runtime staging on one integrity-checked implementation without granting delegated clients any Box or Pi access.",
+          "No change to Companion skill commands, permissions, or installation behavior."
+        ]
+      },
       {
         "version": "1.69.0",
         "date": "2026-08-16",

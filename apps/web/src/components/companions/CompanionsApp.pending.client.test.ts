@@ -97,6 +97,7 @@ function companionIn(state: "provisioning" | "running" | "stopping" | "error"): 
       last_observed_at: null,
       last_started_at: null,
       last_stopped_at: null,
+      latest_operation: null,
     },
     created_at: "2026-08-12T12:00:00.000Z",
     updated_at: "2026-08-12T12:00:00.000Z",
@@ -113,7 +114,6 @@ const emptyThread: Thread = {
   active_turn: null,
   queued_count: 0,
   interrupted_turn: null,
-  pending_count: 1,
   last_message_at: null,
   last_read_ordinal: null,
 };
@@ -131,7 +131,6 @@ function controlPlane(options: {
   let settled = companionIn(options.initialState ?? "provisioning");
   const runtimeReads: string[] = [];
   const threadReads: string[] = [];
-  const threadSyncs: string[] = [];
   let held = 0;
   let release = () => {};
   const holding = new Promise<void>((resolve) => { release = resolve; });
@@ -156,12 +155,11 @@ function controlPlane(options: {
       if (options.holdFirstRead && held++ === 0) {
         const stale = settled;
         await holding;
-        return json({ companion: stale, source: "control_plane" });
+        return json({ companion: stale });
       }
-      return json({ companion: settled, source: "control_plane" });
+      return json({ companion: settled });
     }
     if (url.includes("/thread")) {
-      if (method === "POST" && url.endsWith("/thread/sync")) threadSyncs.push(url);
       if (method === "GET") threadReads.push(url);
       return json({ thread: emptyThread });
     }
@@ -172,7 +170,6 @@ function controlPlane(options: {
     fetchMock,
     runtimeReads,
     threadReads,
-    threadSyncs,
     /** What the wake writes when the Box and Pi are up: the state the chip is waiting for. */
     boxCameUp: () => { settled = companionIn("running"); },
     /** What a wake that fails writes instead. */
@@ -263,10 +260,10 @@ describe("CompanionsApp while a Companion is starting", () => {
     await wait(20);
 
     expect(api.runtimeReads.length).toBeGreaterThan(1);
-    expect(api.runtimeReads.filter((url) => url.includes("live=true"))).toHaveLength(0);
+    expect(api.runtimeReads.every((url) => url.endsWith("/runtime"))).toBe(true);
   });
 
-  it("polls an archiving thread through the read model without running legacy continuation", async () => {
+  it("polls a stopping thread through the read model", async () => {
     api = controlPlane({ initialState: "stopping" });
     vi.stubGlobal("fetch", api.fetchMock);
     await openThread(companionIn("stopping"));
@@ -274,16 +271,14 @@ describe("CompanionsApp while a Companion is starting", () => {
     await wait(5);
 
     expect(api.threadReads.length).toBeGreaterThan(0);
-    expect(api.threadSyncs).toHaveLength(0);
   });
 
-  it("polls a provisioning thread without invoking the legacy executor", async () => {
+  it("polls a provisioning thread through the read model", async () => {
     await openThread(companionIn("provisioning"));
 
     await wait(5);
 
     expect(api.threadReads.length).toBeGreaterThan(0);
-    expect(api.threadSyncs).toHaveLength(0);
   });
 
   it("keeps the Box online when an overtaken read finally answers", async () => {

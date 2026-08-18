@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { COMPANION_SKILL_KEY, companionSkillDir } from "@companion/companion-skill";
+import { getCompanionSkillPackage } from "@companion/companion-skill/package";
 import {
-  getCompanionSkillPackage,
   type CompanionBoxRuntimeV2,
   type CompanionRuntimeSkill,
 } from "@companion/box-runtime";

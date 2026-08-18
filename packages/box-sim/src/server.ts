@@ -425,7 +425,7 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
             ...(typeof body.name === "string" ? { name: body.name } : {}),
             ...(typeof body.ttlSeconds === "number" ? { ttlSeconds: body.ttlSeconds } : {}),
           }),
-          respond: (box) => sendJson(response, 200, { ok: true, type: "box.info", box }),
+          respond: (box) => sendJson(response, 200, { ok: true, type: "box.updated", box }),
         });
         return;
       }

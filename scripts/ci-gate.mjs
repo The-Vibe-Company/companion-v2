@@ -1,6 +1,15 @@
 #!/usr/bin/env node
 
-const SCOPE_OUTPUTS = ["quality", "build", "database", "browser", "containers", "dependencies", "skill"];
+const SCOPE_OUTPUTS = [
+  "quality",
+  "build",
+  "database",
+  "runtime",
+  "browser",
+  "containers",
+  "dependencies",
+  "skill",
+];
 
 function isTrue(value) {
   return value === "true";
@@ -25,6 +34,7 @@ export function rejectedJobs(jobs, eventName) {
     quality: isTrue(outputs.quality),
     "application-build": isTrue(outputs.build),
     "database-integration": isTrue(outputs.database),
+    "runtime-integration": isTrue(outputs.runtime),
     "railway-containers": isTrue(outputs.containers),
     browser: isTrue(outputs.browser),
     "dependency-audit": isTrue(outputs.dependencies),

@@ -70,6 +70,7 @@ const companion: Companion = {
     last_observed_at: null,
     last_started_at: null,
     last_stopped_at: null,
+    latest_operation: null,
   },
   created_at: "2026-08-12T12:00:00.000Z",
   updated_at: "2026-08-12T12:00:00.000Z",
@@ -83,7 +84,6 @@ function thread(entries: CompanionTranscriptEntry[], overrides: Partial<Thread> 
     read_only: false,
     can_send: true,
     entries,
-    pending_count: 0,
     last_message_at: null,
     last_read_ordinal: null,
     ...overrides,
@@ -354,7 +354,7 @@ describe("a tool run in the thread", () => {
       entry({ event_id: "msg:2", ordinal: 2, role: "user", content: "Alors ?" }),
       entry({ event_id: "msg:3", ordinal: 3, role: "user", content: "Ca va ?" }),
       entry({ event_id: "msg:4", ordinal: 4, role: "user", content: "ping THE-369" }),
-    ], { pending_count: 0 }));
+    ]));
 
     expect(container.textContent).not.toContain("Luna is replying...");
   });

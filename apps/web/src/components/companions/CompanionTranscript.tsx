@@ -272,13 +272,11 @@ export function CompanionTranscript({
   const runtimeRef = useRef<AssistantRuntime | null>(null);
   const inFlight = useRef(false);
   /**
-   * The id of a send whose request did not confirm, held beside the draft it named. A send that wakes
-   * an asleep Companion persists the turn before the wake it then waits on, so a request that dies
-   * mid-wake still left that turn durable under this id. Restoring the draft and minting a fresh id on
-   * the retry would ask the control plane to store the same message under a second name — the second
-   * turn THE-341 saw. Reusing the id keeps one submission one turn: the retry resolves to the entry
-   * already stored. It is cleared the moment a send confirms and only reused for the identical draft,
-   * so two different messages are still two turns.
+   * The id of a send whose request did not confirm, held beside the draft it named. The control plane
+   * can persist a turn before a response is lost, so minting a fresh id for the restored draft could
+   * store the same message twice. Reusing the id keeps one submission one turn. It is cleared the
+   * moment a send confirms and only reused for the identical draft, so two different messages are
+   * still two turns.
    */
   const pendingSendRef = useRef<{ content: string; clientMessageId: string } | null>(null);
   /**

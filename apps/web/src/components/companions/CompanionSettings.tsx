@@ -3,6 +3,7 @@
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type {
   Companion,
+  CompanionLatestOperation,
   CompanionProvidersResponse,
 } from "@companion/contracts";
 import type { RestartCompanionRuntimeInput } from "@companion/contracts/companion-runtime";
@@ -29,6 +30,69 @@ import { CompanionSkillsSyncStatus } from "./CompanionSkillsSyncStatus";
 const SKILLS_SYNC_POLL_MS = 3_000;
 /** A stalled apply stops moving on its own; cap the poll instead of reading forever. */
 const SKILLS_SYNC_POLL_MAX_TICKS = 40;
+
+type RuntimeNotice = {
+  operationId: string | null;
+  message: string;
+};
+
+function operationNotice(
+  operation: Pick<CompanionLatestOperation, "id" | "kind" | "status">,
+): RuntimeNotice | null {
+  const operationId = operation.id;
+  if (operation.status === "pending") {
+    switch (operation.kind) {
+      case "delete":
+        return {
+          operationId,
+          message: "Deletion accepted. This Companion remains visible until its Box is permanently deleted.",
+        };
+      case "restart_pi":
+        return { operationId, message: "Pi restart accepted. It will run after earlier runtime work." };
+      case "restart_box":
+        return { operationId, message: "Full Box restart accepted. It will run after earlier runtime work." };
+      default:
+        return null;
+    }
+  }
+  if (operation.status !== "succeeded") return null;
+  switch (operation.kind) {
+    case "delete":
+      return { operationId, message: "Deletion completed." };
+    case "restart_pi":
+      return { operationId, message: "Pi restart completed." };
+    case "restart_box":
+      return { operationId, message: "Full Box restart completed." };
+    case "stop":
+      return { operationId, message: "Stop completed." };
+    case "start":
+      return { operationId, message: "Start completed." };
+    case "apply_settings":
+      return { operationId, message: "Settings applied." };
+  }
+}
+
+function operationFailureMessage(operation: CompanionLatestOperation | null): string | null {
+  if (operation === null
+    || !["failed", "interrupted", "cancelled"].includes(operation.status)) return null;
+  if (operation.error?.message) return operation.error.message;
+  const label = operation.kind === "delete"
+    ? "Deletion"
+    : operation.kind === "restart_pi"
+      ? "Pi restart"
+      : operation.kind === "restart_box"
+        ? "Full Box restart"
+        : operation.kind === "apply_settings"
+          ? "Settings apply"
+          : operation.kind === "start"
+            ? "Start"
+            : "Stop";
+  return operation.status === "failed"
+    ? `${label} failed.`
+    : operation.status === "interrupted"
+      ? `${label} was interrupted. Retry when it is safe.`
+      : `${label} was cancelled.`;
+}
 
 export function CompanionSettings({
   orgId,
@@ -62,12 +126,9 @@ export function CompanionSettings({
   const [confirmingBoxRestart, setConfirmingBoxRestart] = useState(false);
   const [restartTarget, setRestartTarget] = useState<RestartCompanionRuntimeInput["target"]>("pi");
   const [restarting, setRestarting] = useState<RestartCompanionRuntimeInput["target"] | null>(null);
-  const [pendingRestartTarget, setPendingRestartTarget] = useState<
-    RestartCompanionRuntimeInput["target"] | null
-  >(null);
   const [runtimeSnapshot, setRuntimeSnapshot] = useState(companion.runtime);
-  const [runtimeMessage, setRuntimeMessage] = useState<string | null>(null);
-  const [deletionRequested, setDeletionRequested] = useState(false);
+  const [latestOperation, setLatestOperation] = useState(companion.runtime.latest_operation ?? null);
+  const [runtimeNotice, setRuntimeNotice] = useState<RuntimeNotice | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [hidden, setHidden] = useState(companion.hidden);
@@ -89,6 +150,11 @@ export function CompanionSettings({
 
   useEffect(() => {
     setRuntimeSnapshot(companion.runtime);
+    const nextOperation = companion.runtime.latest_operation ?? null;
+    setLatestOperation(nextOperation);
+    if (nextOperation !== null && nextOperation.status !== "pending") {
+      setRuntimeNotice(operationNotice(nextOperation));
+    }
   }, [companion.runtime]);
 
   useEffect(() => {
@@ -101,11 +167,58 @@ export function CompanionSettings({
     setLatest(companion);
   }, [companion]);
 
-  const lifecycleActive = pendingRestartTarget !== null
+  const operationActive = latestOperation !== null
+    && (latestOperation.status === "pending" || latestOperation.status === "running");
+  const pendingRestartTarget: RestartCompanionRuntimeInput["target"] | null = operationActive
+    ? latestOperation.kind === "restart_pi"
+      ? "pi"
+      : latestOperation.kind === "restart_box"
+        ? "box"
+        : null
+    : null;
+  const deletionActive = operationActive && latestOperation?.kind === "delete";
+  const deletionRetryable = latestOperation?.kind === "delete"
+    && (latestOperation.status === "failed"
+      || latestOperation.status === "interrupted"
+      || latestOperation.status === "cancelled");
+  const operationPending = latestOperation?.status === "pending";
+  const durableOperationMessage = operationActive
+    ? latestOperation.kind === "delete"
+      ? operationPending
+        ? "Deletion is queued. This Companion remains until its Box is permanently deleted."
+        : "Deletion is in progress. This Companion remains until its Box is permanently deleted."
+      : latestOperation.kind === "stop"
+        ? operationPending
+          ? "Stop is queued. Status refreshes every three seconds."
+          : "Stop is in progress. Status refreshes every three seconds."
+        : latestOperation.kind === "restart_pi"
+          ? operationPending
+            ? "Pi restart is queued. Status refreshes every three seconds."
+            : "Pi restart is in progress. Status refreshes every three seconds."
+          : latestOperation.kind === "restart_box"
+            ? operationPending
+              ? "Full Box restart is queued. Status refreshes every three seconds."
+              : "Full Box restart is in progress. Status refreshes every three seconds."
+            : latestOperation.kind === "start"
+              ? operationPending
+                ? "Start is queued. Status refreshes every three seconds."
+                : "Start is in progress. Status refreshes every three seconds."
+              : operationPending
+                ? "Settings apply is queued. Status refreshes every three seconds."
+                : "Settings are being applied. Status refreshes every three seconds."
+    : null;
+  const runtimeMessage = runtimeNotice !== null
+    && (latestOperation === null
+      || runtimeNotice.operationId === null
+      || runtimeNotice.operationId === latestOperation.id)
+    ? runtimeNotice.message
+    : null;
+  const durableOperationError = operationFailureMessage(latestOperation);
+  const lifecycleActive = operationActive
     || runtimeSnapshot.state === "provisioning"
     || runtimeSnapshot.state === "stopping";
   useEffect(() => {
-    if (!lifecycleActive || deletionRequested) return;
+    if (!lifecycleActive || deletionActive) return;
     let active = true;
     const read = async () => {
       try {
@@ -113,6 +226,11 @@ export function CompanionSettings({
         if (!active) return;
         setError(null);
         setRuntimeSnapshot(next.runtime);
+        const nextOperation = next.runtime.latest_operation ?? null;
+        setLatestOperation(nextOperation);
+        if (nextOperation !== null && nextOperation.status !== "pending") {
+          setRuntimeNotice(operationNotice(nextOperation));
+        }
         setLatest(next);
         onSavedRef.current(next);
         if (pendingRestartTarget === null
@@ -120,13 +238,19 @@ export function CompanionSettings({
           || next.runtime.state === "stopping") return;
         if (next.runtime.state === "error") {
           setError(next.runtime.last_error ?? "The accepted restart failed. Retry when it is safe.");
-          setRuntimeMessage(null);
-        } else {
-          setRuntimeMessage(pendingRestartTarget === "pi"
-            ? "Pi restart completed."
-            : "Full Box restart completed.");
+          setRuntimeNotice(null);
+          return;
         }
-        setPendingRestartTarget(null);
+        if (nextOperation !== null
+          && (nextOperation.status === "pending" || nextOperation.status === "running")) return;
+        if (nextOperation !== null
+          && ["failed", "interrupted", "cancelled"].includes(nextOperation.status)) return;
+        setRuntimeNotice({
+          operationId: nextOperation?.id ?? null,
+          message: pendingRestartTarget === "pi"
+            ? "Pi restart completed."
+            : "Full Box restart completed.",
+        });
       } catch (cause) {
         if (!active) return;
         setError(cause instanceof Error
@@ -139,13 +263,13 @@ export function CompanionSettings({
       active = false;
       clearInterval(timer);
     };
-  }, [companion.id, deletionRequested, lifecycleActive, orgId, pendingRestartTarget]);
+  }, [companion.id, deletionActive, lifecycleActive, orgId, pendingRestartTarget]);
 
   const skillsPending = latest.runtime.skills_applied_revision < latest.runtime.skills_revision;
   // A recorded restage failure will not clear on its own — only the next start or save retries it —
   // so it stops the poll rather than reading the same answer forever.
   const skillsApplying = skillsPending
-    && !deletionRequested
+    && !deletionActive
     && !latest.runtime.skills_last_error
     && (latest.runtime.state === "provisioning" || latest.runtime.state === "running");
   useEffect(() => {
@@ -170,7 +294,7 @@ export function CompanionSettings({
   // Permanent deletion is asynchronous. Keep this surface until PostgreSQL confirms the row is
   // gone, so a queued operation is never presented as if external Box deletion already succeeded.
   useEffect(() => {
-    if (!deletionRequested) return;
+    if (!deletionActive) return;
     let active = true;
     const read = async () => {
       try {
@@ -178,6 +302,11 @@ export function CompanionSettings({
         if (!active) return;
         setError(null);
         setRuntimeSnapshot(next.runtime);
+        const nextOperation = next.runtime.latest_operation ?? null;
+        setLatestOperation(nextOperation);
+        if (nextOperation !== null && nextOperation.status !== "pending") {
+          setRuntimeNotice(operationNotice(nextOperation));
+        }
         setLatest(next);
         onSavedRef.current(next);
       } catch (cause) {
@@ -197,7 +326,7 @@ export function CompanionSettings({
       active = false;
       clearInterval(timer);
     };
-  }, [companion.id, deletionRequested, orgId]);
+  }, [companion.id, deletionActive, orgId]);
 
   const changed = useMemo(
     () =>
@@ -224,7 +353,7 @@ export function CompanionSettings({
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!canEdit || deletionRequested || !name.trim() || !providerId || !modelId || !changed) return;
+    if (!canEdit || deletionActive || !name.trim() || !providerId || !modelId || !changed) return;
     setBusy(true);
     setError(null);
     setSaved(false);
@@ -264,13 +393,11 @@ export function CompanionSettings({
     const requestId = deleteRequestIdRef.current ?? crypto.randomUUID();
     deleteRequestIdRef.current = requestId;
     try {
-      await deleteCompanion(orgId, companion.id, requestId);
+      const operation = await deleteCompanion(orgId, companion.id, requestId);
       deleteRequestIdRef.current = null;
       setConfirmingDelete(false);
-      setDeletionRequested(true);
-      setRuntimeMessage(
-        "Deletion accepted. This Companion remains visible until its Box is permanently deleted.",
-      );
+      setLatestOperation(operation);
+      setRuntimeNotice(operationNotice(operation));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "This Companion could not be deleted.");
       setConfirmingDelete(false);
@@ -280,20 +407,18 @@ export function CompanionSettings({
   };
 
   const restart = async (target: RestartCompanionRuntimeInput["target"]) => {
-    if (!canEdit || changed || !online || deletionRequested || pendingRestartTarget !== null) return;
+    if (!canEdit || changed || !online || deletionActive || pendingRestartTarget !== null) return;
     setBusy(true);
     setRestarting(target);
     setError(null);
-    setRuntimeMessage(null);
+    setRuntimeNotice(null);
     const requestId = restartRequestIdRef.current[target] ?? crypto.randomUUID();
     restartRequestIdRef.current[target] = requestId;
     try {
-      await restartCompanionRuntime(orgId, companion.id, { target }, requestId);
+      const operation = await restartCompanionRuntime(orgId, companion.id, { target }, requestId);
       delete restartRequestIdRef.current[target];
-      setPendingRestartTarget(target);
-      setRuntimeMessage(target === "pi"
-        ? "Pi restart accepted. It will run after earlier runtime work."
-        : "Full Box restart accepted. It will run after earlier runtime work.");
+      setLatestOperation(operation);
+      setRuntimeNotice(operationNotice(operation));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "This Companion could not be restarted.");
     } finally {
@@ -318,10 +443,16 @@ export function CompanionSettings({
       </header>
 
       <div className="companions-content companions-settings__content">
-        {error && <div className="companions-error" role="alert">{error}</div>}
+        {(error ?? durableOperationError) && (
+          <div className="companions-error" role="alert">
+            {error ?? durableOperationError}
+          </div>
+        )}
         {saved && <div className="companions-settings__saved" role="status">Settings saved.</div>}
-        {runtimeMessage && (
-          <div className="companions-settings__saved" role="status">{runtimeMessage}</div>
+        {(runtimeMessage ?? durableOperationMessage) && (
+          <div className="companions-settings__saved" role="status">
+            {runtimeMessage ?? durableOperationMessage}
+          </div>
         )}
 
         <form className="companions-settings__form" onSubmit={submit}>
@@ -332,7 +463,7 @@ export function CompanionSettings({
               required
               maxLength={120}
               value={name}
-              disabled={!canEdit || busy || deletionRequested}
+              disabled={!canEdit || busy || deletionActive}
               onChange={(event) => {
                 setName(event.target.value);
                 setSaved(false);
@@ -347,7 +478,7 @@ export function CompanionSettings({
               maxLength={280}
               rows={4}
               value={instructions}
-              disabled={!canEdit || busy || deletionRequested}
+              disabled={!canEdit || busy || deletionActive}
               aria-describedby="companion-instructions-hint"
               onChange={(event) => {
                 setInstructions(event.target.value);
@@ -365,7 +496,7 @@ export function CompanionSettings({
             modelId={modelId}
             namePrefix="companion-settings"
             descriptionId="companion-provider-hint"
-            disabled={!canEdit || busy || deletionRequested}
+            disabled={!canEdit || busy || deletionActive}
             onChange={(selection) => {
               setProviderId(selection.providerId);
               setModelId(selection.modelId);
@@ -380,7 +511,7 @@ export function CompanionSettings({
             orgId={orgId}
             selectedSkillIds={selectedSkillIds}
             canWriteSkills={canWriteSkills}
-            disabled={!canEdit || busy || deletionRequested}
+            disabled={!canEdit || busy || deletionActive}
             footer={<CompanionSkillsSyncStatus companion={latest} />}
             onSelectedSkillIdsChange={(ids) => {
               setSelectedSkillIds(ids);
@@ -395,7 +526,7 @@ export function CompanionSettings({
           <CompanionPluginPicker
             orgId={orgId}
             selectedMcpAccountIds={selectedMcpAccountIds}
-            disabled={!canEdit || busy || deletionRequested}
+            disabled={!canEdit || busy || deletionActive}
             onSelectedMcpAccountIdsChange={(ids) => {
               setSelectedMcpAccountIds(ids);
               setSaved(false);
@@ -407,7 +538,7 @@ export function CompanionSettings({
               <button
                 type="submit"
                 className="cds-btn cds-btn--primary cds-btn--md"
-                disabled={busy || deletionRequested || !changed || !name.trim() || !providerId || !modelId}
+                disabled={busy || deletionActive || !changed || !name.trim() || !providerId || !modelId}
               >
                 {busy ? "Saving..." : "Save changes"}
               </button>
@@ -424,7 +555,7 @@ export function CompanionSettings({
 
             <fieldset
               className="companions-settings__restart-options"
-              disabled={busy || changed || deletionRequested || pendingRestartTarget !== null}
+              disabled={busy || changed || deletionActive || pendingRestartTarget !== null}
               aria-describedby="restart-companion-hint"
             >
               <legend className="sr-only">Restart scope</legend>
@@ -460,7 +591,7 @@ export function CompanionSettings({
 
             <div className="companions-settings__restart-action">
               <p className="companions-settings__hint" id="restart-companion-hint">
-                {deletionRequested
+                {deletionActive
                   ? "Companion deletion is in progress. Runtime controls are unavailable."
                   : pendingRestartTarget !== null
                     ? "The accepted restart is still running. Status refreshes every three seconds."
@@ -478,7 +609,7 @@ export function CompanionSettings({
                 disabled={
                   busy
                   || changed
-                  || deletionRequested
+                  || deletionActive
                   || pendingRestartTarget !== null
                   || !online
                 }
@@ -510,7 +641,7 @@ export function CompanionSettings({
             <button
               type="button"
               className="cds-btn cds-btn--secondary cds-btn--md"
-              disabled={busy || deletionRequested}
+              disabled={busy || deletionActive}
               onClick={async () => {
                 setBusy(true);
                 setError(null);
@@ -541,10 +672,14 @@ export function CompanionSettings({
             <button
               type="button"
               className="cds-btn cds-btn--danger cds-btn--md"
-              disabled={busy || deletionRequested}
+              disabled={busy || deletionActive}
               onClick={() => setConfirmingDelete(true)}
             >
-              {deletionRequested ? "Deletion requested" : "Delete Companion"}
+              {deletionActive
+                ? "Deletion requested"
+                : deletionRetryable
+                  ? "Retry Delete"
+                  : "Delete Companion"}
             </button>
           </section>
         )}

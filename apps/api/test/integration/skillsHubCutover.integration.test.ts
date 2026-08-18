@@ -34,6 +34,10 @@ if (!databaseUrl?.trim()) {
 
 const migrationsDir = fileURLToPath(new URL("../../../../packages/db/drizzle/", import.meta.url));
 const databaseName = `companion_cutover_${randomUUID().replaceAll("-", "")}`;
+const roleSuffix = randomUUID().replaceAll("-", "").slice(0, 12);
+const apiRole = `cutover_api_${roleSuffix}`;
+const workerRole = `cutover_worker_${roleSuffix}`;
+const runtimeRole = `cutover_runtime_${roleSuffix}`;
 const adminSql = postgres(databaseUrl, { max: 1 });
 const upgradeUrl = new URL(databaseUrl);
 upgradeUrl.pathname = `/${databaseName}`;
@@ -81,37 +85,24 @@ async function replayHistoryThrough0062(): Promise<void> {
 }
 
 async function migrateWithApiEnvironment(): Promise<void> {
-  const previous = {
-    migrationUrl: process.env.DATABASE_MIGRATION_URL,
-    url: process.env.DATABASE_URL,
-    runtimeRole: process.env.DATABASE_RUNTIME_ROLE,
-    apiRole: process.env.DATABASE_API_ROLE,
-    workerRole: process.env.DATABASE_WORKER_ROLE,
-  };
-  process.env.DATABASE_MIGRATION_URL = upgradeUrl.toString();
-  process.env.DATABASE_URL = upgradeUrl.toString();
-  delete process.env.DATABASE_RUNTIME_ROLE;
-  delete process.env.DATABASE_API_ROLE;
-  delete process.env.DATABASE_WORKER_ROLE;
-
-  try {
-    await runMigrations();
-  } finally {
-    for (const [key, value] of [
-      ["DATABASE_MIGRATION_URL", previous.migrationUrl],
-      ["DATABASE_URL", previous.url],
-      ["DATABASE_RUNTIME_ROLE", previous.runtimeRole],
-      ["DATABASE_API_ROLE", previous.apiRole],
-      ["DATABASE_WORKER_ROLE", previous.workerRole],
-    ] as const) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
+  await runMigrations({
+    env: {
+      DATABASE_MIGRATION_URL: upgradeUrl.toString(),
+      DATABASE_API_ROLE: apiRole,
+      DATABASE_WORKER_ROLE: workerRole,
+      DATABASE_COMPANION_RUNTIME_ROLE: runtimeRole,
+      COMPANION_MIGRATIONS_DIR: migrationsDir,
+    },
+  });
 }
 
 describe("Skills Hub-only cutover", () => {
   beforeAll(async () => {
+    await adminSql.unsafe(`
+      create role ${apiRole} login nosuperuser nobypassrls noinherit;
+      create role ${workerRole} login nosuperuser nobypassrls noinherit;
+      create role ${runtimeRole} login nosuperuser nobypassrls noinherit;
+    `);
     await adminSql.unsafe(`create database "${databaseName}"`);
     upgradeSql = postgres(upgradeUrl.toString(), { max: 1 });
     await replayHistoryThrough0062();
@@ -152,6 +143,11 @@ describe("Skills Hub-only cutover", () => {
   afterAll(async () => {
     await upgradeSql?.end({ timeout: 1 });
     await adminSql.unsafe(`drop database if exists "${databaseName}" with (force)`);
+    await adminSql.unsafe(`
+      drop role if exists ${apiRole};
+      drop role if exists ${workerRole};
+      drop role if exists ${runtimeRole};
+    `);
     await adminSql.end({ timeout: 1 });
   });
 

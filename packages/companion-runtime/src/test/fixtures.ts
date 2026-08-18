@@ -367,10 +367,10 @@ export class MemoryRuntimeStore implements RuntimeStore {
     if (input.diskLayoutVersion !== undefined) {
       this.authorization.diskLayoutVersion = input.diskLayoutVersion;
     }
-    if (input.appliedSettingsRevision !== undefined) {
+    if (fence.workKind !== "settings" && input.appliedSettingsRevision !== undefined) {
       this.authorization.appliedSettingsRevision = input.appliedSettingsRevision;
     }
-    if (input.appliedSkillsRevision !== undefined) {
+    if (fence.workKind !== "settings" && input.appliedSkillsRevision !== undefined) {
       this.authorization.appliedSkillsRevision = input.appliedSkillsRevision;
     }
     let nextCheckpoint: string | null = null;
@@ -400,6 +400,15 @@ export class MemoryRuntimeStore implements RuntimeStore {
       nextCheckpoint = "provider_deleted";
     } else if (fence.workKind === "health" && current === "observing") {
       nextCheckpoint = "observed";
+    } else if (fence.workKind === "settings" && current === "applying"
+      && input.appliedSettingsRevision === this.authorization.desiredSettingsRevision
+      && (this.authorization.clientSurface === "native_mobile"
+        ? input.appliedSkillsRevision === undefined
+        : input.appliedSkillsRevision === this.authorization.skillsRevision)
+      && input.piState === "idle"
+      && input.piInvocationId !== undefined
+      && input.piInvocationId !== previousPiInvocationId) {
+      nextCheckpoint = "applied";
     }
     if (nextCheckpoint) {
       const next = input.expectedSequence + 1n;
@@ -504,8 +513,12 @@ export class MemoryRuntimeStore implements RuntimeStore {
     return null;
   }
 
-  async settle(_fence: LeaseFence, input: RuntimeSettlementInput): Promise<boolean> {
+  async settle(fence: LeaseFence, input: RuntimeSettlementInput): Promise<boolean> {
     this.settlements.push(input);
+    if (fence.workKind === "settings" && input.terminalStatus === "succeeded") {
+      this.authorization.appliedSettingsRevision = this.authorization.desiredSettingsRevision;
+      this.authorization.appliedSkillsRevision = this.authorization.skillsRevision;
+    }
     return true;
   }
 
@@ -619,6 +632,7 @@ export function engineDependencies(input: {
   clock?: TestClock;
   ports?: FakePorts;
   materialProvider?: RuntimeMaterialProvider;
+  log?: RuntimeEngineDependencies["log"];
 }): RuntimeEngineDependencies {
   const ports = input.ports ?? fakePorts(input.store);
   return {
@@ -638,5 +652,6 @@ export function engineDependencies(input: {
     jitter: () => 0.5,
     executorId: "executor-test",
     eventPollIntervalMs: 1,
+    ...(input.log ? { log: input.log } : {}),
   };
 }

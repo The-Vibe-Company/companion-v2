@@ -14,6 +14,7 @@ import {
   LeaseRenewalError,
   LeaseSession,
 } from "./leaseSession";
+import { workFailureLogRecord } from "./logging";
 import { handleOperation } from "./operations";
 import type { RuntimeEngineDependencies } from "./ports";
 import { handleSettings } from "./settings";
@@ -21,7 +22,7 @@ import {
   RuntimeStoreIndeterminateError,
   RuntimeStoreSerializationError,
 } from "./store";
-import type { RuntimeClaim, RuntimeSettlementInput } from "./types";
+import type { RuntimeClaim, RuntimeSettlementInput, SafeRuntimeError } from "./types";
 
 export type RuntimeExecutionOutcome =
   | "succeeded"
@@ -115,6 +116,14 @@ export class RuntimeEngine {
       const localControl = await this.#honorLocalControl(claim, session);
       if (localControl) return localControl;
       if (error instanceof LeaseFenceLostError || error instanceof LeaseRenewalError) {
+        this.#logFailure({
+          claim,
+          session,
+          event: "runtime.work.fence_lost",
+          outcome: "fence_lost",
+          reason: error instanceof LeaseRenewalError ? "lease_renewal_failed" : "lease_fence_lost",
+          thrown: error,
+        });
         return this.#result(claim, "fence_lost");
       }
       if (
@@ -123,10 +132,20 @@ export class RuntimeEngine {
       ) {
         // The database may have committed a response-lost CAS. Do not guess or replay a side effect.
         session.stop();
+        this.#logFailure({
+          claim,
+          session,
+          event: "runtime.work.fence_lost",
+          outcome: "fence_lost",
+          reason: error instanceof RuntimeStoreSerializationError
+            ? "serialization_conflict"
+            : "indeterminate_store",
+          thrown: error,
+        });
         return this.#result(claim, "fence_lost");
       }
       if (error instanceof LeaseAuthorizationDeniedError) {
-        return await this.#finishDenial(claim, session, error.denialCode);
+        return await this.#finishDenial(claim, session, error.denialCode, error);
       }
       if (error instanceof AmbiguousExternalEffectError) {
         return await this.#finishSettlement(claim, session, {
@@ -136,7 +155,7 @@ export class RuntimeEngine {
             message: "An external effect may have succeeded and was not replayed.",
             action: "retry",
           }),
-        });
+        }, error);
       }
       if (error instanceof RuntimeShutdownError) {
         return await this.#finishSettlement(claim, session, {
@@ -146,7 +165,7 @@ export class RuntimeEngine {
             message: "Runtime execution was interrupted during shutdown.",
             action: "retry",
           }),
-        });
+        }, error);
       }
       return await this.#finishSettlement(claim, session, {
         terminalStatus: "failed",
@@ -155,7 +174,7 @@ export class RuntimeEngine {
           message: "Runtime execution failed.",
           action: "retry",
         }),
-      });
+      }, error);
     } finally {
       session.stop();
       await session.drain();
@@ -185,6 +204,7 @@ export class RuntimeEngine {
     claim: RuntimeClaim,
     session: LeaseSession,
     denialCode: string | null,
+    thrown?: unknown,
   ): Promise<RuntimeExecutionResult> {
     const code = denialCode ?? "runtime_authorization_denied";
     if (RELEASE_DENIALS.has(code)) {
@@ -192,7 +212,7 @@ export class RuntimeEngine {
       return this.#result(claim, released ? "released" : "fence_lost");
     }
     const settlement = denialRuntimeError(code);
-    return await this.#finishSettlement(claim, session, settlement);
+    return await this.#finishSettlement(claim, session, settlement, thrown);
   }
 
   async #honorLocalControl(
@@ -218,9 +238,48 @@ export class RuntimeEngine {
     claim: RuntimeClaim,
     session: LeaseSession,
     settlement: RuntimeSettlementInput,
+    thrown?: unknown,
   ): Promise<RuntimeExecutionResult> {
     const settled = await session.settle(settlement);
-    return this.#result(claim, settled ? settlement.terminalStatus : "fence_lost");
+    const outcome = settled ? settlement.terminalStatus : "fence_lost";
+    if (!settled || settlement.terminalStatus !== "succeeded") {
+      this.#logFailure({
+        claim,
+        session,
+        event: settled ? `runtime.work.${settlement.terminalStatus}` : "runtime.work.fence_lost",
+        outcome,
+        reason: settled ? undefined : "settle_rejected",
+        thrown,
+        persisted: settlement.error,
+        level: settlement.terminalStatus === "interrupted" && thrown === undefined ? "warn" : "error",
+      });
+    }
+    return this.#result(claim, outcome);
+  }
+
+  #logFailure(input: {
+    claim: RuntimeClaim;
+    session: LeaseSession;
+    event: string;
+    outcome: RuntimeExecutionOutcome;
+    reason?: string;
+    thrown?: unknown;
+    persisted?: SafeRuntimeError;
+    level?: "error" | "warn";
+  }): void {
+    const log = this.#deps.log;
+    if (!log) return;
+    const record = workFailureLogRecord({
+      ts: this.#deps.clock.now(),
+      event: input.event,
+      claim: input.claim,
+      authorization: input.session.authorization,
+      outcome: input.outcome,
+      ...(input.reason ? { reason: input.reason } : {}),
+      ...(input.thrown !== undefined ? { thrown: input.thrown } : {}),
+      ...(input.persisted ? { persisted: input.persisted } : {}),
+    });
+    log[input.level ?? "error"](record);
   }
 
   #result(claim: RuntimeClaim, outcome: RuntimeExecutionOutcome): RuntimeExecutionResult {

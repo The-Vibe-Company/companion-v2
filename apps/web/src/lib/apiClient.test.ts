@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createThreadQueue } from "../components/companions/threadQueue";
-import { ApiFetchError, apiFetch } from "./apiClient";
+import { apiFetch } from "./apiClient";
 
 /** A fetch that never answers on its own — it settles only when the request's signal aborts. */
 function hangingFetch() {
@@ -26,23 +25,6 @@ describe("apiFetch deadlines", () => {
 
     await expect(apiFetch("/v1/companions", undefined, { timeoutMs: 5 }))
       .rejects.toMatchObject({ name: "ApiFetchError", status: 408 });
-  });
-
-  it("releases the thread queue when a request times out, so the next poll still runs", async () => {
-    vi.stubGlobal("fetch", hangingFetch());
-    const queue = createThreadQueue();
-
-    // Without a deadline this hang would hold the queue's busy flag forever, and every later poll
-    // would be skipped while every send waited behind it.
-    await expect(
-      queue.run(
-        () => apiFetch("/v1/companions/c1/thread/sync", { method: "POST" }, { timeoutMs: 5 }),
-        { skipWhenBusy: false },
-      ),
-    ).rejects.toBeInstanceOf(ApiFetchError);
-
-    const next = await queue.run(() => Promise.resolve("poll"), { skipWhenBusy: true });
-    expect(next).toBe("poll");
   });
 
   it("keeps a deadline that fires mid-body a timeout instead of a fake empty success", async () => {

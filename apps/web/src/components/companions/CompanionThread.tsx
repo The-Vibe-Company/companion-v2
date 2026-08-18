@@ -1,7 +1,12 @@
 "use client";
 
 import { useEffect, useId, useRef, useState } from "react";
-import type { Companion, CompanionDesktop, CompanionThread as Thread } from "@companion/contracts";
+import type {
+  Companion,
+  CompanionDesktop,
+  CompanionOperation,
+  CompanionThread as Thread,
+} from "@companion/contracts";
 import { ApiFetchError } from "@/lib/apiClient";
 import { Icon } from "../Icon";
 import { CompanionContext, type CompanionContextSkill } from "./CompanionContext";
@@ -25,26 +30,28 @@ export interface CompanionContextPanel {
 
 function InterruptedTurnNotice({
   turn,
+  latestOperation,
   canAct,
   onRetry,
   onCancel,
 }: {
   turn: NonNullable<Thread["interrupted_turn"]>;
+  latestOperation: Companion["runtime"]["latest_operation"];
   canAct: boolean;
-  onRetry: (turnId: string, retryId: string) => Promise<void>;
+  onRetry: (turnId: string, retryId: string) => Promise<CompanionOperation>;
   onCancel: (turnId: string) => Promise<void>;
 }) {
   const titleId = useId();
   const errorRef = useRef<HTMLParagraphElement>(null);
   const retryIdRef = useRef<string | null>(null);
   const [action, setAction] = useState<"retry" | "cancel" | null>(null);
-  const [retryAccepted, setRetryAccepted] = useState(false);
+  const [acceptedRetry, setAcceptedRetry] = useState<CompanionOperation | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     retryIdRef.current = null;
     setAction(null);
-    setRetryAccepted(false);
+    setAcceptedRetry(null);
     setActionError(null);
   }, [turn.id, turn.latest_attempt?.id]);
 
@@ -52,15 +59,22 @@ function InterruptedTurnNotice({
     if (actionError) errorRef.current?.focus();
   }, [actionError]);
 
+  useEffect(() => {
+    if (latestOperation?.kind !== "restart_pi"
+      || latestOperation.source_turn_id !== turn.id
+      || !["failed", "interrupted", "cancelled"].includes(latestOperation.status)) return;
+    retryIdRef.current = null;
+    if (acceptedRetry?.id === latestOperation.id) setAcceptedRetry(null);
+  }, [acceptedRetry?.id, latestOperation, turn.id]);
+
   const retry = async () => {
-    if (!canAct || action || retryAccepted) return;
+    if (!canAct || action) return;
     const retryId = retryIdRef.current ?? crypto.randomUUID();
     retryIdRef.current = retryId;
     setAction("retry");
     setActionError(null);
     try {
-      await onRetry(turn.id, retryId);
-      setRetryAccepted(true);
+      setAcceptedRetry(await onRetry(turn.id, retryId));
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "This turn could not be retried.");
     } finally {
@@ -82,6 +96,19 @@ function InterruptedTurnNotice({
     }
   };
 
+  const durableRetry = latestOperation?.kind === "restart_pi"
+    && latestOperation.source_turn_id === turn.id
+    ? latestOperation
+    : null;
+  const retryOperation = acceptedRetry && acceptedRetry.id !== durableRetry?.id
+    ? acceptedRetry
+    : durableRetry ?? acceptedRetry;
+  const retryPending = retryOperation?.status === "pending" || retryOperation?.status === "running";
+  const retryFailure = retryOperation
+    && (retryOperation.status === "failed" || retryOperation.status === "interrupted")
+    ? retryOperation.error?.message ?? "Pi could not restart. Retry or cancel this turn."
+    : null;
+
   return (
     <section
       className="chat-interruption"
@@ -90,24 +117,26 @@ function InterruptedTurnNotice({
     >
       <Icon name="alert-triangle" size={18} />
       <div className="chat-interruption__body">
-        <h2 id={titleId}>Turn interrupted</h2>
-        <p>
-          {turn.error?.message ?? "The runtime lost a confirmed outcome for this turn."} External
-          actions may already have succeeded.
-        </p>
+        <div role="alert" aria-labelledby={titleId}>
+          <h2 id={titleId}>Turn interrupted</h2>
+          <p>
+            {turn.error?.message ?? "The runtime lost a confirmed outcome for this turn."} External
+            actions may already have succeeded.
+          </p>
+        </div>
         {!canAct ? (
           <p className="chat-interruption__status">
             An Owner or Editor must retry or cancel this turn before the queue can continue.
           </p>
         ) : (
           <>
-            {retryAccepted ? (
+            {retryPending ? (
               <p className="chat-interruption__status" role="status">
                 Retry accepted. Pi will restart before this turn runs again.
               </p>
             ) : null}
             <div className="chat-interruption__actions">
-              {!retryAccepted ? (
+              {!retryPending ? (
                 <button
                   type="button"
                   className="cds-btn cds-btn--primary cds-btn--sm"
@@ -128,6 +157,9 @@ function InterruptedTurnNotice({
             </div>
           </>
         )}
+        {retryFailure ? (
+          <p className="chat-interruption__error" role="alert">{retryFailure}</p>
+        ) : null}
         {actionError ? (
           <p ref={errorRef} className="chat-interruption__error" role="alert" tabIndex={-1}>
             {actionError}
@@ -145,10 +177,10 @@ function InterruptedTurnNotice({
  * conversation without any Box contact and gets no composer. Pi's tools and skills stay out of the
  * transcript by design.
  *
- * A runner can open the context panel beside the conversation: the Box screen as a preview, the
- * routines this Companion will keep, and the skills it may stage. It is a second pane rather than a
- * change to the transcript: the primitives keep the conversation, the composer, and their own
- * mechanics untouched whether the panel is open or not.
+ * A runner can open the context panel beside the conversation: the Box screen as a preview and the
+ * skills it may stage. It is a second pane rather than a change to the transcript: the primitives
+ * keep the conversation, the composer, and their own mechanics untouched whether the panel is open
+ * or not.
  */
 export function CompanionThread({
   companion,
@@ -191,7 +223,7 @@ export function CompanionThread({
   onSettings: (() => void) | null;
   onThread: (thread: Thread) => void;
   onDesktop: () => void;
-  onRetryInterrupted: (turnId: string, retryId: string) => Promise<void>;
+  onRetryInterrupted: (turnId: string, retryId: string) => Promise<CompanionOperation>;
   onCancelInterrupted: (turnId: string) => Promise<void>;
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -362,6 +394,7 @@ export function CompanionThread({
       {interruptedTurn ? (
         <InterruptedTurnNotice
           turn={interruptedTurn}
+          latestOperation={companion.runtime.latest_operation ?? null}
           canAct={canSend}
           onRetry={onRetryInterrupted}
           onCancel={onCancelInterrupted}

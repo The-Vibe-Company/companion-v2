@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import {
@@ -22,7 +22,6 @@ const socketPath = optionalAbsolutePath("COMPANION_PI_SOCKET_PATH")
   ?? join(root, "state", "pi-broker.sock");
 const journalPath = optionalAbsolutePath("COMPANION_PI_JOURNAL_PATH")
   ?? join(root, "events");
-const compatibilityLogPath = join(root, "logs", "pi.rpc.ndjson");
 const maxLineBytes = optionalPositiveInteger("COMPANION_PI_MAX_LINE_BYTES")
   ?? COMPANION_PI_BROKER_MAX_LINE_BYTES;
 const segmentBytes = optionalPositiveInteger("COMPANION_PI_SEGMENT_BYTES");
@@ -185,12 +184,6 @@ async function main(): Promise<void> {
     invocationId,
     transport,
     journal,
-    appendCompatibilityEvent(event) {
-      appendFileSync(compatibilityLogPath, `${JSON.stringify(event)}\n`, {
-        encoding: "utf8",
-        mode: 0o600,
-      });
-    },
   });
   transport.bind({
     onEvent(record) {
@@ -246,7 +239,15 @@ async function main(): Promise<void> {
 }
 
 function piArguments(runtimeRoot: string): string[] {
-  const args = ["--mode", "rpc", "--session-dir", join(runtimeRoot, "sessions")];
+  // Without --continue, Pi's own CLI always starts a brand-new session (SessionManager.create),
+  // even when one already exists in --session-dir. Every broker start -- including a routine
+  // Pi-only restart that never recreates the Box -- must resume the Companion's single ongoing
+  // conversation instead of silently discarding it. --continue safely falls back to a fresh
+  // session when the directory has none yet, so this is correct on a Companion's very first start
+  // too.
+  const args = [
+    "--mode", "rpc", "--session-dir", join(runtimeRoot, "sessions"), "--continue",
+  ];
   const model = readOptionalText(join(runtimeRoot, "state", "model.txt"));
   if (model) args.push("--model", model);
   args.push("--no-skills");

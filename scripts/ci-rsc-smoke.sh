@@ -15,7 +15,7 @@ export COMPOSE_BIND_HOST="${COMPOSE_BIND_HOST:-127.0.0.1}"
 
 if [ -n "${CI_USE_GHA_POSTGRES:-}" ]; then
   export POSTGRES_PORT="${POSTGRES_PORT:-5432}"
-  export DATABASE_URL="${DATABASE_URL:-postgres://companion:companion@127.0.0.1:${POSTGRES_PORT}/companion}"
+  export DATABASE_MIGRATION_URL="${DATABASE_MIGRATION_URL:-postgres://companion:companion@127.0.0.1:${POSTGRES_PORT}/companion}"
   COMPOSE_SERVICES=(minio mailpit)
 else
   export POSTGRES_PORT="${POSTGRES_PORT:-15432}"
@@ -30,8 +30,17 @@ export COMPANION_API_PORT="${COMPANION_API_PORT:-13301}"
 export COMPANION_API_HOST="${COMPANION_API_HOST:-127.0.0.1}"
 export COMPANION_WEB_HOST="${COMPANION_WEB_HOST:-127.0.0.1}"
 if [ -z "${CI_USE_GHA_POSTGRES:-}" ]; then
-  export DATABASE_URL="${DATABASE_URL:-postgres://companion:companion@127.0.0.1:${POSTGRES_PORT}/companion}"
+  export DATABASE_MIGRATION_URL="${DATABASE_MIGRATION_URL:-postgres://companion:companion@127.0.0.1:${POSTGRES_PORT}/companion}"
+  export DATABASE_URL="${DATABASE_URL:-postgres://companion_api:companion-api@127.0.0.1:${POSTGRES_PORT}/companion}"
+  export DATABASE_WORKER_URL="${DATABASE_WORKER_URL:-postgres://companion_worker:companion-worker@127.0.0.1:${POSTGRES_PORT}/companion}"
+  export DATABASE_COMPANION_RUNTIME_URL="${DATABASE_COMPANION_RUNTIME_URL:-postgres://companion_runtime_v2:companion-runtime-v2@127.0.0.1:${POSTGRES_PORT}/companion}"
 fi
+export DATABASE_API_ROLE="${DATABASE_API_ROLE:-companion_api}"
+export DATABASE_WORKER_ROLE="${DATABASE_WORKER_ROLE:-companion_worker}"
+export DATABASE_COMPANION_RUNTIME_ROLE="${DATABASE_COMPANION_RUNTIME_ROLE:-companion_runtime_v2}"
+export DATABASE_API_PASSWORD="${DATABASE_API_PASSWORD:-companion-api}"
+export DATABASE_WORKER_PASSWORD="${DATABASE_WORKER_PASSWORD:-companion-worker}"
+export DATABASE_COMPANION_RUNTIME_PASSWORD="${DATABASE_COMPANION_RUNTIME_PASSWORD:-companion-runtime-v2}"
 export COMPANION_API_URL="${COMPANION_API_URL:-http://127.0.0.1:${COMPANION_API_PORT}}"
 export COMPANION_WEB_URL="${COMPANION_WEB_URL:-http://127.0.0.1:${COMPANION_WEB_PORT}}"
 export NEXT_PUBLIC_COMPANION_API_URL="${NEXT_PUBLIC_COMPANION_API_URL:-$COMPANION_API_URL}"
@@ -130,26 +139,32 @@ start_stack() {
   docker compose -p "$COMPOSE_PROJECT_NAME" up -d --wait "${COMPOSE_SERVICES[@]}"
   docker compose -p "$COMPOSE_PROJECT_NAME" up -d minio-init
 
-  log "Applying migrations and seeding test user"
-  if [ -n "${DATABASE_RUNTIME_ROLE:-}" ] \
-    || [ -n "${DATABASE_API_ROLE:-}" ] \
-    || [ -n "${DATABASE_WORKER_ROLE:-}" ]; then
-    NODE_ENV=development pnpm --filter @companion/api migrate
-  else
-    NODE_ENV=development pnpm db:migrate
+  if [ -z "${CI_USE_GHA_POSTGRES:-}" ]; then
+    docker compose -p "$COMPOSE_PROJECT_NAME" exec -T postgres \
+      psql -v ON_ERROR_STOP=1 -U companion -d companion \
+        -v api_role="$DATABASE_API_ROLE" -v api_password="$DATABASE_API_PASSWORD" \
+        -v worker_role="$DATABASE_WORKER_ROLE" -v worker_password="$DATABASE_WORKER_PASSWORD" \
+        -v runtime_role="$DATABASE_COMPANION_RUNTIME_ROLE" \
+        -v runtime_password="$DATABASE_COMPANION_RUNTIME_PASSWORD" \
+        -f - < "$ROOT/scripts/disposable-db-roles.sql" >/dev/null
   fi
-  NODE_ENV=development pnpm --filter @companion/api seed:test-user
+
+  log "Applying migrations and seeding test user"
+  NODE_ENV=development pnpm --filter @companion/api migrate
+  NODE_ENV=development bash scripts/dev-process.sh api-seed \
+    pnpm --filter @companion/api seed:test-user
 
   log "Starting built API"
-  NODE_ENV=production pnpm --filter @companion/api start >"$LOG_DIR/api.log" 2>&1 < /dev/null &
+  NODE_ENV=production bash scripts/dev-process.sh api \
+    pnpm --filter @companion/api start >"$LOG_DIR/api.log" 2>&1 < /dev/null &
   write_pid_file "$API_PID_FILE" "$!"
   wait_for_url "$COMPANION_API_URL/health" "API"
 
   log "Starting built web"
-  (
-    cd apps/web
-    NODE_ENV=production exec pnpm start --hostname "$COMPANION_WEB_HOST" --port "$COMPANION_WEB_PORT"
-  ) >"$LOG_DIR/web.log" 2>&1 < /dev/null &
+  NODE_ENV=production bash scripts/dev-process.sh web \
+    bash -c 'cd apps/web && exec pnpm start --hostname "$1" --port "$2"' \
+    _ "$COMPANION_WEB_HOST" "$COMPANION_WEB_PORT" \
+    >"$LOG_DIR/web.log" 2>&1 < /dev/null &
   write_pid_file "$WEB_PID_FILE" "$!"
   wait_for_url "$COMPANION_WEB_URL/login" "web"
 }

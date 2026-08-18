@@ -19,6 +19,7 @@
  * command non-idempotent fails an assertion against durable rows in the migrated database.
  */
 import { randomUUID } from "node:crypto";
+import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import type {
   BoxDeletionOperation,
@@ -26,8 +27,6 @@ import type {
   BoxMaintenanceClient,
   BoxPermanentDeletionResult,
 } from "@companion/box-runtime";
-import { drizzle } from "drizzle-orm/postgres-js";
-import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -54,6 +53,21 @@ const observedName = `Companion ${companionId}`;
 let databaseCreated = false;
 let upgradeSql: ReturnType<typeof postgres> | undefined;
 
+async function replayThroughLegacyPurge(client: ReturnType<typeof postgres>): Promise<void> {
+  const migrations = (await readdir(migrationsDir))
+    .filter((name) => /^\d{4}_.+\.sql$/.test(name) && name < "0090_companion_runtime_v2.sql")
+    .sort();
+  for (const migration of migrations) {
+    const statements = (await readFile(`${migrationsDir}/${migration}`, "utf8"))
+      .split("--> statement-breakpoint")
+      .map((statement) => statement.trim())
+      .filter(Boolean);
+    await client.begin(async (tx) => {
+      for (const statement of statements) await tx.unsafe(statement);
+    });
+  }
+}
+
 class GoneOnDeleteBoxClient implements BoxMaintenanceClient {
   listCount = 0;
   operationPollCount = 0;
@@ -78,16 +92,16 @@ class GoneOnDeleteBoxClient implements BoxMaintenanceClient {
   }
 }
 
-describe("legacy Companion purge command against a fully migrated database", () => {
+describe("legacy Companion purge command at the guarded pre-v2 cutover checkpoint", () => {
   beforeAll(async () => {
     await adminSql.unsafe(`create database "${databaseName}"`);
     databaseCreated = true;
-    // The deploy migrator and the offline purge command are separate processes. Drizzle installs
-    // its own serializers on the client it receives, so close that migration connection before
-    // opening the raw postgres-js client whose tx.json behavior the command relies on.
+    // The destructive command must run after 0089 installed its ledger/finalizer and before 0090+
+    // make Runtime v2 rows authoritative. Replaying the exact historical checkpoint also proves the
+    // final 0094 migration cannot accidentally be required before external Box cleanup.
     const migrationSql = postgres(upgradeUrl.toString(), { max: 1 });
     try {
-      await migrate(drizzle(migrationSql), { migrationsFolder: migrationsDir });
+      await replayThroughLegacyPurge(migrationSql);
     } finally {
       await migrationSql.end({ timeout: 1 });
     }

@@ -37,6 +37,7 @@ const companion: Companion = {
     last_observed_at: null,
     last_started_at: null,
     last_stopped_at: null,
+    latest_operation: null,
   },
   created_at: "2026-08-16T00:00:00.000Z",
   updated_at: "2026-08-16T00:00:00.000Z",
@@ -105,6 +106,13 @@ describe("Runtime v2 Companion projection", () => {
       daemon_state: "stopped",
       box_id: null,
       desktop_available: false,
+      latest_operation: {
+        id: "22222222-2222-4222-8222-222222222222",
+        source_turn_id: null,
+        kind: "start",
+        status: "pending",
+        error: null,
+      },
     });
   });
 
@@ -214,6 +222,15 @@ describe("Runtime v2 Companion projection", () => {
     expect(viewer.runtime).toMatchObject({
       state: "error",
       last_error: "Companion runtime needs attention.",
+      latest_operation: {
+        kind: "restart_pi",
+        status: "failed",
+        error: {
+          code: "runtime_unavailable",
+          message: "Companion runtime needs attention.",
+          action: "none",
+        },
+      },
     });
   });
 });

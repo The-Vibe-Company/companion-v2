@@ -499,6 +499,53 @@ describe("runtime lifecycle operations", () => {
     expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
   });
 
+  it("activates native-mobile settings without publishing a Skills revision", async () => {
+    const claim = operationClaim({
+      clientSurface: "native_mobile",
+      operationKind: "apply_settings",
+      targetSettingsRevision: 2n,
+      targetSkillsRevision: 2,
+    });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        clientSurface: "native_mobile",
+        boxId: BOX_ID,
+        boxState: "ready",
+        piState: "idle",
+        piInvocationId: "old-native-pi",
+        appliedSettingsRevision: 1n,
+        appliedSkillsRevision: 1,
+      }),
+    });
+    const ports = fakePorts(store);
+    ports.resourceStager.stageExistingBox = async (input) => {
+      expect(input.clientSurface).toBe("native_mobile");
+      expect(input.targetSkillsRevision).toBeNull();
+      return {
+        diskLayoutVersion: 14,
+        appliedSettingsRevision: input.targetSettingsRevision,
+        appliedSkillsRevision: null,
+      };
+    };
+    ports.pi.restartPiDaemon = async () => ({
+      state: "idle",
+      invocationId: "new-native-pi",
+    });
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(store.authorization.piInvocationId).toBe("new-native-pi");
+    expect(store.authorization.appliedSettingsRevision).toBe(2n);
+    expect(store.authorization.appliedSkillsRevision).toBe(1);
+    expect(store.observations.at(-1)).toMatchObject({
+      piState: "idle",
+      piInvocationId: "new-native-pi",
+      appliedSettingsRevision: 2n,
+    });
+    expect(store.observations.at(-1)).not.toHaveProperty("appliedSkillsRevision");
+  });
+
   it("does not publish staged revisions when settings activation lacks a new idle Pi", async () => {
     const claim = operationClaim({
       checkpoint: "applying_settings",

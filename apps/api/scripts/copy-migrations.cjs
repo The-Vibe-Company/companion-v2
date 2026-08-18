@@ -4,15 +4,15 @@ const { join } = require("node:path");
 const apiRoot = join(__dirname, "..");
 const repoRoot = join(apiRoot, "..", "..");
 
-// Drizzle migrations: read at startup by dist/migrate.js.
+// Drizzle migrations: read only by the explicit one-shot dist/migrate.js entrypoint.
 const migrationsSource = join(repoRoot, "packages", "db", "drizzle");
 const migrationsDest = join(apiRoot, "dist", "drizzle");
 rmSync(migrationsDest, { recursive: true, force: true });
 cpSync(migrationsSource, migrationsDest, { recursive: true });
 
-// The migration entrypoint applies least-privilege runtime grants immediately after migrations
-// when the separated DATABASE_API_ROLE + DATABASE_WORKER_ROLE contract (or the legacy single
-// DATABASE_RUNTIME_ROLE fallback) is configured.
+// The migration entrypoint checkpoints through additive migration 0093, applies least-privilege
+// runtime grants, then admits guarded cutover migration 0094 on the same connection. The distinct
+// DATABASE_API_ROLE + DATABASE_WORKER_ROLE + DATABASE_COMPANION_RUNTIME_ROLE contract is mandatory.
 copyFileSync(
   join(repoRoot, "packages", "db", "runtime-role-grants.sql"),
   join(apiRoot, "dist", "runtime-role-grants.sql"),

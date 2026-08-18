@@ -191,6 +191,9 @@ describe("PostgresRuntimeStore", () => {
     const store = new PostgresRuntimeStore(sql);
 
     await expect(store.settle(fence, { terminalStatus: "succeeded" }))
-      .rejects.toBeInstanceOf(RuntimeStoreIndeterminateError);
+      .rejects.toMatchObject({
+        name: "RuntimeStoreIndeterminateError",
+        cause: expect.objectContaining({ message: "connection closed after command" }),
+      });
   });
 });

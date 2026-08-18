@@ -103,24 +103,31 @@ async function applyMigrationFile(client: Sql, name: string): Promise<void> {
   });
 }
 
-async function replayMigrations(client: Sql): Promise<void> {
-  const names = (await readdir(migrationsDir))
+async function migrationFileNames(): Promise<string[]> {
+  return (await readdir(migrationsDir))
     .filter((name) => /^\d{4}_.+\.sql$/.test(name))
     .sort();
+}
+
+async function replayMigrations(client: Sql, names: string[]): Promise<void> {
   for (const name of names) await applyMigrationFile(client, name);
 }
 
-async function applySplitGrants(): Promise<void> {
-  if (!sql) throw new Error("runtime executor database is not initialized");
+async function applySplitGrants(database: Sql | undefined = sql): Promise<void> {
+  if (!database) throw new Error("runtime executor database is not initialized");
   const grants = extractRuntimeRoleGrantBlock(
     await readFile(await resolveRuntimeRoleGrantsFile(), "utf8"),
   );
-  await sql.begin(async (tx) => {
-    await tx`select set_config('companion.api_role', ${apiRole}, true)`;
-    await tx`select set_config('companion.worker_role', ${workerRole}, true)`;
-    await tx`select set_config('companion.companion_runtime_role', ${runtimeRole}, true)`;
-    await tx.unsafe(grants);
-  });
+  const connection = await database.reserve();
+  try {
+    await connection`select set_config('companion.api_role', ${apiRole}, false)`;
+    await connection`select set_config('companion.worker_role', ${workerRole}, false)`;
+    await connection`select set_config('companion.companion_runtime_role', ${runtimeRole}, false)`;
+    await connection`select set_config('companion.retired_runtime_role', '', false)`;
+    await connection.unsafe(grants);
+  } finally {
+    connection.release();
+  }
 }
 
 async function asRuntime<T>(action: (tx: Tx) => Promise<T>): Promise<T> {
@@ -142,6 +149,21 @@ async function asApi<T>(input: {
     await tx.unsafe(`set local role ${apiRole}`);
     await tx`select set_config('app.org_id', ${input.orgId}, true)`;
     await tx`select set_config('app.user_id', ${input.actorId}, true)`;
+    return { value: await input.action(tx) };
+  });
+  return wrapped.value;
+}
+
+async function asApplicationRoleWithForgedProtocol<T>(input: {
+  role: string;
+  action: (tx: Tx) => PromiseLike<T>;
+}): Promise<T> {
+  if (!sql) throw new Error("runtime executor database is not initialized");
+  const wrapped = await sql.begin(async (tx) => {
+    await tx.unsafe(`set local role ${input.role}`);
+    await tx`select set_config('app.org_id', ${ids.orgA}, true)`;
+    await tx`select set_config('app.user_id', ${ids.ownerA}, true)`;
+    await tx`select set_config('app.companion_runtime_protocol', '2', true)`;
     return { value: await input.action(tx) };
   });
   return wrapped.value;
@@ -315,15 +337,28 @@ async function authorizeDesktop(input: {
 
 describe("Companion runtime executor PostgreSQL surface", () => {
   beforeAll(async () => {
-    await adminSql.unsafe(`create database "${databaseName}"`);
-    sql = postgres(runtimeUrl.toString(), { max: 4 });
-    await replayMigrations(sql);
     await adminSql.unsafe(`
       create role ${apiRole} login nosuperuser nobypassrls noinherit;
       create role ${workerRole} login nosuperuser nobypassrls noinherit;
       create role ${runtimeRole} login nosuperuser nobypassrls noinherit;
     `);
-    await applySplitGrants();
+    await adminSql.unsafe(`create database "${databaseName}"`);
+    const migrationSql = postgres(runtimeUrl.toString(), { max: 1 });
+    const migrations = await migrationFileNames();
+    const cutoverIndex = migrations.findIndex((name) => name.startsWith("0094_"));
+    if (cutoverIndex < 0) throw new Error("Runtime v2 cutover migration is missing");
+    try {
+      await replayMigrations(migrationSql, migrations.slice(0, cutoverIndex));
+      await applySplitGrants(migrationSql);
+      await replayMigrations(migrationSql, migrations.slice(cutoverIndex));
+    } finally {
+      await migrationSql.end();
+    }
+    // Runtime grant application and the cutover guard require one physical
+    // migration connection. The behavior tests deliberately use a wider pool
+    // so Promise.all exercises concurrent database transactions instead of a
+    // serialized single-connection queue.
+    sql = postgres(runtimeUrl.toString(), { max: 4 });
 
     for (const [index, userId] of [
       ids.ownerA, ids.editorA, ids.viewerA, ids.revokedA, ids.ownerB,
@@ -658,6 +693,133 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         where org_id = ${ids.orgA}::uuid and target_id = ${created.companionId}
       `;
       await removeCompanion(created.companionId);
+    }
+  });
+
+  it("keeps Companion aggregate DML behind API capabilities even with a forged protocol GUC", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const capabilityTables = [
+      "companions",
+      "companion_workspace_access",
+      "companion_member_state",
+      "companion_threads",
+      "companion_transcript_entries",
+    ];
+    const workerForbiddenTables = [
+      ...capabilityTables,
+      "companion_provider_connections",
+      "companion_mcp_accounts",
+    ];
+    const tableAcl = await sql<Array<{
+      tableName: string;
+      apiSelect: boolean;
+      apiInsert: boolean;
+      apiUpdate: boolean;
+      apiDelete: boolean;
+      workerSelect: boolean;
+      workerInsert: boolean;
+      workerUpdate: boolean;
+      workerDelete: boolean;
+    }>>`
+      select table_name as "tableName",
+        has_table_privilege(${apiRole}, 'public.' || table_name, 'SELECT') as "apiSelect",
+        has_table_privilege(${apiRole}, 'public.' || table_name, 'INSERT') as "apiInsert",
+        has_table_privilege(${apiRole}, 'public.' || table_name, 'UPDATE') as "apiUpdate",
+        has_table_privilege(${apiRole}, 'public.' || table_name, 'DELETE') as "apiDelete",
+        has_table_privilege(${workerRole}, 'public.' || table_name, 'SELECT') as "workerSelect",
+        has_table_privilege(${workerRole}, 'public.' || table_name, 'INSERT') as "workerInsert",
+        has_table_privilege(${workerRole}, 'public.' || table_name, 'UPDATE') as "workerUpdate",
+        has_table_privilege(${workerRole}, 'public.' || table_name, 'DELETE') as "workerDelete"
+      from unnest(${workerForbiddenTables}::text[]) tables(table_name)
+      order by table_name
+    `;
+    expect(tableAcl).toHaveLength(workerForbiddenTables.length);
+    for (const acl of tableAcl) {
+      if (capabilityTables.includes(acl.tableName)) {
+        expect(acl.apiSelect, `${acl.tableName} remains an API read projection`).toBe(true);
+        expect(
+          [acl.apiInsert, acl.apiUpdate, acl.apiDelete],
+          `${acl.tableName} API writes require a capability function`,
+        ).toEqual([false, false, false]);
+      }
+      expect(
+        [acl.workerSelect, acl.workerInsert, acl.workerUpdate, acl.workerDelete],
+        `${acl.tableName} is outside the worker boundary`,
+      ).toEqual([false, false, false, false]);
+    }
+
+    const directDml = capabilityTables.flatMap((table) => [
+      `insert into public.${table} default values`,
+      `update public.${table} set org_id = org_id where false`,
+      `delete from public.${table} where false`,
+    ]);
+    for (const role of [apiRole, workerRole]) {
+      for (const statement of directDml) {
+        await expect(asApplicationRoleWithForgedProtocol({
+          role,
+          action: (tx) => tx.unsafe(statement),
+        })).rejects.toThrow(/permission denied/i);
+      }
+    }
+
+    let companionId = "";
+    try {
+      const created = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Capability-only fixture', ${null}::text,
+            ${null}::text, ${null}::text, '[]'::jsonb, false, '[]'::jsonb, ${null}::uuid
+          )
+        `,
+      });
+      companionId = created[0]?.companionId ?? "";
+      expect(companionId).toMatch(/^[0-9a-f-]{36}$/);
+
+      const sharing = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ role: string }>>`
+          select workspace_role::text as role
+          from public.companion_api_set_workspace_access(
+            ${ids.orgA}::uuid, ${companionId}::uuid, 'editor'
+          )
+        `,
+      });
+      expect(sharing).toEqual([{ role: "editor" }]);
+
+      const memberState = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ hidden: boolean }>>`
+          select hidden
+          from public.companion_api_update_member_state(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${null}::boolean, true, ${null}::boolean
+          )
+        `,
+      });
+      expect(memberState).toEqual([{ hidden: true }]);
+
+      const clientMessageId = randomUUID();
+      const enqueued = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ turn: { client_message_id: string }; replayed: boolean }>>`
+          select turn, replayed
+          from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
+            'Capability-backed send', 'web'
+          )
+        `,
+      });
+      expect(enqueued).toEqual([{
+        turn: expect.objectContaining({ client_message_id: clientMessageId }),
+        replayed: false,
+      }]);
+    } finally {
+      if (companionId) await removeCompanion(companionId);
     }
   });
 
@@ -1117,6 +1279,26 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       }]);
       expect(await enqueueStop()).toEqual([{ ...stop[0], replayed: true }]);
 
+      for (const [initialSurface, conflictingSurface] of [
+        ["web", "native_mobile"],
+        ["native_mobile", "web"],
+      ] as const) {
+        const startRequestId = randomUUID();
+        const enqueueStart = (surface: "web" | "native_mobile") => asApi({
+          orgId: ids.orgA,
+          actorId: ids.editorA,
+          action: (tx: Tx) => tx<Array<{ replayed: boolean }>>`
+            select replayed from public.companion_api_enqueue_operation(
+              ${ids.orgA}::uuid, ${companionId}::uuid, ${startRequestId}::uuid,
+              'start', ${surface}::public.companion_client_surface
+            )
+          `,
+        });
+        expect(await enqueueStart(initialSurface)).toEqual([{ replayed: false }]);
+        expect(await enqueueStart(initialSurface)).toEqual([{ replayed: true }]);
+        await expect(enqueueStart(conflictingSurface)).rejects.toMatchObject({ code: "22023" });
+      }
+
       const deleteRequestId = randomUUID();
       const enqueueDelete = () => asApi({
         orgId: ids.orgA,
@@ -1159,6 +1341,157 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         })]);
     } finally {
       if (duplicateId) await removeCompanion(duplicateId);
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("enqueues an already-warm send without a start operation and dispatches it directly", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    try {
+      const created = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Warm send fixture', null, null, null,
+            '[]'::jsonb, false, '[]'::jsonb
+          )
+        `,
+      });
+      companionId = created[0]?.companionId ?? "";
+
+      // Simulate a Companion that already finished its cold start on an earlier message: the Box is
+      // observed ready and Pi is idle before this send, exactly as it is moments after Pi replies.
+      await sql`
+        update companion_runtime_instances
+        set box_id = 'bx_warmsend', box_state = 'ready', pi_state = 'idle',
+          pi_invocation_id = 'pi-already-warm', disk_layout_version = 14,
+          applied_settings_revision = desired_settings_revision,
+          applied_skills_revision = 1, applied_client_surface = 'web',
+          last_observed_at = now()
+        where companion_id = ${companionId}::uuid
+      `;
+
+      const clientMessageId = randomUUID();
+      const enqueued = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx: Tx) => tx<Array<{
+          turn: Record<string, unknown>;
+          operation: Record<string, unknown> | null;
+          replayed: boolean;
+        }>>`
+          select * from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
+            'Already warm, no wake needed', 'web'
+          )
+        `,
+      });
+      expect(enqueued[0]?.replayed).toBe(false);
+      expect(enqueued[0]?.operation).toBeNull();
+      expect(companionTurnSchema.safeParse(enqueued[0]?.turn).success).toBe(true);
+      const turnId = enqueued[0]?.turn.id;
+
+      // Sending the identical message again must still replay idempotently even though no operation
+      // was ever created to prove the first insert's completeness.
+      const replay = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx: Tx) => tx<Array<{ turn: Record<string, unknown>; replayed: boolean }>>`
+          select turn, replayed from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
+            'Already warm, no wake needed', 'web'
+          )
+        `,
+      });
+      expect(replay[0]?.replayed).toBe(true);
+      expect(replay[0]?.turn.id).toBe(turnId);
+
+      const [operationCount] = await sql<Array<{ count: number }>>`
+        select count(*)::int as count from companion_operations
+        where companion_id = ${companionId}::uuid
+      `;
+      expect(operationCount).toEqual({ count: 0 });
+
+      // No 'start' operation stands between the send and dispatch: the very next claim picks the
+      // turn itself up directly as an 'attempt', ready to prompt the already-idle Pi.
+      const claim = await claimWork();
+      expect(claim).toMatchObject({ workKind: "attempt", companionId });
+      const [claimedAttempt] = await sql<Array<{ turnId: string }>>`
+        select turn_id::text as "turnId" from companion_turn_attempts
+        where id = ${claim.workId}::uuid
+      `;
+      expect(claimedAttempt).toEqual({ turnId });
+      await release(claim);
+
+      const [instance] = await sql<Array<{ boxState: string; piState: string; piInvocationId: string }>>`
+        select box_state::text as "boxState", pi_state::text as "piState",
+          pi_invocation_id as "piInvocationId"
+        from companion_runtime_instances where companion_id = ${companionId}::uuid
+      `;
+      expect(instance).toEqual({
+        boxState: "ready", piState: "idle", piInvocationId: "pi-already-warm",
+      });
+    } finally {
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("still enqueues a start operation when the cached warm observation is stale", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    try {
+      const created = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Stale warm send fixture', null, null, null,
+            '[]'::jsonb, false, '[]'::jsonb
+          )
+        `,
+      });
+      companionId = created[0]?.companionId ?? "";
+
+      // Same cached box_state='ready'/pi_state='idle' as a genuinely warm instance, but the last
+      // observation is older than the periodic health check's own cadence: nothing has re-verified
+      // Pi is still actually alive recently enough to trust for a direct dispatch.
+      await sql`
+        update companion_runtime_instances
+        set box_id = 'bx_2345678s', box_state = 'ready', pi_state = 'idle',
+          pi_invocation_id = 'pi-stale-observed', disk_layout_version = 14,
+          applied_settings_revision = desired_settings_revision,
+          applied_skills_revision = 1, applied_client_surface = 'web',
+          last_observed_at = now() - interval '10 minutes'
+        where companion_id = ${companionId}::uuid
+      `;
+
+      const clientMessageId = randomUUID();
+      const enqueued = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx: Tx) => tx<Array<{
+          turn: Record<string, unknown>;
+          operation: Record<string, unknown> | null;
+          replayed: boolean;
+        }>>`
+          select * from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
+            'Stale observation still needs a start', 'web'
+          )
+        `,
+      });
+      expect(enqueued[0]?.operation).toMatchObject({ kind: "start", status: "pending" });
+
+      const [operationCount] = await sql<Array<{ count: number }>>`
+        select count(*)::int as count from companion_operations
+        where companion_id = ${companionId}::uuid
+      `;
+      expect(operationCount).toEqual({ count: 1 });
+    } finally {
       if (companionId) await removeCompanion(companionId);
     }
   });
@@ -1881,17 +2214,35 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         role: string;
         content: string;
         toolStatus: string | null;
+        decisionExpiresAt: string | null;
       }>>`
-        select role::text as role, content, tool ->> 'status' as "toolStatus"
+        select role::text as role, content, tool ->> 'status' as "toolStatus",
+          decision ->> 'expires_at' as "decisionExpiresAt"
         from companion_transcript_entries
         where companion_id = ${fixture.companionId}::uuid and role <> 'user'
         order by ordinal
       `;
       expect(transcript).toEqual([
-        { role: "assistant", content: "A durable answer", toolStatus: null },
-        { role: "tool", content: "Run check", toolStatus: "ok" },
-        { role: "decision", content: "Choose a direction", toolStatus: null },
+        {
+          role: "assistant",
+          content: "A durable answer",
+          toolStatus: null,
+          decisionExpiresAt: null,
+        },
+        {
+          role: "tool",
+          content: "Run check",
+          toolStatus: "ok",
+          decisionExpiresAt: null,
+        },
+        {
+          role: "decision",
+          content: "Choose a direction",
+          toolStatus: null,
+          decisionExpiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/),
+        },
       ]);
+      expect(Number.isNaN(Date.parse(transcript[2]!.decisionExpiresAt!))).toBe(false);
       const [attempt] = await sql<Array<{
         cursor: string;
         sequence: string;
@@ -2498,7 +2849,10 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       selectedSkillIds: [ids.orgSkill],
       selectedMcpAccountIds: [],
     });
-    const writer = await sql.reserve();
+    // The final rollout deliberately exercises the application pool at max=1. Use a distinct
+    // writer connection for lock races so the authorization call tests PostgreSQL contention,
+    // rather than waiting forever for the only client-side pool slot.
+    const writer = postgres(runtimeUrl.toString(), { max: 1 });
     let transactionOpen = false;
     const authorizeWithLockTimeout = () => asRuntime(async (tx) => {
       await tx.unsafe("set local lock_timeout = '150ms'");
@@ -2560,7 +2914,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       }]);
     } finally {
       if (transactionOpen) await writer`rollback`;
-      await writer.release();
+      await writer.end({ timeout: 1 });
       await removeCompanion(fixture.companionId);
     }
   });

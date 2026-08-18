@@ -6,7 +6,7 @@ import {
   RuntimeScheduler,
   type RuntimeEngineControl,
 } from "./scheduler";
-import type { RuntimeClaim } from "./types";
+import { RuntimeRowDecodeError, type RuntimeClaim } from "./types";
 import {
   MemoryRuntimeStore,
   TestClock,
@@ -237,5 +237,37 @@ describe("RuntimeScheduler", () => {
 
     expect(engine.handoffs).toBe(1);
     expect(scheduler.snapshot().acceptingClaims).toBe(false);
+  });
+
+  it("logs a claim-loop decode failure instead of only flipping healthz", async () => {
+    const base = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(base) });
+    store.claimWork = async () => {
+      throw new RuntimeRowDecodeError("settings", "settings claim has an impossible nullable shape");
+    };
+    const records: Record<string, unknown>[] = [];
+    const scheduler = new RuntimeScheduler({
+      store,
+      engine: new HoldingEngine(),
+      clock: new TestClock(),
+      executorId: "scheduler-test",
+      claimsEnabled: true,
+      log: {
+        error(record) { records.push(record); },
+        warn() {},
+      },
+    });
+
+    await expect(scheduler.sweepOnce()).rejects.toBeInstanceOf(RuntimeRowDecodeError);
+    expect(scheduler.snapshot().claimLoopErrorAt).not.toBeNull();
+    expect(records).toEqual([expect.objectContaining({
+      event: "runtime.claim_loop.error",
+      thrown: expect.objectContaining({
+        name: "RuntimeRowDecodeError",
+        stableCode: "runtime_row_decode_failed",
+        field: "settings",
+        message: "settings claim has an impossible nullable shape",
+      }),
+    })]);
   });
 });

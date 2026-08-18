@@ -55,6 +55,8 @@ export interface RuntimeHttpServerOptions {
   host: string;
   port: number;
   sweepIntervalMs: number;
+  /** Public, non-secret immutable deployment identifier; "unknown" is explicit misconfiguration. */
+  releaseId: string;
   /** Null only while the product kill switch is active; desktop then fails closed with 503. */
   desktopHmacSecret: Uint8Array | null;
   desktopMaxSkewSeconds: number;
@@ -144,6 +146,7 @@ export function createRuntimeHttpServer(options: RuntimeHttpServerOptions): Runt
       last_sweep_completed_at: isoOrNull(snapshot.lastSweepCompletedAt),
       claim_loop_error_at: isoOrNull(snapshot.claimLoopErrorAt),
       active_count: activeCount,
+      release_id: options.releaseId,
     });
   }
 

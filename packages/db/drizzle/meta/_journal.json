@@ -652,6 +652,41 @@
       "when": 1788109600000,
       "tag": "0092_companion_runtime_api",
       "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1788152800000,
+      "tag": "0093_companion_runtime_desktop_replay",
+      "breakpoints": true
+    },
+    {
+      "idx": 94,
+      "version": "7",
+      "when": 1788196000000,
+      "tag": "0094_companion_runtime_cutover",
+      "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1788282400000,
+      "tag": "0095_companion_runtime_desktop_replay_recovery",
+      "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1788368800000,
+      "tag": "0096_companion_runtime_settings_claim_revisions",
+      "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1788455200000,
+      "tag": "0097_companion_runtime_warm_send_dispatch",
+      "breakpoints": true
     }
   ]
 }

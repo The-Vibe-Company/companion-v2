@@ -130,6 +130,51 @@ describe("runtime SQL row refinement", () => {
     )).toThrow(RuntimeRowDecodeError);
   });
 
+  it("rejects settings claims that omit the frozen revision snapshot", () => {
+    expect(() => decodeRuntimeClaimRow(claimRow({
+      work_kind: "settings",
+      work_id: COMPANION_ID,
+      checkpoint: "applying",
+      turn_id: null,
+      turn_status: null,
+      attempt_status: null,
+      dispatch_state: null,
+      event_cursor: null,
+      unknown_event_count: null,
+      malformed_event_count: null,
+      oversized_event_count: null,
+      cold_start_deadline_at: null,
+      absolute_deadline_at: null,
+      target_settings_revision: null,
+      target_skills_revision: null,
+    }))).toThrow(RuntimeRowDecodeError);
+  });
+
+  it("accepts settings claims that carry the frozen revision snapshot", () => {
+    const claim = decodeRuntimeClaimRow(claimRow({
+      work_kind: "settings",
+      work_id: COMPANION_ID,
+      checkpoint: "applying",
+      turn_id: null,
+      turn_status: null,
+      attempt_status: null,
+      dispatch_state: null,
+      event_cursor: null,
+      unknown_event_count: null,
+      malformed_event_count: null,
+      oversized_event_count: null,
+      cold_start_deadline_at: null,
+      absolute_deadline_at: null,
+      target_settings_revision: "1",
+      target_skills_revision: 1,
+    }));
+    expect(claim.workKind).toBe("settings");
+    if (claim.workKind === "settings") {
+      expect(claim.targetSettingsRevision).toBe(1n);
+      expect(claim.targetSkillsRevision).toBe(1);
+    }
+  });
+
   it("accepts stop claims with no client surface or resource snapshot", () => {
     const claim = decodeRuntimeClaimRow(claimRow({
       work_kind: "operation",

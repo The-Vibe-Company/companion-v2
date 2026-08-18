@@ -353,7 +353,6 @@ describe("Companion chat contracts", () => {
       active_turn: null,
       queued_count: 0,
       interrupted_turn: null,
-      pending_count: 0,
       last_message_at: "2026-08-12T12:00:00.000Z",
     });
 
@@ -624,6 +623,7 @@ describe("Companion conversation-list contracts", () => {
       last_observed_at: null,
       last_started_at: null,
       last_stopped_at: null,
+      latest_operation: null,
     },
     created_at: "2026-08-14T09:00:00.000Z",
     updated_at: "2026-08-14T09:00:00.000Z",
@@ -662,6 +662,28 @@ describe("Companion conversation-list contracts", () => {
       ...companion,
       runtime: { ...companion.runtime, generation: 0 },
     })).toThrow();
+  });
+
+  it("carries the bounded latest lifecycle operation needed to restore UI after reload", () => {
+    const parsed = companionSchema.parse({
+      ...companion,
+      runtime: {
+        ...companion.runtime,
+        latest_operation: {
+          id: "22222222-2222-4222-8222-222222222222",
+          source_turn_id: null,
+          kind: "restart_box",
+          status: "running",
+          error: null,
+        },
+      },
+    });
+
+    expect(parsed.runtime.latest_operation).toEqual(expect.objectContaining({
+      kind: "restart_box",
+      status: "running",
+    }));
+    expect(parsed.runtime.latest_operation).not.toHaveProperty("checkpoint");
   });
 
   it("carries only what a person or Pi said, in one bounded line", () => {

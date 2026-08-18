@@ -8,7 +8,6 @@ import type {
   CompanionMcpCredential,
   CompanionRuntimeState,
 } from "@companion/contracts";
-import { COMPANION_TOOL_RUN_SCREENSHOT_MAX_CHARACTERS } from "@companion/contracts";
 import { COMPANION_RUNTIME_ERROR_MAX_LENGTH } from "@companion/core";
 import {
   COMPANION_PERMISSION_BROKER_EXTENSION_FILE,
@@ -54,20 +53,6 @@ const BOX_FILE_WRITE_LIMIT_BYTES = 5 * 1024 * 1024;
 const BOX_FILE_PART_BYTES = 3 * 1024 * 1024;
 /** A multi-megabyte part takes longer to upload than the short control calls share a budget with. */
 const BOX_FILE_PART_TIMEOUT_MS = 120_000;
-/** Bytes of Pi RPC output one control-plane sync may pull; the rest is read by the next sync. */
-export const COMPANION_PI_EVENT_READ_LIMIT = 262_144;
-/**
- * Bytes of encoded desktop frame one capture may return. Base64 grows it by a third and the
- * transcript caps the whole `data:` URL, so a frame larger than this is dropped on the Box rather
- * than carried across the wire only to be refused here.
- */
-const COMPANION_DESKTOP_FRAME_LIMIT = 140_000;
-/**
- * What a capture must have printed to count as a frame. A Box that answered with a diagnostic, a
- * truncated line, or nothing at all fails this, and the run it belonged to simply keeps no picture
- * rather than carrying whatever the shell happened to say into an `img` tag.
- */
-const DESKTOP_FRAME_PATTERN = /^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/;
 /**
  * How long a started Pi daemon has to answer `active`. `systemctl --user start` returns once
  * systemd has forked `ExecStart`, and the unit is `Type=simple` with `Restart=on-failure`, so a
@@ -137,21 +122,10 @@ const PI_DAEMON_DIAGNOSTIC_SEPARATOR = "; ";
 type PiDaemonDiagnosticKey = (typeof PI_DAEMON_DIAGNOSTIC_BUDGETS)[number]["key"];
 const READY_STATES = new Set<BoxState>(["ready", "idle", "running"]);
 const STARTING_STATES = new Set<BoxState>(["init", "provisioning", "provisioned", "cloning"]);
-const ARCHIVED_STATES = new Set<BoxState>(["archiving", "archived"]);
-/**
- * States a Box can be brought back from with `resume`. `archived` is the state an explicit stop
- * leaves, and `idle` is the resting state the provider's own idle handling can put a Box into: it
- * normally still runs commands, which is why a start treats it as ready, but a start that finds it
- * will not answer has to resume it rather than run the wake's commands against a machine that is not
- * listening.
- */
-const RESUMABLE_STATES = new Set<BoxState>(["archived", "idle"]);
-/** Printed by the probe that proves this Box is running commands for the start. */
+/** Printed by the probe that proves an explicitly resumed Box is running commands for staging. */
 const BOX_RUNNABLE_MARKER = "companion-box-runnable";
 /** Printed by the staging command when Pi's auth file already exists on the Box disk. */
 const PROVIDER_AUTH_PRESENT_MARKER = "companion-provider-auth-present";
-/** Printed only when a warm Box already has everything an automatic Pi restart needs. */
-const WARM_DAEMON_READY_MARKER = "companion-pi-warm-ready";
 /** Where staged skill archives wait on the Box disk between the file writes and the extract. */
 const STAGED_ARCHIVE_DIRECTORY = ".companion/runtime/state/skill-archives";
 /** Labels each staged archive's size so one stdout can be read back as a measurement. */
@@ -176,17 +150,58 @@ const BOX_DESKTOP_MINT_BUDGET_MS = 15_000;
 const VNC_RETRYABLE_STATUSES = new Set([408, 409, 425, 429]);
 
 
-export type BoxState =
-  | "init"
-  | "provisioning"
-  | "provisioned"
-  | "cloning"
-  | "ready"
-  | "idle"
-  | "running"
-  | "archiving"
-  | "archived"
-  | "error";
+export const BOX_PROVIDER_STATES = [
+  "init",
+  "provisioning",
+  "provisioned",
+  "cloning",
+  "ready",
+  "idle",
+  "running",
+  "archiving",
+  "archived",
+  "error",
+] as const;
+
+export type BoxState = (typeof BOX_PROVIDER_STATES)[number];
+
+const BOX_PROVIDER_STATE_SET = new Set<string>(BOX_PROVIDER_STATES);
+
+/**
+ * Map a live Box `state` onto the control-plane enum. Official lifecycle docs treat
+ * `provisioning` / `provisioned` / `cloning` as "keep polling GET" — they are not ready, even
+ * though a previous mapping stored `provisioned` as `ready` and let start skip `waiting_ready`.
+ */
+export function observedBoxStateFromProvider(
+  state: BoxState,
+): "initializing" | "provisioning" | "ready" | "idle" | "running" | "archiving" | "archived" | "error" {
+  switch (state) {
+    case "init":
+      return "initializing";
+    case "provisioning":
+    case "provisioned":
+    case "cloning":
+      return "provisioning";
+    case "ready":
+      return "ready";
+    case "idle":
+      return "idle";
+    case "running":
+      return "running";
+    case "archiving":
+      return "archiving";
+    case "archived":
+      return "archived";
+    case "error":
+      return "error";
+  }
+}
+
+export function parseProviderBoxState(value: unknown): BoxState | undefined {
+  return typeof value === "string" && BOX_PROVIDER_STATE_SET.has(value)
+    ? value as BoxState
+    : undefined;
+}
 
 interface BoxInfo {
   id: string;
@@ -197,23 +212,13 @@ interface BoxInfo {
   setupError?: string | null;
 }
 
-interface BoxEnvelope {
-  box: BoxInfo;
-}
-
-interface BoxListEnvelope {
-  boxes: BoxInfo[];
-  pageInfo?: {
-    nextCursor: string | null;
-    hasMore: boolean;
-  };
-}
-
 interface CommandEnvelope {
   success: boolean;
   exitCode: number | null;
   stdout: string;
   stderr: string;
+  timedOut?: boolean;
+  signal?: string | number | null;
 }
 
 interface DesktopEnvelope {
@@ -243,21 +248,6 @@ export interface CompanionRuntimeObservation {
   desktopAvailable: boolean;
 }
 
-/**
- * What a start reports beyond the observation: whether this start actually staged runtime
- * resources (skills, auth, MCP). A warm shortcut returns `staged: false`, and the lifecycle caller
- * must not record a skills apply for it — the Box still runs whatever was staged before.
- */
-export interface CompanionRuntimeStartObservation extends CompanionRuntimeObservation {
-  staged?: boolean;
-}
-
-/** A byte range of the Pi RPC log; `offset` is where the next read must resume. */
-export interface CompanionPiEventChunk {
-  chunk: string;
-  offset: number;
-}
-
 /** Durable broker cursors and bounded protocol telemetry, observed without sending a command to Pi. */
 export interface CompanionPiBrokerState {
   invocationId: string;
@@ -285,96 +275,8 @@ export type CompanionPiPromptDispatch =
 
 export type CompanionPiExtensionUiDispatch = CompanionPiPromptDispatch;
 
-export interface CompanionBoxRuntime {
-  start(input: {
-    companionId: string;
-    /** Runtime v2 Box identity suffix; omitted callers retain the exact legacy name. */
-    runtimeGeneration?: number;
-    orgId: string;
-    boxId: string | null;
-    clientSurface: CompanionClientSurface;
-    providerAuth: Record<string, Record<string, unknown>>;
-    replaceProviderAuth: boolean;
-    /** Recycle Pi after a process-level model selection changed, without rewriting provider auth. */
-    restartPi?: boolean;
-    /** Force layout/resource injection without recycling a running Pi or interrupting its turn. */
-    refreshRuntimeLayout?: boolean;
-    /** Refuse creation or resume when a caller may touch only an already-runnable Box. */
-    allowBoxWake?: boolean;
-    /**
-     * Runtime v2 owns create through its durable lifecycle ledger. When false, this staging helper
-     * may still resume the exact assigned Box but must never replace a Box that disappeared between
-     * the lifecycle checkpoint and resource injection.
-     */
-    allowBoxCreate?: boolean;
-    /** This start claimed an archive continuation even if the provider's first read says idle. */
-    waitForArchive?: boolean;
-    /** Operator instructions applied when Pi next starts; changing them never restarts a warm Box. */
-    instructions?: string | null;
-    /** Pi model id selected from the provider's pinned catalog. */
-    modelId: string;
-    mcpCredentials: McpRuntimeCredential[];
-    mcpAccounts: CompanionMcpAccount[];
-    skills: CompanionRuntimeSkill[];
-    /**
-     * Skills Hub env for the Box (COMPANION_API_URL / WORKSPACE_ID / optional DELEGATION_TOKEN).
-     * Lives only in the volatile providers.env file alongside MCP credentials.
-     */
-    hubEnv?: Record<string, string>;
-    /** Persist that archival completed before this adapter asks the provider to resume the Box. */
-    onArchiveReady?: (boxId: string) => Promise<void>;
-    /** Record which Box backs this Companion, or `null` when the recorded one is not its own. */
-    onBoxAssigned: (boxId: string | null) => Promise<void>;
-    /**
-     * The lifecycle caller's start budget. Every Box call and every wait this start makes ends when
-     * it does, so a wake the control plane stopped waiting for stops working too.
-     */
-    signal?: AbortSignal;
-  }): Promise<CompanionRuntimeStartObservation>;
-  stop(input: {
-    boxId: string;
-    /** Retry an in-flight Stop handoff; provider 409s are safe once wake waits for archival. */
-    recoverArchive?: boolean;
-    signal?: AbortSignal;
-  }): Promise<CompanionRuntimeObservation>;
-  status(input: { boxId: string; signal?: AbortSignal }): Promise<CompanionRuntimeObservation>;
-  /** Mint one fresh desktop URL for a Box that is already running; never creates or resumes one. */
-  desktop(input: { boxId: string; signal?: AbortSignal }): Promise<CompanionDesktopMint>;
-  /** Hand one chat message to Pi and wait for its correlated acceptance; never wakes the Box. */
-  prompt(input: { boxId: string; message: string; requestId: string }): Promise<void>;
-  /**
-   * Unblock a Pi extension UI dialog (Allow / Deny / answer). Sends one correlated
-   * `extension_ui_response` through the same owner-only broker socket as prompts; never creates or
-   * resumes a Box.
-   */
-  respondExtensionUi(input: {
-    boxId: string;
-    /** Runtime v2 fences the decision to the durable attempt; legacy callers omit it. */
-    attemptId?: string;
-    response: Record<string, unknown>;
-  }): Promise<void>;
-  /** Reset the provider's idle clock after Pi accepts a durable message. */
-  refreshTtl(input: { boxId: string; ttlSeconds?: number; signal?: AbortSignal }): Promise<void>;
-  /**
-   * Repair a stopped or RPC-unresponsive Pi daemon. A healthy active daemon acknowledges get_state
-   * and stays untouched; an unresponsive active daemon is restarted. Never resumes or creates a Box.
-   */
-  healPiDaemon(input: { boxId: string; requireIdle?: boolean }): Promise<{
-    daemonState: "running" | "stopped" | "error";
-    detail: string | null;
-  }>;
-  /** Legacy byte-log projection retained until the API executor is removed. */
-  readEvents(input: { boxId: string; offset: number }): Promise<CompanionPiEventChunk>;
-  /**
-   * One frame of the running Box desktop as a `data:` image URL, or null when there is no desktop to
-   * photograph, no tool on the machine that can, or a frame too large to keep. Observing a screen is
-   * not a lifecycle action: like `desktop`, it never creates or resumes a Box.
-   */
-  captureDesktopFrame(input: { boxId: string }): Promise<string | null>;
-}
-
-/** Layout-14 protocol used only by the dedicated Runtime v2 service during the stacked cutover. */
-export interface CompanionBoxRuntimeV2 extends CompanionBoxRuntime {
+/** Narrow layout-14 Box/Pi port owned exclusively by the dedicated Runtime v2 service. */
+export interface CompanionBoxRuntimeV2 {
   /** Read the provider's exact lifecycle state without probing Pi or waking the Box. */
   existingBoxStatus(input: {
     boxId: string;
@@ -443,7 +345,6 @@ export interface CompanionBoxRuntimeV2 extends CompanionBoxRuntime {
     response: Record<string, unknown>;
     signal?: AbortSignal;
   }): Promise<CompanionPiExtensionUiDispatch>;
-  readEvents(input: { boxId: string; offset: number }): Promise<CompanionPiEventChunk>;
   /** Read the layout-14 journal after an exclusive monotonic cursor. */
   readEvents(input: {
     boxId: string;
@@ -457,6 +358,10 @@ export interface CompanionBoxRuntimeV2 extends CompanionBoxRuntime {
     through: number;
     signal?: AbortSignal;
   }): Promise<{ acknowledgedCursor: number }>;
+  /** Reset the provider's idle clock after Pi accepts one durable attempt. */
+  refreshTtl(input: { boxId: string; ttlSeconds?: number; signal?: AbortSignal }): Promise<void>;
+  /** Mint one fresh desktop URL for a Box that is already running; never creates or resumes one. */
+  desktop(input: { boxId: string; signal?: AbortSignal }): Promise<CompanionDesktopMint>;
 }
 
 export class BoxRuntimeConfigurationError extends Error {
@@ -469,6 +374,8 @@ export class BoxRuntimeConfigurationError extends Error {
 export class BoxRuntimeProviderError extends Error {
   readonly status: number;
   readonly code?: string;
+  readonly stableCode: string = "box_provider_error";
+  readonly action = "retry" as const;
 
   constructor(message: string, status: number, code?: string) {
     super(message);
@@ -492,8 +399,77 @@ function commandFailureDetail(result: CommandEnvelope): string {
   const lastLine = (text: string | undefined): string | undefined =>
     (text ?? "").split(/[\r\n]+/).map((line) => line.trim()).filter(Boolean).at(-1);
   const output = lastLine(result.stderr) ?? lastLine(result.stdout);
-  const exit = result.exitCode === null ? "" : ` (exit ${result.exitCode})`;
-  return output ? `${exit}: ${output}` : exit;
+  const flags = [
+    result.timedOut ? "timed out" : undefined,
+    result.signal === undefined || result.signal === null || result.signal === ""
+      ? undefined
+      : `signal ${String(result.signal)}`,
+    result.exitCode === null ? undefined : `exit ${result.exitCode}`,
+  ].filter((flag): flag is string => Boolean(flag));
+  const suffix = flags.length > 0 ? ` (${flags.join(", ")})` : "";
+  return output ? `${suffix}: ${output}` : suffix;
+}
+
+function parseCommandEnvelope(body: unknown): CommandEnvelope {
+  if (!body || typeof body !== "object") {
+    throw new BoxRuntimeProviderError("Box API returned an invalid command response", 502);
+  }
+  const record = body as Record<string, unknown>;
+  if (typeof record.success !== "boolean") {
+    const type = typeof record.type === "string" ? ` type=${record.type.slice(0, 80)}` : "";
+    throw new BoxRuntimeProviderError(`Box API returned an invalid command response${type}`, 502);
+  }
+  return {
+    success: record.success,
+    exitCode: typeof record.exitCode === "number" ? record.exitCode : null,
+    stdout: typeof record.stdout === "string" ? record.stdout : "",
+    stderr: typeof record.stderr === "string" ? record.stderr : "",
+    ...(record.timedOut === true ? { timedOut: true } : {}),
+    ...(typeof record.signal === "string" || typeof record.signal === "number"
+      ? { signal: record.signal }
+      : {}),
+  };
+}
+
+function parseBoxEnvelope(body: unknown): BoxInfo {
+  if (!body || typeof body !== "object") {
+    throw new BoxRuntimeProviderError("Box API returned an invalid Box envelope", 502);
+  }
+  const record = body as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type.slice(0, 80) : undefined;
+  const box = record.box;
+  if (!box || typeof box !== "object") {
+    throw new BoxRuntimeProviderError(
+      `Box API returned an invalid Box envelope${type ? ` type=${type}` : ""}`,
+      502,
+    );
+  }
+  const info = box as Record<string, unknown>;
+  const state = parseProviderBoxState(info.state);
+  if (typeof info.id !== "string" || !state) {
+    throw new BoxRuntimeProviderError(
+      `Box API returned an invalid Box${type ? ` type=${type}` : ""}${
+        typeof info.state === "string" ? ` state=${info.state.slice(0, 40)}` : ""
+      }`,
+      502,
+    );
+  }
+  return {
+    id: info.id,
+    state,
+    desktopAvailable: info.desktopAvailable === true,
+    ...(typeof info.name === "string" ? { name: info.name } : {}),
+    ...(info.setupStatus === "pending"
+      || info.setupStatus === "running"
+      || info.setupStatus === "done"
+      || info.setupStatus === "failed"
+      || info.setupStatus === null
+      ? { setupStatus: info.setupStatus }
+      : {}),
+    ...(typeof info.setupError === "string" || info.setupError === null
+      ? { setupError: info.setupError }
+      : {}),
+  };
 }
 
 /**
@@ -592,14 +568,6 @@ export function composeDaemonFailureDetail(stdout: string): string {
  * happened: without it there is nothing to project and nothing to resume from, and with it the
  * remainder is projectable whether the reader ran to the read limit or was cut short.
  */
-function parsePiEventChunk(stdout: string): CompanionPiEventChunk | null {
-  const separator = stdout.indexOf("\n");
-  if (separator < 0) return null;
-  const offset = Number.parseInt(stdout.slice(0, separator), 10);
-  if (!Number.isSafeInteger(offset) || offset < 0) return null;
-  return { chunk: stdout.slice(separator + 1), offset };
-}
-
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -930,32 +898,8 @@ if ! systemctl --user show-environment >/dev/null 2>&1; then
   exit 1
 fi`;
 
-/**
- * A cold start's first command. It proves nothing about Pi and is not meant to: its only job is to
- * establish that this Box runs the commands the rest of the start is made of, so a machine that will
- * not answer is discovered here rather than reported as a wake in progress.
- */
+/** Prove an explicitly resumed Box runs commands before staging layout or credential material. */
 const BOX_RUNNABLE_COMMAND = `printf '%s\\n' ${shellQuote(BOX_RUNNABLE_MARKER)}`;
-
-/**
- * A warm-eligible start's first command. A current-layout active daemon with its runtime credential
- * file is already fully started. Returning from that state avoids replacing Skills/MCP files
- * underneath an in-flight turn and, most importantly, avoids killing that turn with an unnecessary
- * systemd restart. Printing nothing is the ordinary answer for a Box whose Pi is not warm, so this
- * exits 0 either way and its exit status carries the same reachability proof as the cold probe.
- */
-const WARM_DAEMON_READY_COMMAND = `${USER_BUS_ENVIRONMENT}
-companion_pi_invocation="$(systemctl --user show companion-pi-daemon.service -p InvocationID --value 2>/dev/null || true)"
-companion_pi_socket="$HOME/${COMPANION_PI_BROKER_SOCKET_PATH}"
-companion_pi_socket_mode="$(stat -c '%a' "$companion_pi_socket" 2>/dev/null || true)"
-if systemctl --user show-environment >/dev/null 2>&1 &&
-  systemctl --user is-active --quiet companion-pi-daemon.service &&
-  [ -n "$companion_pi_invocation" ] &&
-  [ -S "$companion_pi_socket" ] &&
-  [ "$companion_pi_socket_mode" = 600 ] &&
-  [ -f "$XDG_RUNTIME_DIR/companion/providers.env" ]; then
-  printf '%s\\n' ${shellQuote(WARM_DAEMON_READY_MARKER)}
-fi`;
 
 function encodeEnvironmentFile(
   credentials: McpRuntimeCredential[],
@@ -1016,9 +960,6 @@ function isCompanionOwnBox(
  * in the terminal error state. Waking such a Box again only repeats the same failure, so the
  * Companion has to be moved onto a new Box instead.
  */
-function isBeyondRecovery(box: BoxInfo): boolean {
-  return box.state === "error" || box.setupStatus === "failed";
-}
 
 function observation(box: BoxInfo, daemonState: CompanionDaemonState): CompanionRuntimeObservation {
   const runtimeState: CompanionRuntimeState =
@@ -1131,7 +1072,6 @@ export async function mintBoxDesktopUrl(input: {
 export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   readonly #apiKey: string;
   readonly #baseUrl: string;
-  readonly #environment: string | undefined;
   readonly #ttlSeconds: number;
   readonly #pollIntervalMs: number;
   readonly #readyTimeoutMs: number;
@@ -1140,12 +1080,10 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   readonly #installCommand: string | undefined;
   readonly #mcpAdapterPackage: string;
   /**
-   * The current start's budget, held for as long as that start runs. Every Box request and every
-   * poll interval reads it, so one field cancels the whole tree of calls a wake makes without
-   * threading the signal through each private step, and delivery on the same adapter instance is
-   * unaffected because the field is cleared when the start returns.
+   * The current staging call's budget. Private file/command helpers share it so cancellation covers
+   * the whole layout transaction without leaking into a later adapter call.
    */
-  #startSignal: AbortSignal | undefined;
+  #stagingSignal: AbortSignal | undefined;
 
   constructor(env: NodeJS.ProcessEnv = process.env) {
     const apiKey = env.COMPANION_BOX_API_KEY?.trim();
@@ -1156,7 +1094,6 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     }
     this.#apiKey = apiKey;
     this.#baseUrl = (env.COMPANION_BOX_API_BASE?.trim() || DEFAULT_BOX_API_BASE).replace(/\/+$/, "");
-    this.#environment = env.COMPANION_BOX_ENVIRONMENT?.trim() || undefined;
     this.#ttlSeconds = positiveInteger(env.COMPANION_BOX_TTL_SECONDS, 21_600);
     this.#pollIntervalMs = positiveInteger(env.COMPANION_BOX_POLL_INTERVAL_MS, 1000);
     this.#readyTimeoutMs = positiveInteger(env.COMPANION_BOX_READY_TIMEOUT_MS, 120_000);
@@ -1174,9 +1111,8 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   }
 
   /**
-   * What ends one Box request: its own timeout, whatever the caller passed, and the running start's
-   * budget. The per-call timeout alone is what let a wake outlive every deadline it had — each call
-   * answered inside its own limit while their sum ran for minutes.
+   * What ends one Box request: its own timeout, whatever the caller passed, and the running staging
+   * budget. The shared budget bounds the full multi-call layout transaction.
    */
   #requestSignal(
     timeoutMs: number,
@@ -1193,10 +1129,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     path: string,
     init?: RequestInit,
     timeoutMs = 30_000,
-    // The running start's budget, unless a caller passes `null` to leave it out. Only a call that
-    // undoes what a cancelled start left behind does that: the cancellation is the reason it has work
-    // to do, so inheriting it would cancel the repair along with the wake.
-    budget: AbortSignal | null = this.#startSignal ?? null,
+    budget: AbortSignal | null = this.#stagingSignal ?? null,
   ): Promise<T> {
     const response = await fetch(`${this.#baseUrl}${path}`, {
       ...init,
@@ -1221,138 +1154,15 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   }
 
   async #get(boxId: string, signal?: AbortSignal): Promise<BoxInfo> {
-    return (await this.#request<BoxEnvelope>(
+    return parseBoxEnvelope(await this.#request<unknown>(
       `/boxes/${encodeURIComponent(boxId)}`,
       signal ? { signal } : undefined,
-    )).box;
+    ));
   }
 
-  /** A Box the provider no longer knows about is reported as missing so the start can replace it. */
-  async #getAssignedBox(boxId: string): Promise<BoxInfo | null> {
-    try {
-      return await this.#get(boxId);
-    } catch (error) {
-      if (error instanceof BoxRuntimeProviderError && error.status === 404) return null;
-      throw error;
-    }
-  }
 
-  /**
-   * The Box already carrying this Companion's name, if the provider has one. Ownership is decided by
-   * the same predicate the recorded id goes through, so neither route can adopt what the other
-   * refuses; a Box with no name is not a match here, because a name lookup must not answer with a Box
-   * that has yet to be named.
-   */
-  async #findCompanionBox(
-    companionId: string,
-    runtimeGeneration?: number,
-  ): Promise<BoxInfo | null> {
-    let cursor: string | null = null;
-    do {
-      const query = new URLSearchParams({ limit: "200", sort: "desc" });
-      if (cursor) query.set("cursor", cursor);
-      const result = await this.#request<BoxListEnvelope>(`/boxes?${query}`);
-      const found = result.boxes.find((candidate) =>
-        (candidate.name?.trim() ?? "") !== ""
-        && isCompanionOwnBox(candidate, companionId, runtimeGeneration));
-      if (found) return found;
-      cursor = result.pageInfo?.hasMore ? result.pageInfo.nextCursor : null;
-    } while (cursor);
-    return null;
-  }
-
-  /**
-   * Create the Box for one Companion and persist its id before the configured TTL and deterministic
-   * name are applied, so a crash between the two can only leak a short-lived, unnamed Box.
-   */
-  async #createCompanionBox(input: {
-    companionId: string;
-    runtimeGeneration?: number;
-    orgId: string;
-    onBoxAssigned: (boxId: string) => Promise<void>;
-  }): Promise<BoxInfo> {
-    const created = await this.#request<BoxEnvelope>("/boxes", {
-      method: "POST",
-      body: JSON.stringify({
-        // Bound the cost of the irreducible POST-response/process-crash window. The desired TTL
-        // is applied only after the returned id is durable in the control plane.
-        ttlSeconds: Math.min(this.#ttlSeconds, 300),
-        noEnv: true,
-        ...(this.#environment ? { environment: this.#environment } : {}),
-        env: {
-          COMPANION_ID: input.companionId,
-          COMPANION_ORG_ID: input.orgId,
-          ...(input.runtimeGeneration === undefined
-            ? {}
-            : { COMPANION_RUNTIME_GENERATION: String(input.runtimeGeneration) }),
-        },
-        setupScript: setupScript(this.#installCommand, this.#mcpAdapterPackage),
-      }),
-    });
-    try {
-      await input.onBoxAssigned(created.box.id);
-      return (await this.#request<BoxEnvelope>(
-        `/boxes/${encodeURIComponent(created.box.id)}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({
-            name: companionBoxName(input.companionId, input.runtimeGeneration),
-            ttlSeconds: this.#ttlSeconds,
-          }),
-        },
-      )).box;
-    } catch (error) {
-      await this.#sleepUnrecordedBox(created.box.id);
-      throw error;
-    }
-  }
-
-  /**
-   * Put a Box back to sleep after this start failed to record which Companion it belongs to. Stopping
-   * it the ordinary way snapshots the disk and keeps the deterministic name, so the next start finds
-   * the same Box and resumes it rather than building another one.
-   *
-   * The call is deliberately off the start's budget. A wake cancelled at its deadline is the main way
-   * a Box ends up awake with nothing pointing at it, and a stop that inherited that cancellation would
-   * put nothing to sleep. It stays best-effort: a Box the provider will not stop must not replace the
-   * failure the caller is already reporting.
-   */
-  async #sleepUnrecordedBox(boxId: string): Promise<void> {
-    await this.#request(
-      `/boxes/${encodeURIComponent(boxId)}/stop`,
-      { method: "POST", body: JSON.stringify({ force: false }) },
-      undefined,
-      null,
-    ).catch(() => undefined);
-  }
-
-  /**
-   * Release a Box that can never run Pi again. Renaming it first frees the deterministic Companion
-   * name so the replacement Box owns it and no later start re-adopts the broken disk. Both calls are
-   * best-effort: a Box the provider will not rename or stop must not keep the Companion un-wakeable.
-   */
-  async #retireBox(
-    box: BoxInfo,
-    companionId: string,
-    runtimeGeneration?: number,
-  ): Promise<void> {
-    await this.#request(`/boxes/${encodeURIComponent(box.id)}`, {
-      method: "PATCH",
-      body: JSON.stringify({
-        name: `Retired ${companionBoxName(companionId, runtimeGeneration)} ${Date.now()}`,
-      }),
-    }).catch(() => undefined);
-    if (!ARCHIVED_STATES.has(box.state)) {
-      await this.#request(`/boxes/${encodeURIComponent(box.id)}/stop`, {
-        method: "POST",
-        // The disk is unusable, so it is discarded instead of snapshotted for a later resume.
-        body: JSON.stringify({ force: true }),
-      }).catch(() => undefined);
-    }
-  }
-
-  /** One poll interval, ended early by the running start's budget. */
-  async #pause(signal: AbortSignal | undefined = this.#startSignal): Promise<void> {
+  /** One poll interval, ended early by the running staging budget. */
+  async #pause(signal: AbortSignal | undefined = this.#stagingSignal): Promise<void> {
     await sleep(this.#pollIntervalMs, undefined, { signal });
   }
 
@@ -1372,105 +1182,26 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     throw new BoxRuntimeProviderError("Box did not become ready before the configured timeout", 504);
   }
 
-  /**
-   * A graceful Box stop snapshots the disk asynchronously. Starting during that window must wait
-   * for the snapshot rather than turning the provider's ordinary `archiving` response into a
-   * lifecycle failure. Box can briefly report `idle` while the snapshot is still settling, so only
-   * `archived` proves the stop completed; treating that intermediate state as runnable lets the
-   * archive finish underneath the newly started Pi. The bounded fallback returns the latest
-   * observation so the control plane can keep projecting `stopping`; a later restart or wake can
-   * continue the same wait safely.
-   */
-  async #waitWhileArchiving(box: BoxInfo): Promise<BoxInfo> {
-    const deadline = Date.now() + this.#readyTimeoutMs;
-    let current = box;
-    while (
-      current.state !== "archived"
-      && !isBeyondRecovery(current)
-      && Date.now() < deadline
-    ) {
-      await this.#pause();
-      current = await this.#get(box.id);
-    }
-    return current;
-  }
 
   async #resume(boxId: string, signal?: AbortSignal): Promise<BoxInfo> {
-    const resumed = await this.#request<BoxEnvelope>(
+    return parseBoxEnvelope(await this.#request<unknown>(
       `/boxes/${encodeURIComponent(boxId)}/resume`,
       {
         method: "POST",
         body: JSON.stringify({ noEnv: true, ttlSeconds: this.#ttlSeconds }),
         ...(signal ? { signal } : {}),
       },
-    );
-    return resumed.box;
+    ));
   }
 
-  /**
-   * Run one command and treat a refusal as an answer rather than a failure, because the caller's next
-   * move is to resume the machine. Only cancellation travels on: a wake the control plane stopped
-   * waiting for has nothing left to resume.
-   */
-  async #attemptCommand(
-    boxId: string,
-    command: string,
-  ): Promise<{ ran: boolean; stdout: string; detail: string }> {
-    try {
-      const result = await this.#command(boxId, command);
-      if (result.success) return { ran: true, stdout: result.stdout, detail: "" };
-      return { ran: false, stdout: result.stdout, detail: commandFailureDetail(result) };
-    } catch (error) {
-      if (this.#startSignal?.aborted) throw error;
-      const detail = error instanceof BoxRuntimeProviderError ? error.message : "";
-      return { ran: false, stdout: "", detail: detail ? `: ${detail}` : "" };
+  async #assertBoxRunnable(box: BoxInfo): Promise<void> {
+    const result = await this.#command(box.id, BOX_RUNNABLE_COMMAND);
+    if (!result.success) {
+      throw new BoxRuntimeProviderError(
+        `Box in state ${box.state} did not run the staging probe${commandFailureDetail(result)}`,
+        409,
+      );
     }
-  }
-
-  /**
-   * Run this start's first command, resuming the Box when it will not run it.
-   *
-   * `idle` is a ready state for a Box that answers, and the start's own commands are what discover
-   * that this one does not. A Box whose compute the provider parked is resumed and asked again, and
-   * one that still says nothing fails the start with what it said: reporting a start as
-   * `provisioning` against a machine that is not listening is what left a Companion waking forever.
-   *
-   * The command is the warm probe whenever this start could still return early, so a warm Box is
-   * touched exactly once — the answer that proves it is listening is the same answer that says its Pi
-   * is already running.
-   */
-  async #firstCommand(
-    box: BoxInfo,
-    warmEligible: boolean,
-    allowResume = true,
-  ): Promise<{ box: BoxInfo; warm: boolean }> {
-    const command = warmEligible ? WARM_DAEMON_READY_COMMAND : BOX_RUNNABLE_COMMAND;
-    let attempt = await this.#attemptCommand(box.id, command);
-    if (!attempt.ran) {
-      if (!allowResume) {
-        throw new BoxRuntimeProviderError(
-          `Box in state ${box.state} did not run this apply command${attempt.detail}`,
-          409,
-        );
-      }
-      if (!RESUMABLE_STATES.has(box.state)) {
-        throw new BoxRuntimeProviderError(
-          `Box in state ${box.state} did not run this start's first command${attempt.detail}`,
-          502,
-        );
-      }
-      box = await this.#waitReady((await this.#resume(box.id)).id);
-      attempt = await this.#attemptCommand(box.id, command);
-      if (!attempt.ran) {
-        throw new BoxRuntimeProviderError(
-          `Box in state ${box.state} did not run this start's first command after a resume`
-          + attempt.detail,
-          502,
-        );
-      }
-    }
-    const warm = warmEligible && attempt.stdout.split(/[\r\n]+/).includes(WARM_DAEMON_READY_MARKER);
-    return { box, warm };
   }
 
   async #command(
@@ -1479,11 +1210,15 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     timeoutSeconds = 60,
     signal?: AbortSignal,
   ): Promise<CommandEnvelope> {
-    return this.#request<CommandEnvelope>(`/boxes/${encodeURIComponent(boxId)}/commands`, {
-      method: "POST",
-      body: JSON.stringify({ command, timeoutSeconds }),
-      ...(signal ? { signal } : {}),
-    }, (timeoutSeconds + 10) * 1_000);
+    return parseCommandEnvelope(await this.#request<unknown>(
+      `/boxes/${encodeURIComponent(boxId)}/commands`,
+      {
+        method: "POST",
+        body: JSON.stringify({ command, timeoutSeconds }),
+        ...(signal ? { signal } : {}),
+      },
+      (timeoutSeconds + 10) * 1_000,
+    ));
   }
 
   async #daemonState(boxId: string, signal?: AbortSignal): Promise<CompanionDaemonState> {
@@ -1623,45 +1358,6 @@ COMPANION_PI_BROKER_CLIENT`,
     return null;
   }
 
-  async #rpcCommandAccepted(input: {
-    boxId: string;
-    command: Record<string, unknown> & { id: string };
-    responseCommand: string;
-  }): Promise<boolean> {
-    return (await this.#rpcCommandResponse(input))?.success === true;
-  }
-
-  /** Probe both RPC liveness and, when recovering a timed-out turn, its queue boundary. */
-  async #piRpcHealth(
-    boxId: string,
-    acceptTimeoutSeconds?: number,
-  ): Promise<"idle" | "busy" | null> {
-    const response = await this.#rpcCommandResponse({
-      boxId,
-      acceptTimeoutSeconds,
-      responseCommand: "get_state",
-      command: { id: `companion-health:${randomUUID()}`, type: "get_state" },
-    });
-    if (response?.success !== true) return null;
-    const data = response.data;
-    if (!data || typeof data !== "object") return null;
-    const state = data as Record<string, unknown>;
-    return state.isStreaming === false && state.pendingMessageCount === 0 ? "idle" : "busy";
-  }
-
-  /** Systemd active is intermediate; wait until the replacement Pi answers RPC while idle. */
-  async #waitPiRpcReady(boxId: string): Promise<boolean> {
-    const deadline = Date.now() + this.#daemonActiveTimeoutMs;
-    do {
-      const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) break;
-      // A single missing RPC response must not outlive the whole replacement-readiness budget.
-      if (await this.#piRpcHealth(boxId, remainingMs / 1_000) === "idle") return true;
-      if (Date.now() >= deadline) break;
-      await this.#pause();
-    } while (Date.now() < deadline);
-    return false;
-  }
 
   /**
    * Say why Pi is not running. A daemon that never reached `active` is either still starting, dead,
@@ -1675,10 +1371,12 @@ COMPANION_PI_BROKER_CLIENT`,
    * file and the transient MCP credential file are never opened, and the control plane redacts and
    * truncates what it stores.
    */
-  async #daemonFailureDetail(boxId: string): Promise<string> {
-    const result = await this.#command(
-      boxId,
-      `${USER_BUS_ENVIRONMENT}
+  async #daemonFailureDetail(boxId: string, signal?: AbortSignal): Promise<string> {
+    let result: CommandEnvelope;
+    try {
+      result = await this.#command(
+        boxId,
+        `${USER_BUS_ENVIRONMENT}
 # The status fields are matched by name here and read by name again by the caller, so the Box
 # reports them in the one language both sides agree on rather than in its own locale.
 LC_ALL=C
@@ -1697,9 +1395,14 @@ if command -v journalctl >/dev/null 2>&1; then
   journalctl --user --unit companion-pi-daemon.service --since=-${PI_DAEMON_JOURNAL_FRESH_MINUTES}min --no-pager --output=cat --lines=25 2>/dev/null | grep -Ev '^(Started|Starting|Stopping|Stopped|Deactivated|Succeeded|Consumed|Scheduled restart job|[[:space:]]*$)' | tail -n 1 | companion_label ${PI_DAEMON_DIAGNOSTIC_LABELS.journal}
 fi
 exit 0`,
-      30,
-    ).catch(() => null);
-    return result ? composeDaemonFailureDetail(result.stdout) : "";
+        30,
+        signal,
+      );
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
+      return "";
+    }
+    return composeDaemonFailureDetail(result.stdout);
   }
 
   async #removeProviderFile(boxId: string): Promise<void> {
@@ -2000,8 +1703,6 @@ exit 0`,
     boxId: string;
     restart: boolean;
     signal?: AbortSignal;
-    /** Legacy callers predate the correlated broker-state contract and ignore this return value. */
-    verifyBrokerState?: boolean;
   }): Promise<{ state: "idle"; invocationId: string }> {
     let started: CommandEnvelope;
     try {
@@ -2049,12 +1750,9 @@ trap - EXIT`,
     const daemonState = await this.#waitDaemonActive(input.boxId, input.signal);
     if (daemonState !== "running") {
       throw new BoxRuntimeProviderError(
-        `${PI_DAEMON_FAILURE_MESSAGE}${await this.#daemonFailureDetail(input.boxId)}`,
+        `${PI_DAEMON_FAILURE_MESSAGE}${await this.#daemonFailureDetail(input.boxId, input.signal)}`,
         502,
       );
-    }
-    if (input.verifyBrokerState === false) {
-      return { state: "idle", invocationId: "legacy-unobserved" };
     }
     const broker = await this.brokerState({ boxId: input.boxId, signal: input.signal });
     if (broker.activeAttemptId !== null) {
@@ -2075,10 +1773,7 @@ if systemctl --user show-environment >/dev/null 2>&1; then
   fi
 fi
 rm -f "/run/user/$(id -u)/companion/providers.env" \
-  "$HOME/${COMPANION_PI_BROKER_SOCKET_PATH}" \
-  "$HOME/.companion/runtime/state/pi.rpc.in" \
-  "$HOME/.companion/runtime/state/pi.rpc.ready" \
-  "$HOME/.companion/runtime/state/pi.rpc.start"`,
+  "$HOME/${COMPANION_PI_BROKER_SOCKET_PATH}"`,
       60,
       input.signal,
     );
@@ -2133,7 +1828,7 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     let box = observed ?? await this.#get(input.boxId, input.signal);
     if (box.state !== "archived" && box.state !== "archiving") {
       try {
-        const response = await this.#request<BoxEnvelope>(
+        const response = await this.#request<unknown>(
           `/boxes/${encodeURIComponent(input.boxId)}/stop`,
           {
             method: "POST",
@@ -2141,7 +1836,7 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
             ...(input.signal ? { signal: input.signal } : {}),
           },
         );
-        box = response.box;
+        box = parseBoxEnvelope(response);
       } catch (error) {
         if (
           input.recoverArchive !== true
@@ -2171,7 +1866,7 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     signal?: AbortSignal;
   }): Promise<{ boxId: string; diskLayoutVersion: typeof COMPANION_PI_DISK_LAYOUT_VERSION }> {
     companionBoxName(input.companionId, input.runtimeGeneration);
-    this.#startSignal = input.signal;
+    this.#stagingSignal = input.signal;
     try {
       const box = await this.#get(input.boxId, input.signal);
       if (!isCompanionOwnBox(box, input.companionId, input.runtimeGeneration)) {
@@ -2180,7 +1875,7 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
       if (!READY_STATES.has(box.state)) {
         throw new BoxRuntimeProviderError("Box must be resumed before staging runtime resources", 409);
       }
-      await this.#firstCommand(box, false, false);
+      await this.#assertBoxRunnable(box);
       await this.#ensurePiLayout(box.id);
       await this.#stageCompanionInteractionExtension(box.id);
       await this.#injectPiResources({
@@ -2197,7 +1892,7 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
       });
       return { boxId: box.id, diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION };
     } finally {
-      this.#startSignal = undefined;
+      this.#stagingSignal = undefined;
     }
   }
 
@@ -2234,244 +1929,6 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     } catch (error) {
       if (input.signal?.aborted) throw input.signal.reason ?? error;
       return { state: "error", invocationId: null };
-    }
-  }
-
-  async start(input: {
-    companionId: string;
-    runtimeGeneration?: number;
-    orgId: string;
-    boxId: string | null;
-    clientSurface: CompanionClientSurface;
-    providerAuth: Record<string, Record<string, unknown>>;
-    replaceProviderAuth: boolean;
-    restartPi?: boolean;
-    refreshRuntimeLayout?: boolean;
-    allowBoxWake?: boolean;
-    allowBoxCreate?: boolean;
-    /** This start claimed a control-plane archive continuation even if Box's first read says idle. */
-    waitForArchive?: boolean;
-    instructions?: string | null;
-    modelId: string;
-    mcpCredentials: McpRuntimeCredential[];
-    mcpAccounts: CompanionMcpAccount[];
-    skills: CompanionRuntimeSkill[];
-    hubEnv?: Record<string, string>;
-    onArchiveReady?: (boxId: string) => Promise<void>;
-    onBoxAssigned: (boxId: string | null) => Promise<void>;
-    signal?: AbortSignal;
-  }): Promise<CompanionRuntimeStartObservation> {
-    // Validate before any Box read/create so a malformed durable generation cannot leak a resource.
-    companionBoxName(input.companionId, input.runtimeGeneration);
-    this.#startSignal = input.signal;
-    try {
-      return await this.#startBox(input);
-    } finally {
-      // Delivery runs on this same adapter instance, so the wake's deadline must not outlive it.
-      this.#startSignal = undefined;
-    }
-  }
-
-  async #startBox(input: {
-    companionId: string;
-    runtimeGeneration?: number;
-    orgId: string;
-    boxId: string | null;
-    clientSurface: CompanionClientSurface;
-    providerAuth: Record<string, Record<string, unknown>>;
-    replaceProviderAuth: boolean;
-    restartPi?: boolean;
-    refreshRuntimeLayout?: boolean;
-    allowBoxWake?: boolean;
-    allowBoxCreate?: boolean;
-    waitForArchive?: boolean;
-    instructions?: string | null;
-    modelId: string;
-    mcpCredentials: McpRuntimeCredential[];
-    mcpAccounts: CompanionMcpAccount[];
-    skills: CompanionRuntimeSkill[];
-    hubEnv?: Record<string, string>;
-    onArchiveReady?: (boxId: string) => Promise<void>;
-    onBoxAssigned: (boxId: string | null) => Promise<void>;
-  }): Promise<CompanionRuntimeStartObservation> {
-    const allowBoxWake = input.allowBoxWake !== false;
-    const allowBoxCreate = input.allowBoxCreate !== false;
-    const assigned = input.boxId ? await this.#getAssignedBox(input.boxId) : null;
-    // A recorded id that names a machine this Companion does not own is treated as no assignment at
-    // all, and the row is cleared so nothing else — a stop, a live status, a thread sync — reaches
-    // that machine either. The Box itself is left untouched: it is not this Companion's to rename or
-    // archive, and another Companion's row may still be pointing at it.
-    let box = assigned
-      && isCompanionOwnBox(assigned, input.companionId, input.runtimeGeneration)
-      ? assigned
-      : null;
-    const keptAssignment = box !== null;
-    if (assigned && !keptAssignment) await input.onBoxAssigned(null);
-    if (!box) box = await this.#findCompanionBox(input.companionId, input.runtimeGeneration);
-    if (box && isBeyondRecovery(box)) {
-      if (!allowBoxWake) {
-        throw new BoxRuntimeProviderError("Box is no longer online; apply on the next wake", 409);
-      }
-      // The assigned Box failed setup or died, so the Companion moves onto a new Box instead of
-      // failing every future wake against the same broken disk.
-      await this.#retireBox(box, input.companionId, input.runtimeGeneration);
-      box = null;
-    }
-    let boxIdPersisted = false;
-    let replaceProviderAuth = input.replaceProviderAuth;
-    if (!box) {
-      if (!allowBoxWake) {
-        throw new BoxRuntimeProviderError("Box is no longer online; apply on the next wake", 409);
-      }
-      if (!allowBoxCreate) {
-        throw new BoxRuntimeProviderError(
-          "The durably assigned Box disappeared before runtime staging",
-          409,
-          "box_not_found",
-        );
-      }
-      box = await this.#createCompanionBox(input);
-      boxIdPersisted = true;
-      // Pi's auth file lives on the Box disk, so a new disk needs it written whatever generation the
-      // control plane recorded for the Box this start replaced.
-      replaceProviderAuth = true;
-    }
-    // `waitForArchive` describes the exact Box id whose lifecycle claim was persisted. If that Box
-    // vanished, a different Box recovered by deterministic name (or a fresh one created here) has
-    // no old snapshot to finish and must proceed. A provider-observed `archiving` state remains
-    // authoritative even when the control-plane assignment was absent or stale.
-    const retainedArchiveTarget = input.waitForArchive === true
-      && input.boxId !== null
-      && box.id === input.boxId;
-    const waitedForArchive = !boxIdPersisted
-      && (retainedArchiveTarget || box.state === "archiving");
-    if (waitedForArchive) {
-      box = await this.#waitWhileArchiving(box);
-      // Archival can outlast one request budget. Keep the truthful, retryable projection instead of
-      // throwing the transient state through startRuntime's durable Error path. `idle` is not proof
-      // of completion here: Box can expose it between `archiving` and the terminal `archived` state.
-      if (box.state !== "archived" && !isBeyondRecovery(box)) {
-        return {
-          ...observation(box, "stopped"),
-          runtimeState: "stopping",
-          daemonState: "stopped",
-        };
-      }
-    }
-    if (box.state === "archived") {
-      if (!allowBoxWake) {
-        // This caller found an Online Box and lost a race with an archive. Completing that expected
-        // wait may not turn an apply-only operation into either a wake or a durable failure.
-        if (waitedForArchive) return observation(box, "stopped");
-        throw new BoxRuntimeProviderError("Box is asleep; apply on the next wake", 409);
-      }
-      // Move the durable claim out of its archive-wait marker before resume. If this process dies
-      // on either side of the provider call, a stale owner sees an ordinary start: before resume it
-      // will observe `archived` and retry it; after resume it will accept the runnable Box instead
-      // of waiting for that Box to archive again.
-      if (waitedForArchive) await input.onArchiveReady?.(box.id);
-      box = await this.#resume(box.id);
-    } else if (!READY_STATES.has(box.state) && !STARTING_STATES.has(box.state)) {
-      throw new BoxRuntimeProviderError(`Box cannot start from state ${box.state}`, 409);
-    }
-
-    if (!boxIdPersisted) {
-      try {
-        await input.onBoxAssigned(box.id);
-      } catch (error) {
-        // A Box recovered by name is recorded nowhere until this write lands, so a refused write —
-        // whether the control plane could not store the id or a cancelled wake no longer owns the
-        // lifecycle — would leave it awake with nothing pointing at it. The Box the control plane
-        // already had recorded stays awake and stays recorded.
-        if (!keptAssignment) await this.#sleepUnrecordedBox(box.id);
-        throw error;
-      }
-    }
-    box = await this.#waitReady(box.id);
-    // Everything from here on is a command, so this is where a Box that is not listening has to be
-    // found: a state that reads as ready is not the same as a machine that answers.
-    //
-    // `replaceProviderAuth=false` proves the control-plane row already records this layout and the
-    // current provider generation. The runtime-file probe supplies the missing volatile half of the
-    // proof: a later systemd auto-restart can still inherit this daemon's MCP credentials.
-    const first = await this.#firstCommand(
-      box,
-      !replaceProviderAuth && !input.restartPi && !input.refreshRuntimeLayout,
-      allowBoxWake,
-    );
-    box = first.box;
-    // A warm shortcut staged nothing: the Box keeps whatever resources the previous injection
-    // left. `staged: false` is what stops the caller from recording a skills apply for it.
-    if (first.warm) return { ...observation(await this.#get(box.id), "running"), staged: false };
-    // The permissive extension may expose image reads only after setup proves this Box has the Pi
-    // release whose resize worker keeps the RPC loop bounded. A daemon that restarts during an
-    // older layout repair keeps its prior fail-closed extension until this proof succeeds.
-    await this.#ensurePiLayout(box.id);
-    await this.#stageCompanionInteractionExtension(box.id);
-    await this.#injectPiResources({
-      boxId: box.id,
-      clientSurface: input.clientSurface,
-      providerAuth: input.providerAuth,
-      replaceProviderAuth,
-      modelId: input.modelId,
-      instructions: input.instructions,
-      mcpCredentials: input.mcpCredentials,
-      mcpAccounts: input.mcpAccounts,
-      skills: input.skills,
-      hubEnv: input.hubEnv,
-    });
-    await this.#activatePiDaemon({
-      boxId: box.id,
-      restart: replaceProviderAuth || input.restartPi === true,
-      signal: this.#startSignal,
-      verifyBrokerState: false,
-    });
-    return { ...observation(await this.#get(box.id), "running"), staged: true };
-  }
-
-  async stop(input: {
-    boxId: string;
-    recoverArchive?: boolean;
-    signal?: AbortSignal;
-  }): Promise<CompanionRuntimeObservation> {
-    let box = await this.#get(input.boxId, input.signal);
-    if (READY_STATES.has(box.state)) {
-      try {
-        await this.#deactivatePiDaemon({ boxId: input.boxId, signal: input.signal });
-      } catch (error) {
-        // A Stop owner can die after Box accepted archival but before PostgreSQL recorded it. During
-        // the provider's transient idle projection, command execution can answer "not running".
-        // The recovering wake must still reassert Stop and wait for `archived`; an ordinary explicit
-        // Stop keeps surfacing every command failure.
-        if (
-          input.recoverArchive !== true
-          || !(error instanceof BoxRuntimeProviderError)
-          || error.status !== 409
-        ) throw error;
-      }
-    }
-    const archived = await this.#archiveBox(input, box);
-    box = { ...box, state: archived.state };
-    return observation(box, "stopped");
-  }
-
-  async status(input: { boxId: string; signal?: AbortSignal }): Promise<CompanionRuntimeObservation> {
-    const box = await this.#get(input.boxId, input.signal);
-    const daemonState = READY_STATES.has(box.state)
-      ? await this.#daemonState(input.boxId, input.signal)
-      : "stopped";
-    return observation(box, daemonState);
-  }
-
-  async prompt(input: { boxId: string; message: string; requestId: string }): Promise<void> {
-    const dispatched = await this.dispatchPrompt({
-      boxId: input.boxId,
-      attemptId: input.requestId,
-      requestId: input.requestId,
-      message: input.message,
-    });
-    if (dispatched.outcome !== "accepted") {
-      throw new BoxRuntimeProviderError("Pi did not accept the message; wake the Companion and retry", 409);
     }
   }
 
@@ -2576,23 +2033,6 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     };
   }
 
-  async respondExtensionUi(input: {
-    boxId: string;
-    attemptId?: string;
-    response: Record<string, unknown>;
-  }): Promise<void> {
-    const dispatched = await this.dispatchExtensionUi({
-      ...input,
-      requestId: `companion-decision:${randomUUID()}`,
-    });
-    if (dispatched.outcome !== "accepted") {
-      throw new BoxRuntimeProviderError(
-        "Pi did not accept the permission response; wake the Companion and retry",
-        409,
-      );
-    }
-  }
-
   async dispatchExtensionUi(input: {
     boxId: string;
     attemptId?: string;
@@ -2670,57 +2110,6 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     });
   }
 
-  /**
-   * Heal a Pi daemon that stopped or is active without consuming RPC. The unit is already
-   * provisioned, so nothing is staged and no credential is rewritten: a healthy daemon proves it
-   * can acknowledge `get_state` and stays untouched; a stopped daemon is started; an active but
-   * unresponsive daemon is restarted. A daemon that stays down is an answer with its reason rather
-   * than a thrown failure — only transport-level errors the other methods would also throw for
-   * travel out of here.
-   */
-  async healPiDaemon(input: { boxId: string; requireIdle?: boolean }): Promise<{
-    daemonState: "running" | "stopped" | "error";
-    detail: string | null;
-  }> {
-    const initialState = await this.#daemonState(input.boxId);
-    if (initialState === "running") {
-      const health = await this.#piRpcHealth(input.boxId);
-      if (health && (!input.requireIdle || health === "idle")) {
-        return { daemonState: "running", detail: null };
-      }
-    }
-    const started = await this.#command(
-      input.boxId,
-      `set -e
-${PREPARE_USER_BUS}
-# A unit that crash-looped past systemd's start limit refuses every later start until its failure is
-# cleared, so the latched failure is cleared first; a unit with nothing latched is unaffected.
-systemctl --user reset-failed companion-pi-daemon.service >/dev/null 2>&1 || true
-systemctl --user ${initialState === "running" ? "restart" : "start"} companion-pi-daemon.service`,
-      120,
-    );
-    if (!started.success) {
-      return {
-        daemonState: "error",
-        detail: `Pi daemon failed to start${commandFailureDetail(started)}`,
-      };
-    }
-    const daemonState = await this.#waitDaemonActive(input.boxId);
-    if (daemonState === "running" && await this.#waitPiRpcReady(input.boxId)) {
-      return { daemonState: "running", detail: null };
-    }
-    if (daemonState === "running") {
-      return {
-        daemonState: "error",
-        detail: "Pi daemon became active but did not become ready to accept messages",
-      };
-    }
-    return {
-      daemonState: "error",
-      detail: `${PI_DAEMON_FAILURE_MESSAGE}${await this.#daemonFailureDetail(input.boxId)}`,
-    };
-  }
-
   async ackEvents(input: {
     boxId: string;
     through: number;
@@ -2743,166 +2132,55 @@ systemctl --user ${initialState === "running" ? "restart" : "start"} companion-p
     return { acknowledgedCursor: data.acknowledgedCursor };
   }
 
-  async readEvents(input: { boxId: string; offset: number }): Promise<CompanionPiEventChunk>;
   async readEvents(input: {
     boxId: string;
     after: number;
     limit?: number;
     signal?: AbortSignal;
-  }): Promise<CompanionPiBrokerEventPage>;
-  async readEvents(input: { boxId: string; offset: number } | {
-    boxId: string;
-    after: number;
-    limit?: number;
-    signal?: AbortSignal;
-  }): Promise<CompanionPiEventChunk | CompanionPiBrokerEventPage> {
-    if ("after" in input) {
-      const response = await this.#rpcCommandResponse({
-        boxId: input.boxId,
-        responseCommand: "read_events",
-        command: {
-          id: `companion-read-events:${randomUUID()}`,
-          type: "read_events",
-          after: input.after,
-          ...(input.limit === undefined ? {} : { limit: input.limit }),
-        },
-        signal: input.signal,
-      });
-      const data = response?.success === true && isJsonObject(response.data) ? response.data : null;
-      const events = Array.isArray(data?.events)
-        ? data.events.map(parseBrokerJournalRecord)
-        : null;
-      if (
-        !data
-        || !events
-        || events.some((event) => event === null)
-        || !nonNegativeSafeInteger(data.nextCursor)
-        || !nonNegativeSafeInteger(data.acknowledgedCursor)
-        || typeof data.hasMore !== "boolean"
-      ) {
-        throw new BoxRuntimeProviderError("Pi broker event journal could not be read", 502);
-      }
-      let prior = Math.max(input.after, data.acknowledgedCursor);
-      for (const event of events as CompanionPiJournalRecord[]) {
-        if (event.sequence <= prior || event.sequence > data.nextCursor) {
-          throw new BoxRuntimeProviderError("Pi broker event journal is not monotonic", 502);
-        }
-        prior = event.sequence;
-      }
-      if (events.length > 0 && prior !== data.nextCursor) {
-        throw new BoxRuntimeProviderError("Pi broker event cursor does not match its page", 502);
-      }
-      return {
-        events: events as CompanionPiJournalRecord[],
-        nextCursor: data.nextCursor,
-        acknowledgedCursor: data.acknowledgedCursor,
-        hasMore: data.hasMore,
-      };
+  }): Promise<CompanionPiBrokerEventPage> {
+    const response = await this.#rpcCommandResponse({
+      boxId: input.boxId,
+      responseCommand: "read_events",
+      command: {
+        id: `companion-read-events:${randomUUID()}`,
+        type: "read_events",
+        after: input.after,
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+      },
+      signal: input.signal,
+    });
+    const data = response?.success === true && isJsonObject(response.data) ? response.data : null;
+    const events = Array.isArray(data?.events)
+      ? data.events.map(parseBrokerJournalRecord)
+      : null;
+    if (
+      !data
+      || !events
+      || events.some((event) => event === null)
+      || !nonNegativeSafeInteger(data.nextCursor)
+      || !nonNegativeSafeInteger(data.acknowledgedCursor)
+      || typeof data.hasMore !== "boolean"
+    ) {
+      throw new BoxRuntimeProviderError("Pi broker event journal could not be read", 502);
     }
-
-    /*
-     * Read the next slice of the transitional compatibility log. A log that is missing, unreadable,
-     * or longer than the read limit is a normal read with a resume offset. Runtime v2 consumes the
-     * monotonic journal branch above; this branch exists only until the legacy API executor leaves.
-     */
-    const result = await this.#command(
-      input.boxId,
-      `set -eu
-log="$HOME/.companion/runtime/logs/pi.rpc.ndjson"
-offset=${Math.max(0, Math.trunc(input.offset))}
-# A Companion that has not spoken yet has no log at all, so an absent log reads as empty from the top.
-if [ ! -e "$log" ]; then printf '%s\\n' 0; exit 0; fi
-# A log this Box will not size, whether unreadable or not a byte stream at all, is an empty read at
-# the offset this sync came in with. Rewinding to 0 would reproject the whole transcript once it can
-# be read again, and failing would report a broken thread over a file that is merely unreadable.
-# 'wc' still prints a 0 on the way out when it cannot size what it was handed, so its exit status
-# decides whether that 0 is the log's length or the reason there isn't one.
-if size="$(wc -c < "$log" 2>/dev/null)"; then size="$(printf '%s' "$size" | tr -cd '0-9')"; else size=""; fi
-case "$size" in ''|*[!0-9]*) printf '%s\\n' "$offset"; exit 0 ;; esac
-# A resumed Box keeps the log, but a rebuilt disk can shrink it; restart from the top instead of
-# reading a stale byte range.
-if [ "$size" -lt "$offset" ]; then offset=0; fi
-printf '%s\\n' "$offset"
-# Deliberately no 'pipefail' on this read, and the pipeline's own status is discarded. 'head' closes
-# the pipe the moment it has the read limit, so 'tail' dies of SIGPIPE and exits 141; under 'pipefail'
-# that failed the whole read and told the operator a healthy thread could not be read as soon as its
-# log outgrew one chunk. 'head' then fails the same way on its own stdout when whatever captures this
-# command's output stops accepting bytes before the read limit, and under 'set -e' that skipped the
-# 'exit 0' below and reported the chunk's last event line as the reason the log could not be read. A
-# reader that stops partway has still produced bytes and the offset they start at, so the read is
-# capped rather than broken and the rest is read by the next sync.
-tail -c "+$((offset + 1))" "$log" 2>/dev/null | head -c ${COMPANION_PI_EVENT_READ_LIMIT} || true
-exit 0`,
-      30,
-    );
-    const read = parsePiEventChunk(result.stdout);
-    // A read that printed the offset its bytes start at produced a chunk, whatever status came back
-    // with it: the reader can stop partway when the transport capturing this command's output caps it
-    // below the read limit, and those bytes plus that offset are exactly what the next sync resumes
-    // from. Only output with no resume point in it means the Box never ran the read, and only then is
-    // the sync a failure that names the exit status and the last line the Box printed.
-    if (read) return read;
-    if (!result.success) {
-      throw new BoxRuntimeProviderError(
-        `Pi event log could not be read from Box${commandFailureDetail(result)}`,
-        502,
-      );
+    let prior = Math.max(input.after, data.acknowledgedCursor);
+    for (const event of events as CompanionPiJournalRecord[]) {
+      if (event.sequence <= prior || event.sequence > data.nextCursor) {
+        throw new BoxRuntimeProviderError("Pi broker event journal is not monotonic", 502);
+      }
+      prior = event.sequence;
     }
-    return { chunk: "", offset: input.offset };
+    if (events.length > 0 && prior !== data.nextCursor) {
+      throw new BoxRuntimeProviderError("Pi broker event cursor does not match its page", 502);
+    }
+    return {
+      events: events as CompanionPiJournalRecord[],
+      nextCursor: data.nextCursor,
+      acknowledgedCursor: data.acknowledgedCursor,
+      hasMore: data.hasMore,
+    };
   }
 
-  /**
-   * Photograph the Box desktop once, with whatever the machine already has. Every branch of this
-   * command ends in `exit 0`: a Box with no X display, no capture tool, or a frame too large is a
-   * run that simply gets no picture, which is not a reason to fail the sync that projected it.
-   */
-  async captureDesktopFrame(input: { boxId: string }): Promise<string | null> {
-    const result = await this.#command(
-      input.boxId,
-      `set -u
-frame="$(mktemp -t companion-frame.XXXXXX 2>/dev/null)" || exit 0
-trap 'rm -f "$frame" "$frame.png"' EXIT
-mime=""
-# One frame, downscaled and re-encoded on the machine that already holds it. ImageMagick and ffmpeg
-# both write JPEG straight from the root window; scrot and gnome-screenshot only write PNG, so they
-# are tried last and their bytes are sent as PNG rather than re-encoded by a tool that may be absent.
-grab() {
-  DISPLAY="$1"
-  export DISPLAY
-  if command -v import >/dev/null 2>&1 \\
-    && import -silent -window root -resize '1280x800>' -quality 55 "jpeg:$frame" 2>/dev/null \\
-    && [ -s "$frame" ]; then mime="image/jpeg"; return 0; fi
-  if command -v ffmpeg >/dev/null 2>&1 \\
-    && ffmpeg -loglevel quiet -y -f x11grab -video_size 1280x800 -i "$1" -frames:v 1 -q:v 8 \\
-      -f mjpeg "$frame" </dev/null 2>/dev/null \\
-    && [ -s "$frame" ]; then mime="image/jpeg"; return 0; fi
-  if command -v scrot >/dev/null 2>&1 \\
-    && scrot -o -F "$frame.png" 2>/dev/null && [ -s "$frame.png" ]; then
-    mv -f "$frame.png" "$frame" && mime="image/png" && return 0
-  fi
-  if command -v gnome-screenshot >/dev/null 2>&1 \\
-    && gnome-screenshot -f "$frame.png" 2>/dev/null && [ -s "$frame.png" ]; then
-    mv -f "$frame.png" "$frame" && mime="image/png" && return 0
-  fi
-  return 1
-}
-for display in "\${DISPLAY:-}" :0 :1 :99; do
-  [ -n "$display" ] || continue
-  grab "$display" || continue
-  size="$(wc -c < "$frame" 2>/dev/null | tr -cd '0-9')"
-  case "$size" in ''|*[!0-9]*) exit 0 ;; esac
-  [ "$size" -le ${COMPANION_DESKTOP_FRAME_LIMIT} ] || exit 0
-  printf 'data:%s;base64,' "$mime"
-  base64 -w0 "$frame" 2>/dev/null || base64 "$frame" | tr -d '\\n'
-  exit 0
-done
-exit 0`,
-      30,
-    );
-    const frame = result.stdout.trim();
-    if (frame.length > COMPANION_TOOL_RUN_SCREENSHOT_MAX_CHARACTERS) return null;
-    return DESKTOP_FRAME_PATTERN.test(frame) ? frame : null;
-  }
 
   /**
    * A fresh desktop URL for a Box that is already running. Reaching a desktop observes a Box; it
