@@ -145,7 +145,7 @@ describe("SegmentedCompanionPiJournal", () => {
     });
     expect(journal.append({
       invocationId: "invocation-1",
-      attemptId: null,
+      attemptId: "attempt-exit",
       kind: "pi_process_exit",
       exit: { code: 86, signal: null },
     }).sequence).toBe(4);
@@ -170,6 +170,26 @@ describe("SegmentedCompanionPiJournal", () => {
     journal = new SegmentedCompanionPiJournal({ directory });
     expect(journal.tailCursor).toBe(1);
     expect(readFileSync(path, "utf8")).toBe(complete);
+  });
+
+  it("retires unacknowledged records when a new systemd invocation takes ownership", () => {
+    const directory = temporaryDirectory("pi-journal-invocation-");
+    const journal = new SegmentedCompanionPiJournal({ directory });
+    journal.append({
+      invocationId: "invocation-old",
+      attemptId: "attempt-old",
+      kind: "pi_event",
+      event: { type: "agent_start" },
+    });
+
+    new CompanionPiBroker({
+      invocationId: "invocation-new",
+      journal,
+      transport: new FakePiTransport({}),
+    });
+
+    expect(journal.acknowledgedCursor).toBe(journal.tailCursor);
+    expect(journal.read(0).events).toEqual([]);
   });
 
   it("bounds pages by encoded bytes without skipping a monotonic record", () => {
@@ -214,6 +234,28 @@ describe("SegmentedCompanionPiJournal", () => {
 });
 
 describe("CompanionPiBroker", () => {
+  it("correlates broker identity with Pi model input capabilities", async () => {
+    const harness = brokerHarness();
+
+    await expect(harness.broker.command({
+      id: "control-runtime-state",
+      type: "runtime_state",
+    })).resolves.toMatchObject({
+      id: "control-runtime-state",
+      success: true,
+      data: {
+        invocationId: "invocation-1",
+        activeAttemptId: null,
+        tailCursor: 0,
+        acknowledgedCursor: 0,
+        modelInput: ["text", "image"],
+      },
+    });
+    expect(harness.transport.requests).toEqual([
+      expect.objectContaining({ type: "get_state" }),
+    ]);
+  });
+
   it("preflights idle state, omits streamingBehavior, and binds events through settlement", async () => {
     const harness = brokerHarness();
 
@@ -433,6 +475,30 @@ describe("CompanionPiBroker", () => {
     });
   });
 
+  it("marks a failed one-way decision send ambiguous and keeps the active binding", async () => {
+    const harness = brokerHarness();
+    await harness.broker.command({
+      id: "control-prompt",
+      type: "prompt",
+      attemptId: "attempt-question",
+      message: "Ask",
+    });
+    harness.transport.sendFailure = true;
+
+    const response = await harness.broker.command({
+      id: "control-answer-lost",
+      type: "extension_ui_response",
+      response: { type: "extension_ui_response", id: "ui-1", value: "Continue" },
+    });
+
+    expect(response).toMatchObject({
+      success: false,
+      error: { code: "decision_delivery_ambiguous", ambiguous: true },
+    });
+    expect(harness.broker.activeAttemptId).toBe("attempt-question");
+    expect(harness.transport.sent).toHaveLength(1);
+  });
+
   it("records process exit separately with the active attempt and clears the binding", async () => {
     const harness = brokerHarness();
     await harness.broker.command({
@@ -450,6 +516,21 @@ describe("CompanionPiBroker", () => {
         exit: { code: 86, signal: null },
       }),
     ]);
+  });
+
+  it("counts a process exit after settlement without writing an unbound journal record", async () => {
+    const harness = brokerHarness();
+    await harness.broker.command({
+      id: "control-prompt",
+      type: "prompt",
+      attemptId: "attempt-settled",
+      message: "Finish",
+    });
+    harness.broker.acceptPiRecord({ type: "agent_settled" });
+    harness.broker.acceptPiProcessExit({ code: 0, signal: null });
+
+    expect(harness.journal.read(0).events).toHaveLength(1);
+    expect(harness.journal.counters.unboundEvents).toBe(1);
   });
 
   it("counts malformed and oversized Pi lines without writing their raw content", async () => {
@@ -569,6 +650,7 @@ class FakePiTransport implements CompanionPiRpcTransport {
   readonly sent: PiJsonObject[] = [];
   state: PiJsonObject;
   promptFailure = false;
+  sendFailure = false;
   promptResponseSuccess: unknown = true;
 
   constructor(state: PiJsonObject) {
@@ -600,6 +682,7 @@ class FakePiTransport implements CompanionPiRpcTransport {
 
   async send(command: PiJsonObject): Promise<void> {
     this.sent.push(command);
+    if (this.sendFailure) throw new Error("synthetic lost decision delivery");
   }
 }
 

@@ -76,7 +76,7 @@ export type CompanionPiJournalRecord =
   | {
       sequence: number;
       invocationId: string;
-      attemptId: string | null;
+      attemptId: string;
       kind: "pi_process_exit";
       exit: {
         code: number | null;
@@ -329,6 +329,19 @@ export class SegmentedCompanionPiJournal {
     return this.#acknowledged;
   }
 
+  /**
+   * A fresh systemd invocation cannot resume the attempt bound by its predecessor. Retire that
+   * predecessor's remaining records atomically so the explicitly interrupted turn cannot poison
+   * the next user-requested retry with an forever-unacknowledgeable cursor.
+   */
+  beginInvocation(invocationId: string): number {
+    if (!validOpaqueId(invocationId)) throw new Error("invocationId is invalid");
+    if (this.#tail <= this.#acknowledged) return this.#acknowledged;
+    const first = this.read(this.#acknowledged, 1).events[0];
+    if (first && first.invocationId !== invocationId) return this.acknowledge(this.#tail);
+    return this.#acknowledged;
+  }
+
   recordFault(fault: keyof CompanionPiBrokerCounters): void {
     const current = this.#counters[fault];
     this.#counters[fault] = current >= Number.MAX_SAFE_INTEGER ? current : current + 1;
@@ -436,6 +449,7 @@ export class CompanionPiBroker {
     this.#invocationId = options.invocationId;
     this.#transport = options.transport;
     this.#journal = options.journal;
+    this.#journal.beginInvocation(options.invocationId);
     this.#appendCompatibilityEvent = options.appendCompatibilityEvent;
   }
 
@@ -482,6 +496,10 @@ export class CompanionPiBroker {
 
   acceptPiProcessExit(exit: { code: number | null; signal: string | null }): void {
     const attemptId = this.#activeAttemptId;
+    if (!attemptId) {
+      this.#journal.recordFault("unboundEvents");
+      return;
+    }
     this.#journal.append({
       invocationId: this.#invocationId,
       attemptId,
@@ -523,6 +541,8 @@ export class CompanionPiBroker {
     switch (type) {
       case "broker_state":
         return this.#brokerState();
+      case "runtime_state":
+        return await this.#runtimeState();
       case "get_state":
         return normalizePiState(await this.#piRequest("get_state", {}));
       case "prompt":
@@ -600,7 +620,7 @@ export class CompanionPiBroker {
         true,
       );
     }
-    return { attemptId, piAcknowledged: true };
+    return { attemptId, invocationId: this.#invocationId, piAcknowledged: true };
   }
 
   async #extensionUiResponse(command: PiJsonObject): Promise<PiJsonObject> {
@@ -621,8 +641,23 @@ export class CompanionPiBroker {
     if (!validCommandId(responseId)) {
       throw new BrokerCommandError("invalid_command", "extension UI response id is required");
     }
-    await this.#transport.send({ ...command.response });
-    return { attemptId: activeAttemptId, delivered: true };
+    try {
+      await this.#transport.send({ ...command.response });
+    } catch {
+      // Pi's one-way decision command has no correlated acknowledgement. A transport
+      // failure can therefore happen after the bytes reached Pi; replaying it would
+      // risk applying the same external decision twice.
+      throw new BrokerCommandError(
+        "decision_delivery_ambiguous",
+        "Pi decision delivery is unavailable",
+        true,
+      );
+    }
+    return {
+      attemptId: activeAttemptId,
+      invocationId: this.#invocationId,
+      delivered: true,
+    };
   }
 
   async #piRequest(type: string, fields: PiJsonObject): Promise<PiJsonObject> {
@@ -646,6 +681,16 @@ export class CompanionPiBroker {
       tailCursor: this.#journal.tailCursor,
       acknowledgedCursor: this.#journal.acknowledgedCursor,
       counters: this.#journal.counters,
+    };
+  }
+
+  /** One correlated snapshot of broker identity plus Pi's current model input capabilities. */
+  async #runtimeState(): Promise<PiJsonObject> {
+    const state = normalizePiState(await this.#piRequest("get_state", {}));
+    const model = isJsonObject(state.model) ? state.model : null;
+    return {
+      ...this.#brokerState(),
+      modelInput: Array.isArray(model?.input) ? model.input : [],
     };
   }
 }
@@ -948,7 +993,7 @@ function validJournalRecord(value: unknown): value is CompanionPiJournalRecord {
     return validOpaqueId(value.attemptId) && isJsonObject(value.event);
   }
   if (value.kind === "pi_process_exit") {
-    return (value.attemptId === null || validOpaqueId(value.attemptId)) && isJsonObject(value.exit);
+    return validOpaqueId(value.attemptId) && isJsonObject(value.exit);
   }
   return false;
 }

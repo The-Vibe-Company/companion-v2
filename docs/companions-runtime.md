@@ -44,6 +44,18 @@ The flag is the operational kill switch and rollback once v2 rows exist. A legac
 never execute them. The flag is not a mechanism for enabling excluded harness, provider, deployment,
 routine, schedule, or multi-Bot surfaces.
 
+SIGTERM or an ordinary runtime service shutdown is instead a replica handoff. The process stops new
+claims and local I/O, does not settle or release already-active work, and stops renewing those leases
+so another replica can take over after expiry. A claim returned by PostgreSQL but not yet handed to
+the engine is safe to release immediately. This path never substitutes for the feature-gate kill
+switch, which still explicitly interrupts active work.
+
+During the stacked deployment, the flag remains disabled from the destructive purge through the
+runtime-service layer. Those intermediate binaries install the fenced v2 schema but are not an
+activatable mixed-protocol release. The flag may be re-enabled only once the asynchronous API/web
+cutover is deployed; rollback after that point means disabling claims, never sending v2 rows back to
+the legacy executor.
+
 ## Durable data model
 
 All runtime rows carry `org_id`, force RLS, and use foreign keys/cascades that preserve external
@@ -166,17 +178,19 @@ Companion <companion-id> g<runtime-generation>
 ```
 
 Before create, runtime searches every provider list page for the exact name. It chooses one canonical
-Box and permanently deletes duplicates, preventing a crash after provider create from leaking an
-untracked machine. A provider create without an idempotency key is therefore recovered by name, not
-blindly repeated.
+Box and permanently deletes duplicates. The public Box create contract cannot assign that name and
+has no idempotency key: runtime therefore writes `creating_box`, performs exactly one `POST /boxes`
+with a five-minute provisional TTL, and never retries an ambiguous result. A positive `202` exposes
+the provider id; runtime checkpoints that id before an idempotent `PATCH` applies the deterministic
+name and six-hour TTL. It then lists again, chooses the canonical id, and durably deletes duplicates.
 
-The Box adapter/provider contract gives a create request and exact-name list visibility a hard
-upper bound of three minutes from the durable `creating_box` write intent. A deployment that cannot
-uphold that bound must keep Runtime v2 disabled. When Delete preempts an ambiguous create, an absent
-name is rejected until that horizon has elapsed; runtime then requires two exact-name absence
-observations at least thirty seconds apart. If either observation finds a Box, its id becomes the
-canonical id and permanent deletion is mandatory before retirement. The real-provider canary
-continuously exercises this assumption.
+A transport loss around the create POST is irreducibly ambiguous under the provider's current
+public contract. It interrupts the operation explicitly and may leave one unnamed Box which
+auto-archives after the provisional TTL; runtime never guesses its id from account-wide list order
+and never creates a second Box automatically. Operators must keep the real-provider canary and
+orphan inventory enabled until the provider offers a create idempotency key or client-supplied name.
+An exact-name Box discovered after any acknowledged create is always adopted and permanently
+deleted before retirement.
 
 Known-idempotent lifecycle calls retry network failures, `429`, and `5xx` responses up to five times
 with jittered backoff of 1, 2, 5, 10, and 30 seconds. A provider operation id is retained whenever
@@ -217,6 +231,13 @@ Unknown event types are counted and ignored. Malformed or oversized lines are re
 bounded counters and stable codes, then skipped so the journal progresses. Raw event lines,
 provider response bodies, stderr, tokens, auth JSON, and signed URLs are never stored in PostgreSQL
 or ordinary logs.
+
+Runtime commits each supported event projection and its monotonic cursor in one PostgreSQL
+transaction. A supported `agent_settled` or Pi process-exit observation records the terminal
+checkpoint in that same commit. Only then may runtime acknowledge the cursor to the broker. After a
+lease takeover, the new owner acknowledges an already-durable terminal cursor before settling the
+turn, so neither a crash after projection nor a duplicate journal delivery can lose or duplicate the
+terminal result.
 
 ## Dispatch ambiguity and Retry/Cancel
 
@@ -286,6 +307,22 @@ Companion's selected provider/model after ACL revalidation. API keys and OAuth r
 encrypted server-side except for the minimal owner-only Pi auth entry required on Box disk. Provider
 and MCP plaintext never appears in responses, projections, audit metadata, fixtures, or logs.
 
+Before dispatch, the attempt pins the exact provider and MCP credential revisions used to stage Pi.
+Every takeover that may still project Pi events must resolve the same revisions; if an account
+rotates after Pi accepted the prompt, runtime interrupts rather than projecting output with a
+different redaction dictionary. Once a terminal projection is already committed, takeover reads
+only its fenced cursor/output proof and may ACK and settle without loading credentials. OAuth
+refresh compare-and-swap is allowed only while applying settings or another pre-dispatch operation,
+never while consuming an accepted attempt or decision.
+
+The projection boundary receives an in-memory dictionary built from every string leaf of those
+validated, decrypted credentials. Assistant text and decision copy are scrubbed against those exact
+values plus bounded generic credential patterns. Tool activity is deliberately metadata-only: it
+stores a safe kind/name/title and an opaque hashed call id, never tool arguments or results. A
+complete Authorization or Cookie header value is removed before narrower generic matchers run. A
+decision request key that would require redaction fails closed and interrupts the turn. The
+dictionary, ciphertext, and raw Pi event are never serialized or logged.
+
 Provider connections and MCP accounts survive the Runtime v2 cutover. Legacy Companion rows and
 Box disks do not.
 
@@ -308,7 +345,10 @@ short-lived HMAC-authenticated request to a private runtime endpoint. Runtime re
 mints the provider desktop URL only when the exact current settings and Skills revisions are already
 staged and every selected personal Skill and MCP account belongs to that actor. A pending restage or
 foreign personal resource denies desktop access, so a warm shared Box cannot bypass creator-only
-privacy. Neither process stores or logs the URL, and Viewer requests fail before a Box client exists.
+privacy. Runtime atomically consumes the signed request id through a narrow `SECURITY DEFINER`
+function; PostgreSQL retains it through the signature window so replay is rejected across replicas
+and process restarts. Neither process stores or logs the URL, and Viewer requests fail before a Box
+client exists.
 
 ## Legacy purge
 

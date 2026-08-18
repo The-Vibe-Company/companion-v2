@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./ids": "./src/ids.ts",
+    "./runtime-role": "./src/runtimeRole.ts",
     "./schema": "./src/schema.ts"
   },
   "scripts": {

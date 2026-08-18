@@ -69,6 +69,9 @@ describe("Skills Hub runtime-role grants", () => {
       expect(sql).toContain(`'public.${helper}'::regprocedure`);
     }
     expect(sql).toContain("owner_only_runtime_functions || internal_runtime_functions");
+    expect(sql).toContain(
+      "companion_runtime_get_attempt_terminal_projection(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)",
+    );
     expect(sql).toContain("pg_catalog.aclexplode(");
     expect(sql).toContain("acl.grantee <> protected_proc.proowner");
     expect(sql).toContain("defaults.defaclobjtype = 'f'");

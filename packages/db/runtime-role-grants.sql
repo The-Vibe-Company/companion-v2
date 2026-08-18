@@ -65,7 +65,10 @@ DECLARE
     'companion_turn_attempts',
     'companion_operations',
     'companion_decision_deliveries',
-    'companion_runtime_leases'
+    'companion_runtime_leases',
+    'companion_runtime_duplicate_cleanups',
+    'companion_runtime_event_projections',
+    'companion_runtime_desktop_requests'
   ];
   legacy_companion_mutation_tables regclass[] := ARRAY[
     'public.companions'::regclass,
@@ -198,6 +201,26 @@ BEGIN
       'public.companion_settle_reconcile_lease(uuid,uuid,text,text,integer)'::regprocedure
     ];
 
+    -- 0091 is additive and the hook is also replayed by historical-migration tests. Resolve its
+    -- exact surface only when the migration sentinel exists; a partial 0091 remains fail closed.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_runtime_get_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'
+    ) IS NOT NULL THEN
+      companion_runtime_functions := companion_runtime_functions || ARRAY[
+        'public.companion_runtime_get_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'::regprocedure,
+        'public.companion_runtime_get_attempt_terminal_projection(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)'::regprocedure,
+        'public.companion_runtime_cas_mcp_oauth(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,uuid,uuid,uuid,text,text,text,text,text,text,text)'::regprocedure,
+        'public.companion_runtime_register_duplicate_cleanups(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text[])'::regprocedure,
+        'public.companion_runtime_checkpoint_duplicate_cleanup(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text,bigint,public.companion_duplicate_cleanup_status,text)'::regprocedure,
+        'public.companion_runtime_authorize_desktop(uuid,uuid,text)'::regprocedure,
+        'public.companion_runtime_consume_desktop_request(text,bigint,integer)'::regprocedure,
+        'public.companion_runtime_project_event_batch(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)'::regprocedure
+      ];
+      internal_runtime_functions := internal_runtime_functions || ARRAY[
+        'public.companion_runtime_guard_duplicate_cleanup()'::regprocedure
+      ];
+    END IF;
+
     -- A migration owner can carry arbitrary ALTER DEFAULT PRIVILEGES grants installed by an
     -- earlier operator. Runtime v2 never relies on default function EXECUTE: erase every named
     -- non-owner grantee and PUBLIC before granting the exact executor surface below.
@@ -253,6 +276,13 @@ BEGIN
       OR runtime_attributes.rolbypassrls
       OR runtime_attributes.rolinherit THEN
       RAISE EXCEPTION 'companion runtime role % must be LOGIN NOSUPERUSER NOBYPASSRLS NOINHERIT', configured_role;
+    END IF;
+    -- These are effective-privilege checks, so an unsafe ambient PUBLIC CREATE grant is rejected
+    -- just as firmly as a direct role grant.
+    IF pg_catalog.has_database_privilege(configured_role, current_database(), 'CREATE')
+       OR pg_catalog.has_schema_privilege(configured_role, 'public', 'CREATE') THEN
+      RAISE EXCEPTION 'companion runtime role % must not have database or public schema CREATE',
+        configured_role;
     END IF;
     IF pg_catalog.pg_has_role(configured_role, current_user, 'member') THEN
       RAISE EXCEPTION 'companion runtime role % must not inherit the migration-owner role', configured_role;
@@ -362,7 +392,13 @@ BEGIN
         current_database(),
         companion_runtime_role
       );
+      EXECUTE format(
+        'REVOKE CREATE ON DATABASE %I FROM %I',
+        current_database(),
+        companion_runtime_role
+      );
       EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', companion_runtime_role);
+      EXECUTE format('REVOKE CREATE ON SCHEMA public FROM %I', companion_runtime_role);
       EXECUTE format(
         'ALTER DEFAULT PRIVILEGES IN SCHEMA public
          REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM %I',

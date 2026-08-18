@@ -92,6 +92,12 @@ export const companionDecisionStatusEnum = pgEnum("companion_decision_status", [
 export const companionDecisionDeliveryStateEnum = pgEnum("companion_decision_delivery_state", [
   "pending", "write_intent", "delivered", "ambiguous", "cancelled",
 ]);
+export const companionDecisionRequestKindEnum = pgEnum("companion_decision_request_kind", [
+  "question", "confirmation",
+]);
+export const companionDuplicateCleanupStatusEnum = pgEnum("companion_duplicate_cleanup_status", [
+  "pending", "delete_requested", "waiting_deleted", "deleted", "already_deleted", "blocked",
+]);
 export type CompanionLegacyPurgePhase =
   | "deleting_external"
   | "external_complete"
@@ -791,7 +797,7 @@ export const companionRuntimeInstances = pgTable(
       foreignColumns: companionTurnCompositeKeyColumns(),
       name: "companion_runtime_instances_settings_claim_turn_fk",
     }).onDelete("restrict"),
-    generationCheck: check("companion_runtime_instances_generation_check", sql`${t.generation} >= 1`),
+    generationCheck: check("companion_runtime_instances_generation_check", sql`${t.generation} between 1 and 2147483647`),
     boxIdCheck: check("companion_runtime_instances_box_id_check", sql`${t.boxId} is null or ${t.boxId} ~ '^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$'`),
     invocationCheck: check("companion_runtime_instances_pi_invocation_check", sql`${t.piInvocationId} is null or (char_length(${t.piInvocationId}) between 1 and 200 and ${t.piInvocationId} !~ E'[\\n\\r]')`),
     revisionCheck: check("companion_runtime_instances_revision_check", sql`${t.diskLayoutVersion} >= 0 and ${t.desiredSettingsRevision} >= 1 and ${t.appliedSettingsRevision} >= 0 and ${t.appliedSettingsRevision} <= ${t.desiredSettingsRevision} and ${t.appliedSkillsRevision} >= 0 and ((${t.appliedSettingsRevision} = 0) = (${t.appliedClientSurface} is null)) and ${t.nextTurnSequence} >= 1 and ${t.nextOperationSequence} >= 1 and ${t.lastWriteEpoch} >= 0`),
@@ -882,12 +888,16 @@ export const companionTurnAttempts = pgTable(
     persona: text("persona"),
     canWriteSkills: boolean("can_write_skills").notNull().default(false),
     providerIds: jsonb("provider_ids").$type<string[]>().notNull(),
+    providerCredentialRefs: jsonb("provider_credential_refs")
+      .$type<Array<{ provider_id: string; credential_generation: string; credential_version: number }>>(),
     selectedSkillIds: jsonb("selected_skill_ids").$type<string[]>().notNull(),
     skillRefs: jsonb("skill_refs")
       .$type<Array<{ skill_id: string; current_version_id: string | null }>>()
       .notNull()
       .default(sql`'[]'::jsonb`),
     selectedMcpAccountIds: jsonb("selected_mcp_account_ids").$type<string[]>().notNull(),
+    mcpCredentialRefs: jsonb("mcp_credential_refs")
+      .$type<Array<{ account_id: string; credential_generation: string }>>(),
     claimEpoch: bigint("claim_epoch", { mode: "number" }),
     status: companionAttemptStatusEnum("status").notNull().default("starting"),
     checkpoint: text("checkpoint").notNull().default("starting"),
@@ -922,9 +932,15 @@ export const companionTurnAttempts = pgTable(
     turnFk: foreignKey({ columns: [t.orgId, t.companionId, t.turnId], foreignColumns: [companionTurns.orgId, companionTurns.companionId, companionTurns.id], name: "companion_turn_attempts_turn_fk" }).onDelete("cascade"),
     numberCheck: check("companion_turn_attempts_number_check", sql`${t.attemptNumber} >= 1`),
     actorCheck: check("companion_turn_attempts_actor_check", sql`char_length(${t.actorId}) between 1 and 200 and ${t.actorId} !~ E'[\\n\\r]'`),
-    runtimeCheck: check("companion_turn_attempts_runtime_check", sql`${t.runtimeGeneration} >= 1 and ${t.settingsRevision} >= 1 and ${t.skillsRevision} >= 1 and (${t.claimEpoch} is null or ${t.claimEpoch} >= 1)`),
+    runtimeCheck: check("companion_turn_attempts_runtime_check", sql`${t.runtimeGeneration} between 1 and 2147483647 and ${t.settingsRevision} >= 1 and ${t.skillsRevision} >= 1 and (${t.claimEpoch} is null or ${t.claimEpoch} >= 1)`),
     resourceSnapshotCheck: check("companion_turn_attempts_resource_snapshot_check", sql`(${t.modelId} is null or (char_length(${t.modelId}) between 1 and 200 and ${t.modelId} !~ E'[\\n\\r]')) and (${t.persona} is null or char_length(${t.persona}) <= 280) and jsonb_typeof(${t.providerIds}) = 'array' and jsonb_typeof(${t.selectedSkillIds}) = 'array' and jsonb_typeof(${t.skillRefs}) = 'array' and jsonb_typeof(${t.selectedMcpAccountIds}) = 'array'`),
-    checkpointCheck: check("companion_turn_attempts_checkpoint_check", sql`${t.checkpoint} in ('starting','dispatch_write_intent','dispatch_accepted','dispatch_ambiguous','dispatch_rejected','running','needs_input','event_projected','agent_settled') and ${t.checkpointSequence} >= 0`),
+    credentialSnapshotCheck: check("companion_turn_attempts_credential_snapshot_check", sql`
+      (${t.providerCredentialRefs} is null or (jsonb_typeof(${t.providerCredentialRefs}) = 'array' and octet_length(${t.providerCredentialRefs}::text) <= 262144))
+      and (${t.mcpCredentialRefs} is null or (jsonb_typeof(${t.mcpCredentialRefs}) = 'array' and octet_length(${t.mcpCredentialRefs}::text) <= 262144))
+      and ((${t.providerCredentialRefs} is null) = (${t.mcpCredentialRefs} is null))
+      and (${t.dispatchState} <> 'accepted' or ${t.providerCredentialRefs} is not null)
+    `),
+    checkpointCheck: check("companion_turn_attempts_checkpoint_check", sql`${t.checkpoint} in ('starting','dispatch_write_intent','dispatch_accepted','dispatch_ambiguous','dispatch_rejected','running','needs_input','event_projected','agent_settled','process_exited') and ${t.checkpointSequence} >= 0`),
     dispatchCheck: check("companion_turn_attempts_dispatch_check", sql`${t.dispatchCount} >= 0 and ((${t.dispatchState} = 'pending' and ${t.commandId} is null) or (${t.dispatchState} <> 'pending' and ${t.commandId} is not null)) and (${t.dispatchAcceptedAt} is null or ${t.dispatchState} = 'accepted')`),
     invocationCheck: check("companion_turn_attempts_pi_invocation_check", sql`${t.piInvocationId} is null or (char_length(${t.piInvocationId}) between 1 and 200 and ${t.piInvocationId} !~ E'[\\n\\r]')`),
     progressCheck: check("companion_turn_attempts_progress_check", sql`${t.eventCursor} >= 0 and ${t.unknownEventCount} >= 0 and ${t.malformedEventCount} >= 0 and ${t.oversizedEventCount} >= 0`),
@@ -984,7 +1000,7 @@ export const companionOperations = pgTable(
     sourceTurnFk: foreignKey({ columns: [t.orgId, t.companionId, t.sourceTurnId], foreignColumns: [companionTurns.orgId, companionTurns.companionId, companionTurns.id], name: "companion_operations_source_turn_fk" }).onDelete("restrict"),
     queueSequenceCheck: check("companion_operations_queue_sequence_check", sql`${t.queueSequence} >= 1 and ${t.turnQueueCutoff} >= 0`),
     actorCheck: check("companion_operations_actor_check", sql`char_length(${t.actorId}) between 1 and 200 and ${t.actorId} !~ E'[\\n\\r]'`),
-    runtimeCheck: check("companion_operations_runtime_check", sql`${t.runtimeGeneration} >= 1 and (${t.claimEpoch} is null or ${t.claimEpoch} >= 1)`),
+    runtimeCheck: check("companion_operations_runtime_check", sql`${t.runtimeGeneration} between 1 and 2147483647 and (${t.claimEpoch} is null or ${t.claimEpoch} >= 1)`),
     checkpointCheck: check("companion_operations_checkpoint_check", sql`${t.checkpoint} in ('pending','resolving_box','box_resolved','box_absence_observed','creating_box','box_created','waiting_ready','box_ready_observed','installing_layout','starting_pi','pi_observed','pi_ready','stopping_pi','provider_stop_requested','waiting_archived','box_archived','restarting_pi','restarting_box','applying_settings','settings_applied','provider_delete_requested','waiting_deleted','provider_deleted','box_absent','completed') and ${t.checkpointSequence} >= 0 and ${t.attemptCount} >= 0`),
     targetRevisionCheck: check("companion_operations_target_revision_check", sql`(${t.targetSettingsRevision} is null or ${t.targetSettingsRevision} >= 1) and (${t.targetSkillsRevision} is null or ${t.targetSkillsRevision} >= 1) and ((${t.kind} in ('start','restart_pi','restart_box','apply_settings') and ${t.targetSettingsRevision} is not null and ${t.targetSkillsRevision} is not null) or (${t.kind} not in ('start','restart_pi','restart_box','apply_settings') and ${t.targetSettingsRevision} is null and ${t.targetSkillsRevision} is null))`),
     resourceSnapshotCheck: check("companion_operations_resource_snapshot_check", sql`((${t.kind} in ('start','restart_pi','restart_box','apply_settings') and ${t.clientSurface} is not null and (${t.modelId} is null or (char_length(${t.modelId}) between 1 and 200 and ${t.modelId} !~ E'[\n\r]')) and (${t.persona} is null or char_length(${t.persona}) <= 280) and ${t.canWriteSkills} is not null and jsonb_typeof(${t.providerIds}) = 'array' and jsonb_typeof(${t.selectedSkillIds}) = 'array' and jsonb_typeof(${t.skillRefs}) = 'array' and jsonb_typeof(${t.selectedMcpAccountIds}) = 'array') or (${t.kind} not in ('start','restart_pi','restart_box','apply_settings') and ${t.clientSurface} is null and ${t.modelId} is null and ${t.persona} is null and ${t.canWriteSkills} is null and ${t.providerIds} is null and ${t.selectedSkillIds} is null and ${t.skillRefs} is null and ${t.selectedMcpAccountIds} is null))`),
@@ -1005,6 +1021,7 @@ export const companionDecisionDeliveries = pgTable(
     turnId: uuid("turn_id").notNull(),
     attemptId: uuid("attempt_id").notNull(),
     requestKey: text("request_key").notNull(),
+    requestKind: companionDecisionRequestKindEnum("request_kind").notNull().default("question"),
     decisionStatus: companionDecisionStatusEnum("decision_status").notNull().default("pending"),
     actorId: text("actor_id"),
     responseText: text("response_text"),
@@ -1037,6 +1054,94 @@ export const companionDecisionDeliveries = pgTable(
     responseCheck: check("companion_decision_deliveries_response_check", sql`(${t.responseText} is null or octet_length(${t.responseText}) <= 16384) and ((${t.decisionStatus} = 'pending' and ${t.actorId} is null and ${t.responseText} is null and ${t.respondedAt} is null) or (${t.decisionStatus} in ('allowed','denied') and ${t.actorId} is not null and ${t.responseText} is null and ${t.respondedAt} is not null) or (${t.decisionStatus} = 'answered' and ${t.actorId} is not null and ${t.responseText} is not null and ${t.respondedAt} is not null) or (${t.decisionStatus} in ('expired','cancelled') and ${t.responseText} is null and ${t.respondedAt} is not null))`),
     deliveryCheck: check("companion_decision_deliveries_delivery_check", sql`${t.deliveryCheckpoint} in ('pending','write_intent','delivered','ambiguous','cancelled') and ${t.deliveryCheckpointSequence} >= 0 and ${t.deliveryAttemptCount} >= 0 and (${t.claimEpoch} is null or ${t.claimEpoch} >= 1) and ((${t.deliveryState} in ('pending','cancelled') and ${t.commandId} is null) or (${t.deliveryState} in ('write_intent','delivered','ambiguous') and ${t.commandId} is not null)) and ((${t.deliveryState} = 'delivered') = (${t.deliveredAt} is not null))`),
     errorCheck: check("companion_decision_deliveries_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAction} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]'))`),
+  }),
+);
+
+/** Crash-resumable permanent deletion of non-canonical generation-named Boxes. */
+export const companionRuntimeDuplicateCleanups = pgTable(
+  "companion_runtime_duplicate_cleanups",
+  {
+    orgId: uuid("org_id").notNull(),
+    companionId: uuid("companion_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    boxId: text("box_id").notNull(),
+    status: companionDuplicateCleanupStatusEnum("status").notNull().default("pending"),
+    providerOperationId: text("provider_operation_id"),
+    checkpointSequence: bigint("checkpoint_sequence", { mode: "number" }).notNull().default(0),
+    deleteRequestedAt: timestamp("delete_requested_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    primaryKey: primaryKey({ columns: [t.operationId, t.boxId], name: "companion_runtime_duplicate_cleanups_pk" }),
+    uniqueOrgCompanionOperation: unique("companion_runtime_duplicate_cleanups_org_companion_operation_uq")
+      .on(t.orgId, t.companionId, t.operationId, t.boxId),
+    operationFk: foreignKey({
+      columns: [t.orgId, t.companionId, t.operationId],
+      foreignColumns: [companionOperations.orgId, companionOperations.companionId, companionOperations.id],
+      name: "companion_runtime_duplicate_cleanups_operation_fk",
+    }).onDelete("cascade"),
+    providerOperationUnique: uniqueIndex("companion_runtime_duplicate_cleanups_provider_operation_uq")
+      .on(t.providerOperationId).where(sql`${t.providerOperationId} is not null`),
+    pending: index("companion_runtime_duplicate_cleanups_pending_idx")
+      .on(t.operationId, t.status, t.boxId)
+      .where(sql`${t.status} not in ('deleted','already_deleted','blocked')`),
+    boxIdCheck: check("companion_runtime_duplicate_cleanups_box_id_check", sql`${t.boxId} ~ '^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$'`),
+    providerOperationCheck: check("companion_runtime_duplicate_cleanups_provider_operation_check", sql`${t.providerOperationId} is null or (char_length(${t.providerOperationId}) between 1 and 200 and ${t.providerOperationId} !~ E'[\\n\\r]')`),
+    sequenceCheck: check("companion_runtime_duplicate_cleanups_sequence_check", sql`${t.checkpointSequence} >= 0`),
+    stateCheck: check("companion_runtime_duplicate_cleanups_state_check", sql`
+      (${t.status} = 'pending' and ${t.providerOperationId} is null and ${t.deleteRequestedAt} is null and ${t.completedAt} is null)
+      or (${t.status} in ('delete_requested','waiting_deleted') and ${t.providerOperationId} is not null and ${t.deleteRequestedAt} is not null and ${t.completedAt} is null)
+      or (${t.status} = 'deleted' and ${t.providerOperationId} is not null and ${t.deleteRequestedAt} is not null and ${t.completedAt} is not null)
+      or (${t.status} = 'already_deleted' and ${t.completedAt} is not null)
+      or (${t.status} = 'blocked' and ${t.completedAt} is not null)
+    `),
+  }),
+);
+
+/** Typed event identities and digests; raw broker and Pi lines are never persisted. */
+export const companionRuntimeEventProjections = pgTable(
+  "companion_runtime_event_projections",
+  {
+    orgId: uuid("org_id").notNull(),
+    companionId: uuid("companion_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    brokerSequence: bigint("broker_sequence", { mode: "number" }).notNull(),
+    piInvocationId: text("pi_invocation_id").notNull(),
+    projectionKind: text("projection_kind").notNull(),
+    projectionSha256: text("projection_sha256").notNull(),
+    createdAt: now(),
+  },
+  (t) => ({
+    primaryKey: primaryKey({ columns: [t.attemptId, t.brokerSequence], name: "companion_runtime_event_projections_pk" }),
+    uniqueOrgCompanionAttempt: unique("companion_runtime_event_projections_org_companion_attempt_uq")
+      .on(t.orgId, t.companionId, t.attemptId, t.brokerSequence),
+    attemptFk: foreignKey({
+      columns: [t.orgId, t.companionId, t.attemptId],
+      foreignColumns: [companionTurnAttempts.orgId, companionTurnAttempts.companionId, companionTurnAttempts.id],
+      name: "companion_runtime_event_projections_attempt_fk",
+    }).onDelete("cascade"),
+    cursor: index("companion_runtime_event_projections_cursor_idx").on(t.attemptId, t.brokerSequence),
+    sequenceCheck: check("companion_runtime_event_projections_sequence_check", sql`${t.brokerSequence} >= 1`),
+    invocationCheck: check("companion_runtime_event_projections_invocation_check", sql`char_length(${t.piInvocationId}) between 1 and 200 and ${t.piInvocationId} !~ E'[\\n\\r]'`),
+    kindCheck: check("companion_runtime_event_projections_kind_check", sql`${t.projectionKind} in ('assistant','tool','decision','activity','settled','process_exit')`),
+    digestCheck: check("companion_runtime_event_projections_digest_check", sql`${t.projectionSha256} ~ '^[0-9a-f]{64}$'`),
+  }),
+);
+
+/** Short-lived, globally unique HMAC request ids consumed atomically by every runtime replica. */
+export const companionRuntimeDesktopRequests = pgTable(
+  "companion_runtime_desktop_requests",
+  {
+    requestId: text("request_id").primaryKey().notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: now(),
+  },
+  (t) => ({
+    expiry: index("companion_runtime_desktop_requests_expiry_idx").on(t.expiresAt),
+    requestIdCheck: check("companion_runtime_desktop_requests_id_check", sql`${t.requestId} ~ '^[A-Za-z0-9._:-]{16,128}$'`),
+    expiryCheck: check("companion_runtime_desktop_requests_expiry_check", sql`${t.expiresAt} > ${t.createdAt} - interval '5 minutes'`),
   }),
 );
 

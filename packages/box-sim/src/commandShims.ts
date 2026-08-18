@@ -464,10 +464,16 @@ function validBrokerCorrelationId(value: unknown): value is string | number {
     || (typeof value === "number" && Number.isFinite(value));
 }
 
-function executeBrokerControl(
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+async function executeBrokerControl(
   machine: BoxSimCommandMachine,
   command: Record<string, unknown>,
-): BoxSimCommandResult | null {
+): Promise<BoxSimCommandResult | null> {
   const tailCursor = brokerTailCursor(machine);
   switch (command.type) {
     case "broker_state":
@@ -478,6 +484,46 @@ function executeBrokerControl(
         acknowledgedCursor: machine.daemon.brokerAcknowledgedCursor,
         counters: { ...machine.daemon.brokerCounters },
       }))}\n`);
+    case "runtime_state": {
+      let piState: Record<string, unknown> | null;
+      try {
+        piState = await machine.piController?.handleRpc({
+          id: command.id,
+          type: "get_state",
+        }) ?? responseFor({ id: command.id, type: "get_state" }, {
+          model: { input: [] },
+          isStreaming: false,
+          isCompacting: false,
+          pendingMessageCount: 0,
+        });
+      } catch {
+        return ok(`${JSON.stringify(brokerFailureFor(
+          command,
+          "broker_unavailable",
+          "Pi broker command failed",
+        ))}\n`);
+      }
+      const state = piState.success === true ? objectRecord(piState.data) : null;
+      if (!state) {
+        return ok(`${JSON.stringify(brokerFailureFor(
+          command,
+          "pi_state_unavailable",
+          "Pi state is unavailable",
+        ))}\n`);
+      }
+      const model = objectRecord(state.model);
+      const modelInput = Array.isArray(model?.input)
+        ? structuredClone(model.input)
+        : [];
+      return ok(`${JSON.stringify(responseFor(command, {
+        invocationId: machine.daemon.invocationId,
+        activeAttemptId: machine.daemon.activeAttemptId,
+        tailCursor,
+        acknowledgedCursor: machine.daemon.brokerAcknowledgedCursor,
+        counters: { ...machine.daemon.brokerCounters },
+        modelInput,
+      }))}\n`);
+    }
     case "read_events": {
       const after = brokerNonNegativeInteger(command.after);
       const limit = command.limit === undefined ? BROKER_READ_LIMIT : brokerNonNegativeInteger(command.limit);
@@ -545,7 +591,7 @@ async function executeRpc(
   }
   const brokerCommand = extractBrokerJson(commandText);
   if (!brokerCommand) return failed("Pi broker command was not valid JSON");
-  const brokerControl = executeBrokerControl(machine, brokerCommand);
+  const brokerControl = await executeBrokerControl(machine, brokerCommand);
   if (brokerControl) return brokerControl;
   if (brokerCommand.type === "prompt" && machine.daemon.activeAttemptId) {
     return ok(`${JSON.stringify(brokerFailureFor(
@@ -582,6 +628,7 @@ async function executeRpc(
     response = response.success === true
       ? responseFor(brokerCommand, {
           attemptId: brokerCommand.attemptId,
+          invocationId: machine.daemon.invocationId,
           piAcknowledged: true,
         })
       : {

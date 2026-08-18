@@ -4503,7 +4503,12 @@ BEGIN
   SET box_id = COALESCE(i.box_id, p_box_id),
       box_state = COALESCE(p_box_state, i.box_state),
       pi_state = COALESCE(p_pi_state, i.pi_state),
-      pi_invocation_id = COALESCE(p_pi_invocation_id, i.pi_invocation_id),
+      pi_invocation_id = CASE
+        -- Absence is positive proof that no invocation remains. Retaining the previous id would
+        -- pair an absent daemon state with stale identity and mislead the next health claimant.
+        WHEN p_pi_state = 'absent'::public.companion_pi_observed_state THEN NULL
+        ELSE COALESCE(p_pi_invocation_id, i.pi_invocation_id)
+      END,
       disk_layout_version = COALESCE(p_disk_layout_version, i.disk_layout_version),
       applied_settings_revision = CASE
         WHEN p_work_kind = 'settings' THEN i.applied_settings_revision

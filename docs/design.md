@@ -127,9 +127,13 @@ idempotent retry network, `429`, and `5xx` failures up to five times with jitter
 1/2/5/10/30-second backoff. Epoch predicates prevent an expired executor from committing after a
 replacement claims the work, but database fencing never pretends to fence a provider side effect.
 
-Box create uses the generation-qualified name `Companion <id> g<generation>`. Before create,
-runtime searches every Box-list page for that name, adopts one canonical Box, and permanently
-deletes duplicates. Permanent deletion is provider operation tracking, not stop/archive.
+Box identity uses the generation-qualified name `Companion <id> g<generation>`. Before create,
+runtime searches every Box-list page for that exact name and adopts one canonical Box. Because the
+public create request cannot set a name or supply an idempotency key, runtime issues one create with
+a five-minute provisional TTL, checkpoints the acknowledged Box id, then applies the name and
+six-hour TTL through an idempotent PATCH. An ambiguous create is interrupted and never replayed.
+After naming, runtime lists again and permanently deletes duplicates. Permanent deletion is provider
+operation tracking, not stop/archive.
 
 After a prompt may have been written, loss of acknowledgement is ambiguous: the attempt becomes
 `interrupted`, no automatic replay occurs, and later turns remain blocked. A proven negative ACK may
@@ -139,6 +143,9 @@ accepts that uncertainty and releases the queue.
 Disabling the existing Companions flag blocks new claims. Active work reaches a safe checkpoint and
 becomes interrupted. This kill switch is the operational rollback after v2 data exists; a legacy
 executor must never process v2 rows.
+
+A normal runtime process shutdown is a replica handoff, not that kill switch. It stops new claims
+and local lease renewal without settling active work; the next replica takes over after lease expiry.
 
 ## Box and Pi boundary
 
@@ -161,6 +168,12 @@ Before `prompt`, runtime requires a correlated `get_state` response showing idle
 messages. It omits Pi `streamingBehavior`, so a race is refused rather than hidden as a follow-up.
 Only explicitly supported terminal event shapes settle a turn.
 
+Runtime projects an event batch and its monotonic cursor atomically. Supported settlement and
+process-exit events also persist their terminal checkpoint in that transaction; broker
+acknowledgement happens only after commit. A takeover first acknowledges any already-durable
+terminal cursor, then settles from the checkpoint, which makes replay safe across the projection,
+acknowledgement, and settlement crash boundaries.
+
 Pi catalog normalization preserves the model `input` capabilities. Image work sent to a text-only
 model fails explicitly with a stable capability error. Capability data comes from Pi's catalog or a
 bounded bundled fallback; there is no global learned capability table.
@@ -179,6 +192,17 @@ write-only. Runtime decrypts only the selected values after authorization. Durab
 references where possible; transient connector values use the owner-only runtime channel and never
 appear in logs, API responses, audit metadata, or projections. The provider auth file remains on
 Box disk only where Pi must refresh it.
+
+An attempt pins the exact provider and MCP credential revisions before prompt dispatch. A takeover
+that observes a later revision interrupts an already-accepted attempt instead of interpreting
+unprojected events with new credentials. A terminal projection already committed is read through a
+separate fenced metadata-only function, then ACKed and settled without credential material. OAuth
+refresh compare-and-swap is limited to pre-dispatch settings and operation staging. Projection
+redaction uses every string leaf of the validated plaintext material in memory plus generic
+credential patterns; tool projections retain metadata and an opaque hashed call id only, never
+arguments or results. Generic scrubbing removes complete Authorization and Cookie header values
+before narrower token/assignment matchers run. Redacted or oversized decision identifiers are
+rejected fail-closed.
 
 Persisted runtime failures contain a stable code, an expurgated message no longer than 500
 characters, and an allowed next action. Provider response bodies, raw Pi lines, tokens, auth files,
@@ -205,7 +229,10 @@ Desktop minting remains an Owner/Editor action that cannot wake Box. The API aut
 then calls a private runtime endpoint with a short-lived HMAC request. Runtime revalidates the
 Companion and returns the fresh provider URL only after the current actor owns every selected
 personal resource and the applied settings/Skills revisions exactly match desired state. This gate
-keeps a warm Box unavailable during a cross-actor restage; neither process persists or logs the URL.
+keeps a warm Box unavailable during a cross-actor restage. Each authenticated request id is
+atomically consumed through a narrow `SECURITY DEFINER` function and retained in PostgreSQL until
+its signature window expires, so replicas and restarted processes share one replay boundary;
+neither process persists or logs the URL.
 
 Sending is the sole normal wake path. There is no Wake button or first-keystroke prewarm. Successful
 Pi acceptance refreshes Box TTL to six hours. Automatic recovery may recycle Pi only. Full Box
@@ -227,6 +254,11 @@ billing, and audit rows survive.
 Old runtime columns may remain temporarily only to keep each stacked PR deployable. They receive no
 history backfill and are removed with every old executor, watermark, pool, reconciler, function, and
 grant after seven green canary days, no open P0/P1 runtime issue, and an empty purge report.
+
+The feature flag stays disabled between purge and the asynchronous API/web cutover. Schema and
+runtime-service layers in that interval are deployable only as a fenced, non-activatable rollout;
+the legacy executor must not be re-enabled against v2 rows. Once cut over, rollback uses the kill
+switch rather than a legacy binary.
 
 ## Explicit exclusions
 

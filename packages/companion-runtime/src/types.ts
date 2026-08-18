@@ -1,0 +1,792 @@
+export const WORK_KINDS = ["operation", "decision", "attempt", "settings", "health"] as const;
+export type WorkKind = (typeof WORK_KINDS)[number];
+
+export const CLIENT_SURFACES = ["web", "mobile_web", "native_mobile"] as const;
+export type ClientSurface = (typeof CLIENT_SURFACES)[number];
+
+export const TURN_STATUSES = [
+  "queued",
+  "starting",
+  "dispatching",
+  "running",
+  "needs_input",
+  "succeeded",
+  "failed",
+  "interrupted",
+  "cancelled",
+] as const;
+export type TurnStatus = (typeof TURN_STATUSES)[number];
+export type AttemptStatus = Exclude<TurnStatus, "queued">;
+
+export const DISPATCH_STATES = [
+  "pending",
+  "write_intent",
+  "accepted",
+  "rejected",
+  "ambiguous",
+] as const;
+export type DispatchState = (typeof DISPATCH_STATES)[number];
+
+export const OPERATION_KINDS = [
+  "delete",
+  "stop",
+  "restart_pi",
+  "restart_box",
+  "start",
+  "apply_settings",
+] as const;
+export type OperationKind = (typeof OPERATION_KINDS)[number];
+
+export const DECISION_STATUSES = [
+  "pending",
+  "allowed",
+  "denied",
+  "answered",
+  "expired",
+  "cancelled",
+] as const;
+export type DecisionStatus = (typeof DECISION_STATUSES)[number];
+
+export const DECISION_DELIVERY_STATES = [
+  "pending",
+  "write_intent",
+  "delivered",
+  "ambiguous",
+  "cancelled",
+] as const;
+export type DecisionDeliveryState = (typeof DECISION_DELIVERY_STATES)[number];
+
+export const BOX_OBSERVED_STATES = [
+  "absent",
+  "initializing",
+  "provisioning",
+  "ready",
+  "idle",
+  "running",
+  "archiving",
+  "archived",
+  "error",
+  "unknown",
+] as const;
+export type BoxObservedState = (typeof BOX_OBSERVED_STATES)[number];
+
+export const PI_OBSERVED_STATES = [
+  "absent",
+  "starting",
+  "idle",
+  "running",
+  "stopped",
+  "error",
+  "unknown",
+] as const;
+export type PiObservedState = (typeof PI_OBSERVED_STATES)[number];
+
+export const ERROR_ACTIONS = [
+  "retry",
+  "cancel",
+  "restart_pi",
+  "restart_box",
+  "switch_model",
+  "reconnect_provider",
+  "none",
+] as const;
+export type ErrorAction = (typeof ERROR_ACTIONS)[number];
+
+export interface GateStatus {
+  enabled: boolean;
+  gateEpoch: bigint;
+  updatedAt: Date;
+}
+
+export interface LeaseFence {
+  orgId: string;
+  companionId: string;
+  claimToken: string;
+  claimEpoch: bigint;
+  gateEpoch: bigint;
+  executorId: string;
+  workKind: WorkKind;
+  workId: string;
+}
+
+export interface RuntimeClaimBase extends Omit<LeaseFence, "executorId"> {
+  actorId: string | null;
+  clientSurface: ClientSurface | null;
+  runtimeGeneration: bigint;
+  checkpoint: string;
+  checkpointSequence: bigint;
+  turnId: string | null;
+  turnStatus: TurnStatus | null;
+  attemptStatus: AttemptStatus | null;
+  dispatchState: DispatchState | null;
+  eventCursor: bigint | null;
+  unknownEventCount: number | null;
+  malformedEventCount: number | null;
+  oversizedEventCount: number | null;
+  coldStartDeadlineAt: Date | null;
+  inactivityDeadlineAt: Date | null;
+  absoluteDeadlineAt: Date | null;
+  operationKind: OperationKind | null;
+  operationStartedAt: Date | null;
+  operationAttemptCount: number | null;
+  providerOperationId: string | null;
+  targetSettingsRevision: bigint | null;
+  targetSkillsRevision: number | null;
+  decisionStatus: DecisionStatus | null;
+  decisionDeliveryState: DecisionDeliveryState | null;
+}
+
+export type OperationRuntimeClaim =
+  | (RuntimeClaimBase & {
+    workKind: "operation";
+    actorId: string;
+    clientSurface: ClientSurface;
+    operationKind: "start" | "restart_pi" | "restart_box" | "apply_settings";
+    operationStartedAt: Date;
+    operationAttemptCount: number;
+    targetSettingsRevision: bigint;
+    targetSkillsRevision: number | null;
+  })
+  | (RuntimeClaimBase & {
+    workKind: "operation";
+    actorId: string;
+    clientSurface: null;
+    operationKind: "stop" | "delete";
+    operationStartedAt: Date;
+    operationAttemptCount: number;
+    targetSettingsRevision: null;
+    targetSkillsRevision: null;
+  });
+
+export type DecisionRuntimeClaim = RuntimeClaimBase & {
+  workKind: "decision";
+  turnId: string;
+  decisionStatus: DecisionStatus;
+  decisionDeliveryState: DecisionDeliveryState;
+};
+
+export type AttemptRuntimeClaim = RuntimeClaimBase & {
+  workKind: "attempt";
+  actorId: string;
+  clientSurface: ClientSurface;
+  turnId: string;
+  attemptStatus: AttemptStatus;
+  dispatchState: DispatchState;
+  eventCursor: bigint;
+  unknownEventCount: number;
+  malformedEventCount: number;
+  oversizedEventCount: number;
+  absoluteDeadlineAt: Date;
+};
+
+export type SettingsRuntimeClaim = RuntimeClaimBase & {
+  workKind: "settings";
+  actorId: string;
+  clientSurface: ClientSurface;
+  targetSettingsRevision: bigint;
+};
+
+export type HealthRuntimeClaim = RuntimeClaimBase & {
+  workKind: "health";
+  actorId: null;
+  clientSurface: null;
+  turnId: null;
+  operationKind: null;
+};
+
+export type RuntimeClaim =
+  | OperationRuntimeClaim
+  | DecisionRuntimeClaim
+  | AttemptRuntimeClaim
+  | SettingsRuntimeClaim
+  | HealthRuntimeClaim;
+
+export interface ProviderRef {
+  provider_id: string;
+  credential_generation: string;
+  credential_version: number;
+}
+
+export interface SkillRef {
+  skill_id: string;
+  current_version_id: string | null;
+}
+
+export interface McpRef {
+  account_id: string;
+  credential_generation: string;
+}
+
+export interface RuntimeAuthorization {
+  authorized: boolean;
+  denialCode: string | null;
+  leaseExpiresAt: Date;
+  authorizationActorId: string | null;
+  decisionActorId: string | null;
+  clientSurface: ClientSurface | null;
+  runtimeGeneration: bigint | null;
+  boxId: string | null;
+  boxState: BoxObservedState | null;
+  piState: PiObservedState | null;
+  piInvocationId: string | null;
+  diskLayoutVersion: number | null;
+  appliedSettingsRevision: bigint | null;
+  appliedSkillsRevision: number | null;
+  modelId: string | null;
+  persona: string | null;
+  canWriteSkills: boolean | null;
+  providerRefs: ProviderRef[];
+  skillRefs: SkillRef[];
+  mcpRefs: McpRef[];
+  desiredSettingsRevision: bigint | null;
+  skillsRevision: number | null;
+  workCheckpoint: string;
+  workCheckpointSequence: bigint;
+  turnId: string | null;
+  turnStatus: TurnStatus | null;
+  attemptStatus: AttemptStatus | null;
+  dispatchState: DispatchState | null;
+  eventCursor: bigint | null;
+  unknownEventCount: number | null;
+  malformedEventCount: number | null;
+  oversizedEventCount: number | null;
+  coldStartDeadlineAt: Date | null;
+  inactivityDeadlineAt: Date | null;
+  absoluteDeadlineAt: Date | null;
+  operationKind: OperationKind | null;
+  operationStartedAt: Date | null;
+  operationAttemptCount: number | null;
+  providerOperationId: string | null;
+  targetSettingsRevision: bigint | null;
+  targetSkillsRevision: number | null;
+  decisionStatus: DecisionStatus | null;
+  decisionDeliveryState: DecisionDeliveryState | null;
+  decisionRequestKey: string | null;
+  decisionResponseText: string | null;
+}
+
+export interface RuntimeCheckpointInput {
+  expectedSequence: bigint;
+  nextCheckpoint: string;
+  providerOperationId?: string;
+  commandId?: string;
+  piInvocationId?: string;
+  eventCursor?: bigint;
+  activityAt?: Date;
+  unknownEventCount?: number;
+  malformedEventCount?: number;
+  oversizedEventCount?: number;
+}
+
+export interface RuntimeObservationInput {
+  runtimeGeneration: bigint;
+  expectedSequence: bigint;
+  boxId?: string;
+  boxState?: BoxObservedState;
+  piState?: PiObservedState;
+  piInvocationId?: string;
+  diskLayoutVersion?: number;
+  appliedSettingsRevision?: bigint;
+  appliedSkillsRevision?: number;
+  observedAt: Date;
+}
+
+export type RuntimeTerminalStatus = "succeeded" | "failed" | "interrupted" | "cancelled";
+
+export interface SafeRuntimeError {
+  code: string;
+  message: string;
+  action: ErrorAction;
+}
+
+export interface RuntimeSettlementInput {
+  terminalStatus: RuntimeTerminalStatus;
+  error?: SafeRuntimeError;
+}
+
+export type DecisionRequestKind = "question" | "confirmation";
+export type ModelInputCapability = "text" | "image";
+
+/** Sensitive values remain opaque to this package and are never included in errors or health. */
+export interface RuntimeWorkMaterial {
+  turnId: string | null;
+  attemptId: string | null;
+  messageEventId: string | null;
+  promptText: string | null;
+  decisionRequestKind: DecisionRequestKind | null;
+  decisionResponsePayload: Record<string, unknown> | null;
+  providerMaterial: Record<string, unknown>[];
+  skillMaterial: Record<string, unknown>[];
+  mcpMaterial: Record<string, unknown>[];
+  modelInput: ModelInputCapability[] | null;
+  hasVisibleOutput: boolean;
+}
+
+export const DUPLICATE_CLEANUP_STATUSES = [
+  "pending",
+  "delete_requested",
+  "waiting_deleted",
+  "deleted",
+  "already_deleted",
+  "blocked",
+] as const;
+export type DuplicateCleanupStatus = (typeof DUPLICATE_CLEANUP_STATUSES)[number];
+
+export interface DuplicateCleanup {
+  boxId: string;
+  status: DuplicateCleanupStatus;
+  providerOperationId: string | null;
+  checkpointSequence: bigint;
+}
+
+export interface McpOauthEnvelope {
+  ciphertext: string;
+  iv: string;
+  authTag: string;
+  wrappedDek: string;
+  wrapIv: string;
+  wrapAuthTag: string;
+  keyId: string;
+}
+
+export interface McpOauthCasResult {
+  updated: boolean;
+  credentialGeneration: string;
+}
+
+export class RuntimeRowDecodeError extends Error {
+  constructor(readonly field: string, detail = "invalid runtime database row") {
+    super(detail);
+    this.name = "RuntimeRowDecodeError";
+  }
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const BOX_ID = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
+const STABLE_TEXT = /^[a-z][a-z0-9_]{0,63}$/;
+
+function record(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new RuntimeRowDecodeError("row");
+  }
+  return value as Record<string, unknown>;
+}
+
+function requiredString(row: Record<string, unknown>, key: string): string {
+  const value = row[key];
+  if (typeof value !== "string" || value.length === 0 || value.includes("\n") || value.includes("\r")) {
+    throw new RuntimeRowDecodeError(key);
+  }
+  return value;
+}
+
+function nullableString(row: Record<string, unknown>, key: string): string | null {
+  if (row[key] === null || row[key] === undefined) return null;
+  return requiredString(row, key);
+}
+
+function uuid(row: Record<string, unknown>, key: string): string {
+  const value = requiredString(row, key);
+  if (!UUID.test(value)) throw new RuntimeRowDecodeError(key);
+  return value;
+}
+
+function nullableUuid(row: Record<string, unknown>, key: string): string | null {
+  if (row[key] === null || row[key] === undefined) return null;
+  return uuid(row, key);
+}
+
+function bigintText(row: Record<string, unknown>, key: string): bigint {
+  const value = row[key];
+  if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value)) {
+    throw new RuntimeRowDecodeError(key, "runtime bigint was not selected as text");
+  }
+  return BigInt(value);
+}
+
+function nullableBigintText(row: Record<string, unknown>, key: string): bigint | null {
+  if (row[key] === null || row[key] === undefined) return null;
+  return bigintText(row, key);
+}
+
+function integer(row: Record<string, unknown>, key: string): number {
+  const value = row[key];
+  if (!Number.isSafeInteger(value) || (value as number) < 0) throw new RuntimeRowDecodeError(key);
+  return value as number;
+}
+
+function nullableInteger(row: Record<string, unknown>, key: string): number | null {
+  if (row[key] === null || row[key] === undefined) return null;
+  return integer(row, key);
+}
+
+function boolean(row: Record<string, unknown>, key: string): boolean {
+  if (typeof row[key] !== "boolean") throw new RuntimeRowDecodeError(key);
+  return row[key] as boolean;
+}
+
+function nullableBoolean(row: Record<string, unknown>, key: string): boolean | null {
+  if (row[key] === null || row[key] === undefined) return null;
+  return boolean(row, key);
+}
+
+function date(row: Record<string, unknown>, key: string): Date {
+  const value = row[key];
+  if (!(value instanceof Date) || !Number.isFinite(value.getTime())) throw new RuntimeRowDecodeError(key);
+  return value;
+}
+
+function nullableDate(row: Record<string, unknown>, key: string): Date | null {
+  if (row[key] === null || row[key] === undefined) return null;
+  return date(row, key);
+}
+
+function enumeration<T extends string>(
+  row: Record<string, unknown>,
+  key: string,
+  values: readonly T[],
+): T {
+  const value = row[key];
+  if (typeof value !== "string" || !values.includes(value as T)) throw new RuntimeRowDecodeError(key);
+  return value as T;
+}
+
+function nullableEnumeration<T extends string>(
+  row: Record<string, unknown>,
+  key: string,
+  values: readonly T[],
+): T | null {
+  if (row[key] === null || row[key] === undefined) return null;
+  return enumeration(row, key, values);
+}
+
+function jsonArray(row: Record<string, unknown>, key: string): unknown[] {
+  const value = row[key];
+  if (!Array.isArray(value)) throw new RuntimeRowDecodeError(key);
+  return value;
+}
+
+function providerRefs(row: Record<string, unknown>): ProviderRef[] {
+  return jsonArray(row, "provider_refs").map((entry) => {
+    const value = record(entry);
+    return {
+      provider_id: requiredString(value, "provider_id"),
+      credential_generation: requiredString(value, "credential_generation"),
+      credential_version: integer(value, "credential_version"),
+    };
+  });
+}
+
+function skillRefs(row: Record<string, unknown>): SkillRef[] {
+  return jsonArray(row, "skill_refs").map((entry) => {
+    const value = record(entry);
+    return {
+      skill_id: requiredString(value, "skill_id"),
+      current_version_id: nullableString(value, "current_version_id"),
+    };
+  });
+}
+
+function mcpRefs(row: Record<string, unknown>): McpRef[] {
+  return jsonArray(row, "mcp_refs").map((entry) => {
+    const value = record(entry);
+    return {
+      account_id: requiredString(value, "account_id"),
+      credential_generation: requiredString(value, "credential_generation"),
+    };
+  });
+}
+
+export function decodeGateStatusRow(value: unknown): GateStatus {
+  const row = record(value);
+  return {
+    enabled: boolean(row, "enabled"),
+    gateEpoch: bigintText(row, "gate_epoch"),
+    updatedAt: date(row, "updated_at"),
+  };
+}
+
+export function decodeRuntimeClaimRow(value: unknown): RuntimeClaim {
+  const row = record(value);
+  const workKind = enumeration(row, "work_kind", WORK_KINDS);
+  const base: RuntimeClaimBase = {
+    orgId: uuid(row, "org_id"),
+    companionId: uuid(row, "companion_id"),
+    claimToken: uuid(row, "claim_token"),
+    claimEpoch: bigintText(row, "claim_epoch"),
+    gateEpoch: bigintText(row, "gate_epoch"),
+    workKind,
+    workId: uuid(row, "work_id"),
+    actorId: nullableString(row, "actor_id"),
+    clientSurface: nullableEnumeration(row, "client_surface", CLIENT_SURFACES),
+    runtimeGeneration: bigintText(row, "runtime_generation"),
+    checkpoint: requiredString(row, "checkpoint"),
+    checkpointSequence: bigintText(row, "checkpoint_sequence"),
+    turnId: nullableUuid(row, "turn_id"),
+    turnStatus: nullableEnumeration(row, "turn_status", TURN_STATUSES),
+    attemptStatus: nullableEnumeration(row, "attempt_status", TURN_STATUSES.filter((s) => s !== "queued") as AttemptStatus[]),
+    dispatchState: nullableEnumeration(row, "dispatch_state", DISPATCH_STATES),
+    eventCursor: nullableBigintText(row, "event_cursor"),
+    unknownEventCount: nullableInteger(row, "unknown_event_count"),
+    malformedEventCount: nullableInteger(row, "malformed_event_count"),
+    oversizedEventCount: nullableInteger(row, "oversized_event_count"),
+    coldStartDeadlineAt: nullableDate(row, "cold_start_deadline_at"),
+    inactivityDeadlineAt: nullableDate(row, "inactivity_deadline_at"),
+    absoluteDeadlineAt: nullableDate(row, "absolute_deadline_at"),
+    operationKind: nullableEnumeration(row, "operation_kind", OPERATION_KINDS),
+    operationStartedAt: nullableDate(row, "operation_started_at"),
+    operationAttemptCount: nullableInteger(row, "operation_attempt_count"),
+    providerOperationId: nullableString(row, "provider_operation_id"),
+    targetSettingsRevision: nullableBigintText(row, "target_settings_revision"),
+    targetSkillsRevision: nullableInteger(row, "target_skills_revision"),
+    decisionStatus: nullableEnumeration(row, "decision_status", DECISION_STATUSES),
+    decisionDeliveryState: nullableEnumeration(row, "decision_delivery_state", DECISION_DELIVERY_STATES),
+  };
+
+  switch (workKind) {
+    case "operation":
+      if (
+        !base.actorId
+        || !base.operationKind
+        || !base.operationStartedAt
+        || base.operationAttemptCount === null
+      ) {
+        throw new RuntimeRowDecodeError("operation", "operation claim has an impossible nullable shape");
+      }
+      if (base.operationKind === "stop" || base.operationKind === "delete") {
+        if (
+          base.clientSurface !== null
+          || base.targetSettingsRevision !== null
+          || base.targetSkillsRevision !== null
+        ) {
+          throw new RuntimeRowDecodeError("operation", "control operation contains resource snapshot data");
+        }
+      } else if (
+        base.clientSurface === null
+        || base.targetSettingsRevision === null
+        || (base.clientSurface !== "native_mobile" && base.targetSkillsRevision === null)
+      ) {
+        throw new RuntimeRowDecodeError("operation", "resource operation lacks its captured snapshot");
+      }
+      return base as OperationRuntimeClaim;
+    case "decision":
+      if (!base.turnId || !base.decisionStatus || !base.decisionDeliveryState) {
+        throw new RuntimeRowDecodeError("decision", "decision claim has an impossible nullable shape");
+      }
+      return base as DecisionRuntimeClaim;
+    case "attempt":
+      if (
+        !base.actorId
+        || !base.clientSurface
+        || !base.turnId
+        || !base.attemptStatus
+        || !base.dispatchState
+        || base.eventCursor === null
+        || base.unknownEventCount === null
+        || base.malformedEventCount === null
+        || base.oversizedEventCount === null
+        || !base.absoluteDeadlineAt
+      ) {
+        throw new RuntimeRowDecodeError("attempt", "attempt claim has an impossible nullable shape");
+      }
+      return base as AttemptRuntimeClaim;
+    case "settings":
+      if (
+        !base.actorId
+        || !base.clientSurface
+        || base.targetSettingsRevision === null
+        || (base.clientSurface !== "native_mobile" && base.targetSkillsRevision === null)
+      ) {
+        throw new RuntimeRowDecodeError("settings", "settings claim has an impossible nullable shape");
+      }
+      return base as SettingsRuntimeClaim;
+    case "health":
+      if (base.actorId !== null || base.clientSurface !== null || base.turnId !== null || base.operationKind !== null) {
+        throw new RuntimeRowDecodeError("health", "health claim contains actor or work payload data");
+      }
+      return base as HealthRuntimeClaim;
+  }
+}
+
+export function decodeRuntimeAuthorizationRow(
+  value: unknown,
+  expectedWorkKind: WorkKind,
+): RuntimeAuthorization {
+  const row = record(value);
+  const authorization: RuntimeAuthorization = {
+    authorized: boolean(row, "authorized"),
+    denialCode: nullableString(row, "denial_code"),
+    leaseExpiresAt: date(row, "lease_expires_at"),
+    authorizationActorId: nullableString(row, "authorization_actor_id"),
+    decisionActorId: nullableString(row, "decision_actor_id"),
+    clientSurface: nullableEnumeration(row, "client_surface", CLIENT_SURFACES),
+    runtimeGeneration: nullableBigintText(row, "runtime_generation"),
+    boxId: nullableString(row, "box_id"),
+    boxState: nullableEnumeration(row, "box_state", BOX_OBSERVED_STATES),
+    piState: nullableEnumeration(row, "pi_state", PI_OBSERVED_STATES),
+    piInvocationId: nullableString(row, "pi_invocation_id"),
+    diskLayoutVersion: nullableInteger(row, "disk_layout_version"),
+    appliedSettingsRevision: nullableBigintText(row, "applied_settings_revision"),
+    appliedSkillsRevision: nullableInteger(row, "applied_skills_revision"),
+    modelId: nullableString(row, "model_id"),
+    persona: nullableString(row, "persona"),
+    canWriteSkills: nullableBoolean(row, "can_write_skills"),
+    providerRefs: providerRefs(row),
+    skillRefs: skillRefs(row),
+    mcpRefs: mcpRefs(row),
+    desiredSettingsRevision: nullableBigintText(row, "desired_settings_revision"),
+    skillsRevision: nullableInteger(row, "skills_revision"),
+    workCheckpoint: requiredString(row, "work_checkpoint"),
+    workCheckpointSequence: bigintText(row, "work_checkpoint_sequence"),
+    turnId: nullableUuid(row, "turn_id"),
+    turnStatus: nullableEnumeration(row, "turn_status", TURN_STATUSES),
+    attemptStatus: nullableEnumeration(row, "attempt_status", TURN_STATUSES.filter((s) => s !== "queued") as AttemptStatus[]),
+    dispatchState: nullableEnumeration(row, "dispatch_state", DISPATCH_STATES),
+    eventCursor: nullableBigintText(row, "event_cursor"),
+    unknownEventCount: nullableInteger(row, "unknown_event_count"),
+    malformedEventCount: nullableInteger(row, "malformed_event_count"),
+    oversizedEventCount: nullableInteger(row, "oversized_event_count"),
+    coldStartDeadlineAt: nullableDate(row, "cold_start_deadline_at"),
+    inactivityDeadlineAt: nullableDate(row, "inactivity_deadline_at"),
+    absoluteDeadlineAt: nullableDate(row, "absolute_deadline_at"),
+    operationKind: nullableEnumeration(row, "operation_kind", OPERATION_KINDS),
+    operationStartedAt: nullableDate(row, "operation_started_at"),
+    operationAttemptCount: nullableInteger(row, "operation_attempt_count"),
+    providerOperationId: nullableString(row, "provider_operation_id"),
+    targetSettingsRevision: nullableBigintText(row, "target_settings_revision"),
+    targetSkillsRevision: nullableInteger(row, "target_skills_revision"),
+    decisionStatus: nullableEnumeration(row, "decision_status", DECISION_STATUSES),
+    decisionDeliveryState: nullableEnumeration(row, "decision_delivery_state", DECISION_DELIVERY_STATES),
+    decisionRequestKey: nullableString(row, "decision_request_key"),
+    decisionResponseText: nullableString(row, "decision_response_text"),
+  };
+
+  if (authorization.boxId !== null && !BOX_ID.test(authorization.boxId)) {
+    throw new RuntimeRowDecodeError("box_id");
+  }
+  if (authorization.authorized === (authorization.denialCode !== null)) {
+    throw new RuntimeRowDecodeError("denial_code", "authorization discriminator is inconsistent");
+  }
+  if (authorization.denialCode !== null && !STABLE_TEXT.test(authorization.denialCode)) {
+    throw new RuntimeRowDecodeError("denial_code");
+  }
+  if (!STABLE_TEXT.test(authorization.workCheckpoint)) {
+    throw new RuntimeRowDecodeError("work_checkpoint");
+  }
+  if (expectedWorkKind === "health") {
+    if (
+      authorization.authorizationActorId !== null
+      || authorization.decisionActorId !== null
+      || authorization.clientSurface !== null
+      || authorization.providerRefs.length > 0
+      || authorization.skillRefs.length > 0
+      || authorization.mcpRefs.length > 0
+    ) {
+      throw new RuntimeRowDecodeError("health", "health authorization contains actor or resource data");
+    }
+  }
+  if (authorization.authorized) {
+    if (authorization.runtimeGeneration === null) {
+      throw new RuntimeRowDecodeError("runtime_generation");
+    }
+    const resourceBearing = expectedWorkKind === "attempt"
+      || expectedWorkKind === "decision"
+      || expectedWorkKind === "settings"
+      || (expectedWorkKind === "operation"
+        && authorization.operationKind !== null
+        && ["start", "restart_pi", "restart_box", "apply_settings"].includes(authorization.operationKind));
+    if (
+      resourceBearing
+      && (
+        authorization.modelId === null
+        || authorization.desiredSettingsRevision === null
+        || (authorization.clientSurface !== "native_mobile"
+          && authorization.skillsRevision === null)
+      )
+    ) {
+      throw new RuntimeRowDecodeError("resources", "authorized resource work lacks model or revisions");
+    }
+    switch (expectedWorkKind) {
+      case "operation": {
+        if (
+          authorization.authorizationActorId === null
+          || authorization.operationKind === null
+          || authorization.operationStartedAt === null
+          || authorization.operationAttemptCount === null
+        ) {
+          throw new RuntimeRowDecodeError("operation", "authorized operation lacks its durable identity");
+        }
+        const resourceOperation = ["start", "restart_pi", "restart_box", "apply_settings"]
+          .includes(authorization.operationKind);
+        if (resourceOperation) {
+          if (
+            authorization.clientSurface === null
+            || authorization.targetSettingsRevision === null
+            || (authorization.clientSurface !== "native_mobile"
+              && authorization.targetSkillsRevision === null)
+          ) {
+            throw new RuntimeRowDecodeError("operation", "authorized operation lacks its captured snapshot");
+          }
+        } else if (
+          authorization.clientSurface !== null
+          || authorization.targetSettingsRevision !== null
+          || authorization.targetSkillsRevision !== null
+        ) {
+          throw new RuntimeRowDecodeError("operation", "control operation contains resource snapshot data");
+        }
+        break;
+      }
+      case "attempt":
+        if (
+          authorization.authorizationActorId === null
+          || authorization.clientSurface === null
+          || authorization.turnId === null
+          || authorization.turnStatus === null
+          || authorization.attemptStatus === null
+          || authorization.dispatchState === null
+          || authorization.eventCursor === null
+          || authorization.unknownEventCount === null
+          || authorization.malformedEventCount === null
+          || authorization.oversizedEventCount === null
+          || authorization.absoluteDeadlineAt === null
+          || authorization.operationKind !== null
+        ) {
+          throw new RuntimeRowDecodeError("attempt", "authorized attempt has an impossible nullable shape");
+        }
+        break;
+      case "decision":
+        if (
+          authorization.authorizationActorId === null
+          || authorization.clientSurface === null
+          || authorization.turnId === null
+          || authorization.turnStatus === null
+          || authorization.attemptStatus === null
+          || authorization.dispatchState === null
+          || authorization.eventCursor === null
+          || authorization.unknownEventCount === null
+          || authorization.malformedEventCount === null
+          || authorization.oversizedEventCount === null
+          || authorization.absoluteDeadlineAt === null
+          || authorization.decisionStatus === null
+          || authorization.decisionDeliveryState === null
+          || authorization.decisionRequestKey === null
+          || authorization.operationKind !== null
+        ) {
+          throw new RuntimeRowDecodeError("decision", "authorized decision has an impossible nullable shape");
+        }
+        break;
+      case "settings":
+        if (
+          authorization.authorizationActorId === null
+          || authorization.clientSurface === null
+          || authorization.operationKind !== null
+        ) {
+          throw new RuntimeRowDecodeError("settings", "authorized settings work has an impossible nullable shape");
+        }
+        break;
+      case "health":
+        break;
+    }
+  }
+  return authorization;
+}

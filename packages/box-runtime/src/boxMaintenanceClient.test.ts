@@ -461,7 +461,7 @@ describe("AsciiBoxMaintenanceClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("accepts one documented 202 create and exposes its Box id before rename", async () => {
+  it("accepts one documented 202 create with a bounded orphan TTL and exposes its id", async () => {
     const createdId = OTHER_BOX_ID;
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(json({
@@ -474,7 +474,7 @@ describe("AsciiBoxMaintenanceClient", () => {
         ok: true,
         type: "box.created",
         status: "provisioning",
-        ttlSeconds: 21_600,
+        ttlSeconds: 300,
         box: { id: createdId, name: "Box 2026-08-16 21:00" },
       }, 202));
     vi.stubGlobal("fetch", fetchMock);
@@ -496,7 +496,7 @@ describe("AsciiBoxMaintenanceClient", () => {
     const createInit = fetchMock.mock.calls[1]?.[1] as RequestInit;
     expect(createInit.method).toBe("POST");
     expect(JSON.parse(String(createInit.body))).toEqual({
-      ttlSeconds: 21_600,
+      ttlSeconds: 300,
       noEnv: true,
       setupScript: "install-layout-14",
       environment: "prod",
@@ -546,7 +546,7 @@ describe("AsciiBoxMaintenanceClient", () => {
         ok: true,
         type: "box.created",
         status: "provisioning",
-        ttlSeconds: 21_600,
+        ttlSeconds: 300,
         box: { id: BOX_ID, name: "provider default" },
       }, 201));
     vi.stubGlobal("fetch", fetchMock);

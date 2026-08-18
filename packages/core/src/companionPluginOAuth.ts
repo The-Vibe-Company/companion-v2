@@ -122,23 +122,31 @@ async function oauthJson(
   init: RequestInit,
   fetchImpl: typeof fetch,
   failure: CompanionPluginOAuthError,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   let response: Response;
   try {
     response = await fetchImpl(url, {
       ...init,
       redirect: "error",
-      signal: AbortSignal.timeout(OAUTH_TIMEOUT_MS),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(OAUTH_TIMEOUT_MS)])
+        : AbortSignal.timeout(OAUTH_TIMEOUT_MS),
       headers: {
         accept: "application/json",
         ...init.headers,
       },
     });
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason ?? error;
     throw failure;
   }
   if (!response.ok) throw failure;
-  const value = await response.json().catch(() => null);
+  const value = await response.json().catch((error: unknown) => {
+    if (signal?.aborted) throw signal.reason ?? error;
+    return null;
+  });
+  if (signal?.aborted) throw signal.reason ?? failure;
   if (!isRecord(value)) throw failure;
   return value;
 }
@@ -386,6 +394,7 @@ export async function refreshCompanionPluginOAuth(input: {
   credential: CompanionPluginStoredOAuthCredential;
   env?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
 }): Promise<CompanionPluginStoredOAuthCredential> {
   if (!input.credential.refreshToken) {
     throw new CompanionPluginOAuthError(
@@ -415,6 +424,7 @@ export async function refreshCompanionPluginOAuth(input: {
     },
     input.fetchImpl ?? fetch,
     failure,
+    input.signal,
   );
   return {
     ...input.credential,

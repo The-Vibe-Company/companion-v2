@@ -51,6 +51,10 @@ simulator; lifecycle commands must never execute against the CI host.
 
 - Fake the Box HTTP contract for create, paginated list, state, resume, stop/archive, permanent
   delete and operation polling, commands, files, and desktop minting.
+- Keep create faithful to the public API: `202`, provider-generated name, no client name in the
+  request. Assert the acknowledged id is checkpointed before the generation-name/six-hour-TTL
+  PATCH; a lost create response leaves a five-minute provisional Box and never triggers a second
+  POST.
 - Run Pi as a real JSONL process with command ACKs, tool calls/results, `ask_user`, provider errors,
   crash loops, malformed/oversized lines, and `agent_settled`.
 - Replace `systemctl`, `loginctl`, and `journalctl` with deterministic shims inside a contained test

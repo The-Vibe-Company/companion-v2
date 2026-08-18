@@ -76,6 +76,9 @@ describe("semantic Box command shims", () => {
       command: command.type,
       id: command.id,
       success: true,
+      ...(command.type === "get_state"
+        ? { data: { model: { input: ["text", "image"] } } }
+        : {}),
     }));
     const controller: BoxSimPiController = {
       start: vi.fn(),
@@ -119,6 +122,24 @@ describe("semantic Box command shims", () => {
     expect(await executeBoxCommand(machine, "printf companion-pi-warm-ready"))
       .toMatchObject({ success: true, stdout: "companion-pi-warm-ready\n" });
 
+    const runtimeState = await executeBoxCommand(machine, brokerShell({
+      id: "runtime-state-1",
+      type: "runtime_state",
+    }));
+    expect(runtimeState.success).toBe(true);
+    expect(JSON.parse(runtimeState.stdout)).toMatchObject({
+      type: "response",
+      command: "runtime_state",
+      id: "runtime-state-1",
+      success: true,
+      data: {
+        invocationId: "00000000000000000000000000000001",
+        activeAttemptId: null,
+        modelInput: ["text", "image"],
+      },
+    });
+    expect(handleRpc).toHaveBeenCalledWith({ id: "runtime-state-1", type: "get_state" });
+
     const rpc = await executeBoxCommand(machine, brokerShell({
       id: "turn-with-apostrophe",
       type: "prompt",
@@ -131,6 +152,11 @@ describe("semantic Box command shims", () => {
       command: "prompt",
       id: "turn-with-apostrophe",
       success: true,
+      data: {
+        attemptId: "turn-with-apostrophe",
+        invocationId: "00000000000000000000000000000001",
+        piAcknowledged: true,
+      },
     });
     expect(handleRpc).toHaveBeenCalledWith(expect.objectContaining({ message: "don't repeat" }));
     expect(machine.daemon.rpcLog).not.toContain('"id":"turn-with-apostrophe"');
@@ -148,6 +174,7 @@ describe("semantic Box command shims", () => {
       success: true,
       data: {
         attemptId: "turn-with-apostrophe",
+        invocationId: "00000000000000000000000000000001",
         delivered: true,
       },
     });
@@ -197,6 +224,39 @@ describe("semantic Box command shims", () => {
       status: "active",
       invocationId: "00000000000000000000000000000002",
       restartCount: 1,
+    });
+  });
+
+  it("preserves malformed Pi model capabilities so the production adapter rejects them", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    machine.daemon.status = "active";
+    machine.daemon.rpcReady = true;
+    machine.daemon.invocationId = "00000000000000000000000000000001";
+    machine.piController = {
+      start: vi.fn(),
+      restart: vi.fn(),
+      stop: vi.fn(),
+      handleRpc: vi.fn(async (command: Record<string, unknown>) => ({
+        type: "response",
+        command: command.type,
+        id: command.id,
+        success: true,
+        data: { model: { input: ["text", 7, null] } },
+      })),
+      respondExtensionUi: vi.fn(),
+      crash: vi.fn(),
+      setScenario: vi.fn(),
+      dispose: vi.fn(),
+    };
+
+    const result = await executeBoxCommand(machine, brokerShell({
+      id: "runtime-state-malformed",
+      type: "runtime_state",
+    }));
+
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      success: true,
+      data: { modelInput: ["text", 7, null] },
     });
   });
 

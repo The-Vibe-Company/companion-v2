@@ -14,4 +14,5 @@ export * from "./companionProviderOAuth";
 export * from "./companionPluginOAuth";
 export * from "./companionPiEvents";
 export * from "./companionRuntimeErrors";
+export * from "./companionRuntimeCredentials";
 export { listCompanionRuntimeSkillPackages } from "./services";
