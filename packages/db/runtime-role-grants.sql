@@ -501,6 +501,14 @@ BEGIN
       ];
     END IF;
 
+    -- 0104 mints the ephemeral Skills Hub token under the live claim fence.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_runtime_mint_hub_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'
+    ) IS NOT NULL THEN
+      companion_runtime_functions := companion_runtime_functions || ARRAY[
+        'public.companion_runtime_mint_hub_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'::regprocedure
+      ];
+    END IF;
     -- A migration owner can carry arbitrary ALTER DEFAULT PRIVILEGES grants installed by an
     -- earlier operator. Runtime v2 never relies on default function EXECUTE: erase every named
     -- non-owner grantee and PUBLIC before granting the exact executor surface below.

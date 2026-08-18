@@ -653,6 +653,11 @@ export const companionRuntimeInstances = pgTable(
     lastErrorCode: text("last_error_code"),
     lastErrorMessage: text("last_error_message"),
     lastErrorAction: companionRuntimeErrorActionEnum("last_error_action"),
+    /**
+     * Current ephemeral Skills Hub token for this Box. Rotated at each staging mint; revoked
+     * rows stay in api_tokens until expiry.
+     */
+    hubTokenId: uuid("hub_token_id").references(() => apiTokens.id, { onDelete: "set null" }),
     createdAt: now(),
     updatedAt: updatedAt(),
   },
@@ -2071,8 +2076,9 @@ export const skillCommentImages = pgTable(
  * `cmp_pat_<hex>` is shown to the caller once; only its sha256 `token_hash` is stored.
  * `scopes` gates capability; tokens expire and can be revoked. Agent-derived rows keep only
  * value-free provenance plus an optional explicit runtime target binding. Companion-sourced
- * rows are ephemeral Skills Hub tokens (not the THE-360 permanent PAT): scope-snapshotted at
- * mint, re-checked against `companions.hub_access` on every request.
+ * rows are ephemeral Skills Hub tokens (not the THE-360 permanent PAT): minted per Box staging with
+ * the fixed unconditional scope set, and re-checked on every request against the Companion still
+ * existing for the acting member.
  */
 export const apiTokens = pgTable(
   "api_tokens",

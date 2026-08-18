@@ -51,6 +51,12 @@ export interface RuntimeMaterialPipeline {
   outboxHarvester: RuntimeOutboxHarvester;
 }
 
+export function companionHubApiUrl(apiUrl: string): string {
+  const trimmed = apiUrl.trim().replace(/\/+$/, "");
+  if (trimmed.endsWith("/v1")) return trimmed;
+  return `${trimmed}/v1`;
+}
+
 export function createRuntimeMaterialPipeline(input: {
   masterKey: Buffer;
   apiUrl: string;
@@ -81,6 +87,7 @@ export function createRuntimeMaterialPipeline(input: {
   const uuid = input.uuid ?? randomUUID;
   const refreshOauth = input.refreshOauth
     ?? (async (credential, signal) => await refreshCompanionPluginOAuth({ credential, signal }));
+  const hubTokensByMaterial = new WeakMap<RuntimeWorkMaterial, string>();
 
   const materialProvider: RuntimeMaterialProvider = {
     async getMaterial({ store, fence, signal }) {
@@ -144,6 +151,8 @@ export function createRuntimeMaterialPipeline(input: {
       }
       if (fence.workKind === "settings" || fence.workKind === "operation") {
         material.configCatalog = await store.getConfigCatalog(fence, RUNTIME_LEASE_SECONDS);
+        const hubToken = await store.mintHubToken(fence, RUNTIME_LEASE_SECONDS);
+        if (hubToken) hubTokensByMaterial.set(material, hubToken);
       }
       refreshedByMaterial.set(material, refreshed);
       return material;
@@ -191,6 +200,7 @@ export function createRuntimeMaterialPipeline(input: {
         now,
       });
       const nativeMobile = stage.clientSurface === "native_mobile";
+      const hubToken = nativeMobile ? undefined : hubTokensByMaterial.get(stage.material);
       const skills = nativeMobile
         ? []
         : [
@@ -219,8 +229,9 @@ export function createRuntimeMaterialPipeline(input: {
         hubEnv: nativeMobile
           ? {}
           : {
-            COMPANION_API_URL: input.apiUrl,
+            COMPANION_API_URL: companionHubApiUrl(input.apiUrl),
             COMPANION_WORKSPACE_ID: stage.orgId,
+            ...(hubToken ? { COMPANION_DELEGATION_TOKEN: hubToken } : {}),
           },
         configCatalog: nativeMobile ? null : stage.material.configCatalog,
         signal: stage.signal,

@@ -53,6 +53,10 @@ export interface RuntimeStore {
     fence: LeaseFence,
     leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
   ): Promise<RuntimeConfigCatalog | null>;
+  mintHubToken(
+    fence: LeaseFence,
+    leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
+  ): Promise<string | null>;
   getAttemptTerminalProjection(fence: LeaseFence): Promise<{
     checkpoint: "agent_settled" | "process_exited";
     eventCursor: bigint;
@@ -375,6 +379,14 @@ function decodeConfigCatalog(row: Record<string, unknown>): RuntimeConfigCatalog
   };
 }
 
+function decodeHubToken(row: Record<string, unknown>): string {
+  const token = row.token;
+  if (typeof token !== "string" || !token.startsWith("cmp_pat_") || token.length > 80) {
+    throw new RuntimeStoreContractError();
+  }
+  return token;
+}
+
 function decodeAttemptTerminalProjection(row: Record<string, unknown>): {
   checkpoint: "agent_settled" | "process_exited";
   eventCursor: bigint;
@@ -663,6 +675,23 @@ export class PostgresRuntimeStore implements RuntimeStore {
       `, [...fenceParameters(fence), leaseSeconds]);
       if (rows.length === 0) return null;
       return decodeConfigCatalog(one(rows, "config catalog"));
+    }, true);
+  }
+
+  async mintHubToken(
+    fence: LeaseFence,
+    leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
+  ): Promise<string | null> {
+    return await mapped(async () => {
+      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+        SELECT token
+        FROM public.companion_runtime_mint_hub_token(
+          $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
+          $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
+        )
+      `, [...fenceParameters(fence), leaseSeconds]);
+      if (rows.length === 0) return null;
+      return decodeHubToken(one(rows, "hub token"));
     }, true);
   }
 
