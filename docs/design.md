@@ -230,9 +230,11 @@ already exist. `GET /v1/companions/:id/attachments/:attachmentId` serves those b
 on every request and contacting only PostgreSQL and object storage. Thread reads add the active turn,
 queued count, interruption state, and each entry's attachment metadata — never a storage key or URL. Existing lifecycle paths
 persist operations and return `202`; decision answers are durable and runtime-delivered. Config
-proposals (`kind: config` plus a bounded `proposal` object) are a distinct decision kind: the
-existing answer route refuses them until a dedicated apply path exists. New explicit
-actions are:
+proposals (`kind: config` plus a bounded `proposal` object) dispatch to
+`companion_api_answer_config_decision` after the route validates `model_id` against the provider
+catalog. The web thread shows a dedicated config card that names the Companion as proposer, lists
+diffs from already-loaded skill/plugin/model names, and keeps the card pending when apply fails.
+New explicit recovery actions are:
 
 - `POST /v1/companions/:id/turns/:turnId/retry` with a unique `retry_id`;
 - `POST /v1/companions/:id/turns/:turnId/cancel` for an interrupted turn.

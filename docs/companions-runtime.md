@@ -278,10 +278,14 @@ the same attempt and decision identity.
 A `companion:config:<op>` confirmation with a strict JSON `{summary, proposal}` body projects as
 `request_kind = config_proposal`. The payload cannot name `hub_access`, `can_write_skills`, `name`,
 or `provider_id`, and a message that would require redaction is counted as unknown rather than
-stored. The generic `companion_api_answer_decision` path rejects this kind fail-closed; approval
-that applies settings is a dedicated later function. Until then the kind is inert: Pi does not emit
-it. Delivery to Pi uses the same `confirmed` / `cancelled` `extension_ui_response` shape as other
-confirmations.
+stored. Pi emits these through the staged `propose_config` and `request_plugin_connection` tools.
+Owner/Editor approval runs `companion_api_answer_config_decision`, which applies the patch under the
+approver's authority after the current turn. `connect_plugin` only confirms the request; the human
+finishes the connection in the web Plugins UI. Delivery to Pi uses the same `confirmed` / `cancelled`
+`extension_ui_response` shape as other confirmations.
+
+Each staging writes a credential-free `config-catalog.json` (≤100 skills and plugins the settings
+actor can already name) so Pi can compose summaries without reading secrets. Native mobile omits it.
 
 A running attempt has two bounds:
 

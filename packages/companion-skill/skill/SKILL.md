@@ -20,6 +20,13 @@ its dedicated runtime service may stage selected Skills for Pi. Keep that hosted
 from this delegated skill. Agent Auth authorizes external clients to use Skills Hub APIs only; it
 does not authorize Companion chat, turns, decisions, desktop, provider settings, or Box/Pi lifecycle.
 
+A hosted Pi teammate may propose settings with `propose_config` (skills, plugins, model, persona)
+and `request_plugin_connection` (Linear, GitHub, or Notion). Those tools only emit a config decision
+card; they never apply changes themselves and never touch hub access, name, or provider. Owner/Editor
+approval in the thread applies after the current turn. After a plugin connection is approved, the
+human finishes it in the web Plugins UI; Pi may propose attaching that account on a later turn.
+Agent Auth clients must not call those tools.
+
 Treat runtime provider/model settings, provider credentials, MCP accounts, and Companion
 Owner/Editor/Viewer sharing as browser-session workspace administration. Never request, read, store,
 forward, or manage them through this skill or its Agent Auth client. Never use a skill command to
@@ -1343,7 +1350,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.73.0","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.74.0","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 
