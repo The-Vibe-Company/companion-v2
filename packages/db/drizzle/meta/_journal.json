@@ -680,6 +680,13 @@
       "when": 1788368800000,
       "tag": "0096_companion_runtime_settings_claim_revisions",
       "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1788455200000,
+      "tag": "0097_companion_runtime_warm_send_dispatch",
+      "breakpoints": true
     }
   ]
 }

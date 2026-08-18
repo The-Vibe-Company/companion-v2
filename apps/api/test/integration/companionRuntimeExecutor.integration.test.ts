@@ -1345,6 +1345,157 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
+  it("enqueues an already-warm send without a start operation and dispatches it directly", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    try {
+      const created = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Warm send fixture', null, null, null,
+            '[]'::jsonb, false, '[]'::jsonb
+          )
+        `,
+      });
+      companionId = created[0]?.companionId ?? "";
+
+      // Simulate a Companion that already finished its cold start on an earlier message: the Box is
+      // observed ready and Pi is idle before this send, exactly as it is moments after Pi replies.
+      await sql`
+        update companion_runtime_instances
+        set box_id = 'bx_warmsend', box_state = 'ready', pi_state = 'idle',
+          pi_invocation_id = 'pi-already-warm', disk_layout_version = 14,
+          applied_settings_revision = desired_settings_revision,
+          applied_skills_revision = 1, applied_client_surface = 'web',
+          last_observed_at = now()
+        where companion_id = ${companionId}::uuid
+      `;
+
+      const clientMessageId = randomUUID();
+      const enqueued = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx: Tx) => tx<Array<{
+          turn: Record<string, unknown>;
+          operation: Record<string, unknown> | null;
+          replayed: boolean;
+        }>>`
+          select * from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
+            'Already warm, no wake needed', 'web'
+          )
+        `,
+      });
+      expect(enqueued[0]?.replayed).toBe(false);
+      expect(enqueued[0]?.operation).toBeNull();
+      expect(companionTurnSchema.safeParse(enqueued[0]?.turn).success).toBe(true);
+      const turnId = enqueued[0]?.turn.id;
+
+      // Sending the identical message again must still replay idempotently even though no operation
+      // was ever created to prove the first insert's completeness.
+      const replay = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx: Tx) => tx<Array<{ turn: Record<string, unknown>; replayed: boolean }>>`
+          select turn, replayed from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
+            'Already warm, no wake needed', 'web'
+          )
+        `,
+      });
+      expect(replay[0]?.replayed).toBe(true);
+      expect(replay[0]?.turn.id).toBe(turnId);
+
+      const [operationCount] = await sql<Array<{ count: number }>>`
+        select count(*)::int as count from companion_operations
+        where companion_id = ${companionId}::uuid
+      `;
+      expect(operationCount).toEqual({ count: 0 });
+
+      // No 'start' operation stands between the send and dispatch: the very next claim picks the
+      // turn itself up directly as an 'attempt', ready to prompt the already-idle Pi.
+      const claim = await claimWork();
+      expect(claim).toMatchObject({ workKind: "attempt", companionId });
+      const [claimedAttempt] = await sql<Array<{ turnId: string }>>`
+        select turn_id::text as "turnId" from companion_turn_attempts
+        where id = ${claim.workId}::uuid
+      `;
+      expect(claimedAttempt).toEqual({ turnId });
+      await release(claim);
+
+      const [instance] = await sql<Array<{ boxState: string; piState: string; piInvocationId: string }>>`
+        select box_state::text as "boxState", pi_state::text as "piState",
+          pi_invocation_id as "piInvocationId"
+        from companion_runtime_instances where companion_id = ${companionId}::uuid
+      `;
+      expect(instance).toEqual({
+        boxState: "ready", piState: "idle", piInvocationId: "pi-already-warm",
+      });
+    } finally {
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("still enqueues a start operation when the cached warm observation is stale", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    try {
+      const created = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Stale warm send fixture', null, null, null,
+            '[]'::jsonb, false, '[]'::jsonb
+          )
+        `,
+      });
+      companionId = created[0]?.companionId ?? "";
+
+      // Same cached box_state='ready'/pi_state='idle' as a genuinely warm instance, but the last
+      // observation is older than the periodic health check's own cadence: nothing has re-verified
+      // Pi is still actually alive recently enough to trust for a direct dispatch.
+      await sql`
+        update companion_runtime_instances
+        set box_id = 'bx_2345678s', box_state = 'ready', pi_state = 'idle',
+          pi_invocation_id = 'pi-stale-observed', disk_layout_version = 14,
+          applied_settings_revision = desired_settings_revision,
+          applied_skills_revision = 1, applied_client_surface = 'web',
+          last_observed_at = now() - interval '10 minutes'
+        where companion_id = ${companionId}::uuid
+      `;
+
+      const clientMessageId = randomUUID();
+      const enqueued = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx: Tx) => tx<Array<{
+          turn: Record<string, unknown>;
+          operation: Record<string, unknown> | null;
+          replayed: boolean;
+        }>>`
+          select * from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
+            'Stale observation still needs a start', 'web'
+          )
+        `,
+      });
+      expect(enqueued[0]?.operation).toMatchObject({ kind: "start", status: "pending" });
+
+      const [operationCount] = await sql<Array<{ count: number }>>`
+        select count(*)::int as count from companion_operations
+        where companion_id = ${companionId}::uuid
+      `;
+      expect(operationCount).toEqual({ count: 1 });
+    } finally {
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
   it("accepts only exact sequential and concurrent client_message_id replays", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     let companionId = "";
