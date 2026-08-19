@@ -762,7 +762,14 @@
       "idx": 108,
       "version": "7",
       "when": 1789405600000,
-      "tag": "0108_companion_runtime_health_identity",
+      "tag": "0108_companion_turn_stop",
+      "breakpoints": true
+    },
+    {
+      "idx": 109,
+      "version": "7",
+      "when": 1789405600000,
+      "tag": "0109_companion_runtime_health_identity",
       "breakpoints": true
     }
   ]

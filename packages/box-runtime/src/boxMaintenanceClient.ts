@@ -1095,15 +1095,12 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
 
     while (true) {
       if (operation.status === "completed") return { outcome: "deleted", operation };
-      // A provider-blocked delete is usually transient (an in-flight snapshot save). Poll it
-      // through like pending and report blocked only once the caller's deadline elapses while
-      // still blocked.
-      if (operation.status === "blocked" && Date.now() >= deadlineAt) {
-        return { outcome: "blocked", operation };
-      }
+
+      // Official Box docs poll until `completed`. `blocked` has no completedAt and is in-progress.
 
       const remaining = deadlineAt - Date.now();
       if (remaining <= 0) {
+        if (operation.status === "blocked") return { outcome: "blocked", operation };
         throw adapterError({
           stableCode: "box_deletion_deadline_exceeded",
           message: "The Box deletion deadline elapsed",

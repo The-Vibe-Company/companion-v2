@@ -183,6 +183,17 @@ export function createRuntimePiControl(options: RuntimeBoxAdapterOptions): Runti
       });
       return writeOutcome(result);
     },
+    async abort(input) {
+      input.signal.throwIfAborted();
+      const runtime = options.runtime();
+      const result = await runtime.dispatchAbort({
+        boxId: input.boxId,
+        attemptId: input.attemptId,
+        requestId: input.commandId,
+        signal: input.signal,
+      });
+      return writeOutcome(result);
+    },
     async readBrokerEvents(input) {
       return await options.runtime().readEvents({
         boxId: input.boxId,

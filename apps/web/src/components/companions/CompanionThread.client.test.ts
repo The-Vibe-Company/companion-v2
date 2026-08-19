@@ -572,6 +572,8 @@ describe("CompanionThread composer", () => {
     attachments: [],
           reasoning: null,
           routine: null,
+          turn_id: null,
+          queued: false,
           created_at: "2026-08-12T12:01:00.000Z",
         }],
       }));
@@ -628,6 +630,8 @@ describe("CompanionThread stream", () => {
     attachments: [],
     reasoning: null,
     routine: null,
+    turn_id: null,
+    queued: false,
     created_at: "2026-08-12T12:01:00.000Z",
   };
 
@@ -643,6 +647,8 @@ describe("CompanionThread stream", () => {
     attachments: [],
     reasoning: null,
     routine: null,
+    turn_id: null,
+    queued: false,
     created_at: "2026-08-12T12:01:20.000Z",
   });
 
@@ -683,6 +689,8 @@ describe("CompanionThread stream", () => {
     attachments: [],
           reasoning: null,
           routine: null,
+          turn_id: null,
+          queued: false,
           created_at: "2026-08-12T12:01:24.000Z",
         },
       ],
@@ -726,6 +734,8 @@ describe("CompanionThread stream", () => {
     attachments: [],
           reasoning: null,
           routine: null,
+          turn_id: null,
+          queued: false,
           created_at: "2026-08-12T12:01:20.000Z",
         },
       ],

@@ -17,6 +17,7 @@ import {
 } from "@/lib/companions";
 import { Icon } from "../Icon";
 import { Dialog } from "../org/primitives";
+import { PluginMark } from "./PluginMark";
 
 function providerName(value: string): string {
   return value
@@ -287,14 +288,14 @@ function CatalogConnectDialog({
 
   return (
     <Dialog
-      icon="plug-zap"
+      icon={<PluginMark provider={server.provider} size="md" variant="glyph" />}
       title={`Connect ${server.title}`}
       desc={server.provider === "github"
         ? "Give this account a short label such as work or personal. GitHub is used for MCP tools and for git clone, commit, and push."
         : "Give this account a short label such as work or personal."}
       onClose={onClose}
       closeDisabled={busy}
-      className="og-dialog companions-plugin-dialog"
+      className={`og-dialog companions-plugin-dialog companions-plugin-dialog--${server.provider}`}
       foot={(
         <>
           <button
@@ -349,18 +350,25 @@ function CatalogConnectDialog({
 
 function CatalogPluginCard({
   server,
+  connectedCount,
   onConnect,
 }: {
   server: CompanionPluginCatalogEntry;
+  connectedCount: number;
   onConnect: (server: CompanionPluginCatalogEntry) => void;
 }) {
   return (
     <article className="companions-catalog-card">
-      <span className="companions-plugin-icon" aria-hidden="true">
-        {server.title.slice(0, 1).toLocaleUpperCase("en-US")}
-      </span>
+      <PluginMark provider={server.provider} size="md" />
       <div className="companions-catalog-card__body">
-        <strong>{server.title}</strong>
+        <strong>
+          {server.title}
+          {connectedCount > 0 && (
+            <span className="companions-catalog-card__count">
+              {connectedCount === 1 ? "1 account" : `${connectedCount} accounts`}
+            </span>
+          )}
+        </strong>
         {server.description && <p>{server.description}</p>}
       </div>
       <button
@@ -368,7 +376,7 @@ function CatalogPluginCard({
         className="cds-btn cds-btn--secondary cds-btn--sm"
         onClick={() => onConnect(server)}
       >
-        Connect
+        {connectedCount > 0 ? "Add account" : "Connect"}
       </button>
     </article>
   );
@@ -429,6 +437,14 @@ export function CompanionPlugins({
     return [...grouped.entries()];
   }, [accounts]);
 
+  const connectedByProvider = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const account of accounts) {
+      counts.set(account.provider, (counts.get(account.provider) ?? 0) + 1);
+    }
+    return counts;
+  }, [accounts]);
+
   const remove = async (account: CompanionPluginAccount) => {
     setRemoving(account.id);
     setError(null);
@@ -473,16 +489,22 @@ export function CompanionPlugins({
         {error && <div className="companions-error" role="alert">{error}</div>}
 
         <section className="companions-plugin-section" aria-label="Connected accounts">
-          <h2 className="companions-plugin-section__title">Connected</h2>
+          <h2 className="companions-plugin-section__title">
+            Connected
+            {accounts.length > 0 && (
+              <span className="companions-plugin-section__count">{accounts.length}</span>
+            )}
+          </h2>
           {groups.length === 0 ? (
-            <p className="companions-catalog-note">No plugins connected yet.</p>
+            <div className="companions-plugin-empty">
+              <p>No plugins connected yet.</p>
+              <p>Connect Linear, GitHub, or Notion below, or add a custom MCP server.</p>
+            </div>
           ) : (
             <div className="companions-plugin-list">
               {groups.map(([provider, providerAccounts]) => (
                 <section className="companions-plugin-row" key={provider}>
-                  <span className="companions-plugin-icon" aria-hidden="true">
-                    {provider.slice(0, 1).toLocaleUpperCase("en-US")}
-                  </span>
+                  <PluginMark provider={provider} />
                   <strong>{providerName(provider)}</strong>
                   <span className="companions-state companions-state--ok">
                     <i aria-hidden="true" /> Connected
@@ -515,6 +537,7 @@ export function CompanionPlugins({
               <CatalogPluginCard
                 key={server.server_name}
                 server={server}
+                connectedCount={connectedByProvider.get(server.provider) ?? 0}
                 onConnect={setConnecting}
               />
             ))}

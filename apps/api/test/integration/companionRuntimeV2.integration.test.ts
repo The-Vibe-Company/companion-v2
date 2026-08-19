@@ -953,10 +953,10 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
 
     await applySplitRuntimeGrants(runtimeMigrationSql, true);
     await applyMigrationFile(runtimeMigrationSql, "0094_companion_runtime_cutover.sql");
-    // This suite pins the post-cutover contract. 0108 redefines
+    // This suite pins the post-cutover contract. 0109 redefines
     // companion_runtime_observe_instance with CREATE OR REPLACE, so grants survive and the
     // final split-grants pass below mirrors the production grants hook running after it.
-    await applyMigrationFile(runtimeMigrationSql, "0108_companion_runtime_health_identity.sql");
+    await applyMigrationFile(runtimeMigrationSql, "0109_companion_runtime_health_identity.sql");
     await runtimeMigrationSql.end({ timeout: 1 });
     runtimeSql = postgres(runtimeUrl.toString(), { max: 10 });
     await runtimeSql.unsafe(`

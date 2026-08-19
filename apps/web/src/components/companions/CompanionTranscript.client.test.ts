@@ -94,6 +94,36 @@ function thread(entries: CompanionTranscriptEntry[], overrides: Partial<Thread> 
   };
 }
 
+function activeTurn(): NonNullable<Thread["active_turn"]> {
+  const now = "2026-08-12T12:01:00.000Z";
+  return {
+    id: "22222222-2222-4222-8222-222222222222",
+    companion_id: companionId,
+    client_message_id: "33333333-3333-4333-8333-333333333333",
+    status: "running",
+    queue_sequence: 1,
+    latest_attempt: {
+      id: "44444444-4444-4444-8444-444444444444",
+      turn_id: "22222222-2222-4222-8222-222222222222",
+      attempt_number: 1,
+      retry_id: null,
+      status: "running",
+      dispatch_state: "accepted",
+      pi_invocation_id: "pi-1",
+      dispatch_accepted_at: now,
+      error: null,
+      started_at: now,
+      settled_at: null,
+    },
+    replying: true,
+    error: null,
+    state_changed_at: now,
+    settled_at: null,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
 const nextThread = thread([]);
 
 function entry(overrides: Partial<CompanionTranscriptEntry>): CompanionTranscriptEntry {
@@ -104,6 +134,8 @@ function entry(overrides: Partial<CompanionTranscriptEntry>): CompanionTranscrip
     content: "",
     reasoning: null,
     routine: null,
+    turn_id: null,
+    queued: false,
     author_id: null,
     author_name: null,
     tool: null,
@@ -159,6 +191,10 @@ function mount(
   },
   onSend: (content: string, id: string, files: readonly File[]) => Promise<boolean>
     = async () => true,
+  extras: {
+    onStop?: (turnId: string) => Promise<void>;
+    onCancelQueued?: (turnId: string) => Promise<void>;
+  } = {},
 ) {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -174,6 +210,8 @@ function mount(
       plugins: catalog?.plugins,
       models: catalog?.models,
       onSend,
+      onStop: extras.onStop,
+      onCancelQueued: extras.onCancelQueued,
       onThread: (next: Thread) => threads.push(next),
     }));
   });
@@ -1088,5 +1126,53 @@ describe("Companion thread attachments", () => {
     // A refused send must not cost the member the files they picked.
     expect(container.querySelector("[data-slot=composer-attachments]")?.textContent)
       .toContain("chart.png");
+  });
+});
+
+describe("queued follow-ups and stop", () => {
+  it("labels a saved follow-up as queued and lets the runner remove it", async () => {
+    const onCancelQueued = vi.fn(async () => {});
+    const turnId = "22222222-2222-4222-8222-222222222222";
+    const container = mount(
+      thread([
+        entry({ event_id: "msg:1", role: "user", content: "First", author_id: "user-1" }),
+        entry({
+          event_id: "msg:2",
+          ordinal: 1,
+          role: "user",
+          content: "Then this",
+          author_id: "user-1",
+          queued: true,
+          turn_id: turnId,
+        }),
+      ], { queued_count: 1, active_turn: activeTurn() }),
+      undefined,
+      async () => true,
+      { onCancelQueued },
+    );
+
+    expect(container.querySelector("[data-slot=queued-message]")?.textContent).toContain("Queued");
+    await act(async () => {
+      (container.querySelector("[aria-label='Remove from queue']") as HTMLButtonElement).click();
+    });
+    expect(onCancelQueued).toHaveBeenCalledWith(turnId);
+  });
+
+  it("offers Stop while a turn is active and names the turn it cancels", async () => {
+    const onStop = vi.fn(async () => {});
+    const container = mount(
+      thread([
+        entry({ event_id: "msg:1", role: "user", content: "Draft it", author_id: "user-1" }),
+      ], { active_turn: activeTurn() }),
+      undefined,
+      async () => true,
+      { onStop },
+    );
+
+    const stop = container.querySelector("[data-slot=composer-stop]") as HTMLButtonElement;
+    expect(stop).not.toBeNull();
+    expect(container.querySelector("button[aria-label='Send message']")).not.toBeNull();
+    await act(async () => stop.click());
+    expect(onStop).toHaveBeenCalledWith("22222222-2222-4222-8222-222222222222");
   });
 });

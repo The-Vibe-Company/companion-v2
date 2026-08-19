@@ -312,10 +312,18 @@ describe("Companions mobile viewport", () => {
       .toContain("grid-area: icon;");
   });
 
+  it("keeps branded plugin tiles after the shared icon surface", () => {
+    // One-class modifiers lose to a later `.companions-plugin-icon` reset of background/color/border.
+    const base = source.indexOf("\n.companions-plugin-icon {");
+    const linear = source.lastIndexOf(".companions-plugin-icon--linear");
+    expect(base).toBeGreaterThan(0);
+    expect(linear).toBeGreaterThan(base);
+  });
+
   it("puts the catalog card's action under its text on a phone", () => {
     const card = declarationsFor(".companions-catalog-card", PHONE)[0];
 
-    expect(card).toContain("grid-template-columns: 32px minmax(0, 1fr);");
+    expect(card).toContain("grid-template-columns: 40px minmax(0, 1fr);");
     expect(card).toContain('"action action"');
     expect(declarationsFor(".companions-catalog-card > .cds-btn", PHONE)[0])
       .toContain("min-height: 40px;");

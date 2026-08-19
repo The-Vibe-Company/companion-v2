@@ -34,6 +34,7 @@ export type BoxDeleteRequest =
   | { outcome: "absent" }
   | { outcome: "accepted"; operationId: string };
 
+/** `blocked` is in-progress at the provider; only `completed` is terminal success. */
 export type BoxDeletePoll =
   | { status: "pending" | "processing" }
   | { status: "completed" }
@@ -110,6 +111,13 @@ export interface RuntimePiControl {
     commandId: string;
     attemptId: string;
     message: string;
+    signal: AbortSignal;
+  }): Promise<BrokerWriteOutcome>;
+  /** Best-effort Pi abort for an Owner/Editor stop. Does not go through the turn lease signal. */
+  abort(input: {
+    boxId: string;
+    commandId: string;
+    attemptId: string;
     signal: AbortSignal;
   }): Promise<BrokerWriteOutcome>;
   readBrokerEvents(input: {

@@ -328,8 +328,12 @@ runtime restart, or a new user message. Later turns stay queued.
 attempt on the same turn, and shows a warning that earlier external effects may already have
 succeeded. Repeating the same retry request resolves to that attempt.
 
-`POST /v1/companions/:id/turns/:turnId/cancel` settles the interrupted turn `cancelled` and releases
-the next queued turn. Cancel does not claim that prior effects were rolled back.
+`POST /v1/companions/:id/turns/:turnId/cancel` is the Owner/Editor stop and dequeue path. A
+queued follow-up, an interrupted turn, or an active turn that has not yet written a prompt to Pi
+settles `cancelled` immediately. An active turn that may already be on Pi records
+`cancel_requested_at` and stays active until the executor that holds the lease aborts Pi and
+settles; remaining queued turns then run. Cancel does not claim that prior effects were rolled
+back.
 
 ## Decisions and deadlines
 

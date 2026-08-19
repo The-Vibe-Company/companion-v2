@@ -517,6 +517,12 @@ export async function processLegacyPurgeTarget(input: {
   const pollIntervalMs = input.pollIntervalMs ?? DEFAULT_DELETE_POLL_INTERVAL_MS;
   const pollTimeoutMs = input.pollTimeoutMs ?? DEFAULT_DELETE_TIMEOUT_MS;
   let operationId = input.target.operationId;
+  let lastStatus: BoxDeletionStatus | null =
+    input.target.state === "pending"
+    || input.target.state === "processing"
+    || input.target.state === "blocked"
+      ? input.target.state
+      : null;
 
   try {
     if (operationId === null) {
@@ -528,32 +534,32 @@ export async function processLegacyPurgeTarget(input: {
         return;
       }
       operationId = deletion.operation.id;
+      lastStatus = deletion.operation.status;
       await input.journal.markOperation(input.target.boxId, deletion.operation, false);
       log(
         `Box ${input.target.boxId}: deletion operation ${operationId} ${deletion.operation.status}`,
       );
       if (deletion.operation.status === "completed") return;
-      if (deletion.operation.status === "blocked") {
-        throw new Error(`Box deletion operation ${operationId} is blocked`);
-      }
     }
 
     const deadline = nowMs() + pollTimeoutMs;
     for (;;) {
       if (nowMs() >= deadline) {
-        throw new Error(`Box deletion operation ${operationId} timed out before completion`);
+        throw new Error(
+          lastStatus === "blocked"
+            ? `Box deletion operation ${operationId} is blocked`
+            : `Box deletion operation ${operationId} timed out before completion`,
+        );
       }
       await pause(pollIntervalMs);
       const operation = await input.boxClient.getDeletionOperation({
         operationId,
         boxId: input.target.boxId,
       });
+      lastStatus = operation.status;
       await input.journal.markOperation(input.target.boxId, operation, true);
       log(`Box ${input.target.boxId}: deletion operation ${operation.id} ${operation.status}`);
       if (operation.status === "completed") return;
-      if (operation.status === "blocked") {
-        throw new Error(`Box deletion operation ${operation.id} is blocked`);
-      }
     }
   } catch (error) {
     await input.journal.markError(input.target.boxId, safeProviderFailure(error)).catch(() => undefined);

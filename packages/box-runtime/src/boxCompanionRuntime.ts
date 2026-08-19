@@ -753,6 +753,13 @@ export interface CompanionBoxRuntimeV2 {
     requestId?: string;
     signal?: AbortSignal;
   }): Promise<CompanionPiPromptDispatch>;
+  /** Abort the active Pi attempt. Used by Owner/Editor stop; never inferred from a dropped stream. */
+  dispatchAbort(input: {
+    boxId: string;
+    attemptId: string;
+    requestId?: string;
+    signal?: AbortSignal;
+  }): Promise<CompanionPiPromptDispatch>;
   /** Observe broker identity/cursors and Pi's current model input capabilities in one command. */
   brokerState(input: { boxId: string; signal?: AbortSignal }): Promise<CompanionPiBrokerState>;
   /** Deliver one durable decision without collapsing a lost Box response into a safe refusal. */
@@ -2866,6 +2873,72 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
       message: brokerSafeMessage(
         error.message,
         ambiguous ? "Pi prompt acknowledgement is unavailable" : "Pi refused the prompt",
+      ),
+    };
+  }
+
+  async dispatchAbort(input: {
+    boxId: string;
+    attemptId: string;
+    requestId?: string;
+    signal?: AbortSignal;
+  }): Promise<CompanionPiPromptDispatch> {
+    let response: Record<string, unknown> | null;
+    try {
+      response = await this.#rpcCommandResponse({
+        boxId: input.boxId,
+        responseCommand: "abort",
+        command: {
+          id: input.requestId ?? `companion-abort:${randomUUID()}`,
+          type: "abort",
+          attemptId: input.attemptId,
+        },
+        signal: input.signal,
+      });
+    } catch {
+      response = null;
+    }
+    if (!response) {
+      return {
+        outcome: "ambiguous",
+        code: "pi_ack_ambiguous",
+        message: "Pi abort acknowledgement is unavailable",
+      };
+    }
+    if (response.success === true) {
+      const data = isJsonObject(response.data) ? response.data : null;
+      if (data?.aborted === false && opaqueBrokerId(data.invocationId)) {
+        return {
+          outcome: "accepted",
+          attemptId: input.attemptId,
+          invocationId: data.invocationId,
+        };
+      }
+      if (
+        data?.aborted === true
+        && data.attemptId === input.attemptId
+        && opaqueBrokerId(data.invocationId)
+      ) {
+        return {
+          outcome: "accepted",
+          attemptId: input.attemptId,
+          invocationId: data.invocationId,
+        };
+      }
+      return {
+        outcome: "ambiguous",
+        code: "pi_ack_ambiguous",
+        message: "Pi abort acknowledgement is unavailable",
+      };
+    }
+    const error = isJsonObject(response.error) ? response.error : {};
+    const ambiguous = error.ambiguous === true;
+    return {
+      outcome: ambiguous ? "ambiguous" : "refused",
+      code: brokerSafeCode(error.code, ambiguous ? "pi_ack_ambiguous" : "pi_abort_refused"),
+      message: brokerSafeMessage(
+        error.message,
+        ambiguous ? "Pi abort acknowledgement is unavailable" : "Pi refused the abort",
       ),
     };
   }

@@ -147,6 +147,8 @@ function controlPlane(
           attachments: [],
           reasoning: null,
           routine: null,
+          turn_id: null,
+          queued: false,
           created_at: "2026-08-15T18:00:00.000Z",
         },
         ...["Alors?", "Ca va?"].map((content, index): CompanionTranscriptEntry => ({
@@ -161,6 +163,8 @@ function controlPlane(
           attachments: [],
           reasoning: null,
           routine: null,
+          turn_id: null,
+          queued: false,
           created_at: `2026-08-15T18:0${index + 1}:00.000Z`,
         })),
       ]
@@ -229,6 +233,8 @@ function controlPlane(
         attachments: [],
         reasoning: null,
         routine: null,
+        turn_id: null,
+        queued: false,
         created_at: new Date().toISOString(),
       });
     }
@@ -277,6 +283,8 @@ function controlPlane(
     attachments: [],
           reasoning: null,
           routine: null,
+          turn_id: null,
+          queued: false,
           created_at: new Date().toISOString(),
         });
         if (!options.refuseDelivery) {

@@ -1194,6 +1194,68 @@ describe("RuntimeEngine attempts", () => {
     expect(store.settlements[0]?.error?.code).toBe("turn_stalled");
   });
 
+  it("aborts Pi and settles cancelled when the runner stops an accepted turn", async () => {
+    const claim = attemptClaim();
+    const denied = attemptAuthorization(claim, {
+      authorized: false,
+      denialCode: "turn_cancel_requested",
+      workCheckpoint: "running",
+      dispatchState: "accepted",
+      attemptStatus: "running",
+      turnStatus: "running",
+    });
+    const store = new MemoryRuntimeStore({ authorization: denied });
+    const ports = fakePorts(store);
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("cancelled");
+    expect(ports.abortCalls).toEqual([{ attemptId: ATTEMPT_ID, boxId: BOX_ID }]);
+    expect(store.settlements).toEqual([expect.objectContaining({ terminalStatus: "cancelled" })]);
+    expect(ports.promptCalls).toHaveLength(0);
+  });
+
+  it("cancels a stop that arrives while dispatch is still unacknowledged", async () => {
+    const claim = attemptClaim();
+    const denied = attemptAuthorization(claim, {
+      authorized: false,
+      denialCode: "turn_cancel_requested",
+      workCheckpoint: "dispatch_write_intent",
+      dispatchState: "write_intent",
+      boxId: BOX_ID,
+    });
+    const store = new MemoryRuntimeStore({ authorization: denied });
+    const ports = fakePorts(store);
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("cancelled");
+    expect(store.settlements[0]?.error?.code).toBeUndefined();
+    expect(ports.abortCalls).toEqual([{ attemptId: ATTEMPT_ID, boxId: BOX_ID }]);
+  });
+
+  it("cancels a stop that arrives after an ambiguous dispatch", async () => {
+    const claim = attemptClaim();
+    const denied = attemptAuthorization(claim, {
+      authorized: false,
+      denialCode: "turn_cancel_requested",
+      workCheckpoint: "dispatch_ambiguous",
+      dispatchState: "ambiguous",
+      boxId: BOX_ID,
+    });
+    const store = new MemoryRuntimeStore({ authorization: denied });
+    const ports = fakePorts(store);
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("cancelled");
+    expect(store.settlements).toEqual([expect.objectContaining({ terminalStatus: "cancelled" })]);
+    expect(ports.abortCalls).toEqual([{ attemptId: ATTEMPT_ID, boxId: BOX_ID }]);
+  });
+
   it("hands off an active accepted attempt without settling or releasing its lease", async () => {
     const claim = attemptClaim();
     const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
@@ -1374,6 +1436,27 @@ describe("RuntimeEngine decisions", () => {
     expect(result.outcome).toBe("fence_lost");
     expect(ports.decisionCalls).toEqual([{ attemptId: ATTEMPT_ID }]);
     expect(store.settlements).toHaveLength(0);
+  });
+
+  it("cancels a stop that arrives while a permission answer is being delivered", async () => {
+    const { claim, store, ports } = decisionSetup();
+    store.authorization = attemptAuthorization(attemptClaim(), {
+      authorized: false,
+      denialCode: "turn_cancel_requested",
+      workCheckpoint: "pending",
+      dispatchState: "accepted",
+      boxId: BOX_ID,
+      decisionStatus: "answered",
+      decisionDeliveryState: "pending",
+    });
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("cancelled");
+    expect(store.settlements[0]?.terminalStatus).toBe("cancelled");
+    expect(store.settlements[0]?.error).toBeUndefined();
+    expect(ports.decisionCalls).toHaveLength(0);
   });
 });
 

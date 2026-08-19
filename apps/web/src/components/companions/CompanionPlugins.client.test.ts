@@ -136,10 +136,14 @@ describe("CompanionPlugins", () => {
 
     const sectionTitles = Array.from(
       container.querySelectorAll(".companions-plugin-section__title"),
-      (heading) => heading.textContent,
+      (heading) => heading.textContent?.replace(/\s+/g, " ").trim(),
     );
     expect(sectionTitles).toEqual(["Connected", "Available plugins"]);
     expect(container.textContent).toContain("No plugins connected yet.");
+    expect(container.querySelector(".companions-plugin-empty")).not.toBeNull();
+    expect(container.textContent).toContain(
+      "Connect Linear, GitHub, or Notion below, or add a custom MCP server.",
+    );
     expect(container.textContent).toContain("Available plugins");
     expect(container.textContent).toContain("Linear");
     expect(container.textContent).toContain("GitHub");
@@ -148,6 +152,9 @@ describe("CompanionPlugins", () => {
     expect(container.textContent).not.toContain("Browse the registry");
     expect(container.querySelector('input[type="search"]')).toBeNull();
     expect(container.querySelectorAll(".companions-catalog-card")).toHaveLength(3);
+    expect(container.querySelector('[data-plugin-mark="linear"]')).not.toBeNull();
+    expect(container.querySelector('[data-plugin-mark="github"]')).not.toBeNull();
+    expect(container.querySelector('[data-plugin-mark="notion"]')).not.toBeNull();
 
     const connectButton = Array.from(
       container.querySelectorAll<HTMLButtonElement>(".companions-catalog-card button"),
@@ -156,6 +163,8 @@ describe("CompanionPlugins", () => {
 
     const dialog = container.querySelector("#companion-catalog-connect") as HTMLFormElement;
     const label = dialog.querySelector("input") as HTMLInputElement;
+    expect(container.querySelector(".companions-plugin-dialog--linear")).not.toBeNull();
+    expect(container.querySelector(".og-dialog__ic svg")).not.toBeNull();
     expect(dialog.querySelector('input[type="password"]')).toBeNull();
     expect(container.textContent).toContain("Continue with OAuth");
     await act(async () => setControlled(label, "personal"));
@@ -178,6 +187,10 @@ describe("CompanionPlugins", () => {
 
     expect(container.querySelector('[role="status"]')?.textContent).toBe("MCP account connected.");
     expect(container.textContent).toContain("work");
+    expect(container.querySelector(".companions-plugin-row [data-plugin-mark=\"linear\"]")).not.toBeNull();
+    expect(container.textContent).toContain("1 account");
+    expect(Array.from(container.querySelectorAll(".companions-catalog-card button"), (button) => button.textContent))
+      .toEqual(["Add account", "Connect", "Connect"]);
     expect(window.location.search).toBe("?view=plugins");
   });
 
@@ -246,6 +259,11 @@ describe("CompanionPlugins", () => {
       'button[aria-label="Disconnect Linear work"]',
     )).toBeNull();
     expect(container.querySelectorAll(".companions-catalog-card")).toHaveLength(3);
+    expect(container.textContent).not.toContain("1 account");
+    expect(Array.from(
+      container.querySelectorAll(".companions-catalog-card button"),
+      (button) => button.textContent,
+    )).toEqual(["Connect", "Connect", "Connect"]);
   });
 
   it("explains a duplicate-label callback and removes the error parameter", async () => {

@@ -21,7 +21,7 @@ import {
   type AppendMessage,
   type AssistantRuntime,
 } from "@assistant-ui/react";
-import { ArrowUpIcon, PaperclipIcon, XIcon } from "lucide-react";
+import { ArrowUpIcon, PaperclipIcon, SquareIcon, XIcon } from "lucide-react";
 import type {
   Companion,
   CompanionThread as Thread,
@@ -94,6 +94,9 @@ interface TranscriptChrome {
   loading: boolean;
   empty: boolean;
   replying: boolean;
+  stopping: boolean;
+  /** True while an Owner/Editor can stop the turn that currently owns Pi. */
+  canStop: boolean;
   hint: string;
   /** Files staged for the next send, in the order they will be staged on the Box. */
   attachments: readonly File[];
@@ -103,6 +106,9 @@ interface TranscriptChrome {
   onRemoveAttachment: (index: number) => void;
   onSendPress: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   onSendClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onStop: () => void;
+  onCancelQueued: (turnId: string) => void;
+  dequeueingTurnId: string | null;
 }
 
 const ChromeContext = createContext<TranscriptChrome | null>(null);
@@ -223,21 +229,46 @@ function AssistantFrame({ children }: { children: ReactNode }) {
 
 function UserFrame({ children }: { children: ReactNode }) {
   const message = useTranscriptMessage();
+  const { canSend, onCancelQueued, dequeueingTurnId } = useChrome();
   const routine = message?.entries[0]?.routine ?? null;
+  const queued = message?.queued === true;
   return (
-    <div className="flex w-full flex-col items-end" aria-busy={message?.sending || undefined}>
+    <div
+      className="flex w-full flex-col items-end"
+      aria-busy={message?.sending || queued || undefined}
+    >
       <div className="w-full">
         <Separators message={message} />
       </div>
       <PassageLead message={message} />
       {/* Full width on purpose: the bubble inside is capped as a percentage, and a fit-content
           wrapper would make that percentage resolve against the bubble's own text. */}
-      <div className={cn("flex w-full flex-col items-end", message?.sending && "opacity-60")}>
+      <div className={cn("flex w-full flex-col items-end", (message?.sending || queued) && "opacity-60")}>
         {routine ? (
           <p className="chat-routine-header">Routine: {routine.name}</p>
         ) : children}
         {message && <AttachmentList attachments={attachmentsOf(message)} />}
       </div>
+      {queued ? (
+        <p data-slot="queued-message" className="text-muted-foreground mt-1 flex items-center gap-2 text-xs">
+          <span>Queued</span>
+          {canSend && message?.turnId ? (
+            <button
+              type="button"
+              className="hover:text-foreground pointer-coarse:size-11 grid size-8 shrink-0 place-items-center rounded-sm"
+              aria-label="Remove from queue"
+              aria-busy={dequeueingTurnId === message.turnId || undefined}
+              disabled={dequeueingTurnId === message.turnId}
+              onClick={() => onCancelQueued(message.turnId!)}
+            >
+              <XIcon className="size-3.5" />
+            </button>
+          ) : null}
+        </p>
+      ) : null}
+      {queued ? (
+        <span className="sr-only" role="status">This message is queued.</span>
+      ) : null}
       <UploadStatus message={message} />
     </div>
   );
@@ -339,6 +370,8 @@ export function CompanionTranscript({
   plugins = [],
   models = [],
   onSend,
+  onStop,
+  onCancelQueued,
   onThread,
 }: {
   companion: Companion;
@@ -356,6 +389,10 @@ export function CompanionTranscript({
   /** Provider catalog models this surface already loaded. */
   models?: readonly DecisionNamedResource[];
   onSend: (content: string, clientMessageId: string, files: readonly File[]) => Promise<boolean>;
+  /** Stop the active turn. Absent for a Viewer. */
+  onStop?: (turnId: string) => Promise<void>;
+  /** Remove a queued follow-up. Absent for a Viewer. */
+  onCancelQueued?: (turnId: string) => Promise<void>;
   /** Replace the thread after a permission card is decided, without a full poll cycle. */
   onThread: (thread: Thread) => void;
 }) {
@@ -389,6 +426,8 @@ export function CompanionTranscript({
    * drops it and hands the text back to the composer.
    */
   const [outgoing, setOutgoing] = useState<CompanionTranscriptEntry | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const [dequeueingTurnId, setDequeueingTurnId] = useState<string | null>(null);
 
   const entries = useMemo(() => {
     const saved = thread?.entries ?? [];
@@ -461,6 +500,11 @@ export function CompanionTranscript({
       tool: null,
       decision: null,
       routine: null,
+      turn_id: null,
+      queued: thread?.active_turn != null
+        || thread?.interrupted_turn != null
+        || (thread?.queued_count ?? 0) > 0
+        || companion.runtime.state !== "running",
       // Named, not fetchable: the ids here are local and the bytes are still being uploaded, so the
       // card shows the files as chips until the saved entry replaces this one.
       attachments: files.flatMap((file, position) => {
@@ -506,7 +550,7 @@ export function CompanionTranscript({
       // the files it named, so nothing has to be picked again.
       if (!saved) setOutgoing(null);
     }
-  }, [canSend, onSend, viewerId]);
+  }, [canSend, companion.runtime.state, onSend, thread, viewerId]);
 
   const onAttach = useCallback((incoming: FileList | readonly File[] | null) => {
     if (!incoming) return;
@@ -568,6 +612,31 @@ export function CompanionTranscript({
     event.preventDefault();
   }, []);
 
+  const activeTurnId = thread?.active_turn?.id ?? null;
+  useEffect(() => {
+    if (!activeTurnId) setStopping(false);
+  }, [activeTurnId]);
+
+  const stopTurn = useCallback(() => {
+    if (!activeTurnId || !onStop || stopping) return;
+    setStopping(true);
+    void onStop(activeTurnId).then(
+      () => document.querySelector<HTMLTextAreaElement>("[data-slot=composer-root] textarea")?.focus(),
+      () => setStopping(false),
+    );
+  }, [activeTurnId, onStop, stopping]);
+
+  const cancelQueued = useCallback((turnId: string) => {
+    if (!onCancelQueued || dequeueingTurnId === turnId) return;
+    setDequeueingTurnId(turnId);
+    void onCancelQueued(turnId).then(
+      () => document.querySelector<HTMLTextAreaElement>("[data-slot=composer-root] textarea")?.focus(),
+      () => undefined,
+    ).finally(() => {
+      setDequeueingTurnId((current) => current === turnId ? null : current);
+    });
+  }, [onCancelQueued, dequeueingTurnId]);
+
   const replying = replyExpected(thread);
   const loading = thread === null;
   const empty = thread !== null && messages.length === 0;
@@ -585,6 +654,8 @@ export function CompanionTranscript({
     loading,
     empty,
     replying,
+    stopping,
+    canStop: canSend && activeTurnId !== null && onStop !== undefined,
     hint,
     attachments,
     attachmentError,
@@ -592,18 +663,27 @@ export function CompanionTranscript({
     onRemoveAttachment,
     onSendPress: sendOnPress,
     onSendClick: swallowClickAfterPress,
+    onStop: stopTurn,
+    onCancelQueued: cancelQueued,
+    dequeueingTurnId,
   }), [
     attachmentError,
     attachments,
+    activeTurnId,
     canSend,
+    cancelQueued,
     companion.name,
+    dequeueingTurnId,
     empty,
     hint,
     loading,
     onAttach,
     onRemoveAttachment,
+    onStop,
     replying,
     sendOnPress,
+    stopTurn,
+    stopping,
     swallowClickAfterPress,
   ]);
 
@@ -771,6 +851,9 @@ function Footer() {
     onAttach,
     onSendPress,
     onSendClick,
+    onStop,
+    stopping,
+    canStop,
   } = useChrome();
   const fileInput = useRef<HTMLInputElement | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -865,6 +948,19 @@ function Footer() {
             // text this composer is holding on to.
             cancelOnEscape={false}
           />
+          {canStop ? (
+            <button
+              type="button"
+              data-slot="composer-stop"
+              className="bg-foreground text-background hover:bg-foreground/90 disabled:bg-muted disabled:text-muted-foreground pointer-coarse:size-11 grid size-8 shrink-0 place-items-center rounded-full transition-colors disabled:cursor-not-allowed"
+              aria-label={stopping ? "Stopping" : "Stop"}
+              aria-busy={stopping || undefined}
+              disabled={stopping}
+              onClick={onStop}
+            >
+              <SquareIcon className="size-3 fill-current" />
+            </button>
+          ) : null}
           <ComposerPrimitive.Send
             // THE-346: Send is the control the composer exists for, and a 32px square is not a thumb
             // target. The field grows around it rather than the control shrinking, and a mouse keeps
