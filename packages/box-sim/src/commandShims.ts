@@ -7,6 +7,7 @@ export type BoxSimCommandKind =
   | "warm-daemon-ready"
   | "mkdir-pi-bin"
   | "install-layout"
+  | "probe-layout"
   | "mkdir-extensions"
   | "clear-skill-archives"
   | "measure-skill-archives"
@@ -324,6 +325,11 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
   if (command.includes("chmod a-w") || command.includes("chmod -R a-w")) return "lock-attachments";
   if (command.trim() === 'mkdir -p "$HOME/.companion/bin"') return "mkdir-pi-bin";
   if (command.includes("ensure-pi-layout.sh") && /^\s*bash\s/.test(command)) return "install-layout";
+  if (
+    command.includes("pi-layout.version")
+    && command.includes("companion-layout-unchanged")
+    && command.includes("companion-pi-broker.mjs")
+  ) return "probe-layout";
   if (command.trim() === 'mkdir -p "$HOME/.companion/pi/extensions"') return "mkdir-extensions";
   return "unsupported";
 }
@@ -334,6 +340,56 @@ function ok(stdout = ""): BoxSimCommandResult {
 
 function failed(stderr: string, exitCode = 1, stdout = ""): BoxSimCommandResult {
   return { success: false, exitCode, stdout, stderr };
+}
+
+function installedLayout(machine: BoxSimCommandMachine): BoxSimCommandResult {
+  const script = machine.persistentFiles.get(".companion/bin/ensure-pi-layout.sh")?.toString("utf8");
+  if (!script) return failed("staged Pi layout script is missing");
+  const expected = /(?:^|\n)expected_layout='([^']*)'/.exec(script)?.[1];
+  const base = /(?:^|\n)base_layout='([^']*)'/.exec(script)?.[1];
+  const markerPath = ".companion/runtime/state/pi-layout.version";
+  const recorded = machine.persistentFiles.get(markerPath)?.toString("utf8").trim() ?? "";
+  const brokerReady = machine.persistentFiles.has(".companion/bin/companion-pi-broker.mjs")
+    && machine.persistentFiles.has(".companion/bin/pi-daemon")
+    && machine.persistentFiles.has(".config/systemd/user/companion-pi-daemon.service");
+  machine.layoutInstalled = true;
+  if (expected && recorded === expected && brokerReady) {
+    return ok("companion-layout-unchanged\n");
+  }
+  writeSimulatedLayoutFiles(machine, expected);
+  if (expected && base && recorded.split(":overlay=")[0] === base) {
+    return ok("companion-layout-overlay\n");
+  }
+  return ok("companion-layout-base\n");
+}
+
+function probedLayout(machine: BoxSimCommandMachine, command: string): BoxSimCommandResult {
+  const quoted = /\[ "\$recorded" = ('(?:\\'|[^'])*') \]/.exec(command)?.[1];
+  const expected = quoted ? decodeShellQuoted(quoted) : undefined;
+  const recorded = machine.persistentFiles.get(".companion/runtime/state/pi-layout.version")
+    ?.toString("utf8").trim() ?? "";
+  const brokerReady = machine.persistentFiles.has(".companion/bin/companion-pi-broker.mjs")
+    && machine.persistentFiles.has(".companion/bin/pi-daemon")
+    && machine.persistentFiles.has(".config/systemd/user/companion-pi-daemon.service");
+  if (expected && recorded === expected && brokerReady) {
+    return ok("companion-layout-unchanged\n");
+  }
+  return ok();
+}
+
+function writeSimulatedLayoutFiles(machine: BoxSimCommandMachine, expected?: string): void {
+  machine.persistentFiles.set(".companion/bin/companion-pi-broker.mjs", Buffer.from("broker\n"));
+  machine.persistentFiles.set(".companion/bin/pi-daemon", Buffer.from("daemon\n"));
+  machine.persistentFiles.set(
+    ".config/systemd/user/companion-pi-daemon.service",
+    Buffer.from("[Service]\n"),
+  );
+  if (expected) {
+    machine.persistentFiles.set(
+      ".companion/runtime/state/pi-layout.version",
+      Buffer.from(`${expected}\n`),
+    );
+  }
 }
 
 /** The staged attachment directory a prepare command names, relative to the Box home. */
@@ -771,11 +827,9 @@ export async function executeBoxCommand(
     case "mkdir-pi-bin":
       return ok();
     case "install-layout":
-      if (!machine.persistentFiles.has(".companion/bin/ensure-pi-layout.sh")) {
-        return failed("staged Pi layout script is missing");
-      }
-      machine.layoutInstalled = true;
-      return ok();
+      return installedLayout(machine);
+    case "probe-layout":
+      return probedLayout(machine, command);
     case "mkdir-extensions":
       machine.extensionDirectoryCreated = true;
       return ok();

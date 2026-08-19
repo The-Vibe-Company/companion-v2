@@ -16,6 +16,7 @@ import {
   parseOutboxManifest,
   resolvePiPackages,
 } from "./boxCompanionRuntime";
+import { companionPiLayoutIdentity } from "./companionRuntimeImage";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -494,11 +495,22 @@ describe("default Pi packages on the Box disk", () => {
 
   it("makes every pin part of the layout marker, so an existing Box relayouts on its next wake", async () => {
     // The marker is the whole update system: changing a pin is what a Box holding the old one
-    // cannot short-circuit past.
-    expect(await stagedLayoutScript()).toContain(
-      "expected_layout='14:npm:pi-mcp-adapter@2.12.1,npm:pi-web-access@0.24.0,"
-      + "npm:pi-subagents@0.51.0,npm:pi-memory@0.4.2:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2'",
-    );
+    // cannot short-circuit past. Overlay is hashed separately so a broker change does not reinstall
+    // packages.
+    const identity = companionPiLayoutIdentity({
+      layoutVersion: 14,
+      packages: resolvePiPackages({}),
+      qmdPackage: "@tobilu/qmd@2.8.3",
+      minimumPiVersion: "0.84.2",
+    });
+    const script = await stagedLayoutScript();
+    expect(script).toContain(`base_layout='${identity.baseMarker}'`);
+    expect(script).toContain(`expected_layout='${identity.fullMarker}'`);
+    expect(script).toContain("companion-layout-unchanged");
+    expect(script).toContain("companion-layout-overlay");
+    expect(script).toContain("companion-layout-base");
+    expect(script.indexOf("companion-layout-overlay"))
+      .toBeLessThan(script.indexOf(`"$pi_bin" install`));
   });
 
   it("gives a deployment no way to drop what a Companion can do", async () => {

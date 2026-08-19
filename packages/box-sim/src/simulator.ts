@@ -20,6 +20,7 @@ import {
   type BoxSimFaultAction,
   type BoxSimFaultRule,
   type BoxSimFaultRuleInput,
+  type BoxSimNamedSnapshot,
   type BoxSimPiControllerFactory,
   type BoxSimRequestJournalEntry,
   type BoxSimStateSnapshot,
@@ -30,6 +31,12 @@ interface BoxRecord {
   pendingStates: BoxSimBoxState[];
   setupScriptSha256: string | null;
   machine: BoxSimCommandMachine;
+}
+
+interface NamedSnapshotRecord {
+  snapshot: BoxSimNamedSnapshot;
+  files: Map<string, Buffer>;
+  layoutInstalled: boolean;
 }
 
 interface DeletionRecord {
@@ -51,8 +58,12 @@ export interface CreateBoxInput {
   env?: Record<string, unknown>;
   environment?: string;
   noEnv?: boolean;
+  /** Clone persistent files from a ready named snapshot. */
+  from?: string;
 }
 
+const NAMED_SNAPSHOT_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
+const NAMED_SNAPSHOT_LIMIT = 10;
 const BOX_ID_ALPHABET = "23456789abcdefghjkmnpqrstuvwxyz";
 const BOX_ID_SEED = "23456789";
 const RUNNABLE_STATES = new Set<BoxSimBoxState>(["ready", "running", "idle"]);
@@ -78,6 +89,13 @@ function validatePositiveInteger(value: unknown, name: string): number {
     throw new BoxSimHttpError(400, "invalid_request", `${name} must be a positive integer`);
   }
   return Number(value);
+}
+
+function assertNamedSnapshotName(name: string): string {
+  if (!NAMED_SNAPSHOT_NAME.test(name)) {
+    throw new BoxSimHttpError(400, "invalid_request", "invalid named snapshot name");
+  }
+  return name;
 }
 
 function validateDefaults(input: Partial<BoxSimDefaults>, current: BoxSimDefaults): BoxSimDefaults {
@@ -127,10 +145,13 @@ function validateDefaults(input: Partial<BoxSimDefaults>, current: BoxSimDefault
   };
 }
 
-function observedReadyStates(polls: number, initial: "provisioning" | "archived"): BoxSimBoxState[] {
+function observedReadyStates(
+  polls: number,
+  initial: "provisioning" | "archived" | "cloning",
+): BoxSimBoxState[] {
   if (polls === 1) return ["ready"];
-  const intermediate: BoxSimBoxState = initial === "archived" ? "provisioning" : "provisioning";
-  const result = Array<BoxSimBoxState>(polls - 1).fill(intermediate);
+  const fill: BoxSimBoxState = initial === "cloning" ? "cloning" : "provisioning";
+  const result = Array<BoxSimBoxState>(polls - 1).fill(fill);
   result[result.length - 1] = "provisioned";
   result.push("ready");
   return result;
@@ -152,6 +173,14 @@ function incrementSeed(seed: string, amount: number): string {
   return digits.map((digit) => BOX_ID_ALPHABET[digit]!).join("");
 }
 
+function cloneFileMap(files: Map<string, Buffer>): Map<string, Buffer> {
+  return new Map([...files.entries()].map(([path, bytes]) => [path, Buffer.from(bytes)]));
+}
+
+function publicNamedSnapshot(record: NamedSnapshotRecord): BoxSimNamedSnapshot {
+  return { ...record.snapshot };
+}
+
 function sortedObjectKeys(value: unknown): string[] {
   if (!value || typeof value !== "object" || Array.isArray(value)) return [];
   return Object.keys(value).sort();
@@ -162,6 +191,7 @@ export class BoxSimulator {
   readonly #initialDefaults: BoxSimDefaults;
   readonly #piControllerFactory: BoxSimPiControllerFactory | undefined;
   readonly #boxes = new Map<string, BoxRecord>();
+  readonly #namedSnapshots = new Map<string, NamedSnapshotRecord>();
   readonly #deletions = new Map<string, DeletionRecord>();
   readonly #faults = new Map<string, BoxSimFaultRule>();
   readonly #requests: BoxSimRequestJournalEntry[] = [];
@@ -224,6 +254,7 @@ export class BoxSimulator {
       await machine.piController?.dispose();
     }));
     this.#boxes.clear();
+    this.#namedSnapshots.clear();
     this.#deletions.clear();
     this.#faults.clear();
     this.#requests.length = 0;
@@ -263,15 +294,28 @@ export class BoxSimulator {
   }
 
   async createBox(input: CreateBoxInput = {}): Promise<BoxSimBox> {
+    const from = typeof input.from === "string" ? input.from.trim() : "";
+    let cloned: NamedSnapshotRecord | undefined;
+    if (from) {
+      cloned = this.#namedSnapshots.get(from);
+      if (!cloned || cloned.snapshot.status !== "ready") {
+        throw new BoxSimHttpError(404, "unknown_snapshot", `Named snapshot ${from} was not found`);
+      }
+    }
     const id = `bx_${incrementSeed(BOX_ID_SEED, this.#boxSequence)}`;
     this.#boxSequence += 1;
     const tick = this.#nextTick();
     const machine = createBoxSimCommandMachine({ boxId: id, scenario: this.#defaults.piScenario });
+    if (cloned) {
+      machine.persistentFiles = cloneFileMap(cloned.files);
+      machine.layoutInstalled = cloned.layoutInstalled;
+    }
+    const cloning = Boolean(cloned);
     const record: BoxRecord = {
       box: {
         id,
         name: `box-sim-${id.slice(3)}`,
-        state: "provisioning",
+        state: cloning ? "cloning" : "provisioning",
         desktopAvailable: this.#defaults.desktopAvailable,
         setupStatus: "running",
         setupError: null,
@@ -281,7 +325,10 @@ export class BoxSimulator {
         createdTick: tick,
         updatedTick: tick,
       },
-      pendingStates: observedReadyStates(this.#defaults.createPolls, "provisioning"),
+      pendingStates: observedReadyStates(
+        this.#defaults.createPolls,
+        cloning ? "cloning" : "provisioning",
+      ),
       setupScriptSha256: typeof input.setupScript === "string" ? sha256(input.setupScript) : null,
       machine,
     };
@@ -302,6 +349,56 @@ export class BoxSimulator {
       }
     }
     return publicBox(record);
+  }
+
+  listNamedSnapshots(): BoxSimNamedSnapshot[] {
+    this.#nextTick();
+    return [...this.#namedSnapshots.values()]
+      .map((record) => this.#settleNamedSnapshot(record))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  }
+
+  getNamedSnapshot(name: string): BoxSimNamedSnapshot {
+    const record = this.#namedSnapshots.get(assertNamedSnapshotName(name));
+    if (!record) {
+      throw new BoxSimHttpError(404, "unknown_snapshot", `Named snapshot ${name} was not found`);
+    }
+    this.#nextTick();
+    return this.#settleNamedSnapshot(record);
+  }
+
+  saveNamedSnapshot(input: { boxId: string; name: string }): BoxSimNamedSnapshot {
+    const name = assertNamedSnapshotName(input.name);
+    const record = this.#record(input.boxId);
+    if (!this.#namedSnapshots.has(name) && this.#namedSnapshots.size >= NAMED_SNAPSHOT_LIMIT) {
+      throw new BoxSimHttpError(409, "named_snapshot_limit", "Named snapshot limit reached");
+    }
+    const tick = this.#nextTick();
+    const saved: NamedSnapshotRecord = {
+      snapshot: {
+        name,
+        status: "saving",
+        sourceBoxId: record.box.id,
+        createdAt: new Date(Date.UTC(2026, 7, 19, 0, 0, tick)).toISOString(),
+      },
+      files: cloneFileMap(record.machine.persistentFiles),
+      layoutInstalled: record.machine.layoutInstalled,
+    };
+    this.#namedSnapshots.set(name, saved);
+    return publicNamedSnapshot(saved);
+  }
+
+  deleteNamedSnapshot(name: string): void {
+    const key = assertNamedSnapshotName(name);
+    if (!this.#namedSnapshots.delete(key)) {
+      throw new BoxSimHttpError(404, "unknown_snapshot", `Named snapshot ${name} was not found`);
+    }
+    this.#nextTick();
+  }
+
+  #settleNamedSnapshot(record: NamedSnapshotRecord): BoxSimNamedSnapshot {
+    if (record.snapshot.status === "saving") record.snapshot.status = "ready";
+    return publicNamedSnapshot(record);
   }
 
   getBox(boxId: string, advance = true): BoxSimBox {
@@ -720,6 +817,9 @@ export class BoxSimulator {
       deletions: [...this.#deletions.values()]
         .map(({ operation }) => ({ ...operation }))
         .sort((left, right) => left.id.localeCompare(right.id)),
+      namedSnapshots: [...this.#namedSnapshots.values()]
+        .map((record) => publicNamedSnapshot(record))
+        .sort((left, right) => left.name.localeCompare(right.name)),
       faults: [...this.#faults.values()].map((rule) => structuredClone(rule)),
       requests: this.#requests.map((request) => ({ ...request, bodyKeys: [...request.bodyKeys] })),
     };

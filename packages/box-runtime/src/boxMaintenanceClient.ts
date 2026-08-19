@@ -29,6 +29,9 @@ const SAFE_PROVIDER_CODES = new Set([
   "deletion_operation_not_found",
   "rate_limited",
   "internal_error",
+  "named_snapshot_limit",
+  "save_in_progress",
+  "unknown_snapshot",
 ]);
 
 export type BoxAbsoluteDeadline = number | Date;
@@ -135,6 +138,8 @@ export interface BoxGenerationCreateInput extends BoxDeadlineControl {
   setupScript?: string;
   environment?: string;
   env?: Record<string, string>;
+  /** Named snapshot to clone. New companions skip the layout install when this is ready. */
+  from?: string;
 }
 
 /**
@@ -163,6 +168,52 @@ export interface BoxGenerationSettingsResult {
   boxId: string;
   name: string;
   ttlSeconds: number;
+}
+
+const namedSnapshotNameSchema = z.string().regex(
+  /^[a-z0-9][a-z0-9-]{0,62}$/,
+  "invalid named snapshot name",
+);
+const namedSnapshotStatusSchema = z.enum(["saving", "ready", "failed"]);
+const namedSnapshotSchema = z.object({
+  name: namedSnapshotNameSchema,
+  status: namedSnapshotStatusSchema,
+  sourceBoxId: boxIdSchema,
+  createdAt: z.string().min(1),
+  error: z.string().optional(),
+  snapshotId: z.string().min(1).optional(),
+  type: z.string().optional(),
+  sizeBytes: z.number().int().nonnegative().optional(),
+}).passthrough();
+
+const namedSnapshotListEnvelopeSchema = z.object({
+  ok: z.literal(true),
+  type: z.literal("snapshot.named.list"),
+  snapshots: z.array(namedSnapshotSchema),
+}).passthrough();
+
+const namedSnapshotEnvelopeSchema = z.object({
+  ok: z.literal(true),
+  type: z.string().min(1),
+  snapshot: namedSnapshotSchema.optional(),
+  status: namedSnapshotStatusSchema.optional(),
+}).passthrough();
+
+export type BoxNamedSnapshotStatus = z.infer<typeof namedSnapshotStatusSchema>;
+
+export interface BoxNamedSnapshot {
+  name: string;
+  status: BoxNamedSnapshotStatus;
+  sourceBoxId: string;
+  createdAt: string;
+  error?: string;
+  snapshotId?: string;
+}
+
+export interface BoxEphemeralCreateInput extends BoxDeadlineControl {
+  ttlSeconds: number;
+  from?: string;
+  noEnv?: boolean;
 }
 
 /** Durable provider identity and state for one permanent Box deletion. */
@@ -249,6 +300,14 @@ export interface BoxRuntimeLifecycleClient extends BoxMaintenanceClient {
   applyGenerationBoxSettings(
     input: BoxGenerationSettingsInput,
   ): Promise<BoxGenerationSettingsResult>;
+  createEphemeralBox(input: BoxEphemeralCreateInput): Promise<{ boxId: string }>;
+  getNamedSnapshot(input: { name: string } & BoxCallControl): Promise<BoxNamedSnapshot | null>;
+  listNamedSnapshots(input?: BoxCallControl): Promise<BoxNamedSnapshot[]>;
+  saveNamedSnapshot(input: {
+    boxId: string;
+    name: string;
+  } & BoxCallControl): Promise<BoxNamedSnapshot>;
+  deleteNamedSnapshot(input: { name: string } & BoxCallControl): Promise<void>;
   deletePermanentlyAndWait(input: {
     boxId: string;
     operationId?: string;
@@ -438,6 +497,29 @@ export function companionGenerationBoxName(input: {
 }): string {
   const identity = assertGenerationIdentity(input);
   return `Companion ${identity.companionId} g${identity.generation}`;
+}
+
+function namedSnapshotFromParsed(snapshot: z.infer<typeof namedSnapshotSchema>): BoxNamedSnapshot {
+  return {
+    name: snapshot.name,
+    status: snapshot.status,
+    sourceBoxId: snapshot.sourceBoxId,
+    createdAt: snapshot.createdAt,
+    ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
+    ...(snapshot.snapshotId === undefined ? {} : { snapshotId: snapshot.snapshotId }),
+  };
+}
+
+function parseNamedSnapshot(body: unknown, expectedName: string): BoxNamedSnapshot {
+  const parsed = namedSnapshotEnvelopeSchema.safeParse(body);
+  if (parsed.success && parsed.data.snapshot?.name === expectedName) {
+    return namedSnapshotFromParsed(parsed.data.snapshot);
+  }
+  throw invalidProviderResponse(providerEnvelopeDetail({
+    summary: "Box API returned an invalid named snapshot",
+    body,
+    ...(parsed.success ? {} : { issues: parsed.error.issues }),
+  }));
 }
 
 function selectGenerationBoxes(
@@ -764,6 +846,7 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
           ...(input.setupScript === undefined ? {} : { setupScript: input.setupScript }),
           ...(input.environment === undefined ? {} : { environment: input.environment }),
           ...(input.env === undefined ? {} : { env: input.env }),
+          ...(input.from === undefined ? {} : { from: input.from }),
         }),
       },
       input,
@@ -837,6 +920,110 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
       }), true);
     }
     return { boxId, name, ttlSeconds };
+  }
+
+  async createEphemeralBox(input: BoxEphemeralCreateInput): Promise<{ boxId: string }> {
+    const ttlSeconds = Math.min(assertBoxTtlSeconds(input.ttlSeconds), BOX_UNASSIGNED_CREATE_TTL_SECONDS);
+    const response = await this.#request(
+      "/boxes",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          ttlSeconds,
+          noEnv: input.noEnv !== false,
+          ...(input.from === undefined ? {} : { from: input.from }),
+        }),
+      },
+      input,
+      true,
+    );
+    if (response.status !== 202) {
+      throw invalidProviderResponse(providerEnvelopeDetail({
+        summary: "Box API returned an unexpected create status",
+        status: response.status,
+        body: response.body,
+      }), true);
+    }
+    const parsed = boxCreateEnvelopeSchema.safeParse(response.body);
+    if (!parsed.success) {
+      throw invalidProviderResponse(providerEnvelopeDetail({
+        summary: "Box API returned an invalid Box create response",
+        status: response.status,
+        body: response.body,
+        issues: parsed.error.issues,
+      }), true);
+    }
+    return { boxId: parsed.data.box.id };
+  }
+
+  async getNamedSnapshot(input: {
+    name: string;
+  } & BoxCallControl): Promise<BoxNamedSnapshot | null> {
+    const name = namedSnapshotNameSchema.parse(input.name);
+    try {
+      const response = await this.#request(
+        `/named-snapshots/${encodeURIComponent(name)}`,
+        undefined,
+        input,
+      );
+      return parseNamedSnapshot(response.body, name);
+    } catch (error) {
+      if (error instanceof BoxRuntimeAdapterError && error.stableCode === "box_not_found") {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  async listNamedSnapshots(input: BoxCallControl = {}): Promise<BoxNamedSnapshot[]> {
+    const response = await this.#request("/named-snapshots", undefined, input);
+    if (response.status !== 200) {
+      throw invalidProviderResponse("Box API returned an unexpected named snapshot list status");
+    }
+    const parsed = namedSnapshotListEnvelopeSchema.safeParse(response.body);
+    if (!parsed.success) {
+      throw invalidProviderResponse("Box API returned an invalid named snapshot list");
+    }
+    return parsed.data.snapshots.map((snapshot) => namedSnapshotFromParsed(snapshot));
+  }
+
+  async saveNamedSnapshot(input: {
+    boxId: string;
+    name: string;
+  } & BoxCallControl): Promise<BoxNamedSnapshot> {
+    const boxId = assertBoxId(input.boxId);
+    const name = namedSnapshotNameSchema.parse(input.name);
+    const response = await this.#request(
+      "/named-snapshots",
+      {
+        method: "POST",
+        body: JSON.stringify({ boxId, name }),
+      },
+      input,
+      true,
+    );
+    if (response.status !== 202 && response.status !== 200) {
+      throw invalidProviderResponse(providerEnvelopeDetail({
+        summary: "Box API returned an unexpected named snapshot save status",
+        status: response.status,
+        body: response.body,
+      }), true);
+    }
+    return parseNamedSnapshot(response.body, name);
+  }
+
+  async deleteNamedSnapshot(input: { name: string } & BoxCallControl): Promise<void> {
+    const name = namedSnapshotNameSchema.parse(input.name);
+    try {
+      await this.#request(
+        `/named-snapshots/${encodeURIComponent(name)}`,
+        { method: "DELETE" },
+        input,
+      );
+    } catch (error) {
+      if (error instanceof BoxRuntimeAdapterError && error.stableCode === "box_not_found") return;
+      throw error;
+    }
   }
 
   /** Request permanent deletion and follow its retained provider operation to a terminal result. */

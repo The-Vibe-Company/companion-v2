@@ -111,6 +111,17 @@ describe("production runtime composition", () => {
     }));
     const createBoxRuntime = vi.fn(() => ({
       existingBoxStatus,
+      layoutIdentity: () => ({
+        layoutVersion: 14,
+        packages: [],
+        qmdPackage: "@tobilu/qmd@2.8.3",
+        minimumPiVersion: "0.84.2",
+        overlayRevision: 1,
+        overlayMarker: "overlay",
+        baseMarker: "14:base",
+        fullMarker: "14:base:overlay=overlay",
+        imageName: "companion-l14-aaaaaaaaaaaa",
+      }),
     } as unknown as CompanionBoxRuntimeV2));
     const storageClose = vi.fn();
     const factories = {
@@ -122,7 +133,14 @@ describe("production runtime composition", () => {
       createStore: () => store,
       createLifecycle: (env) => {
         boxEnv = env;
-        return {} as BoxRuntimeLifecycleClient;
+        return {
+          getNamedSnapshot: async () => ({
+            name: "companion-l14-aaaaaaaaaaaa",
+            status: "ready" as const,
+            sourceBoxId: "bx_23456789",
+            createdAt: "2026-08-19T00:00:00.000Z",
+          }),
+        } as unknown as BoxRuntimeLifecycleClient;
       },
       createBoxRuntime,
       createArchiveStorage: () => ({
@@ -182,7 +200,7 @@ describe("production runtime composition", () => {
     const control = (kernelInput as CreateRuntimeKernelInput).box;
     await control.getStatus({ boxId: "bx_23456789", signal: new AbortController().signal });
     await control.getStatus({ boxId: "bx_23456789", signal: new AbortController().signal });
-    expect(createBoxRuntime).toHaveBeenCalledTimes(2);
+    expect(createBoxRuntime).toHaveBeenCalledTimes(3);
 
     await service.application.stop();
     expect(storageClose).toHaveBeenCalledOnce();

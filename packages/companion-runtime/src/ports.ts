@@ -163,6 +163,22 @@ export interface RuntimeResourceStager {
     appliedSettingsRevision: bigint;
     appliedSkillsRevision: number | null;
   }>;
+  /**
+   * Apply the current Pi layout to a Box that is already running. Overlay-only changes rewrite the
+   * broker without reinstalling packages. The caller restarts Pi when `applied` is not `none`.
+   */
+  refreshLayout(input: {
+    boxId: string;
+    signal: AbortSignal;
+  }): Promise<{ applied: "none" | "overlay" | "base" }>;
+  /**
+   * Drop the overlay suffix from the on-disk marker so the next refresh is not a no-op. Used when
+   * files were rewritten but Pi could not be recycled.
+   */
+  invalidateLayout(input: {
+    boxId: string;
+    signal: AbortSignal;
+  }): Promise<void>;
 }
 
 /** Where one attachment landed on the Box, as the prompt suffix will name it to Pi. */

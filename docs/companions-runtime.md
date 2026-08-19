@@ -272,17 +272,27 @@ member happens to be talking to. Only the MCP adapter pin stays overridable, bec
 
 Like the outbox, the package set rides within layout 14 rather than claiming a version, because the
 layout version gates the attempt state machine. Every pin is part of the layout marker string
-instead, and that marker is the whole update system for Boxes that already exist: a Box whose marker
-does not match relayouts at the start of its next staging, which is the next time a member sends it
-a message. Nothing is restaged proactively, and a Box whose marker matches exits the layout script
-in milliseconds.
+instead. That marker is split into two layers:
 
-The one wake that relayouts installs the whole pinned set, so it is the one wake that can outlive a
-turn's three-minute cold-start deadline and fail that turn with a retryable error. The layout
-command is given five minutes rather than three on purpose: the marker is written only after the
-install finishes, so a budget that stops the install short of the marker is a Box that repeats the
-same work on every retry and can never record it. Letting the install finish makes that cost
-one-time — the member's next message short-circuits on the marker.
+- **base** — Pi and npm pins. Slow to install; baked into a named ascii.dev snapshot
+  (`companion-l14-<hash>`).
+- **overlay** — broker source, permission extension, and daemon unit. Cheap to rewrite in place.
+
+Runtime bakes the current full marker into a throwaway baker Box (never a tenant Companion), then
+creates new generation Boxes with `from` that snapshot so the first send skips the five-minute
+package install. The baker Box is created with the five-minute unnamed-orphan TTL, then patched to
+thirty minutes so layout and snapshot can finish; a failed or in-flight bake is retried until the
+named snapshot is ready. While that bake is in flight, new generation Boxes clone the previous
+ready companion snapshot when one exists, then overlay on first staging. If the snapshot is missing,
+create falls back to an empty Box and installs in place. Running Companions keep their disk: health (every 30 seconds while idle) and the next warm
+send apply overlay or base in place and recycle **Pi only**. If that recycle fails, runtime writes
+the package-base marker so the next health or send retries the overlay instead of treating the disk
+as current. Full Box restart remains an explicit Owner/Editor action.
+
+A Box whose full marker already matches exits the layout script in milliseconds. The same-base
+overlay path rewrites the broker without `pi install`. Only a pin change reruns the package set,
+and that command still has five minutes so a budget that stops short of the marker cannot loop.
+The member's next message short-circuits on the marker.
 
 Runtime commits each supported event projection and its monotonic cursor in one PostgreSQL
 transaction. A supported `agent_settled` or Pi process-exit observation records the terminal

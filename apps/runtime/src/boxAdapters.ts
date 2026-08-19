@@ -1,5 +1,6 @@
 import {
   observedBoxStateFromProvider,
+  BoxRuntimeAdapterError,
   type BoxRuntimeLifecycleClient,
   type CompanionBoxRuntimeV2,
   type BoxState,
@@ -14,6 +15,8 @@ export interface RuntimeBoxAdapterOptions {
   lifecycle: BoxRuntimeLifecycleClient;
   /** Fresh adapter per port call prevents one staging call's signal budget leaking into another. */
   runtime(): CompanionBoxRuntimeV2;
+  /** Named snapshot to clone when the baker has a ready layout image. */
+  runtimeImageName?: () => string | null;
   /** Each provider operation gets a bound even when delete/health work has no turn deadline. */
   providerDeadlineMs?: number;
   now?: () => number;
@@ -32,16 +35,27 @@ export function createRuntimeBoxControl(options: RuntimeBoxAdapterOptions): Runt
       return normalizeDiscovery(result);
     },
     async createGenerationBox(input) {
-      const result = await options.lifecycle.createOrRecoverGenerationBox({
+      const from = options.runtimeImageName?.() ?? undefined;
+      const create = (image?: string) => options.lifecycle.createOrRecoverGenerationBox({
         companionId: input.companionId,
         generation: generationNumber(input.generation),
         ttlSeconds: input.ttlSeconds,
         deadlineAt: deadline(input.deadlineAt),
         signal: input.signal,
+        ...(image ? { from: image } : {}),
       });
-      return result.outcome === "created"
-        ? result
-        : { ...normalizeDiscovery(result), outcome: "recovered", boxId: result.boxId };
+      try {
+        const result = await create(from);
+        return result.outcome === "created"
+          ? result
+          : { ...normalizeDiscovery(result), outcome: "recovered", boxId: result.boxId };
+      } catch (error) {
+        if (!from || !isUnknownSnapshot(error)) throw error;
+        const result = await create();
+        return result.outcome === "created"
+          ? result
+          : { ...normalizeDiscovery(result), outcome: "recovered", boxId: result.boxId };
+      }
     },
     async applyGenerationBoxSettings(input) {
       await options.lifecycle.applyGenerationBoxSettings({
@@ -199,6 +213,11 @@ function cursorNumber(value: bigint): number {
     throw new TypeError("Pi broker cursor is outside the safe integer range");
   }
   return number;
+}
+
+function isUnknownSnapshot(error: unknown): boolean {
+  if (!(error instanceof BoxRuntimeAdapterError)) return false;
+  return error.providerCode === "unknown_snapshot" || error.stableCode === "box_not_found";
 }
 
 const DEFAULT_PROVIDER_DEADLINE_MS = 30_000;

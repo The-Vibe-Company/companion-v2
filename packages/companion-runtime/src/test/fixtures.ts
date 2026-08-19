@@ -666,6 +666,8 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
       appliedSettingsRevision: input.targetSettingsRevision,
       appliedSkillsRevision: input.targetSkillsRevision,
     }),
+    refreshLayout: async () => ({ applied: "none" }),
+    invalidateLayout: async () => undefined,
   };
   const eventProjector: RuntimeEventProjector = {
     projectEventBatch: async (input) => {

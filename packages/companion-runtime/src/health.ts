@@ -1,8 +1,10 @@
 import { RuntimeInvariantError } from "./errors";
+import { mustAbandonRuntimeExecution } from "./executionControl";
 import { runtimeSucceeded, type RuntimeWorkDisposition } from "./handler";
 import type { LeaseSession } from "./leaseSession";
 import type { RuntimeEngineDependencies } from "./ports";
 import { retryIdempotentLifecycle } from "./retry";
+import { refreshWarmCompanionLayout } from "./layoutRefresh";
 import type { RuntimeScheduler, RuntimeSchedulerSnapshot } from "./scheduler";
 import type { RuntimeStore } from "./store";
 import type { RuntimeClock } from "./clock";
@@ -79,13 +81,50 @@ export async function handleHealth(
       piObservation = { piState: "absent" };
     }
   }
+  if (
+    (boxState === "ready" || boxState === "idle" || boxState === "running")
+    && piObservation.piState === "idle"
+  ) {
+    try {
+      const refreshed = await refreshWarmCompanionLayout({
+        session: context.session,
+        deps: context.deps,
+        authorization: requiredAuthorization(context),
+        restartPi: true,
+      });
+      if (refreshed.restartedPi && refreshed.piInvocationId) {
+        piObservation = { piState: "idle", piInvocationId: refreshed.piInvocationId };
+      }
+    } catch (error) {
+      if (mustAbandonRuntimeExecution(error)) throw error;
+      // Layout refresh is opportunistic on health. The next send retries it on the warm path.
+    }
+  }
+  await observeHealth(context, { boxState, ...piObservation });
+  return runtimeSucceeded;
+}
+
+function requiredAuthorization(context: HealthContext) {
+  const authorization = context.session.authorization;
+  if (!authorization?.authorized) {
+    throw new RuntimeInvariantError({
+      code: "runtime_authorization_missing",
+      message: "Runtime authorization was unavailable at an execution checkpoint.",
+      action: "none",
+    });
+  }
+  return authorization;
+}
+
+async function observeHealth(
+  context: HealthContext,
+  observation: Omit<Parameters<LeaseSession["observe"]>[0], "runtimeGeneration" | "observedAt">,
+): Promise<void> {
   await context.session.observe({
     runtimeGeneration: context.claim.runtimeGeneration,
-    boxState,
-    ...piObservation,
     observedAt: context.deps.clock.now(),
+    ...observation,
   });
-  return runtimeSucceeded;
 }
 
 export interface RuntimeHealthSnapshot {

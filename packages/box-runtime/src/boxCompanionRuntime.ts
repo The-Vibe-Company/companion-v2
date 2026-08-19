@@ -31,6 +31,13 @@ import {
   type CompanionPiBrokerCounters,
   type CompanionPiJournalRecord,
 } from "./companionPiBroker";
+import {
+  COMPANION_PI_LAYOUT_REFRESH_LABEL,
+  companionPiLayoutIdentity,
+  parseCompanionPiLayoutRefresh,
+  type CompanionPiLayoutIdentity,
+  type CompanionPiLayoutRefresh,
+} from "./companionRuntimeImage";
 
 /** Credential-free snapshot Pi reads before proposing settings. Omitted on native_mobile. */
 export type CompanionConfigCatalog = {
@@ -509,6 +516,22 @@ export interface CompanionBoxRuntimeV2 {
     signal?: AbortSignal;
   }): Promise<{ boxId: string; state: BoxState }>;
   /**
+   * Install or repair layout 14 on a Box that is already running. Overlay-only refreshes rewrite
+   * the broker and unit without reinstalling packages, so a warm Companion can pick up a runtime
+   * deploy without a Full Box restart.
+   */
+  refreshPiLayout(input: { boxId: string; signal?: AbortSignal }): Promise<{
+    boxId: string;
+    applied: CompanionPiLayoutRefresh;
+  }>;
+  /**
+   * Rewrite the layout marker to the package base only. The next refresh reapplies overlay instead
+   * of short-circuiting after a failed Pi recycle.
+   */
+  invalidatePiLayoutOverlay(input: { boxId: string; signal?: AbortSignal }): Promise<void>;
+  /** Current package/overlay identity used to name and reuse the golden Box snapshot. */
+  layoutIdentity(): CompanionPiLayoutIdentity;
+  /**
    * Install layout 14 and concrete, already-authorized resources on one runnable Box. It never
    * creates/resumes a Box and never starts Pi; apps/runtime owns decryption and material loading.
    */
@@ -927,6 +950,12 @@ function setupScript(
 ): string {
   const configuredInstall = installCommand?.trim();
   const encodedBrokerSource = Buffer.from(COMPANION_PI_BROKER_SOURCE, "utf8").toString("base64");
+  const layoutIdentity = companionPiLayoutIdentity({
+    layoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
+    packages: piPackages,
+    qmdPackage,
+    minimumPiVersion: MINIMUM_IMAGE_SAFE_PI_VERSION,
+  });
   const encodedInstallScript = configuredInstall
     ? Buffer.from(`#!/usr/bin/env bash
 set -euo pipefail
@@ -975,84 +1004,27 @@ fi`;
   return `#!/usr/bin/env bash
 set -euo pipefail
 # An already-laid-out disk short-circuits before anything else, so repairing the layout on a Box that
-# is already correct costs one file read and cannot fail on a dependency it does not need.
+# is already correct costs one file read and cannot fail on a dependency it does not need. Overlay is
+# split from the package base so a running Companion can take a broker/unit update without npm.
 layout_marker="$HOME/.companion/runtime/state/pi-layout.version"
-expected_layout=${shellQuote(
-    `${COMPANION_PI_DISK_LAYOUT_VERSION}:${piPackages.join(",")}`
-    + `:qmd=${qmdPackage}`
-    + `:pi>=${MINIMUM_IMAGE_SAFE_PI_VERSION}`,
-  )}
-if [ -f "$layout_marker" ] \
-  && [ "$(cat "$layout_marker")" = "$expected_layout" ] \
-  && [ -x "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}" ] \
-  && [ -x "$HOME/.companion/bin/pi-daemon" ] \
-  && [ -f "$HOME/.config/systemd/user/companion-pi-daemon.service" ]; then
-  exit 0
-fi
-${ensureInstalled}
-command -v pi >/dev/null 2>&1
-command -v node >/dev/null 2>&1
-mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/pi/extensions" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/.companion/tools" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}" "$HOME/.config/systemd/user"
-chmod 700 "$HOME/.companion/runtime" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}"
-# Resolve Pi's absolute path now so the daemon does not depend on a login-shell PATH it will never
-# have under the minimal systemd user manager environment.
-pi_bin="$(command -v pi)"
-node_bin="$(command -v node)"
-pi_version="$($pi_bin --version 2>/dev/null || true)"
-"$node_bin" - "$pi_version" ${shellQuote(MINIMUM_IMAGE_SAFE_PI_VERSION)} <<'COMPANION_PI_VERSION'
-const actualText = process.argv[2] ?? "";
-const minimumText = process.argv[3] ?? "";
-const parse = (value) => {
-  const match = value.match(/(\\d+)\\.(\\d+)\\.(\\d+)/);
-  return match ? match.slice(1).map(Number) : null;
-};
-const actual = parse(actualText);
-const minimum = parse(minimumText);
-const currentEnough = actual && minimum && (
-  actual.every((part, index) => part === minimum[index])
-  || actual.some((part, index) =>
-    part > minimum[index]
-    && actual.slice(0, index).every((prior, priorIndex) => prior === minimum[priorIndex]))
-);
-if (!currentEnough) {
-  console.error(
-    \`Pi \${minimumText} or newer is required for bounded image reads; found \${actualText || "an unknown version"}\`,
-  );
-  process.exit(1);
-}
-COMPANION_PI_VERSION
-pi_bin_dir="$(dirname "$pi_bin")"
-${piPackages
-    .map((spec) => `PI_CODING_AGENT_DIR="$HOME/.companion/pi" "$pi_bin" install ${shellQuote(spec)}`)
-    .join("\n")}
-# Semantic memory search is an optimization: pi-memory recalls without it, so a Box that cannot
-# install it is still a working Box. Nothing in this block may end a staging, which is why it runs
-# outside errexit and why the reported line is a fixed shape rather than npm's own words: the
-# control plane falls back to the last stdout line when a later step fails without stderr, and a
-# registry's output is not something to persist there. The full log stays on the Box for an operator.
-# The marker below is written either way: a Box that missed this keeps plain recall until a pin
-# changes, which is cheaper than re-running the whole layout on every wake to retry an optimization.
-qmd_log="$HOME/.companion/runtime/logs/qmd-install.log"
-set +e
-npm install --global --prefix "$HOME/.companion/tools" ${shellQuote(qmdPackage)} >"$qmd_log" 2>&1
-qmd_status=$?
-set -e
-if [ "$qmd_status" -ne 0 ]; then
-  printf 'Memory search binary %s did not install (exit %s); see runtime/logs/qmd-install.log\\n' ${shellQuote(qmdPackage)} "$qmd_status"
-fi
-# The broker is an autonomous ESM program. Encoding it keeps arbitrary JavaScript out of the shell
-# grammar while preserving one identical setup script for Box create and in-place layout repair.
-printf '%s' ${shellQuote(encodedBrokerSource)} | base64 --decode > "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
-chmod 700 "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
-{
-  printf '%s\n' '#!/usr/bin/env bash'
-  printf '%s\n' 'set -euo pipefail'
-  printf 'PI_BIN=%q\n' "$pi_bin"
-  printf 'NODE_BIN=%q\n' "$node_bin"
-  printf 'MINIMUM_IMAGE_SAFE_PI_VERSION=%q\n' ${shellQuote(MINIMUM_IMAGE_SAFE_PI_VERSION)}
-  printf 'PATH=%q:"$PATH"\n' "$pi_bin_dir"
-  printf '%s\n' 'export PATH'
-  cat <<'COMPANION_PI_DAEMON'
+base_layout=${shellQuote(layoutIdentity.baseMarker)}
+expected_layout=${shellQuote(layoutIdentity.fullMarker)}
+companion_layout_apply_overlay() {
+  mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/pi/extensions" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/.companion/tools" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}" "$HOME/.config/systemd/user"
+  chmod 700 "$HOME/.companion/runtime" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}"
+  # The broker is an autonomous ESM program. Encoding it keeps arbitrary JavaScript out of the shell
+  # grammar while preserving one identical setup script for Box create and in-place layout repair.
+  printf '%s' ${shellQuote(encodedBrokerSource)} | base64 --decode > "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
+  chmod 700 "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -euo pipefail'
+    printf 'PI_BIN=%q\n' "$pi_bin"
+    printf 'NODE_BIN=%q\n' "$node_bin"
+    printf 'MINIMUM_IMAGE_SAFE_PI_VERSION=%q\n' ${shellQuote(MINIMUM_IMAGE_SAFE_PI_VERSION)}
+    printf 'PATH=%q:"$PATH"\n' "$pi_bin_dir"
+    printf '%s\n' 'export PATH'
+    cat <<'COMPANION_PI_DAEMON'
 root="$HOME/.companion/runtime"
 stderr_log="$root/logs/pi.stderr.log"
 mkdir -p "$root/sessions" "$root/state" "$root/logs" "$root/memory"
@@ -1119,10 +1091,10 @@ export COMPANION_PI_JOURNAL_PATH="$broker_journal"
 printf 'pi-broker: starting invocation %s\\n' "$INVOCATION_ID" >&2
 exec "$NODE_BIN" "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
 COMPANION_PI_DAEMON
-} > "$HOME/.companion/bin/pi-daemon"
-chmod 700 "$HOME/.companion/bin/pi-daemon"
-{
-  cat <<'COMPANION_PI_SERVICE_HEAD'
+  } > "$HOME/.companion/bin/pi-daemon"
+  chmod 700 "$HOME/.companion/bin/pi-daemon"
+  {
+    cat <<'COMPANION_PI_SERVICE_HEAD'
 [Unit]
 Description=Companion Pi broker
 After=network-online.target
@@ -1131,10 +1103,10 @@ After=network-online.target
 Type=simple
 UMask=0077
 COMPANION_PI_SERVICE_HEAD
-  # Pin the systemd user unit's PATH to the resolved Pi bin directory so the daemon starts without a
-  # login-shell PATH, matching the absolute path baked into the wrapper above.
-  printf 'Environment=PATH=%s:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n' "$pi_bin_dir"
-  cat <<'COMPANION_PI_SERVICE_TAIL'
+    # Pin the systemd user unit's PATH to the resolved Pi bin directory so the daemon starts without a
+    # login-shell PATH, matching the absolute path baked into the wrapper above.
+    printf 'Environment=PATH=%s:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n' "$pi_bin_dir"
+    cat <<'COMPANION_PI_SERVICE_TAIL'
 ExecStart=%h/.companion/bin/pi-daemon
 # The user runtime directory is tmpfs: credentials survive Pi's on-failure restart, but are neither
 # snapshotted with the Box disk nor left behind after the Box stops.
@@ -1146,11 +1118,87 @@ KillMode=control-group
 [Install]
 WantedBy=default.target
 COMPANION_PI_SERVICE_TAIL
-} > "$HOME/.config/systemd/user/companion-pi-daemon.service"
+  } > "$HOME/.config/systemd/user/companion-pi-daemon.service"
+}
+recorded="$(cat "$layout_marker" 2>/dev/null || true)"
+if [ -f "$layout_marker" ] \
+  && [ "$recorded" = "$expected_layout" ] \
+  && [ -x "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}" ] \
+  && [ -x "$HOME/.companion/bin/pi-daemon" ] \
+  && [ -f "$HOME/.config/systemd/user/companion-pi-daemon.service" ]; then
+  printf '%s\\n' ${shellQuote(COMPANION_PI_LAYOUT_REFRESH_LABEL.none)}
+  exit 0
+fi
+recorded_base="\${recorded%%:overlay=*}"
+if [ -n "$recorded" ] \
+  && [ "$recorded_base" = "$base_layout" ] \
+  && command -v pi >/dev/null 2>&1 \
+  && command -v node >/dev/null 2>&1; then
+  pi_bin="$(command -v pi)"
+  node_bin="$(command -v node)"
+  pi_bin_dir="$(dirname "$pi_bin")"
+  companion_layout_apply_overlay
+  printf '%s\\n' "$expected_layout" > "$layout_marker"
+  printf '%s\\n' ${shellQuote(COMPANION_PI_LAYOUT_REFRESH_LABEL.overlay)}
+  exit 0
+fi
+${ensureInstalled}
+command -v pi >/dev/null 2>&1
+command -v node >/dev/null 2>&1
+mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/pi/extensions" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/.companion/tools" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}" "$HOME/.config/systemd/user"
+chmod 700 "$HOME/.companion/runtime" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}"
+# Resolve Pi's absolute path now so the daemon does not depend on a login-shell PATH it will never
+# have under the minimal systemd user manager environment.
+pi_bin="$(command -v pi)"
+node_bin="$(command -v node)"
+pi_version="$($pi_bin --version 2>/dev/null || true)"
+"$node_bin" - "$pi_version" ${shellQuote(MINIMUM_IMAGE_SAFE_PI_VERSION)} <<'COMPANION_PI_VERSION'
+const actualText = process.argv[2] ?? "";
+const minimumText = process.argv[3] ?? "";
+const parse = (value) => {
+  const match = value.match(/(\\d+)\\.(\\d+)\\.(\\d+)/);
+  return match ? match.slice(1).map(Number) : null;
+};
+const actual = parse(actualText);
+const minimum = parse(minimumText);
+const currentEnough = actual && minimum && (
+  actual.every((part, index) => part === minimum[index])
+  || actual.some((part, index) =>
+    part > minimum[index]
+    && actual.slice(0, index).every((prior, priorIndex) => prior === minimum[priorIndex]))
+);
+if (!currentEnough) {
+  console.error(
+    \`Pi \${minimumText} or newer is required for bounded image reads; found \${actualText || "an unknown version"}\`,
+  );
+  process.exit(1);
+}
+COMPANION_PI_VERSION
+pi_bin_dir="$(dirname "$pi_bin")"
+${piPackages
+    .map((spec) => `PI_CODING_AGENT_DIR="$HOME/.companion/pi" "$pi_bin" install ${shellQuote(spec)}`)
+    .join("\n")}
+# Semantic memory search is an optimization: pi-memory recalls without it, so a Box that cannot
+# install it is still a working Box. Nothing in this block may end a staging, which is why it runs
+# outside errexit and why the reported line is a fixed shape rather than npm's own words: the
+# control plane falls back to the last stdout line when a later step fails without stderr, and a
+# registry's output is not something to persist there. The full log stays on the Box for an operator.
+# The marker below is written either way: a Box that missed this keeps plain recall until a pin
+# changes, which is cheaper than re-running the whole layout on every wake to retry an optimization.
+qmd_log="$HOME/.companion/runtime/logs/qmd-install.log"
+set +e
+npm install --global --prefix "$HOME/.companion/tools" ${shellQuote(qmdPackage)} >"$qmd_log" 2>&1
+qmd_status=$?
+set -e
+if [ "$qmd_status" -ne 0 ]; then
+  printf 'Memory search binary %s did not install (exit %s); see runtime/logs/qmd-install.log\\n' ${shellQuote(qmdPackage)} "$qmd_status"
+fi
+companion_layout_apply_overlay
 # A Box running its create setupScript has no user D-Bus session yet, so no user-manager command
 # belongs here: it would fail with "Failed to connect to bus" and mark the whole setup failed even
 # though Pi installed correctly. The unit is loaded by the post-ready control-plane command instead.
-printf '%s\n' "$expected_layout" > "$layout_marker"
+printf '%s\\n' "$expected_layout" > "$layout_marker"
+printf '%s\\n' ${shellQuote(COMPANION_PI_LAYOUT_REFRESH_LABEL.base)}
 `;
 }
 
@@ -1414,6 +1462,15 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     this.#installCommand = env.COMPANION_PI_INSTALL_COMMAND;
     this.#piPackages = resolvePiPackages(env);
     this.#qmdPackage = validPackageSpec(QMD_PACKAGE, "QMD_PACKAGE");
+  }
+
+  layoutIdentity() {
+    return companionPiLayoutIdentity({
+      layoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
+      packages: this.#piPackages,
+      qmdPackage: this.#qmdPackage,
+      minimumPiVersion: MINIMUM_IMAGE_SAFE_PI_VERSION,
+    });
   }
 
   /**
@@ -1830,7 +1887,8 @@ exit 0`,
    * the command transport intact. So this stages the script through the file API the same way the
    * create path gets it, and the command it does send is one short, quote-light line.
    */
-  async #ensurePiLayout(boxId: string): Promise<void> {
+  async #ensurePiLayout(boxId: string): Promise<CompanionPiLayoutRefresh> {
+    if (await this.#piLayoutAlreadyCurrent(boxId)) return "none";
     const prepared = await this.#command(boxId, 'mkdir -p "$HOME/.companion/bin"');
     if (!prepared.success) {
       throw new BoxRuntimeProviderError(
@@ -1856,6 +1914,79 @@ exit 0`,
         `Pi runtime layout failed to install${commandFailureDetail(result)}`,
         502,
       );
+    }
+    return parseCompanionPiLayoutRefresh(result.stdout);
+  }
+
+  async #piLayoutAlreadyCurrent(boxId: string): Promise<boolean> {
+    const expected = this.layoutIdentity().fullMarker;
+    try {
+      const probe = await this.#command(
+        boxId,
+        `recorded="$(cat "$HOME/.companion/runtime/state/pi-layout.version" 2>/dev/null || true)"
+if [ "$recorded" = ${shellQuote(expected)} ] \\
+  && [ -x "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}" ] \\
+  && [ -x "$HOME/.companion/bin/pi-daemon" ] \\
+  && [ -f "$HOME/.config/systemd/user/companion-pi-daemon.service" ]; then
+  printf '%s\\n' ${shellQuote(COMPANION_PI_LAYOUT_REFRESH_LABEL.none)}
+fi`,
+        15,
+      );
+      return probe.success && parseCompanionPiLayoutRefresh(probe.stdout) === "none";
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Apply the current layout to a Box that is already running. Overlay-only changes rewrite the
+   * broker and unit; a package-pin change still runs the full install. The caller restarts Pi when
+   * the result is not `none`.
+   */
+  async refreshPiLayout(input: {
+    boxId: string;
+    signal?: AbortSignal;
+  }): Promise<{ boxId: string; applied: CompanionPiLayoutRefresh }> {
+    this.#stagingSignal = input.signal;
+    try {
+      const applied = await this.#ensurePiLayout(input.boxId);
+      if (applied !== "none") {
+        try {
+          await this.#stageCompanionInteractionExtension(input.boxId);
+        } catch (error) {
+          const marker = this.layoutIdentity().baseMarker;
+          await this.#command(
+            input.boxId,
+            `printf '%s\\n' ${shellQuote(marker)} > "$HOME/.companion/runtime/state/pi-layout.version"`,
+          ).catch(() => undefined);
+          throw error;
+        }
+      }
+      return { boxId: input.boxId, applied };
+    } finally {
+      this.#stagingSignal = undefined;
+    }
+  }
+
+  async invalidatePiLayoutOverlay(input: {
+    boxId: string;
+    signal?: AbortSignal;
+  }): Promise<void> {
+    this.#stagingSignal = input.signal;
+    try {
+      const marker = this.layoutIdentity().baseMarker;
+      const result = await this.#command(
+        input.boxId,
+        `printf '%s\\n' ${shellQuote(marker)} > "$HOME/.companion/runtime/state/pi-layout.version"`,
+      );
+      if (!result.success) {
+        throw new BoxRuntimeProviderError(
+          `Pi layout marker could not be invalidated${commandFailureDetail(result)}`,
+          502,
+        );
+      }
+    } finally {
+      this.#stagingSignal = undefined;
     }
   }
 
