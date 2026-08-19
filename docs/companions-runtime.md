@@ -243,6 +243,46 @@ bounded counters and stable codes, then skipped so the journal progresses. Raw e
 provider response bodies, stderr, tokens, auth JSON, and signed URLs are never stored in PostgreSQL
 or ordinary logs.
 
+**Subagent runs.** A tool run is projected as a card naming only its kind, and its arguments are
+never persisted — a shell command or a file path is the payload most likely to carry a credential.
+A delegated agent is the one exception, because a card that says only "a tool ran" tells a reader
+nothing about a run that can last minutes. A `subagent` start carries the child agent's name and its
+task; a `tool_execution_update` for that kind alone carries the latest progress; the settlement
+carries its status. All three are redacted with the turn's own redactor and bounded (300 characters
+of headline, 8 000 of task or progress), and all three settle the same card through the shared
+`call_id`. Empty title, empty content, and null detail are inherit sentinels the projection function
+reads as "keep what the row already holds", so progress never erases the headline and a settlement
+never erases the last progress. Classification remains stateless per event, so replaying a page
+still produces byte-identical projection digests. An update with no readable text stays activity.
+
+**Installed Pi packages.** Every Box installs the MCP adapter plus a pinned set: `pi-web-access`
+(search and fetch, zero-config), `pi-subagents` (delegation through a `subagent` tool), and
+`pi-memory` (memory that survives a Box wake, kept on the persistent disk at
+`~/.companion/runtime/memory` and exported as `PI_MEMORY_DIR`). pi-memory's semantic-search binary,
+`qmd`, installs best-effort under `~/.companion/tools`: memory degrades to recall without it, so a
+failed install reports on stdout and never fails a staging. Best-effort also means recorded once —
+the marker is written whether or not that install succeeded, so a Box that missed it keeps plain
+recall until a pin changes, rather than paying for the whole layout again on every wake.
+
+None of that set is configurable. The pins live in `packages/box-runtime` and no environment variable
+can drop one: what a Companion can do is a product decision, and a deployment able to remove web
+access, delegation, or memory would be one where a Companion's abilities depend on which install its
+member happens to be talking to. Only the MCP adapter pin stays overridable, because it already was.
+
+Like the outbox, the package set rides within layout 14 rather than claiming a version, because the
+layout version gates the attempt state machine. Every pin is part of the layout marker string
+instead, and that marker is the whole update system for Boxes that already exist: a Box whose marker
+does not match relayouts at the start of its next staging, which is the next time a member sends it
+a message. Nothing is restaged proactively, and a Box whose marker matches exits the layout script
+in milliseconds.
+
+The one wake that relayouts installs the whole pinned set, so it is the one wake that can outlive a
+turn's three-minute cold-start deadline and fail that turn with a retryable error. The layout
+command is given five minutes rather than three on purpose: the marker is written only after the
+install finishes, so a budget that stops the install short of the marker is a Box that repeats the
+same work on every retry and can never record it. Letting the install finish makes that cost
+one-time — the member's next message short-circuits on the marker.
+
 Runtime commits each supported event projection and its monotonic cursor in one PostgreSQL
 transaction. A supported `agent_settled` or Pi process-exit observation records the terminal
 checkpoint in that same commit. Only then may runtime acknowledge the cursor to the broker. After a
@@ -413,7 +453,10 @@ never while consuming an accepted attempt or decision.
 The projection boundary receives an in-memory dictionary built from every string leaf of those
 validated, decrypted credentials. Assistant text and decision copy are scrubbed against those exact
 values plus bounded generic credential patterns. Tool activity is deliberately metadata-only: it
-stores a safe kind/name/title and an opaque hashed call id, never tool arguments or results. A
+stores a safe kind/name/title and an opaque hashed call id, never tool arguments or results, with
+one exception — a delegated `subagent` run, whose child-agent name, task, and latest progress are
+redacted against the same dictionary and bounded before they are stored, because a card that says
+only "a tool ran" tells a reader nothing about a run that can last minutes. A
 complete Authorization or Cookie header value is removed before narrower generic matchers run. A
 decision request key that would require redaction fails closed and interrupts the turn. A config
 proposal message is fail-closed the same way: if redaction would change the JSON, the event is
@@ -522,6 +565,10 @@ Production cutover, kill-switch, purge, incident, rollback, and canary procedure
 `docs/runbooks/companions-runtime.md`.
 
 ## Explicit exclusions
+
+A `subagent` is not an exception to any of this. It is a child agent inside the one Pi harness on
+the Companion's own Box, with no Box, thread, ACL, or identity of its own; the exclusions below
+remain in force for Companion-to-Companion handoff and group Bot chat.
 
 Runtime v2 adds no generic Projects/skill runs, multi-Bot team or handoff, group Bot chat, routine,
 schedule, proactive task, voice, file library, file versioning, artifact surface outside a thread,

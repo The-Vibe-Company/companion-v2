@@ -314,10 +314,19 @@ export const setCompanionWorkspaceShareInputSchema = z.object({
 
 /**
  * What one tool run touched, so a chip can name it in a word and pick its icon. `computer` is the
- * Box desktop Lux drives; `tool` is the honest fallback for a name this catalog does not recognize,
- * because a chip that guesses wrong is worse than one that only says a run happened.
+ * Box desktop Lux drives; `subagent` is a child agent the Companion delegated a piece of its work
+ * to, which is the one kind a reader wants named rather than counted; `tool` is the honest fallback
+ * for a name this catalog does not recognize, because a chip that guesses wrong is worse than one
+ * that only says a run happened.
  */
-export const companionToolRunKindSchema = z.enum(["shell", "file", "browse", "computer", "tool"]);
+export const companionToolRunKindSchema = z.enum([
+  "shell",
+  "file",
+  "browse",
+  "computer",
+  "subagent",
+  "tool",
+]);
 export type CompanionToolRunKind = z.infer<typeof companionToolRunKindSchema>;
 
 /** A run is `running` until Pi reports its result; the chip spins until then. */
@@ -332,9 +341,10 @@ export type CompanionToolRunStatus = z.infer<typeof companionToolRunStatusSchema
 export const COMPANION_TOOL_RUN_TIMEOUT_MS = 90_000;
 
 /**
- * Shell runs get their own ceiling: a legitimate build, install, or test sweep routinely outlives
- * the 90-second default, and killing it mid-flight loses real work. Both the staged Pi extension
- * and the control-plane settlement classify by the run's `kind`, so the two deadlines agree.
+ * Shell runs and delegated subagent runs get their own ceiling: a legitimate build, install, or test
+ * sweep routinely outlives the 90-second default, a child agent working through a task of its own
+ * always does, and killing either mid-flight loses real work. Both the staged Pi extension and the
+ * control-plane settlement classify by the run's `kind`, so the two deadlines agree.
  */
 export const COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS = 600_000;
 
@@ -359,7 +369,13 @@ const COMPANION_TOOL_RUN_SCREENSHOT_PATTERN = /^data:image\/(?:png|jpeg|webp);ba
 export const companionToolRunSchema = z.object({
   /** Pi's own id for the call, so the result that closes it finds the chip it belongs to. */
   call_id: z.string().min(1).max(200).nullable(),
-  kind: companionToolRunKindSchema,
+  /**
+   * A stored kind this build has never heard of reads as the generic one rather than failing.
+   * The whole transcript is parsed as one array, so a strict enum would turn a single card written
+   * by a newer runtime — during a rolling deploy, or after an API-only rollback — into a thread
+   * nobody can open at all. Widening the catalog must never be able to do that.
+   */
+  kind: companionToolRunKindSchema.catch("tool"),
   /** Pi's tool name, verbatim, so an unrecognized tool still reports what actually ran. */
   name: z.string().min(1).max(120),
   /** One line naming what the run did: the command, the path, the URL. */

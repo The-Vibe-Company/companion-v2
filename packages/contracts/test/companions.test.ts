@@ -32,6 +32,7 @@ import {
   updateCompanionMemberStateInputSchema,
 } from "../src/companions";
 import { restartCompanionRuntimeInputSchema } from "../src/companionRuntime";
+import { companionToolRunKind } from "../src/companionToolKinds";
 
 describe("Companion provider contracts", () => {
   it("keeps API keys write-only and removes browser-submitted subscription credentials", () => {
@@ -618,6 +619,28 @@ describe("Companion chat contracts", () => {
     expect(() => frame(`data:image/jpeg;base64,${"A".repeat(
       COMPANION_TOOL_RUN_SCREENSHOT_MAX_CHARACTERS,
     )}`)).toThrow();
+  });
+
+  it("names a delegated run, whatever Pi calls the tool that launched it", () => {
+    expect(companionToolRunSchema.parse({
+      call_id: null,
+      kind: "subagent",
+      name: "subagent",
+      title: "researcher: read the changelog",
+      status: "running",
+      detail: "read the changelog",
+      screenshot: null,
+    }).kind).toBe("subagent");
+
+    for (const name of ["subagent", "run_subagent", "Subagents", "spawn-subagent"]) {
+      expect(companionToolRunKind(name)).toBe("subagent");
+    }
+    // The catalog it sits in front of still classifies everything it classified before.
+    expect(companionToolRunKind("bash")).toBe("shell");
+    expect(companionToolRunKind("run_command")).toBe("shell");
+    expect(companionToolRunKind("read_file")).toBe("file");
+    expect(companionToolRunKind("web_search")).toBe("browse");
+    expect(companionToolRunKind("stargazer")).toBe("tool");
   });
 });
 

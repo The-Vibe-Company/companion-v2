@@ -22,7 +22,7 @@ packages/skills            package parsing, validation, versioning
 packages/skilldb           hosted SQLite execution for declared Skill Databases
 packages/storage           archives, releases, images, logos, database objects
 packages/github            GitHub App and deterministic repository writer
-packages/box-runtime       ascii.dev adapter and layout-14 Pi broker installer
+packages/box-runtime       ascii.dev adapter, layout-14 Pi broker, and default Pi package pins
 packages/companion-runtime runtime state machine and operation execution
 packages/companion-skill   bundled delegated Skills Hub workflow
 ```
@@ -218,7 +218,9 @@ separate fenced metadata-only function, then ACKed and settled without credentia
 refresh compare-and-swap is limited to pre-dispatch settings and operation staging. Projection
 redaction uses every string leaf of the validated plaintext material in memory plus generic
 credential patterns; tool projections retain metadata and an opaque hashed call id only, never
-arguments or results. Generic scrubbing removes complete Authorization and Cookie header values
+arguments or results, except a delegated `subagent` run, whose child-agent name, task, and latest
+progress are redacted against the same dictionary and bounded before they are stored. Generic
+scrubbing removes complete Authorization and Cookie header values
 before narrower token/assignment matchers run. Redacted or oversized decision identifiers are
 rejected fail-closed.
 
