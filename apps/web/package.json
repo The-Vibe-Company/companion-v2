@@ -9,7 +9,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "next typegen && tsc --noEmit",
-    "test": "vitest run",
+    "test": "TZ=UTC vitest run",
     "coverage": "vitest run --coverage --coverage.reporter=text-summary --coverage.reporter=json-summary"
   },
   "dependencies": {
@@ -19,6 +19,7 @@
     "@companion/core": "workspace:*",
     "@companion/skills": "workspace:*",
     "@posthog/react": "^1.10.3",
+    "@sentry/nextjs": "^10.70.0",
     "@trpc/client": "^10.45.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

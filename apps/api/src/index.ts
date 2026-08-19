@@ -1,4 +1,8 @@
 import { serve } from "@hono/node-server";
+import { initSentry, Sentry } from "./sentry";
+
+initSentry();
+
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -285,6 +289,11 @@ import {
 } from "@companion/core";
 
 const app = new Hono<{ Variables: ApiVariables }>();
+
+app.onError((err, c) => {
+  Sentry.captureException(err);
+  return jsonError(c, err, 500);
+});
 
 export { app };
 

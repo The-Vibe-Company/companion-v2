@@ -1,3 +1,7 @@
+import { initSentry, Sentry } from "./sentry";
+
+initSentry();
+
 import { closeDb } from "@companion/db";
 import { keepWorkerProcessAliveWhenIdle, startWorkerSupervisors } from "./supervisors";
 
@@ -28,7 +32,8 @@ async function main(): Promise<void> {
   });
 }
 
-main().catch(() => {
-  console.error("worker failed to start");
+main().catch((error: unknown) => {
+  Sentry.captureException(error);
+  console.error("worker failed to start", error);
   process.exitCode = 1;
 });

@@ -34,7 +34,7 @@
     "dev:check": "bash scripts/dev-stack-check.sh",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
-    "test": "turbo run test",
+    "test": "TZ=UTC turbo run test",
     "test:coverage": "turbo run coverage",
     "test:integration": "pnpm --filter @companion/api test:integration",
     "test:e2e": "node scripts/ci-playwright-policy.mjs && playwright test",
