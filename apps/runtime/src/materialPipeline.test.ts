@@ -12,7 +12,7 @@ import {
 } from "@companion/companion-runtime";
 import type { CompanionBoxRuntimeV2 } from "@companion/box-runtime";
 
-import { createRuntimeMaterialPipeline } from "./materialPipeline";
+import { companionHubApiUrl, createRuntimeMaterialPipeline } from "./materialPipeline";
 import { RuntimeMaterialError } from "./resourceMaterial";
 
 const orgId = "11111111-1111-4111-8111-111111111111";
@@ -99,6 +99,13 @@ const authorization = {
 } as unknown as RuntimeAuthorization;
 
 describe("runtime material provider and Box stager", () => {
+  it("normalizes the staged Skills Hub API base to /v1", () => {
+    expect(companionHubApiUrl("https://api.example.test")).toBe("https://api.example.test/v1");
+    expect(companionHubApiUrl("https://api.example.test/")).toBe("https://api.example.test/v1");
+    expect(companionHubApiUrl("https://api.example.test/v1")).toBe("https://api.example.test/v1");
+    expect(companionHubApiUrl("https://api.example.test/v1/")).toBe("https://api.example.test/v1");
+  });
+
   it("persists an OAuth refresh through fenced CAS before staging its plaintext", async () => {
     const material = workMaterial();
     const catalog = {
@@ -114,6 +121,7 @@ describe("runtime material provider and Box stager", () => {
     const store = {
       getMaterial: vi.fn(async () => material),
       getConfigCatalog: vi.fn(async () => catalog),
+      mintHubToken: vi.fn(async () => "cmp_pat_hubtokenfixture000000000000000000000000"),
       casMcpOauth,
     } as unknown as RuntimeStore;
     const stageExistingBox = vi.fn(async () => ({
@@ -148,6 +156,7 @@ describe("runtime material provider and Box stager", () => {
     }));
     expect(JSON.stringify(casMcpOauth.mock.calls[0]?.[1])).not.toContain("new-token");
     expect(store.getConfigCatalog).toHaveBeenCalled();
+    expect(store.mintHubToken).toHaveBeenCalled();
 
     await expect(pipeline.resourceStager.stageExistingBox({
       orgId,
@@ -174,8 +183,9 @@ describe("runtime material provider and Box stager", () => {
       mcpCredentials: [{ env_key: "LINEAR_AUTH", value: "Bearer new-token" }],
       skills: [expect.objectContaining({ slug: "companion" })],
       hubEnv: {
-        COMPANION_API_URL: "https://api.example.test",
+        COMPANION_API_URL: "https://api.example.test/v1",
         COMPANION_WORKSPACE_ID: orgId,
+        COMPANION_DELEGATION_TOKEN: "cmp_pat_hubtokenfixture000000000000000000000000",
       },
       configCatalog: catalog,
       signal: expect.any(AbortSignal),

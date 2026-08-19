@@ -729,6 +729,13 @@
       "when": 1788973600000,
       "tag": "0103_companion_hub_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1789060000000,
+      "tag": "0104_companion_mint_hub_token",
+      "breakpoints": true
     }
   ]
 }

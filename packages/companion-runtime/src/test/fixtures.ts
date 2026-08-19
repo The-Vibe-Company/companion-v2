@@ -433,6 +433,10 @@ export class MemoryRuntimeStore implements RuntimeStore {
     return this.material.configCatalog;
   }
 
+  async mintHubToken(): Promise<string | null> {
+    return null;
+  }
+
   async getAttemptTerminalProjection(): Promise<{
     checkpoint: "agent_settled" | "process_exited";
     eventCursor: bigint;

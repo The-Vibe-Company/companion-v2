@@ -519,6 +519,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           select count(*)::int from unnest(array[
             'public.companion_runtime_get_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
             'public.companion_runtime_get_config_catalog(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
+            'public.companion_runtime_mint_hub_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
             'public.companion_runtime_get_attempt_terminal_projection(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)',
             'public.companion_runtime_cas_mcp_oauth(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,uuid,uuid,uuid,text,text,text,text,text,text,text)',
             'public.companion_runtime_register_duplicate_cleanups(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text[])',
@@ -534,7 +535,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           ${runtimeRole}, 'public.companion_runtime_guard_duplicate_cleanup()', 'EXECUTE'
         ) as "helperCallable"
     `;
-    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 10, helperCallable: false });
+    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 11, helperCallable: false });
     await expect(asRuntime((tx) => tx`select * from companion_turn_attempts`))
       .rejects.toThrow(/permission denied/i);
 
@@ -2699,6 +2700,53 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     } finally {
       if (sql) await sql`delete from api_tokens where id = ${companionTokenId}::uuid`;
       if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("mints a claim-fenced hub token and rotates the previous one", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion();
+    try {
+      const claim = await claimWork();
+      const mint = () => asRuntime((tx) => tx<Array<{ token: string }>>`
+        select token
+        from public.companion_runtime_mint_hub_token(
+          ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+          ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+          ${claim.workKind}, ${claim.workId}::uuid, 30
+        )
+      `);
+      const [first] = await mint();
+      expect(first?.token).toMatch(/^cmp_pat_[0-9a-f]{48}$/);
+      const [second] = await mint();
+      expect(second?.token).toMatch(/^cmp_pat_[0-9a-f]{48}$/);
+      expect(second?.token).not.toEqual(first?.token);
+      const [counts] = await sql<Array<{ live: number; revoked: number }>>`
+        select
+          count(*) filter (where revoked_at is null)::int as live,
+          count(*) filter (where revoked_at is not null)::int as revoked
+        from api_tokens
+        where source_type = 'companion' and source_agent_id = ${fixture.companionId}
+      `;
+      expect(counts).toEqual({ live: 1, revoked: 1 });
+      expect(JSON.stringify(counts)).not.toContain("cmp_pat_");
+      // Access is unconditional, so the scope set is fixed — and never widens past reading secrets.
+      const [live] = await sql<Array<{ scopes: string[] }>>`
+        select scopes from api_tokens
+        where source_type = 'companion' and source_agent_id = ${fixture.companionId}
+          and revoked_at is null
+      `;
+      expect(live?.scopes).toEqual([
+        "skills:read",
+        "skills:write",
+        "secrets:read",
+        "database:read",
+        "database:write",
+      ]);
+      await release(claim);
+    } finally {
+      await sql`delete from api_tokens where source_agent_id = ${fixture.companionId}`;
+      await removeCompanion(fixture.companionId);
     }
   });
 

@@ -262,6 +262,17 @@ describe("PostgresRuntimeStore", () => {
     expect(JSON.stringify(result)).not.toMatch(/ciphertext|wrapped_dek|auth_tag/i);
   });
 
+  it("reads a claim-fenced ephemeral hub token once", async () => {
+    const sql = new RecordingSql();
+    sql.rows = [{ token: "cmp_pat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }];
+    const store = new PostgresRuntimeStore(sql);
+
+    const result = await store.mintHubToken(fence, 30);
+
+    expect(sql.calls[0]?.query).toContain("public.companion_runtime_mint_hub_token(");
+    expect(result).toBe("cmp_pat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  });
+
   it("rejects material whose dispatch-time credential snapshot changed", async () => {
     const sql = new RecordingSql();
     sql.rows = [{ credential_snapshot_matches: false }];
