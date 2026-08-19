@@ -74,6 +74,7 @@ function workMaterial(): RuntimeWorkMaterial {
     modelInput: null,
     hasVisibleOutput: false,
     attachments: [],
+    configCatalog: null,
   };
 }
 
@@ -100,12 +101,19 @@ const authorization = {
 describe("runtime material provider and Box stager", () => {
   it("persists an OAuth refresh through fenced CAS before staging its plaintext", async () => {
     const material = workMaterial();
+    const catalog = {
+      companion: { model_id: "claude-opus-4-8", provider_id: "anthropic", persona: null },
+      skills: [],
+      plugins: [],
+      note: "Propose changes with propose_config.",
+    };
     const casMcpOauth = vi.fn(async (_fence: LeaseFence, _input: unknown) => ({
       updated: true,
       credentialGeneration: nextGeneration,
     }));
     const store = {
       getMaterial: vi.fn(async () => material),
+      getConfigCatalog: vi.fn(async () => catalog),
       casMcpOauth,
     } as unknown as RuntimeStore;
     const stageExistingBox = vi.fn(async () => ({
@@ -139,6 +147,7 @@ describe("runtime material provider and Box stager", () => {
       envelope: expect.objectContaining({ ciphertext: expect.any(String) }),
     }));
     expect(JSON.stringify(casMcpOauth.mock.calls[0]?.[1])).not.toContain("new-token");
+    expect(store.getConfigCatalog).toHaveBeenCalled();
 
     await expect(pipeline.resourceStager.stageExistingBox({
       orgId,
@@ -168,6 +177,7 @@ describe("runtime material provider and Box stager", () => {
         COMPANION_API_URL: "https://api.example.test",
         COMPANION_WORKSPACE_ID: orgId,
       },
+      configCatalog: catalog,
       signal: expect.any(AbortSignal),
     }));
   });

@@ -43,6 +43,7 @@ function material(overrides: Partial<RuntimeWorkMaterial> = {}): RuntimeWorkMate
     mcpMaterial: [],
     modelInput: null,
     hasVisibleOutput: false,
+    configCatalog: null,
     attachments: [],
     ...overrides,
   };

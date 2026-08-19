@@ -16,6 +16,7 @@ import {
   type RuntimeAttachment,
   type RuntimeOutputAttachment,
   type RuntimeSettlementInput,
+  type RuntimeConfigCatalog,
   type RuntimeWorkMaterial,
 } from "./types";
 import {
@@ -48,6 +49,10 @@ export interface RuntimeStore {
     fence: LeaseFence,
     leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
   ): Promise<RuntimeWorkMaterial | null>;
+  getConfigCatalog(
+    fence: LeaseFence,
+    leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
+  ): Promise<RuntimeConfigCatalog | null>;
   getAttemptTerminalProjection(fence: LeaseFence): Promise<{
     checkpoint: "agent_settled" | "process_exited";
     eventCursor: bigint;
@@ -315,6 +320,58 @@ function decodeMaterial(row: Record<string, unknown>): RuntimeWorkMaterial {
     modelInput: modelInput as RuntimeWorkMaterial["modelInput"],
     hasVisibleOutput: row.has_visible_output,
     attachments: decodeAttachments(row),
+    configCatalog: null,
+  };
+}
+
+function decodeConfigCatalog(row: Record<string, unknown>): RuntimeConfigCatalog {
+  const catalog = row.catalog;
+  if (!catalog || typeof catalog !== "object" || Array.isArray(catalog)) {
+    throw new RuntimeStoreContractError();
+  }
+  const value = catalog as Record<string, unknown>;
+  const companion = value.companion;
+  const skills = value.skills;
+  const plugins = value.plugins;
+  const note = value.note;
+  if (
+    !companion || typeof companion !== "object" || Array.isArray(companion)
+    || !Array.isArray(skills) || skills.length > 100
+    || !Array.isArray(plugins) || plugins.length > 100
+    || typeof note !== "string"
+  ) {
+    throw new RuntimeStoreContractError();
+  }
+  const companionRecord = companion as Record<string, unknown>;
+  for (const skill of skills) {
+    if (
+      !skill || typeof skill !== "object" || Array.isArray(skill)
+      || typeof (skill as Record<string, unknown>).id !== "string"
+      || typeof (skill as Record<string, unknown>).slug !== "string"
+      || typeof (skill as Record<string, unknown>).name !== "string"
+      || typeof (skill as Record<string, unknown>).description !== "string"
+      || typeof (skill as Record<string, unknown>).selected !== "boolean"
+    ) throw new RuntimeStoreContractError();
+  }
+  for (const plugin of plugins) {
+    if (
+      !plugin || typeof plugin !== "object" || Array.isArray(plugin)
+      || typeof (plugin as Record<string, unknown>).id !== "string"
+      || typeof (plugin as Record<string, unknown>).label !== "string"
+      || typeof (plugin as Record<string, unknown>).provider !== "string"
+      || typeof (plugin as Record<string, unknown>).transport !== "string"
+      || typeof (plugin as Record<string, unknown>).selected !== "boolean"
+    ) throw new RuntimeStoreContractError();
+  }
+  return {
+    companion: {
+      model_id: typeof companionRecord.model_id === "string" ? companionRecord.model_id : null,
+      provider_id: typeof companionRecord.provider_id === "string" ? companionRecord.provider_id : null,
+      persona: typeof companionRecord.persona === "string" ? companionRecord.persona : null,
+    },
+    skills: skills as RuntimeConfigCatalog["skills"],
+    plugins: plugins as RuntimeConfigCatalog["plugins"],
+    note,
   };
 }
 
@@ -589,6 +646,23 @@ export class PostgresRuntimeStore implements RuntimeStore {
       `, [...fenceParameters(fence), leaseSeconds]);
       if (rows.length === 0) return null;
       return decodeMaterial(one(rows, "work material"));
+    }, true);
+  }
+
+  async getConfigCatalog(
+    fence: LeaseFence,
+    leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
+  ): Promise<RuntimeConfigCatalog | null> {
+    return await mapped(async () => {
+      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+        SELECT catalog
+        FROM public.companion_runtime_get_config_catalog(
+          $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
+          $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
+        )
+      `, [...fenceParameters(fence), leaseSeconds]);
+      if (rows.length === 0) return null;
+      return decodeConfigCatalog(one(rows, "config catalog"));
     }, true);
   }
 

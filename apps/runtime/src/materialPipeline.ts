@@ -142,6 +142,9 @@ export function createRuntimeMaterialPipeline(input: {
         });
         refreshed.set(oauthKey(row.accountId, nextGeneration), active);
       }
+      if (fence.workKind === "settings" || fence.workKind === "operation") {
+        material.configCatalog = await store.getConfigCatalog(fence, RUNTIME_LEASE_SECONDS);
+      }
       refreshedByMaterial.set(material, refreshed);
       return material;
     },
@@ -219,6 +222,7 @@ export function createRuntimeMaterialPipeline(input: {
             COMPANION_API_URL: input.apiUrl,
             COMPANION_WORKSPACE_ID: stage.orgId,
           },
+        configCatalog: nativeMobile ? null : stage.material.configCatalog,
         signal: stage.signal,
       });
       return {

@@ -27,6 +27,7 @@ import type {
   RuntimeObservationInput,
   RuntimeOutputAttachment,
   RuntimeSettlementInput,
+  RuntimeConfigCatalog,
   RuntimeWorkMaterial,
 } from "../types";
 
@@ -254,6 +255,7 @@ export function attemptMaterial(overrides: Partial<RuntimeWorkMaterial> = {}): R
     modelInput: null,
     hasVisibleOutput: false,
     attachments: [],
+    configCatalog: null,
     ...overrides,
   };
 }
@@ -425,6 +427,10 @@ export class MemoryRuntimeStore implements RuntimeStore {
 
   async getMaterial(): Promise<RuntimeWorkMaterial | null> {
     return { ...this.material };
+  }
+
+  async getConfigCatalog(): Promise<RuntimeConfigCatalog | null> {
+    return this.material.configCatalog;
   }
 
   async getAttemptTerminalProjection(): Promise<{

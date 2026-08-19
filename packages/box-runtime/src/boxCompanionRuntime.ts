@@ -32,6 +32,30 @@ import {
   type CompanionPiJournalRecord,
 } from "./companionPiBroker";
 
+/** Credential-free snapshot Pi reads before proposing settings. Omitted on native_mobile. */
+export type CompanionConfigCatalog = {
+  companion: {
+    model_id: string | null;
+    provider_id: string | null;
+    persona: string | null;
+  };
+  skills: Array<{
+    id: string;
+    slug: string;
+    name: string;
+    description: string;
+    selected: boolean;
+  }>;
+  plugins: Array<{
+    id: string;
+    label: string;
+    provider: string;
+    transport: string;
+    selected: boolean;
+  }>;
+  note: string;
+};
+
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
 const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
 /** First Pi release whose image resize runs outside the RPC event loop. */
@@ -469,6 +493,7 @@ export interface CompanionBoxRuntimeV2 {
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
     hubEnv?: Record<string, string>;
+    configCatalog?: CompanionConfigCatalog | null;
     signal?: AbortSignal;
   }): Promise<{ boxId: string; diskLayoutVersion: typeof COMPANION_PI_DISK_LAYOUT_VERSION }>;
   /** Pi-only lifecycle controls. None may resume/archive/create the Box. */
@@ -1818,6 +1843,7 @@ exit 0`,
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
     hubEnv?: Record<string, string>;
+    configCatalog?: CompanionConfigCatalog | null;
   }): Promise<void> {
     const injectedSkills = input.clientSurface === "native_mobile" ? [] : input.skills;
     const mcp = buildMcpAdapterInjection(input.mcpAccounts);
@@ -1861,6 +1887,13 @@ exit 0`,
         skills: injectedSkills.map(({ slug, version, checksum }) => ({ slug, version, checksum })),
       }, null, 2)}\n`,
     );
+    if (input.clientSurface !== "native_mobile" && input.configCatalog) {
+      await this.#writeFile(
+        input.boxId,
+        ".companion/runtime/state/config-catalog.json",
+        `${JSON.stringify(input.configCatalog)}\n`,
+      );
+    }
     await this.#writeFile(
       input.boxId,
       ".companion/runtime/state/instructions.txt",
@@ -2074,6 +2107,7 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
     hubEnv?: Record<string, string>;
+    configCatalog?: CompanionConfigCatalog | null;
     signal?: AbortSignal;
   }): Promise<{ boxId: string; diskLayoutVersion: typeof COMPANION_PI_DISK_LAYOUT_VERSION }> {
     companionBoxName(input.companionId, input.runtimeGeneration);
@@ -2100,6 +2134,7 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
         mcpAccounts: input.mcpAccounts,
         skills: input.skills,
         hubEnv: input.hubEnv,
+        configCatalog: input.configCatalog,
       });
       return { boxId: box.id, diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION };
     } finally {

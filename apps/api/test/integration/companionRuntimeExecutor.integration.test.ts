@@ -518,6 +518,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         (
           select count(*)::int from unnest(array[
             'public.companion_runtime_get_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
+            'public.companion_runtime_get_config_catalog(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
             'public.companion_runtime_get_attempt_terminal_projection(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)',
             'public.companion_runtime_cas_mcp_oauth(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,uuid,uuid,uuid,text,text,text,text,text,text,text)',
             'public.companion_runtime_register_duplicate_cleanups(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text[])',
@@ -533,7 +534,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           ${runtimeRole}, 'public.companion_runtime_guard_duplicate_cleanup()', 'EXECUTE'
         ) as "helperCallable"
     `;
-    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 9, helperCallable: false });
+    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 10, helperCallable: false });
     await expect(asRuntime((tx) => tx`select * from companion_turn_attempts`))
       .rejects.toThrow(/permission denied/i);
 
@@ -2593,6 +2594,35 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           )
         `,
       })).rejects.toMatchObject({ code: "42501" });
+    } finally {
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
+  it("returns a claim-fenced config catalog without credentials", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion();
+    try {
+      const claim = await claimWork();
+      const [row] = await asRuntime((tx) => tx<Array<{ catalog: Record<string, unknown> }>>`
+        select catalog
+        from public.companion_runtime_get_config_catalog(
+          ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+          ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+          ${claim.workKind}, ${claim.workId}::uuid, 30
+        )
+      `);
+      expect(row?.catalog).toMatchObject({
+        companion: {
+          model_id: "fixture-model",
+          provider_id: providerId,
+        },
+      });
+      const skills = row?.catalog.skills as Array<{ id: string; selected: boolean; slug: string }>;
+      expect(skills.some((skill) => skill.id === ids.skill && skill.selected)).toBe(true);
+      expect(skills.some((skill) => skill.id === ids.orgSkill)).toBe(true);
+      expect(JSON.stringify(row?.catalog)).not.toMatch(/ciphertext|wrapped_dek|auth_tag|storage_path/i);
+      await release(claim);
     } finally {
       await removeCompanion(fixture.companionId);
     }

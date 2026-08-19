@@ -325,6 +325,33 @@ export interface RuntimeAttachment {
 }
 
 /** Sensitive values remain opaque to this package and are never included in errors or health. */
+export interface RuntimeConfigCatalogSkill {
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  selected: boolean;
+}
+
+export interface RuntimeConfigCatalogPlugin {
+  id: string;
+  label: string;
+  provider: string;
+  transport: string;
+  selected: boolean;
+}
+
+export interface RuntimeConfigCatalog {
+  companion: {
+    model_id: string | null;
+    provider_id: string | null;
+    persona: string | null;
+  };
+  skills: RuntimeConfigCatalogSkill[];
+  plugins: RuntimeConfigCatalogPlugin[];
+  note: string;
+}
+
 export interface RuntimeWorkMaterial {
   turnId: string | null;
   attemptId: string | null;
@@ -339,6 +366,8 @@ export interface RuntimeWorkMaterial {
   hasVisibleOutput: boolean;
   /** Files the member sent with this turn's message, in stable order. Empty for every other work kind. */
   attachments: RuntimeAttachment[];
+  /** Credential-free snapshot of what this Companion could select, or null when it is not staged. */
+  configCatalog: RuntimeConfigCatalog | null;
 }
 
 /**

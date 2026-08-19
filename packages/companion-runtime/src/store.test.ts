@@ -230,6 +230,38 @@ describe("PostgresRuntimeStore", () => {
     });
   });
 
+  it("decodes a claim-fenced config catalog without credentials", async () => {
+    const sql = new RecordingSql();
+    sql.rows = [{
+      catalog: {
+        companion: { model_id: "fixture-model", provider_id: "anthropic", persona: null },
+        skills: [{
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          slug: "search",
+          name: "search",
+          description: "Search the workspace",
+          selected: true,
+        }],
+        plugins: [],
+        note: "Propose changes with propose_config.",
+      },
+    }];
+    const store = new PostgresRuntimeStore(sql);
+
+    const result = await store.getConfigCatalog(fence, 30);
+
+    expect(sql.calls[0]?.query).toContain("public.companion_runtime_get_config_catalog(");
+    expect(result?.companion.model_id).toBe("fixture-model");
+    expect(result?.skills).toEqual([{
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      slug: "search",
+      name: "search",
+      description: "Search the workspace",
+      selected: true,
+    }]);
+    expect(JSON.stringify(result)).not.toMatch(/ciphertext|wrapped_dek|auth_tag/i);
+  });
+
   it("rejects material whose dispatch-time credential snapshot changed", async () => {
     const sql = new RecordingSql();
     sql.rows = [{ credential_snapshot_matches: false }];
