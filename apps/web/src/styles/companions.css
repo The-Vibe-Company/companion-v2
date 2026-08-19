@@ -161,14 +161,80 @@
 .companions-plugin-icon {
   display: grid;
   place-items: center;
+  flex: none;
   width: 32px;
   height: 32px;
+  overflow: hidden;
   border: 1px solid var(--color-line);
   border-radius: var(--radius-md);
   background: var(--color-surface-raised);
   color: var(--color-muted);
   font-size: var(--text-sm);
   font-weight: 600;
+}
+
+.companions-plugin-icon svg {
+  display: block;
+}
+
+.companions-plugin-icon--md {
+  width: 40px;
+  height: 40px;
+}
+
+.companions-plugin-icon--linear,
+.companions-plugin-dialog--linear .og-dialog__ic {
+  background: #5e6ad2;
+  border-color: #5e6ad2;
+  color: #fff;
+}
+
+.companions-plugin-icon--github,
+.companions-plugin-dialog--github .og-dialog__ic {
+  background: #181717;
+  border-color: #181717;
+  color: #fff;
+}
+
+.companions-plugin-icon--notion,
+.companions-plugin-dialog--notion .og-dialog__ic {
+  background: var(--color-surface);
+  border-color: var(--color-line-strong);
+  color: var(--color-fg);
+}
+
+:root[data-theme="dark"] .companions-plugin-icon--github,
+:root[data-theme="dark"] .companions-plugin-dialog--github .og-dialog__ic {
+  background: var(--color-fg);
+  border-color: var(--color-fg);
+  color: var(--color-canvas);
+}
+
+:root[data-theme="dark"] .companions-plugin-dialog--linear .og-dialog__ic {
+  color: #fff;
+}
+
+:root[data-theme="dark"] .companions-plugin-dialog--notion .og-dialog__ic {
+  color: var(--color-fg);
+}
+
+.companions-plugin-empty {
+  padding: 22px 16px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.companions-plugin-empty p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+
+.companions-plugin-empty p + p {
+  margin-top: 4px;
+  color: var(--color-faint);
+  font-size: var(--text-xs);
 }
 
 .companions-plugin-labels {
@@ -268,29 +334,55 @@
 
 .companions-plugin-section__title {
   margin: 0 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--color-fg);
   font-size: var(--text-sm);
   font-weight: 600;
 }
 
-/* A card is 280px wide until the column itself is narrower than that, at which point the track
+.companions-plugin-section__count {
+  min-width: 18px;
+  padding: 0 6px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-full);
+  background: var(--color-surface-raised);
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  text-align: center;
+}
+
+/* A card is 300px wide until the column itself is narrower than that, at which point the track
    follows the column instead of pushing past its edge. */
 .companions-catalog-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
   gap: 12px;
 }
 
 .companions-catalog-card {
   min-width: 0;
-  padding: 14px 16px;
+  padding: 16px 18px;
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) auto;
-  align-items: center;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: start;
   gap: 14px;
   border: 1px solid var(--color-line);
   border-radius: var(--radius-md);
   background: var(--color-surface);
+  transition: border-color var(--duration-fast) var(--ease-out-quint);
+}
+
+.companions-catalog-card:hover {
+  border-color: var(--color-line-strong);
+}
+
+.companions-catalog-card > .cds-btn {
+  margin-top: 4px;
 }
 
 .companions-catalog-card__body {
@@ -299,21 +391,31 @@
 
 .companions-catalog-card__body strong {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   color: var(--color-fg);
   font-size: var(--text-base);
   font-weight: 600;
 }
 
-.companions-catalog-card__body p {
-  margin: 4px 0 0;
-  overflow: hidden;
+.companions-catalog-card__count {
+  flex: none;
   color: var(--color-muted);
   font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.companions-catalog-card__body p {
+  margin: 6px 0 0;
+  overflow: hidden;
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
   text-overflow: ellipsis;
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
 }
 
@@ -2070,7 +2172,7 @@ button.chat-box:focus-visible {
      Connect button left the name and description a sliver each, so the action moves under them and
      takes the width instead of taking it from the text. */
   .companions-catalog-card {
-    grid-template-columns: 32px minmax(0, 1fr);
+    grid-template-columns: 40px minmax(0, 1fr);
     grid-template-areas:
       "icon body"
       "action action";
