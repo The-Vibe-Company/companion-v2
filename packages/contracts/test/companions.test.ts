@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  COMPANION_CONFIG_PROPOSAL_MAX_IDS,
   COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS,
   COMPANION_PROVIDER_CATALOG,
   COMPANION_REASONING_MAX_CHARACTERS,
   COMPANION_TOOL_RUN_SCREENSHOT_MAX_CHARACTERS,
+  companionConfigProposalMessageSchema,
+  companionConfigProposalSchema,
+  companionDecisionSchema,
   companionProviderOAuthCompleteInputSchema,
   companionProviderOAuthStartInputSchema,
   companionDesktopSchema,
@@ -482,6 +486,87 @@ describe("Companion chat contracts", () => {
       author_name: null,
       decision,
       created_at: "2026-08-12T12:00:03.000Z",
+    })).toThrow();
+  });
+
+  it("accepts a bounded config proposal and refuses mixed or oversized payloads", () => {
+    const skillId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const pluginId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const valid = companionConfigProposalSchema.parse({
+      kind: "config",
+      add_skill_ids: [skillId],
+      model_id: "claude-sonnet-4-6",
+    });
+    expect(valid).toEqual({
+      kind: "config",
+      add_skill_ids: [skillId],
+      model_id: "claude-sonnet-4-6",
+    });
+    expect(companionConfigProposalSchema.parse({
+      kind: "config",
+      connect_plugin: { server_name: "linear", reason: "Need issue search" },
+    }).connect_plugin).toEqual({ server_name: "linear", reason: "Need issue search" });
+    expect(companionConfigProposalMessageSchema.parse({
+      summary: "Add the search skill and switch to Sonnet",
+      proposal: valid,
+    }).summary).toBe("Add the search skill and switch to Sonnet");
+
+    expect(() => companionConfigProposalSchema.parse({
+      kind: "config",
+      add_skill_ids: [skillId],
+      connect_plugin: { server_name: "github" },
+    })).toThrow();
+    expect(() => companionConfigProposalSchema.parse({
+      kind: "config",
+      can_write_skills: true,
+      add_skill_ids: [skillId],
+    })).toThrow();
+    expect(() => companionConfigProposalSchema.parse({
+      kind: "config",
+      name: "renamed",
+      persona: "helpful",
+    })).toThrow();
+    expect(() => companionConfigProposalSchema.parse({ kind: "config" })).toThrow();
+    expect(() => companionConfigProposalSchema.parse({
+      kind: "config",
+      add_skill_ids: Array.from({ length: COMPANION_CONFIG_PROPOSAL_MAX_IDS + 1 }, () => skillId),
+    })).toThrow();
+    expect(() => companionConfigProposalSchema.parse({
+      kind: "config",
+      attach_plugin_ids: [pluginId],
+      extra: true,
+    })).toThrow();
+    expect(() => companionConfigProposalSchema.parse({
+      kind: "config",
+      persona: "x".repeat(281),
+    })).toThrow();
+
+    const decision = {
+      request_id: "ui-config-1",
+      kind: "config" as const,
+      name: "propose_config",
+      title: "Add the search skill",
+      detail: "Add the search skill",
+      status: "pending" as const,
+      answer: null,
+      decided_by_id: null,
+      decided_by_name: null,
+      decided_at: null,
+      expires_at: "2026-08-12T12:05:00.000Z",
+      proposal: valid,
+    };
+    expect(companionDecisionSchema.parse(decision).proposal).toEqual(valid);
+    expect(companionDecisionSchema.parse({
+      ...decision,
+      kind: "question",
+      name: "ask_user",
+      proposal: undefined,
+    }).proposal).toBeNull();
+    expect(() => companionDecisionSchema.parse({ ...decision, proposal: null })).toThrow();
+    expect(() => companionDecisionSchema.parse({
+      ...decision,
+      kind: "shell",
+      name: "bash",
     })).toThrow();
   });
 

@@ -102,6 +102,7 @@ function card(overrides: Partial<CompanionDecision> = {}): CompanionDecision {
     decided_by_name: null,
     decided_at: null,
     expires_at: "2026-08-12T12:05:00.000Z",
+    proposal: null,
     ...overrides,
   };
 }

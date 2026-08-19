@@ -9,6 +9,7 @@ import {
   FilePenLineIcon,
   LoaderIcon,
   MessageSquareIcon,
+  Settings2Icon,
   TerminalIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -31,12 +32,14 @@ const DECISION_ICONS: Record<CompanionDecisionKind, LucideIcon> = {
   shell: TerminalIcon,
   file: FilePenLineIcon,
   question: MessageSquareIcon,
+  config: Settings2Icon,
 };
 
 const DECISION_KIND_LABELS: Record<CompanionDecisionKind, string> = {
   shell: "run a command",
   file: "edit a file",
   question: "asks",
+  config: "these settings",
 };
 
 const DECISION_STATUS_LABELS = {

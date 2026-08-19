@@ -72,7 +72,7 @@ export const companionDecisionDeliveryStateEnum = pgEnum("companion_decision_del
   "pending", "write_intent", "delivered", "ambiguous", "cancelled",
 ]);
 export const companionDecisionRequestKindEnum = pgEnum("companion_decision_request_kind", [
-  "question", "confirmation",
+  "question", "confirmation", "config_proposal",
 ]);
 export const companionDuplicateCleanupStatusEnum = pgEnum("companion_duplicate_cleanup_status", [
   "pending", "delete_requested", "waiting_deleted", "deleted", "already_deleted", "blocked",
@@ -910,6 +910,12 @@ export const companionDecisionDeliveries = pgTable(
     lastErrorCode: text("last_error_code"),
     lastErrorMessage: text("last_error_message"),
     lastErrorAction: companionRuntimeErrorActionEnum("last_error_action"),
+    /**
+     * Structured settings Pi proposed for `config_proposal` deliveries. Null on question and
+     * confirmation rows. The CHECK compares `request_kind` as text because PostgreSQL cannot read
+     * an enum label added earlier in the same migration transaction.
+     */
+    proposal: jsonb("proposal"),
     createdAt: now(),
     updatedAt: updatedAt(),
   },
@@ -926,6 +932,15 @@ export const companionDecisionDeliveries = pgTable(
     responseCheck: check("companion_decision_deliveries_response_check", sql`(${t.responseText} is null or octet_length(${t.responseText}) <= 16384) and ((${t.decisionStatus} = 'pending' and ${t.actorId} is null and ${t.responseText} is null and ${t.respondedAt} is null) or (${t.decisionStatus} in ('allowed','denied') and ${t.actorId} is not null and ${t.responseText} is null and ${t.respondedAt} is not null) or (${t.decisionStatus} = 'answered' and ${t.actorId} is not null and ${t.responseText} is not null and ${t.respondedAt} is not null) or (${t.decisionStatus} in ('expired','cancelled') and ${t.responseText} is null and ${t.respondedAt} is not null))`),
     deliveryCheck: check("companion_decision_deliveries_delivery_check", sql`${t.deliveryCheckpoint} in ('pending','write_intent','delivered','ambiguous','cancelled') and ${t.deliveryCheckpointSequence} >= 0 and ${t.deliveryAttemptCount} >= 0 and (${t.claimEpoch} is null or ${t.claimEpoch} >= 1) and ((${t.deliveryState} in ('pending','cancelled') and ${t.commandId} is null) or (${t.deliveryState} in ('write_intent','delivered','ambiguous') and ${t.commandId} is not null)) and ((${t.deliveryState} = 'delivered') = (${t.deliveredAt} is not null))`),
     errorCheck: check("companion_decision_deliveries_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAction} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]'))`),
+    proposalCheck: check("companion_decision_deliveries_proposal_check", sql`(
+      (${t.proposal} is null and ${t.requestKind}::text <> 'config_proposal')
+      or (
+        ${t.requestKind}::text = 'config_proposal'
+        and ${t.proposal} is not null
+        and jsonb_typeof(${t.proposal}) = 'object'
+        and octet_length(${t.proposal}::text) <= 16384
+      )
+    )`),
   }),
 );
 
@@ -1167,7 +1182,7 @@ export interface CompanionStoredToolRun {
  */
 export interface CompanionStoredDecision {
   request_id: string;
-  kind: "shell" | "file" | "question";
+  kind: "shell" | "file" | "question" | "config";
   name: string;
   title: string;
   detail: string | null;
@@ -1177,6 +1192,7 @@ export interface CompanionStoredDecision {
   decided_by_name: string | null;
   decided_at: string | null;
   expires_at: string;
+  proposal: Record<string, unknown> | null;
 }
 
 /**

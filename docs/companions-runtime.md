@@ -275,6 +275,14 @@ Pi's `ask_user` is projected as durable `needs_input`. Owner/Editor answers are 
 delivery; Viewer can read but not answer. A runtime failure after persistence resumes delivery under
 the same attempt and decision identity.
 
+A `companion:config:<op>` confirmation with a strict JSON `{summary, proposal}` body projects as
+`request_kind = config_proposal`. The payload cannot name `hub_access`, `can_write_skills`, `name`,
+or `provider_id`, and a message that would require redaction is counted as unknown rather than
+stored. The generic `companion_api_answer_decision` path rejects this kind fail-closed; approval
+that applies settings is a dedicated later function. Until then the kind is inert: Pi does not emit
+it. Delivery to Pi uses the same `confirmed` / `cancelled` `extension_ui_response` shape as other
+confirmations.
+
 A running attempt has two bounds:
 
 - inactivity stall after ten minutes without correlated activity;
@@ -403,8 +411,10 @@ validated, decrypted credentials. Assistant text and decision copy are scrubbed 
 values plus bounded generic credential patterns. Tool activity is deliberately metadata-only: it
 stores a safe kind/name/title and an opaque hashed call id, never tool arguments or results. A
 complete Authorization or Cookie header value is removed before narrower generic matchers run. A
-decision request key that would require redaction fails closed and interrupts the turn. The
-dictionary, ciphertext, and raw Pi event are never serialized or logged.
+decision request key that would require redaction fails closed and interrupts the turn. A config
+proposal message is fail-closed the same way: if redaction would change the JSON, the event is
+unknown and is not stored. The dictionary, ciphertext, and raw Pi event are never serialized or
+logged.
 
 Provider connections and MCP accounts survive the Runtime v2 cutover. Legacy Companion rows and
 Box disks do not.

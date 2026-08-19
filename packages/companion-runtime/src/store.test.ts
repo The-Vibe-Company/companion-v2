@@ -199,6 +199,37 @@ describe("PostgresRuntimeStore", () => {
     )).resolves.toBeNull();
   });
 
+  it("accepts a config_proposal decision kind from the material definer", async () => {
+    const sql = new RecordingSql();
+    sql.rows = [{
+      turn_id: TURN_ID,
+      attempt_id: ATTEMPT_ID,
+      message_event_id: null,
+      prompt_text: null,
+      decision_request_kind: "config_proposal",
+      decision_response_payload: { type: "extension_ui_response", id: "config-1", confirmed: true },
+      provider_material: [],
+      skill_material: [],
+      mcp_material: [],
+      model_input: null,
+      has_visible_output: true,
+      credential_snapshot_matches: true,
+      attachments: [],
+    }];
+    const store = new PostgresRuntimeStore(sql);
+
+    const result = await store.getMaterial({ ...fence, workKind: "decision", workId: ATTEMPT_ID }, 30);
+
+    expect(result).toMatchObject({
+      decisionRequestKind: "config_proposal",
+      decisionResponsePayload: {
+        type: "extension_ui_response",
+        id: "config-1",
+        confirmed: true,
+      },
+    });
+  });
+
   it("rejects material whose dispatch-time credential snapshot changed", async () => {
     const sql = new RecordingSql();
     sql.rows = [{ credential_snapshot_matches: false }];
