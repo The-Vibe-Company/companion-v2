@@ -52,8 +52,18 @@ describe("Companion Pi interaction extension", () => {
       kind: "config",
       name: "propose_config",
     });
+    expect(parseCompanionDecisionTitle("companion:routine:Standup")).toEqual({
+      kind: "routine",
+      name: "Standup",
+    });
     expect(parseCompanionDecisionTitle("companion:question:ask_user")?.kind).toBe("question");
     expect(parseCompanionDecisionTitle("companion:hub:write")).toBeNull();
+  });
+
+  it("proposes routines through confirm with a companion:routine title", () => {
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain('name: "propose_routine"');
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("companion:routine:");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("never claim a routine is active");
   });
 
   it("classifies shell runs with the control plane's own catalog, priority order included", () => {

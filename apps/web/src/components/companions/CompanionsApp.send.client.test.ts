@@ -146,6 +146,7 @@ function controlPlane(
           decision: null,
           attachments: [],
           reasoning: null,
+          routine: null,
           created_at: "2026-08-15T18:00:00.000Z",
         },
         ...["Alors?", "Ca va?"].map((content, index): CompanionTranscriptEntry => ({
@@ -159,6 +160,7 @@ function controlPlane(
           decision: null,
           attachments: [],
           reasoning: null,
+          routine: null,
           created_at: `2026-08-15T18:0${index + 1}:00.000Z`,
         })),
       ]
@@ -226,6 +228,7 @@ function controlPlane(
         decision: null,
         attachments: [],
         reasoning: null,
+        routine: null,
         created_at: new Date().toISOString(),
       });
     }
@@ -273,6 +276,7 @@ function controlPlane(
     decision: null,
     attachments: [],
           reasoning: null,
+          routine: null,
           created_at: new Date().toISOString(),
         });
         if (!options.refuseDelivery) {
@@ -294,6 +298,7 @@ function controlPlane(
         turn: projectedTurn("queued"),
       });
     }
+    if (url.includes("/routines")) return json({ routines: [] });
     if (url.includes("/thread")) {
       if (holdNextThreadRead) {
         holdNextThreadRead = false;

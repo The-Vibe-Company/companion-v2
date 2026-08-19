@@ -11,7 +11,7 @@ removed the legacy executor surface; it must not be reintroduced.
 ```text
 apps/web       Next.js Skills workspace, Companion threads, and settings
 apps/api       REST/tRPC authorization and transactional intent persistence
-apps/worker    GitHub sync, billing, and Skill Database object cleanup
+apps/worker    GitHub sync, billing, Skill Database object cleanup, and Companion routines
 apps/runtime   sole Box/Pi executor; durable claims, health, and lifecycle
 cli            REST client for Skills Hub workflows
 
@@ -291,11 +291,10 @@ them.
 
 ## Explicit exclusions
 
-No generic Projects or skill runs, multi-Bot coordination, group Bot chat, handoffs, routines,
-schedules, proactive jobs, voice, file library, file versioning, artifact surface outside a thread,
-second harness, second Box provider, Box pool, generic provider marketplace, container catalog,
-deployment manager, or AI app builder. Bounded chat files are in scope: uploads on a message and
-images Pi hands back from a turn.
+No generic Projects or skill runs, multi-Bot coordination, group Bot chat, handoffs, proactive jobs,
+voice, file library, file versioning, artifact surface outside a thread, second harness, second Box
+provider, Box pool, generic provider marketplace, container catalog, deployment manager, or AI app
+builder. Bounded chat files and scheduled Companion routines are in scope.
 No SSE, Box-to-control-plane push agent, detached API executor, automatic Full Box recovery,
 automatic ambiguous-prompt replay, or global learned model-capability table.
 

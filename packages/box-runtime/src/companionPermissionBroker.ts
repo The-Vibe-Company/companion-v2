@@ -21,22 +21,23 @@ export const COMPANION_DECISION_TIMEOUT_MS = 5 * 60 * 1000;
  * On-disk name under `$PI_CODING_AGENT_DIR/extensions/`.
  *
  * Keep the legacy permission-broker filename so every start overwrites the older extension that
- * gated shell and file tools. The current extension provides ask_user plus config-proposal tools.
+ * gated shell and file tools. The current extension provides ask_user, config-proposal, and
+ * routine-proposal tools.
  */
 export const COMPANION_PERMISSION_BROKER_EXTENSION_FILE = "companion-permission-broker.ts";
 
 /** Title the extension puts on extension_ui_request events: `companion:<kind>:<tool>`. */
 export const COMPANION_DECISION_TITLE_PATTERN =
-  /^companion:(shell|file|question|config):([A-Za-z0-9._-]{1,120})$/;
+  /^companion:(shell|file|question|config|routine):([A-Za-z0-9._-]{1,120})$/;
 
 export function parseCompanionDecisionTitle(title: string): {
-  kind: "shell" | "file" | "question" | "config";
+  kind: "shell" | "file" | "question" | "config" | "routine";
   name: string;
 } | null {
   const match = COMPANION_DECISION_TITLE_PATTERN.exec(title.trim());
   if (!match) return null;
   return {
-    kind: match[1] as "shell" | "file" | "question" | "config",
+    kind: match[1] as "shell" | "file" | "question" | "config" | "routine",
     name: match[2]!,
   };
 }
@@ -49,8 +50,8 @@ export function parseCompanionDecisionTitle(title: string): {
 export const COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE = `/**
  * Companion question and config broker — Pi extension installed on every Companion Box.
  *
- * ask_user, propose_config, and request_plugin_connection emit extension_ui_request events and
- * block until the control plane answers. Built-in shell and file tools remain unrestricted.
+ * ask_user, propose_config, propose_routine, and request_plugin_connection emit extension_ui_request
+ * events and block until the control plane answers. Built-in shell and file tools remain unrestricted.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
@@ -62,7 +63,7 @@ const EXEC_TOOL_TIMEOUT_MS = ${COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS};
 const CONFIG_MAX_IDS = ${COMPANION_CONFIG_PROPOSAL_MAX_IDS};
 const CONFIG_SUMMARY_MAX = ${COMPANION_CONFIG_PROPOSAL_SUMMARY_MAX_CHARACTERS};
 const CONNECT_PROVIDERS = ${JSON.stringify(COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS)} as string[];
-const INTERACTIVE_TOOLS = new Set(["ask_user", "propose_config", "request_plugin_connection"]);
+const INTERACTIVE_TOOLS = new Set(["ask_user", "propose_config", "propose_routine", "request_plugin_connection"]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CATALOG_PATH = \`$\{process.env.HOME || ""}/.companion/runtime/state/config-catalog.json\`;
 
@@ -123,6 +124,11 @@ function decisionTitle(name: string): string {
 
 function configTitle(name: string): string {
   return \`companion:config:\${name}\`;
+}
+
+function routineTitle(name: string): string {
+  const slug = name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 120);
+  return \`companion:routine:\${slug || "propose_routine"}\`;
 }
 
 function asStringList(value: unknown): string[] {
@@ -308,6 +314,63 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
       }
       return {
         content: [{ type: "text", text: "User denied or timed out. No settings changed." }],
+        details: { proposal, confirmed: false },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "propose_routine",
+    label: "Propose routine",
+    description:
+      "Propose a scheduled Companion routine for Owner/Editor approval. This only proposes; never claim a routine is active without approval. Approved routines fire as ordinary turns whose prompt is hidden in the thread.",
+    parameters: Type.Object({
+      name: Type.String({ description: "Short unique name, max 80 characters" }),
+      prompt: Type.String({ description: "The prompt the Companion will run on each fire" }),
+      cron: Type.String({ description: "Five- or six-field cron expression" }),
+      timezone: Type.String({ description: "IANA timezone, for example America/New_York" }),
+      summary: Type.Optional(Type.String({ description: "One-line confirm copy for the human" })),
+    }),
+    executionMode: "sequential",
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const name = typeof params.name === "string" ? params.name.trim() : "";
+      const prompt = typeof params.prompt === "string" ? params.prompt.trim() : "";
+      const cron = typeof params.cron === "string" ? params.cron.trim() : "";
+      const timezone = typeof params.timezone === "string" ? params.timezone.trim() : "";
+      const summaryArg = typeof params.summary === "string" ? params.summary.trim() : "";
+      if (
+        !name || name.length > 80 || /[\\n\\r]/.test(name)
+        || !prompt || prompt.length > 16384
+        || !cron || cron.length > 120 || /[\\n\\r]/.test(cron)
+        || !timezone || timezone.length > 64 || /[\\n\\r]/.test(timezone)
+        || (summaryArg && summaryArg.length > CONFIG_SUMMARY_MAX)
+      ) {
+        return {
+          content: [{ type: "text", text: "Error: propose_routine arguments are invalid" }],
+          details: { proposal: null, confirmed: null },
+        };
+      }
+      const proposal = { kind: "routine", name, prompt, cron, timezone };
+      if (!ctx.hasUI) {
+        return {
+          content: [{ type: "text", text: "Error: no permission UI available" }],
+          details: { proposal, confirmed: null },
+        };
+      }
+      const summary = (summaryArg || \`Schedule \${name} (\${cron} \${timezone})\`).slice(0, CONFIG_SUMMARY_MAX);
+      const confirmed = await ctx.ui.confirm(
+        routineTitle(name),
+        JSON.stringify({ summary, proposal }),
+        { timeout: DECISION_TIMEOUT_MS },
+      );
+      if (confirmed === true) {
+        return {
+          content: [{ type: "text", text: "Approved. The routine starts after this turn ends." }],
+          details: { proposal, confirmed: true },
+        };
+      }
+      return {
+        content: [{ type: "text", text: "User denied or timed out. No routine was created." }],
         details: { proposal, confirmed: false },
       };
     },

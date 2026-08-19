@@ -35,8 +35,9 @@ hosted Companions, and their grants do not authorize Companion lifecycle or chat
 ## Product boundary
 
 Companions deliberately stop short of the broader Grok Bot vision. This version has no generic
-Projects, multi-Bot teams or handoffs, routines, schedules, proactive jobs, voice, file library,
-artifact surface, or arbitrary computer-provider marketplace. A message may carry files and a turn
+Projects, multi-Bot teams or handoffs, proactive jobs, voice, file library, artifact surface, or
+arbitrary computer-provider marketplace. Scheduled Companion routines are in scope: they fire
+named prompts on a cron+timezone schedule as ordinary turns. A message may carry files and a turn
 may hand images back, because showing a teammate something is part of talking to them; nothing
 about that becomes a store of files with a life of its own. It does not add a generic model platform,
 agent builder, container catalog, deployment manager, or harness selection UI.

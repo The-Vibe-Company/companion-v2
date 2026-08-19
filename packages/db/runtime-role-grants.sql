@@ -65,7 +65,8 @@ DECLARE
     'companion_runtime_desktop_requests',
     'companion_legacy_purge_runs',
     'companion_legacy_purge_targets',
-    'companion_message_attachments'
+    'companion_message_attachments',
+    'companion_routines'
   ];
   api_capability_managed_tables regclass[] := ARRAY[
     'public.companions'::regclass,
@@ -443,11 +444,23 @@ BEGIN
       ];
 
       -- 0098 changed companion_api_enqueue_turn's parameter list and added the attachment surface.
-      -- Name whichever signature this database actually has: historical-migration replays and a
-      -- migration-first deploy must both stay fail-closed rather than error on a cast to a function
-      -- that does not exist yet. companion_runtime_get_material keeps its argument list, so its
-      -- existing cast above still resolves after the return type changed.
+      -- 0105 added optional routine origin columns with defaults. Name whichever signature this
+      -- database actually has: historical-migration replays and a migration-first deploy must both
+      -- stay fail-closed rather than error on a cast to a function that does not exist yet.
       IF pg_catalog.to_regprocedure(
+        'public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface,jsonb,uuid,text)'
+      ) IS NOT NULL THEN
+        companion_api_functions := companion_api_functions || ARRAY[
+          'public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface,jsonb,uuid,text)'::regprocedure,
+          'public.companion_api_read_attachment(uuid,uuid,uuid)'::regprocedure
+        ];
+        internal_runtime_functions := internal_runtime_functions || ARRAY[
+          'public.companion_api_assert_message_attachments(uuid,uuid,jsonb)'::regprocedure,
+          'public.companion_api_message_attachment_intent(jsonb)'::regprocedure,
+          'public.companion_api_stored_attachment_intent(uuid,uuid,text)'::regprocedure,
+          'public.companion_enqueue_attachment_object_deletion()'::regprocedure
+        ];
+      ELSIF pg_catalog.to_regprocedure(
         'public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface,jsonb)'
       ) IS NOT NULL THEN
         companion_api_functions := companion_api_functions || ARRAY[
@@ -507,6 +520,34 @@ BEGIN
     ) IS NOT NULL THEN
       companion_runtime_functions := companion_runtime_functions || ARRAY[
         'public.companion_runtime_mint_hub_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'::regprocedure
+      ];
+    END IF;
+
+    -- 0105/0106 add Companion routines. Resolved on sentinels so a database stopped before those
+    -- migrations still grants a complete, self-consistent surface.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_api_list_routines(uuid,uuid)'
+    ) IS NOT NULL THEN
+      companion_api_functions := companion_api_functions || ARRAY[
+        'public.companion_api_list_routines(uuid,uuid)'::regprocedure,
+        'public.companion_api_create_routine(uuid,uuid,uuid,text,text,text,text,boolean,timestamp with time zone)'::regprocedure,
+        'public.companion_api_update_routine(uuid,uuid,uuid,text,text,text,text,boolean,timestamp with time zone)'::regprocedure,
+        'public.companion_api_delete_routine(uuid,uuid,uuid)'::regprocedure
+      ];
+      internal_runtime_functions := internal_runtime_functions || ARRAY[
+        'public.companion_api_routine_json(uuid,uuid,uuid)'::regprocedure
+      ];
+      worker_functions := worker_functions || ARRAY[
+        'public.companion_claim_due_routines(text,integer,integer)'::regprocedure,
+        'public.companion_fire_routine(text,uuid,uuid,uuid,timestamp with time zone,timestamp with time zone)'::regprocedure,
+        'public.companion_fail_routine_fire(text,uuid,uuid,text,text,timestamp with time zone)'::regprocedure
+      ];
+    END IF;
+    IF pg_catalog.to_regprocedure(
+      'public.companion_api_answer_routine_decision(uuid,uuid,text,text,uuid,timestamp with time zone)'
+    ) IS NOT NULL THEN
+      companion_api_functions := companion_api_functions || ARRAY[
+        'public.companion_api_answer_routine_decision(uuid,uuid,text,text,uuid,timestamp with time zone)'::regprocedure
       ];
     END IF;
     -- A migration owner can carry arbitrary ALTER DEFAULT PRIVILEGES grants installed by an

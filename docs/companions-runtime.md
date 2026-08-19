@@ -19,7 +19,7 @@ The process boundary is strict:
 |---|---|---|
 | `apps/web` | Render durable state; submit user intent | Never |
 | `apps/api` | Authenticate, authorize, persist intent, return `202` | Never |
-| `apps/worker` | Billing, GitHub, Skill Database cleanup | Never |
+| `apps/worker` | Billing, GitHub, Skill Database cleanup, Companion routine fire | Never |
 | `apps/runtime` | Claim, execute, observe, checkpoint, and settle runtime work | Sole owner |
 
 Only `apps/runtime` receives the Box service key. API, worker, and runtime use distinct PostgreSQL
@@ -47,7 +47,8 @@ replayed after re-enable.
 
 The flag is the operational kill switch and rollback once v2 rows exist. A legacy API or worker must
 never execute them. The flag is not a mechanism for enabling excluded harness, provider, deployment,
-routine, schedule, or multi-Bot surfaces.
+or multi-Bot surfaces. Disabling it also stops new routine claims; missed fires are skipped rather
+than replayed when the flag returns.
 
 SIGTERM or an ordinary runtime service shutdown is instead a replica handoff. The process stops new
 claims and local I/O, does not settle or release already-active work, and stops renewing those leases
@@ -327,6 +328,12 @@ finishes the connection in the web Plugins UI. Delivery to Pi uses the same `con
 Each staging writes a credential-free `config-catalog.json` (≤100 skills and plugins the settings
 actor can already name) so Pi can compose summaries without reading secrets. Native mobile omits it.
 
+A `companion:routine:<name>` confirmation with a strict JSON `{summary, proposal}` body projects as
+`request_kind = routine_proposal`. Pi emits these through the staged `propose_routine` tool. The
+payload is name, prompt, cron, and timezone; a redacted or malformed message is counted as unknown.
+Owner/Editor approval runs `companion_api_answer_routine_decision`, which creates the routine under
+the approver's authority after the current turn.
+
 A running attempt has two bounds:
 
 - inactivity stall after ten minutes without correlated activity;
@@ -336,6 +343,30 @@ The two-second sweep settles either deadline no later than one additional sweep.
 visible and expurgated. “Companion is replying…” is true only after positive prompt ACK and before
 `needs_input` or a terminal state; queued, starting, dispatching, interrupted, cancelled, or settled
 turns never show it.
+
+## Companion routines
+
+A routine is a named cron+timezone prompt that fires outside chat. The worker supervisor claims due
+rows every 15 seconds when Companions are enabled, computes the next strictly future fire in
+TypeScript (`cron-parser`, IANA timezone), and calls `companion_fire_routine`. That function
+impersonates the immutable Companion Owner through transaction-local GUCs and then calls
+`companion_api_enqueue_turn`, so membership, editor access, retirement, warm-send, and
+`(companion_id, client_message_id)` idempotence all apply. SQL never parses cron.
+
+`client_message_id` is `uuidv5(routineId + '|' + scheduledFor.toISOString(), ROUTINE_FIRE_NAMESPACE)`.
+A scheduled instant older than ten minutes is `skipped_missed`. An in-flight turn for the same
+routine is `skipped_pileup`. Skips still advance `next_fire_at` and drop the lease. Five consecutive
+classified failures disable the routine. After delete, `routine_id` on historical turns is set null
+and `routine_name` remains as the transcript header.
+
+`companion_api_read_thread` projects `routine {id, name}` on the originating user entry. The prompt
+stays in `content`; the web surface hides that bubble. The conversation-list projection masks it the
+same way: a routine-origin last message carries an empty `preview` and the `routine_name`, so no
+surface outside the thread reads the fire as a line the Owner typed.
+
+`next_fire_at` is stored with millisecond precision. The worker claims a routine, carries that
+instant through a JavaScript `Date`, and hands it back as the fire fence; microseconds would be
+durable in PostgreSQL but lost in that round trip, and every fire would then lose its fence.
 
 ## Attachments
 
@@ -570,10 +601,10 @@ A `subagent` is not an exception to any of this. It is a child agent inside the 
 the Companion's own Box, with no Box, thread, ACL, or identity of its own; the exclusions below
 remain in force for Companion-to-Companion handoff and group Bot chat.
 
-Runtime v2 adds no generic Projects/skill runs, multi-Bot team or handoff, group Bot chat, routine,
-schedule, proactive task, voice, file library, file versioning, artifact surface outside a thread,
-alternate harness, alternate Box provider, pool, generic model/provider marketplace, container
-catalog, deployment platform, or AI app builder. Bounded chat attachments are in scope and are
-specified above.
+Runtime v2 adds no generic Projects/skill runs, multi-Bot team or handoff, group Bot chat, proactive
+task, voice, file library, file versioning, artifact surface outside a thread, alternate harness,
+alternate Box provider, pool, generic model/provider marketplace, container catalog, deployment
+platform, or AI app builder. Bounded chat attachments and scheduled Companion routines are in scope
+and are specified above.
 It adds no SSE, Box push bearer, detached API executor, automatic Full Box repair, automatic replay
 after ambiguous dispatch, or global learned capability table.

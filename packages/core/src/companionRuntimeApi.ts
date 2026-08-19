@@ -15,13 +15,13 @@ import type {
 } from "@companion/contracts";
 import {
   companionAttachmentUploadSchema,
-  companionConfigProposalSchema,
+  companionDecisionProposalSchema,
   companionOperationSchema,
   companionSelectedMcpAccountIdsSchema,
   companionSelectedSkillIdsSchema,
   companionTranscriptEntrySchema,
   companionTurnSchema,
-  type CompanionConfigProposal,
+  type CompanionDecisionProposal,
 } from "@companion/contracts";
 import { schema, type Db } from "@companion/db";
 
@@ -657,7 +657,7 @@ export type CompanionDecisionRecord = {
   requestKey: string;
   requestKind: string;
   decisionStatus: string;
-  proposal: CompanionConfigProposal | null;
+  proposal: CompanionDecisionProposal | null;
   expiresAt: string;
 };
 
@@ -688,7 +688,7 @@ export async function getCompanionDecisionV2(input: {
     requestKey: row.request_key,
     requestKind: row.request_kind,
     decisionStatus: row.decision_status,
-    proposal: row.proposal == null ? null : companionConfigProposalSchema.parse(row.proposal),
+    proposal: row.proposal == null ? null : companionDecisionProposalSchema.parse(row.proposal),
     expiresAt: iso(row.expires_at) ?? new Date(row.expires_at).toISOString(),
   };
 }

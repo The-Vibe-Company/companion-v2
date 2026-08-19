@@ -27,6 +27,7 @@ const companionsApi = vi.hoisted(() => ({
   getCompanionThread: vi.fn(),
   listCompanions: vi.fn(),
   listCompanionProviders: vi.fn(),
+  listCompanionRoutines: vi.fn(),
   openCompanionDesktop: vi.fn(),
   saveCompanionProvider: vi.fn(),
   sendCompanionMessage: vi.fn(),
@@ -109,6 +110,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
       role: "assistant",
       author_id: null,
       author_name: null,
+      routine_name: null,
       created_at: "2026-08-14T09:05:00.000Z",
     },
     runtime: {
@@ -212,6 +214,7 @@ describe("CompanionsApp conversation list", () => {
     companionsApi.listCompanionProviders.mockResolvedValue(providers);
     companionsApi.getCompanionThread.mockResolvedValue(thread());
     companionsApi.getCompanionRuntime.mockResolvedValue(companion());
+    companionsApi.listCompanionRoutines.mockResolvedValue([]);
     companionsApi.deleteCompanionProvider.mockResolvedValue(undefined);
     companionsApi.saveCompanionProvider.mockResolvedValue({
       ...providers.connections[0]!,
@@ -697,6 +700,7 @@ describe("CompanionsApp conversation list", () => {
         decision: null,
         attachments: [],
         reasoning: null,
+        routine: null,
         created_at: "2026-08-14T09:05:00.000Z",
       }],
     }));
@@ -727,6 +731,22 @@ describe("CompanionsApp conversation list", () => {
     expect(row(container).textContent).toContain("Drafted the launch note.");
   });
 
+  it("names the routine in the list instead of leaking the prompt nobody typed", async () => {
+    const container = await render([companion({
+      last_message: {
+        preview: "",
+        role: "user",
+        author_id: "owner-1",
+        author_name: "Ada",
+        routine_name: "Daily standup",
+        created_at: "2026-08-14T09:30:00.000Z",
+      },
+    })]);
+
+    expect(row(container).textContent).toContain("Routine: Daily standup");
+    expect(row(container).textContent).not.toContain("Write the standup");
+  });
+
   const said = (ordinal: number) => ({
     event_id: `pi:${ordinal}`,
     ordinal,
@@ -738,6 +758,7 @@ describe("CompanionsApp conversation list", () => {
     decision: null,
     attachments: [],
     reasoning: null,
+    routine: null,
     created_at: `2026-08-14T09:0${ordinal}:00.000Z`,
   });
 
@@ -825,6 +846,7 @@ describe("CompanionsApp conversation list", () => {
         role: "assistant",
         author_id: null,
         author_name: null,
+        routine_name: null,
         created_at: "2026-08-14T09:30:00.000Z",
       },
     })]);

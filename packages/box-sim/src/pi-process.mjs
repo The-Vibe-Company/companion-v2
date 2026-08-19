@@ -15,6 +15,7 @@ const SCENARIOS = new Set([
   "tool",
   "ask_user",
   "propose_config",
+  "propose_routine",
   "retry",
   "errors",
   "crash",
@@ -264,6 +265,37 @@ function run() {
     pendingUiRequest = { requestId, toolCallId, toolName: "propose_config" };
   }
 
+  function runProposeRoutine() {
+    const toolCallId = `call-routine-${promptSequence}`;
+    const requestId = `ui-sim-${promptSequence}`;
+    const proposal = {
+      kind: "routine",
+      name: "Standup",
+      prompt: "Write the standup.",
+      cron: "0 9 * * 1-5",
+      timezone: "UTC",
+    };
+    beginRun();
+    writeJson({
+      type: "tool_execution_start",
+      toolCallId,
+      toolName: "propose_routine",
+      args: proposal,
+    });
+    writeJson({
+      type: "extension_ui_request",
+      id: requestId,
+      method: "confirm",
+      title: "companion:routine:Standup",
+      message: JSON.stringify({
+        summary: "Schedule Standup each weekday at 9am",
+        proposal,
+      }),
+      timeout: 300_000,
+    });
+    pendingUiRequest = { requestId, toolCallId, toolName: "propose_routine" };
+  }
+
   function continueAskUser(command) {
     if (!pendingUiRequest || command.id !== pendingUiRequest.requestId) return;
     const { toolCallId, toolName } = pendingUiRequest;
@@ -271,6 +303,7 @@ function run() {
     const cancelled = command.cancelled === true || command.confirmed === false;
     const approved = command.confirmed === true;
     const config = toolName === "propose_config";
+    const routine = toolName === "propose_routine";
     writeJson({
       type: "tool_execution_end",
       toolCallId,
@@ -282,6 +315,10 @@ function run() {
             ? (approved
               ? "Approved. Changes apply after this turn ends."
               : "User denied or timed out. No settings changed.")
+            : routine
+              ? (approved
+                ? "Approved. The routine is created after this turn ends."
+                : "User denied or timed out. No routine was created.")
             : (cancelled ? "Question cancelled." : "Answer received."),
         }],
         details: {},
@@ -292,6 +329,10 @@ function run() {
       ? (approved
         ? "The simulated config proposal was approved."
         : "The simulated config proposal was denied.")
+      : routine
+        ? (approved
+          ? "The simulated routine proposal was approved."
+          : "The simulated routine proposal was denied.")
       : (cancelled
         ? "The simulated question was cancelled."
         : "The simulated answer was received."));
@@ -350,6 +391,9 @@ function run() {
         return;
       case "propose_config":
         runProposeConfig();
+        return;
+      case "propose_routine":
+        runProposeRoutine();
         return;
       case "retry":
         runRetry();

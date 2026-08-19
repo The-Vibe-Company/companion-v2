@@ -7,7 +7,7 @@ dependencies:
 | --- | --- | --- | --- |
 | `web` | `web.railway.json` | Next.js UI | Public |
 | `api` | `api.railway.json` | Auth, REST/tRPC, durable runtime intent | Public |
-| `worker` | `worker.railway.json` | GitHub, billing, Skill Database cleanup | Private, no inbound route |
+| `worker` | `worker.railway.json` | GitHub, billing, Skill Database cleanup, Companion routines | Private, no inbound route |
 | `runtime` | `runtime.railway.json` | Sole Box/Pi owner and Runtime v2 executor | Private, no public domain |
 | `release` | `release.railway.json` | Owner-only migrations and grant cutover, then exit | One-shot, no route |
 
@@ -196,8 +196,10 @@ provider connections and member MCP accounts survive. An existing installation m
 purge-capable staged release before deploying a release that removes the legacy schema/executor.
 
 1. Back up PostgreSQL and record the deployed commit and Box account/environment.
-2. Set `COMPANION_COMPANIONS_ENABLED=false` on web, API, and runtime. Deploy all three and wait for
-   active work to reach an interrupted checkpoint. Verify the database runtime gate is disabled.
+2. Set `COMPANION_COMPANIONS_ENABLED=false` on web, API, worker, and runtime. Deploy all four and
+   wait for active work to reach an interrupted checkpoint. Verify the database runtime gate is
+   disabled. The worker reads the flag only to decide whether Companion routines may enqueue turns;
+   it never holds a Box credential.
 3. Run the [legacy purge](../../docs/runbooks/companions-runtime.md#legacy-purge) from an ephemeral,
    private maintenance execution of the **runtime image**. Give that command the migration-owner URL
    and Box key only for its lifetime; do not add the owner URL to the long-lived runtime service.
@@ -205,10 +207,11 @@ purge-capable staged release before deploying a release that removes the legacy 
    pending/blocked delete operation, or unresolved external resource.
 5. Deploy the asynchronous API/web and Runtime v2 service with the flag still disabled. Do not let
    any legacy binary execute v2 rows.
-6. Configure the flag and allowlist on web, API, and runtime. Runtime additionally receives Box/Pi,
-   envelope master key, public API origin, and read-only Skill archive credentials. API and runtime
-   receive the shared desktop HMAC. Deploy runtime first, then API and web, while user traffic stays
-   quiesced.
+6. Configure the flag and allowlist on web, API, worker, and runtime. Runtime additionally receives
+   Box/Pi, envelope master key, public API origin, and read-only Skill archive credentials. API and
+   runtime receive the shared desktop HMAC. Deploy runtime first, then API, worker, and web, while
+   user traffic stays quiesced. Leaving the flag off the worker is a supported configuration: every
+   other Companion surface works and only scheduled routines stay dormant.
 7. Confirm runtime `/healthz` is healthy, inspect the disabled gate epoch, and have the database
    owner call `companion_runtime_enable(<observed_epoch>, '<change-id>')`. This compare-and-set is
    intentionally unavailable to the runtime role.

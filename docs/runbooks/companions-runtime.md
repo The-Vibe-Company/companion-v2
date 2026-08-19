@@ -63,7 +63,7 @@ MCP accounts, Skills, secrets, users, organizations, billing, and audit history 
 ### Prepare
 
 1. Take a fresh PostgreSQL backup.
-2. Set `COMPANION_COMPANIONS_ENABLED=false` on web, API, and runtime, then deploy. The purge rejects
+2. Set `COMPANION_COMPANIONS_ENABLED=false` on web, API, worker, and runtime, then deploy. The purge rejects
    every value other than explicit `false` and takes the migration advisory lock.
 3. Wait for the runtime to stop claims and for active work to become interrupted. Keep public
    Companion traffic quiesced until cutover completes.
@@ -119,7 +119,8 @@ Do not deploy final legacy-removal migrations when any item remains.
 1. Complete and archive the legacy purge report while the feature flag and database gate are off.
 2. Deploy the asynchronous API/web, dedicated runtime, separated role grants, and Runtime v2 schema
    from one compatible stack. No legacy executor may be restarted against v2 rows.
-3. Configure on web, API, and runtime:
+3. Configure on web, API, worker, and runtime. The worker reads the flag only to decide whether
+   Companion routines may enqueue turns, and still holds no Box credential:
 
    ```dotenv
    COMPANION_COMPANIONS_ENABLED=true
@@ -129,7 +130,7 @@ Do not deploy final legacy-removal migrations when any item remains.
 4. Give API only its private runtime URL and the desktop HMAC. Give runtime its dedicated DB URL,
    Box/Pi configuration, the same HMAC, envelope master key, public API origin, and read-only Skill
    archive access. Confirm API and worker environments contain no Box key.
-5. Deploy runtime first, then API and web, with Companion traffic still quiesced. Require runtime
+5. Deploy runtime first, then API, worker, and web, with Companion traffic still quiesced. Require runtime
    `/healthz` to report PostgreSQL, claim loop, and sweep freshness healthy.
 6. As the migration owner, read the compare-and-set epoch:
 

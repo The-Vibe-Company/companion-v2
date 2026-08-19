@@ -223,6 +223,7 @@ function AssistantFrame({ children }: { children: ReactNode }) {
 
 function UserFrame({ children }: { children: ReactNode }) {
   const message = useTranscriptMessage();
+  const routine = message?.entries[0]?.routine ?? null;
   return (
     <div className="flex w-full flex-col items-end" aria-busy={message?.sending || undefined}>
       <div className="w-full">
@@ -232,7 +233,9 @@ function UserFrame({ children }: { children: ReactNode }) {
       {/* Full width on purpose: the bubble inside is capped as a percentage, and a fit-content
           wrapper would make that percentage resolve against the bubble's own text. */}
       <div className={cn("flex w-full flex-col items-end", message?.sending && "opacity-60")}>
-        {children}
+        {routine ? (
+          <p className="chat-routine-header">Routine: {routine.name}</p>
+        ) : children}
         {message && <AttachmentList attachments={attachmentsOf(message)} />}
       </div>
       <UploadStatus message={message} />
@@ -457,6 +460,7 @@ export function CompanionTranscript({
       author_name: null,
       tool: null,
       decision: null,
+      routine: null,
       // Named, not fetchable: the ids here are local and the bytes are still being uploaded, so the
       // card shows the files as chips until the saved entry replaces this one.
       attachments: files.flatMap((file, position) => {

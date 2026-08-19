@@ -18,6 +18,7 @@ const companionsApi = vi.hoisted(() => ({
   getCompanionRuntime: vi.fn(),
   listCompanions: vi.fn(),
   getCompanionThread: vi.fn(),
+  listCompanionRoutines: vi.fn(),
   openCompanionDesktop: vi.fn(),
   sendCompanionMessage: vi.fn(),
   setCompanionProvider: vi.fn(),
@@ -230,6 +231,7 @@ describe("CompanionsApp Box desktop", () => {
     companionsApi.listCompanions.mockResolvedValue([companion()]);
     companionsApi.getCompanionThread.mockResolvedValue(thread());
     companionsApi.getCompanionRuntime.mockResolvedValue(companion());
+    companionsApi.listCompanionRoutines.mockResolvedValue([]);
     window.open = vi.fn();
   });
 
@@ -460,6 +462,7 @@ describe("CompanionsApp context panel", () => {
     companionsApi.listCompanions.mockResolvedValue([companion()]);
     companionsApi.getCompanionThread.mockResolvedValue(thread());
     companionsApi.getCompanionRuntime.mockResolvedValue(companion());
+    companionsApi.listCompanionRoutines.mockResolvedValue([]);
     window.open = vi.fn();
   });
 

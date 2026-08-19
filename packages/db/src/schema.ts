@@ -72,7 +72,7 @@ export const companionDecisionDeliveryStateEnum = pgEnum("companion_decision_del
   "pending", "write_intent", "delivered", "ambiguous", "cancelled",
 ]);
 export const companionDecisionRequestKindEnum = pgEnum("companion_decision_request_kind", [
-  "question", "confirmation", "config_proposal",
+  "question", "confirmation", "config_proposal", "routine_proposal",
 ]);
 export const companionDuplicateCleanupStatusEnum = pgEnum("companion_duplicate_cleanup_status", [
   "pending", "delete_requested", "waiting_deleted", "deleted", "already_deleted", "blocked",
@@ -467,6 +467,56 @@ export const companions = pgTable(
 );
 
 /**
+ * Scheduled Companion prompts. Cron is stored as text and parsed only in TypeScript; SQL never
+ * computes the next fire. `next_fire_at` is NULL exactly when the routine is disabled.
+ *
+ * `next_fire_at` keeps millisecond precision because the worker claims a routine, carries the
+ * instant through a JavaScript `Date`, and hands it back as the fire fence. Microseconds would
+ * survive in PostgreSQL but not in the round trip, so the fence would fail closed forever.
+ */
+export const companionRoutines = pgTable(
+  "companion_routines",
+  {
+    id: uuid("id").primaryKey().notNull(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "restrict" }),
+    companionId: uuid("companion_id").notNull(),
+    name: text("name").notNull(),
+    prompt: text("prompt").notNull(),
+    cron: text("cron").notNull(),
+    timezone: text("timezone").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    nextFireAt: timestamp("next_fire_at", { withTimezone: true, precision: 3 }),
+    lastFiredAt: timestamp("last_fired_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+    lastErrorMessage: text("last_error_message"),
+    lastErrorAt: timestamp("last_error_at", { withTimezone: true }),
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+    claimedBy: text("claimed_by"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgCompanionId: unique("companion_routines_org_companion_id_uq").on(t.orgId, t.companionId, t.id),
+    companionFk: foreignKey({
+      columns: [t.orgId, t.companionId],
+      foreignColumns: [companions.orgId, companions.id],
+      name: "companion_routines_companion_fk",
+    }).onDelete("cascade"),
+    nameUnique: uniqueIndex("companion_routines_name_uq").on(t.companionId, sql`lower(${t.name})`),
+    due: index("companion_routines_due_idx").on(t.nextFireAt).where(sql`${t.enabled} and ${t.nextFireAt} is not null`),
+    nameCheck: check("companion_routines_name_check", sql`char_length(btrim(${t.name})) between 1 and 80 and ${t.name} !~ E'[\\n\\r]'`),
+    promptCheck: check("companion_routines_prompt_check", sql`char_length(btrim(${t.prompt})) between 1 and 16384`),
+    cronCheck: check("companion_routines_cron_check", sql`char_length(${t.cron}) between 1 and 120 and ${t.cron} !~ E'[\\n\\r]'`),
+    timezoneCheck: check("companion_routines_timezone_check", sql`char_length(${t.timezone}) between 1 and 64 and ${t.timezone} !~ E'[\\n\\r]'`),
+    nextFireCheck: check("companion_routines_next_fire_check", sql`(${t.enabled} and ${t.nextFireAt} is not null) or (not ${t.enabled} and ${t.nextFireAt} is null)`),
+    errorCheck: check("companion_routines_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAt} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]')) and ${t.consecutiveFailures} >= 0`),
+    leaseCheck: check("companion_routines_lease_check", sql`(${t.claimedBy} is null) = (${t.leaseExpiresAt} is null) and (${t.claimedBy} is null or (char_length(${t.claimedBy}) between 1 and 200 and ${t.claimedBy} !~ E'[\\n\\r]'))`),
+  }),
+);
+
+/**
  * Global one-shot maintenance ledger for the Runtime v2 cutover. These rows intentionally have no
  * tenant or Companion foreign key: they are inaccessible to application roles and must outlive the
  * legacy ownership rows so a partial provider purge can resume and PR4 can prove completion.
@@ -729,6 +779,12 @@ export const companionTurns = pgTable(
     lastErrorCode: text("last_error_code"),
     lastErrorMessage: text("last_error_message"),
     lastErrorAction: companionRuntimeErrorActionEnum("last_error_action"),
+    /**
+     * Originating routine, if this turn was a scheduled fire. `routine_id` is SET NULL if the
+     * routine is deleted; `routine_name` is the snapshot that still labels the transcript.
+     */
+    routineId: uuid("routine_id").references(() => companionRoutines.id, { onDelete: "set null" }),
+    routineName: text("routine_name"),
     createdAt: now(),
     updatedAt: updatedAt(),
   },
@@ -746,6 +802,8 @@ export const companionTurns = pgTable(
     deadlineCheck: check("companion_turns_deadline_check", sql`(${t.coldStartDeadlineAt} is null or ${t.coldStartDeadlineAt} >= ${t.createdAt}) and ((${t.status} in ('queued','cancelled') and ${t.inactivityDeadlineAt} is null and ${t.absoluteDeadlineAt} is null) or (${t.status} <> 'queued' and ${t.absoluteDeadlineAt} is not null and (${t.inactivityDeadlineAt} is null or ${t.absoluteDeadlineAt} >= ${t.inactivityDeadlineAt})))`),
     terminalCheck: check("companion_turns_terminal_check", sql`(${t.status} in ('succeeded','failed','interrupted','cancelled')) = (${t.settledAt} is not null)`),
     errorCheck: check("companion_turns_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAction} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]')) and (${t.status} not in ('failed','interrupted') or ${t.lastErrorCode} is not null) and (${t.status} not in ('succeeded','cancelled') or ${t.lastErrorCode} is null)`),
+    messageEvent: index("companion_turns_message_event_idx").on(t.companionId, t.messageEventId),
+    routineOriginCheck: check("companion_turns_routine_origin_check", sql`(${t.routineId} is null or ${t.routineName} is not null) and (${t.routineName} is null or (char_length(${t.routineName}) between 1 and 80 and ${t.routineName} !~ E'[\\n\\r]'))`),
   }),
 );
 
@@ -917,9 +975,9 @@ export const companionDecisionDeliveries = pgTable(
     lastErrorMessage: text("last_error_message"),
     lastErrorAction: companionRuntimeErrorActionEnum("last_error_action"),
     /**
-     * Structured settings Pi proposed for `config_proposal` deliveries. Null on question and
-     * confirmation rows. The CHECK compares `request_kind` as text because PostgreSQL cannot read
-     * an enum label added earlier in the same migration transaction.
+     * Structured payload Pi proposed for `config_proposal` and `routine_proposal` deliveries. Null
+     * on question and confirmation rows. The CHECK compares `request_kind` as text because
+     * PostgreSQL cannot read an enum label added earlier in the same migration transaction.
      */
     proposal: jsonb("proposal"),
     createdAt: now(),
@@ -939,9 +997,9 @@ export const companionDecisionDeliveries = pgTable(
     deliveryCheck: check("companion_decision_deliveries_delivery_check", sql`${t.deliveryCheckpoint} in ('pending','write_intent','delivered','ambiguous','cancelled') and ${t.deliveryCheckpointSequence} >= 0 and ${t.deliveryAttemptCount} >= 0 and (${t.claimEpoch} is null or ${t.claimEpoch} >= 1) and ((${t.deliveryState} in ('pending','cancelled') and ${t.commandId} is null) or (${t.deliveryState} in ('write_intent','delivered','ambiguous') and ${t.commandId} is not null)) and ((${t.deliveryState} = 'delivered') = (${t.deliveredAt} is not null))`),
     errorCheck: check("companion_decision_deliveries_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAction} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]'))`),
     proposalCheck: check("companion_decision_deliveries_proposal_check", sql`(
-      (${t.proposal} is null and ${t.requestKind}::text <> 'config_proposal')
+      (${t.proposal} is null and ${t.requestKind}::text not in ('config_proposal', 'routine_proposal'))
       or (
-        ${t.requestKind}::text = 'config_proposal'
+        ${t.requestKind}::text in ('config_proposal', 'routine_proposal')
         and ${t.proposal} is not null
         and jsonb_typeof(${t.proposal}) = 'object'
         and octet_length(${t.proposal}::text) <= 16384
@@ -1239,6 +1297,13 @@ export const companionTranscriptEntries = pgTable(
     decision: jsonb("decision").$type<CompanionStoredDecision>(),
     /** Member who sent a user message; null for Pi output and for entries written before sharing. */
     authorId: text("author_id").references(() => user.id, { onDelete: "set null" }),
+    /**
+     * Name of the routine that enqueued this user message, snapshotted so it survives the routine's
+     * deletion. `companion_turns` carries the same snapshot, but that table is private to the
+     * runtime function owner, and the conversation-list preview is an ordinary API-role read of the
+     * transcript. Null on every entry a member or Pi actually wrote.
+     */
+    routineName: text("routine_name"),
     createdAt: now(),
   },
   (t) => ({
@@ -1290,6 +1355,11 @@ export const companionTranscriptEntries = pgTable(
     boundedDecision: check(
       "companion_transcript_entries_decision_size_check",
       sql`${t.decision} is null or octet_length(${t.decision}::text) <= 262144`,
+    ),
+    // Only a member message can have a routine origin, and the name matches the routine's own bound.
+    routineOnUserEntries: check(
+      "companion_transcript_entries_routine_check",
+      sql`${t.routineName} is null or (${t.role}::text = 'user' and char_length(${t.routineName}) between 1 and 80 and ${t.routineName} !~ E'[\n\r]')`,
     ),
   }),
 );

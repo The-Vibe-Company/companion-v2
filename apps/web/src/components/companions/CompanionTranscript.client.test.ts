@@ -103,6 +103,7 @@ function entry(overrides: Partial<CompanionTranscriptEntry>): CompanionTranscrip
     role: "assistant",
     content: "",
     reasoning: null,
+    routine: null,
     author_id: null,
     author_name: null,
     tool: null,
@@ -711,6 +712,114 @@ describe("a permission card in the thread", () => {
       approve!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
     expect(decide).toHaveBeenCalledWith("org-1", companionId, "config-1", { action: "allow" });
+  });
+
+  it("hides a routine prompt behind a compact header", () => {
+    const container = mount(thread([
+      entry({
+        role: "user",
+        event_id: "msg:routine-1",
+        content: "Write the standup with yesterday's blockers.",
+        author_id: "user-1",
+        routine: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Standup" },
+      }),
+      entry({
+        role: "assistant",
+        event_id: "pi:1",
+        content: "Standup drafted.",
+      }),
+    ]));
+
+    expect(container.querySelector(".chat-routine-header")?.textContent).toBe("Routine: Standup");
+    expect(container.textContent).not.toContain("yesterday's blockers");
+    expect(container.textContent).toContain("Standup drafted.");
+  });
+
+  it("attributes a routine proposal to the Companion and shows the schedule", async () => {
+    const container = mount(thread([entry({
+      role: "decision",
+      event_id: "decision:routine-1",
+      content: "Schedule Standup",
+      decision: card({
+        request_id: "routine-1",
+        kind: "routine",
+        name: "routine",
+        title: "injected title from Pi",
+        proposal: {
+          kind: "routine",
+          name: "Standup",
+          prompt: "Write the standup.",
+          cron: "0 9 * * 1-5",
+          timezone: "America/New_York",
+        },
+      }),
+    })]));
+
+    expect(container.textContent).toContain("Luna proposes this routine");
+    expect(container.textContent).toContain("Standup");
+    expect(container.textContent).toContain("0 9 * * 1-5");
+    expect(container.textContent).toContain("America/New_York");
+    expect(container.textContent).not.toContain("injected title from Pi");
+    const approve = buttonNamed(container, "Approve");
+    expect(approve).toBeDefined();
+    await act(async () => {
+      approve!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(decide).toHaveBeenCalledWith("org-1", companionId, "routine-1", { action: "allow" });
+  });
+
+  it("hides a routine prompt behind a compact header", () => {
+    const container = mount(thread([
+      entry({
+        role: "user",
+        event_id: "msg:routine-1",
+        content: "Write the standup with yesterday's blockers.",
+        author_id: "user-1",
+        routine: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Standup" },
+      }),
+      entry({
+        role: "assistant",
+        event_id: "pi:1",
+        content: "Standup drafted.",
+      }),
+    ]));
+
+    expect(container.querySelector(".chat-routine-header")?.textContent).toBe("Routine: Standup");
+    expect(container.textContent).not.toContain("yesterday's blockers");
+    expect(container.textContent).toContain("Standup drafted.");
+  });
+
+  it("attributes a routine proposal to the Companion and shows the schedule", async () => {
+    const container = mount(thread([entry({
+      role: "decision",
+      event_id: "decision:routine-1",
+      content: "Schedule Standup",
+      decision: card({
+        request_id: "routine-1",
+        kind: "routine",
+        name: "routine",
+        title: "injected title from Pi",
+        proposal: {
+          kind: "routine",
+          name: "Standup",
+          prompt: "Write the standup.",
+          cron: "0 9 * * 1-5",
+          timezone: "America/New_York",
+        },
+      }),
+    })]));
+
+    expect(container.textContent).toContain("Luna proposes this routine");
+    expect(container.textContent).toContain("Standup");
+    expect(container.textContent).toContain("0 9 * * 1-5");
+    expect(container.textContent).toContain("America/New_York");
+    expect(container.textContent).not.toContain("injected title from Pi");
+    const approve = buttonNamed(container, "Approve");
+    expect(approve).toBeDefined();
+    await act(async () => {
+      approve!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(decide).toHaveBeenCalledWith("org-1", companionId, "routine-1", { action: "allow" });
   });
 
   it("keeps a config card pending and shows the error when approval fails", async () => {
