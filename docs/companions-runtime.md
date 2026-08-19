@@ -260,7 +260,9 @@ still produces byte-identical projection digests. An update with no readable tex
 tool), and `pi-memory` (memory that survives a Box wake, kept on the persistent disk at
 `~/.companion/runtime/memory` and exported as `PI_MEMORY_DIR`). pi-memory's optional semantic-search
 binary, `qmd`, installs best-effort under `~/.companion/tools`: memory degrades to recall without it,
-so a failed install reports on stdout and never fails a staging. `COMPANION_PI_DEFAULT_PACKAGES` and
+so a failed install reports on stdout and never fails a staging. Best-effort also means recorded
+once — the marker is written whether or not that optional install succeeded, so a Box that missed it
+keeps plain recall until a pin changes, rather than paying for the whole layout again on every wake. `COMPANION_PI_DEFAULT_PACKAGES` and
 `COMPANION_PI_QMD_PACKAGE` override the pins, and `none` disables either.
 
 Like the outbox, the package set rides within layout 14 rather than claiming a version, because the

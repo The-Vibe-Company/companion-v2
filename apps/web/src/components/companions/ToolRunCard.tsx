@@ -60,13 +60,21 @@ export const ToolRunCard: ToolCallMessagePartComponent<CompanionToolArgs> = ({ a
   const [open, setOpen] = useState(false);
   const run = args?.run;
   if (!run) return null;
-  const KindIcon = TOOL_ICONS[run.kind];
+  // A thread outlives the tab that renders it: a reader can be holding a bundle from before the
+  // catalog grew, and a kind it has never heard of must still be a card rather than the reason the
+  // whole conversation fails to render.
+  const KindIcon = TOOL_ICONS[run.kind] ?? BracesIcon;
+  const status = TOOL_STATUS_LABELS[run.status] ?? "running";
   const named = run.title !== run.name;
   const failed = run.status === "error" || run.status === "timeout";
-  // A delegated agent is the one run whose progress a reader waits on rather than skims past, and
-  // it is the one that can stay open for minutes. It says where it has got to in a word, so nobody
-  // has to read a spinner to find out whether their Companion is still waiting on it.
-  const saysStatus = run.kind === "subagent";
+  // A delegated agent is the one run whose outcome a reader waits on rather than skims past, and it
+  // is the one that can stay open for minutes. Its headline is the only prose on this card — an
+  // agent and the sentence it was given — so it is set like prose rather than like a command.
+  const delegated = run.kind === "subagent";
+  // How it ended is said in a word; that it has not ended is left to the spinner, which is a state
+  // rather than a claim. A card is not re-rendered in place by a poll, so a word saying "running"
+  // would go on saying it long after the run finished, and be read as fact.
+  const saysOutcome = delegated && run.status !== "running";
 
   return (
     <Collapsible
@@ -87,7 +95,15 @@ export const ToolRunCard: ToolCallMessagePartComponent<CompanionToolArgs> = ({ a
         <KindIcon className="text-muted-foreground size-3.5 shrink-0" aria-hidden="true" />
         <span className="text-foreground font-medium">{run.name}</span>
         {named && (
-          <span className="text-muted-foreground min-w-0 flex-1 truncate font-mono text-xs">
+          <span
+            // The line is one line by design, so what it cannot show has to remain reachable: a
+            // delegated run's headline is the only copy of the task the progress will replace.
+            title={run.title}
+            className={cn(
+              "text-muted-foreground min-w-0 flex-1 truncate text-xs",
+              delegated ? "" : "font-mono",
+            )}
+          >
             {run.title}
           </span>
         )}
@@ -102,8 +118,8 @@ export const ToolRunCard: ToolCallMessagePartComponent<CompanionToolArgs> = ({ a
             <CheckIcon className="size-3.5 text-(--color-ok)" aria-hidden="true" />
           )}
           {failed && <AlertTriangleIcon className="text-destructive size-3.5" aria-hidden="true" />}
-          <span className={saysStatus ? "text-muted-foreground text-xs" : "sr-only"}>
-            {TOOL_STATUS_LABELS[run.status]}
+          <span className={saysOutcome ? "text-muted-foreground shrink-0 text-xs" : "sr-only"}>
+            {status}
           </span>
           {run.detail && (
             <ChevronDownIcon

@@ -369,7 +369,13 @@ const COMPANION_TOOL_RUN_SCREENSHOT_PATTERN = /^data:image\/(?:png|jpeg|webp);ba
 export const companionToolRunSchema = z.object({
   /** Pi's own id for the call, so the result that closes it finds the chip it belongs to. */
   call_id: z.string().min(1).max(200).nullable(),
-  kind: companionToolRunKindSchema,
+  /**
+   * A stored kind this build has never heard of reads as the generic one rather than failing.
+   * The whole transcript is parsed as one array, so a strict enum would turn a single card written
+   * by a newer runtime — during a rolling deploy, or after an API-only rollback — into a thread
+   * nobody can open at all. Widening the catalog must never be able to do that.
+   */
+  kind: companionToolRunKindSchema.catch("tool"),
   /** Pi's tool name, verbatim, so an unrecognized tool still reports what actually ran. */
   name: z.string().min(1).max(120),
   /** One line naming what the run did: the command, the path, the URL. */

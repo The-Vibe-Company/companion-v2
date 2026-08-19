@@ -483,7 +483,9 @@ function subagentStart(
   // match, so a credential that straddles a cut no longer matches the value it came from and its
   // surviving half is what gets persisted. `decisionRequestKey` refuses provider input for the same
   // reason; here there is a safe answer, which is to scrub first and bound the scrubbed text.
-  const agent = rawAgent ? firstLine(redact(rawAgent)).slice(0, MAX_SUBAGENT_AGENT) : null;
+  const agent = rawAgent
+    ? withoutOrphanSurrogate(firstLine(redact(rawAgent)).slice(0, MAX_SUBAGENT_AGENT), "end")
+    : null;
   const task = rawTask ? redact(rawTask) : null;
   const headline = [agent, task ? firstLine(task) : null].filter(Boolean).join(": ");
   return {
@@ -533,7 +535,11 @@ function toolProjection(
     // the thread. Progress is only ever an update to a run that already named itself.
     if (kind !== "subagent" || !callId) return null;
     const progress = progressText(event);
-    if (!progress) return null;
+    // Emptiness is judged after redaction, not before. A line that was entirely a credential leaves
+    // nothing to show, and an empty detail is not the inherit sentinel — it would overwrite the task
+    // the card is holding with nothing, and take the disclosure with it.
+    const scrubbed = progress ? redact(progress).trim() : "";
+    if (!scrubbed) return null;
     return {
       sequence,
       type: "tool",
@@ -545,7 +551,7 @@ function toolProjection(
         name,
         title: "",
         status: "running",
-        detail: boundedTail(redact(progress), MAX_SUBAGENT_DETAIL),
+        detail: boundedTail(scrubbed, MAX_SUBAGENT_DETAIL),
         screenshot: null,
       },
     };

@@ -331,40 +331,71 @@ describe("a tool run in the thread", () => {
       title: "researcher: read the changelog",
       ...overrides,
     });
-    const running = mount(thread([
-      entry({
-        role: "tool",
-        content: "researcher: read the changelog",
-        tool: delegated({ status: "running", detail: "reading CHANGELOG.md" }),
-      }),
-    ]));
-    const runningCard = running.querySelector("[data-slot='companion-tool-run']") as HTMLElement;
+    const delegatedThread = (tool: CompanionToolRun) => thread([
+      entry({ role: "tool", content: "researcher: read the changelog", tool }),
+    ]);
+    const container = mount(
+      delegatedThread(delegated({ status: "running", detail: "reading CHANGELOG.md" })),
+    );
+    const card = () =>
+      container.querySelector("[data-slot='companion-tool-run']") as HTMLElement;
 
-    expect(runningCard.textContent).toContain("subagent");
-    expect(runningCard.textContent).toContain("researcher: read the changelog");
-    // A run that can last minutes says where it is in words, not only as a spinner.
-    expect(runningCard.querySelector(".sr-only")).toBeNull();
-    expect(runningCard.textContent).toContain("running");
-    expect(runningCard.getAttribute("aria-busy")).toBe("true");
+    expect(card().textContent).toContain("subagent");
+    expect(card().textContent).toContain("researcher: read the changelog");
+    // A run in flight is a spinner and `aria-busy`, exactly as every other kind is. The word is
+    // reserved for how it ended, because a card is not re-rendered in place by a poll and a word
+    // saying "running" would go on saying it long after the run had finished.
+    expect(card().getAttribute("aria-busy")).toBe("true");
+    expect(card().querySelector(".sr-only")?.textContent).toBe("running");
+    // The line is one line, so the headline it cannot fit stays reachable rather than lost: it is
+    // the only copy of the task once progress replaces the detail.
+    expect(container.querySelector("[title='researcher: read the changelog']")).not.toBeNull();
 
     // What it did is a disclosure, exactly like every other run's.
-    expect(runningCard.textContent).not.toContain("reading CHANGELOG.md");
-    click(running.querySelector(
+    expect(card().textContent).not.toContain("reading CHANGELOG.md");
+    click(container.querySelector(
       "[data-slot='companion-tool-run'] [data-slot='collapsible-trigger']",
     ) as HTMLButtonElement);
-    expect(running.textContent).toContain("reading CHANGELOG.md");
+    expect(container.textContent).toContain("reading CHANGELOG.md");
+  });
 
-    const settled = mount(thread([
+  it("says in a word how a delegated run ended", () => {
+    for (const [status, word] of [["ok", "done"], ["error", "failed"]] as const) {
+      const container = mount(thread([
+        entry({
+          role: "tool",
+          content: "researcher: read the changelog",
+          tool: run({
+            kind: "subagent",
+            name: "subagent",
+            title: "researcher: read the changelog",
+            status,
+            detail: "read 240 lines",
+          }),
+        }),
+      ]));
+      const settled = container.querySelector("[data-slot='companion-tool-run']") as HTMLElement;
+
+      expect(settled.querySelector(".sr-only")).toBeNull();
+      expect(settled.textContent).toContain(word);
+      expect(settled.getAttribute("aria-busy")).toBeNull();
+    }
+  });
+
+  it("renders a card for a kind this bundle has never heard of", () => {
+    // A thread outlives the tab that renders it, and the kind catalog grows. An unknown kind used
+    // to be an unguarded icon lookup, which React renders as a thrown error — taking the whole
+    // conversation with it, not just the card.
+    const container = mount(thread([
       entry({
         role: "tool",
-        content: "researcher: read the changelog",
-        tool: delegated({ status: "ok", detail: "read 240 lines" }),
+        content: "future tool",
+        tool: { ...run(), kind: "hologram" as CompanionToolRun["kind"], name: "hologram" },
       }),
     ]));
-    const settledCard = settled.querySelector("[data-slot='companion-tool-run']") as HTMLElement;
 
-    expect(settledCard.textContent).toContain("done");
-    expect(settledCard.getAttribute("aria-busy")).toBeNull();
+    expect(container.querySelector("[data-slot='companion-tool-run']")?.textContent)
+      .toContain("hologram");
   });
 
   it("shows the Box desktop as the run left it", () => {

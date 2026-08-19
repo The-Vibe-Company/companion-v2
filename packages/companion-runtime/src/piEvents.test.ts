@@ -857,6 +857,44 @@ describe("delegated subagent runs", () => {
 
     // A name is a name: one line, bounded, and it cannot push the task out of the headline.
     expect(title).toBe(`${"n".repeat(120)}: do the thing`);
+
+    // The name is cut like every other persisted string here, so it cannot end mid-emoji and take
+    // the whole event batch down with it.
+    const astral = classify([{
+      type: "tool_execution_start",
+      toolCallId: "call-1",
+      toolName: "subagent",
+      args: { agent: `${"n".repeat(119)}🙂 rest`, task: "do the thing" },
+    }]);
+    const [astralTitle] = astral.projections
+      .filter((projection) => projection.type === "tool")
+      .map((projection) => projection.tool.title);
+
+    expect(astralTitle).toBe(`${"n".repeat(119)}: do the thing`);
+  });
+
+  it("keeps the task when a progress line is nothing but a credential", () => {
+    const classified = classify([
+      {
+        type: "tool_execution_start",
+        toolCallId: "call-1",
+        toolName: "subagent",
+        args: { agent: "deployer", task: "ship the release" },
+      },
+      {
+        type: "tool_execution_update",
+        toolCallId: "call-1",
+        toolName: "subagent",
+        partialResult: { content: [{ type: "text", text: secret }] },
+      },
+    ]);
+
+    // An empty detail is not the inherit sentinel: projecting one would replace the task with
+    // nothing and close the disclosure for good. Nothing to show means nothing to project.
+    expect(classified.projections).toEqual([
+      expect.objectContaining({ type: "tool" }),
+      expect.objectContaining({ type: "activity", event_type: "tool_execution_update" }),
+    ]);
   });
 
   it("never persists half of a credential that a cut would hide from the redactor", () => {

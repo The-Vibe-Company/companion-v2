@@ -1041,6 +1041,8 @@ ${piPackages
 # outside errexit and why the reported line is a fixed shape rather than npm's own words: the
 # control plane falls back to the last stdout line when a later step fails without stderr, and a
 # registry's output is not something to persist there. The full log stays on the Box for an operator.
+# The marker below is written either way: a Box that missed this keeps plain recall until a pin
+# changes, which is cheaper than re-running the whole layout on every wake to retry an optimization.
 qmd_log="$HOME/.companion/runtime/logs/qmd-install.log"
 set +e
 npm install --global --prefix "$HOME/.companion/tools" ${shellQuote(qmdPackage)} >"$qmd_log" 2>&1
