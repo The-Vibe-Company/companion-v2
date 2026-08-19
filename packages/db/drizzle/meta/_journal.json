@@ -741,14 +741,21 @@
       "idx": 105,
       "version": "7",
       "when": 1789146400000,
-      "tag": "0105_companion_routines",
+      "tag": "0105_companion_subagent_tool_runs",
       "breakpoints": true
     },
     {
       "idx": 106,
       "version": "7",
       "when": 1789232800000,
-      "tag": "0106_companion_answer_routine_decision",
+      "tag": "0106_companion_routines",
+      "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1789319200000,
+      "tag": "0107_companion_answer_routine_decision",
       "breakpoints": true
     }
   ]

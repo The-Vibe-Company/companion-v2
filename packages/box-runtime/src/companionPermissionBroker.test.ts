@@ -72,10 +72,19 @@ describe("Companion Pi interaction extension", () => {
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain('["shell",');
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain('"bash"');
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
-      .toContain('toolRunKind(toolName) === "shell" ? EXEC_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS');
+      .toContain('kind === "shell" || kind === "subagent" ? EXEC_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS');
     const shellIndex = COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE.indexOf('["shell",');
     const browseIndex = COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE.indexOf('["browse",');
     expect(browseIndex).toBeGreaterThan(-1);
     expect(browseIndex).toBeLessThan(shellIndex);
+  });
+
+  it("gives a delegated agent the execution deadline instead of the 90-second default", () => {
+    // A subagent runs a task of its own, so the default deadline would abort the parent turn while
+    // the child was still working. The Box-side timer and the control-plane kind agree on which
+    // runs those are, because both read the same table.
+    const table = COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE;
+    expect(table).toContain('["subagent",["subagent","subagents"]]');
+    expect(table.indexOf('["subagent",')).toBeLessThan(table.indexOf('["shell",'));
   });
 });

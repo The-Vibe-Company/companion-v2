@@ -152,6 +152,7 @@ describe("production runtime composition", () => {
         COMPANION_SECRETS_MASTER_KEY: masterKey.toString("base64"),
         COMPANION_RUNTIME_DESKTOP_HMAC_SECRET: hmacKey.toString("base64"),
         COMPANION_API_URL: "http://127.0.0.1:3001",
+        COMPANION_PI_MCP_ADAPTER_PACKAGE: "npm:pi-mcp-adapter@2.12.1",
         UNRELATED_DATABASE_SECRET: "must-not-be-forwarded",
       },
       factories,
@@ -170,10 +171,13 @@ describe("production runtime composition", () => {
         warn: expect.any(Function),
       }),
     });
+    // The Box adapter is the only process that lays out a disk, so the one pin an environment can
+    // still move reaches it and nothing else in this environment does.
     expect(boxEnv).toEqual({
       COMPANION_BOX_API_KEY: "box-secret",
       COMPANION_BOX_API_BASE: "http://127.0.0.1:13400",
       COMPANION_BOX_TTL_SECONDS: "21600",
+      COMPANION_PI_MCP_ADAPTER_PACKAGE: "npm:pi-mcp-adapter@2.12.1",
     });
     const control = (kernelInput as CreateRuntimeKernelInput).box;
     await control.getStatus({ boxId: "bx_23456789", signal: new AbortController().signal });

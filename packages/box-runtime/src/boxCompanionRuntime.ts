@@ -58,6 +58,35 @@ export type CompanionConfigCatalog = {
 
 const DEFAULT_BOX_API_BASE = "https://ascii.dev/api/box/v1";
 const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
+/**
+ * The Pi packages every Companion gets, beyond the MCP adapter. Web access is what makes a Companion
+ * useful without any plugin connected at all, subagents let one delegate a bounded piece of its own
+ * work, and memory is what carries a fact from one thread session to the next. Each is pinned: a
+ * floating range would let two Boxes laid out a day apart disagree about what a Companion can do.
+ *
+ * They are not configurable. What a Companion can do is a product decision, not a deployment's to
+ * make: a Box missing one of these is a Companion that quietly cannot do what its thread, its
+ * instructions, and this repository all say it can.
+ */
+const PI_PACKAGES = [
+  "npm:pi-web-access@0.24.0",
+  "npm:pi-subagents@0.51.0",
+  "npm:pi-memory@0.4.2",
+] as const;
+/**
+ * pi-memory's semantic-search binary. It is not a Pi package and memory recalls without it, so its
+ * install is best-effort and can never fail a staging — but it is always attempted, for the same
+ * reason the packages above are.
+ */
+const QMD_PACKAGE = "@tobilu/qmd@2.8.3";
+/**
+ * What a package specification may contain. Deliberately permissive about the grammar npm and Pi
+ * already understand — exact pins, ranges, git refs — and closed to everything a shell would read as
+ * more than one word. `shellQuote` is what actually makes the install safe; this is the second lock,
+ * and it is drawn here so that an operator whose adapter was already pinned to a range keeps working.
+ */
+const PI_PACKAGE_SPEC = /^[@A-Za-z0-9:._/^~+#-]+$/;
+const MAX_PI_PACKAGE_SPEC_LENGTH = 200;
 /** First Pi release whose image resize runs outside the RPC event loop. */
 const MINIMUM_IMAGE_SAFE_PI_VERSION = "0.84.2";
 const MAX_COMPANION_RUNTIME_GENERATION = 2_147_483_647;
@@ -72,6 +101,10 @@ const MAX_COMPANION_RUNTIME_GENERATION = 2_147_483_647;
 // readiness to the current systemd invocation; the same 90-second guard aborts a read that does not
 // settle. Layout 14 replaces the shell-held FIFO with the supervised Node broker, an owner-only Unix
 // socket, and a segmented acknowledgement journal.
+//
+// The default Pi package set and its semantic-search binary ride within layout 14 rather than
+// claiming a version: the layout version gates the state machine, while the marker string below
+// already carries every installed pin, so changing a pin restages each Box on its next wake.
 export const COMPANION_PI_DISK_LAYOUT_VERSION = 14;
 /** Content bytes the provider's file API refuses in one `PUT /boxes/:id/files` body. */
 const BOX_FILE_WRITE_LIMIT_BYTES = 5 * 1024 * 1024;
@@ -861,7 +894,37 @@ function parseBrokerJournalRecord(value: unknown): CompanionPiJournalRecord | nu
 /** Where the layout script is staged on the Box disk so it runs as a file, never as a command. */
 const PI_LAYOUT_SCRIPT_PATH = ".companion/bin/ensure-pi-layout.sh";
 
-function setupScript(installCommand: string | undefined, mcpAdapterPackage: string): string {
+/**
+ * The Pi packages one Box installs, adapter first.
+ *
+ * Only the adapter is deployment-pinnable, and only because it already was. Everything after it is
+ * fixed: a deployment that could drop web access, delegation, or memory would be a deployment where
+ * a Companion's abilities depend on which install it happens to be talking to.
+ */
+export function resolvePiPackages(env: NodeJS.ProcessEnv): string[] {
+  const adapter = validPackageSpec(
+    env.COMPANION_PI_MCP_ADAPTER_PACKAGE?.trim() || DEFAULT_PI_MCP_ADAPTER_PACKAGE,
+    "COMPANION_PI_MCP_ADAPTER_PACKAGE",
+  );
+  // Validated too, though they are literals here: this is the one place a bad edit to them can be
+  // caught before it reaches a Box.
+  return [adapter, ...PI_PACKAGES.map((spec) => validPackageSpec(spec, "PI_PACKAGES"))];
+}
+
+function validPackageSpec(spec: string, variable: string): string {
+  if (spec.length > MAX_PI_PACKAGE_SPEC_LENGTH || !PI_PACKAGE_SPEC.test(spec)) {
+    throw new BoxRuntimeConfigurationError(
+      `${variable} contains a package specification that is not installable: ${JSON.stringify(spec)}`,
+    );
+  }
+  return spec;
+}
+
+function setupScript(
+  installCommand: string | undefined,
+  piPackages: readonly string[],
+  qmdPackage: string,
+): string {
   const configuredInstall = installCommand?.trim();
   const encodedBrokerSource = Buffer.from(COMPANION_PI_BROKER_SOURCE, "utf8").toString("base64");
   const encodedInstallScript = configuredInstall
@@ -914,7 +977,11 @@ set -euo pipefail
 # An already-laid-out disk short-circuits before anything else, so repairing the layout on a Box that
 # is already correct costs one file read and cannot fail on a dependency it does not need.
 layout_marker="$HOME/.companion/runtime/state/pi-layout.version"
-expected_layout=${shellQuote(`${COMPANION_PI_DISK_LAYOUT_VERSION}:${mcpAdapterPackage}:pi>=${MINIMUM_IMAGE_SAFE_PI_VERSION}`)}
+expected_layout=${shellQuote(
+    `${COMPANION_PI_DISK_LAYOUT_VERSION}:${piPackages.join(",")}`
+    + `:qmd=${qmdPackage}`
+    + `:pi>=${MINIMUM_IMAGE_SAFE_PI_VERSION}`,
+  )}
 if [ -f "$layout_marker" ] \
   && [ "$(cat "$layout_marker")" = "$expected_layout" ] \
   && [ -x "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}" ] \
@@ -925,8 +992,8 @@ fi
 ${ensureInstalled}
 command -v pi >/dev/null 2>&1
 command -v node >/dev/null 2>&1
-mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/pi/extensions" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}" "$HOME/.config/systemd/user"
-chmod 700 "$HOME/.companion/runtime" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}"
+mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/pi/extensions" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/.companion/tools" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}" "$HOME/.config/systemd/user"
+chmod 700 "$HOME/.companion/runtime" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}"
 # Resolve Pi's absolute path now so the daemon does not depend on a login-shell PATH it will never
 # have under the minimal systemd user manager environment.
 pi_bin="$(command -v pi)"
@@ -955,7 +1022,24 @@ if (!currentEnough) {
 }
 COMPANION_PI_VERSION
 pi_bin_dir="$(dirname "$pi_bin")"
-PI_CODING_AGENT_DIR="$HOME/.companion/pi" "$pi_bin" install ${shellQuote(mcpAdapterPackage)}
+${piPackages
+    .map((spec) => `PI_CODING_AGENT_DIR="$HOME/.companion/pi" "$pi_bin" install ${shellQuote(spec)}`)
+    .join("\n")}
+# Semantic memory search is an optimization: pi-memory recalls without it, so a Box that cannot
+# install it is still a working Box. Nothing in this block may end a staging, which is why it runs
+# outside errexit and why the reported line is a fixed shape rather than npm's own words: the
+# control plane falls back to the last stdout line when a later step fails without stderr, and a
+# registry's output is not something to persist there. The full log stays on the Box for an operator.
+# The marker below is written either way: a Box that missed this keeps plain recall until a pin
+# changes, which is cheaper than re-running the whole layout on every wake to retry an optimization.
+qmd_log="$HOME/.companion/runtime/logs/qmd-install.log"
+set +e
+npm install --global --prefix "$HOME/.companion/tools" ${shellQuote(qmdPackage)} >"$qmd_log" 2>&1
+qmd_status=$?
+set -e
+if [ "$qmd_status" -ne 0 ]; then
+  printf 'Memory search binary %s did not install (exit %s); see runtime/logs/qmd-install.log\\n' ${shellQuote(qmdPackage)} "$qmd_status"
+fi
 # The broker is an autonomous ESM program. Encoding it keeps arbitrary JavaScript out of the shell
 # grammar while preserving one identical setup script for Box create and in-place layout repair.
 printf '%s' ${shellQuote(encodedBrokerSource)} | base64 --decode > "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
@@ -971,7 +1055,7 @@ chmod 700 "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
   cat <<'COMPANION_PI_DAEMON'
 root="$HOME/.companion/runtime"
 stderr_log="$root/logs/pi.stderr.log"
-mkdir -p "$root/sessions" "$root/state" "$root/logs"
+mkdir -p "$root/sessions" "$root/state" "$root/logs" "$root/memory"
 # A crash loop appends one line every couple of seconds for as long as it runs, so the log is rolled
 # once instead of growing until the Box disk notices.
 if [ -f "$stderr_log" ] && [ -n "$(find "$stderr_log" -size +${PI_DAEMON_STDERR_ROLL_KILOBYTES}k 2>/dev/null)" ]; then
@@ -983,11 +1067,20 @@ fi
 exec 2>>"$stderr_log"
 trap 'companion_status=$?; printf "pi-daemon: line %s: %s failed with status %s\\n" "$LINENO" "$BASH_COMMAND" "$companion_status" >&2' ERR
 export PI_CODING_AGENT_DIR="$HOME/.companion/pi"
+# The optional memory search binary is installed under the Companion's own prefix, which no login
+# shell contributes to a systemd user unit's PATH. It is appended, not prepended: the resolved Pi
+# directory has to stay ahead of it so nothing landing in this prefix can shadow the pinned Pi or
+# node for a process Pi spawns.
+PATH="$PATH:$HOME/.companion/tools/bin"
+export PATH
+# Memory outlives one Pi start and one Box wake, so it lives on the snapshotted Box disk rather than
+# under /run/user/<uid>, which is tmpfs and is where the provider credentials live.
+export PI_MEMORY_DIR="$root/memory"
 broker_socket="$HOME/${COMPANION_PI_BROKER_SOCKET_PATH}"
 broker_journal="$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}"
 rm -f "$broker_socket"
 mkdir -p "$broker_journal"
-chmod 700 "$root" "$root/state" "$root/logs" "$broker_journal"
+chmod 700 "$root" "$root/state" "$root/logs" "$root/memory" "$broker_journal"
 pi_version="$("$PI_BIN" --version 2>/dev/null || true)"
 "$NODE_BIN" - "$pi_version" "$MINIMUM_IMAGE_SAFE_PI_VERSION" <<'COMPANION_PI_DAEMON_VERSION'
 const actualText = process.argv[2] ?? "";
@@ -1290,7 +1383,8 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   readonly #desktopMintBudgetMs: number;
   readonly #daemonActiveTimeoutMs: number;
   readonly #installCommand: string | undefined;
-  readonly #mcpAdapterPackage: string;
+  readonly #piPackages: readonly string[];
+  readonly #qmdPackage: string;
   /**
    * The current staging call's budget. Private file/command helpers share it so cancellation covers
    * the whole layout transaction without leaking into a later adapter call.
@@ -1318,8 +1412,8 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
       PI_DAEMON_ACTIVE_TIMEOUT_MS,
     );
     this.#installCommand = env.COMPANION_PI_INSTALL_COMMAND;
-    this.#mcpAdapterPackage =
-      env.COMPANION_PI_MCP_ADAPTER_PACKAGE?.trim() || DEFAULT_PI_MCP_ADAPTER_PACKAGE;
+    this.#piPackages = resolvePiPackages(env);
+    this.#qmdPackage = validPackageSpec(QMD_PACKAGE, "QMD_PACKAGE");
   }
 
   /**
@@ -1747,9 +1841,15 @@ exit 0`,
     await this.#writeFile(
       boxId,
       PI_LAYOUT_SCRIPT_PATH,
-      setupScript(this.#installCommand, this.#mcpAdapterPackage),
+      setupScript(this.#installCommand, this.#piPackages, this.#qmdPackage),
     );
-    const result = await this.#command(boxId, `bash "$HOME/${PI_LAYOUT_SCRIPT_PATH}"`, 180);
+    // A Box whose marker already matches exits in milliseconds. The budget is for the run that does
+    // relayout: it installs the whole pinned package set, and the marker is written only once that
+    // finishes. A budget that stops the install short of the marker is a Box that repeats the same
+    // work on every wake and can never record it, so this deliberately outlives a turn's own
+    // three-minute cold-start deadline: that turn may still fail retryably, but the install it paid
+    // for is kept and the member's next message short-circuits.
+    const result = await this.#command(boxId, `bash "$HOME/${PI_LAYOUT_SCRIPT_PATH}"`, 300);
     if (!result.success) {
       // The bare message cost a production probe to diagnose, so the failing line travels with it.
       throw new BoxRuntimeProviderError(

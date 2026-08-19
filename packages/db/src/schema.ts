@@ -1230,7 +1230,7 @@ export const companionThreads = pgTable(
  */
 export interface CompanionStoredToolRun {
   call_id: string | null;
-  kind: "shell" | "file" | "browse" | "computer" | "tool";
+  kind: "shell" | "file" | "browse" | "computer" | "subagent" | "tool";
   name: string;
   title: string;
   status: "running" | "ok" | "error" | "timeout";

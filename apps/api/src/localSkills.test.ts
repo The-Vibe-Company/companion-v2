@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.77.0");
+    expect(pkg.version).toBe("1.78.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -132,10 +132,11 @@ describe("companion skill package + row", () => {
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
-    const hubClientChanges = manifest.metadata?.changelog
-      ?.find((entry) => entry.version === "1.75.0")
+    const hubAccessChanges = manifest.metadata?.changelog
+      ?.find((entry) => entry.version === "1.76.0")
       ?.changes?.join("\n") ?? "";
-    expect(hubClientChanges).toContain("bundled Agent Auth client");
+    expect(hubAccessChanges).toContain("hosted-Box Skills Hub access is unconditional");
+    expect(hubAccessChanges).toContain("refusal means the Companion or its member is gone");
     const configProposalChanges = manifest.metadata?.changelog
       ?.find((entry) => entry.version === "1.74.0")
       ?.changes?.join("\n") ?? "";

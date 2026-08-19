@@ -4,6 +4,10 @@ import type { CompanionToolRunKind } from "./companions";
 export const COMPANION_TOOL_KIND_NAME_TABLE: ReadonlyArray<
   readonly [CompanionToolRunKind, readonly string[]]
 > = [
+  // First on purpose. A name like `run_subagent` matches `run` in the shell row too, and word
+  // matching takes the first row that claims any word: what a reader needs told is that a delegated
+  // agent ran, not that something was run.
+  ["subagent", ["subagent", "subagents"]],
   ["computer", [
     "computer", "computeruse", "desktop", "lux", "screenshot", "screencapture", "screen",
     "click", "doubleclick", "rightclick", "type", "key", "press", "scroll", "drag", "mouse",

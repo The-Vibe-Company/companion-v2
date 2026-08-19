@@ -483,6 +483,8 @@ DECLARE
   v_existing_hash text;
   v_event_id text;
   v_existing_event_id text;
+  v_existing_content text;
+  v_existing_tool jsonb;
   v_ordinal integer;
   v_content text;
   v_reasoning text;
@@ -614,7 +616,7 @@ BEGIN
          OR COALESCE(jsonb_typeof(v_tool -> 'call_id'), 'null') NOT IN ('string', 'null')
          OR char_length(COALESCE(v_tool ->> 'call_id', '')) > 200
          OR COALESCE(jsonb_typeof(v_tool -> 'kind'), 'missing') <> 'string'
-         OR (v_tool ->> 'kind') NOT IN ('shell', 'file', 'browse', 'computer', 'tool')
+         OR (v_tool ->> 'kind') NOT IN ('shell', 'file', 'browse', 'computer', 'subagent', 'tool')
          OR COALESCE(jsonb_typeof(v_tool -> 'name'), 'missing') <> 'string'
          OR char_length(v_tool ->> 'name') NOT BETWEEN 1 AND 120
          OR COALESCE(jsonb_typeof(v_tool -> 'title'), 'missing') <> 'string'
@@ -813,8 +815,11 @@ BEGIN
       v_content := v_event ->> 'content';
       v_tool := v_event -> 'tool';
       v_existing_event_id := NULL;
+      v_existing_content := NULL;
+      v_existing_tool := NULL;
       IF v_tool ->> 'call_id' IS NOT NULL THEN
-        SELECT entry.event_id INTO v_existing_event_id
+        SELECT entry.event_id, entry.content, entry.tool
+        INTO v_existing_event_id, v_existing_content, v_existing_tool
         FROM public.companion_transcript_entries entry
         WHERE entry.org_id = p_org_id
           AND entry.companion_id = p_companion_id
@@ -826,6 +831,13 @@ BEGIN
         FOR UPDATE;
       END IF;
       IF v_existing_event_id IS NULL THEN
+        -- A progress or result line whose start never landed -- an oversized start is dropped by the
+        -- broker, counted, and not projected -- still becomes a card. It names the tool rather than
+        -- inheriting a headline no row holds.
+        v_content := COALESCE(NULLIF(v_content, ''), v_tool ->> 'name');
+        v_tool := v_tool || jsonb_build_object(
+          'title', COALESCE(NULLIF(v_tool ->> 'title', ''), v_tool ->> 'name')
+        );
         UPDATE public.companion_threads thread
         SET next_ordinal = thread.next_ordinal + 1,
             last_message_at = v_now,
@@ -838,6 +850,22 @@ BEGIN
           p_org_id, p_companion_id, v_event_id, v_ordinal, 'tool', v_content, v_tool, v_now
         );
       ELSE
+        -- Merge, do not replace. An empty title or content and a null detail are the projection's
+        -- inherit sentinels: a progress update carries progress only, and the settlement that
+        -- follows it carries a status only, so neither erases what the card already says.
+        v_content := COALESCE(NULLIF(v_content, ''), v_existing_content);
+        v_tool := v_tool || jsonb_build_object(
+          'title', COALESCE(
+            NULLIF(v_tool ->> 'title', ''),
+            v_existing_tool ->> 'title',
+            v_tool ->> 'name'
+          ),
+          'detail', COALESCE(
+            to_jsonb(v_tool ->> 'detail'),
+            v_existing_tool -> 'detail',
+            'null'::jsonb
+          )
+        );
         UPDATE public.companion_transcript_entries entry
         SET content = v_content, tool = v_tool
         WHERE entry.org_id = p_org_id
