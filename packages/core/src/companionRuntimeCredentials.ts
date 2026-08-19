@@ -4,6 +4,7 @@ import {
 } from "@companion/contracts";
 import {
   COMPANION_PLUGIN_OAUTH_SERVERS,
+  parseCompanionPluginGithubIdentity,
   type CompanionPluginStoredOAuthCredential,
 } from "./companionPluginOAuth";
 import {
@@ -132,11 +133,33 @@ function parseStoredOauth(value: unknown): CompanionPluginStoredOAuthCredential 
   if (resource !== new URL(server.remoteUrl).toString()) {
     throw new Error("invalid MCP OAuth resource");
   }
+  const githubIdentity = value.serverName === "io.github.github/github-mcp-server"
+    ? parseGithubIdentityLenient(value.githubIdentity)
+    : undefined;
   return {
-    ...value,
+    kind: "oauth",
+    version: 1,
+    serverName: value.serverName,
+    accessToken: value.accessToken,
+    refreshToken: value.refreshToken,
+    accessExpiresAt: value.accessExpiresAt,
+    scope: value.scope,
+    tokenType: value.tokenType,
     tokenEndpoint,
     resource,
+    client: value.client,
+    ...(githubIdentity ? { githubIdentity } : {}),
   } as unknown as CompanionPluginStoredOAuthCredential;
+}
+
+function parseGithubIdentityLenient(
+  value: unknown,
+): ReturnType<typeof parseCompanionPluginGithubIdentity> {
+  try {
+    return parseCompanionPluginGithubIdentity(value);
+  } catch {
+    return undefined;
+  }
 }
 
 function pinnedRuntimeUrl(value: string, allowedOrigins: readonly string[]): string {

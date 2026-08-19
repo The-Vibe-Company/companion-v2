@@ -289,7 +289,9 @@ function CatalogConnectDialog({
     <Dialog
       icon="plug-zap"
       title={`Connect ${server.title}`}
-      desc="Give this account a short label such as work or personal."
+      desc={server.provider === "github"
+        ? "Give this account a short label such as work or personal. GitHub is used for MCP tools and for git clone, commit, and push."
+        : "Give this account a short label such as work or personal."}
       onClose={onClose}
       closeDisabled={busy}
       className="og-dialog companions-plugin-dialog"
@@ -336,8 +338,9 @@ function CatalogConnectDialog({
           />
         </label>
         <p className="companions-new-form__hint">
-          You will authorize this account on the provider&apos;s website. Tokens remain write-only
-          and encrypted.
+          {server.provider === "github"
+            ? "Authorize GitHub once. After you attach this account to a Companion, it can use GitHub tools plus git clone, commit, and push. Tokens remain write-only and encrypted."
+            : "You will authorize this account on the provider's website. Tokens remain write-only and encrypted."}
         </p>
       </form>
     </Dialog>
@@ -393,7 +396,12 @@ export function CompanionPlugins({
   useEffect(() => {
     const url = new URL(window.location.href);
     if (url.searchParams.get("oauth") === "connected") {
-      setOauthNotice({ tone: "success", message: "MCP account connected." });
+      setOauthNotice({
+        tone: "success",
+        message: url.searchParams.get("provider") === "github"
+          ? "GitHub connected for MCP and git."
+          : "MCP account connected.",
+      });
     } else {
       const oauthError = url.searchParams.get("oauth_error");
       if (oauthError) {
@@ -408,6 +416,7 @@ export function CompanionPlugins({
     if (url.searchParams.has("oauth") || url.searchParams.has("oauth_error")) {
       url.searchParams.delete("oauth");
       url.searchParams.delete("oauth_error");
+      url.searchParams.delete("provider");
       window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
     }
   }, []);

@@ -36,7 +36,7 @@ export const COMPANION_PLUGIN_CATALOG = [
     server_name: "io.github.github/github-mcp-server",
     provider: "github",
     title: "GitHub",
-    description: "GitHub repositories, issues, pull requests, and workflows.",
+    description: "Git clone, commit, and push, plus repositories, issues, and pull requests.",
   },
   {
     server_name: "com.notion/mcp",

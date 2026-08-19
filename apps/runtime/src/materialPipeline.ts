@@ -8,6 +8,7 @@ import {
 import {
   COMPANION_MCP_OAUTH_REFRESH_SKEW_MS,
   encryptCompanionMcpRuntimeCredential,
+  githubUserIdentity,
   refreshCompanionPluginOAuth,
   type CompanionPluginStoredOAuthCredential,
 } from "@companion/core";
@@ -196,6 +197,10 @@ export function createRuntimeMaterialPipeline(input: {
           if (!active) throw new RuntimeMaterialError("runtime_material_invalid");
           return active;
         },
+        resolveGithubIdentity: async ({ accessToken }) => await githubUserIdentity({
+          accessToken,
+          signal: stage.signal,
+        }),
         signal: stage.signal,
         now,
       });
@@ -231,6 +236,7 @@ export function createRuntimeMaterialPipeline(input: {
           : {
             COMPANION_API_URL: companionHubApiUrl(input.apiUrl),
             COMPANION_WORKSPACE_ID: stage.orgId,
+            ...resources.extraEnv,
             ...(hubToken ? { COMPANION_DELEGATION_TOKEN: hubToken } : {}),
           },
         configCatalog: nativeMobile ? null : stage.material.configCatalog,

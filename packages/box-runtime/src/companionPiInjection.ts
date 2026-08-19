@@ -102,3 +102,36 @@ export function buildMcpAdapterInjection(accounts: CompanionMcpAccount[]): {
 export function runtimeSkillArchivePath(skill: Pick<CompanionRuntimeSkill, "slug">): string {
   return `.companion/runtime/state/skill-archives/${skill.slug}.tar.gz.b64`;
 }
+
+/** Secret-free git credential helper. The token is inherited from Pi's tmpfs environment. */
+export const COMPANION_GIT_CREDENTIAL_HELPER_PATH = ".companion/bin/git-credential-github";
+
+export const COMPANION_GIT_CREDENTIAL_HELPER_SOURCE = `#!/bin/sh
+# Companion GitHub credential helper. Answers only HTTPS github.com / gist.github.com.
+# The token lives in the transient runtime environment, not this file.
+action="\${1-}"
+if [ "$action" != "get" ]; then
+  exit 0
+fi
+protocol=""
+host=""
+while IFS= read -r line || [ -n "$line" ]; do
+  [ -z "$line" ] && break
+  case "$line" in
+    protocol=https) protocol=https ;;
+    host=github.com|host=gist.github.com) host="\${line#host=}" ;;
+  esac
+done
+if [ "$protocol" != "https" ] || [ -z "$host" ] || [ -z "\${GITHUB_TOKEN-}" ]; then
+  exit 0
+fi
+printf 'username=x-access-token\\npassword=%s\\n' "$GITHUB_TOKEN"
+`;
+
+export function companionGitCredentialHelperInstallCommand(): string {
+  return `chmod 700 "$HOME/${COMPANION_GIT_CREDENTIAL_HELPER_PATH}"
+command -v git >/dev/null 2>&1 || exit 0
+git config --global --unset-all credential.helper >/dev/null 2>&1 || true
+git config --global credential.helper "$HOME/${COMPANION_GIT_CREDENTIAL_HELPER_PATH}"`;
+}
+

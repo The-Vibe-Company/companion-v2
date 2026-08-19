@@ -79,6 +79,65 @@ describe("runtime material resolution", () => {
     expect(values).not.toContain(mcpEnvelope.ciphertext);
   });
 
+  it("does not treat GitHub commit identity as a transcript secret", () => {
+    const envelope = encryptCompanionMcpRuntimeCredential({
+      orgId,
+      accountId,
+      credentialGeneration: generation,
+      credential: {
+        kind: "oauth",
+        version: 1,
+        serverName: "io.github.github/github-mcp-server",
+        accessToken: "gho_secret",
+        refreshToken: "refresh-secret",
+        accessExpiresAt: "2030-01-01T00:00:00.000Z",
+        scope: "repo",
+        tokenType: "Bearer",
+        tokenEndpoint: "https://github.com/login/oauth/access_token",
+        resource: "https://api.githubcopilot.com/mcp/",
+        client: {
+          clientId: "github-client",
+          clientSecret: null,
+          tokenEndpointAuthMethod: "client_secret_post",
+        },
+        githubIdentity: {
+          login: "stan",
+          name: "Stan Girard",
+          email: "stan@users.noreply.github.com",
+        },
+      },
+    }, masterKey);
+
+    const values = collectRuntimeCredentialSensitiveValues({
+      orgId,
+      masterKey,
+      material: {
+        providerMaterial: [],
+        skillMaterial: [],
+        mcpMaterial: [{
+          account_id: accountId,
+          credential_generation: generation,
+          account_config: {
+            id: accountId,
+            label: "GitHub",
+            lifecycle: "lazy",
+            direct_tools: false,
+            transport: "http",
+            url: "https://api.githubcopilot.com/mcp/",
+            headers: { Authorization: "GITHUB_MCP_AUTH" },
+          },
+          ...snakeEnvelope(envelope),
+        }],
+      },
+    });
+
+    expect(values).toEqual(expect.arrayContaining(["gho_secret", "refresh-secret"]));
+    expect(values).not.toContain("stan");
+    expect(values).not.toContain("Stan Girard");
+    expect(values).not.toContain("stan@users.noreply.github.com");
+    expect(values).not.toContain("github-client");
+  });
+
   it("verifies Skill bytes and decrypts generation-pinned MCP environment credentials", async () => {
     const canonicalTar = Buffer.from("canonical tar bytes");
     const archive = gzipSync(canonicalTar);
@@ -196,6 +255,291 @@ describe("runtime material resolution", () => {
       env_key: "LINEAR_AUTH",
       value: "Bearer new-token",
     }]);
+    expect(resources.extraEnv).toEqual({});
+  });
+
+  it("stages GitHub MCP OAuth as Bearer MCP plus git/gh tokens", async () => {
+    const stored = {
+      kind: "oauth" as const,
+      version: 1 as const,
+      serverName: "io.github.github/github-mcp-server" as const,
+      accessToken: "gho_secret",
+      refreshToken: "refresh-token",
+      accessExpiresAt: "2030-01-01T00:00:00.000Z",
+      scope: "repo read:user user:email",
+      tokenType: "Bearer" as const,
+      tokenEndpoint: "https://github.com/login/oauth/access_token",
+      resource: "https://api.githubcopilot.com/mcp/",
+      client: {
+        clientId: "github-client",
+        clientSecret: null,
+        tokenEndpointAuthMethod: "client_secret_post" as const,
+      },
+      githubIdentity: {
+        login: "stan",
+        name: "Stan Girard",
+        email: "stan@users.noreply.github.com",
+      },
+    };
+    const envelope = encryptCompanionMcpRuntimeCredential({
+      orgId,
+      accountId,
+      credentialGeneration: generation,
+      credential: stored,
+    }, masterKey);
+
+    const resources = await resolveRuntimeResources({
+      orgId,
+      masterKey,
+      material: {
+        providerMaterial: [],
+        skillMaterial: [],
+        mcpMaterial: [{
+          account_id: accountId,
+          credential_generation: generation,
+          account_config: {
+            id: accountId,
+            label: "GitHub work",
+            lifecycle: "lazy",
+            direct_tools: false,
+            transport: "http",
+            url: "https://api.githubcopilot.com/mcp/",
+            headers: { Authorization: "GITHUB_MCP_AUTH" },
+          },
+          ...snakeEnvelope(envelope),
+        }],
+      },
+      loadSkillArchive: vi.fn(),
+      signal: new AbortController().signal,
+    });
+
+    expect(resources.mcpCredentials).toEqual([
+      { env_key: "GITHUB_MCP_AUTH", value: "Bearer gho_secret" },
+      { env_key: "GITHUB_TOKEN", value: "gho_secret" },
+      { env_key: "GH_TOKEN", value: "gho_secret" },
+    ]);
+    expect(resources.extraEnv).toEqual({
+      GIT_TERMINAL_PROMPT: "0",
+      GH_PROMPT_DISABLED: "1",
+      GIT_AUTHOR_NAME: "Stan Girard",
+      GIT_AUTHOR_EMAIL: "stan@users.noreply.github.com",
+      GIT_COMMITTER_NAME: "Stan Girard",
+      GIT_COMMITTER_EMAIL: "stan@users.noreply.github.com",
+    });
+  });
+
+  it("looks up GitHub identity at stage time when the stored grant has none", async () => {
+    const stored = {
+      kind: "oauth" as const,
+      version: 1 as const,
+      serverName: "io.github.github/github-mcp-server" as const,
+      accessToken: "gho_secret",
+      refreshToken: "refresh-token",
+      accessExpiresAt: "2030-01-01T00:00:00.000Z",
+      scope: "repo",
+      tokenType: "Bearer" as const,
+      tokenEndpoint: "https://github.com/login/oauth/access_token",
+      resource: "https://api.githubcopilot.com/mcp/",
+      client: {
+        clientId: "github-client",
+        clientSecret: null,
+        tokenEndpointAuthMethod: "client_secret_post" as const,
+      },
+    };
+    const envelope = encryptCompanionMcpRuntimeCredential({
+      orgId,
+      accountId,
+      credentialGeneration: generation,
+      credential: stored,
+    }, masterKey);
+    const resolveGithubIdentity = vi.fn(async () => ({
+      login: "stan",
+      name: "Stan Girard",
+      email: "stan@users.noreply.github.com",
+    }));
+
+    const resources = await resolveRuntimeResources({
+      orgId,
+      masterKey,
+      material: {
+        providerMaterial: [],
+        skillMaterial: [],
+        mcpMaterial: [{
+          account_id: accountId,
+          credential_generation: generation,
+          account_config: {
+            id: accountId,
+            label: "GitHub work",
+            lifecycle: "lazy",
+            direct_tools: false,
+            transport: "http",
+            url: "https://api.githubcopilot.com/mcp/",
+            headers: { Authorization: "GITHUB_MCP_AUTH" },
+          },
+          ...snakeEnvelope(envelope),
+        }],
+      },
+      loadSkillArchive: vi.fn(),
+      resolveGithubIdentity,
+      signal: new AbortController().signal,
+    });
+
+    expect(resolveGithubIdentity).toHaveBeenCalledWith({
+      accountId,
+      credentialGeneration: generation,
+      accessToken: "gho_secret",
+    });
+    expect(resources.mcpCredentials).toEqual([
+      { env_key: "GITHUB_MCP_AUTH", value: "Bearer gho_secret" },
+      { env_key: "GITHUB_TOKEN", value: "gho_secret" },
+      { env_key: "GH_TOKEN", value: "gho_secret" },
+    ]);
+    expect(resources.extraEnv.GIT_AUTHOR_NAME).toBe("Stan Girard");
+  });
+
+  it("still stages GitHub git tokens when identity lookup returns nothing", async () => {
+    const stored = {
+      kind: "oauth" as const,
+      version: 1 as const,
+      serverName: "io.github.github/github-mcp-server" as const,
+      accessToken: "gho_secret",
+      refreshToken: "refresh-token",
+      accessExpiresAt: "2030-01-01T00:00:00.000Z",
+      scope: "repo",
+      tokenType: "Bearer" as const,
+      tokenEndpoint: "https://github.com/login/oauth/access_token",
+      resource: "https://api.githubcopilot.com/mcp/",
+      client: {
+        clientId: "github-client",
+        clientSecret: null,
+        tokenEndpointAuthMethod: "client_secret_post" as const,
+      },
+    };
+    const envelope = encryptCompanionMcpRuntimeCredential({
+      orgId,
+      accountId,
+      credentialGeneration: generation,
+      credential: stored,
+    }, masterKey);
+
+    const resources = await resolveRuntimeResources({
+      orgId,
+      masterKey,
+      material: {
+        providerMaterial: [],
+        skillMaterial: [],
+        mcpMaterial: [{
+          account_id: accountId,
+          credential_generation: generation,
+          account_config: {
+            id: accountId,
+            label: "GitHub work",
+            lifecycle: "lazy",
+            direct_tools: false,
+            transport: "http",
+            url: "https://api.githubcopilot.com/mcp/",
+            headers: { Authorization: "GITHUB_MCP_AUTH" },
+          },
+          ...snakeEnvelope(envelope),
+        }],
+      },
+      loadSkillArchive: vi.fn(),
+      resolveGithubIdentity: async () => null,
+      signal: new AbortController().signal,
+    });
+
+    expect(resources.mcpCredentials.map((credential) => credential.env_key)).toEqual([
+      "GITHUB_MCP_AUTH",
+      "GITHUB_TOKEN",
+      "GH_TOKEN",
+    ]);
+    expect(resources.extraEnv).toEqual({
+      GIT_TERMINAL_PROMPT: "0",
+      GH_PROMPT_DISABLED: "1",
+    });
+  });
+
+  it("does not bind git/gh when two GitHub OAuth accounts are selected", async () => {
+    const secondAccountId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const secondGeneration = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    function githubStored(accessToken: string) {
+      return {
+        kind: "oauth" as const,
+        version: 1 as const,
+        serverName: "io.github.github/github-mcp-server" as const,
+        accessToken,
+        refreshToken: "refresh-token",
+        accessExpiresAt: "2030-01-01T00:00:00.000Z",
+        scope: "repo",
+        tokenType: "Bearer" as const,
+        tokenEndpoint: "https://github.com/login/oauth/access_token",
+        resource: "https://api.githubcopilot.com/mcp/",
+        client: {
+          clientId: "github-client",
+          clientSecret: null,
+          tokenEndpointAuthMethod: "client_secret_post" as const,
+        },
+      };
+    }
+    const firstEnvelope = encryptCompanionMcpRuntimeCredential({
+      orgId,
+      accountId,
+      credentialGeneration: generation,
+      credential: githubStored("gho_personal"),
+    }, masterKey);
+    const secondEnvelope = encryptCompanionMcpRuntimeCredential({
+      orgId,
+      accountId: secondAccountId,
+      credentialGeneration: secondGeneration,
+      credential: githubStored("gho_work"),
+    }, masterKey);
+
+    const resources = await resolveRuntimeResources({
+      orgId,
+      masterKey,
+      material: {
+        providerMaterial: [],
+        skillMaterial: [],
+        mcpMaterial: [
+          {
+            account_id: accountId,
+            credential_generation: generation,
+            account_config: {
+              id: accountId,
+              label: "GitHub personal",
+              lifecycle: "lazy",
+              direct_tools: false,
+              transport: "http",
+              url: "https://api.githubcopilot.com/mcp/",
+              headers: { Authorization: "GITHUB_PERSONAL" },
+            },
+            ...snakeEnvelope(firstEnvelope),
+          },
+          {
+            account_id: secondAccountId,
+            credential_generation: secondGeneration,
+            account_config: {
+              id: secondAccountId,
+              label: "GitHub work",
+              lifecycle: "lazy",
+              direct_tools: false,
+              transport: "http",
+              url: "https://api.githubcopilot.com/mcp/",
+              headers: { Authorization: "GITHUB_WORK" },
+            },
+            ...snakeEnvelope(secondEnvelope),
+          },
+        ],
+      },
+      loadSkillArchive: vi.fn(),
+      signal: new AbortController().signal,
+    });
+
+    expect(resources.mcpCredentials).toEqual([
+      { env_key: "GITHUB_PERSONAL", value: "Bearer gho_personal" },
+      { env_key: "GITHUB_WORK", value: "Bearer gho_work" },
+    ]);
+    expect(resources.extraEnv).toEqual({});
   });
 
   it("collapses storage and malformed-row details to fixed safe errors", async () => {

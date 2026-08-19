@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMcpAdapterInjection } from "./companionPiInjection";
+import { buildMcpAdapterInjection, companionGitCredentialHelperInstallCommand, COMPANION_GIT_CREDENTIAL_HELPER_PATH, COMPANION_GIT_CREDENTIAL_HELPER_SOURCE } from "./companionPiInjection";
 
 describe("Pi MCP injection", () => {
   it("keeps labeled accounts distinct and writes only environment references", () => {
@@ -39,5 +39,16 @@ describe("Pi MCP injection", () => {
       sampling: false,
       elicitation: false,
     });
+  });
+
+  it("installs a GitHub-only credential helper that never embeds a token", () => {
+    expect(COMPANION_GIT_CREDENTIAL_HELPER_SOURCE).toContain("protocol=https");
+    expect(COMPANION_GIT_CREDENTIAL_HELPER_SOURCE).toContain("host=github.com");
+    expect(COMPANION_GIT_CREDENTIAL_HELPER_SOURCE).toContain("host=gist.github.com");
+    expect(COMPANION_GIT_CREDENTIAL_HELPER_SOURCE).toContain("$GITHUB_TOKEN");
+    expect(COMPANION_GIT_CREDENTIAL_HELPER_SOURCE).not.toMatch(/gho_|ghp_|github_pat_/);
+    expect(companionGitCredentialHelperInstallCommand()).toContain(
+      COMPANION_GIT_CREDENTIAL_HELPER_PATH,
+    );
   });
 });

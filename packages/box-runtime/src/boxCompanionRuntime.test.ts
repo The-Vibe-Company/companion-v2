@@ -396,10 +396,14 @@ function runtimeClient(): AsciiBoxCompanionRuntime {
 
 describe("default Pi packages on the Box disk", () => {
   const layoutCommands: Array<{ command: string; timeoutSeconds: number }> = [];
+  const stagedFiles = new Map<string, string>();
 
   /** Stage a Box and hand back the layout script the adapter wrote to its disk. */
-  async function stagedLayoutScript(env: Record<string, string> = {}): Promise<string> {
-    const files = new Map<string, string>();
+  async function stagedLayoutScript(
+    env: Record<string, string> = {},
+    mcpCredentials: Array<{ env_key: string; value: string }> = [],
+  ): Promise<string> {
+    stagedFiles.clear();
     layoutCommands.length = 0;
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
@@ -407,7 +411,7 @@ describe("default Pi packages on the Box disk", () => {
       if (url.endsWith("/boxes/bx_23456789") && method === "GET") return response({ box: box("ready") });
       if (url.endsWith("/files") && method === "PUT") {
         const body = JSON.parse(String(init?.body)) as { path: string; content: string };
-        files.set(body.path, body.content);
+        stagedFiles.set(body.path, body.content);
         return response({ ok: true });
       }
       if (url.endsWith("/commands") && method === "POST") {
@@ -415,7 +419,9 @@ describe("default Pi packages on the Box disk", () => {
           command: string;
           timeoutSeconds: number;
         };
-        if (body.command.includes("ensure-pi-layout.sh")) layoutCommands.push(body);
+        if (body.command.includes("ensure-pi-layout.sh") || body.command.includes("git-credential-github")) {
+          layoutCommands.push(body);
+        }
         return response(commandResult("companion-box-runnable\n"));
       }
       throw new Error(`unexpected Box request: ${method} ${url}`);
@@ -431,11 +437,11 @@ describe("default Pi packages on the Box disk", () => {
         providerAuth: {},
         replaceProviderAuth: false,
         modelId: "glm-4.6",
-        mcpCredentials: [],
+        mcpCredentials,
         mcpAccounts: [],
         skills: [],
       });
-    const script = files.get(".companion/bin/ensure-pi-layout.sh");
+    const script = stagedFiles.get(".companion/bin/ensure-pi-layout.sh");
     if (!script) throw new Error("staging did not write the Pi layout script");
     return script;
   }
@@ -490,6 +496,19 @@ describe("default Pi packages on the Box disk", () => {
     expect(layoutCommands).toEqual([
       expect.objectContaining({ timeoutSeconds: 300 }),
     ]);
+  });
+
+  it("stages a GitHub git credential helper only when a GitHub token is present", async () => {
+    await stagedLayoutScript();
+    expect(stagedFiles.get(".companion/bin/git-credential-github")).toBeUndefined();
+
+    await stagedLayoutScript({}, [{ env_key: "GITHUB_TOKEN", value: "gho_test_token" }]);
+    const helper = stagedFiles.get(".companion/bin/git-credential-github");
+    expect(helper).toContain("protocol=https");
+    expect(helper).toContain("host=github.com");
+    expect(helper).toContain("$GITHUB_TOKEN");
+    expect(helper).not.toContain("gho_test_token");
+    expect(layoutCommands.some((command) => command.command.includes("credential.helper"))).toBe(true);
   });
 
   it("makes every pin part of the layout marker, so an existing Box relayouts on its next wake", async () => {
