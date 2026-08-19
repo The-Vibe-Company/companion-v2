@@ -9,7 +9,7 @@ describe("Companion Pi interaction extension", () => {
   it("overwrites the legacy broker without gating shell or file tools", () => {
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_FILE).toBe("companion-permission-broker.ts");
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).not.toContain("GATED_TOOLS");
-    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).not.toContain("ctx.ui.confirm");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("ctx.ui.confirm");
   });
 
   it("keeps ask_user as an explicit blocking question", () => {
@@ -31,9 +31,20 @@ describe("Companion Pi interaction extension", () => {
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).not.toContain("Image reads are disabled");
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("clearToolTimeouts()");
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain(
-      'if (event.toolName === "ask_user") return undefined',
+      'if (INTERACTIVE_TOOLS.has(event.toolName)) return undefined',
     );
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).not.toContain("runtime.abortTurn");
+  });
+
+  it("proposes config changes through confirm with catalog-backed summaries", () => {
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain('name: "propose_config"');
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain('name: "request_plugin_connection"');
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("companion:config:");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("config-catalog.json");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("never claim a change is active");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("apply after this turn ends");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("finish the connection in the web UI");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("const CONFIG_MAX_IDS = 20");
   });
 
   it("accepts config proposal titles without treating them as questions", () => {

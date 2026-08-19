@@ -1,7 +1,7 @@
 {
   "$schema": "https://thecompanion.sh/schemas/companion-manifest.v2.schema.json",
   "name": "companion",
-  "version": "1.73.0",
+  "version": "1.74.0",
   "icon": "boxes",
   "title": "Companion",
   "description": "Manage and safely install SKILL.md packages through delegated Agent Auth, including pinned public releases, publishing, updates, dependencies, secrets, hosted Skill Databases, local install tracking, and Companion self-update.",
@@ -28,6 +28,15 @@
       "evals/evals.json"
     ],
     "changelog": [
+      {
+        "version": "1.74.0",
+        "date": "2026-08-18",
+        "changes": [
+          "Documents hosted Pi propose_config and request_plugin_connection tools that emit config decision cards.",
+          "Keeps those config proposals and permission decisions outside delegated Skills Hub Agent Auth.",
+          "No change to Companion skill commands, permissions, or installation behavior."
+        ]
+      },
       {
         "version": "1.73.0",
         "date": "2026-08-18",

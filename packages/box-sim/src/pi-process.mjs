@@ -14,6 +14,7 @@ const SCENARIOS = new Set([
   "normal",
   "tool",
   "ask_user",
+  "propose_config",
   "retry",
   "errors",
   "crash",
@@ -232,27 +233,68 @@ function run() {
       placeholder: "Continue the simulated task?",
       timeout: 300_000,
     });
-    pendingUiRequest = { requestId, toolCallId };
+    pendingUiRequest = { requestId, toolCallId, toolName: "ask_user" };
+  }
+
+  function runProposeConfig() {
+    const toolCallId = `call-config-${promptSequence}`;
+    const requestId = `ui-sim-${promptSequence}`;
+    const proposal = {
+      kind: "config",
+      add_skill_ids: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+    };
+    beginRun();
+    writeJson({
+      type: "tool_execution_start",
+      toolCallId,
+      toolName: "propose_config",
+      args: { add_skills: proposal.add_skill_ids },
+    });
+    writeJson({
+      type: "extension_ui_request",
+      id: requestId,
+      method: "confirm",
+      title: "companion:config:propose_config",
+      message: JSON.stringify({
+        summary: "Add the search skill",
+        proposal,
+      }),
+      timeout: 300_000,
+    });
+    pendingUiRequest = { requestId, toolCallId, toolName: "propose_config" };
   }
 
   function continueAskUser(command) {
     if (!pendingUiRequest || command.id !== pendingUiRequest.requestId) return;
-    const { toolCallId } = pendingUiRequest;
+    const { toolCallId, toolName } = pendingUiRequest;
     pendingUiRequest = null;
-    const cancelled = command.cancelled === true;
+    const cancelled = command.cancelled === true || command.confirmed === false;
+    const approved = command.confirmed === true;
+    const config = toolName === "propose_config";
     writeJson({
       type: "tool_execution_end",
       toolCallId,
-      toolName: "ask_user",
+      toolName,
       result: {
-        content: [{ type: "text", text: cancelled ? "Question cancelled." : "Answer received." }],
+        content: [{
+          type: "text",
+          text: config
+            ? (approved
+              ? "Approved. Changes apply after this turn ends."
+              : "User denied or timed out. No settings changed.")
+            : (cancelled ? "Question cancelled." : "Answer received."),
+        }],
         details: {},
       },
       isError: false,
     });
-    const reply = emitTextTurn(cancelled
-      ? "The simulated question was cancelled."
-      : "The simulated answer was received.");
+    const reply = emitTextTurn(config
+      ? (approved
+        ? "The simulated config proposal was approved."
+        : "The simulated config proposal was denied.")
+      : (cancelled
+        ? "The simulated question was cancelled."
+        : "The simulated answer was received."));
     finishRun([reply]);
   }
 
@@ -305,6 +347,9 @@ function run() {
         return;
       case "ask_user":
         runAskUser();
+        return;
+      case "propose_config":
+        runProposeConfig();
         return;
       case "retry":
         runRetry();

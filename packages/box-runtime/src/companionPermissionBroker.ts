@@ -6,6 +6,9 @@
  */
 
 import {
+  COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS,
+  COMPANION_CONFIG_PROPOSAL_MAX_IDS,
+  COMPANION_CONFIG_PROPOSAL_SUMMARY_MAX_CHARACTERS,
   COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS,
   COMPANION_TOOL_KIND_NAME_TABLE,
   COMPANION_TOOL_RUN_TIMEOUT_MS,
@@ -18,7 +21,7 @@ export const COMPANION_DECISION_TIMEOUT_MS = 5 * 60 * 1000;
  * On-disk name under `$PI_CODING_AGENT_DIR/extensions/`.
  *
  * Keep the legacy permission-broker filename so every start overwrites the older extension that
- * gated shell and file tools. The current extension only provides the interactive `ask_user` tool.
+ * gated shell and file tools. The current extension provides ask_user plus config-proposal tools.
  */
 export const COMPANION_PERMISSION_BROKER_EXTENSION_FILE = "companion-permission-broker.ts";
 
@@ -39,23 +42,29 @@ export function parseCompanionDecisionTitle(title: string): {
 }
 
 /**
- * Source installed onto every Companion Box so Pi can ask the human a blocking question.
- * Shell and file tools are deliberately not intercepted: a Companion runs them without approval.
- * Kept as text so the API package does not depend on Pi's extension types.
+ * Source installed onto every Companion Box so Pi can ask the human a blocking question or propose
+ * settings. Shell and file tools are deliberately not intercepted: a Companion runs them without
+ * approval. Kept as text so the API package does not depend on Pi's extension types.
  */
 export const COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE = `/**
- * Companion question broker — Pi extension installed on every Companion Box.
+ * Companion question and config broker — Pi extension installed on every Companion Box.
  *
- * The model can call ask_user to emit an extension_ui_request over Pi's RPC log and block until the
- * control plane answers with an extension_ui_response (or the timeout cancels the question).
- * Built-in shell and file tools remain unrestricted and execute without a confirmation request.
+ * ask_user, propose_config, and request_plugin_connection emit extension_ui_request events and
+ * block until the control plane answers. Built-in shell and file tools remain unrestricted.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
 import { Type } from "typebox";
 
 const DECISION_TIMEOUT_MS = ${COMPANION_DECISION_TIMEOUT_MS};
 const TOOL_TIMEOUT_MS = ${COMPANION_TOOL_RUN_TIMEOUT_MS};
 const EXEC_TOOL_TIMEOUT_MS = ${COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS};
+const CONFIG_MAX_IDS = ${COMPANION_CONFIG_PROPOSAL_MAX_IDS};
+const CONFIG_SUMMARY_MAX = ${COMPANION_CONFIG_PROPOSAL_SUMMARY_MAX_CHARACTERS};
+const CONNECT_PROVIDERS = ${JSON.stringify(COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS)} as string[];
+const INTERACTIVE_TOOLS = new Set(["ask_user", "propose_config", "request_plugin_connection"]);
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const CATALOG_PATH = \`$\{process.env.HOME || ""}/.companion/runtime/state/config-catalog.json\`;
 
 // The control plane classifies a run's kind from this same table with this same priority order,
 // so a run the transcript settles as shell also received the shell deadline here.
@@ -109,12 +118,71 @@ function decisionTitle(name: string): string {
   return \`companion:question:\${name}\`;
 }
 
+function configTitle(name: string): string {
+  return \`companion:config:\${name}\`;
+}
+
+function asStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string").map((item) => item.trim());
+}
+
+function uniqueUuids(values: string[]): string[] | null {
+  const unique = [...new Set(values)];
+  if (unique.length > CONFIG_MAX_IDS || unique.some((id) => !UUID_PATTERN.test(id))) return null;
+  return unique;
+}
+
+function readCatalog(): {
+  skills?: Array<{ id: string; name?: string; slug?: string }>;
+  plugins?: Array<{ id: string; label?: string; provider?: string }>;
+} | null {
+  try {
+    return JSON.parse(readFileSync(CATALOG_PATH, "utf8")) as {
+      skills?: Array<{ id: string; name?: string; slug?: string }>;
+      plugins?: Array<{ id: string; label?: string; provider?: string }>;
+    };
+  } catch {
+    return null;
+  }
+}
+
+function namedIds(
+  ids: string[],
+  catalog: Array<{ id: string; name?: string; slug?: string; label?: string; provider?: string }> | undefined,
+  fallback: (id: string) => string,
+): string {
+  return ids.map((id) => {
+    const match = catalog?.find((item) => item.id === id);
+    return match?.name || match?.slug || match?.label || fallback(id);
+  }).join(", ");
+}
+
+function summarizeProposal(proposal: Record<string, unknown>): string {
+  const catalog = readCatalog();
+  const parts: string[] = [];
+  const addSkills = Array.isArray(proposal.add_skill_ids) ? proposal.add_skill_ids as string[] : [];
+  const removeSkills = Array.isArray(proposal.remove_skill_ids) ? proposal.remove_skill_ids as string[] : [];
+  const attach = Array.isArray(proposal.attach_plugin_ids) ? proposal.attach_plugin_ids as string[] : [];
+  const detach = Array.isArray(proposal.detach_plugin_ids) ? proposal.detach_plugin_ids as string[] : [];
+  if (addSkills.length) parts.push(\`add \${namedIds(addSkills, catalog?.skills, (id) => id.slice(0, 8))}\`);
+  if (removeSkills.length) parts.push(\`remove \${namedIds(removeSkills, catalog?.skills, (id) => id.slice(0, 8))}\`);
+  if (attach.length) parts.push(\`attach \${namedIds(attach, catalog?.plugins, (id) => id.slice(0, 8))}\`);
+  if (detach.length) parts.push(\`detach \${namedIds(detach, catalog?.plugins, (id) => id.slice(0, 8))}\`);
+  if (typeof proposal.model_id === "string") parts.push(\`model \${proposal.model_id}\`);
+  if (typeof proposal.persona === "string") parts.push("update persona");
+  const connect = proposal.connect_plugin as { server_name?: string } | undefined;
+  if (connect?.server_name) parts.push(\`connect \${connect.server_name}\`);
+  const summary = parts.join("; ") || "Propose Companion settings";
+  return summary.length > CONFIG_SUMMARY_MAX ? summary.slice(0, CONFIG_SUMMARY_MAX) : summary;
+}
+
 export default function companionPermissionBroker(pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
-    // ask_user is an interactive decision with its own five-minute fail-closed UI deadline. Its
-    // execute body does not perform external work, so the shorter execution timer must not abort a
-    // still-actionable question.
-    if (event.toolName === "ask_user") return undefined;
+    // Interactive decisions have their own five-minute fail-closed UI deadline. Their execute
+    // bodies do not perform external work, so the shorter execution timer must not abort a
+    // still-actionable question or config proposal.
+    if (INTERACTIVE_TOOLS.has(event.toolName)) return undefined;
     startToolTimeout(event.toolCallId, event.toolName, ctx);
     return undefined;
   });
@@ -168,6 +236,129 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: answer.trim() }],
         details: { question, answer: answer.trim() },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "propose_config",
+    label: "Propose settings",
+    description:
+      "Propose Companion settings changes for Owner/Editor approval. This only proposes; never claim a change is active without approval. Settings apply after the current turn ends.",
+    parameters: Type.Object({
+      add_skills: Type.Optional(Type.Array(Type.String(), { description: "Skill ids to add" })),
+      remove_skills: Type.Optional(Type.Array(Type.String(), { description: "Skill ids to remove" })),
+      attach_plugins: Type.Optional(Type.Array(Type.String(), { description: "Plugin account ids to attach" })),
+      detach_plugins: Type.Optional(Type.Array(Type.String(), { description: "Plugin account ids to detach" })),
+      model_id: Type.Optional(Type.String({ description: "Pi model id from the catalog" })),
+      persona: Type.Optional(Type.String({ description: "Short operator-authored persona, max 280 characters" })),
+    }),
+    executionMode: "sequential",
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const addSkills = uniqueUuids(asStringList(params.add_skills));
+      const removeSkills = uniqueUuids(asStringList(params.remove_skills));
+      const attachPlugins = uniqueUuids(asStringList(params.attach_plugins));
+      const detachPlugins = uniqueUuids(asStringList(params.detach_plugins));
+      const modelId = typeof params.model_id === "string" ? params.model_id.trim() : "";
+      const persona = typeof params.persona === "string" ? params.persona : undefined;
+      if (
+        addSkills === null || removeSkills === null
+        || attachPlugins === null || detachPlugins === null
+        || (modelId && (modelId.length > 200 || /[\\n\\r]/.test(modelId)))
+        || (persona !== undefined && persona.length > 280)
+      ) {
+        return {
+          content: [{ type: "text", text: "Error: propose_config arguments are invalid" }],
+          details: { proposal: null, confirmed: null },
+        };
+      }
+      const proposal: Record<string, unknown> = { kind: "config" };
+      if (addSkills.length) proposal.add_skill_ids = addSkills;
+      if (removeSkills.length) proposal.remove_skill_ids = removeSkills;
+      if (attachPlugins.length) proposal.attach_plugin_ids = attachPlugins;
+      if (detachPlugins.length) proposal.detach_plugin_ids = detachPlugins;
+      if (modelId) proposal.model_id = modelId;
+      if (persona !== undefined) proposal.persona = persona;
+      if (Object.keys(proposal).length === 1) {
+        return {
+          content: [{ type: "text", text: "Error: propose_config requires at least one change" }],
+          details: { proposal: null, confirmed: null },
+        };
+      }
+      if (!ctx.hasUI) {
+        return {
+          content: [{ type: "text", text: "Error: no permission UI available" }],
+          details: { proposal, confirmed: null },
+        };
+      }
+      const summary = summarizeProposal(proposal);
+      const confirmed = await ctx.ui.confirm(
+        configTitle("propose_config"),
+        JSON.stringify({ summary, proposal }),
+        { timeout: DECISION_TIMEOUT_MS },
+      );
+      if (confirmed === true) {
+        return {
+          content: [{ type: "text", text: "Approved. Changes apply after this turn ends." }],
+          details: { proposal, confirmed: true },
+        };
+      }
+      return {
+        content: [{ type: "text", text: "User denied or timed out. No settings changed." }],
+        details: { proposal, confirmed: false },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "request_plugin_connection",
+    label: "Request plugin connection",
+    description:
+      "Ask the human to connect a new Linear, GitHub, or Notion plugin. This only proposes; they finish the connection in the web UI. After it is connected, propose attaching it on a later turn.",
+    parameters: Type.Object({
+      server_name: Type.String({ description: "linear, github, or notion" }),
+      reason: Type.Optional(Type.String({ description: "Why this plugin is needed" })),
+    }),
+    executionMode: "sequential",
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const serverName = typeof params.server_name === "string" ? params.server_name.trim().toLowerCase() : "";
+      const reason = typeof params.reason === "string" ? params.reason.trim() : "";
+      if (!CONNECT_PROVIDERS.includes(serverName) || (reason && reason.length > 280)) {
+        return {
+          content: [{ type: "text", text: "Error: request_plugin_connection arguments are invalid" }],
+          details: { proposal: null, confirmed: null },
+        };
+      }
+      const proposal = {
+        kind: "config",
+        connect_plugin: reason
+          ? { server_name: serverName, reason }
+          : { server_name: serverName },
+      };
+      if (!ctx.hasUI) {
+        return {
+          content: [{ type: "text", text: "Error: no permission UI available" }],
+          details: { proposal, confirmed: null },
+        };
+      }
+      const summary = summarizeProposal(proposal);
+      const confirmed = await ctx.ui.confirm(
+        configTitle("request_plugin_connection"),
+        JSON.stringify({ summary, proposal }),
+        { timeout: DECISION_TIMEOUT_MS },
+      );
+      if (confirmed === true) {
+        return {
+          content: [{
+            type: "text",
+            text: "Approved. The human must finish the connection in the web UI; propose attaching it on a later turn.",
+          }],
+          details: { proposal, confirmed: true },
+        };
+      }
+      return {
+        content: [{ type: "text", text: "User denied or timed out. No plugin connection was requested." }],
+        details: { proposal, confirmed: false },
       };
     },
   });
