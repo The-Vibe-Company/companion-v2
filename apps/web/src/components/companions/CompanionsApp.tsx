@@ -1348,6 +1348,13 @@ export function CompanionsApp({
                 onJoin: () => void joinContext(),
               }}
               contextSkills={skills}
+              contextPlugins={initialPlugins.map((plugin) => ({
+                id: plugin.id,
+                label: `${plugin.provider} · ${plugin.label}`,
+              }))}
+              contextModels={(providers?.catalog ?? []).flatMap((provider) =>
+                provider.models.map((model) => ({ id: model.id, label: model.name }))
+              )}
               lastReadOrdinal={lastReadOrdinal}
               openedThroughOrdinal={openedThroughOrdinal}
               onBack={closeThread}

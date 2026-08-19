@@ -38,7 +38,11 @@ import { Thread as AssistantThread } from "@/components/assistant-ui/thread";
 import { cn } from "@/lib/utils";
 import { decideCompanionDecision } from "../../lib/companions";
 import { AttachmentContext, AttachmentList, readableSize } from "./AttachmentCard";
-import { DecisionActionsContext, type DecisionAction } from "./decisionActions";
+import {
+  DecisionActionsContext,
+  type DecisionAction,
+  type DecisionNamedResource,
+} from "./decisionActions";
 import { DecisionToolCard } from "./DecisionToolCard";
 import { ToolRunCard } from "./ToolRunCard";
 import { composerHint, localDay, replyExpected, utcDay } from "./transcript";
@@ -328,6 +332,9 @@ export function CompanionTranscript({
   busy,
   lastReadOrdinal,
   openedThroughOrdinal,
+  skills = [],
+  plugins = [],
+  models = [],
   onSend,
   onThread,
 }: {
@@ -339,6 +346,12 @@ export function CompanionTranscript({
   lastReadOrdinal?: number | null;
   /** The newest ordinal the thread held when it was opened, so the divider cannot chase new arrivals. */
   openedThroughOrdinal?: number | null;
+  /** Library skills this reader can already name. Config cards never take labels from Pi. */
+  skills?: readonly DecisionNamedResource[];
+  /** Connected plugins this reader can already name. */
+  plugins?: readonly DecisionNamedResource[];
+  /** Provider catalog models this surface already loaded. */
+  models?: readonly DecisionNamedResource[];
   onSend: (content: string, clientMessageId: string, files: readonly File[]) => Promise<boolean>;
   /** Replace the thread after a permission card is decided, without a full poll cycle. */
   onThread: (thread: Thread) => void;
@@ -590,7 +603,14 @@ export function CompanionTranscript({
     swallowClickAfterPress,
   ]);
 
-  const decisions = useMemo(() => ({ canAct: canSend, onDecide }), [canSend, onDecide]);
+  const decisions = useMemo(() => ({
+    canAct: canSend,
+    companionName: companion.name,
+    skills,
+    plugins,
+    models,
+    onDecide,
+  }), [canSend, companion.name, models, onDecide, plugins, skills]);
   const attachmentContext = useMemo(() => ({ companionId: companion.id }), [companion.id]);
 
   return (

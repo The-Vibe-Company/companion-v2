@@ -192,6 +192,8 @@ export function CompanionThread({
   openingDesktop,
   context,
   contextSkills,
+  contextPlugins = [],
+  contextModels = [],
   lastReadOrdinal,
   openedThroughOrdinal,
   onBack,
@@ -213,6 +215,10 @@ export function CompanionThread({
   context: CompanionContextPanel;
   /** Selected skills this surface can name; the panel counts the ones it cannot. */
   contextSkills: CompanionContextSkill[];
+  /** Connected plugins this reader can already name on a config card. */
+  contextPlugins?: Array<{ id: string; label: string }>;
+  /** Provider catalog models this surface already loaded. */
+  contextModels?: Array<{ id: string; label: string }>;
   /** This reader's unread watermark when the thread was opened; the "New" divider sits past it. */
   lastReadOrdinal?: number | null;
   /** The last ordinal the thread held when it was opened, so the divider stays where reading did. */
@@ -421,6 +427,9 @@ export function CompanionThread({
           busy={busy}
           lastReadOrdinal={lastReadOrdinal}
           openedThroughOrdinal={openedThroughOrdinal}
+          skills={contextSkills.map((skill) => ({ id: skill.id, label: skill.slug }))}
+          plugins={contextPlugins}
+          models={contextModels}
           onSend={onSend}
           onThread={onThread}
         />
