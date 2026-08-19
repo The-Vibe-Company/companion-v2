@@ -322,6 +322,49 @@ describe("a tool run in the thread", () => {
     expect(trigger.disabled).toBe(true);
   });
 
+  it("names the agent a turn delegated to, and says where it has got to", () => {
+    const delegated = (overrides: Partial<CompanionToolRun>) => run({
+      kind: "subagent",
+      name: "subagent",
+      title: "researcher: read the changelog",
+      ...overrides,
+    });
+    const running = mount(thread([
+      entry({
+        role: "tool",
+        content: "researcher: read the changelog",
+        tool: delegated({ status: "running", detail: "reading CHANGELOG.md" }),
+      }),
+    ]));
+    const runningCard = running.querySelector("[data-slot='companion-tool-run']") as HTMLElement;
+
+    expect(runningCard.textContent).toContain("subagent");
+    expect(runningCard.textContent).toContain("researcher: read the changelog");
+    // A run that can last minutes says where it is in words, not only as a spinner.
+    expect(runningCard.querySelector(".sr-only")).toBeNull();
+    expect(runningCard.textContent).toContain("running");
+    expect(runningCard.getAttribute("aria-busy")).toBe("true");
+
+    // What it did is a disclosure, exactly like every other run's.
+    expect(runningCard.textContent).not.toContain("reading CHANGELOG.md");
+    click(running.querySelector(
+      "[data-slot='companion-tool-run'] [data-slot='collapsible-trigger']",
+    ) as HTMLButtonElement);
+    expect(running.textContent).toContain("reading CHANGELOG.md");
+
+    const settled = mount(thread([
+      entry({
+        role: "tool",
+        content: "researcher: read the changelog",
+        tool: delegated({ status: "ok", detail: "read 240 lines" }),
+      }),
+    ]));
+    const settledCard = settled.querySelector("[data-slot='companion-tool-run']") as HTMLElement;
+
+    expect(settledCard.textContent).toContain("done");
+    expect(settledCard.getAttribute("aria-busy")).toBeNull();
+  });
+
   it("shows the Box desktop as the run left it", () => {
     const screenshot = "data:image/png;base64,iVBORw0KGgo=";
     const container = mount(thread([

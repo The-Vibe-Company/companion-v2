@@ -5,6 +5,7 @@ import type { ToolCallMessagePartComponent } from "@assistant-ui/react";
 import type { CompanionToolRunKind } from "@companion/contracts";
 import {
   AlertTriangleIcon,
+  BotIcon,
   BracesIcon,
   CheckIcon,
   ChevronDownIcon,
@@ -43,6 +44,7 @@ const TOOL_ICONS: Record<CompanionToolRunKind, LucideIcon> = {
   file: FilePenLineIcon,
   browse: GlobeIcon,
   computer: MonitorIcon,
+  subagent: BotIcon,
   tool: BracesIcon,
 };
 
@@ -61,6 +63,10 @@ export const ToolRunCard: ToolCallMessagePartComponent<CompanionToolArgs> = ({ a
   const KindIcon = TOOL_ICONS[run.kind];
   const named = run.title !== run.name;
   const failed = run.status === "error" || run.status === "timeout";
+  // A delegated agent is the one run whose progress a reader waits on rather than skims past, and
+  // it is the one that can stay open for minutes. It says where it has got to in a word, so nobody
+  // has to read a spinner to find out whether their Companion is still waiting on it.
+  const saysStatus = run.kind === "subagent";
 
   return (
     <Collapsible
@@ -96,7 +102,9 @@ export const ToolRunCard: ToolCallMessagePartComponent<CompanionToolArgs> = ({ a
             <CheckIcon className="size-3.5 text-(--color-ok)" aria-hidden="true" />
           )}
           {failed && <AlertTriangleIcon className="text-destructive size-3.5" aria-hidden="true" />}
-          <span className="sr-only">{TOOL_STATUS_LABELS[run.status]}</span>
+          <span className={saysStatus ? "text-muted-foreground text-xs" : "sr-only"}>
+            {TOOL_STATUS_LABELS[run.status]}
+          </span>
           {run.detail && (
             <ChevronDownIcon
               className={cn(

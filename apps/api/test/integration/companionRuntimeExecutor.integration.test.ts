@@ -3238,6 +3238,134 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
+  it("merges a delegated subagent run into one card and still refuses an unknown kind", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion();
+    const headline = "researcher: read the changelog";
+    const callId = `sha256:${"a".repeat(32)}`;
+    try {
+      const claim = await claimWork();
+      const delegated = (
+        sequence: string,
+        content: string,
+        tool: Record<string, unknown>,
+      ) => ({
+        sequence,
+        type: "tool",
+        entry_key: `tool:${sequence}`,
+        content,
+        tool: {
+          call_id: callId,
+          kind: "subagent",
+          name: "subagent",
+          title: "",
+          status: "running",
+          detail: null,
+          screenshot: null,
+          ...tool,
+        },
+      });
+      const events = [
+        delegated("1", headline, { title: headline, detail: "read the changelog" }),
+        delegated("2", "", { detail: "reading CHANGELOG.md" }),
+        delegated("3", "", { status: "ok" }),
+      ];
+
+      // An unrecognized kind is still refused before anything is written, so widening the list is
+      // an addition and not an opening.
+      await expect(asRuntime((tx) => tx`
+        select * from public.companion_runtime_project_event_batch(
+          ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+          ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+          'attempt', ${claim.workId}::uuid, ${claim.checkpointSequence}::bigint,
+          ${`pi-${fixture.attemptId}`}, ${tx.json([
+            delegated("1", "x", { kind: "telepathy" }),
+          ])}, 1, now(), 0, 0, 0
+        )
+      `)).rejects.toMatchObject({ code: "22023" });
+
+      const projected = await asRuntime((tx) => tx<Array<{
+        sequence: string;
+        cursor: string;
+      }>>`
+        select checkpoint_sequence::text as sequence, event_cursor::text as cursor
+        from public.companion_runtime_project_event_batch(
+          ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+          ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+          'attempt', ${claim.workId}::uuid, ${claim.checkpointSequence}::bigint,
+          ${`pi-${fixture.attemptId}`}, ${tx.json(events)}, 3, now(), 0, 0, 0
+        )
+      `);
+      expect(projected).toEqual([{ sequence: "1", cursor: "3" }]);
+
+      // Three events, one card: the headline survived the progress that carried none, and the
+      // settlement kept the last progress it followed.
+      const cards = await sql<Array<{
+        content: string;
+        title: string;
+        detail: string | null;
+        status: string;
+      }>>`
+        select content, tool ->> 'title' as title, tool ->> 'detail' as detail,
+          tool ->> 'status' as status
+        from companion_transcript_entries
+        where companion_id = ${fixture.companionId}::uuid and role = 'tool'
+        order by ordinal
+      `;
+      expect(cards).toEqual([{
+        content: headline,
+        title: headline,
+        detail: "reading CHANGELOG.md",
+        status: "ok",
+      }]);
+
+      // Replaying the committed page is still a digest check, not a second projection.
+      const replayed = await asRuntime((tx) => tx<Array<{ cursor: string }>>`
+        select event_cursor::text as cursor
+        from public.companion_runtime_project_event_batch(
+          ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+          ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+          'attempt', ${claim.workId}::uuid, ${claim.checkpointSequence}::bigint,
+          ${`pi-${fixture.attemptId}`}, ${tx.json(events)}, 3, now(), 0, 0, 0
+        )
+      `);
+      expect(replayed).toEqual([{ cursor: "3" }]);
+
+      // A progress line whose start never landed -- an oversized start line is dropped by the
+      // broker and never projected -- still becomes a card that names the tool.
+      const orphan = await asRuntime((tx) => tx<Array<{ cursor: string }>>`
+        select event_cursor::text as cursor
+        from public.companion_runtime_project_event_batch(
+          ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+          ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+          'attempt', ${claim.workId}::uuid, ${projected[0]!.sequence}::bigint,
+          ${`pi-${fixture.attemptId}`}, ${tx.json([{
+            ...delegated("4", "", { detail: "still working" }),
+            tool: {
+              call_id: `sha256:${"b".repeat(32)}`,
+              kind: "subagent",
+              name: "subagent",
+              title: "",
+              status: "running",
+              detail: "still working",
+              screenshot: null,
+            },
+          }])}, 4, now(), 0, 0, 0
+        )
+      `);
+      expect(orphan).toEqual([{ cursor: "4" }]);
+      const [started] = await sql<Array<{ content: string; title: string }>>`
+        select content, tool ->> 'title' as title
+        from companion_transcript_entries
+        where companion_id = ${fixture.companionId}::uuid and role = 'tool'
+        order by ordinal desc limit 1
+      `;
+      expect(started).toEqual({ content: "subagent", title: "subagent" });
+    } finally {
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
   it("returns a takeover-safe negative proof when settlement has no visible output", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     const fixture = await createCompanion();

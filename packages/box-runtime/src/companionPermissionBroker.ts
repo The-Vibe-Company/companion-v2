@@ -93,7 +93,10 @@ function toolRunKind(name: string): string {
 }
 
 function toolTimeoutFor(toolName: string): number {
-  return toolRunKind(toolName) === "shell" ? EXEC_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS;
+  // A delegated agent runs a whole task of its own, so it takes as long as a build or a test sweep
+  // does. Holding it to the 90-second default would abort the turn that launched it, every time.
+  const kind = toolRunKind(toolName);
+  return kind === "shell" || kind === "subagent" ? EXEC_TOOL_TIMEOUT_MS : TOOL_TIMEOUT_MS;
 }
 
 const toolTimeouts = new Map<string, ReturnType<typeof setTimeout>>();

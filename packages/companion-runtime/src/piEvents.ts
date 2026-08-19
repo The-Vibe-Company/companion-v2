@@ -3,6 +3,7 @@ import {
   companionConfigProposalMessageSchema,
   companionToolRunKind,
   type CompanionConfigProposal,
+  type CompanionToolRunKind,
 } from "@companion/contracts";
 import {
   genericRuntimeVisibleTextRedactor,
@@ -91,10 +92,12 @@ export type RuntimePiProjection =
     content: string;
     tool: {
       call_id: string | null;
-      kind: "shell" | "file" | "browse" | "computer" | "tool";
+      kind: CompanionToolRunKind;
       name: string;
+      /** Empty inherits the stored title, so a progress update never overwrites what started. */
       title: string;
       status: "running" | "ok" | "error" | "timeout";
+      /** Null inherits the stored detail, so a settlement keeps the last progress it followed. */
       detail: string | null;
       screenshot: null;
     };
@@ -256,12 +259,22 @@ const MAX_ASSISTANT = 100_000;
 const MAX_REASONING = 16_000;
 const MAX_REASONING_BYTES = 48_000;
 const MAX_DECISION_DETAIL = 8_000;
+/** A delegated run's task, and then its progress, are the only tool payloads a transcript keeps. */
+const MAX_SUBAGENT_DETAIL = 8_000;
+/** One line naming the child agent. Anything longer is a payload, not a name. */
+const MAX_SUBAGENT_AGENT = 120;
 const MAX_TITLE = 300;
 const DEFAULT_DECISION_TIMEOUT_MS = 5 * 60 * 1_000;
 
 function bounded(value: string, maximum: number): string {
   if (value.length <= maximum) return value;
   return `${value.slice(0, Math.max(0, maximum - 12))}\n[truncated]`;
+}
+
+/** Progress is read from its end: the newest line is the one that says where a run has got to. */
+function boundedTail(value: string, maximum: number): string {
+  if (value.length <= maximum) return value;
+  return `[truncated]\n${value.slice(value.length - Math.max(0, maximum - 12))}`;
 }
 
 function boundedReasoning(value: string): string {
@@ -302,16 +315,17 @@ function decisionRequestKey(
   return normalized;
 }
 
-function toolKind(name: string): "shell" | "file" | "browse" | "computer" | "tool" {
+function toolKind(name: string): CompanionToolRunKind {
   return companionToolRunKind(name);
 }
 
-function safeToolMetadata(kind: ReturnType<typeof toolKind>): { name: string; title: string } {
+function safeToolMetadata(kind: CompanionToolRunKind): { name: string; title: string } {
   switch (kind) {
     case "shell": return { name: "shell", title: "Shell command" };
     case "file": return { name: "file", title: "File operation" };
     case "browse": return { name: "browse", title: "Browser operation" };
     case "computer": return { name: "computer", title: "Computer action" };
+    case "subagent": return { name: "subagent", title: "Subagent run" };
     default: return { name: "tool", title: "Tool operation" };
   }
 }
@@ -366,11 +380,77 @@ function assistantProjection(
   };
 }
 
+/** The argument object of a tool call, under whichever of Pi's names carries it. */
+function toolArguments(event: Record<string, unknown>): Record<string, unknown> | null {
+  for (const candidate of [event.args, event.arguments, event.input, event.toolInput]) {
+    if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+      return candidate as Record<string, unknown>;
+    }
+  }
+  return null;
+}
+
+function firstText(
+  source: Record<string, unknown> | null,
+  keys: readonly string[],
+): string | null {
+  if (!source) return null;
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+/**
+ * What a delegated run is, in one line: which agent, and the first line of what it was asked to do.
+ *
+ * Everything here is provider text, so it is redacted before it is bounded and bounded before it is
+ * persisted. A run whose arguments say neither is still shown — as a subagent run that started,
+ * which is more than a reader learns from a spinner with no card at all.
+ */
+function subagentStart(
+  event: Record<string, unknown>,
+  fallbackTitle: string,
+  redact: RuntimeVisibleTextRedactor,
+): { title: string; detail: string | null } {
+  const args = toolArguments(event);
+  const agent = firstText(args, ["agent", "agent_name", "agentName", "name"])
+    ?.split("\n")[0]!
+    .slice(0, MAX_SUBAGENT_AGENT);
+  const task = firstText(args, ["task", "prompt", "description", "instructions"]);
+  const headline = [agent, task?.split("\n").find((line) => line.trim())?.trim()]
+    .filter(Boolean)
+    .join(": ");
+  return {
+    title: headline ? bounded(redact(headline), MAX_TITLE) : fallbackTitle,
+    detail: task ? bounded(redact(task), MAX_SUBAGENT_DETAIL) : null,
+  };
+}
+
+/**
+ * One tool run, as the transcript stores it.
+ *
+ * Arguments are never persisted for a tool the catalog only knows generically: a shell command or a
+ * file path is the payload most likely to carry a credential, and the card says enough without it.
+ * A delegated agent is the exception, because "a tool ran for six minutes" tells a reader nothing
+ * about what their Companion is doing while it runs. So a subagent run carries its task and its
+ * progress, redacted and bounded, and settles in place through the shared `call_id`.
+ *
+ * Empty title, empty content, and null detail are inherit sentinels the projection reads as "keep
+ * what the row already holds". Classification stays stateless per event: nothing here remembers a
+ * previous event, so replaying a page produces byte-identical projections.
+ */
 function toolProjection(
   sequence: bigint,
   event: Record<string, unknown>,
+  redact: RuntimeVisibleTextRedactor,
 ): Extract<RuntimePiProjection, { type: "tool" }> | null {
-  if (event.type !== "tool_execution_start" && event.type !== "tool_execution_end") return null;
+  if (
+    event.type !== "tool_execution_start"
+    && event.type !== "tool_execution_update"
+    && event.type !== "tool_execution_end"
+  ) return null;
   const callId = hashedCallId(event.toolCallId ?? event.tool_call_id ?? event.callId);
   const rawName = optionalId(event.toolName ?? event.tool_name ?? event.name, 120) ?? "tool";
   // Transcript entry keys have a strict DB-safe grammar. Provider-controlled
@@ -378,34 +458,63 @@ function toolProjection(
   const entryKey = `tool:${sequence}`;
   const kind = toolKind(rawName);
   const { name, title } = safeToolMetadata(kind);
-  if (event.type === "tool_execution_start") {
+  // Only a delegated run reports progress. Every other kind's update stays what it has always been:
+  // activity, which keeps the turn alive without touching the card.
+  if (event.type === "tool_execution_update") {
+    // Without a call id there is no card to merge into, and one row per progress line would bury
+    // the thread. Progress is only ever an update to a run that already named itself.
+    if (kind !== "subagent" || !callId) return null;
+    const progress = firstText(event, ["partialOutput", "partial_output", "output", "content", "message"]);
+    if (!progress) return null;
     return {
       sequence,
       type: "tool",
       entry_key: entryKey,
-      content: title,
+      content: "",
       tool: {
         call_id: callId,
         kind,
         name,
-        title,
+        title: "",
         status: "running",
-        detail: null,
+        detail: boundedTail(redact(progress), MAX_SUBAGENT_DETAIL),
+        screenshot: null,
+      },
+    };
+  }
+  if (event.type === "tool_execution_start") {
+    const started = kind === "subagent"
+      ? subagentStart(event, title, redact)
+      : { title, detail: null };
+    return {
+      sequence,
+      type: "tool",
+      entry_key: entryKey,
+      content: started.title,
+      tool: {
+        call_id: callId,
+        kind,
+        name,
+        title: started.title,
+        status: "running",
+        detail: started.detail,
         screenshot: null,
       },
     };
   }
   const failed = event.isError === true || event.is_error === true || event.success === false;
+  // A settled subagent keeps the headline and the last progress it was already showing.
+  const settledTitle = kind === "subagent" ? "" : title;
   return {
     sequence,
     type: "tool",
     entry_key: entryKey,
-    content: title,
+    content: settledTitle,
     tool: {
       call_id: callId,
       kind,
       name,
-      title,
+      title: settledTitle,
       status: failed ? "error" : "ok",
       detail: null,
       screenshot: null,
@@ -550,7 +659,7 @@ export function classifyPiJournalPage(
     }
     const assistant = assistantProjection(record.sequence, record.event, redact);
     if (assistant) projections.push(assistant);
-    const tool = toolProjection(record.sequence, record.event);
+    const tool = toolProjection(record.sequence, record.event, redact);
     if (tool) projections.push(tool);
     if (ACTIVITY_EVENT_TYPES.has(eventType)) {
       activity = true;

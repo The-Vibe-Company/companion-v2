@@ -214,8 +214,10 @@ const BOX_RUNTIME_ENV_KEYS = [
   "COMPANION_PI_BROKER_SOCKET",
   "COMPANION_PI_BROKER_TIMEOUT_MS",
   "COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS",
+  "COMPANION_PI_DEFAULT_PACKAGES",
   "COMPANION_PI_INSTALL_COMMAND",
   "COMPANION_PI_MCP_ADAPTER_PACKAGE",
+  "COMPANION_PI_QMD_PACKAGE",
 ] as const;
 
 /** Construct the Box-only environment without forwarding database or encryption credentials. */

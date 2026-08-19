@@ -697,3 +697,164 @@ describe("Pi journal validation and projection", () => {
     expect(serialized).not.toContain("can_write_skills");
   });
 });
+
+describe("delegated subagent runs", () => {
+  const secret = "mF9xOpaqueCredentialValue";
+
+  function classify(events: Array<Record<string, unknown>>) {
+    const page = validatePiJournalRead({
+      value: {
+        events: events.map((event, index) => ({
+          sequence: index + 1,
+          invocationId: PI_INVOCATION_ID,
+          attemptId: ATTEMPT_ID,
+          kind: "pi_event",
+          event,
+        })),
+        nextCursor: events.length,
+        acknowledgedCursor: 0,
+        hasMore: false,
+      },
+      after: 0n,
+      attemptId: ATTEMPT_ID,
+      invocationId: PI_INVOCATION_ID,
+    });
+    return classifyPiJournalPage(
+      page,
+      new Date("2026-08-19T12:00:00.000Z"),
+      createRuntimeVisibleTextRedactor([secret]),
+    );
+  }
+
+  it("names the agent and its task when a run starts, and follows it to its result", () => {
+    const classified = classify([
+      {
+        type: "tool_execution_start",
+        toolCallId: "call-1",
+        toolName: "run_subagent",
+        args: { agent: "researcher", task: "Read the changelog\nand summarize it" },
+      },
+      {
+        type: "tool_execution_update",
+        toolCallId: "call-1",
+        toolName: "run_subagent",
+        partialOutput: "reading CHANGELOG.md",
+      },
+      {
+        type: "tool_execution_end",
+        toolCallId: "call-1",
+        toolName: "run_subagent",
+      },
+    ]);
+    const tools = classified.projections.filter((projection) => projection.type === "tool");
+
+    expect(tools[0]).toMatchObject({
+      content: "researcher: Read the changelog",
+      tool: {
+        kind: "subagent",
+        name: "subagent",
+        title: "researcher: Read the changelog",
+        status: "running",
+        detail: "Read the changelog\nand summarize it",
+      },
+    });
+    // Progress and settlement carry only what changed. Empty title and null detail are the
+    // inherit sentinels the projection reads as "keep what the card already says".
+    expect(tools[1]).toMatchObject({
+      content: "",
+      tool: { title: "", status: "running", detail: "reading CHANGELOG.md" },
+    });
+    expect(tools[2]).toMatchObject({
+      content: "",
+      tool: { title: "", status: "ok", detail: null },
+    });
+    // Every one of them settles the same card.
+    expect(new Set(tools.map((tool) => tool.tool.call_id)).size).toBe(1);
+  });
+
+  it("redacts the task and the progress it shows, and bounds both", () => {
+    const classified = classify([
+      {
+        type: "tool_execution_start",
+        toolCallId: "call-1",
+        toolName: "subagent",
+        args: { agent: "deployer", task: `Deploy with ${secret}\n${"x".repeat(9_000)}` },
+      },
+      {
+        type: "tool_execution_update",
+        toolCallId: "call-1",
+        toolName: "subagent",
+        output: `${"y".repeat(9_000)}\nlast line with ${secret}`,
+      },
+    ]);
+    const tools = classified.projections.filter((projection) => projection.type === "tool");
+    const serialized = JSON.stringify(classified.projections, (_key, value) =>
+      typeof value === "bigint" ? value.toString() : value);
+
+    expect(serialized).not.toContain(secret);
+    expect(tools[0]?.tool.title.length).toBeLessThanOrEqual(300);
+    expect(tools[0]?.tool.detail?.length).toBeLessThanOrEqual(8_000);
+    // Progress is read from its end, so a long stream keeps its newest lines rather than its first.
+    expect(tools[1]?.tool.detail?.length).toBeLessThanOrEqual(8_000);
+    expect(tools[1]?.tool.detail).toContain("last line with");
+    expect(tools[1]?.tool.detail?.startsWith("[truncated]")).toBe(true);
+  });
+
+  it("still shows a run whose arguments say nothing, and stays activity with nothing to show", () => {
+    const classified = classify([
+      { type: "tool_execution_start", toolCallId: "call-1", toolName: "subagent" },
+      { type: "tool_execution_update", toolCallId: "call-1", toolName: "subagent" },
+      {
+        type: "tool_execution_update",
+        toolCallId: "call-1",
+        toolName: "subagent",
+        partialOutput: { not: "text" },
+      },
+      // No call id is no card to merge into: one row per progress line would bury the thread.
+      { type: "tool_execution_update", toolName: "subagent", partialOutput: "still working" },
+    ]);
+
+    expect(classified.projections).toEqual([
+      expect.objectContaining({
+        type: "tool",
+        content: "Subagent run",
+        tool: expect.objectContaining({ title: "Subagent run", detail: null }),
+      }),
+      // An update with no readable text is what it has always been: activity that keeps the turn
+      // alive, and no change to the card.
+      expect.objectContaining({ type: "activity", event_type: "tool_execution_update" }),
+      expect.objectContaining({ type: "activity", event_type: "tool_execution_update" }),
+      expect.objectContaining({ type: "activity", event_type: "tool_execution_update" }),
+    ]);
+    expect(classified.activity).toBe(true);
+  });
+
+  it("never serializes the arguments of a tool that is not a delegated run", () => {
+    const classified = classify([
+      {
+        type: "tool_execution_start",
+        toolCallId: "call-1",
+        toolName: "bash",
+        args: { command: `echo ${secret}`, task: "Read the changelog" },
+      },
+      {
+        type: "tool_execution_update",
+        toolCallId: "call-1",
+        toolName: "bash",
+        partialOutput: `TOKEN=${secret}`,
+      },
+      { type: "tool_execution_end", toolCallId: "call-1", toolName: "bash" },
+    ]);
+    const tools = classified.projections.filter((projection) => projection.type === "tool");
+    const serialized = JSON.stringify(classified.projections, (_key, value) =>
+      typeof value === "bigint" ? value.toString() : value);
+
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain("Read the changelog");
+    // Two cards, not three: a shell run's progress is still activity only, and both cards carry the
+    // generic title with no payload behind it.
+    expect(tools).toHaveLength(2);
+    expect(tools.every((tool) => tool.tool.title === "Shell command" && tool.tool.detail === null))
+      .toBe(true);
+  });
+});

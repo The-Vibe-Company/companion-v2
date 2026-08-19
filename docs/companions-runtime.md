@@ -243,6 +243,33 @@ bounded counters and stable codes, then skipped so the journal progresses. Raw e
 provider response bodies, stderr, tokens, auth JSON, and signed URLs are never stored in PostgreSQL
 or ordinary logs.
 
+**Subagent runs.** A tool run is projected as a card naming only its kind, and its arguments are
+never persisted — a shell command or a file path is the payload most likely to carry a credential.
+A delegated agent is the one exception, because a card that says only "a tool ran" tells a reader
+nothing about a run that can last minutes. A `subagent` start carries the child agent's name and its
+task; a `tool_execution_update` for that kind alone carries the latest progress; the settlement
+carries its status. All three are redacted with the turn's own redactor and bounded (300 characters
+of headline, 8 000 of task or progress), and all three settle the same card through the shared
+`call_id`. Empty title, empty content, and null detail are inherit sentinels the projection function
+reads as "keep what the row already holds", so progress never erases the headline and a settlement
+never erases the last progress. Classification remains stateless per event, so replaying a page
+still produces byte-identical projection digests. An update with no readable text stays activity.
+
+**Installed Pi packages.** Every Box installs the MCP adapter plus a pinned default set:
+`pi-web-access` (search and fetch, zero-config), `pi-subagents` (delegation through a `subagent`
+tool), and `pi-memory` (memory that survives a Box wake, kept on the persistent disk at
+`~/.companion/runtime/memory` and exported as `PI_MEMORY_DIR`). pi-memory's optional semantic-search
+binary, `qmd`, installs best-effort under `~/.companion/tools`: memory degrades to recall without it,
+so a failed install reports on stdout and never fails a staging. `COMPANION_PI_DEFAULT_PACKAGES` and
+`COMPANION_PI_QMD_PACKAGE` override the pins, and `none` disables either.
+
+Like the outbox, the package set rides within layout 14 rather than claiming a version, because the
+layout version gates the attempt state machine. Every pin is part of the layout marker string
+instead, and that marker is the whole update system for Boxes that already exist: a Box whose marker
+does not match relayouts at the start of its next staging, which is the next time a member sends it
+a message. Nothing is restaged proactively, and a Box whose marker matches exits the layout script
+in milliseconds.
+
 Runtime commits each supported event projection and its monotonic cursor in one PostgreSQL
 transaction. A supported `agent_settled` or Pi process-exit observation records the terminal
 checkpoint in that same commit. Only then may runtime acknowledge the cursor to the broker. After a

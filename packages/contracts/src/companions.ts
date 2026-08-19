@@ -314,10 +314,19 @@ export const setCompanionWorkspaceShareInputSchema = z.object({
 
 /**
  * What one tool run touched, so a chip can name it in a word and pick its icon. `computer` is the
- * Box desktop Lux drives; `tool` is the honest fallback for a name this catalog does not recognize,
- * because a chip that guesses wrong is worse than one that only says a run happened.
+ * Box desktop Lux drives; `subagent` is a child agent the Companion delegated a piece of its work
+ * to, which is the one kind a reader wants named rather than counted; `tool` is the honest fallback
+ * for a name this catalog does not recognize, because a chip that guesses wrong is worse than one
+ * that only says a run happened.
  */
-export const companionToolRunKindSchema = z.enum(["shell", "file", "browse", "computer", "tool"]);
+export const companionToolRunKindSchema = z.enum([
+  "shell",
+  "file",
+  "browse",
+  "computer",
+  "subagent",
+  "tool",
+]);
 export type CompanionToolRunKind = z.infer<typeof companionToolRunKindSchema>;
 
 /** A run is `running` until Pi reports its result; the chip spins until then. */

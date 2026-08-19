@@ -22,7 +22,7 @@ packages/skills            package parsing, validation, versioning
 packages/skilldb           hosted SQLite execution for declared Skill Databases
 packages/storage           archives, releases, images, logos, database objects
 packages/github            GitHub App and deterministic repository writer
-packages/box-runtime       ascii.dev adapter and layout-14 Pi broker installer
+packages/box-runtime       ascii.dev adapter, layout-14 Pi broker, and default Pi package pins
 packages/companion-runtime runtime state machine and operation execution
 packages/companion-skill   bundled delegated Skills Hub workflow
 ```

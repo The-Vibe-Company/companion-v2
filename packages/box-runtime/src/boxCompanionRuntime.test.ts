@@ -392,6 +392,113 @@ function runtimeClient(): AsciiBoxCompanionRuntime {
   });
 }
 
+describe("default Pi packages on the Box disk", () => {
+  /** Stage a Box and hand back the layout script the adapter wrote to its disk. */
+  async function stagedLayoutScript(env: Record<string, string> = {}): Promise<string> {
+    const files = new Map<string, string>();
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") return response({ box: box("ready") });
+      if (url.endsWith("/files") && method === "PUT") {
+        const body = JSON.parse(String(init?.body)) as { path: string; content: string };
+        files.set(body.path, body.content);
+        return response({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        return response(commandResult("companion-box-runnable\n"));
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+
+    await new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test", ...env })
+      .stageExistingBox({
+        companionId: "11111111-1111-4111-8111-111111111111",
+        runtimeGeneration: 1,
+        orgId: "22222222-2222-4222-8222-222222222222",
+        boxId: "bx_23456789",
+        clientSurface: "web",
+        providerAuth: {},
+        replaceProviderAuth: false,
+        modelId: "glm-4.6",
+        mcpCredentials: [],
+        mcpAccounts: [],
+        skills: [],
+      });
+    const script = files.get(".companion/bin/ensure-pi-layout.sh");
+    if (!script) throw new Error("staging did not write the Pi layout script");
+    return script;
+  }
+
+  it("installs the pinned default set beside the adapter, and qmd without being able to fail", async () => {
+    const script = await stagedLayoutScript();
+
+    for (const spec of [
+      "npm:pi-mcp-adapter@2.12.1",
+      "npm:pi-web-access@0.24.0",
+      "npm:pi-subagents@0.51.0",
+      "npm:pi-memory@0.4.2",
+    ]) {
+      expect(script).toContain(`"$pi_bin" install '${spec}'`);
+    }
+    // Semantic search is an optimization for memory, so its install may not end a staging: it runs
+    // outside `set -e` and reports on stdout, which Box does not promote to a setup failure.
+    expect(script).toContain(
+      `npm install --global --prefix "$HOME/.companion/tools" '@tobilu/qmd@2.8.3'`,
+    );
+    expect(script).toMatch(/set \+e\nnpm install --global/);
+    expect(script).not.toMatch(/npm install --global[^\n]*>&2/);
+    // Memory has to survive one Pi restart and one Box wake, so it lives on the persistent disk.
+    expect(script).toContain('export PI_MEMORY_DIR="$root/memory"');
+    expect(script).toContain('PATH="$HOME/.companion/tools/bin:$PATH"');
+  });
+
+  it("makes every pin part of the layout marker, so an existing Box relayouts on its next wake", async () => {
+    const before = await stagedLayoutScript();
+    expect(before).toContain(
+      "expected_layout='14:npm:pi-mcp-adapter@2.12.1,npm:pi-web-access@0.24.0,"
+      + "npm:pi-subagents@0.51.0,npm:pi-memory@0.4.2:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2'",
+    );
+
+    const after = await stagedLayoutScript({
+      COMPANION_PI_DEFAULT_PACKAGES: "npm:pi-web-access@0.25.0",
+    });
+    // The marker is the whole update system: a Box holding the old one cannot short-circuit.
+    expect(after).toContain(
+      "expected_layout='14:npm:pi-mcp-adapter@2.12.1,npm:pi-web-access@0.25.0"
+      + ":qmd=@tobilu/qmd@2.8.3:pi>=0.84.2'",
+    );
+    expect(after).not.toContain("npm:pi-memory@0.4.2");
+  });
+
+  it("installs nothing beyond the adapter, and no qmd, when the deployment asks for none", async () => {
+    const script = await stagedLayoutScript({
+      COMPANION_PI_DEFAULT_PACKAGES: "none",
+      COMPANION_PI_QMD_PACKAGE: "none",
+    });
+
+    expect(script).toContain(`"$pi_bin" install 'npm:pi-mcp-adapter@2.12.1'`);
+    expect(script).not.toContain("npm install --global");
+    expect(script).toContain("expected_layout='14:npm:pi-mcp-adapter@2.12.1:qmd=none:pi>=0.84.2'");
+    // A deployment that installs no memory package still gets the directory and the export: the
+    // wrapper is one shape, and an unused directory costs nothing.
+    expect(script).toContain('export PI_MEMORY_DIR="$root/memory"');
+  });
+
+  it("refuses a package specification that is not a package name", () => {
+    for (const spec of ["npm:pi-memory@0.4.2; rm -rf /", "$(id)", "pi memory", "a".repeat(201)]) {
+      expect(() => new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_PI_DEFAULT_PACKAGES: spec,
+      })).toThrow(BoxRuntimeConfigurationError);
+      expect(() => new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_PI_QMD_PACKAGE: spec,
+      })).toThrow(BoxRuntimeConfigurationError);
+    }
+  });
+});
+
 describe("staged Companion instructions", () => {
   it("always tells Pi how to show an image, with or without a persona", () => {
     expect(composedInstructions("Answer briefly.")).toBe(
