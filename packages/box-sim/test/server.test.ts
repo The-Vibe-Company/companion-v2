@@ -473,6 +473,46 @@ describe("Box simulator HTTP server", () => {
     expect(await (await provider(handle, `/boxes/${created.box.id}`)).json())
       .toMatchObject({ box: { state: "archived" } });
   });
+
+  it("saves a named snapshot and clones its persistent files onto a new Box", async () => {
+    const handle = await start();
+    const created = await (await provider(handle, "/boxes", {
+      method: "POST",
+      body: "{}",
+    })).json() as { box: { id: string } };
+    await provider(handle, `/boxes/${created.box.id}`);
+    await provider(handle, `/boxes/${created.box.id}`);
+    await provider(handle, `/boxes/${created.box.id}/files`, {
+      method: "PUT",
+      body: JSON.stringify({
+        path: ".companion/runtime/state/pi-layout.version",
+        content: "14:baked:overlay=deadbeef",
+      }),
+    });
+
+    const saved = await (await provider(handle, "/named-snapshots", {
+      method: "POST",
+      body: JSON.stringify({ boxId: created.box.id, name: "companion-l14-aaaaaaaaaaaa" }),
+    })).json() as { snapshot: { name: string; status: string } };
+    expect(saved.snapshot).toMatchObject({
+      name: "companion-l14-aaaaaaaaaaaa",
+      status: "saving",
+    });
+    expect(await (await provider(handle, "/named-snapshots/companion-l14-aaaaaaaaaaaa")).json())
+      .toMatchObject({ snapshot: { status: "ready" } });
+
+    const cloned = await (await provider(handle, "/boxes", {
+      method: "POST",
+      body: JSON.stringify({ from: "companion-l14-aaaaaaaaaaaa" }),
+    })).json() as { box: { id: string; state: string } };
+    expect(cloned.box.state).toBe("cloning");
+    expect(cloned.box.id).not.toBe(created.box.id);
+    await provider(handle, `/boxes/${cloned.box.id}`);
+    await provider(handle, `/boxes/${cloned.box.id}`);
+    expect(handle.simulator.commandMachine(cloned.box.id).persistentFiles.get(
+      ".companion/runtime/state/pi-layout.version",
+    )?.toString()).toBe("14:baked:overlay=deadbeef");
+  });
 });
 
 function brokerCommand(command: Record<string, unknown>): string {

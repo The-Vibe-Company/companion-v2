@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { BoxRuntimeLifecycleClient, CompanionBoxRuntimeV2 } from "@companion/box-runtime";
+import { BoxRuntimeAdapterError, type BoxRuntimeLifecycleClient, type CompanionBoxRuntimeV2 } from "@companion/box-runtime";
 
 import { createRuntimeBoxControl, createRuntimePiControl } from "./boxAdapters";
 
@@ -73,6 +73,44 @@ describe("runtime Box/Pi port adapters", () => {
       ttlSeconds: 21_600,
       deadlineAt,
       signal,
+    }));
+  });
+
+  it("clones the golden runtime image and falls back when that snapshot is gone", async () => {
+    const createOrRecoverGenerationBox = vi.fn()
+      .mockRejectedValueOnce(new BoxRuntimeAdapterError({
+        stableCode: "box_not_found",
+        message: "The Box provider resource was not found",
+        status: 404,
+        providerCode: "unknown_snapshot",
+        retryable: false,
+        outcomeUnknown: false,
+      }))
+      .mockResolvedValue({
+        outcome: "created" as const,
+        boxId: "bx_23456789",
+        name: "canonical",
+      });
+    const control = createRuntimeBoxControl({
+      lifecycle: lifecycle({ createOrRecoverGenerationBox }),
+      runtime: () => boxRuntime(),
+      runtimeImageName: () => "companion-l14-aaaaaaaaaaaa",
+      now: () => deadlineAt.getTime() - 10_000,
+    });
+
+    await expect(control.createGenerationBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      generation: 4n,
+      ttlSeconds: 21_600,
+      deadlineAt,
+      signal,
+    })).resolves.toMatchObject({ outcome: "created", boxId: "bx_23456789" });
+
+    expect(createOrRecoverGenerationBox).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      from: "companion-l14-aaaaaaaaaaaa",
+    }));
+    expect(createOrRecoverGenerationBox).toHaveBeenNthCalledWith(2, expect.not.objectContaining({
+      from: expect.anything(),
     }));
   });
 

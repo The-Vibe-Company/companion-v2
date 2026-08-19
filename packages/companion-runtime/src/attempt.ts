@@ -18,9 +18,8 @@ import type { RuntimeEngineDependencies, StagedRuntimeAttachment } from "./ports
 import type { RuntimeVisibleTextRedactor } from "./projectionRedaction";
 import { isCompanionAttachmentImage } from "@companion/contracts";
 import { retryIdempotentLifecycle } from "./retry";
-import {
-  RuntimeStoreIndeterminateError,
-} from "./store";
+import { RuntimeStoreIndeterminateError } from "./store";
+import { refreshWarmCompanionLayout } from "./layoutRefresh";
 import type {
   AttemptRuntimeClaim,
   ModelInputCapability,
@@ -552,6 +551,12 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           orgId: context.claim.orgId,
           material: workMaterial,
         });
+        await refreshWarmCompanionLayout({
+          session: context.session,
+          deps: context.deps,
+          authorization: authorization(context),
+          restartPi: true,
+        });
         const state = await brokerState(context);
         const runtime = requiredRuntime(context);
         requireModelInputCapability(state.modelInput, "text");
@@ -561,8 +566,10 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
         if (attachmentsIncludeImage(workMaterial.attachments)) {
           requireModelInputCapability(state.modelInput, "image");
         }
+        // Overlay refresh recycles Pi in place. Bind to the live idle daemon: the stored instance
+        // id can lag a health recycle or a restart that succeeded before this checkpoint.
         if (
-          state.invocationId !== runtime.piInvocationId
+          !state.invocationId
           || state.activeAttemptId !== null
           || state.tailCursor !== state.acknowledgedCursor
         ) {
@@ -572,6 +579,7 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
             action: "restart_pi",
           });
         }
+        const dispatchRuntime = { boxId: runtime.boxId, piInvocationId: state.invocationId };
         await clearOutbox(context);
         const promptText = workMaterial.promptText!
           + attachmentPromptSuffix(await stageAttachments(context, workMaterial));
@@ -586,7 +594,7 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           outcome = await context.session.external(async (signal) => {
             providerCallStarted = true;
             return await context.deps.pi.prompt({
-              boxId: runtime.boxId,
+              boxId: dispatchRuntime.boxId,
               commandId: commandId!,
               attemptId: context.claim.workId,
               message: promptText,
@@ -619,7 +627,7 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
             },
           };
         }
-        if (outcome.invocationId !== runtime.piInvocationId) {
+        if (outcome.invocationId !== dispatchRuntime.piInvocationId) {
           await checkpointDispatchAmbiguous(context, commandId);
           throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
         }

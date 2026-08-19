@@ -504,6 +504,42 @@ describe("AsciiBoxMaintenanceClient", () => {
     });
   });
 
+  it("clones a named snapshot on create when from is supplied", async () => {
+    const createdId = OTHER_BOX_ID;
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "box.list",
+        boxes: [],
+        pageInfo: { nextCursor: null, hasMore: false },
+      }))
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "box.created",
+        status: "cloning",
+        ttlSeconds: 300,
+        box: { id: createdId, name: "Box 2026-08-19 12:00" },
+      }, 202));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(client().createOrRecoverGenerationBox({
+      companionId: COMPANION_ID,
+      generation: 14,
+      ttlSeconds: 21_600,
+      from: "companion-l14-aaaaaaaaaaaa",
+      deadlineAt: Date.now() + 1_000,
+    })).resolves.toEqual({
+      outcome: "created",
+      boxId: createdId,
+      name: GENERATION_NAME,
+    });
+    expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))).toEqual({
+      ttlSeconds: 300,
+      noEnv: true,
+      from: "companion-l14-aaaaaaaaaaaa",
+    });
+  });
+
   it.each(["init", "provisioned", "cloning"] as const)(
     "accepts a 202 create whose lifecycle status is %s",
     async (lifecycleStatus) => {

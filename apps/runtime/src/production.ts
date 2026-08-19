@@ -1,6 +1,7 @@
 import {
   AsciiBoxCompanionRuntime,
   AsciiBoxMaintenanceClient,
+  createCompanionRuntimeImageBaker,
   type BoxRuntimeLifecycleClient,
   type CompanionBoxRuntimeV2,
   type CompanionRuntimeSkill,
@@ -8,6 +9,7 @@ import {
 import {
   createRuntimeKernel,
   createJsonRuntimeProcessLog,
+  describeThrownError,
   PostgresRuntimeStore,
   type CreateRuntimeKernelInput,
   type RuntimeAttachmentStager,
@@ -106,10 +108,12 @@ export async function buildProductionRuntimeService(
   const config = loadRuntimeServiceConfig(env);
   const database = factories.createDatabase(config);
   let archiveStorage: RuntimeArchiveStorage | null = null;
+  let bakerAbort: AbortController | null = null;
   const closeResources = resourceCloser({
     database,
     archiveStorage: () => archiveStorage,
     config,
+    abortBaker: () => bakerAbort?.abort(),
   });
 
   try {
@@ -144,6 +148,32 @@ export async function buildProductionRuntimeService(
     // Staging is a multi-request transaction with one shared abort budget. Keep adapter instances
     // call-local so that budget cannot leak into a later lifecycle or broker operation.
     const freshRuntime = (): CompanionBoxRuntimeV2 => factories.createBoxRuntime(boxEnv);
+    const bakerAbortController = new AbortController();
+    bakerAbort = bakerAbortController;
+    const baker = createCompanionRuntimeImageBaker({
+      identity: freshRuntime().layoutIdentity(),
+      lifecycle,
+      runtime: {
+        existingBoxStatus: (input) => freshRuntime().existingBoxStatus(input),
+        refreshPiLayout: (input) => freshRuntime().refreshPiLayout(input),
+        refreshTtl: (input) => freshRuntime().refreshTtl(input),
+      },
+      onAttemptError: (error) => {
+        log.warn({
+          ts: new Date().toISOString(),
+          event: "companion_runtime_image_baker_failed",
+          error: describeThrownError(error),
+        });
+      },
+    });
+    void baker.ensure(bakerAbortController.signal).catch((error) => {
+      if (bakerAbortController.signal.aborted) return;
+      log.warn({
+        ts: new Date().toISOString(),
+        event: "companion_runtime_image_baker_failed",
+        error: describeThrownError(error),
+      });
+    });
     archiveStorage = factories.createArchiveStorage();
     const bundledSkill = await factories.loadBundledSkill();
     const material = createRuntimeMaterialPipeline({
@@ -169,7 +199,11 @@ export async function buildProductionRuntimeService(
         await storage.store(stored);
       },
     });
-    const adapters = { lifecycle, runtime: freshRuntime };
+    const adapters = {
+      lifecycle,
+      runtime: freshRuntime,
+      runtimeImageName: () => baker.cloneName(),
+    };
     const kernel = factories.createKernel({
       store,
       box: createRuntimeBoxControl(adapters),
@@ -239,10 +273,12 @@ function resourceCloser(input: {
   database: RuntimeDatabase;
   archiveStorage(): RuntimeArchiveStorage | null;
   config: RuntimeServiceConfig;
+  abortBaker?: () => void;
 }): () => Promise<void> {
   let closing: Promise<void> | null = null;
   return () => {
     closing ??= (async () => {
+      input.abortBaker?.();
       let failure: unknown;
       try {
         await input.archiveStorage()?.close();
@@ -293,6 +329,8 @@ const disabledPiControl: RuntimePiControl = {
 
 const disabledResourceStager: RuntimeResourceStager = {
   stageExistingBox: async () => runtimeDisabled(),
+  refreshLayout: async () => runtimeDisabled(),
+  invalidateLayout: async () => runtimeDisabled(),
 };
 
 const disabledAttachmentStager: RuntimeAttachmentStager = {

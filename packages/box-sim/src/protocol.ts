@@ -29,6 +29,15 @@ export interface BoxSimBox {
   updatedTick: number;
 }
 
+export type BoxSimNamedSnapshotStatus = "saving" | "ready" | "failed";
+
+export interface BoxSimNamedSnapshot {
+  name: string;
+  status: BoxSimNamedSnapshotStatus;
+  sourceBoxId: string;
+  createdAt: string;
+}
+
 export type BoxSimDeletionStatus = "pending" | "processing" | "blocked" | "completed";
 
 export interface BoxSimDeletionOperation {
@@ -189,6 +198,7 @@ export interface BoxSimStateSnapshot {
     };
   }>;
   deletions: BoxSimDeletionOperation[];
+  namedSnapshots: BoxSimNamedSnapshot[];
   faults: BoxSimFaultRule[];
   requests: BoxSimRequestJournalEntry[];
 }

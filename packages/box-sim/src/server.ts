@@ -413,6 +413,7 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
             : {}),
           ...(typeof body.environment === "string" ? { environment: body.environment } : {}),
           ...(typeof body.noEnv === "boolean" ? { noEnv: body.noEnv } : {}),
+          ...(typeof body.from === "string" ? { from: body.from } : {}),
         }),
         respond: (box) => sendJson(response, 202, {
           ok: true,
@@ -423,6 +424,70 @@ export function createBoxSimServer(options: BoxSimServerOptions = {}): BoxSimSer
         }),
       });
       return;
+    }
+
+    if (method === "GET" && url.pathname === "/named-snapshots") {
+      await withFault({
+        request,
+        response,
+        point: "named-snapshot.list",
+        operation: () => simulator.listNamedSnapshots(),
+        respond: (snapshots) => sendJson(response, 200, {
+          ok: true,
+          type: "snapshot.named.list",
+          snapshots,
+        }),
+      });
+      return;
+    }
+    if (method === "POST" && url.pathname === "/named-snapshots") {
+      if (typeof body.boxId !== "string" || typeof body.name !== "string") {
+        throw new BoxSimHttpError(400, "invalid_request", "boxId and name are required");
+      }
+      const boxId = body.boxId;
+      const name = body.name;
+      await withFault({
+        request,
+        response,
+        point: "named-snapshot.save",
+        operation: () => simulator.saveNamedSnapshot({ boxId, name }),
+        respond: (snapshot) => sendJson(response, 202, {
+          ok: true,
+          type: "snapshot.named.saving",
+          snapshot,
+          status: snapshot.status,
+        }),
+      });
+      return;
+    }
+    const namedSnapshotMatch = /^\/named-snapshots\/([^/]+)$/.exec(url.pathname);
+    if (namedSnapshotMatch) {
+      const name = decodePathSegment(namedSnapshotMatch[1]!);
+      if (method === "GET") {
+        await withFault({
+          request,
+          response,
+          point: "named-snapshot.get",
+          operation: () => simulator.getNamedSnapshot(name),
+          respond: (snapshot) => sendJson(response, 200, {
+            ok: true,
+            type: "snapshot.named.info",
+            snapshot,
+            status: snapshot.status,
+          }),
+        });
+        return;
+      }
+      if (method === "DELETE") {
+        await withFault({
+          request,
+          response,
+          point: "named-snapshot.delete",
+          operation: () => simulator.deleteNamedSnapshot(name),
+          respond: () => sendJson(response, 200, { ok: true, type: "snapshot.named.deleted", name }),
+        });
+        return;
+      }
     }
 
     const boxMatch = /^\/boxes\/([^/]+)$/.exec(url.pathname);

@@ -242,6 +242,19 @@ export function createRuntimeMaterialPipeline(input: {
         appliedSkillsRevision: nativeMobile ? null : stage.targetSkillsRevision,
       };
     },
+    async refreshLayout(stage) {
+      const observed = await input.runtime().refreshPiLayout({
+        boxId: stage.boxId,
+        signal: stage.signal,
+      });
+      return { applied: observed.applied };
+    },
+    async invalidateLayout(stage) {
+      await input.runtime().invalidatePiLayoutOverlay({
+        boxId: stage.boxId,
+        signal: stage.signal,
+      });
+    },
   };
   const attachmentStager: RuntimeAttachmentStager = {
     async stageAttachments(stage) {

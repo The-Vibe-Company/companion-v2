@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { RuntimeEngine } from "./engine";
 import type { RuntimeProcessLog } from "./logging";
 import type { RuntimePiControl } from "./ports";
@@ -59,12 +59,12 @@ function harvestedImage() {
   };
 }
 
-function assistantAndSettlementPage(): unknown {
+function assistantAndSettlementPage(invocationId = PI_INVOCATION_ID): unknown {
   return {
     events: [
       {
         sequence: 1,
-        invocationId: PI_INVOCATION_ID,
+        invocationId,
         attemptId: ATTEMPT_ID,
         kind: "pi_event",
         event: {
@@ -74,7 +74,7 @@ function assistantAndSettlementPage(): unknown {
       },
       {
         sequence: 2,
-        invocationId: PI_INVOCATION_ID,
+        invocationId,
         attemptId: ATTEMPT_ID,
         kind: "pi_event",
         event: { type: "agent_settled" },
@@ -183,6 +183,66 @@ describe("RuntimeEngine attempts", () => {
     ]);
     expect(ports.log.indexOf("project")).toBeLessThan(ports.log.indexOf("ack"));
     expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
+  });
+
+  it("recycles Pi after an overlay layout refresh before dispatch", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    const overlayInvocationId = "overlay-pi";
+    const restartPiDaemon = vi.fn(async () => ({
+      state: "idle" as const,
+      invocationId: overlayInvocationId,
+    }));
+    ports.resourceStager.refreshLayout = async () => ({ applied: "overlay" });
+    ports.pi.restartPiDaemon = restartPiDaemon;
+    const baseBrokerState = ports.pi.brokerState;
+    ports.pi.brokerState = async (input) => ({
+      ...await baseBrokerState(input),
+      invocationId: overlayInvocationId,
+    });
+    ports.pi.prompt = async (input) => {
+      ports.promptCalls.push({ attemptId: input.attemptId, message: input.message });
+      return { outcome: "accepted", invocationId: overlayInvocationId };
+    };
+    ports.eventReads.push(assistantAndSettlementPage(overlayInvocationId));
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(restartPiDaemon).toHaveBeenCalledOnce();
+    expect(ports.promptCalls).toEqual([{ attemptId: ATTEMPT_ID, message: "Hello from a durable turn" }]);
+    expect(store.checkpoints).toContainEqual(expect.objectContaining({
+      nextCheckpoint: "dispatch_accepted",
+      piInvocationId: overlayInvocationId,
+    }));
+  });
+
+  it("dispatches against the live idle invocation after a prior overlay recycle", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    const liveInvocationId = "health-overlay-pi";
+    const baseBrokerState = ports.pi.brokerState;
+    ports.pi.brokerState = async (input) => ({
+      ...await baseBrokerState(input),
+      invocationId: liveInvocationId,
+    });
+    ports.pi.prompt = async (input) => {
+      ports.promptCalls.push({ attemptId: input.attemptId, message: input.message });
+      return { outcome: "accepted", invocationId: liveInvocationId };
+    };
+    ports.eventReads.push(assistantAndSettlementPage(liveInvocationId));
+    const engine = new RuntimeEngine(engineDependencies({ store, ports }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(store.checkpoints).toContainEqual(expect.objectContaining({
+      nextCheckpoint: "dispatch_accepted",
+      piInvocationId: liveInvocationId,
+    }));
   });
 
   it("starts a new attempt from the broker's acknowledged monotone cursor", async () => {
@@ -1435,4 +1495,43 @@ describe("RuntimeEngine health observation", () => {
       });
     },
   );
+
+  it("applies an overlay refresh before observing idle Pi", async () => {
+    const claim = healthClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(attemptClaim(), {
+        authorizationActorId: null,
+        clientSurface: null,
+        workCheckpoint: "observing",
+        workCheckpointSequence: 0n,
+        turnId: null,
+        turnStatus: null,
+        attemptStatus: null,
+        dispatchState: null,
+        eventCursor: null,
+        unknownEventCount: null,
+        malformedEventCount: null,
+        oversizedEventCount: null,
+        coldStartDeadlineAt: null,
+        inactivityDeadlineAt: null,
+        absoluteDeadlineAt: null,
+        operationKind: null,
+        boxState: "ready",
+        piState: "idle",
+      }),
+    });
+    const ports = fakePorts(store);
+    ports.resourceStager.refreshLayout = async () => ({ applied: "overlay" });
+    ports.pi.restartPiDaemon = async () => ({ state: "idle", invocationId: "health-overlay-pi" });
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(store.authorization.piInvocationId).toBe("health-overlay-pi");
+    expect(store.observations.at(-1)).toMatchObject({
+      boxState: "ready",
+      piState: "idle",
+      piInvocationId: "health-overlay-pi",
+    });
+  });
 });

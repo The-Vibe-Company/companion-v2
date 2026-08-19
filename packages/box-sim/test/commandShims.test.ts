@@ -29,6 +29,7 @@ describe("semantic Box command shims", () => {
       ["systemctl --user is-active x; printf companion-pi-warm-ready", "warm-daemon-ready"],
       ['mkdir -p "$HOME/.companion/bin"', "mkdir-pi-bin"],
       ['bash "$HOME/.companion/bin/ensure-pi-layout.sh"', "install-layout"],
+      ['recorded="$(cat "$HOME/.companion/runtime/state/pi-layout.version" 2>/dev/null || true)"\nif [ "$recorded" = \'14:pins:overlay=abc\' ] \\\n  && [ -x "$HOME/.companion/bin/companion-pi-broker.mjs" ]; then\n  printf \'%s\\n\' companion-layout-unchanged\nfi', "probe-layout"],
       ['mkdir -p "$HOME/.companion/pi/extensions"', "mkdir-extensions"],
       ["state/skill-archives companion-provider-auth-present", "clear-skill-archives"],
       ["companion-archive-bytes wc -c", "measure-skill-archives"],
@@ -48,6 +49,29 @@ describe("semantic Box command shims", () => {
     ];
     for (const [command, kind] of commands) expect(classifyBoxCommand(command)).toBe(kind);
     expect(classifyBoxCommand("uname -a")).toBe("unsupported");
+  });
+
+  it("prints overlay vs base layout labels from the staged marker", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    const script = [
+      "#!/usr/bin/env bash",
+      "base_layout='14:npm:pi-mcp-adapter@2.12.1:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2'",
+      "expected_layout='14:npm:pi-mcp-adapter@2.12.1:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2:overlay=aaaaaaaaaaaaaaaa'",
+    ].join("\n");
+    putBoxFile(machine, ".companion/bin/ensure-pi-layout.sh", Buffer.from(script));
+
+    expect(await executeBoxCommand(machine, 'bash "$HOME/.companion/bin/ensure-pi-layout.sh"'))
+      .toMatchObject({ success: true, stdout: "companion-layout-base\n" });
+    expect(await executeBoxCommand(machine, 'bash "$HOME/.companion/bin/ensure-pi-layout.sh"'))
+      .toMatchObject({ success: true, stdout: "companion-layout-unchanged\n" });
+
+    putBoxFile(
+      machine,
+      ".companion/bin/ensure-pi-layout.sh",
+      Buffer.from(script.replace("overlay=aaaaaaaaaaaaaaaa", "overlay=bbbbbbbbbbbbbbbb")),
+    );
+    expect(await executeBoxCommand(machine, 'bash "$HOME/.companion/bin/ensure-pi-layout.sh"'))
+      .toMatchObject({ success: true, stdout: "companion-layout-overlay\n" });
   });
 
   it("round-trips the adapter's POSIX quoting, including apostrophes", () => {
