@@ -216,7 +216,7 @@ with jittered backoff of 1, 2, 5, 10, and 30 seconds. A provider operation id is
 the API returns one. A provider-blocked permanent delete is transient (usually an in-flight snapshot
 save on the same Box): runtime keeps polling the retained deletion operation until the bounded
 operation deadline, and only a still-blocked deadline fails the operation — as retryable
-`box_delete_blocked`, so an Owner/Editor retry finishes a delete the provider typically completed
+`box_delete_deadline_exceeded`, so an Owner/Editor retry finishes a delete the provider typically completed
 moments later.
 
 Stop snapshots/archives the Box. A later send queues wake after stop reaches a safe archive

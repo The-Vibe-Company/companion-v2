@@ -1060,7 +1060,7 @@ describe("runtime lifecycle operations", () => {
     const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
 
     expect(result.outcome).toBe("failed");
-    expect(store.settlements[0]?.error?.code).toBe("box_delete_blocked");
+    expect(store.settlements[0]?.error?.code).toBe("box_delete_deadline_exceeded");
     expect(store.settlements[0]?.error?.action).toBe("retry");
   });
 

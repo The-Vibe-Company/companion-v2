@@ -876,26 +876,11 @@ async function handleDelete(context: OperationContext): Promise<RuntimeWorkDispo
           if (!isProviderNotFound(error)) throw error;
           poll = { status: "completed" } as const;
         }
-        if (poll.status === "blocked") {
-          // A blocked delete is transient (typically an in-flight snapshot save): keep polling to
-          // the operation deadline. A still-blocked deadline fails retryably so an explicit Owner
-          // retry can finish a delete the provider usually completed moments later.
-          if (
-            context.deps.clock.now().getTime() + PROVIDER_POLL_INTERVAL_MS
-              >= workDeadline(context).getTime()
-          ) {
-            throw new RuntimeInvariantError({
-              code: "box_delete_blocked",
-              message: "The provider blocked permanent Box deletion until its deadline.",
-              action: "retry",
-            });
-          }
-          await context.deps.clock.sleep(PROVIDER_POLL_INTERVAL_MS, context.session.signal);
-        } else if (poll.status === "completed") {
+        if (poll.status === "completed") {
           await observe(context, { boxState: "absent" });
         } else {
-          // pending and processing are still in progress; blocked is handled above. Official Box
-          // docs poll until `completed`.
+          // pending, processing, and blocked are all in-progress. Official Box docs poll until
+          // `completed`; blocked has no completedAt, so treating it as terminal aborted deletes.
           await context.deps.clock.sleep(PROVIDER_POLL_INTERVAL_MS, context.session.signal);
         }
         break;
