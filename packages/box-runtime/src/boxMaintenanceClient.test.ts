@@ -21,11 +21,11 @@ function json(value: unknown, status = 200): Response {
   return Response.json(value, { status });
 }
 
-function client(): AsciiBoxMaintenanceClient {
+function client(options?: { onTiming?: (sample: import("./boxMaintenanceClient").BoxProviderCallTiming) => void }): AsciiBoxMaintenanceClient {
   return new AsciiBoxMaintenanceClient({
     COMPANION_BOX_API_KEY: "box_test",
     COMPANION_BOX_API_BASE: "https://box.test/v1/",
-  });
+  }, options);
 }
 
 function operation(
@@ -825,20 +825,61 @@ describe("AsciiBoxMaintenanceClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("returns a blocked deletion as a terminal provider result", async () => {
+  it("polls a transient blocked deletion through to completion", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-16T00:00:00.000Z"));
     const blocked = operation("blocked");
-    vi.stubGlobal("fetch", vi.fn(async () => json({
+    const completed = operation("completed");
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "deletion.operation",
+        operation: blocked,
+      }))
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "deletion.operation",
+        operation: completed,
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const deletion = client().deletePermanentlyAndWait({
+      boxId: BOX_ID,
+      operationId: OPERATION_ID,
+      deadlineAt: Date.now() + 5_000,
+      pollIntervalMs: 10,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10);
+
+    await expect(deletion).resolves.toEqual({ outcome: "deleted", operation: completed });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns blocked only once the deadline elapses while still blocked", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-16T00:00:00.000Z"));
+    const blocked = operation("blocked");
+    const fetchMock = vi.fn(async () => json({
       ok: true,
       type: "deletion.operation",
       operation: blocked,
-    })));
+    }));
+    vi.stubGlobal("fetch", fetchMock);
 
-    await expect(client().deletePermanentlyAndWait({
+    const deletion = client().deletePermanentlyAndWait({
       boxId: BOX_ID,
       operationId: OPERATION_ID,
-      deadlineAt: Date.now() + 1_000,
-      pollIntervalMs: 1,
-    })).resolves.toEqual({ outcome: "blocked", operation: blocked });
+      deadlineAt: Date.now() + 20,
+      pollIntervalMs: 100,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(20);
+
+    await expect(deletion).resolves.toEqual({ outcome: "blocked", operation: blocked });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("rejects an explicitly empty operation id without issuing DELETE", async () => {
@@ -891,5 +932,54 @@ describe("AsciiBoxMaintenanceClient", () => {
     await expect(client().deletePermanentlyAndWait({ boxId: BOX_ID }))
       .rejects.toThrow(/absolute deadline/);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("reports provider call timings for list and create", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "box.list",
+        boxes: [],
+        pageInfo: { nextCursor: null, hasMore: false },
+      }))
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "box.created",
+        status: "provisioning",
+        box: { id: BOX_ID },
+        ttlSeconds: 300,
+      }, 202));
+    vi.stubGlobal("fetch", fetchMock);
+    const timings: Array<{ operation: string; durationMs: number; ok: boolean }> = [];
+    const instrumented = client({ onTiming: (sample) => timings.push(sample) });
+
+    await expect(instrumented.createOrRecoverGenerationBox({
+      companionId: COMPANION_ID,
+      generation: 14,
+      ttlSeconds: 21_600,
+      deadlineAt: Date.now() + 30_000,
+    })).resolves.toMatchObject({ outcome: "created", boxId: BOX_ID });
+
+    expect(timings.map((sample) => [sample.operation, sample.ok])).toEqual([
+      ["list_boxes", true],
+      ["create_box", true],
+    ]);
+    for (const sample of timings) expect(sample.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("reports a failed provider call timing", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({
+      ok: false,
+      code: "box_provider_unavailable",
+      message: "unavailable",
+    }, 503)));
+    const timings: Array<{ operation: string; durationMs: number; ok: boolean }> = [];
+    const instrumented = client({ onTiming: (sample) => timings.push(sample) });
+
+    await expect(instrumented.listAllBoxes()).rejects.toBeInstanceOf(BoxRuntimeAdapterError);
+
+    expect(timings).toEqual([
+      { operation: "list_boxes", durationMs: expect.any(Number), ok: false },
+    ]);
   });
 });

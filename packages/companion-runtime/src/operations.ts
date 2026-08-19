@@ -279,7 +279,24 @@ function isReady(state: GenerationBox["state"]): boolean {
   return state === "ready" || state === "idle" || state === "running";
 }
 
+function logStageTiming(
+  context: OperationContext,
+  stage: "waiting_ready" | "installing_layout" | "starting_pi",
+  startedAt: number,
+): void {
+  context.deps.log?.info({
+    ts: context.deps.clock.now().toISOString(),
+    event: "runtime.operation.stage",
+    stage,
+    durationMs: Math.max(0, context.deps.clock.now().getTime() - startedAt),
+    companionId: context.claim.companionId,
+    operationKind: context.claim.operationKind,
+    boxId: context.session.authorization?.boxId ?? null,
+  });
+}
+
 async function waitForReadyBox(context: OperationContext): Promise<void> {
+  const startedAt = context.deps.clock.now().getTime();
   const boxId = requiredBoxId(context.session);
   for (;;) {
     requirePollingBudget(
@@ -289,7 +306,10 @@ async function waitForReadyBox(context: OperationContext): Promise<void> {
     );
     const state = await boxStatus(context, boxId);
     await observe(context, { boxId, boxState: state ?? "unknown" });
-    if (isReady(state)) return;
+    if (isReady(state)) {
+      logStageTiming(context, "waiting_ready", startedAt);
+      return;
+    }
     if (state === "absent" || state === "archived" || state === "error") {
       throw new RuntimeInvariantError({
         code: "box_start_failed",
@@ -302,6 +322,7 @@ async function waitForReadyBox(context: OperationContext): Promise<void> {
 }
 
 async function stageCapturedResources(context: OperationContext): Promise<StagedRuntimeSettings> {
+  const startedAt = context.deps.clock.now().getTime();
   const authorization = requiredAuthorization(context.session);
   if (
     authorization.clientSurface === null
@@ -325,7 +346,7 @@ async function stageCapturedResources(context: OperationContext): Promise<Staged
       fence: context.session.fence,
       signal: context.session.signal,
     }));
-  return await context.session.external(async (signal) =>
+  const staged = await context.session.external(async (signal) =>
     await context.deps.resourceStager.stageExistingBox({
       orgId: context.claim.orgId,
       companionId: context.claim.companionId,
@@ -338,6 +359,8 @@ async function stageCapturedResources(context: OperationContext): Promise<Staged
       targetSkillsRevision,
       signal,
     }));
+  logStageTiming(context, "installing_layout", startedAt);
+  return staged;
 }
 
 async function observeStagedResources(
@@ -354,6 +377,7 @@ async function observeStagedResources(
 }
 
 async function startAndObservePi(context: OperationContext): Promise<void> {
+  const startedAt = context.deps.clock.now().getTime();
   const previousInvocationId = requiredAuthorization(context.session).piInvocationId;
   const recycleWarmPi = context.claim.operationKind === "start" && previousInvocationId !== null;
   const result = await lifecycle(context, "start_pi", async ({ signal }) =>
@@ -372,6 +396,7 @@ async function startAndObservePi(context: OperationContext): Promise<void> {
     });
   }
   await observe(context, { piState: "idle", piInvocationId: result.invocationId });
+  logStageTiming(context, "starting_pi", startedAt);
 }
 
 async function handleStart(context: OperationContext): Promise<RuntimeWorkDisposition> {
@@ -857,13 +882,21 @@ async function handleDelete(context: OperationContext): Promise<RuntimeWorkDispo
           poll = { status: "completed" } as const;
         }
         if (poll.status === "blocked") {
-          throw new RuntimeInvariantError({
-            code: "box_delete_blocked",
-            message: "The provider blocked permanent Box deletion.",
-            action: "none",
-          });
-        }
-        if (poll.status === "completed") {
+          // A blocked delete is transient (typically an in-flight snapshot save): keep polling to
+          // the operation deadline. A still-blocked deadline fails retryably so an explicit Owner
+          // retry can finish a delete the provider usually completed moments later.
+          if (
+            context.deps.clock.now().getTime() + PROVIDER_POLL_INTERVAL_MS
+              >= workDeadline(context).getTime()
+          ) {
+            throw new RuntimeInvariantError({
+              code: "box_delete_blocked",
+              message: "The provider blocked permanent Box deletion until its deadline.",
+              action: "retry",
+            });
+          }
+          await context.deps.clock.sleep(PROVIDER_POLL_INTERVAL_MS, context.session.signal);
+        } else if (poll.status === "completed") {
           await observe(context, { boxState: "absent" });
         } else {
           await context.deps.clock.sleep(PROVIDER_POLL_INTERVAL_MS, context.session.signal);

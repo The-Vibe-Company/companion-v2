@@ -765,4 +765,138 @@ describe("runtime lifecycle operations", () => {
     expect(statusCalls).toBe(0);
     expect(store.settlements[0]?.error?.code).toBe("box_stop_deadline_exceeded");
   });
+
+  function deleteClaimAtWaitingDeleted(overrides: Partial<OperationRuntimeClaim> = {}) {
+    const claim = {
+      ...operationClaim(),
+      clientSurface: null,
+      operationKind: "delete",
+      checkpoint: "waiting_deleted",
+      checkpointSequence: 3n,
+      targetSettingsRevision: null,
+      targetSkillsRevision: null,
+      ...overrides,
+    } as OperationRuntimeClaim;
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        workCheckpoint: "waiting_deleted",
+        workCheckpointSequence: 3n,
+        operationKind: "delete",
+        providerOperationId: "delete-op-1",
+        desiredSettingsRevision: null,
+        skillsRevision: null,
+        modelId: null,
+      }),
+    });
+    return { claim, store };
+  }
+
+  it("polls through a transient blocked delete until the provider completes", async () => {
+    const { claim, store } = deleteClaimAtWaitingDeleted();
+    const ports = fakePorts(store);
+    const polls: string[] = [];
+    let blockedPolls = 2;
+    ports.box.pollPermanentDeletion = async ({ operationId }) => {
+      polls.push(operationId);
+      if (blockedPolls > 0) {
+        blockedPolls -= 1;
+        return { status: "blocked" };
+      }
+      return { status: "completed" };
+    };
+    const clock = new TestClock();
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports, clock }))
+      .execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(polls).toEqual(["delete-op-1", "delete-op-1", "delete-op-1"]);
+    expect(clock.sleeps).toEqual([1_000, 1_000]);
+    expect(store.authorization.workCheckpoint).toBe("provider_deleted");
+    expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
+  });
+
+  it("fails a still-blocked delete retryably at the operation deadline", async () => {
+    const { claim, store } = deleteClaimAtWaitingDeleted();
+    const ports = fakePorts(store);
+    ports.box.pollPermanentDeletion = async () => ({ status: "blocked" });
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("failed");
+    expect(store.settlements[0]?.error?.code).toBe("box_delete_blocked");
+    expect(store.settlements[0]?.error?.action).toBe("retry");
+  });
+
+  it("completes a waiting delete when the provider operation is already gone", async () => {
+    const { claim, store } = deleteClaimAtWaitingDeleted();
+    const ports = fakePorts(store);
+    ports.box.pollPermanentDeletion = async () => {
+      throw Object.assign(new Error("gone"), { status: 404 });
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(store.authorization.workCheckpoint).toBe("provider_deleted");
+  });
+
+  it("records per-stage timings for a start", async () => {
+    const claim = operationClaim({ checkpoint: "waiting_ready", checkpointSequence: 2n });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "provisioning",
+        piState: "absent",
+        piInvocationId: null,
+      }),
+    });
+    const ports = fakePorts(store);
+    const records: Array<Record<string, unknown>> = [];
+    const engine = new RuntimeEngine(engineDependencies({
+      store,
+      ports,
+      clock: new TestClock(),
+      log: {
+        error: () => {},
+        warn: () => {},
+        info: (record) => records.push(record),
+      },
+    }));
+
+    const result = await engine.execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    const stages = records.filter((record) => record.event === "runtime.operation.stage");
+    expect(stages.map((record) => record.stage)).toEqual([
+      "waiting_ready",
+      "installing_layout",
+      "starting_pi",
+    ]);
+    for (const record of stages) {
+      expect(record).toMatchObject({
+        companionId: claim.companionId,
+        operationKind: "start",
+        boxId: BOX_ID,
+      });
+      expect(typeof record.durationMs).toBe("number");
+    }
+  });
+
+  it("runs a start without a process log", async () => {
+    const claim = operationClaim({ checkpoint: "waiting_ready", checkpointSequence: 2n });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "provisioning",
+        piState: "absent",
+        piInvocationId: null,
+      }),
+    });
+    const ports = fakePorts(store);
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+  });
 });

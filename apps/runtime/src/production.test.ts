@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type {
+  AsciiBoxMaintenanceClientOptions,
   BoxRuntimeLifecycleClient,
   CompanionBoxRuntimeV2,
 } from "@companion/box-runtime";
@@ -87,6 +88,7 @@ describe("production runtime composition", () => {
     expect(kernelInput?.log).toEqual(expect.objectContaining({
       error: expect.any(Function),
       warn: expect.any(Function),
+      info: expect.any(Function),
     }));
     expect(createLifecycle).not.toHaveBeenCalled();
     expect(createBoxRuntime).not.toHaveBeenCalled();
@@ -124,6 +126,12 @@ describe("production runtime composition", () => {
       }),
     } as unknown as CompanionBoxRuntimeV2));
     const storageClose = vi.fn();
+    let lifecycleOptions: AsciiBoxMaintenanceClientOptions | undefined;
+    const createOrRecoverGenerationBox = vi.fn(async () => ({
+      outcome: "created" as const,
+      boxId: "bx_23456789",
+      name: "Companion 11111111-1111-4111-8111-111111111111 g1",
+    }));
     const factories = {
       createDatabase: (config) => {
         configuredMasterKey = config.masterKey ?? undefined;
@@ -131,8 +139,9 @@ describe("production runtime composition", () => {
         return db;
       },
       createStore: () => store,
-      createLifecycle: (env) => {
+      createLifecycle: (env, options) => {
         boxEnv = env;
+        lifecycleOptions = options;
         return {
           getNamedSnapshot: async () => ({
             name: "companion-l14-aaaaaaaaaaaa",
@@ -140,6 +149,7 @@ describe("production runtime composition", () => {
             sourceBoxId: "bx_23456789",
             createdAt: "2026-08-19T00:00:00.000Z",
           }),
+          createOrRecoverGenerationBox,
         } as unknown as BoxRuntimeLifecycleClient;
       },
       createBoxRuntime,
@@ -187,6 +197,7 @@ describe("production runtime composition", () => {
       log: expect.objectContaining({
         error: expect.any(Function),
         warn: expect.any(Function),
+        info: expect.any(Function),
       }),
     });
     // The Box adapter is the only process that lays out a disk, so the one pin an environment can
@@ -201,6 +212,21 @@ describe("production runtime composition", () => {
     await control.getStatus({ boxId: "bx_23456789", signal: new AbortController().signal });
     await control.getStatus({ boxId: "bx_23456789", signal: new AbortController().signal });
     expect(createBoxRuntime).toHaveBeenCalledTimes(3);
+
+    // A create right after boot waits on the baker's first resolution and clones the ready image.
+    const created = await control.createGenerationBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      generation: 1n,
+      ttlSeconds: 21_600,
+      signal: new AbortController().signal,
+    });
+    expect(created).toMatchObject({ outcome: "created", boxId: "bx_23456789" });
+    expect(createOrRecoverGenerationBox).toHaveBeenCalledWith(expect.objectContaining({
+      from: "companion-l14-aaaaaaaaaaaa",
+    }));
+    // Provider-call timings flow into the process log as structured info records.
+    expect(lifecycleOptions?.onTiming).toEqual(expect.any(Function));
+    lifecycleOptions?.onTiming?.({ operation: "list_boxes", durationMs: 3, ok: true });
 
     await service.application.stop();
     expect(storageClose).toHaveBeenCalledOnce();

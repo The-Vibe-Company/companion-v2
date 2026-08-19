@@ -76,6 +76,13 @@ cleanup ownership until the provider side effect is confirmed.
 - current Pi invocation id and last successful observation;
 - lifecycle-safe deletion/retirement metadata.
 
+Health work may refresh these typed states, but it can never attach a Box id, a disk layout, or
+applied revisions. Its one identity exception is the Pi invocation id: a warm-refresh recycle or a
+start that crashed between daemon start and observation leaves a live idle invocation the durable
+projection does not know, so health may record that id only with idle proof — the same rule a
+restart operation follows. A busy Pi whose live id does not match keeps its identity unattached
+rather than failing the observation.
+
 This projection is not a lease and cannot authorize work. List, thread, ordinary status, and Viewer
 reads consume it without contacting Box.
 
@@ -206,7 +213,11 @@ deleted before retirement.
 
 Known-idempotent lifecycle calls retry network failures, `429`, and `5xx` responses up to five times
 with jittered backoff of 1, 2, 5, 10, and 30 seconds. A provider operation id is retained whenever
-the API returns one.
+the API returns one. A provider-blocked permanent delete is transient (usually an in-flight snapshot
+save on the same Box): runtime keeps polling the retained deletion operation until the bounded
+operation deadline, and only a still-blocked deadline fails the operation — as retryable
+`box_delete_blocked`, so an Owner/Editor retry finishes a delete the provider typically completed
+moments later.
 
 Stop snapshots/archives the Box. A later send queues wake after stop reaches a safe archive
 checkpoint; it does not race Pi start against an in-flight archive. Restart Pi keeps the Box and

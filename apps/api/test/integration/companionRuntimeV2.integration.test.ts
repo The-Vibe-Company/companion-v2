@@ -953,6 +953,10 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
 
     await applySplitRuntimeGrants(runtimeMigrationSql, true);
     await applyMigrationFile(runtimeMigrationSql, "0094_companion_runtime_cutover.sql");
+    // This suite pins the post-cutover contract. 0108 redefines
+    // companion_runtime_observe_instance with CREATE OR REPLACE, so grants survive and the
+    // final split-grants pass below mirrors the production grants hook running after it.
+    await applyMigrationFile(runtimeMigrationSql, "0108_companion_runtime_health_identity.sql");
     await runtimeMigrationSql.end({ timeout: 1 });
     runtimeSql = postgres(runtimeUrl.toString(), { max: 10 });
     await runtimeSql.unsafe(`
@@ -7397,6 +7401,102 @@ describe("Companion Runtime v2 PostgreSQL contract", () => {
       operationCount: 0,
       auditCount: 1,
     });
+  });
+
+  it("attaches a restarted Pi invocation from health only with idle proof", async () => {
+    if (!runtimeSql) throw new Error("runtime database is not initialized");
+    await resetWork();
+    const gate = await gateStatus();
+    const healthBoxId = "bx_3456789a";
+    await runtimeSql`
+      update companion_runtime_instances
+      set box_id = ${healthBoxId}, box_state = 'ready', pi_state = 'idle',
+          pi_invocation_id = 'pi-health-recycled-old',
+          health_due_at = now() - interval '1 second'
+      where companion_id = ${ids.companionB}::uuid
+    `;
+    const [claim] = await claimWork("observe-health-identity", gate.gateEpoch);
+    expect(claim).toMatchObject({
+      companionId: ids.companionB,
+      workKind: "health",
+      checkpoint: "observing",
+    });
+    await expect(observeInstance(claim!, "observe-health-identity", {
+      piState: "running",
+      piInvocationId: "pi-health-recycled-new",
+    })).rejects.toThrow(/health observation cannot mutate runtime identity/);
+    await expect(observeInstance(claim!, "observe-health-identity", {
+      boxId: "bx_456789ab",
+      piState: "idle",
+    })).rejects.toThrow(/Box id is immutable|health observation cannot mutate runtime identity/);
+    await expect(observeInstance(claim!, "observe-health-identity", {
+      diskLayoutVersion: 14,
+      piState: "idle",
+    })).rejects.toThrow(/health observation cannot mutate runtime identity/);
+    expect(await observeInstance(claim!, "observe-health-identity", {
+      boxState: "ready",
+      piState: "idle",
+      piInvocationId: "pi-health-recycled-new",
+    })).toBe(2);
+    const [projection] = await runtimeSql<Array<{
+      piState: string;
+      piInvocationId: string | null;
+      healthCheckpoint: string;
+    }>>`
+      select pi_state::text as "piState", pi_invocation_id as "piInvocationId",
+             health_checkpoint as "healthCheckpoint"
+      from companion_runtime_instances where companion_id = ${ids.companionB}::uuid
+    `;
+    expect(projection).toMatchObject({
+      piState: "idle",
+      piInvocationId: "pi-health-recycled-new",
+      healthCheckpoint: "observed",
+    });
+    expect(await settle(claim!, "observe-health-identity", "succeeded")).toBe(true);
+  });
+
+  it("repairs a NULL durable Pi identity after a crashed start only with idle proof", async () => {
+    if (!runtimeSql) throw new Error("runtime database is not initialized");
+    await resetWork();
+    const gate = await gateStatus();
+    const healthBoxId = "bx_3456789a";
+    await runtimeSql`
+      update companion_runtime_instances
+      set box_id = ${healthBoxId}, box_state = 'ready', pi_state = 'starting',
+          pi_invocation_id = null,
+          health_due_at = now() - interval '1 second'
+      where companion_id = ${ids.companionB}::uuid
+    `;
+    const [claim] = await claimWork("observe-health-orphan", gate.gateEpoch);
+    expect(claim).toMatchObject({
+      companionId: ids.companionB,
+      workKind: "health",
+      checkpoint: "observing",
+    });
+    await expect(observeInstance(claim!, "observe-health-orphan", {
+      piState: "running",
+      piInvocationId: "pi-health-orphaned-live",
+    })).rejects.toThrow(/health observation cannot mutate runtime identity/);
+    expect(await observeInstance(claim!, "observe-health-orphan", {
+      boxState: "ready",
+      piState: "idle",
+      piInvocationId: "pi-health-orphaned-live",
+    })).toBe(2);
+    const [projection] = await runtimeSql<Array<{
+      piState: string;
+      piInvocationId: string | null;
+      healthCheckpoint: string;
+    }>>`
+      select pi_state::text as "piState", pi_invocation_id as "piInvocationId",
+             health_checkpoint as "healthCheckpoint"
+      from companion_runtime_instances where companion_id = ${ids.companionB}::uuid
+    `;
+    expect(projection).toMatchObject({
+      piState: "idle",
+      piInvocationId: "pi-health-orphaned-live",
+      healthCheckpoint: "observed",
+    });
+    expect(await settle(claim!, "observe-health-orphan", "succeeded")).toBe(true);
   });
 
   it("keeps decision delivery durable, blocks an interrupted queue, and globally fences on disable", async () => {

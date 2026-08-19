@@ -248,4 +248,178 @@ describe("companion runtime image baker", () => {
     expect(saveNamedSnapshot).toHaveBeenCalledOnce();
     expect(onAttemptError).toHaveBeenCalledOnce();
   });
+
+  it("settles the initial resolution on the ready fast path", async () => {
+    const events: string[] = [];
+    const baker = createCompanionRuntimeImageBaker({
+      identity,
+      lifecycle: lifecycle({
+        getNamedSnapshot: vi.fn(async () => snapshot(identity.imageName)),
+      }),
+      runtime: {
+        existingBoxStatus: async () => ({ boxId: "bx_23456789", state: "ready" }),
+        refreshPiLayout: async () => ({ boxId: "bx_23456789", applied: "base" as const }),
+        refreshTtl: async () => undefined,
+      },
+      onEvent: (event) => events.push(event.kind),
+    });
+
+    await baker.ensure(new AbortController().signal);
+
+    await expect(baker.initialResolution()).resolves.toEqual({
+      outcome: "ready",
+      name: identity.imageName,
+    });
+    expect(events).toEqual(["resolved"]);
+  });
+
+  it("settles the initial resolution on the parent before any bake work", async () => {
+    const parent = "companion-l14-bbbbbbbbbbbb";
+    const client = lifecycle({
+      listNamedSnapshots: vi.fn(async () => [snapshot(parent)]),
+      getNamedSnapshot: vi.fn()
+        .mockResolvedValueOnce(null)
+        .mockResolvedValue(snapshot(identity.imageName)),
+    });
+    let baker!: ReturnType<typeof createCompanionRuntimeImageBaker>;
+    let resolution: unknown = null;
+    let resolutionAtCreate: unknown = null;
+    baker = createCompanionRuntimeImageBaker({
+      identity,
+      lifecycle: {
+        ...client,
+        createEphemeralBox: vi.fn(async () => {
+          resolutionAtCreate = resolution;
+          return { boxId: "bx_23456789" };
+        }),
+      },
+      runtime: {
+        existingBoxStatus: async () => ({ boxId: "bx_23456789", state: "ready" }),
+        refreshPiLayout: async () => ({ boxId: "bx_23456789", applied: "base" as const }),
+        refreshTtl: async () => undefined,
+      },
+      sleep: async () => undefined,
+    });
+    void baker.initialResolution().then((value) => {
+      resolution = value;
+    });
+
+    await baker.ensure(new AbortController().signal);
+
+    expect(resolution).toEqual({ outcome: "parent", name: parent });
+    expect(resolutionAtCreate).toEqual({ outcome: "parent", name: parent });
+  });
+
+  it("settles the initial resolution to none without waiting when no snapshot exists", async () => {
+    const baker = createCompanionRuntimeImageBaker({
+      identity,
+      lifecycle: lifecycle({
+        getNamedSnapshot: vi.fn()
+          .mockResolvedValueOnce(null)
+          .mockResolvedValue(snapshot(identity.imageName)),
+      }),
+      runtime: {
+        existingBoxStatus: async () => ({ boxId: "bx_23456789", state: "ready" }),
+        refreshPiLayout: async () => ({ boxId: "bx_23456789", applied: "base" as const }),
+        refreshTtl: async () => undefined,
+      },
+      sleep: async () => undefined,
+    });
+
+    await baker.ensure(new AbortController().signal);
+
+    await expect(baker.initialResolution()).resolves.toEqual({ outcome: "none" });
+    expect(baker.cloneName()).toBe(identity.imageName);
+  });
+
+  it("keeps a failed first resolution sticky when a later attempt succeeds", async () => {
+    const getNamedSnapshot = vi.fn()
+      .mockRejectedValueOnce(new BoxRuntimeAdapterError({
+        stableCode: "box_network_error",
+        message: "The Box provider could not be reached",
+        status: 503,
+        retryable: true,
+        outcomeUnknown: false,
+      }))
+      .mockResolvedValue(snapshot(identity.imageName));
+    const baker = createCompanionRuntimeImageBaker({
+      identity,
+      lifecycle: lifecycle({ getNamedSnapshot }),
+      runtime: {
+        existingBoxStatus: async () => ({ boxId: "bx_23456789", state: "ready" }),
+        refreshPiLayout: async () => ({ boxId: "bx_23456789", applied: "base" as const }),
+        refreshTtl: async () => undefined,
+      },
+      onAttemptError: () => undefined,
+      sleep: async () => undefined,
+    });
+
+    await baker.ensure(new AbortController().signal);
+
+    await expect(baker.initialResolution()).resolves.toEqual({ outcome: "none" });
+    expect(baker.readyName()).toBe(identity.imageName);
+  });
+
+  it("reports baker Box cleanup failure without failing the bake", async () => {
+    const cleanupFailure = new Error("delete blocked at deadline");
+    const onCleanupError = vi.fn();
+    const baker = createCompanionRuntimeImageBaker({
+      identity,
+      lifecycle: lifecycle({
+        getNamedSnapshot: vi.fn()
+          .mockResolvedValueOnce(null)
+          .mockResolvedValue(snapshot(identity.imageName)),
+        deletePermanentlyAndWait: vi.fn(async () => {
+          throw cleanupFailure;
+        }),
+      }),
+      runtime: {
+        existingBoxStatus: async () => ({ boxId: "bx_23456789", state: "ready" }),
+        refreshPiLayout: async () => ({ boxId: "bx_23456789", applied: "base" as const }),
+        refreshTtl: async () => undefined,
+      },
+      onCleanupError,
+      sleep: async () => undefined,
+    });
+
+    await expect(baker.ensure(new AbortController().signal))
+      .resolves.toEqual({ name: identity.imageName, ready: true, baked: true });
+    expect(onCleanupError).toHaveBeenCalledWith(cleanupFailure, "baker_box_delete");
+  });
+
+  it("reports stale snapshot prune failure and still emits prune events", async () => {
+    const parent = "companion-l14-bbbbbbbbbbbb";
+    const stale = "companion-l14-cccccccccccc";
+    const pruneFailure = new Error("snapshot delete failed");
+    const onCleanupError = vi.fn();
+    const events: string[] = [];
+    const baker = createCompanionRuntimeImageBaker({
+      identity,
+      lifecycle: lifecycle({
+        listNamedSnapshots: vi.fn(async () => [
+          snapshot(parent, "2026-08-18T00:00:00.000Z"),
+          snapshot(stale, "2026-08-17T00:00:00.000Z"),
+        ]),
+        getNamedSnapshot: vi.fn()
+          .mockResolvedValueOnce(null)
+          .mockResolvedValue(snapshot(identity.imageName)),
+        deleteNamedSnapshot: vi.fn(async () => {
+          throw pruneFailure;
+        }),
+      }),
+      runtime: {
+        existingBoxStatus: async () => ({ boxId: "bx_23456789", state: "ready" }),
+        refreshPiLayout: async () => ({ boxId: "bx_23456789", applied: "base" as const }),
+        refreshTtl: async () => undefined,
+      },
+      onCleanupError,
+      onEvent: (event) => events.push(event.kind),
+      sleep: async () => undefined,
+    });
+
+    await expect(baker.ensure(new AbortController().signal))
+      .resolves.toEqual({ name: identity.imageName, ready: true, baked: true });
+    expect(onCleanupError).toHaveBeenCalledWith(pruneFailure, "snapshot_prune");
+    expect(events).toEqual(["resolved", "bake_started", "bake_completed"]);
+  });
 });

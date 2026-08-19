@@ -255,6 +255,7 @@ describe("RuntimeScheduler", () => {
       log: {
         error(record) { records.push(record); },
         warn() {},
+        info() {},
       },
     });
 
