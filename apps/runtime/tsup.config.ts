@@ -17,7 +17,7 @@ export default defineConfig({
   // `import.meta.url` CLI guard used by the one-shot purge command.
   splitting: false,
   noExternal: [/^@companion\//],
-  external: ["@aws-sdk/client-s3", "postgres"],
+  external: ["@aws-sdk/client-s3", "@sentry/node", "postgres"],
   esbuildPlugins: [{
     name: "copy-bundled-companion-skill",
     setup(build) {

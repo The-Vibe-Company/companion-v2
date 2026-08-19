@@ -36,3 +36,13 @@ test("the shared backend image maps the release service to the API migration pac
   assert.match(dockerfile, /turbo prune "@companion\/\$\{package\}" --docker/);
   assert.match(dockerfile, /pnpm --filter "@companion\/\$\{package\}" build/);
 });
+
+test("the web image inlines public PostHog and Sentry values at build time", () => {
+  const dockerfile = readFileSync(join(root, "deploy", "railway", "Dockerfile.web"), "utf8");
+  assert.match(dockerfile, /ARG NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN/);
+  assert.match(dockerfile, /ENV NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN=\$\{NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN\}/);
+  assert.match(dockerfile, /ARG NEXT_PUBLIC_SENTRY_DSN/);
+  assert.match(dockerfile, /ARG NEXT_PUBLIC_SENTRY_ENVIRONMENT/);
+  assert.match(dockerfile, /ENV NEXT_PUBLIC_SENTRY_DSN=\$\{NEXT_PUBLIC_SENTRY_DSN\}/);
+  assert.match(dockerfile, /ENV NEXT_PUBLIC_SENTRY_ENVIRONMENT=\$\{NEXT_PUBLIC_SENTRY_ENVIRONMENT\}/);
+});

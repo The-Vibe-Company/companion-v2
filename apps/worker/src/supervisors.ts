@@ -1,3 +1,4 @@
+import { Sentry } from "./sentry";
 import { startBillingSupervisor, type Supervisor } from "./billingSupervisor";
 import { startGitHubSupervisor } from "./githubSupervisor";
 import { startRoutineSupervisor } from "./routineSupervisor";
@@ -8,8 +9,9 @@ type SupervisorStart = () => Promise<Supervisor | null>;
 async function startSafely(name: string, start: SupervisorStart): Promise<Supervisor | null> {
   try {
     return await start();
-  } catch {
+  } catch (error) {
     // Supervisors are isolated: one optional subsystem failing configuration must not stop another.
+    Sentry.captureException(error);
     console.error(`${name} supervisor failed to start`);
     return null;
   }

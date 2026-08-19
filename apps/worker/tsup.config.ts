@@ -7,7 +7,7 @@ export default defineConfig({
   },
   format: ["esm"],
   noExternal: [/^@companion\//],
-  external: ["drizzle-orm", "postgres", "stripe"],
+  external: ["@sentry/node", "drizzle-orm", "postgres", "stripe"],
   sourcemap: true,
   clean: true,
   target: "node20",

@@ -1,8 +1,6 @@
+import "./sentry";
+import { captureServerError } from "./sentry";
 import { serve } from "@hono/node-server";
-import { initSentry, Sentry } from "./sentry";
-
-initSentry();
-
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -291,8 +289,8 @@ import {
 const app = new Hono<{ Variables: ApiVariables }>();
 
 app.onError((err, c) => {
-  Sentry.captureException(err);
-  return jsonError(c, err, 500);
+  captureServerError(err);
+  return c.json({ ok: false, error: "Internal Server Error" }, 500);
 });
 
 export { app };
@@ -866,6 +864,9 @@ app.all("/trpc/*", async (c) => {
     req: c.req.raw,
     router: appRouter,
     createContext: async () => ({ actor, orgId }),
+    onError({ error }) {
+      if (error.code === "INTERNAL_SERVER_ERROR") captureServerError(error);
+    },
   });
 });
 
