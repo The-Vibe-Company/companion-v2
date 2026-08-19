@@ -749,6 +749,7 @@ export function registerCompanionRoutes(
       const target = new URL("/companions", web);
       target.searchParams.set("view", "plugins");
       target.searchParams.set("oauth", "connected");
+      target.searchParams.set("provider", pending.flow.provider);
       setCookie(c, cookieName, "", {
         path: "/v1/companion-plugins/oauth/callback",
         maxAge: 0,

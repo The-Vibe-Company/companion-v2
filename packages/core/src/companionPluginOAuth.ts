@@ -69,6 +69,12 @@ export interface CompanionPluginOAuthTokens {
   tokenType: "Bearer";
 }
 
+export interface CompanionPluginGithubIdentity {
+  login: string;
+  name: string;
+  email: string;
+}
+
 export interface CompanionPluginStoredOAuthCredential extends CompanionPluginOAuthTokens {
   kind: "oauth";
   version: 1;
@@ -76,6 +82,8 @@ export interface CompanionPluginStoredOAuthCredential extends CompanionPluginOAu
   tokenEndpoint: string;
   resource: string;
   client: CompanionPluginOAuthClient;
+  /** Present for GitHub so the Box can commit as this account without another OAuth. */
+  githubIdentity?: CompanionPluginGithubIdentity;
 }
 
 export class CompanionPluginOAuthError extends Error {
@@ -375,17 +383,26 @@ export async function completeCompanionPluginOAuth(input: {
     input.fetchImpl ?? fetch,
     failure,
   );
+  const tokens = parseTokens(raw);
+  const github = input.flow.serverName === "io.github.github/github-mcp-server";
+  const githubIdentity = github
+    ? await githubUserIdentity({
+      accessToken: tokens.accessToken,
+      fetchImpl: input.fetchImpl,
+    }) ?? undefined
+    : undefined;
   return {
     kind: "oauth",
     version: 1,
-    ...parseTokens(raw),
+    ...tokens,
     serverName: input.flow.serverName,
     tokenEndpoint: input.flow.tokenEndpoint,
     resource: input.flow.resource,
     // GitHub's client secret belongs to the deployment, not an account. Keep it in env only.
-    client: input.flow.serverName === "io.github.github/github-mcp-server"
+    client: github
       ? { ...input.flow.client, clientSecret: null }
       : input.flow.client,
+    ...(githubIdentity ? { githubIdentity } : {}),
   };
 }
 
@@ -426,8 +443,86 @@ export async function refreshCompanionPluginOAuth(input: {
     failure,
     input.signal,
   );
+  const tokens = parseTokens(raw, input.credential.refreshToken);
+  const githubIdentity = github
+    ? await githubUserIdentity({
+      accessToken: tokens.accessToken,
+      fetchImpl: input.fetchImpl,
+      signal: input.signal,
+    }) ?? input.credential.githubIdentity
+    : input.credential.githubIdentity;
   return {
     ...input.credential,
-    ...parseTokens(raw, input.credential.refreshToken),
+    ...tokens,
+    ...(githubIdentity ? { githubIdentity } : {}),
   };
+}
+
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
+
+export function parseCompanionPluginGithubIdentity(
+  value: unknown,
+): CompanionPluginGithubIdentity | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value) || typeof value.login !== "string" || !GITHUB_LOGIN.test(value.login)) {
+    throw new Error("invalid GitHub identity");
+  }
+  const name = typeof value.name === "string" ? gitIdentityLine(value.name, 200) : null;
+  const email = typeof value.email === "string" ? gitIdentityLine(value.email, 200) : null;
+  if (!email || !email.includes("@") || email.includes(" ")) {
+    throw new Error("invalid GitHub identity");
+  }
+  return {
+    login: value.login,
+    name: name ?? value.login,
+    email,
+  };
+}
+
+function gitIdentityLine(value: string, max: number): string | null {
+  const trimmed = value.replace(/[\r\n\0"]/g, " ").replace(/\s+/g, " ").trim();
+  if (!trimmed || trimmed.length > max) return null;
+  return trimmed;
+}
+
+/**
+ * Best-effort GitHub commit identity. A missing or malformed profile must not fail the OAuth grant:
+ * clone/push still work from the token, and `git commit` can use noreply once login is known.
+ */
+export async function githubUserIdentity(input: {
+  accessToken: string;
+  fetchImpl?: typeof fetch;
+  signal?: AbortSignal;
+}): Promise<CompanionPluginGithubIdentity | null> {
+  try {
+    const fetchImpl = input.fetchImpl ?? fetch;
+    const response = await fetchImpl("https://api.github.com/user", {
+      method: "GET",
+      redirect: "error",
+      signal: input.signal
+        ? AbortSignal.any([input.signal, AbortSignal.timeout(OAUTH_TIMEOUT_MS)])
+        : AbortSignal.timeout(OAUTH_TIMEOUT_MS),
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${input.accessToken}`,
+        "user-agent": "companion",
+        "x-github-api-version": "2022-11-28",
+      },
+    });
+    if (!response.ok) return null;
+    const raw = await response.json().catch(() => null);
+    if (!isRecord(raw) || typeof raw.login !== "string" || !GITHUB_LOGIN.test(raw.login)) {
+      return null;
+    }
+    const login = raw.login;
+    const name = typeof raw.name === "string" ? gitIdentityLine(raw.name, 200) : null;
+    return {
+      login,
+      name: name ?? login,
+      email: `${login}@users.noreply.github.com`,
+    };
+  } catch (error) {
+    if (input.signal?.aborted) throw input.signal.reason ?? error;
+    return null;
+  }
 }

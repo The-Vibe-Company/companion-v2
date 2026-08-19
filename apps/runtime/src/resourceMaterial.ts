@@ -4,6 +4,8 @@ import {
   COMPANION_MCP_OAUTH_REFRESH_SKEW_MS,
   decryptCompanionMcpRuntimeCredential,
   decryptCompanionProviderRuntimeCredential,
+  githubGitRuntimeMaterial,
+  type CompanionPluginGithubIdentity,
   type CompanionPluginStoredOAuthCredential,
   type CompanionRuntimeMcpCredential,
   type CompanionRuntimeProviderCredential,
@@ -23,6 +25,7 @@ export interface ResolvedRuntimeResources {
   skills: CompanionRuntimeSkill[];
   mcpAccounts: CompanionMcpAccount[];
   mcpCredentials: CompanionMcpCredential[];
+  extraEnv: Record<string, string>;
 }
 
 export interface RuntimeOauthResolutionInput {
@@ -56,6 +59,24 @@ function collectCredentialStrings(
   }
 }
 
+function collectMcpSensitiveValues(
+  decrypted: CompanionRuntimeMcpCredential,
+  output: Set<string>,
+): void {
+  if (decrypted.kind === "environment") {
+    for (const credential of decrypted.credentials) {
+      if (credential.value.length > 0) output.add(credential.value);
+    }
+    return;
+  }
+  const oauth = decrypted.credential;
+  if (oauth.accessToken.length > 0) output.add(oauth.accessToken);
+  if (oauth.refreshToken && oauth.refreshToken.length > 0) output.add(oauth.refreshToken);
+  if (oauth.client.clientSecret && oauth.client.clientSecret.length > 0) {
+    output.add(oauth.client.clientSecret);
+  }
+}
+
 /** Decrypt only the credential fields needed by the in-memory transcript redactor. */
 export function collectRuntimeCredentialSensitiveValues(input: {
   orgId: string;
@@ -79,7 +100,7 @@ export function collectRuntimeCredentialSensitiveValues(input: {
       mcpMaterial: input.material.mcpMaterial,
       masterKey: input.masterKey,
     })) {
-      collectCredentialStrings(row.decrypted, values);
+      collectMcpSensitiveValues(row.decrypted, values);
     }
     return [...values];
   } catch (error) {
@@ -153,6 +174,11 @@ export async function resolveRuntimeResources(input: {
   masterKey: Buffer;
   loadSkillArchive(storagePath: string, signal: AbortSignal): Promise<Buffer>;
   resolveOauth?(input: RuntimeOauthResolutionInput): Promise<CompanionPluginStoredOAuthCredential>;
+  resolveGithubIdentity?(input: {
+    accountId: string;
+    credentialGeneration: string;
+    accessToken: string;
+  }): Promise<CompanionPluginGithubIdentity | null>;
   signal: AbortSignal;
   now?: () => number;
 }): Promise<ResolvedRuntimeResources> {
@@ -197,14 +223,20 @@ export async function resolveRuntimeResources(input: {
       });
     }
 
-    const mcpAccounts: CompanionMcpAccount[] = [];
-    const mcpCredentials: CompanionMcpCredential[] = [];
-    const accountIds = new Set<string>();
-    for (const row of decryptRuntimeMcpRows({
+    const mcpRows = decryptRuntimeMcpRows({
       orgId: input.orgId,
       mcpMaterial: input.material.mcpMaterial,
       masterKey: input.masterKey,
-    })) {
+    });
+    const uniqueGithubGit = mcpRows.filter((row) =>
+      row.decrypted.kind === "oauth"
+      && row.decrypted.credential.serverName === "io.github.github/github-mcp-server"
+    ).length === 1;
+    const mcpAccounts: CompanionMcpAccount[] = [];
+    const mcpCredentials: CompanionMcpCredential[] = [];
+    const extraEnv: Record<string, string> = {};
+    const accountIds = new Set<string>();
+    for (const row of mcpRows) {
       if (accountIds.has(row.accountId)) throw new RuntimeMaterialError("runtime_material_invalid");
       accountIds.add(row.accountId);
       const { account, decrypted } = row;
@@ -233,9 +265,26 @@ export async function resolveRuntimeResources(input: {
         env_key: envKey,
         value: `Bearer ${oauth.accessToken}`,
       }));
+      if (uniqueGithubGit && oauth.serverName === "io.github.github/github-mcp-server") {
+        let identity = oauth.githubIdentity ?? null;
+        if (!identity && input.resolveGithubIdentity) {
+          identity = await input.resolveGithubIdentity({
+            accountId: row.accountId,
+            credentialGeneration: row.credentialGeneration,
+            accessToken: oauth.accessToken,
+          });
+        }
+        const git = githubGitRuntimeMaterial({
+          accessToken: oauth.accessToken,
+          identity,
+          occupiedEnvKeys: mcpCredentials.map((credential) => credential.env_key),
+        });
+        mcpCredentials.push(...git.credentials);
+        Object.assign(extraEnv, git.env);
+      }
     }
     input.signal.throwIfAborted();
-    return { providerAuth, skills, mcpAccounts, mcpCredentials };
+    return { providerAuth, skills, mcpAccounts, mcpCredentials, extraEnv };
   } catch (error) {
     if (input.signal.aborted) throw input.signal.reason;
     if (error instanceof RuntimeMaterialError) throw error;

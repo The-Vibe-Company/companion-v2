@@ -106,6 +106,84 @@ describe("Runtime v2 credential material", () => {
     }, masterKey)).toThrow(CompanionRuntimeCredentialError);
   });
 
+  it("round-trips GitHub OAuth identity used for git commits", () => {
+    const credential = {
+      kind: "oauth" as const,
+      version: 1 as const,
+      serverName: "io.github.github/github-mcp-server" as const,
+      accessToken: "gho_secret",
+      refreshToken: "refresh-secret",
+      accessExpiresAt: "2030-01-01T00:00:00.000Z",
+      scope: "repo read:user user:email",
+      tokenType: "Bearer" as const,
+      tokenEndpoint: "https://github.com/login/oauth/access_token",
+      resource: "https://api.githubcopilot.com/mcp/",
+      client: {
+        clientId: "github-client",
+        clientSecret: null,
+        tokenEndpointAuthMethod: "client_secret_post" as const,
+      },
+      githubIdentity: {
+        login: "stan",
+        name: "Stan Girard",
+        email: "stan@users.noreply.github.com",
+      },
+    };
+    const envelope = encryptCompanionMcpRuntimeCredential({
+      orgId,
+      accountId,
+      credentialGeneration: mcpGeneration,
+      credential,
+    }, masterKey);
+    expect(decryptCompanionMcpRuntimeCredential({
+      orgId,
+      accountId,
+      credentialGeneration: mcpGeneration,
+      envelope,
+    }, masterKey)).toEqual({ kind: "oauth", credential });
+  });
+
+  it("keeps a GitHub OAuth grant when stored commit identity is malformed", () => {
+    const envelope = encryptOpaqueValue({
+      orgId,
+      purpose: "companion-mcp-credential",
+      subjectId: `${accountId}:${mcpGeneration}`,
+      value: JSON.stringify({
+        kind: "oauth",
+        version: 1,
+        serverName: "io.github.github/github-mcp-server",
+        accessToken: "gho_secret",
+        refreshToken: "refresh-secret",
+        accessExpiresAt: "2030-01-01T00:00:00.000Z",
+        scope: "repo",
+        tokenType: "Bearer",
+        tokenEndpoint: "https://github.com/login/oauth/access_token",
+        resource: "https://api.githubcopilot.com/mcp/",
+        client: {
+          clientId: "github-client",
+          clientSecret: null,
+          tokenEndpointAuthMethod: "client_secret_post",
+        },
+        githubIdentity: { login: "not a login", name: "x", email: "nope" },
+      }),
+    }, masterKey);
+
+    const decrypted = decryptCompanionMcpRuntimeCredential({
+      orgId,
+      accountId,
+      credentialGeneration: mcpGeneration,
+      envelope,
+    }, masterKey);
+    expect(decrypted).toMatchObject({
+      kind: "oauth",
+      credential: { accessToken: "gho_secret" },
+    });
+    expect(decrypted).not.toHaveProperty("credential.githubIdentity");
+    if (decrypted.kind === "oauth") {
+      expect(decrypted.credential.githubIdentity).toBeUndefined();
+    }
+  });
+
   it.each([
     {
       label: "an untrusted token endpoint",

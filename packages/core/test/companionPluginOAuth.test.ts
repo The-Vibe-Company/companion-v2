@@ -164,7 +164,10 @@ describe("Companion plugin OAuth broker", () => {
     });
     expect(new URL(started.authorizationUrl).searchParams.has("resource")).toBe(false);
 
-    const exchangeFetch = vi.fn(async (_url, init) => {
+    const exchangeFetch = vi.fn(async (url, init) => {
+      if (String(url) === "https://api.github.com/user") {
+        return jsonResponse({ login: "stan", name: "Stan Girard", email: null });
+      }
       const body = init?.body as URLSearchParams;
       expect(body.has("resource")).toBe(false);
       expect(body.get("client_secret")).toBe("github-client-secret");
@@ -185,9 +188,17 @@ describe("Companion plugin OAuth broker", () => {
       clientSecret: null,
       tokenEndpointAuthMethod: "client_secret_post",
     });
+    expect(credential.githubIdentity).toEqual({
+      login: "stan",
+      name: "Stan Girard",
+      email: "stan@users.noreply.github.com",
+    });
     expect(JSON.stringify(credential)).not.toContain("github-client-secret");
 
-    const refreshFetch = vi.fn(async (_url, init) => {
+    const refreshFetch = vi.fn(async (url, init) => {
+      if (String(url) === "https://api.github.com/user") {
+        return jsonResponse({ login: "stan", name: "Stan Girard", email: null });
+      }
       const body = init?.body as URLSearchParams;
       expect(body.has("resource")).toBe(false);
       expect(body.get("client_secret")).toBe("github-client-secret");
@@ -200,6 +211,48 @@ describe("Companion plugin OAuth broker", () => {
         COMPANION_MCP_GITHUB_CLIENT_SECRET: "github-client-secret",
       },
       fetchImpl: refreshFetch,
-    })).resolves.toMatchObject({ accessToken: "github-access-two" });
+    })).resolves.toMatchObject({
+      accessToken: "github-access-two",
+      githubIdentity: {
+        login: "stan",
+        name: "Stan Girard",
+        email: "stan@users.noreply.github.com",
+      },
+    });
+  });
+
+  it("keeps a GitHub grant when the profile lookup fails", async () => {
+    const fetchImpl = vi.fn(async (url) => {
+      if (String(url).includes("oauth-protected-resource")) {
+        return jsonResponse({
+          resource: "https://api.githubcopilot.com/mcp/",
+          authorization_servers: ["https://github.com/login/oauth"],
+        });
+      }
+      if (String(url) === "https://api.github.com/user") return jsonResponse({ message: "nope" }, 401);
+      return jsonResponse({
+        access_token: "github-access",
+        refresh_token: "github-refresh",
+        expires_in: 60,
+      });
+    }) as unknown as typeof fetch;
+    const started = await beginCompanionPluginOAuth({
+      serverName: "io.github.github/github-mcp-server",
+      redirectUri: "https://companion.example/callback",
+      state: "state",
+      env: {
+        COMPANION_MCP_GITHUB_CLIENT_ID: "github-client",
+        COMPANION_MCP_GITHUB_CLIENT_SECRET: "github-client-secret",
+      },
+      fetchImpl,
+    });
+    const credential = await completeCompanionPluginOAuth({
+      flow: started.flow,
+      code: "github-code",
+      redirectUri: "https://companion.example/callback",
+      fetchImpl,
+    });
+    expect(credential.accessToken).toBe("github-access");
+    expect(credential.githubIdentity).toBeUndefined();
   });
 });

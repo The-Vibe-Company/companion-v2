@@ -25,6 +25,9 @@ import {
 } from "./companionPermissionBroker";
 import {
   buildMcpAdapterInjection,
+  companionGitCredentialHelperInstallCommand,
+  COMPANION_GIT_CREDENTIAL_HELPER_PATH,
+  COMPANION_GIT_CREDENTIAL_HELPER_SOURCE,
   runtimeSkillArchivePath,
   type CompanionRuntimeSkill,
 } from "./companionPiInjection";
@@ -2282,6 +2285,22 @@ fi`,
       ".companion/runtime/state/model.txt",
       `${input.modelId}\n`,
     );
+    if (input.mcpCredentials.some((credential) => credential.env_key === "GITHUB_TOKEN")) {
+      await this.#writeFile(
+        input.boxId,
+        COMPANION_GIT_CREDENTIAL_HELPER_PATH,
+        COMPANION_GIT_CREDENTIAL_HELPER_SOURCE.endsWith("\n")
+          ? COMPANION_GIT_CREDENTIAL_HELPER_SOURCE
+          : `${COMPANION_GIT_CREDENTIAL_HELPER_SOURCE}\n`,
+      );
+      const gitHelper = await this.#command(input.boxId, companionGitCredentialHelperInstallCommand());
+      if (!gitHelper.success) {
+        throw new BoxRuntimeProviderError(
+          `Pi resource staging failed${commandFailureDetail(gitHelper)}`,
+          502,
+        );
+      }
+    }
     const staged = new Map<string, string>();
     for (const skill of injectedSkills) {
       const path = runtimeSkillArchivePath(skill);

@@ -143,6 +143,7 @@ describe("CompanionPlugins", () => {
     expect(container.textContent).toContain("Available plugins");
     expect(container.textContent).toContain("Linear");
     expect(container.textContent).toContain("GitHub");
+    expect(container.textContent).toContain("Git clone, commit, and push");
     expect(container.textContent).toContain("Notion");
     expect(container.textContent).not.toContain("Browse the registry");
     expect(container.querySelector('input[type="search"]')).toBeNull();
@@ -177,6 +178,16 @@ describe("CompanionPlugins", () => {
 
     expect(container.querySelector('[role="status"]')?.textContent).toBe("MCP account connected.");
     expect(container.textContent).toContain("work");
+    expect(window.location.search).toBe("?view=plugins");
+  });
+
+  it("names GitHub as MCP plus git after OAuth returns", async () => {
+    window.location.href = "http://localhost/companions?view=plugins&oauth=connected&provider=github";
+
+    const container = await mount();
+
+    expect(container.querySelector('[role="status"]')?.textContent)
+      .toBe("GitHub connected for MCP and git.");
     expect(window.location.search).toBe("?view=plugins");
   });
 
