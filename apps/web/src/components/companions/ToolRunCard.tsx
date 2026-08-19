@@ -67,14 +67,12 @@ export const ToolRunCard: ToolCallMessagePartComponent<CompanionToolArgs> = ({ a
   const status = TOOL_STATUS_LABELS[run.status] ?? "running";
   const named = run.title !== run.name;
   const failed = run.status === "error" || run.status === "timeout";
-  // A delegated agent is the one run whose outcome a reader waits on rather than skims past, and it
-  // is the one that can stay open for minutes. Its headline is the only prose on this card — an
-  // agent and the sentence it was given — so it is set like prose rather than like a command.
+  // A delegated agent is the one run whose progress a reader waits on rather than skims past, and it
+  // is the one that can stay open for minutes, so it says where it has got to in a word instead of
+  // leaving it to a spinner. The thread polls this card in place, so the word keeps up with the run.
+  // Its headline is the only prose on this card — an agent and the sentence it was given — so it is
+  // set like prose rather than like a command.
   const delegated = run.kind === "subagent";
-  // How it ended is said in a word; that it has not ended is left to the spinner, which is a state
-  // rather than a claim. A card is not re-rendered in place by a poll, so a word saying "running"
-  // would go on saying it long after the run finished, and be read as fact.
-  const saysOutcome = delegated && run.status !== "running";
 
   return (
     <Collapsible
@@ -118,7 +116,7 @@ export const ToolRunCard: ToolCallMessagePartComponent<CompanionToolArgs> = ({ a
             <CheckIcon className="size-3.5 text-(--color-ok)" aria-hidden="true" />
           )}
           {failed && <AlertTriangleIcon className="text-destructive size-3.5" aria-hidden="true" />}
-          <span className={saysOutcome ? "text-muted-foreground shrink-0 text-xs" : "sr-only"}>
+          <span className={delegated ? "text-muted-foreground shrink-0 text-xs" : "sr-only"}>
             {status}
           </span>
           {run.detail && (

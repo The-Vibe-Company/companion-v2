@@ -179,6 +179,33 @@ function mount(
   return container;
 }
 
+/**
+ * Poll again with a newer thread, into the same React root.
+ *
+ * This transcript is keyed by Companion, so it stays mounted for the whole conversation: a card that
+ * was running is the same card once it is done, and a test that mounts twice proves two first
+ * renders rather than the update a reader actually sees.
+ *
+ * The second `act` is what makes it a poll rather than a re-render. The message store publishes
+ * through a scheduler that flushes on a macrotask, so awaiting microtasks is not enough — the event
+ * loop has to turn, which between two real polls it does many times over.
+ */
+async function repoll(value: Thread) {
+  await act(async () => {
+    roots.at(-1)!.render(React.createElement(CompanionTranscript, {
+      companion,
+      thread: value,
+      orgId: "org-1",
+      busy: false,
+      onSend: async () => true,
+      onThread: (next: Thread) => threads.push(next),
+    }));
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
 /** One attachment as the thread projection carries it. */
 function attachment(overrides: Record<string, unknown> = {}) {
   return {
@@ -342,11 +369,10 @@ describe("a tool run in the thread", () => {
 
     expect(card().textContent).toContain("subagent");
     expect(card().textContent).toContain("researcher: read the changelog");
-    // A run in flight is a spinner and `aria-busy`, exactly as every other kind is. The word is
-    // reserved for how it ended, because a card is not re-rendered in place by a poll and a word
-    // saying "running" would go on saying it long after the run had finished.
+    // A run that can last minutes says where it is in words, not only as a spinner.
     expect(card().getAttribute("aria-busy")).toBe("true");
-    expect(card().querySelector(".sr-only")?.textContent).toBe("running");
+    expect(card().querySelector(".sr-only")).toBeNull();
+    expect(card().textContent).toContain("running");
     // The line is one line, so the headline it cannot fit stays reachable rather than lost: it is
     // the only copy of the task once progress replaces the detail.
     expect(container.querySelector("[title='researcher: read the changelog']")).not.toBeNull();
@@ -380,6 +406,64 @@ describe("a tool run in the thread", () => {
       expect(settled.textContent).toContain(word);
       expect(settled.getAttribute("aria-busy")).toBeNull();
     }
+  });
+
+  it("settles a run in place, without the thread being reopened", async () => {
+    // The transcript is keyed by Companion and never remounts on a poll, so a card that cannot
+    // follow its own run would spin for the rest of the conversation. Asserted on a shell run
+    // because that path predates delegated runs: this is the thread's behaviour, not one kind's.
+    const shellThread = (status: CompanionToolRun["status"], detail: string) => thread([
+      entry({ role: "tool", content: "ls -la", tool: run({ status, detail }) }),
+    ]);
+    const container = mount(shellThread("running", "reading"));
+    const card = () =>
+      container.querySelector("[data-slot='companion-tool-run']") as HTMLElement;
+
+    expect(card().getAttribute("aria-busy")).toBe("true");
+
+    await repoll(shellThread("ok", "total 8"));
+
+    expect(card().getAttribute("aria-busy")).toBeNull();
+    click(container.querySelector(
+      "[data-slot='companion-tool-run'] [data-slot='collapsible-trigger']",
+    ) as HTMLButtonElement);
+    expect(container.textContent).toContain("total 8");
+  });
+
+  it("follows a delegated run from its task through progress to how it ended", async () => {
+    const delegated = (status: CompanionToolRun["status"], detail: string) => thread([
+      entry({
+        role: "tool",
+        content: "researcher: read the changelog",
+        tool: run({
+          kind: "subagent",
+          name: "subagent",
+          title: "researcher: read the changelog",
+          status,
+          detail,
+        }),
+      }),
+    ]);
+    const container = mount(delegated("running", "read the changelog"));
+    const card = () =>
+      container.querySelector("[data-slot='companion-tool-run']") as HTMLElement;
+
+    // Progress replaces the task in the disclosure while the run is still going.
+    await repoll(delegated("running", "reading CHANGELOG.md"));
+
+    expect(card().getAttribute("aria-busy")).toBe("true");
+    click(container.querySelector(
+      "[data-slot='companion-tool-run'] [data-slot='collapsible-trigger']",
+    ) as HTMLButtonElement);
+    expect(container.textContent).toContain("reading CHANGELOG.md");
+
+    await repoll(delegated("ok", "read 240 lines"));
+
+    // The headline is still the task; only the outcome and the progress moved.
+    expect(card().textContent).toContain("researcher: read the changelog");
+    expect(card().textContent).toContain("done");
+    expect(card().getAttribute("aria-busy")).toBeNull();
+    expect(container.textContent).toContain("read 240 lines");
   });
 
   it("renders a card for a kind this bundle has never heard of", () => {
