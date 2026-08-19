@@ -203,6 +203,14 @@ references where possible; transient connector values use the owner-only runtime
 appear in logs, API responses, audit metadata, or projections. The provider auth file remains on
 Box disk only where Pi must refresh it.
 
+Every Companion may also call the Skills Hub API itself, with the same scopes: skills read/write,
+secret reads, and Skill Database read/write. Access is unconditional, so no surface asks anyone to
+choose it, neither creation nor settings carries a grant field, and Pi cannot propose one. Staging
+mints a short-lived `source_type = 'companion'` token acting as the settings actor, injects it as
+`COMPANION_DELEGATION_TOKEN` through the transient runtime channel, and rotates it on every stage.
+Each request re-checks that the Companion still exists for that member, so deleting the Companion or
+removing the member refuses it immediately; `/v1/companions*` remains cookie-only.
+
 An attempt pins the exact provider and MCP credential revisions before prompt dispatch. A takeover
 that observes a later revision interrupts an already-accepted attempt instead of interpreting
 unprojected events with new credentials. A terminal projection already committed is read through a
