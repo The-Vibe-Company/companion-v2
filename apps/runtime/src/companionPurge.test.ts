@@ -287,7 +287,32 @@ describe("durable provider deletion state machine", () => {
     expect(events).toEqual([`poll:${BOX_ID}:${OPERATION_ID}:completed`]);
   });
 
-  it("persists blocked and refuses to advance", async () => {
+  it("resumes a retained blocked operation and polls through to completion", async () => {
+    const events: string[] = [];
+    const client: BoxMaintenanceClient = {
+      listAllBoxes: vi.fn(),
+      requestPermanentDeletion: vi.fn(),
+      getDeletionOperation: vi.fn()
+        .mockResolvedValueOnce(operation("blocked"))
+        .mockResolvedValueOnce(operation("completed")),
+    };
+    await processLegacyPurgeTarget({
+      target: ledgerTarget({ state: "blocked", operationId: OPERATION_ID }),
+      boxClient: client,
+      journal: fakeJournal(events),
+      log: () => undefined,
+      pause: async () => undefined,
+      nowMs: () => 0,
+      pollTimeoutMs: 1_000,
+    });
+    expect(client.requestPermanentDeletion).not.toHaveBeenCalled();
+    expect(events).toEqual([
+      `poll:${BOX_ID}:${OPERATION_ID}:blocked`,
+      `poll:${BOX_ID}:${OPERATION_ID}:completed`,
+    ]);
+  });
+
+  it("keeps polling a blocked deletion until the provider completes it", async () => {
     const events: string[] = [];
     const client: BoxMaintenanceClient = {
       listAllBoxes: vi.fn(),
@@ -295,18 +320,79 @@ describe("durable provider deletion state machine", () => {
         outcome: "accepted" as const,
         operation: operation("blocked"),
       })),
-      getDeletionOperation: vi.fn(),
+      getDeletionOperation: vi.fn()
+        .mockResolvedValueOnce(operation("blocked"))
+        .mockResolvedValueOnce(operation("completed")),
+    };
+
+    await processLegacyPurgeTarget({
+      target: ledgerTarget(),
+      boxClient: client,
+      journal: fakeJournal(events),
+      log: () => undefined,
+      pause: async () => undefined,
+      nowMs: () => 0,
+      pollTimeoutMs: 1_000,
+    });
+
+    expect(events).toEqual([
+      `requesting:${BOX_ID}`,
+      `accepted:${BOX_ID}:${OPERATION_ID}:blocked`,
+      `poll:${BOX_ID}:${OPERATION_ID}:blocked`,
+      `poll:${BOX_ID}:${OPERATION_ID}:completed`,
+    ]);
+  });
+
+  it("persists blocked and refuses to advance after the deadline", async () => {
+    const events: string[] = [];
+    let now = 0;
+    const client: BoxMaintenanceClient = {
+      listAllBoxes: vi.fn(),
+      requestPermanentDeletion: vi.fn(async () => ({
+        outcome: "accepted" as const,
+        operation: operation("blocked"),
+      })),
+      getDeletionOperation: vi.fn(async () => operation("blocked")),
     };
     await expect(processLegacyPurgeTarget({
       target: ledgerTarget(),
       boxClient: client,
       journal: fakeJournal(events),
-      pause: async () => undefined,
+      pause: async () => {
+        now += 1_000;
+      },
+      nowMs: () => now,
+      pollTimeoutMs: 1_000,
     })).rejects.toThrow(/blocked/);
     expect(events).toEqual([
       `requesting:${BOX_ID}`,
       `accepted:${BOX_ID}:${OPERATION_ID}:blocked`,
+      `poll:${BOX_ID}:${OPERATION_ID}:blocked`,
       `error:${BOX_ID}:Box deletion operation ${OPERATION_ID} is blocked`,
+    ]);
+  });
+
+  it("times out a still-pending deletion without calling it blocked", async () => {
+    const events: string[] = [];
+    let now = 0;
+    const client: BoxMaintenanceClient = {
+      listAllBoxes: vi.fn(),
+      requestPermanentDeletion: vi.fn(),
+      getDeletionOperation: vi.fn(async () => operation("pending")),
+    };
+    await expect(processLegacyPurgeTarget({
+      target: ledgerTarget({ state: "pending", operationId: OPERATION_ID }),
+      boxClient: client,
+      journal: fakeJournal(events),
+      pause: async () => {
+        now += 1_000;
+      },
+      nowMs: () => now,
+      pollTimeoutMs: 1_000,
+    })).rejects.toThrow(/timed out before completion/);
+    expect(events).toEqual([
+      `poll:${BOX_ID}:${OPERATION_ID}:pending`,
+      `error:${BOX_ID}:Box deletion operation ${OPERATION_ID} timed out before completion`,
     ]);
   });
 

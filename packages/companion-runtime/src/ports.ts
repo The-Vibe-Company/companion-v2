@@ -34,6 +34,7 @@ export type BoxDeleteRequest =
   | { outcome: "absent" }
   | { outcome: "accepted"; operationId: string };
 
+/** `blocked` is in-progress at the provider; only `completed` is terminal success. */
 export type BoxDeletePoll =
   | { status: "pending" | "processing" }
   | { status: "completed" }

@@ -237,16 +237,11 @@ async function deleteDuplicate(context: OperationContext, initial: DuplicateClea
       cleanup = await updateDuplicate(context, cleanup, "deleted", operationId);
       break;
     }
-    if (result.status === "blocked") {
-      await updateDuplicate(context, cleanup, "blocked", operationId);
-      throw new RuntimeInvariantError({
-        code: "duplicate_box_delete_blocked",
-        message: "A duplicate generation Box could not be permanently deleted.",
-        action: "none",
-      });
-    }
+    // `blocked` is an in-progress provider status: poll until `completed` or the deadline.
     await context.deps.clock.sleep(PROVIDER_POLL_INTERVAL_MS, context.session.signal);
   }
+  // SQL treats persisted duplicate-cleanup `blocked` as terminal (completed_at set, no resume
+  // transition). New polls no longer write that status; this guard only covers leftover rows.
   if (cleanup.status === "blocked") {
     throw new RuntimeInvariantError({
       code: "duplicate_box_delete_blocked",
@@ -856,16 +851,11 @@ async function handleDelete(context: OperationContext): Promise<RuntimeWorkDispo
           if (!isProviderNotFound(error)) throw error;
           poll = { status: "completed" } as const;
         }
-        if (poll.status === "blocked") {
-          throw new RuntimeInvariantError({
-            code: "box_delete_blocked",
-            message: "The provider blocked permanent Box deletion.",
-            action: "none",
-          });
-        }
         if (poll.status === "completed") {
           await observe(context, { boxState: "absent" });
         } else {
+          // pending, processing, and blocked are all in-progress. Official Box docs poll until
+          // `completed`; blocked has no completedAt, so treating it as terminal aborted deletes.
           await context.deps.clock.sleep(PROVIDER_POLL_INTERVAL_MS, context.session.signal);
         }
         break;
