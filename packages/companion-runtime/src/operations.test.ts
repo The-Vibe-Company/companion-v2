@@ -121,6 +121,165 @@ describe("runtime lifecycle operations", () => {
     expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
   });
 
+  it("finishes duplicate Box deletion after a transient provider blocked status", async () => {
+    const claim = operationClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: null,
+        boxState: "absent",
+        piState: "absent",
+        piInvocationId: null,
+        diskLayoutVersion: 0,
+        appliedSettingsRevision: 0n,
+        appliedSkillsRevision: 0,
+      }),
+    });
+    const ports = fakePorts(store);
+    const generationName = `Companion ${claim.companionId} g1`;
+    const duplicateId = "bx_2345678b";
+    let discoveryCalls = 0;
+    let polls = 0;
+    ports.box.findGenerationBoxes = async () => {
+      discoveryCalls += 1;
+      return discoveryCalls === 1
+        ? { name: generationName, canonical: null, duplicates: [] }
+        : {
+            name: generationName,
+            canonical: { id: BOX_ID, name: generationName, state: "provisioning" },
+            duplicates: [],
+          };
+    };
+    ports.box.createGenerationBox = async () => ({
+      outcome: "recovered",
+      boxId: BOX_ID,
+      name: generationName,
+      canonical: { id: BOX_ID, name: generationName, state: "provisioning" },
+      duplicates: [{ id: duplicateId, name: generationName, state: "ready" }],
+    });
+    ports.box.requestPermanentDeletion = async () => ({
+      outcome: "accepted",
+      operationId: "delete-op-blocked",
+    });
+    ports.box.pollPermanentDeletion = async () => {
+      polls += 1;
+      return polls === 1 ? { status: "blocked" } : { status: "completed" };
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({
+      store,
+      ports,
+      clock: new TestClock(),
+    })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(polls).toBe(2);
+    expect(store.duplicateCleanups.get(duplicateId)).toMatchObject({
+      status: "deleted",
+      providerOperationId: "delete-op-blocked",
+    });
+  });
+
+  it("keeps a previously terminal blocked duplicate cleanup non-retryable", async () => {
+    const claim = operationClaim({
+      checkpoint: "box_created",
+      checkpointSequence: 4n,
+    });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "provisioning",
+        piState: "absent",
+        piInvocationId: null,
+        diskLayoutVersion: 0,
+        appliedSettingsRevision: 0n,
+        appliedSkillsRevision: 0,
+      }),
+    });
+    const generationName = `Companion ${claim.companionId} g1`;
+    const duplicateId = "bx_2345678e";
+    store.duplicateCleanups.set(duplicateId, {
+      boxId: duplicateId,
+      status: "blocked",
+      providerOperationId: "delete-op-old",
+      checkpointSequence: 3n,
+    });
+    const ports = fakePorts(store);
+    let polls = 0;
+    ports.box.findGenerationBoxes = async () => ({
+      name: generationName,
+      canonical: { id: BOX_ID, name: generationName, state: "provisioning" },
+      duplicates: [{ id: duplicateId, name: generationName, state: "ready" }],
+    });
+    ports.box.pollPermanentDeletion = async () => {
+      polls += 1;
+      return { status: "completed" };
+    };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("failed");
+    expect(polls).toBe(0);
+    expect(store.settlements[0]?.error).toMatchObject({
+      code: "duplicate_box_delete_blocked",
+      action: "none",
+    });
+  });
+
+  it("times out a still-blocked duplicate deletion as retryable", async () => {
+    const claim = operationClaim({
+      coldStartDeadlineAt: new Date("2026-08-16T12:00:02.000Z"),
+    });
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: null,
+        boxState: "absent",
+        piState: "absent",
+        piInvocationId: null,
+        diskLayoutVersion: 0,
+        appliedSettingsRevision: 0n,
+        appliedSkillsRevision: 0,
+      }),
+    });
+    const ports = fakePorts(store);
+    const generationName = `Companion ${claim.companionId} g1`;
+    const duplicateId = "bx_2345678f";
+    let discoveryCalls = 0;
+    ports.box.findGenerationBoxes = async () => {
+      discoveryCalls += 1;
+      return discoveryCalls === 1
+        ? { name: generationName, canonical: null, duplicates: [] }
+        : {
+            name: generationName,
+            canonical: { id: BOX_ID, name: generationName, state: "provisioning" },
+            duplicates: [],
+          };
+    };
+    ports.box.createGenerationBox = async () => ({
+      outcome: "recovered",
+      boxId: BOX_ID,
+      name: generationName,
+      canonical: { id: BOX_ID, name: generationName, state: "provisioning" },
+      duplicates: [{ id: duplicateId, name: generationName, state: "ready" }],
+    });
+    ports.box.requestPermanentDeletion = async () => ({
+      outcome: "accepted",
+      operationId: "delete-op-deadline",
+    });
+    ports.box.pollPermanentDeletion = async () => ({ status: "blocked" });
+
+    const result = await new RuntimeEngine(engineDependencies({
+      store,
+      ports,
+      clock: new TestClock(),
+    })).execute(claim);
+
+    expect(result.outcome).toBe("failed");
+    expect(store.settlements[0]?.error).toMatchObject({
+      code: "duplicate_box_delete_deadline_exceeded",
+      action: "retry",
+    });
+  });
+
   it("does not turn authorization loss immediately before create into an ambiguous effect", async () => {
     const claim = operationClaim({
       checkpoint: "box_absence_observed",
@@ -214,6 +373,83 @@ describe("runtime lifecycle operations", () => {
     expect(requests).toEqual([BOX_ID]);
     expect(store.authorization.providerOperationId).toBe("delete-op-late");
     expect(store.authorization.workCheckpoint).toBe("provider_deleted");
+  });
+
+  it("keeps polling while Box reports a blocked deletion and succeeds when it completes", async () => {
+    const claim: OperationRuntimeClaim = {
+      ...operationClaim(),
+      clientSurface: null,
+      operationKind: "delete",
+      checkpoint: "waiting_deleted",
+      checkpointSequence: 2n,
+      targetSettingsRevision: null,
+      targetSkillsRevision: null,
+      providerOperationId: "bdop_00000000000000000000000000000001",
+    };
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "ready",
+        piState: "absent",
+        piInvocationId: null,
+        desiredSettingsRevision: null,
+        skillsRevision: null,
+      }),
+    });
+    const ports = fakePorts(store);
+    let polls = 0;
+    ports.box.pollPermanentDeletion = async () => {
+      polls += 1;
+      return polls < 3 ? { status: "blocked" } : { status: "completed" };
+    };
+    const clock = new TestClock();
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports, clock })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(polls).toBe(3);
+    expect(clock.sleeps).toEqual([1_000, 1_000]);
+    expect(store.authorization.workCheckpoint).toBe("provider_deleted");
+    expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
+  });
+
+  it("does not treat a still-blocked deletion as a non-retryable failure", async () => {
+    const claim: OperationRuntimeClaim = {
+      ...operationClaim(),
+      clientSurface: null,
+      operationKind: "delete",
+      checkpoint: "waiting_deleted",
+      checkpointSequence: 2n,
+      targetSettingsRevision: null,
+      targetSkillsRevision: null,
+      providerOperationId: "bdop_00000000000000000000000000000001",
+      coldStartDeadlineAt: new Date("2026-08-16T12:00:02.000Z"),
+    };
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "ready",
+        piState: "absent",
+        piInvocationId: null,
+        desiredSettingsRevision: null,
+        skillsRevision: null,
+      }),
+    });
+    const ports = fakePorts(store);
+    ports.box.pollPermanentDeletion = async () => ({ status: "blocked" });
+
+    const result = await new RuntimeEngine(engineDependencies({
+      store,
+      ports,
+      clock: new TestClock(),
+    })).execute(claim);
+
+    expect(result.outcome).toBe("failed");
+    expect(store.settlements[0]?.error).toMatchObject({
+      code: "box_delete_deadline_exceeded",
+      action: "retry",
+    });
+    expect(store.settlements[0]?.error?.code).not.toBe("box_delete_blocked");
   });
 
   it("deletes a duplicate that appears after deterministic Box naming before staging", async () => {

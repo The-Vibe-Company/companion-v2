@@ -789,20 +789,54 @@ describe("AsciiBoxMaintenanceClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("returns a blocked deletion as a terminal provider result", async () => {
+  it("polls through a blocked deletion until the provider completes it", async () => {
     const blocked = operation("blocked");
-    vi.stubGlobal("fetch", vi.fn(async () => json({
-      ok: true,
-      type: "deletion.operation",
-      operation: blocked,
-    })));
+    const completed = operation("completed");
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "deletion.operation",
+        operation: blocked,
+      }))
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "deletion.operation",
+        operation: completed,
+      }));
+    vi.stubGlobal("fetch", fetchMock);
 
     await expect(client().deletePermanentlyAndWait({
       boxId: BOX_ID,
       operationId: OPERATION_ID,
       deadlineAt: Date.now() + 1_000,
       pollIntervalMs: 1,
-    })).resolves.toEqual({ outcome: "blocked", operation: blocked });
+    })).resolves.toEqual({ outcome: "deleted", operation: completed });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns blocked only after the deletion deadline elapses still blocked", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-16T00:00:00.000Z"));
+    const blocked = operation("blocked");
+    const fetchMock = vi.fn(async () => json({
+      ok: true,
+      type: "deletion.operation",
+      operation: blocked,
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const deletion = client().deletePermanentlyAndWait({
+      boxId: BOX_ID,
+      operationId: OPERATION_ID,
+      deadlineAt: Date.now() + 20,
+      pollIntervalMs: 100,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(20);
+
+    await expect(deletion).resolves.toEqual({ outcome: "blocked", operation: blocked });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("rejects an explicitly empty operation id without issuing DELETE", async () => {
