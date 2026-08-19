@@ -32,6 +32,8 @@ import {
   CompanionProviderForbiddenError,
   CompanionRuntimeForbiddenError,
   CompanionRuntimeTransitionError,
+  CompanionRoutineInvalidError,
+  CompanionRoutineNotFoundError,
   CompanionDecisionConflictError,
   CompanionDecisionNotFoundError,
   CompanionShareForbiddenError,
@@ -45,20 +47,25 @@ import {
   getCompanionProviderCatalog,
   answerCompanionConfigDecisionV2,
   answerCompanionDecisionV2,
+  answerCompanionRoutineDecisionV2,
   cancelCompanionTurnV2,
   createCompanionV2,
+  createCompanionRoutineV2,
+  deleteCompanionRoutineV2,
   duplicateCompanionV2,
   enqueueCompanionOperationV2,
   enqueueCompanionTurnV2,
   getCompanionDecisionV2,
   getCompanionV2,
   listCompanionsV2,
+  listCompanionRoutinesV2,
   readCompanionAttachmentV2,
   readCompanionThreadV2,
   retryCompanionTurnV2,
   setCompanionWorkspaceShareV2,
   setCompanionProviderV2,
   updateCompanionMemberStateV2,
+  updateCompanionRoutineV2,
   updateCompanionV2,
   deleteCompanionPlugin,
   deleteCompanionProvider,
@@ -80,6 +87,7 @@ import {
   type CompanionTurn,
   type SendCompanionMessageInput,
   createCompanionInputSchema,
+  createCompanionRoutineInputSchema,
   declaredCompanionAttachmentContentType,
   isCompanionAttachmentImage,
   sanitizeCompanionAttachmentFilename,
@@ -99,6 +107,7 @@ import {
   saveCompanionPluginInputSchema,
   updateCompanionInputSchema,
   updateCompanionMemberStateInputSchema,
+  updateCompanionRoutineInputSchema,
   retryCompanionTurnInputSchema,
 } from "@companion/contracts";
 import {
@@ -327,6 +336,8 @@ function errorStatus(error: unknown): number {
   if (error instanceof CompanionAccessForbiddenError) return 403;
   if (error instanceof CompanionNotFoundError) return 404;
   if (error instanceof CompanionDecisionNotFoundError) return 404;
+  if (error instanceof CompanionRoutineNotFoundError) return 404;
+  if (error instanceof CompanionRoutineInvalidError) return 400;
   if (error instanceof CompanionDecisionConflictError) return 409;
   if (error instanceof CompanionRuntimeForbiddenError) return 403;
   if (error instanceof CompanionSettingsForbiddenError) return 403;
@@ -879,6 +890,75 @@ export function registerCompanionRoutes(
     }
   });
 
+  app.get("/v1/companions/:id/routines", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const routines = await tenant(c, ({ orgId, database }) =>
+        listCompanionRoutinesV2({ orgId, companionId, database }));
+      c.header("Cache-Control", "private, no-store");
+      return c.json({ routines });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companions/:id/routines", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const body = createCompanionRoutineInputSchema.parse(await c.req.json());
+      const routine = await tenant(c, ({ orgId, database }) =>
+        createCompanionRoutineV2({
+          orgId,
+          companionId,
+          id: body.id,
+          name: body.name,
+          prompt: body.prompt,
+          cron: body.cron,
+          timezone: body.timezone,
+          enabled: body.enabled,
+          database,
+        }));
+      return c.json({ routine }, 201);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.patch("/v1/companions/:id/routines/:routineId", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const routineId = companionIdSchema.parse(c.req.param("routineId"));
+      const body = updateCompanionRoutineInputSchema.parse(await c.req.json());
+      const routine = await tenant(c, ({ orgId, database }) =>
+        updateCompanionRoutineV2({
+          orgId,
+          companionId,
+          routineId,
+          name: body.name,
+          prompt: body.prompt,
+          cron: body.cron,
+          timezone: body.timezone,
+          enabled: body.enabled,
+          database,
+        }));
+      return c.json({ routine });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.delete("/v1/companions/:id/routines/:routineId", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const routineId = companionIdSchema.parse(c.req.param("routineId"));
+      await tenant(c, ({ orgId, database }) =>
+        deleteCompanionRoutineV2({ orgId, companionId, routineId, database }));
+      return c.body(null, 204);
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
   app.delete("/v1/companions/:id", async (c) => {
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
@@ -1166,7 +1246,11 @@ export function registerCompanionRoutes(
           if (body.action === "answer") {
             throw new Error("Companion config proposals cannot be answered with free text");
           }
-          if (body.action === "allow" && pending.proposal?.model_id) {
+          if (
+            body.action === "allow"
+            && pending.proposal?.kind === "config"
+            && pending.proposal.model_id
+          ) {
             const companion = await getCompanionV2({ actor, orgId, companionId, database });
             const providerId = companion.runtime.provider_ids[0];
             const modelId = providerId
@@ -1185,6 +1269,17 @@ export function registerCompanionRoutes(
             }
           }
           await answerCompanionConfigDecisionV2({
+            orgId,
+            companionId,
+            requestId,
+            decision: body.action,
+            database,
+          });
+        } else if (pending.requestKind === "routine_proposal") {
+          if (body.action === "answer") {
+            throw new Error("Companion routine proposals cannot be answered with free text");
+          }
+          await answerCompanionRoutineDecisionV2({
             orgId,
             companionId,
             requestId,

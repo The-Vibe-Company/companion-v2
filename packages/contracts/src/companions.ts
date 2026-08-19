@@ -189,6 +189,17 @@ export const companionSelectedMcpAccountIdsSchema = z.array(z.string().uuid()).m
 /** How much of the newest chat line a conversation list carries. One line, cut to fit a row. */
 export const COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS = 140;
 
+/** Upper bounds for a Companion routine. Cron is validated in TypeScript, never in SQL. */
+export const COMPANION_ROUTINE_NAME_MAX_CHARACTERS = 80;
+export const COMPANION_ROUTINE_PROMPT_MAX_CHARACTERS = 16_384;
+export const COMPANION_ROUTINE_CRON_MAX_CHARACTERS = 120;
+export const COMPANION_ROUTINE_TIMEZONE_MAX_CHARACTERS = 64;
+export const COMPANION_ROUTINE_MAX_PER_COMPANION = 10;
+export const COMPANION_ROUTINE_MIN_INTERVAL_MS = 5 * 60 * 1000;
+export const COMPANION_ROUTINE_MISSED_GRACE_MS = 10 * 60 * 1000;
+export const COMPANION_ROUTINE_MAX_CONSECUTIVE_FAILURES = 5;
+
+
 /**
  * The newest chat line on a Companion's thread, projected onto reads so a conversation list can say
  * who spoke last without opening every thread.
@@ -196,15 +207,21 @@ export const COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS = 140;
  * Only a member message or a Pi reply qualifies. Tool runs and permission cards are deliberately not
  * projected: a list is read by everyone who can see the Companion, and a tool title is a command, a
  * path, or a URL, while a pending decision is a question nobody has answered yet. Neither belongs in
- * a preview line that is shown outside the thread it was written in.
+ * a preview line that is shown outside the thread it was written in. A scheduled routine's prompt is
+ * hidden for the same reason: nobody wrote it in the thread, so the list names the routine instead.
  */
 export const companionLastMessageSchema = z.object({
-  /** First line of the message, collapsed and truncated; never the whole body. */
+  /** First line of the message, collapsed and truncated; never the whole body. Empty when a routine wrote it. */
   preview: z.string().max(COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS),
   role: z.enum(["user", "assistant"]),
   /** Member who wrote it, so a reader can tell their own last word from someone else's. Null for Pi. */
   author_id: z.string().nullable(),
   author_name: z.string().nullable(),
+  /**
+   * Name of the routine that enqueued this message, when one did. The client shows the routine
+   * rather than the preview, exactly as the thread does; the prompt itself never leaves the thread.
+   */
+  routine_name: z.string().max(COMPANION_ROUTINE_NAME_MAX_CHARACTERS).nullable().default(null),
   created_at: z.string().datetime(),
 }).strict();
 export type CompanionLastMessage = z.infer<typeof companionLastMessageSchema>;
@@ -380,7 +397,7 @@ export type CompanionToolRun = z.infer<typeof companionToolRunSchema>;
  * an answer; a config proposal needs Owner/Editor confirmation. Browse and computer stay ungated —
  * they already surface through THE-352 chips and the Computer panel rather than a broker card.
  */
-export const companionDecisionKindSchema = z.enum(["shell", "file", "question", "config"]);
+export const companionDecisionKindSchema = z.enum(["shell", "file", "question", "config", "routine"]);
 export type CompanionDecisionKind = z.infer<typeof companionDecisionKindSchema>;
 
 /** A card is `pending` until Allow / Deny / answer, or until the fail-closed timeout expires. */
@@ -483,6 +500,89 @@ export const companionConfigProposalMessageSchema = z.object({
 }).strict();
 export type CompanionConfigProposalMessage = z.infer<typeof companionConfigProposalMessageSchema>;
 
+export const companionRoutineNameSchema = z.string().trim().min(1).max(
+  COMPANION_ROUTINE_NAME_MAX_CHARACTERS,
+);
+export const companionRoutinePromptSchema = z.string().trim().min(1).max(
+  COMPANION_ROUTINE_PROMPT_MAX_CHARACTERS,
+);
+export const companionRoutineCronSchema = z.string().trim().min(1).max(
+  COMPANION_ROUTINE_CRON_MAX_CHARACTERS,
+);
+export const companionRoutineTimezoneSchema = z.string().trim().min(1).max(
+  COMPANION_ROUTINE_TIMEZONE_MAX_CHARACTERS,
+);
+
+export const companionRoutineSchema = z.object({
+  id: z.string().uuid(),
+  companion_id: z.string().uuid(),
+  name: companionRoutineNameSchema,
+  prompt: companionRoutinePromptSchema,
+  cron: companionRoutineCronSchema,
+  timezone: companionRoutineTimezoneSchema,
+  enabled: z.boolean(),
+  next_fire_at: z.string().datetime().nullable(),
+  last_fired_at: z.string().datetime().nullable(),
+  last_error_code: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/).nullable(),
+  last_error_message: z.string().max(500).nullable(),
+  last_error_at: z.string().datetime().nullable(),
+  consecutive_failures: z.number().int().nonnegative(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime(),
+}).strict();
+export type CompanionRoutine = z.infer<typeof companionRoutineSchema>;
+
+/** Create/update payload. Cron and timezone are re-validated in TypeScript before SQL. */
+export const companionRoutineDraftSchema = z.object({
+  name: companionRoutineNameSchema,
+  prompt: companionRoutinePromptSchema,
+  cron: companionRoutineCronSchema,
+  timezone: companionRoutineTimezoneSchema,
+  enabled: z.boolean().default(true),
+}).strict();
+export type CompanionRoutineDraft = z.infer<typeof companionRoutineDraftSchema>;
+
+export const createCompanionRoutineInputSchema = companionRoutineDraftSchema.extend({
+  id: z.string().uuid(),
+}).strict();
+export type CreateCompanionRoutineInput = z.infer<typeof createCompanionRoutineInputSchema>;
+
+export const updateCompanionRoutineInputSchema = companionRoutineDraftSchema.partial().strict();
+export type UpdateCompanionRoutineInput = z.infer<typeof updateCompanionRoutineInputSchema>;
+
+/**
+ * Structured routine Pi may propose. `.strict()` refuses extra fields. Cron is stored as text;
+ * the control plane parses it before create.
+ */
+export const companionRoutineProposalSchema = z.object({
+  kind: z.literal("routine"),
+  name: companionRoutineNameSchema,
+  prompt: companionRoutinePromptSchema,
+  cron: companionRoutineCronSchema,
+  timezone: companionRoutineTimezoneSchema,
+}).strict().superRefine((proposal, context) => {
+  if (utf8ByteLength(JSON.stringify(proposal)) > COMPANION_CONFIG_PROPOSAL_MAX_BYTES) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "routine proposal exceeds 16 KiB",
+    });
+  }
+});
+export type CompanionRoutineProposal = z.infer<typeof companionRoutineProposalSchema>;
+
+/** Pi `extension_ui_request` message for `companion:routine:<name>`: confirm copy plus the proposal. */
+export const companionRoutineProposalMessageSchema = z.object({
+  summary: z.string().trim().min(1).max(COMPANION_CONFIG_PROPOSAL_SUMMARY_MAX_CHARACTERS),
+  proposal: companionRoutineProposalSchema,
+}).strict();
+export type CompanionRoutineProposalMessage = z.infer<typeof companionRoutineProposalMessageSchema>;
+
+export const companionDecisionProposalSchema = z.union([
+  companionConfigProposalSchema,
+  companionRoutineProposalSchema,
+]);
+export type CompanionDecisionProposal = z.infer<typeof companionDecisionProposalSchema>;
+
 /**
  * One permission request Pi blocked on, projected from an `extension_ui_request` in the RPC log.
  * The transcript keeps the decision after refresh and for Viewers; only Owner/Editor may act while
@@ -504,21 +604,30 @@ export const companionDecisionSchema = z.object({
   decided_by_name: z.string().nullable(),
   decided_at: z.string().datetime().nullable(),
   expires_at: z.string().datetime(),
-  /** Present only on `kind: "config"` cards; null on shell, file, and question cards. */
-  proposal: companionConfigProposalSchema.nullable().default(null),
+  /** Present on `kind: "config"` and `kind: "routine"` cards; null on shell, file, and question. */
+  proposal: companionDecisionProposalSchema.nullable().default(null),
 }).strict().superRefine((decision, context) => {
-  if (decision.kind === "config" && decision.proposal === null) {
+  if (decision.kind === "config") {
+    if (decision.proposal === null || decision.proposal.kind !== "config") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["proposal"],
+        message: "a config card carries the proposed settings",
+      });
+    }
+  } else if (decision.kind === "routine") {
+    if (decision.proposal === null || decision.proposal.kind !== "routine") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["proposal"],
+        message: "a routine card carries the proposed schedule",
+      });
+    }
+  } else if (decision.proposal !== null) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["proposal"],
-      message: "a config card carries the proposed settings",
-    });
-  }
-  if (decision.kind !== "config" && decision.proposal !== null) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["proposal"],
-      message: "only a config card may carry a settings proposal",
+      message: "only a config or routine card may carry a proposal",
     });
   }
 });
@@ -797,6 +906,15 @@ export const companionTranscriptEntrySchema = z.object({
   /** Set on exactly the `decision` entries; every other role carries null. */
   decision: companionDecisionSchema.nullable().default(null),
   /**
+   * Present on a user entry that was produced by a scheduled routine fire. The prompt is still in
+   * `content`; the UI hides that bubble and shows this header instead. Null on every other role,
+   * and on ordinary member messages.
+   */
+  routine: z.object({
+    id: z.string().uuid().nullable(),
+    name: companionRoutineNameSchema,
+  }).nullable().default(null),
+  /**
    * Files this entry carries, in stable order. A member message carries what was sent with it; the
    * assistant outputs entry carries what Pi left in its outbox during that turn. Every other entry
    * carries an empty list, and the default keeps older projections parseable.
@@ -816,6 +934,13 @@ export const companionTranscriptEntrySchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["decision"],
       message: "a decision entry carries a permission card and no other role may",
+    });
+  }
+  if (entry.routine !== null && entry.role !== "user") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["routine"],
+      message: "only a user message may carry a routine origin",
     });
   }
   if (entry.reasoning !== null && entry.role !== "assistant") {

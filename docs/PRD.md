@@ -71,6 +71,21 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
 - Pi-only recycle is the automatic repair. Full Box restart and permanent deletion are explicit,
   confirmed user operations; deletion is cleanup, never healing.
 
+### Routines
+
+- A Companion may have at most ten named routines. Each has a full cron expression, an IANA
+  timezone, and a prompt of at most 16,384 characters. Names are unique per Companion
+  (case-insensitive). Fires must be at least five minutes apart.
+- Creation is Owner/Editor only: the context-panel + control, or Pi `propose_routine` approved as a
+  decision card. Viewer reads the panel and cards but cannot write.
+- The worker claims due rows and fires as the immutable Companion Owner. Fire is API-level turn
+  enqueue; the worker never contacts Box or Pi. The message id is deterministic
+  (`uuidv5(routineId|scheduledFor)`), so at-least-once ticks collapse to one turn.
+- Missed fires are not replayed: a scheduled instant older than ten minutes is skipped. An active
+  turn for the same routine skips the next fire. Five consecutive failures disable the routine.
+- The thread projects a routine origin on the user entry. The UI hides that prompt and shows
+  `Routine: <name>` above the ordinary reply.
+
 ### Pi protocol and failure semantics
 
 - Layout 14 installs a Node broker between runtime commands and Pi. It uses an owner-only Unix
@@ -116,7 +131,7 @@ explicitly recoverable interruption even after the browser, API, or one runtime 
 ## Explicit exclusions
 
 - Generic Projects and skill runs, multi-Bot orchestration, Bot-to-Bot handoffs, group Bot chats,
-  routines, schedules, proactive jobs, voice, and a new navigation or visual language.
+  proactive jobs, voice, and a new navigation or visual language.
 - A file library, file versioning, or any artifact surface outside a thread. Chat files themselves
   are in scope: bounded image and document uploads on a message, and bounded images Pi hands back.
 - Harnesses other than Pi, runtime providers other than box.ascii.dev, generic provider/model

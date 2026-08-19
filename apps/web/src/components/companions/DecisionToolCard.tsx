@@ -2,9 +2,10 @@
 
 import { useState } from "react";
 import type { ToolCallMessagePartComponent } from "@assistant-ui/react";
-import type { CompanionConfigProposal, CompanionDecisionKind } from "@companion/contracts";
+import type { CompanionConfigProposal, CompanionDecisionKind, CompanionRoutineProposal } from "@companion/contracts";
 import {
   AlertTriangleIcon,
+  CalendarClockIcon,
   CheckIcon,
   FilePenLineIcon,
   LoaderIcon,
@@ -40,6 +41,7 @@ const DECISION_ICONS: Record<CompanionDecisionKind, LucideIcon> = {
   file: FilePenLineIcon,
   question: MessageSquareIcon,
   config: Settings2Icon,
+  routine: CalendarClockIcon,
 };
 
 const DECISION_KIND_LABELS: Record<CompanionDecisionKind, string> = {
@@ -47,6 +49,7 @@ const DECISION_KIND_LABELS: Record<CompanionDecisionKind, string> = {
   file: "edit a file",
   question: "asks",
   config: "these settings",
+  routine: "this routine",
 };
 
 const DECISION_STATUS_LABELS = {
@@ -145,6 +148,25 @@ function ConfigChangeList({
   );
 }
 
+function RoutineProposal({ proposal }: { proposal: CompanionRoutineProposal }) {
+  return (
+    <div className="mt-1.5 space-y-1.5 text-sm">
+      <p>
+        <span className="font-medium">{proposal.name}</span>
+        <span className="text-muted-foreground"> · </span>
+        <span className="font-mono text-xs">{proposal.cron}</span>
+        <span className="text-muted-foreground"> · {proposal.timezone}</span>
+      </p>
+      <details>
+        <summary className="text-muted-foreground cursor-pointer select-none">Prompt</summary>
+        <p className="text-foreground mt-1 max-h-40 overflow-auto whitespace-pre-wrap">
+          {proposal.prompt}
+        </p>
+      </details>
+    </div>
+  );
+}
+
 export const DecisionToolCard: ToolCallMessagePartComponent<CompanionDecisionArgs> = ({ args }) => {
   const { canAct, companionName, skills, plugins, models, onDecide } = useDecisionActions();
   const [answer, setAnswer] = useState("");
@@ -160,6 +182,7 @@ export const DecisionToolCard: ToolCallMessagePartComponent<CompanionDecisionArg
   const KindIcon = DECISION_ICONS[decision.kind];
   const requestId = decision.request_id;
   const config = decision.kind === "config";
+  const routine = decision.kind === "routine";
 
   async function act(input: DecisionAction) {
     if (!interactive) return;
@@ -194,9 +217,11 @@ export const DecisionToolCard: ToolCallMessagePartComponent<CompanionDecisionArg
             ? "Question"
             : config
               ? `${companionName} proposes these changes`
-              : `Allow ${DECISION_KIND_LABELS[decision.kind]}`}
+              : routine
+                ? `${companionName} proposes this routine`
+                : `Allow ${DECISION_KIND_LABELS[decision.kind]}`}
         </span>
-        {!config && (
+        {!config && !routine && (
           <span className="text-muted-foreground min-w-0 flex-1 truncate font-mono text-xs">
             {decision.name}
           </span>
@@ -214,7 +239,7 @@ export const DecisionToolCard: ToolCallMessagePartComponent<CompanionDecisionArg
         <span className="sr-only">{status}</span>
       </div>
 
-      {config && decision.proposal
+      {config && decision.proposal?.kind === "config"
         ? (
           <ConfigChangeList
             proposal={decision.proposal}
@@ -223,6 +248,8 @@ export const DecisionToolCard: ToolCallMessagePartComponent<CompanionDecisionArg
             models={models}
           />
         )
+        : routine && decision.proposal?.kind === "routine"
+          ? <RoutineProposal proposal={decision.proposal} />
         : (
           <pre className="text-foreground mt-1.5 max-h-40 overflow-auto font-mono text-xs leading-relaxed whitespace-pre-wrap">
             {decision.title}
@@ -277,7 +304,7 @@ export const DecisionToolCard: ToolCallMessagePartComponent<CompanionDecisionArg
       {interactive && decision.kind !== "question" && (
         <div className="mt-2 flex items-center gap-2">
           <Button type="button" size="sm" disabled={busy} onClick={() => void act({ action: "allow" })}>
-            {config ? "Approve" : "Allow"}
+            {config || routine ? "Approve" : "Allow"}
           </Button>
           <Button
             type="button"

@@ -736,6 +736,20 @@
       "when": 1789060000000,
       "tag": "0104_companion_mint_hub_token",
       "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1789146400000,
+      "tag": "0105_companion_routines",
+      "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1789232800000,
+      "tag": "0106_companion_answer_routine_decision",
+      "breakpoints": true
     }
   ]
 }

@@ -30,6 +30,11 @@ const coreMocks = vi.hoisted(() => ({
   getCompanionDecisionV2: vi.fn(),
   getCompanionV2: vi.fn(),
   listCompanionsV2: vi.fn(),
+  listCompanionRoutinesV2: vi.fn(),
+  createCompanionRoutineV2: vi.fn(),
+  updateCompanionRoutineV2: vi.fn(),
+  deleteCompanionRoutineV2: vi.fn(),
+  answerCompanionRoutineDecisionV2: vi.fn(),
   readCompanionThreadV2: vi.fn(),
   retryCompanionTurnV2: vi.fn(),
   setCompanionProviderV2: vi.fn(),
@@ -282,6 +287,8 @@ describe("Companions Runtime v2 API", () => {
     storageMocks.deleteStorageObject.mockResolvedValue(undefined);
     storageMocks.getSkillArchive.mockResolvedValue(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     coreMocks.answerCompanionConfigDecisionV2.mockResolvedValue(undefined);
+    coreMocks.answerCompanionRoutineDecisionV2.mockResolvedValue(undefined);
+    coreMocks.listCompanionRoutinesV2.mockResolvedValue([]);
     coreMocks.getCompanionDecisionV2.mockResolvedValue({
       requestKey: "question-1",
       requestKind: "question",
@@ -869,6 +876,7 @@ describe("Companions Runtime v2 API", () => {
       text: "Use the conservative option",
     }));
     expect(coreMocks.answerCompanionConfigDecisionV2).not.toHaveBeenCalled();
+    expect(coreMocks.answerCompanionRoutineDecisionV2).not.toHaveBeenCalled();
   });
 
   it("applies config proposals through the dedicated answer path", async () => {
@@ -895,6 +903,75 @@ describe("Companions Runtime v2 API", () => {
       decision: "allow",
     }));
     expect(coreMocks.answerCompanionDecisionV2).not.toHaveBeenCalled();
+    expect(coreMocks.answerCompanionRoutineDecisionV2).not.toHaveBeenCalled();
+  });
+
+  it("applies routine proposals through the dedicated answer path", async () => {
+    coreMocks.getCompanionDecisionV2.mockResolvedValue({
+      requestKey: "routine-1",
+      requestKind: "routine_proposal",
+      decisionStatus: "pending",
+      proposal: {
+        kind: "routine",
+        name: "Standup",
+        prompt: "Write the standup.",
+        cron: "0 9 * * 1-5",
+        timezone: "UTC",
+      },
+      expiresAt: NOW,
+    });
+    const response = await appWithRoutes().request(
+      jsonPost(`/v1/companions/${COMPANION_ID}/decisions/routine-1`, {
+        action: "allow",
+      }),
+    );
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toEqual({ thread });
+    expect(coreMocks.answerCompanionRoutineDecisionV2).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: COMPANION_ID,
+      requestId: "routine-1",
+      decision: "allow",
+    }));
+    expect(coreMocks.answerCompanionConfigDecisionV2).not.toHaveBeenCalled();
+    expect(coreMocks.answerCompanionDecisionV2).not.toHaveBeenCalled();
+  });
+
+  it("lists and creates Companion routines", async () => {
+    const routine = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companion_id: COMPANION_ID,
+      name: "Standup",
+      prompt: "Write the standup.",
+      cron: "0 9 * * 1-5",
+      timezone: "UTC",
+      enabled: true,
+      next_fire_at: "2026-08-20T09:00:00.000Z",
+      last_fired_at: null,
+      last_error_code: null,
+      last_error_message: null,
+      last_error_at: null,
+      consecutive_failures: 0,
+      created_at: NOW,
+      updated_at: NOW,
+    };
+    coreMocks.listCompanionRoutinesV2.mockResolvedValue([routine]);
+    coreMocks.createCompanionRoutineV2.mockResolvedValue(routine);
+    const app = appWithRoutes();
+    const listed = await app.request(`/v1/companions/${COMPANION_ID}/routines`);
+    expect(listed.status).toBe(200);
+    await expect(listed.json()).resolves.toEqual({ routines: [routine] });
+    const created = await app.request(
+      jsonPost(`/v1/companions/${COMPANION_ID}/routines`, {
+        id: routine.id,
+        name: routine.name,
+        prompt: routine.prompt,
+        cron: routine.cron,
+        timezone: routine.timezone,
+        enabled: true,
+      }),
+    );
+    expect(created.status).toBe(201);
+    await expect(created.json()).resolves.toEqual({ routine });
   });
 
   it("denies Viewer desktop access before calling the private Runtime service", async () => {

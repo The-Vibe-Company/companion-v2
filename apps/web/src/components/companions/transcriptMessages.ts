@@ -325,6 +325,8 @@ export function useStableEntries(
         && kept.decision?.status === entry.decision?.status
         && kept.decision?.answer === entry.decision?.answer
         && kept.decision?.decided_by_id === entry.decision?.decided_by_id
+        && kept.routine?.id === entry.routine?.id
+        && kept.routine?.name === entry.routine?.name
         // Attachments are written once with the entry and never move afterwards, so identity by
         // count and id is total: an entry that gains a file is a different entry.
         && kept.attachments.length === entry.attachments.length

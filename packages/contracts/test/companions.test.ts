@@ -9,6 +9,9 @@ import {
   companionConfigProposalMessageSchema,
   companionConfigProposalSchema,
   companionDecisionSchema,
+  companionRoutineProposalMessageSchema,
+  companionRoutineProposalSchema,
+  companionRoutineSchema,
   companionProviderOAuthCompleteInputSchema,
   companionProviderOAuthStartInputSchema,
   companionDesktopSchema,
@@ -510,6 +513,29 @@ describe("Companion chat contracts", () => {
     })).toThrow();
   });
 
+  it("carries a routine origin only on a user message", () => {
+    expect(companionTranscriptEntrySchema.parse({
+      event_id: "msg:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      ordinal: 1,
+      role: "user",
+      content: "Write the standup.",
+      author_id: "user-1",
+      author_name: "Ada",
+      routine: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Standup" },
+      created_at: "2026-08-19T09:00:00.000Z",
+    }).routine).toEqual({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Standup" });
+    expect(() => companionTranscriptEntrySchema.parse({
+      event_id: "pi:1",
+      ordinal: 2,
+      role: "assistant",
+      content: "Standup drafted.",
+      author_id: null,
+      author_name: null,
+      routine: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Standup" },
+      created_at: "2026-08-19T09:00:01.000Z",
+    })).toThrow();
+  });
+
   it("accepts a bounded config proposal and refuses mixed or oversized payloads", () => {
     const skillId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const pluginId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -594,6 +620,61 @@ describe("Companion chat contracts", () => {
       kind: "shell",
       name: "bash",
     })).toThrow();
+  });
+
+  it("accepts a bounded routine proposal and rejects a card that mixes kinds", () => {
+    const proposal = companionRoutineProposalSchema.parse({
+      kind: "routine",
+      name: "Standup",
+      prompt: "Write the standup.",
+      cron: "0 9 * * 1-5",
+      timezone: "America/New_York",
+    });
+    expect(companionRoutineProposalMessageSchema.parse({
+      summary: "Schedule Standup each weekday at 9am",
+      proposal,
+    }).proposal.name).toBe("Standup");
+    expect(() => companionRoutineProposalSchema.parse({
+      kind: "routine",
+      name: "Standup",
+      prompt: "Write the standup.",
+      cron: "0 9 * * 1-5",
+      timezone: "America/New_York",
+      extra: true,
+    })).toThrow();
+    const decision = {
+      request_id: "ui-routine-1",
+      kind: "routine" as const,
+      name: "routine",
+      title: "Schedule Standup",
+      detail: "Schedule Standup each weekday at 9am",
+      status: "pending" as const,
+      answer: null,
+      decided_by_id: null,
+      decided_by_name: null,
+      decided_at: null,
+      expires_at: "2026-08-19T12:05:00.000Z",
+      proposal,
+    };
+    expect(companionDecisionSchema.parse(decision).proposal).toEqual(proposal);
+    expect(() => companionDecisionSchema.parse({ ...decision, proposal: null })).toThrow();
+    expect(companionRoutineSchema.parse({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      companion_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      name: "Standup",
+      prompt: "Write the standup.",
+      cron: "0 9 * * 1-5",
+      timezone: "UTC",
+      enabled: true,
+      next_fire_at: "2026-08-20T09:00:00.000Z",
+      last_fired_at: null,
+      last_error_code: null,
+      last_error_message: null,
+      last_error_at: null,
+      consecutive_failures: 0,
+      created_at: "2026-08-19T12:00:00.000Z",
+      updated_at: "2026-08-19T12:00:00.000Z",
+    }).name).toBe("Standup");
   });
 
   it("accepts a Box frame only as an inline image and never as a URL a browser would fetch", () => {

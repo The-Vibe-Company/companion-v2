@@ -9,14 +9,17 @@ import type {
   CompanionProviderConnection,
   CompanionProviderOAuthStartResponse,
   CompanionProvidersResponse,
+  CompanionRoutine,
   CompanionShareRole,
   CompanionShares,
   CompanionThread,
   CancelCompanionTurnAcceptedResponse,
+  CreateCompanionRoutineInput,
   SendCompanionMessageAcceptedResponse,
   SaveCompanionProviderInput,
   SaveCompanionPluginInput,
   UpdateCompanionInput,
+  UpdateCompanionRoutineInput,
 } from "@companion/contracts";
 import {
   COMPANION_OPERATION_IDEMPOTENCY_HEADER,
@@ -447,5 +450,57 @@ export async function openCompanionDesktop(
   );
 }
 
-export type { CompanionProvidersResponse };
-export type { CompanionPluginsResponse };
+export async function listCompanionRoutines(
+  orgId: string,
+  companionId: string,
+): Promise<CompanionRoutine[]> {
+  const result = await apiFetch<{ routines: CompanionRoutine[] }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/routines`,
+    { headers: orgHeaders(orgId) },
+  );
+  return result.routines;
+}
+
+export async function createCompanionRoutine(
+  orgId: string,
+  companionId: string,
+  input: CreateCompanionRoutineInput,
+): Promise<CompanionRoutine> {
+  const result = await apiFetch<{ routine: CompanionRoutine }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/routines`,
+    {
+      method: "POST",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify(input),
+    },
+  );
+  return result.routine;
+}
+
+export async function updateCompanionRoutine(
+  orgId: string,
+  companionId: string,
+  routineId: string,
+  input: UpdateCompanionRoutineInput,
+): Promise<CompanionRoutine> {
+  const result = await apiFetch<{ routine: CompanionRoutine }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/routines/${encodeURIComponent(routineId)}`,
+    {
+      method: "PATCH",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify(input),
+    },
+  );
+  return result.routine;
+}
+
+export async function deleteCompanionRoutine(
+  orgId: string,
+  companionId: string,
+  routineId: string,
+): Promise<void> {
+  await apiFetch(
+    `/v1/companions/${encodeURIComponent(companionId)}/routines/${encodeURIComponent(routineId)}`,
+    { method: "DELETE", headers: orgHeaders(orgId) },
+  );
+}

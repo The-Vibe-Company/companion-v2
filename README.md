@@ -26,7 +26,7 @@ into hosted Companions or launch them as a runtime harness.
 ```text
 apps/web                    Next.js Skills workspace and Companion threads
 apps/api                    REST/tRPC authorization and durable control-plane intent
-apps/worker                 GitHub, billing, and Skill Database maintenance
+apps/worker                 GitHub, billing, Skill Database maintenance, and Companion routines
 apps/runtime                sole Box/Pi lifecycle and durable-turn executor
 cli                         Companion skill CLI
 packages/box-runtime        ascii.dev transport and layout-14 Pi broker
@@ -90,16 +90,16 @@ runtime, and web from that same build. Never use `start` as a migration mechanis
 ### Companions runtime
 
 Companions are disabled by default. To enable them, set the same flag and exact-domain allowlist on
-web, API, and runtime, then restart those services:
+web, API, worker, and runtime, then restart those services:
 
 ```bash
 COMPANION_COMPANIONS_ENABLED=true
 COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS=example.com
 ```
 
-With either value missing, Companion routes and navigation stay absent and runtime claims stay off.
-The flag is also the operational kill switch after Runtime v2 data exists; rollback never sends v2
-rows to a legacy executor.
+With either value missing, Companion routes and navigation stay absent, runtime claims stay off, and
+the worker fires no Companion routine. The flag is also the operational kill switch after Runtime v2
+data exists; rollback never sends v2 rows to a legacy executor.
 
 Runtime needs its dedicated database URL, the public API origin reachable from Box, and the sole
 copy of the Box key. API reaches only the runtime's private desktop endpoint. The two services share

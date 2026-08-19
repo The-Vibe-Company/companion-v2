@@ -571,6 +571,7 @@ describe("CompanionThread composer", () => {
     decision: null,
     attachments: [],
           reasoning: null,
+          routine: null,
           created_at: "2026-08-12T12:01:00.000Z",
         }],
       }));
@@ -626,6 +627,7 @@ describe("CompanionThread stream", () => {
     decision: null,
     attachments: [],
     reasoning: null,
+    routine: null,
     created_at: "2026-08-12T12:01:00.000Z",
   };
 
@@ -640,6 +642,7 @@ describe("CompanionThread stream", () => {
     decision: null,
     attachments: [],
     reasoning: null,
+    routine: null,
     created_at: "2026-08-12T12:01:20.000Z",
   });
 
@@ -679,6 +682,7 @@ describe("CompanionThread stream", () => {
     decision: null,
     attachments: [],
           reasoning: null,
+          routine: null,
           created_at: "2026-08-12T12:01:24.000Z",
         },
       ],
@@ -721,6 +725,7 @@ describe("CompanionThread stream", () => {
     decision: null,
     attachments: [],
           reasoning: null,
+          routine: null,
           created_at: "2026-08-12T12:01:20.000Z",
         },
       ],
@@ -838,13 +843,14 @@ describe("CompanionThread context panel", () => {
     document.body.innerHTML = "";
   });
 
-  it("keeps excluded future product surfaces out of the context panel", async () => {
+  it("shows Screen, Skills, and Routines without placeholder copy", async () => {
     const container = await mount(async () => true, { context: { open: true } });
     const headings = [...container.querySelectorAll(".chat-context h3")]
       .map((heading) => heading.textContent);
 
-    expect(headings).toEqual(["Screen", "Skills"]);
+    expect(headings).toEqual(["Screen", "Skills", "Routines"]);
     expect(panel(container)?.textContent).not.toContain("coming soon");
+    expect(panel(container)?.textContent).toContain("No routines yet.");
   });
 
   it("shows a runner the live desktop beside the conversation once the Box is running", async () => {

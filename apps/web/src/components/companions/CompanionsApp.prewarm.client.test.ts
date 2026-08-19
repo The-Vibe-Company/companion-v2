@@ -147,6 +147,7 @@ function controlPlane(initial: Companion) {
         updated_at: now,
       } });
     }
+    if (url.includes("/routines")) return json({ routines: [] });
     if (url.includes("/runtime")) return json({ companion: settled });
     if (url.includes("/thread")) return json({ thread: emptyThread });
     if (url.includes("/v1/companions")) return json({ companions: [settled] });

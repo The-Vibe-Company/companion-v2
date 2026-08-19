@@ -81,8 +81,9 @@ Companion purge. Old Companions, Boxes, transcripts, runtime rows, pools, and le
 ## Explicit exclusions
 
 Historical Projects and generic skill runs remain removed. This release adds no multi-Bot
-coordination, group Bot chat, handoffs, routines, schedules, proactive jobs, voice, file library,
-file versioning, artifact surface outside the thread, harness selection, Box-provider marketplace,
-container catalog, deployment management, or generic AI application builder. Chat files are in
+coordination, group Bot chat, handoffs, proactive jobs, voice, file library, file versioning,
+artifact surface outside the thread, harness selection, Box-provider marketplace, container catalog,
+deployment management, or generic AI application builder. Scheduled Companion routines are in
+scope: Owner/Editor-gated cron prompts that enqueue ordinary turns. Chat files are in
 scope and bounded: images and documents sent with a message, and images Pi hands back from a turn. Native mobile remains outside Skills, Plugins, and Companion
 settings; it receives no injected Skills or MCP accounts.

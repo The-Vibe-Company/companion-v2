@@ -213,6 +213,12 @@ export function companionLastMessagePreview(content: string): string {
  * tool run still previews the last thing a person or Pi actually said — and no tool title or pending
  * permission question can reach a surface outside the thread.
  *
+ * A routine fire is enqueued as the Companion Owner, so its prompt would otherwise read as something
+ * the Owner just typed. It carries the routine name instead and no preview text at all, which is the
+ * same masking the thread applies. The name is read from the entry's own snapshot column: the turn
+ * carries one too, but `companion_turns` is private to the runtime function owner and this query
+ * runs as the API role.
+ *
  * Callers pass only Companion ids the actor may already read, so this adds no visibility of its own.
  */
 export async function loadCompanionLastMessages(
@@ -228,6 +234,7 @@ export async function loadCompanionLastMessages(
       content: schema.companionTranscriptEntries.content,
       authorId: schema.companionTranscriptEntries.authorId,
       authorName: schema.profiles.name,
+      routineName: schema.companionTranscriptEntries.routineName,
       createdAt: schema.companionTranscriptEntries.createdAt,
     })
     .from(schema.companionTranscriptEntries)
@@ -244,11 +251,13 @@ export async function loadCompanionLastMessages(
   const previews = new Map<string, CompanionLastMessage>();
   for (const row of rows) {
     if (row.role !== "user" && row.role !== "assistant") continue;
+    const routineName = row.routineName ?? null;
     previews.set(row.companionId, {
-      preview: companionLastMessagePreview(row.content),
+      preview: routineName === null ? companionLastMessagePreview(row.content) : "",
       role: row.role,
       author_id: row.authorId,
       author_name: row.authorName,
+      routine_name: routineName,
       created_at: row.createdAt.toISOString(),
     });
   }

@@ -23,12 +23,14 @@ one persistent box.ascii.dev Box, one Pi daemon, and one durable chat thread. Re
   settings apply, or delete.
 
 Do not introduce generic Projects or skill runs, multi-Bot orchestration, agent-to-agent handoffs,
-routines, schedules, voice, another agent harness, another Box provider, or a deployment platform.
-Chat files are in scope and bounded: a member may attach images and documents to a message, and Pi
-may hand back images it leaves in its outbox. Nothing else is an artifact — there is no file
-library, no versioning, and no artifact surface outside the thread the file was sent in. Pi remains
-the only harness and box.ascii.dev the only runtime provider. Keep the existing Companions feature
-flag and email-domain allowlist; do not add flags that can enable an excluded product surface.
+voice, another agent harness, another Box provider, or a deployment platform. Scheduled Companion
+routines are in scope: they enqueue ordinary turns as the immutable Companion Owner and never
+contact Box or Pi from the worker. Chat files are in scope and bounded: a member may attach images
+and documents to a message, and Pi may hand back images it leaves in its outbox. Nothing else is
+an artifact — there is no file library, no versioning, and no artifact surface outside the thread
+the file was sent in. Pi remains the only harness and box.ascii.dev the only runtime provider. Keep
+the existing Companions feature flag and email-domain allowlist; do not add flags that can enable an
+excluded product surface.
 
 ## Architecture anchors
 
@@ -41,7 +43,8 @@ flag and email-domain allowlist; do not add flags that can enable an excluded pr
 - `packages/companion-runtime`: Runtime v2 state machine and durable execution engine.
 - `apps/runtime`: the only process allowed to claim runtime work or contact Box/Pi.
 - `packages/db/runtime-role-grants.sql`: split API, worker, and runtime grants.
-- `apps/worker/src/supervisors.ts`: GitHub, billing, and Skill Database cleanup only.
+- `apps/worker/src/supervisors.ts`: GitHub, billing, Skill Database cleanup, and Companion routines.
+  Routine fire is API-level turn persistence; the worker never contacts Box or Pi.
 - `apps/api/src/agentAuthRoutes.ts`: skill-facing delegated client approval.
 
 ## Invariants

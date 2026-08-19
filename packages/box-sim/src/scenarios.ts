@@ -1,7 +1,7 @@
 /**
  * Deterministic Pi RPC behaviours supported by the Box simulator.
  *
- * `normal`, `tool`, `ask_user`, `propose_config`, `retry`, and `errors` are shaped from the public Pi RPC
+ * `normal`, `tool`, `ask_user`, `propose_config`, `propose_routine`, `retry`, and `errors` are shaped from the public Pi RPC
  * documentation. The remaining scenarios deliberately inject transport faults that real Pi must
  * never emit during a healthy run. Keeping that distinction in the catalog prevents a synthetic
  * fault from quietly becoming an asserted vendor contract.
@@ -11,6 +11,7 @@ export const PI_SCENARIO_NAMES = [
   "tool",
   "ask_user",
   "propose_config",
+  "propose_routine",
   "retry",
   "errors",
   "crash",
@@ -58,6 +59,13 @@ export const PI_SCENARIOS: Readonly<Record<PiScenarioName, PiScenarioDefinition>
   propose_config: {
     name: "propose_config",
     description: "Block on the Companion propose_config confirmation, then resume the same run.",
+    provenance: "official_docs_adapted",
+    requiresExtensionUiResponse: true,
+    exitsBeforeSettlement: false,
+  },
+  propose_routine: {
+    name: "propose_routine",
+    description: "Block on the Companion propose_routine confirmation, then resume the same run.",
     provenance: "official_docs_adapted",
     requiresExtensionUiResponse: true,
     exitsBeforeSettlement: false,

@@ -140,6 +140,15 @@ async function asRuntime<T>(action: (tx: Tx) => Promise<T>): Promise<T> {
   return wrapped.value;
 }
 
+async function asWorker<T>(action: (tx: Tx) => PromiseLike<T>): Promise<T> {
+  if (!sql) throw new Error("runtime executor database is not initialized");
+  const wrapped = await sql.begin(async (tx) => {
+    await tx.unsafe(`set local role ${workerRole}`);
+    return { value: await action(tx) };
+  });
+  return wrapped.value;
+}
+
 async function asApi<T>(input: {
   orgId: string;
   actorId: string;
@@ -511,7 +520,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'companion_turn_attempts', 'companion_operations', 'companion_decision_deliveries',
             'companion_runtime_leases', 'companion_runtime_duplicate_cleanups',
             'companion_runtime_event_projections', 'companion_runtime_desktop_requests',
-            'companion_message_attachments'
+            'companion_message_attachments', 'companion_routines'
           ]) protected(table_name)
           where has_table_privilege(${runtimeRole}, 'public.' || protected.table_name, 'SELECT')
         ) as "privateTableReads",
@@ -556,7 +565,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       "public.companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)",
       "public.companion_api_update_member_state(uuid,uuid,boolean,boolean,boolean)",
       "public.companion_api_mark_thread_read(uuid,uuid)",
-      "public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface,jsonb)",
+      "public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface,jsonb,uuid,text)",
       "public.companion_api_read_attachment(uuid,uuid,uuid)",
       "public.companion_api_read_runtime(uuid,uuid)",
       "public.companion_api_list_runtime(uuid)",
@@ -566,8 +575,13 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       "public.companion_api_cancel_turn(uuid,uuid,uuid)",
       "public.companion_api_answer_decision(uuid,uuid,text,text,text)",
       "public.companion_api_answer_config_decision(uuid,uuid,text,text)",
+      "public.companion_api_answer_routine_decision(uuid,uuid,text,text,uuid,timestamp with time zone)",
       "public.companion_api_get_decision(uuid,uuid,text)",
       "public.companion_api_bump_skill_revision(uuid,uuid)",
+      "public.companion_api_list_routines(uuid,uuid)",
+      "public.companion_api_create_routine(uuid,uuid,uuid,text,text,text,text,boolean,timestamp with time zone)",
+      "public.companion_api_update_routine(uuid,uuid,uuid,text,text,text,text,boolean,timestamp with time zone)",
+      "public.companion_api_delete_routine(uuid,uuid,uuid)",
     ];
     const apiAcl = await sql<Array<{
       signature: string;
@@ -594,7 +608,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           select count(*)::int from unnest(array[
             'companion_runtime_instances', 'companion_turns', 'companion_turn_attempts',
             'companion_operations', 'companion_decision_deliveries',
-            'companion_runtime_leases'
+            'companion_runtime_leases', 'companion_routines'
           ]) protected(table_name)
           where has_table_privilege(${apiRole}, 'public.' || protected.table_name, 'SELECT')
         ) as "privateTableReads",
@@ -603,6 +617,142 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         ) as "helperCallable"
     `;
     expect(apiIsolation).toEqual({ privateTableReads: 0, helperCallable: false });
+
+    const workerRoutineSignatures = [
+      "public.companion_claim_due_routines(text,integer,integer)",
+      "public.companion_fire_routine(text,uuid,uuid,uuid,timestamp with time zone,timestamp with time zone)",
+      "public.companion_fail_routine_fire(text,uuid,uuid,text,text,timestamp with time zone)",
+    ];
+    const workerRoutineAcl = await sql<Array<{
+      signature: string;
+      api: boolean;
+      worker: boolean;
+      runtime: boolean;
+    }>>`
+      select signature,
+        has_function_privilege(${apiRole}, signature, 'EXECUTE') as api,
+        has_function_privilege(${workerRole}, signature, 'EXECUTE') as worker,
+        has_function_privilege(${runtimeRole}, signature, 'EXECUTE') as runtime
+      from unnest(${workerRoutineSignatures}::text[]) signatures(signature)
+      order by signature
+    `;
+    expect(workerRoutineAcl).toHaveLength(workerRoutineSignatures.length);
+    expect(workerRoutineAcl.every((entry) => entry.worker && !entry.api && !entry.runtime)).toBe(true);
+  });
+
+  it("fires a due Companion routine once and skips missed or piled-up instants", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    // No shared Skill or MCP account: this fixture outlives nothing, but org-wide revision bumps
+    // count every Companion that selects the resource, and routines do not exercise that path.
+    const fixture = await createCompanion({
+      workspaceRole: "viewer",
+      selectedSkillIds: [],
+      selectedMcpAccountIds: [],
+    });
+    try {
+    const missedId = randomUUID();
+    const standupId = randomUUID();
+    const nextFire = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const create = (routineId: string, name: string) => asApi({
+      orgId: ids.orgA,
+      actorId: ids.ownerA,
+      action: (tx: Tx) => tx`
+        select public.companion_api_create_routine(
+          ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${routineId}::uuid,
+          ${name}, 'Write the standup.', '0 9 * * 1-5', 'UTC', true,
+          ${nextFire}::timestamptz
+        ) as routine
+      `,
+    });
+    await create(missedId, "Missed");
+    await create(standupId, "Standup");
+    await expect(asApi({
+      orgId: ids.orgA,
+      actorId: ids.viewerA,
+      action: (tx) => tx`
+        select public.companion_api_create_routine(
+          ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${randomUUID()}::uuid,
+          'Viewer', 'Write the standup.', '0 9 * * 1-5', 'UTC', true,
+          ${nextFire}::timestamptz
+        )
+      `,
+    })).rejects.toMatchObject({ code: "42501" });
+
+    await sql`
+      update companion_routines
+      set next_fire_at = now() - interval '15 minutes'
+      where id = ${missedId}::uuid
+    `;
+    const missedClaim = await asWorker((tx) => tx<Array<{
+      routineId: string;
+      scheduledFor: Date;
+    }>>`
+      select routine_id::text as "routineId", scheduled_for as "scheduledFor"
+      from public.companion_claim_due_routines('routine-worker', 25, 60)
+    `);
+    expect(missedClaim).toEqual([expect.objectContaining({ routineId: missedId })]);
+    const missedFire = await asWorker((tx) => tx<Array<{ outcome: string }>>`
+      select outcome
+      from public.companion_fire_routine(
+        'routine-worker', ${ids.orgA}::uuid, ${missedId}::uuid, ${randomUUID()}::uuid,
+        ${new Date(missedClaim[0]!.scheduledFor).toISOString()}::timestamptz,
+        now() + interval '1 hour'
+      )
+    `);
+    expect(missedFire).toEqual([{ outcome: "skipped_missed" }]);
+
+    await sql`
+      update companion_routines
+      set next_fire_at = now()
+      where id = ${standupId}::uuid
+    `;
+    const due = await asWorker((tx) => tx<Array<{
+      routineId: string;
+      scheduledFor: Date;
+    }>>`
+      select routine_id::text as "routineId", scheduled_for as "scheduledFor"
+      from public.companion_claim_due_routines('routine-worker', 25, 60)
+    `);
+    expect(due).toEqual([expect.objectContaining({ routineId: standupId })]);
+    const fired = await asWorker((tx) => tx<Array<{
+      outcome: string;
+      replayed: boolean;
+    }>>`
+      select outcome, replayed
+      from public.companion_fire_routine(
+        'routine-worker', ${ids.orgA}::uuid, ${standupId}::uuid, ${randomUUID()}::uuid,
+        ${new Date(due[0]!.scheduledFor).toISOString()}::timestamptz,
+        now() + interval '1 hour'
+      )
+    `);
+    expect(fired).toEqual([{ outcome: "fired", replayed: false }]);
+
+    await sql`
+      update companion_routines
+      set next_fire_at = now(), claimed_by = null, lease_expires_at = null
+      where id = ${standupId}::uuid
+    `;
+    const piled = await asWorker((tx) => tx<Array<{
+      routineId: string;
+      scheduledFor: Date;
+    }>>`
+      select routine_id::text as "routineId", scheduled_for as "scheduledFor"
+      from public.companion_claim_due_routines('routine-worker', 25, 60)
+    `);
+    expect(piled).toEqual([expect.objectContaining({ routineId: standupId })]);
+    const skipped = await asWorker((tx) => tx<Array<{ outcome: string }>>`
+      select outcome
+      from public.companion_fire_routine(
+        'routine-worker', ${ids.orgA}::uuid, ${standupId}::uuid, ${randomUUID()}::uuid,
+        ${new Date(piled[0]!.scheduledFor).toISOString()}::timestamptz,
+        now() + interval '1 hour'
+      )
+    `);
+    expect(skipped).toEqual([{ outcome: "skipped_pileup" }]);
+    } finally {
+      await sql`delete from companion_routines where companion_id = ${fixture.companionId}::uuid`;
+      await removeCompanion(fixture.companionId);
+    }
   });
 
   it("atomically accepts only one initial provider selection", async () => {

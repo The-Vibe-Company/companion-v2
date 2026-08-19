@@ -124,6 +124,7 @@ function flakyControlPlane() {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
+    if (url.includes("/routines")) return json({ routines: [] });
     if (url.includes("/thread")) {
       if (!online && (method === "POST" || method === "GET")) {
         throw new TypeError("Failed to fetch");

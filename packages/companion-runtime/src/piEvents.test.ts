@@ -696,4 +696,114 @@ describe("Pi journal validation and projection", () => {
     expect(serialized).not.toContain(secret);
     expect(serialized).not.toContain("can_write_skills");
   });
+
+  it("projects a valid routine proposal and ignores malformed, redacted, or mis-method ones", () => {
+    const proposal = {
+      kind: "routine" as const,
+      name: "Standup",
+      prompt: "Write the standup.",
+      cron: "0 9 * * 1-5",
+      timezone: "UTC",
+    };
+    const summary = "Schedule Standup each weekday at 9am";
+    const now = new Date("2026-08-19T12:00:00.000Z");
+    const secret = "opaque-routine-secret";
+    const validMessage = JSON.stringify({ summary, proposal });
+    const page = validatePiJournalRead({
+      value: {
+        events: [
+          {
+            sequence: 1,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "extension_ui_request",
+              id: "routine-1",
+              method: "confirm",
+              title: "companion:routine:Standup",
+              message: validMessage,
+            },
+          },
+          {
+            sequence: 2,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "extension_ui_request",
+              id: "routine-malformed",
+              method: "confirm",
+              title: "companion:routine:Standup",
+              message: "{not json",
+            },
+          },
+          {
+            sequence: 3,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "extension_ui_request",
+              id: "routine-wrong-method",
+              method: "input",
+              title: "companion:routine:Standup",
+              message: validMessage,
+            },
+          },
+          {
+            sequence: 4,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "extension_ui_request",
+              id: "routine-secret",
+              method: "confirm",
+              title: "companion:routine:Standup",
+              message: JSON.stringify({
+                summary: `Schedule ${secret}`,
+                proposal,
+              }),
+            },
+          },
+        ],
+        nextCursor: 4,
+        acknowledgedCursor: 0,
+        hasMore: false,
+      },
+      after: 0n,
+      attemptId: ATTEMPT_ID,
+      invocationId: PI_INVOCATION_ID,
+    });
+
+    const classified = classifyPiJournalPage(
+      page,
+      now,
+      createRuntimeVisibleTextRedactor([secret]),
+    );
+
+    expect(classified.unknownEvents).toBe(3);
+    expect(classified.needsInput).toBe(true);
+    expect(classified.projections).toEqual([
+      expect.objectContaining({
+        type: "decision",
+        entry_key: "decision:1",
+        request_key: "routine-1",
+        request_kind: "routine_proposal",
+        content: summary,
+        proposal,
+        decision: expect.objectContaining({
+          kind: "routine",
+          name: "routine",
+          title: summary,
+          status: "pending",
+          proposal,
+        }),
+      }),
+    ]);
+    const serialized = JSON.stringify(classified.projections, (_key, value) =>
+      typeof value === "bigint" ? value.toString() : value);
+    expect(serialized).not.toContain(secret);
+  });
 });

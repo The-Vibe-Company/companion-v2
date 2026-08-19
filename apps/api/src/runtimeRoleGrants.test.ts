@@ -21,6 +21,7 @@ describe("Skills Hub runtime-role grants", () => {
       "companion_operations",
       "companion_decision_deliveries",
       "companion_runtime_leases",
+      "companion_routines",
     ]) {
       expect(sql).toContain(`'${table}'`);
     }
@@ -115,8 +116,14 @@ describe("Skills Hub runtime-role grants", () => {
       "companion_api_cancel_turn(uuid,uuid,uuid)",
       "companion_api_answer_decision(uuid,uuid,text,text,text)",
       "companion_api_answer_config_decision(uuid,uuid,text,text)",
+      "companion_api_answer_routine_decision(uuid,uuid,text,text,uuid,timestamp with time zone)",
       "companion_api_get_decision(uuid,uuid,text)",
       "companion_api_bump_skill_revision(uuid,uuid)",
+      "companion_api_list_routines(uuid,uuid)",
+      "companion_api_create_routine(uuid,uuid,uuid,text,text,text,text,boolean,timestamp with time zone)",
+      "companion_api_update_routine(uuid,uuid,uuid,text,text,text,text,boolean,timestamp with time zone)",
+      "companion_api_delete_routine(uuid,uuid,uuid)",
+      "companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface,jsonb,uuid,text)",
     ]) {
       expect(apiBlock).toContain(`'public.${signature}'::regprocedure`);
     }

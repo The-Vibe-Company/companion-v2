@@ -21,6 +21,7 @@ simulator; lifecycle commands must never execute against the CI host.
 | Agent Auth grants only exact-workspace Skills Hub capabilities | Mixed workspace approval or hosted-runtime access | HTTP + compatibility + PostgreSQL | Broaden the capability registry |
 | Agent Auth child PATs inherit only the active exact-workspace grant snapshot | PAT-to-PAT minting, caller-chosen scope/org, expired inheritance, target mismatch, or plaintext persistence | Contracts + Core + HTTP + PostgreSQL + bundled client | Remove provenance, target binding, pipe-only handoff, or redaction |
 | One accepted message creates exactly one durable turn | Duplicate message/turn after client or proxy retry | Contracts + HTTP + PostgreSQL | Remove `(companion_id, client_message_id)` uniqueness |
+| A due Companion routine fires exactly once per scheduled instant | Duplicate turn after worker retry, catch-up after flag-off, or pileup on an in-flight routine turn | Core + worker + PostgreSQL | Drop uuidv5 stamping, skip-missed grace, or the active-turn fence |
 | The API persists runtime intent but never contacts Box/Pi | Lost work after `202`, request-held lifecycle, or duplicate executor | HTTP + provider spy + PostgreSQL | Construct the Box adapter in an API route |
 | Only one attempt runs per Companion while later turns stay ordered | Concurrent prompts or queue reordering | Runtime unit + PostgreSQL + simulator | Remove running-attempt uniqueness or queue ordering |
 | Runtime lease epoch fences stale writers | A dead replica checkpoints or settles after takeover | Two runtime replicas + PostgreSQL | Remove epoch from checkpoint/settle predicate |
@@ -96,6 +97,7 @@ Run API + worker + runtime + web + migrated PostgreSQL + Box/Pi simulator and pr
   prompt or Box;
 - two concurrent sends execute in order, one Pi attempt at a time;
 - `ask_user` persists a decision and resumes the same attempt;
+- `propose_routine` projects a card, approve creates the row, and deny/expiry leave none;
 - provider failure, Pi silence, crash loop, unknown event, and oversized line end visibly;
 - a vision model reads the checked-in image fixture and a text-only model fails explicitly;
 - stop then send, explicit Pi restart, explicit Full Box restart, and deletion during a queue obey
@@ -132,8 +134,10 @@ APP_URL=http://127.0.0.1:<port> pnpm browser:smoke
 
 Changed Companion paths need focused manual `agent-browser` checks. Verify truthful status,
 PostgreSQL-only Viewer reads, queue count, input-needed cards, interrupted Retry/Cancel copy, explicit
-Full Box confirmation, attachment chips and inline images inside the message they belong to, and no
-excluded voice, routine, schedule, multi-Bot, harness, deployment, or file-library chrome.
+Full Box confirmation, attachment chips and inline images inside the message they belong to, a
+routine fire that shows `Routine: <name>` with the prompt hidden in the thread and on the list row,
+a context-panel routine create,
+and no excluded voice, multi-Bot, harness, deployment, or file-library chrome.
 
 ## Change verification
 

@@ -26,6 +26,7 @@ function entry(overrides: Partial<CompanionTranscriptEntry> = {}): CompanionTran
     decision: null,
     attachments: [],
     reasoning: null,
+    routine: null,
     created_at: now,
     ...overrides,
   };

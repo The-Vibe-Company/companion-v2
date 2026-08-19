@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import {
   companionConfigProposalMessageSchema,
+  companionRoutineProposalMessageSchema,
   companionToolRunKind,
   type CompanionConfigProposal,
+  type CompanionRoutineProposal,
 } from "@companion/contracts";
 import {
   genericRuntimeVisibleTextRedactor,
@@ -104,12 +106,12 @@ export type RuntimePiProjection =
     type: "decision";
     entry_key: string;
     request_key: string;
-    request_kind: "question" | "confirmation" | "config_proposal";
+    request_kind: "question" | "confirmation" | "config_proposal" | "routine_proposal";
     content: string;
-    proposal?: CompanionConfigProposal;
+    proposal?: CompanionConfigProposal | CompanionRoutineProposal;
     decision: {
       request_id: string;
-      kind: "shell" | "file" | "question" | "config";
+      kind: "shell" | "file" | "question" | "config" | "routine";
       name: string;
       title: string;
       detail: string | null;
@@ -119,7 +121,7 @@ export type RuntimePiProjection =
       decided_by_name: null;
       decided_at: null;
       expires_at: string;
-      proposal: CompanionConfigProposal | null;
+      proposal: CompanionConfigProposal | CompanionRoutineProposal | null;
     };
     expires_at: string;
   }
@@ -251,7 +253,7 @@ export function validatePiJournalRead(input: {
   return { events, nextCursor, acknowledgedCursor, hasMore: page.hasMore };
 }
 
-const DECISION_TITLE = /^companion:(shell|file|question|config):([A-Za-z0-9._-]{1,120})$/;
+const DECISION_TITLE = /^companion:(shell|file|question|config|routine):([A-Za-z0-9._-]{1,120})$/;
 const MAX_ASSISTANT = 100_000;
 const MAX_REASONING = 16_000;
 const MAX_REASONING_BYTES = 48_000;
@@ -413,6 +415,26 @@ function toolProjection(
   };
 }
 
+function parseRoutineProposalMessage(
+  message: unknown,
+  redact: RuntimeVisibleTextRedactor,
+): { summary: string; proposal: CompanionRoutineProposal } | null {
+  if (typeof message !== "string") return null;
+  const raw = message.trim();
+  if (!raw || redact(raw) !== raw) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const envelope = companionRoutineProposalMessageSchema.safeParse(parsed);
+  if (!envelope.success) return null;
+  const serialized = JSON.stringify(envelope.data);
+  if (redact(serialized) !== serialized) return null;
+  return envelope.data;
+}
+
 function parseConfigProposalMessage(
   message: unknown,
   redact: RuntimeVisibleTextRedactor,
@@ -445,25 +467,33 @@ function decisionProjection(
   const title = typeof event.title === "string" ? event.title.trim() : "";
   const parsed = DECISION_TITLE.exec(title);
   if (!requestKey || !parsed) return null;
-  const decisionKind = parsed[1] as "shell" | "file" | "question" | "config";
+  const decisionKind = parsed[1] as "shell" | "file" | "question" | "config" | "routine";
   const requestKind = decisionKind === "question"
     ? "question"
     : decisionKind === "config"
       ? "config_proposal"
-      : "confirmation";
+      : decisionKind === "routine"
+        ? "routine_proposal"
+        : "confirmation";
   if (
     (requestKind === "question" && method !== "input" && method !== "editor")
     || (requestKind === "confirmation" && method !== "confirm" && method !== "select")
     || (requestKind === "config_proposal" && method !== "confirm")
+    || (requestKind === "routine_proposal" && method !== "confirm")
   ) return null;
   const configMessage = requestKind === "config_proposal"
     ? parseConfigProposalMessage(event.message, redact)
     : null;
+  const routineMessage = requestKind === "routine_proposal"
+    ? parseRoutineProposalMessage(event.message, redact)
+    : null;
   if (requestKind === "config_proposal" && !configMessage) return null;
+  if (requestKind === "routine_proposal" && !routineMessage) return null;
+  const proposalMessage = configMessage ?? routineMessage;
   const detailSource = requestKind === "question"
     ? event.placeholder
-    : requestKind === "config_proposal"
-      ? configMessage!.summary
+    : proposalMessage
+      ? proposalMessage.summary
       : event.message;
   const detail = typeof detailSource === "string" && detailSource.trim()
     ? bounded(redact(detailSource.trim()), MAX_DECISION_DETAIL)
@@ -486,7 +516,7 @@ function decisionProjection(
     request_key: requestKey,
     request_kind: requestKind,
     content: titleText,
-    ...(configMessage ? { proposal: configMessage.proposal } : {}),
+    ...(proposalMessage ? { proposal: proposalMessage.proposal } : {}),
     decision: {
       request_id: requestKey,
       kind: decisionKind,
@@ -499,7 +529,7 @@ function decisionProjection(
       decided_by_name: null,
       decided_at: null,
       expires_at: expiresAt,
-      proposal: configMessage?.proposal ?? null,
+      proposal: proposalMessage?.proposal ?? null,
     },
     expires_at: expiresAt,
   };

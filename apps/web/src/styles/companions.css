@@ -1668,6 +1668,52 @@ button.chat-box:focus-visible {
   color: var(--color-faint);
 }
 
+.chat-context__routines {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-context__routine {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chat-context__routine-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat-context__routine-name {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.chat-context__routine-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.chat-context__routine-error {
+  color: var(--color-danger, #b42318);
+  font-size: 11px;
+}
+
+.chat-routine-header {
+  margin: 0;
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  background: var(--color-surface-raised);
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
 /* The screen as a card rather than a pane: a fixed 16:10 tile that keeps the panel's rhythm whatever
    the Box's own resolution turns out to be. */
 .chat-context__screen {

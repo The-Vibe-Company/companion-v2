@@ -20,6 +20,7 @@ type TranscriptRow = {
   content: string;
   authorId: string | null;
   authorName: string | null;
+  routineName?: string | null;
   createdAt: Date;
 };
 
@@ -115,6 +116,7 @@ describe("companion last-message projection", () => {
       role: "assistant",
       author_id: null,
       author_name: null,
+      routine_name: null,
       created_at: "2026-08-14T09:05:00.000Z",
     });
     expect(previews.get(MILO)).toEqual({
@@ -122,6 +124,7 @@ describe("companion last-message projection", () => {
       role: "user",
       author_id: "user-2",
       author_name: "Ada Lovelace",
+      routine_name: null,
       created_at: "2026-08-14T08:00:00.000Z",
     });
   });
@@ -141,6 +144,31 @@ describe("companion last-message projection", () => {
     ]);
 
     expect(await loadCompanionLastMessages(database, ORG, [LUNA])).toEqual(new Map());
+  });
+
+  it("names the routine instead of previewing a prompt no member wrote", async () => {
+    // A routine fire is recorded as the Companion Owner, so an unmasked preview would read on every
+    // reader's list as a line the Owner had just typed into the thread.
+    const { database } = fakeDb([
+      {
+        companionId: LUNA,
+        role: "user",
+        content: "Write the standup summary.",
+        authorId: "user-2",
+        authorName: "Ada Lovelace",
+        routineName: "Daily standup",
+        createdAt: new Date("2026-08-14T09:05:00.000Z"),
+      },
+    ]);
+
+    expect(await loadCompanionLastMessages(database, ORG, [LUNA])).toEqual(new Map([[LUNA, {
+      preview: "",
+      role: "user",
+      author_id: "user-2",
+      author_name: "Ada Lovelace",
+      routine_name: "Daily standup",
+      created_at: "2026-08-14T09:05:00.000Z",
+    }]]));
   });
 });
 
@@ -255,6 +283,7 @@ describe("companion list previews", () => {
       role: "user",
       author_id: actor.id,
       author_name: "Ada",
+      routine_name: null,
       created_at: "2026-08-14T09:30:00.000Z",
     });
     // A thread nobody has written in yet says so, rather than borrowing another Companion's line.
