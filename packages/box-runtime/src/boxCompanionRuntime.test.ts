@@ -1,6 +1,12 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS,
+  COMPANION_ROUTINE_MAX_PER_COMPANION,
+  COMPANION_ROUTINE_MIN_INTERVAL_MS,
+  COMPANION_TOOL_RUN_TIMEOUT_MS,
+} from "@companion/contracts";
 import { COMPANION_RUNTIME_ERROR_MAX_LENGTH } from "@companion/core";
 
 import {
@@ -549,11 +555,64 @@ describe("default Pi packages on the Box disk", () => {
 
 describe("staged Companion instructions", () => {
   it("always tells Pi how to show an image, with or without a persona", () => {
-    expect(composedInstructions("Answer briefly.")).toBe(
-      `Answer briefly.\n\n${COMPANION_OUTBOX_INSTRUCTIONS}\n`,
+    expect(composedInstructions("Answer briefly.")).toContain(COMPANION_OUTBOX_INSTRUCTIONS);
+    expect(composedInstructions(null)).toContain(COMPANION_OUTBOX_INSTRUCTIONS);
+    expect(composedInstructions("   ")).toContain(COMPANION_OUTBOX_INSTRUCTIONS);
+    expect(composedInstructions("   ")).not.toContain("# This Companion");
+  });
+
+  it("places a persona exactly once, in the trailing section, and omits that section when absent", () => {
+    const persona = "Answer briefly.";
+    const withPersona = composedInstructions(persona);
+    expect(withPersona.endsWith(`# This Companion\n\n${persona}\n`)).toBe(true);
+    expect(withPersona.indexOf(persona)).toBe(withPersona.lastIndexOf(persona));
+    expect(composedInstructions(null)).not.toContain("# This Companion");
+    expect(composedInstructions(undefined)).not.toContain("# This Companion");
+  });
+
+  it("includes Skills Hub and the config catalog on web and mobile_web, not on native_mobile", () => {
+    for (const surface of ["web", "mobile_web"] as const) {
+      const text = composedInstructions(null, surface);
+      expect(text).toContain("Skills Hub");
+      expect(text).toContain("config-catalog.json");
+      expect(text).toContain("- Plugins:");
+      expect(text).toContain("- Routines:");
+      expect(text).toContain(COMPANION_OUTBOX_INSTRUCTIONS);
+      expect(text).toContain("ask_user");
+      expect(text).toContain("propose_config");
+      expect(text).toContain("propose_routine");
+    }
+    const native = composedInstructions(null, "native_mobile");
+    expect(native).not.toContain("Skills Hub");
+    expect(native).not.toContain("config-catalog.json");
+    expect(native).not.toContain("- Plugins:");
+    expect(native).not.toContain("- Skills:");
+    expect(native).toContain("- Routines:");
+    expect(native).toContain(COMPANION_OUTBOX_INSTRUCTIONS);
+    expect(native).toContain("ask_user");
+    expect(native).toContain("propose_config");
+    expect(native).toContain("propose_routine");
+  });
+
+  it("interpolates tool-run timeout constants rather than literals", () => {
+    const text = composedInstructions();
+    expect(text).toContain(
+      `stopped after ${COMPANION_TOOL_RUN_TIMEOUT_MS / 1_000} seconds, or ${COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS / 60_000} minutes for shell commands and subagents`,
     );
-    expect(composedInstructions(null)).toBe(`${COMPANION_OUTBOX_INSTRUCTIONS}\n`);
-    expect(composedInstructions("   ")).toBe(`${COMPANION_OUTBOX_INSTRUCTIONS}\n`);
+    expect(text).toContain(
+      `At most ${COMPANION_ROUTINE_MAX_PER_COMPANION} per Companion, at least ${COMPANION_ROUTINE_MIN_INTERVAL_MS / 60_000} minutes apart.`,
+    );
+  });
+
+  it("does not tell Pi that memory is wiped or that tool runs are invisible", () => {
+    const text = composedInstructions();
+    expect(text).toContain("~/.companion/runtime/memory");
+    expect(text).toContain("Staging does not wipe it.");
+    expect(text).toContain("~/.companion/pi and ~/.companion/runtime/state");
+    expect(text).not.toContain("The person does not see your tool calls");
+    expect(text).not.toContain("or your reasoning");
+    expect(text).toContain("compact cards for each tool run");
+    expect(text).toContain("collapsible block");
   });
 });
 

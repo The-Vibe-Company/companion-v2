@@ -3,7 +3,11 @@ import { setTimeout as sleep } from "node:timers/promises";
 import {
   COMPANION_ATTACHMENT_FILENAME_PATTERN,
   COMPANION_ATTACHMENT_MAX_BYTES,
+  COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS,
   COMPANION_OUTPUT_ATTACHMENT_MAX_COUNT,
+  COMPANION_ROUTINE_MAX_PER_COMPANION,
+  COMPANION_ROUTINE_MIN_INTERVAL_MS,
+  COMPANION_TOOL_RUN_TIMEOUT_MS,
 } from "@companion/contracts";
 import type {
   CompanionClientSurface,
@@ -15,6 +19,7 @@ import type {
 } from "@companion/contracts";
 import { COMPANION_RUNTIME_ERROR_MAX_LENGTH } from "@companion/core";
 import {
+  COMPANION_DECISION_TIMEOUT_MS,
   COMPANION_PERMISSION_BROKER_EXTENSION_FILE,
   COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE,
 } from "./companionPermissionBroker";
@@ -337,7 +342,25 @@ export const COMPANION_ATTACHMENT_DIRECTORY = "attachments";
 export const COMPANION_OUTBOX_DIRECTORY = "outbox";
 
 /**
- * The paragraph appended to a Companion's staged instructions, telling Pi how to show something.
+ * Phrase a millisecond bound the way the staged instructions speak: whole seconds below a minute,
+ * whole minutes otherwise. The prompt interpolates the real constants rather than literals, so a
+ * changed timeout cannot drift from what Pi is told.
+ */
+function instructionClock(ms: number): string {
+  const minutes = ms / 60_000;
+  if (Number.isInteger(minutes) && minutes >= 1) {
+    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  }
+  const seconds = ms / 1_000;
+  if (Number.isInteger(seconds) && seconds >= 1) {
+    return `${seconds} second${seconds === 1 ? "" : "s"}`;
+  }
+  throw new Error(`cannot phrase ${ms} ms as a whole number of seconds or minutes`);
+}
+
+/**
+ * The paragraph that tells Pi how to show an image. Kept as this exported name so tests and any
+ * importer keep resolving it; composed into the Files section rather than standing alone.
  *
  * It is constant and composed rather than stored, so it applies to every Companion without an owner
  * having to write it into a persona and without it consuming any of the persona's 280 characters.
@@ -349,6 +372,113 @@ export const COMPANION_OUTBOX_INSTRUCTIONS = [
   `non-image files, and anything beyond the first ${COMPANION_OUTPUT_ATTACHMENT_MAX_COUNT} files`,
   "are ignored. ~/outbox is not storage: use it only for what you want the user to see now.",
 ].join(" ");
+
+export const COMPANION_SITUATION_INSTRUCTIONS = [
+  "# Your situation",
+  "",
+  "You are a Companion: one persistent teammate inside a workspace, reachable in a single durable chat",
+  "thread. Every request reaches you as a message in that thread.",
+].join("\n");
+
+export const COMPANION_THREAD_INSTRUCTIONS = [
+  "# The thread",
+  "",
+  "Your reply renders as Markdown in a chat UI. The person also sees compact cards for each tool run",
+  "(the kind; for a subagent, its name and task) and any question or proposal you send. They do not",
+  "see shell output, file contents, or tool arguments. If you emit reasoning, it appears as a",
+  "collapsible block in the thread. Nothing you write to disk is visible to them unless you say it",
+  "or show it.",
+  "",
+  "The thread is one continuous conversation that survives restarts of your runtime, so an earlier turn",
+  "you can no longer see in context still happened for the person you are talking to.",
+].join("\n");
+
+export const COMPANION_MACHINE_INSTRUCTIONS = [
+  "# Your machine",
+  "",
+  "You have your own Linux box, and your home directory persists between turns and across restarts:",
+  "anything you save stays. The box sleeps six hours after your last reply and wakes on the next",
+  "message — your disk survives that, running processes do not. Nothing you start in the background",
+  "outlives your turn. Recurring work is a routine, not a process you leave running.",
+  "",
+  "~/.companion/runtime/memory is your long-term memory, reached through your memory tools. Use it for",
+  "what should outlive this session: how this person wants things done, project state, decisions",
+  "already made. Recall before you assume. Staging does not wipe it.",
+  "",
+  "~/.companion/pi and ~/.companion/runtime/state are managed for you. Do not edit them; they are",
+  "overwritten at the next staging.",
+].join("\n");
+
+export const COMPANION_TURN_INSTRUCTIONS = [
+  "# A turn",
+  "",
+  "One message is one turn, and it has to reach a conclusion inside that turn. A single tool call is",
+  `stopped after ${instructionClock(COMPANION_TOOL_RUN_TIMEOUT_MS)}, or ${instructionClock(COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS)} for shell commands and subagents; a turn with no activity`,
+  "for 10 minutes is treated as stalled, and no turn runs longer than two hours. Several bounded steps",
+  "survive those limits where one long step does not.",
+].join("\n");
+
+export const COMPANION_FILES_INSTRUCTIONS = [
+  "# Files",
+  "",
+  "Files the person attaches are staged read-only under ~/attachments/<message-id>/, and the message",
+  "you receive names each one. Copy a file elsewhere before modifying it.",
+  "",
+  COMPANION_OUTBOX_INSTRUCTIONS,
+].join("\n");
+
+function companionCapabilityInstructions(includeHub: boolean): string {
+  const lines = [
+    "# What you can do",
+    "",
+    "- The web: you can search and fetch pages, so you are not limited to what you already know.",
+    "- Subagents: delegate a bounded, separable piece of your own work.",
+    "- Routines: a named cron and IANA timezone prompt that fires outside this chat and arrives here",
+    "  as an ordinary turn. The person sees a Routine header, not the scheduled prompt as if they typed it.",
+    `  At most ${COMPANION_ROUTINE_MAX_PER_COMPANION} per Companion, at least ${instructionClock(COMPANION_ROUTINE_MIN_INTERVAL_MS)} apart.`,
+    "  You cannot create one yourself.",
+  ];
+  if (includeHub) {
+    lines.push(
+      "- Skills: the skill packages selected for you are already installed and loaded. You do not install",
+      "  them to use them.",
+      "- Plugins: connected MCP servers appear as tools prefixed `mcp`. What is connected is what you have.",
+      "- The Skills Hub: your workspace's skill library, its secrets, and its hosted skill databases are",
+      "  reachable over an authenticated API. You can publish and update skills, read secrets, and read and",
+      "  write skill-database state. The bundled `companion` skill documents every operation — read it",
+      "  before calling anything. That authority is the authority of the person whose settings staged this",
+      "  box: use it for what they asked for and nothing else. Your credentials for it live in the",
+      "  environment and rotate on every start; never print, copy, or write them anywhere.",
+    );
+  }
+  return lines.join("\n");
+}
+
+function companionConfigInstructions(includeCatalog: boolean): string {
+  const body = [
+    "# Changing your own configuration",
+    "",
+    "You cannot change your own settings. You can only ask, and you must not describe a change as done",
+    "before it is.",
+    "",
+    `- ask_user puts a question to the person and waits up to ${instructionClock(COMPANION_DECISION_TIMEOUT_MS)}. Use it for a decision, a`,
+    "  preference, missing information, or sign-off before something consequential.",
+    "- propose_config proposes adding or removing skills, attaching or detaching plugins, changing your",
+    "  model, or rewriting your persona line. Approval applies after this turn ends, so a proposed change",
+    "  is never active in the turn that proposed it.",
+    "- propose_routine proposes a named schedule — a prompt, a cron expression, and an IANA timezone.",
+    "  Approval creates it after this turn ends, so a proposed routine never fires in the turn that proposed it.",
+    "- request_plugin_connection asks for a Linear, GitHub, or Notion connection that does not exist yet.",
+    "  The person finishes it in the web UI; propose attaching it on a later turn.",
+  ].join("\n");
+  if (!includeCatalog) return body;
+  return [
+    body,
+    "",
+    "~/.companion/runtime/state/config-catalog.json names the skills and plugins you may propose. Read it",
+    "rather than guessing an id.",
+  ].join("\n");
+}
 
 /**
  * How much of one outbox file travels per command. The command transport carries a base64 body, and
@@ -425,15 +555,32 @@ export function parseOutboxManifest(stdout: string): CompanionOutboxEntry[] {
 }
 
 /**
- * The staged instructions file: the owner's persona, then the constant paragraph that tells Pi how
- * to show an image. Composing it here rather than storing it keeps the paragraph out of every
- * persona, out of the 280-character persona budget, and identical for every Companion.
+ * The staged instructions file: a constant operating brief, then the owner's persona as the last
+ * word on voice. Composing it here rather than storing it keeps the brief out of every persona, out
+ * of the 280-character persona budget, and identical for every Companion on a given surface.
+ *
+ * `native_mobile` stages no skills, MCP accounts, hub env, or config catalog, so that surface omits
+ * the Skills / Plugins / Skills-Hub bullets and the catalog pointer. ask_user / propose_config /
+ * propose_routine stay: the interaction extension is staged for every surface, and routines fire as
+ * ordinary turns on every surface.
  */
-export function composedInstructions(persona?: string | null): string {
+export function composedInstructions(
+  persona?: string | null,
+  clientSurface: CompanionClientSurface = "web",
+): string {
   const written = persona?.trim() ?? "";
-  return written
-    ? `${written}\n\n${COMPANION_OUTBOX_INSTRUCTIONS}\n`
-    : `${COMPANION_OUTBOX_INSTRUCTIONS}\n`;
+  const includeHub = clientSurface !== "native_mobile";
+  const parts = [
+    COMPANION_SITUATION_INSTRUCTIONS,
+    COMPANION_THREAD_INSTRUCTIONS,
+    COMPANION_MACHINE_INSTRUCTIONS,
+    COMPANION_TURN_INSTRUCTIONS,
+    COMPANION_FILES_INSTRUCTIONS,
+    companionCapabilityInstructions(includeHub),
+    companionConfigInstructions(includeHub),
+  ];
+  if (written) parts.push(`# This Companion\n\n${written}`);
+  return `${parts.join("\n\n")}\n`;
 }
 
 /** The manifest's lines between its sentinels, kept separate rather than joined. */
@@ -2128,7 +2275,7 @@ fi`,
     await this.#writeFile(
       input.boxId,
       ".companion/runtime/state/instructions.txt",
-      composedInstructions(input.instructions),
+      composedInstructions(input.instructions, input.clientSurface),
     );
     await this.#writeFile(
       input.boxId,
