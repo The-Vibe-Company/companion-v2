@@ -28,7 +28,7 @@ export function Dialog({
   closeDisabled = false,
   className = "og-dialog",
 }: {
-  icon: string;
+  icon: string | ReactNode;
   iconDanger?: boolean;
   title: string;
   desc: string;
@@ -87,7 +87,7 @@ export function Dialog({
       <div className={className} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={descriptionId} ref={dialogRef} tabIndex={-1}>
         <div className="og-dialog__head">
           <span className={"og-dialog__ic" + (iconDanger ? " og-dialog__ic--danger" : "")}>
-            <Icon name={icon} size={17} />
+            {typeof icon === "string" ? <Icon name={icon} size={17} /> : icon}
           </span>
           <div style={{ flex: 1 }}>
             <h3 className="og-dialog__t" id={titleId}>{title}</h3>
