@@ -174,6 +174,13 @@ Layout 14 installs a small Node broker under systemd between runtime commands an
 - malformed or oversized lines advance without persisting their raw content;
 - unknown event types are counted and ignored rather than treated as user-fatal errors.
 
+Staging writes a composed operating brief to `~/.companion/runtime/state/instructions.txt` and Pi
+receives it as `--append-system-prompt`. The brief describes the runtime contract Pi is held to —
+the thread, the durable disk, turn bounds, tools, routines, and the ask/propose surface — not how
+to speak.
+The owner's persona remains one operator-authored line rather than a system prompt, and it is
+appended last so it has the final word on voice.
+
 Before `prompt`, runtime requires a correlated `get_state` response showing idle Pi and no queued
 messages. It omits Pi `streamingBehavior`, so a race is refused rather than hidden as a follow-up.
 Only explicitly supported terminal event shapes settle a turn.

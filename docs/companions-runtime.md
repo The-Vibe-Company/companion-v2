@@ -407,9 +407,17 @@ The prompt Pi receives is the member's message plus a deterministic suffix namin
 its content type, and its size. The suffix is composed at dispatch and never stored, so the
 transcript keeps what the member wrote and the 16 KB message cap is unchanged.
 
-**Outputs.** `~/outbox` and one constant instruction paragraph telling Pi to drop an image there are
-added within layout 14 rather than as a new layout version: the runtime creates and empties the
-directory before every dispatch, so a Box provisioned before this change gains it on its next turn
+**Staged instructions.** Every staging composes `~/.companion/runtime/state/instructions.txt` from a
+constant operating brief plus the owner's persona line. The file carries no credential and no member
+data. Pi receives it as `--append-system-prompt`. It lives at the same path within layout 14, so an
+existing Box gains the current brief at its next staging (`start`, `restart_box`, or
+`apply_settings`) without a forced restage; `restart_pi` re-reads the file without restaging. Native
+mobile receives a narrowed brief that omits Skills, plugins, the Skills Hub, and the config-catalog
+pointer, because that surface stages none of them. Routines and `propose_routine` stay on every
+surface: the interaction extension is staged for all of them, and a fire is an ordinary turn.
+
+**Outputs.** `~/outbox` is created and emptied before every dispatch, still within layout 14 rather
+than as a new layout version, so a Box provisioned before this change gains it on its next turn
 without a forced restage, and the attempt state machine's layout gate is unchanged.
 
 After `agent_settled`, and before the turn settles, runtime harvests at most ten images of at most

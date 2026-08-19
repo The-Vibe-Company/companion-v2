@@ -204,6 +204,57 @@ setInterval(() => {}, 1_000);
   });
 });
 
+describe("Pi broker --append-system-prompt", () => {
+  async function spawnedPiArgv(instructions: string | null): Promise<string[]> {
+    const home = temporaryDirectory("pi-broker-argv-");
+    const runtimeRoot = join(home, ".companion", "runtime");
+    const brokerPath = join(home, "companion-pi-broker.mjs");
+    const piPath = join(home, "fake-pi.mjs");
+    const piArgvPath = join(home, "pi.argv.json");
+    const socketPath = join(home, COMPANION_PI_BROKER_SOCKET_PATH);
+    mkdirSync(join(runtimeRoot, "state"), { recursive: true, mode: 0o700 });
+    mkdirSync(join(runtimeRoot, "logs"), { recursive: true, mode: 0o700 });
+    mkdirSync(join(runtimeRoot, "sessions"), { recursive: true, mode: 0o700 });
+    if (instructions !== null) {
+      writeFileSync(join(runtimeRoot, "state", "instructions.txt"), instructions, { mode: 0o600 });
+    }
+    writeFileSync(brokerPath, COMPANION_PI_BROKER_SOURCE, { mode: 0o700 });
+    writeFileSync(piPath, fakePiSource(), { mode: 0o700 });
+    chmodSync(piPath, 0o700);
+    const broker = spawn(process.execPath, [brokerPath], {
+      env: {
+        ...process.env,
+        COMPANION_PI_ROOT: runtimeRoot,
+        COMPANION_PI_BIN: piPath,
+        COMPANION_PI_INVOCATION_ID: "invocation-argv",
+        COMPANION_PI_SOCKET_PATH: socketPath,
+        FAKE_PI_CAPTURE_PATH: join(home, "unused.ndjson"),
+        FAKE_PI_PID_PATH: join(home, "pi.pid"),
+        FAKE_PI_ARGV_PATH: piArgvPath,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    processes.push(broker);
+    await waitFor(() => existsSync(piArgvPath));
+    return JSON.parse(readFileSync(piArgvPath, "utf8")) as string[];
+  }
+
+  it("passes a present instructions file as --append-system-prompt", async () => {
+    const argv = await spawnedPiArgv("Be terse.\n");
+    const flag = argv.indexOf("--append-system-prompt");
+    expect(flag).toBeGreaterThan(-1);
+    expect(argv[flag + 1]).toBe("Be terse.");
+  });
+
+  it("omits --append-system-prompt when instructions.txt is absent", async () => {
+    expect(await spawnedPiArgv(null)).not.toContain("--append-system-prompt");
+  });
+
+  it("omits --append-system-prompt when instructions.txt is whitespace-only", async () => {
+    expect(await spawnedPiArgv("   \n")).not.toContain("--append-system-prompt");
+  });
+});
+
 function fakePiSource(): string {
   return `#!/usr/bin/env node
 import { appendFileSync, writeFileSync } from "node:fs";

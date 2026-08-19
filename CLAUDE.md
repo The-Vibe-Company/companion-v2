@@ -104,6 +104,13 @@ and runtime database URL only to `apps/runtime` without changing the published w
 - Pi must be idle with no queued messages before prompt dispatch. The layout-14 broker correlates
   the single active attempt through `agent_settled`; unknown events are counted and ignored, while
   only supported terminal shapes settle a turn.
+- Staged Pi instructions (`composedInstructions()` in `packages/box-runtime`, written to
+  `~/.companion/runtime/state/instructions.txt` and passed as `--append-system-prompt`) are how Pi
+  learns what this runtime actually provides. A Companion capability is not shipped until that brief
+  names it: web, subagents, memory, files/outbox, skills, plugins, the Skills Hub, ask_user,
+  propose_config, request_plugin_connection, and routines (`propose_routine`). Interpolate the real
+  constants rather than literals. Omit what a surface does not receive (`native_mobile`). Do not
+  describe a capability the Box does not have. Voice stays in the persona line.
 - A turn stalls after ten minutes without correlated activity and has a two-hour absolute deadline.
   A timed-out or ambiguous turn becomes visible and actionable; it never appears to reply forever.
 - Retry creates a new attempt and warns that earlier external effects may have succeeded. Cancel
@@ -129,6 +136,7 @@ and runtime database URL only to `apps/runtime` without changing the published w
   `pnpm --filter @companion/companion-skill update:integrity`.
 - Run `pnpm verify:change`; exit 2 means printed follow-up gates are still required.
 - Architecture/data/auth/API/runtime changes must keep `docs/design.md`,
-  `docs/companions-runtime.md`, and the bundled Companion skill aligned.
+  `docs/companions-runtime.md`, and the bundled Companion skill aligned. A new Companion capability
+  also updates `composedInstructions()` so Pi is told it exists.
 - PR titles use Commitizen style, for example
   `feat(runtime): add the dedicated Companion runtime service`.
