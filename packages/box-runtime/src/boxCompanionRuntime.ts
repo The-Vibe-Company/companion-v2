@@ -74,8 +74,13 @@ const DEFAULT_PI_PACKAGES = [
  * without it, so its install is best-effort and never fails a staging.
  */
 const DEFAULT_QMD_PACKAGE = "@tobilu/qmd@2.8.3";
-/** Package specifications are installed by name only: no ranges, no shell grammar, no whitespace. */
-const PI_PACKAGE_SPEC = /^[@A-Za-z0-9:._/-]+$/;
+/**
+ * What a package specification may contain. Deliberately permissive about the grammar npm and Pi
+ * already understand — exact pins, ranges, git refs — and closed to everything a shell would read as
+ * more than one word. `shellQuote` is what actually makes the install safe; this is the second lock,
+ * and it is drawn here so that an operator whose adapter was already pinned to a range keeps working.
+ */
+const PI_PACKAGE_SPEC = /^[@A-Za-z0-9:._/^~+#-]+$/;
 const MAX_PI_PACKAGE_SPEC_LENGTH = 200;
 /** An operator asking for no default packages, or no semantic-search binary, says so by name. */
 const NO_PACKAGES_SENTINEL = "none";
@@ -1032,18 +1037,18 @@ ${piPackages
     .map((spec) => `PI_CODING_AGENT_DIR="$HOME/.companion/pi" "$pi_bin" install ${shellQuote(spec)}`)
     .join("\n")}${qmdPackage ? `
 # Semantic memory search is an optimization: pi-memory recalls without it, so a Box that cannot
-# install it is still a working Box. The report stays on stdout because Box promotes setup stderr to
-# setupError, and an optional binary must never become the reason a Companion cannot wake.
-qmd_log="$(mktemp)"
+# install it is still a working Box. Nothing in this block may end a staging, which is why it runs
+# outside errexit and why the reported line is a fixed shape rather than npm's own words: the
+# control plane falls back to the last stdout line when a later step fails without stderr, and a
+# registry's output is not something to persist there. The full log stays on the Box for an operator.
+qmd_log="$HOME/.companion/runtime/logs/qmd-install.log"
 set +e
 npm install --global --prefix "$HOME/.companion/tools" ${shellQuote(qmdPackage)} >"$qmd_log" 2>&1
 qmd_status=$?
 set -e
 if [ "$qmd_status" -ne 0 ]; then
-  qmd_detail="$(awk 'NF { line=$0 } END { print line }' "$qmd_log")"
-  printf 'Optional memory search binary %s did not install (exit %s): %s\\n' ${shellQuote(qmdPackage)} "$qmd_status" "$qmd_detail"
-fi
-rm -f "$qmd_log"` : ""}
+  printf 'Optional memory search binary %s did not install (exit %s); see runtime/logs/qmd-install.log\\n' ${shellQuote(qmdPackage)} "$qmd_status"
+fi` : ""}
 # The broker is an autonomous ESM program. Encoding it keeps arbitrary JavaScript out of the shell
 # grammar while preserving one identical setup script for Box create and in-place layout repair.
 printf '%s' ${shellQuote(encodedBrokerSource)} | base64 --decode > "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
@@ -1072,10 +1077,13 @@ exec 2>>"$stderr_log"
 trap 'companion_status=$?; printf "pi-daemon: line %s: %s failed with status %s\\n" "$LINENO" "$BASH_COMMAND" "$companion_status" >&2' ERR
 export PI_CODING_AGENT_DIR="$HOME/.companion/pi"
 # The optional memory search binary is installed under the Companion's own prefix, which no login
-# shell contributes to a systemd user unit's PATH.
-PATH="$HOME/.companion/tools/bin:$PATH"
+# shell contributes to a systemd user unit's PATH. It is appended, not prepended: the resolved Pi
+# directory has to stay ahead of it so nothing landing in this prefix can shadow the pinned Pi or
+# node for a process Pi spawns.
+PATH="$PATH:$HOME/.companion/tools/bin"
 export PATH
-# Memory outlives one Pi start, so it lives on the Box disk rather than in the tmpfs runtime dir.
+# Memory outlives one Pi start and one Box wake, so it lives on the snapshotted Box disk rather than
+# under /run/user/<uid>, which is tmpfs and is where the provider credentials live.
 export PI_MEMORY_DIR="$root/memory"
 broker_socket="$HOME/${COMPANION_PI_BROKER_SOCKET_PATH}"
 broker_journal="$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}"
@@ -1845,8 +1853,11 @@ exit 0`,
       setupScript(this.#installCommand, this.#piPackages, this.#qmdPackage),
     );
     // A Box whose marker already matches exits in milliseconds. The budget is for the run that does
-    // relayout: it installs the whole pinned package set, and a Box that has to do that on its next
-    // wake must not be timed out into a wake failure it would repeat on every retry.
+    // relayout: it installs the whole pinned package set, and the marker is written only once that
+    // finishes. A budget that stops the install short of the marker is a Box that repeats the same
+    // work on every wake and can never record it, so this deliberately outlives a turn's own
+    // three-minute cold-start deadline: that turn may still fail retryably, but the install it paid
+    // for is kept and the member's next message short-circuits.
     const result = await this.#command(boxId, `bash "$HOME/${PI_LAYOUT_SCRIPT_PATH}"`, 300);
     if (!result.success) {
       // The bare message cost a production probe to diagnose, so the failing line travels with it.

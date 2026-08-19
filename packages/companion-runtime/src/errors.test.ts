@@ -35,6 +35,16 @@ describe("runtime error safety", () => {
     expect(message).not.toContain("private");
   });
 
+  it("redacts Companion's own delegated token, which every Box is staged with", () => {
+    // COMPANION_DELEGATION_TOKEN is the credential most likely to be echoed back by something
+    // running inside the Box, and its prefix matches none of the vendor shapes.
+    const message = expurgateRuntimeMessage(
+      `hub call failed for cmp_pat_${"a1b2c3d4".repeat(6)} while listing skills`,
+    );
+    expect(message).not.toContain("a1b2c3d4");
+    expect(message).toContain("[credential removed]");
+  });
+
   it("replaces unstable error codes", () => {
     expect(safeRuntimeError({ code: "BAD CODE", message: "failed", action: "retry" }).code)
       .toBe("runtime_failure");

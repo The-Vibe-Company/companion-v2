@@ -341,9 +341,10 @@ export type CompanionToolRunStatus = z.infer<typeof companionToolRunStatusSchema
 export const COMPANION_TOOL_RUN_TIMEOUT_MS = 90_000;
 
 /**
- * Shell runs get their own ceiling: a legitimate build, install, or test sweep routinely outlives
- * the 90-second default, and killing it mid-flight loses real work. Both the staged Pi extension
- * and the control-plane settlement classify by the run's `kind`, so the two deadlines agree.
+ * Shell runs and delegated subagent runs get their own ceiling: a legitimate build, install, or test
+ * sweep routinely outlives the 90-second default, a child agent working through a task of its own
+ * always does, and killing either mid-flight loses real work. Both the staged Pi extension and the
+ * control-plane settlement classify by the run's `kind`, so the two deadlines agree.
  */
 export const COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS = 600_000;
 

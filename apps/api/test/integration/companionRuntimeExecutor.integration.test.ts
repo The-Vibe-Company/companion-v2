@@ -3268,7 +3268,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       const events = [
         delegated("1", headline, { title: headline, detail: "read the changelog" }),
         delegated("2", "", { detail: "reading CHANGELOG.md" }),
-        delegated("3", "", { status: "ok" }),
+        delegated("3", "", { status: "error" }),
       ];
 
       // An unrecognized kind is still refused before anything is written, so widening the list is
@@ -3299,7 +3299,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       expect(projected).toEqual([{ sequence: "1", cursor: "3" }]);
 
       // Three events, one card: the headline survived the progress that carried none, and the
-      // settlement kept the last progress it followed.
+      // settlement kept the last progress it followed. A failure is the case that matters most —
+      // it is where a reader needs to see what the child agent was doing when it stopped.
       const cards = await sql<Array<{
         content: string;
         title: string;
@@ -3316,7 +3317,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         content: headline,
         title: headline,
         detail: "reading CHANGELOG.md",
-        status: "ok",
+        status: "error",
       }]);
 
       // Replaying the committed page is still a digest check, not a second projection.

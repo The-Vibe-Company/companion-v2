@@ -266,15 +266,35 @@ const MAX_SUBAGENT_AGENT = 120;
 const MAX_TITLE = 300;
 const DEFAULT_DECISION_TIMEOUT_MS = 5 * 60 * 1_000;
 
+/**
+ * Every cut here lands on a JavaScript code unit, and an emoji is two of them. Half a surrogate pair
+ * is not text PostgreSQL will accept inside `jsonb`, so a cut through one would fail the whole event
+ * batch — deterministically, on every re-read of the same journal page, until the turn stalls.
+ * Dropping the orphan costs one character of provider output and cannot fail.
+ */
+function withoutOrphanSurrogate(value: string, edge: "start" | "end"): string {
+  if (edge === "end") {
+    const last = value.charCodeAt(value.length - 1);
+    return last >= 0xd800 && last <= 0xdbff ? value.slice(0, -1) : value;
+  }
+  const first = value.charCodeAt(0);
+  return first >= 0xdc00 && first <= 0xdfff ? value.slice(1) : value;
+}
+
 function bounded(value: string, maximum: number): string {
   if (value.length <= maximum) return value;
-  return `${value.slice(0, Math.max(0, maximum - 12))}\n[truncated]`;
+  const head = withoutOrphanSurrogate(value.slice(0, Math.max(0, maximum - 12)), "end");
+  return `${head}\n[truncated]`;
 }
 
 /** Progress is read from its end: the newest line is the one that says where a run has got to. */
 function boundedTail(value: string, maximum: number): string {
   if (value.length <= maximum) return value;
-  return `[truncated]\n${value.slice(value.length - Math.max(0, maximum - 12))}`;
+  const tail = withoutOrphanSurrogate(
+    value.slice(value.length - Math.max(0, maximum - 12)),
+    "start",
+  );
+  return `[truncated]\n${tail}`;
 }
 
 function boundedReasoning(value: string): string {
@@ -403,6 +423,48 @@ function firstText(
 }
 
 /**
+ * The text of a tool payload, whether Pi sent a string or its content-block shape.
+ *
+ * `tool_execution_update` carries `partialResult: { content: [{ type: "text", text }] }` — see the
+ * captured event contract in `packages/box-sim/fixtures/pi/official-events.jsonl`. Reading only the
+ * flat string spellings is how a progress line silently becomes no progress at all, so the block
+ * shape is what this reads first.
+ */
+function payloadText(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const blocks = (value as Record<string, unknown>).content;
+  if (!Array.isArray(blocks)) return null;
+  const text = blocks
+    .map((block) =>
+      block && typeof block === "object" && !Array.isArray(block)
+        && (block as Record<string, unknown>).type === "text"
+        && typeof (block as Record<string, unknown>).text === "string"
+        ? (block as Record<string, unknown>).text as string
+        : "")
+    .join("")
+    .trim();
+  return text || null;
+}
+
+/** The newest thing a running tool has said about itself, under any shape Pi reports it in. */
+function progressText(event: Record<string, unknown>): string | null {
+  for (const candidate of [
+    event.partialResult,
+    event.partial_result,
+    event.partialOutput,
+    event.partial_output,
+    event.output,
+    event.content,
+    event.message,
+  ]) {
+    const text = payloadText(candidate);
+    if (text) return text;
+  }
+  return null;
+}
+
+/**
  * What a delegated run is, in one line: which agent, and the first line of what it was asked to do.
  *
  * Everything here is provider text, so it is redacted before it is bounded and bounded before it is
@@ -415,17 +477,23 @@ function subagentStart(
   redact: RuntimeVisibleTextRedactor,
 ): { title: string; detail: string | null } {
   const args = toolArguments(event);
-  const agent = firstText(args, ["agent", "agent_name", "agentName", "name"])
-    ?.split("\n")[0]!
-    .slice(0, MAX_SUBAGENT_AGENT);
-  const task = firstText(args, ["task", "prompt", "description", "instructions"]);
-  const headline = [agent, task?.split("\n").find((line) => line.trim())?.trim()]
-    .filter(Boolean)
-    .join(": ");
+  const rawAgent = firstText(args, ["agent", "agent_name", "agentName", "name"]);
+  const rawTask = firstText(args, ["task", "prompt", "description", "instructions"]);
+  // Redact before cutting, never after. The turn dictionary removes exact values by whole-string
+  // match, so a credential that straddles a cut no longer matches the value it came from and its
+  // surviving half is what gets persisted. `decisionRequestKey` refuses provider input for the same
+  // reason; here there is a safe answer, which is to scrub first and bound the scrubbed text.
+  const agent = rawAgent ? firstLine(redact(rawAgent)).slice(0, MAX_SUBAGENT_AGENT) : null;
+  const task = rawTask ? redact(rawTask) : null;
+  const headline = [agent, task ? firstLine(task) : null].filter(Boolean).join(": ");
   return {
-    title: headline ? bounded(redact(headline), MAX_TITLE) : fallbackTitle,
-    detail: task ? bounded(redact(task), MAX_SUBAGENT_DETAIL) : null,
+    title: headline ? bounded(headline, MAX_TITLE) : fallbackTitle,
+    detail: task ? bounded(task, MAX_SUBAGENT_DETAIL) : null,
   };
+}
+
+function firstLine(value: string): string {
+  return value.split("\n").find((line) => line.trim())?.trim() ?? "";
 }
 
 /**
@@ -464,7 +532,7 @@ function toolProjection(
     // Without a call id there is no card to merge into, and one row per progress line would bury
     // the thread. Progress is only ever an update to a run that already named itself.
     if (kind !== "subagent" || !callId) return null;
-    const progress = firstText(event, ["partialOutput", "partial_output", "output", "content", "message"]);
+    const progress = progressText(event);
     if (!progress) return null;
     return {
       sequence,

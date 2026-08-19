@@ -772,6 +772,129 @@ describe("delegated subagent runs", () => {
     expect(new Set(tools.map((tool) => tool.tool.call_id)).size).toBe(1);
   });
 
+  it("reads progress from the shape Pi actually sends", () => {
+    // The contract fixture for a running tool is
+    // `partialResult: { content: [{ type: "text", text }] }` — see
+    // packages/box-sim/fixtures/pi/official-events.jsonl. Reading only the flat string spellings is
+    // how a progress line becomes no progress at all, silently: the card would just never move.
+    const classified = classify([
+      {
+        type: "tool_execution_start",
+        toolCallId: "call-1",
+        toolName: "subagent",
+        args: { agent: "researcher", task: "read the changelog" },
+      },
+      {
+        type: "tool_execution_update",
+        toolCallId: "call-1",
+        toolName: "subagent",
+        args: { agent: "researcher" },
+        partialResult: {
+          content: [{ type: "text", text: "# Example" }, { type: "image", data: "ignored" }],
+          details: { truncation: null, fullOutputPath: null },
+        },
+      },
+    ]);
+    const tools = classified.projections.filter((projection) => projection.type === "tool");
+
+    expect(tools).toHaveLength(2);
+    expect(tools[1]).toMatchObject({
+      tool: { status: "running", title: "", detail: "# Example" },
+    });
+  });
+
+  it("keeps a failed delegation showing what it was doing", () => {
+    const classified = classify([
+      {
+        type: "tool_execution_start",
+        toolCallId: "call-1",
+        toolName: "subagent",
+        args: { agent: "deployer", task: "ship the release" },
+      },
+      {
+        type: "tool_execution_end",
+        toolCallId: "call-1",
+        toolName: "subagent",
+        isError: true,
+      },
+    ]);
+    const tools = classified.projections.filter((projection) => projection.type === "tool");
+
+    // The failure is the moment a reader most needs the headline and the last progress, so the
+    // settlement carries a status and nothing else.
+    expect(tools[1]).toMatchObject({
+      content: "",
+      tool: { status: "error", title: "", detail: null },
+    });
+  });
+
+  it("accepts every argument spelling, and keeps a runaway agent name to one bounded line", () => {
+    for (const container of ["args", "arguments", "input", "toolInput"]) {
+      for (const agentKey of ["agent", "agent_name", "agentName", "name"]) {
+        for (const taskKey of ["task", "prompt", "description", "instructions"]) {
+          const classified = classify([{
+            type: "tool_execution_start",
+            toolCallId: "call-1",
+            toolName: "subagent",
+            [container]: { [agentKey]: "researcher", [taskKey]: "read the changelog" },
+          }]);
+          expect(classified.projections[0]).toMatchObject({
+            content: "researcher: read the changelog",
+          });
+        }
+      }
+    }
+
+    const wild = classify([{
+      type: "tool_execution_start",
+      toolCallId: "call-1",
+      toolName: "subagent",
+      args: { agent: `${"n".repeat(400)}\nsecond line`, task: "do the thing" },
+    }]);
+    const [title] = wild.projections
+      .filter((projection) => projection.type === "tool")
+      .map((projection) => projection.tool.title);
+
+    // A name is a name: one line, bounded, and it cannot push the task out of the headline.
+    expect(title).toBe(`${"n".repeat(120)}: do the thing`);
+  });
+
+  it("never persists half of a credential that a cut would hide from the redactor", () => {
+    const long = `${"z".repeat(200)}-OPAQUE-CREDENTIAL-VALUE`;
+    const classified = classifyPiJournalPage(
+      validatePiJournalRead({
+        value: {
+          events: [{
+            sequence: 1,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "tool_execution_start",
+              toolCallId: "call-1",
+              toolName: "subagent",
+              args: { agent: long, task: `deploy with ${long}` },
+            },
+          }],
+          nextCursor: 1,
+          acknowledgedCursor: 0,
+          hasMore: false,
+        },
+        after: 0n,
+        attemptId: ATTEMPT_ID,
+        invocationId: PI_INVOCATION_ID,
+      }),
+      new Date("2026-08-19T12:00:00.000Z"),
+      createRuntimeVisibleTextRedactor([long]),
+    );
+    const serialized = JSON.stringify(classified.projections, (_key, value) =>
+      typeof value === "bigint" ? value.toString() : value);
+
+    // The agent name is cut at 120 characters. Cutting before redacting would leave the first 120
+    // characters of the credential in the title, matching nothing the redactor could remove.
+    expect(serialized).not.toContain("zzzzzzzz");
+  });
+
   it("redacts the task and the progress it shows, and bounds both", () => {
     const classified = classify([
       {
@@ -798,6 +921,38 @@ describe("delegated subagent runs", () => {
     expect(tools[1]?.tool.detail?.length).toBeLessThanOrEqual(8_000);
     expect(tools[1]?.tool.detail).toContain("last line with");
     expect(tools[1]?.tool.detail?.startsWith("[truncated]")).toBe(true);
+  });
+
+  it("never cuts an emoji in half, which PostgreSQL would refuse for the whole batch", () => {
+    // A lone surrogate is not text jsonb accepts, and the same journal page is re-read on every
+    // retry, so one split emoji would stall the turn rather than lose a character.
+    const classified = classify([
+      {
+        type: "tool_execution_start",
+        toolCallId: "call-1",
+        toolName: "subagent",
+        args: { agent: "researcher", task: `${"a".repeat(7_988)}🙂 tail` },
+      },
+      {
+        type: "tool_execution_update",
+        toolCallId: "call-1",
+        toolName: "subagent",
+        partialResult: { content: [{ type: "text", text: `head 🙂${"b".repeat(7_988)}` }] },
+      },
+    ]);
+
+    for (const projection of classified.projections) {
+      if (projection.type !== "tool") continue;
+      const detail = projection.tool.detail ?? "";
+      expect(JSON.parse(JSON.stringify(detail))).toBe(detail);
+      for (let index = 0; index < detail.length; index += 1) {
+        const code = detail.charCodeAt(index);
+        const isHigh = code >= 0xd800 && code <= 0xdbff;
+        const isLow = code >= 0xdc00 && code <= 0xdfff;
+        if (isHigh) expect(detail.charCodeAt(index + 1)).toBeGreaterThanOrEqual(0xdc00);
+        if (isLow) expect(detail.charCodeAt(index - 1)).toBeGreaterThanOrEqual(0xd800);
+      }
+    }
   });
 
   it("still shows a run whose arguments say nothing, and stays activity with nothing to show", () => {

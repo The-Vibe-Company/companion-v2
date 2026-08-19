@@ -295,8 +295,10 @@ describe("a tool run in the thread", () => {
 
     expect(runCard.textContent).toContain("bash");
     expect(runCard.textContent).toContain("ls -la");
-    // The status is never left to the tick alone.
+    // The status is never left to the tick alone, but for an ordinary run it stays for the reader
+    // who cannot see the tick rather than taking a place on the line.
     expect(runCard.textContent).toContain("done");
+    expect(runCard.querySelector(".sr-only")?.textContent).toBe("done");
     expect(runCard.textContent).not.toContain("total 8");
   });
 

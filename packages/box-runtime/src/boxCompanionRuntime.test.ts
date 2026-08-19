@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { COMPANION_RUNTIME_ERROR_MAX_LENGTH } from "@companion/core";
@@ -13,6 +14,8 @@ import {
   mintBoxDesktopUrl,
   observedBoxStateFromProvider,
   parseOutboxManifest,
+  resolvePiPackages,
+  resolveQmdPackage,
 } from "./boxCompanionRuntime";
 
 afterEach(() => {
@@ -393,9 +396,12 @@ function runtimeClient(): AsciiBoxCompanionRuntime {
 }
 
 describe("default Pi packages on the Box disk", () => {
+  const layoutCommands: Array<{ command: string; timeoutSeconds: number }> = [];
+
   /** Stage a Box and hand back the layout script the adapter wrote to its disk. */
   async function stagedLayoutScript(env: Record<string, string> = {}): Promise<string> {
     const files = new Map<string, string>();
+    layoutCommands.length = 0;
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const method = init?.method ?? "GET";
@@ -406,6 +412,11 @@ describe("default Pi packages on the Box disk", () => {
         return response({ ok: true });
       }
       if (url.endsWith("/commands") && method === "POST") {
+        const body = JSON.parse(String(init?.body)) as {
+          command: string;
+          timeoutSeconds: number;
+        };
+        if (body.command.includes("ensure-pi-layout.sh")) layoutCommands.push(body);
         return response(commandResult("companion-box-runnable\n"));
       }
       throw new Error(`unexpected Box request: ${method} ${url}`);
@@ -450,7 +461,37 @@ describe("default Pi packages on the Box disk", () => {
     expect(script).not.toMatch(/npm install --global[^\n]*>&2/);
     // Memory has to survive one Pi restart and one Box wake, so it lives on the persistent disk.
     expect(script).toContain('export PI_MEMORY_DIR="$root/memory"');
-    expect(script).toContain('PATH="$HOME/.companion/tools/bin:$PATH"');
+    // Appended, not prepended: the resolved Pi directory stays ahead of the optional prefix.
+    expect(script).toContain('PATH="$PATH:$HOME/.companion/tools/bin"');
+    // npm's own words never reach stdout, which is what the control plane falls back to for the
+    // reason a later step failed.
+    expect(script).not.toContain("awk 'NF { line=$0 } END { print line }' \"$qmd_log\"");
+  });
+
+  it("is a script bash can parse, with and without the optional install", async () => {
+    // The layout script is generated from a template literal, so no shell linter in CI ever sees
+    // it. A quoting slip in it is a Box that fails every staging, which is every message.
+    const variants: Array<Record<string, string>> = [
+      {},
+      { COMPANION_PI_QMD_PACKAGE: "none" },
+      { COMPANION_PI_INSTALL_COMMAND: "curl -fsSL https://pi.test/install | bash" },
+    ];
+    for (const env of variants) {
+      const script = await stagedLayoutScript(env);
+      const parsed = spawnSync("bash", ["-n"], { input: script, encoding: "utf8" });
+      expect(parsed.stderr).toBe("");
+      expect(parsed.status).toBe(0);
+    }
+  });
+
+  it("gives the relayout longer than a turn's own cold start, so the install is never lost", async () => {
+    await stagedLayoutScript();
+
+    // The marker is written only after the install finishes. A budget that stops it short is a Box
+    // that repeats the same work on every wake and can never record it.
+    expect(layoutCommands).toEqual([
+      expect.objectContaining({ timeoutSeconds: 300 }),
+    ]);
   });
 
   it("makes every pin part of the layout marker, so an existing Box relayouts on its next wake", async () => {
@@ -487,15 +528,37 @@ describe("default Pi packages on the Box disk", () => {
 
   it("refuses a package specification that is not a package name", () => {
     for (const spec of ["npm:pi-memory@0.4.2; rm -rf /", "$(id)", "pi memory", "a".repeat(201)]) {
-      expect(() => new AsciiBoxCompanionRuntime({
-        COMPANION_BOX_API_KEY: "box_test",
-        COMPANION_PI_DEFAULT_PACKAGES: spec,
-      })).toThrow(BoxRuntimeConfigurationError);
-      expect(() => new AsciiBoxCompanionRuntime({
-        COMPANION_BOX_API_KEY: "box_test",
-        COMPANION_PI_QMD_PACKAGE: spec,
-      })).toThrow(BoxRuntimeConfigurationError);
+      for (const key of [
+        "COMPANION_PI_DEFAULT_PACKAGES",
+        "COMPANION_PI_QMD_PACKAGE",
+        "COMPANION_PI_MCP_ADAPTER_PACKAGE",
+      ]) {
+        expect(() => new AsciiBoxCompanionRuntime({
+          COMPANION_BOX_API_KEY: "box_test",
+          [key]: spec,
+        })).toThrow(BoxRuntimeConfigurationError);
+      }
     }
+  });
+
+  it("reads the deployment's own spelling of the package list", () => {
+    // A variable that is present but blank is not a deployment asking for no packages: only the
+    // sentinel is, and losing that distinction silently strips every Companion's abilities.
+    expect(resolvePiPackages({ COMPANION_PI_DEFAULT_PACKAGES: "" }))
+      .toEqual(resolvePiPackages({}));
+    expect(resolvePiPackages({ COMPANION_PI_DEFAULT_PACKAGES: " npm:a@1 , npm:b@2, " })).toEqual([
+      "npm:pi-mcp-adapter@2.12.1",
+      "npm:a@1",
+      "npm:b@2",
+    ]);
+    expect(resolvePiPackages({ COMPANION_PI_DEFAULT_PACKAGES: "none" }))
+      .toEqual(["npm:pi-mcp-adapter@2.12.1"]);
+    // A deployment that pinned a range before this existed keeps working.
+    expect(resolvePiPackages({ COMPANION_PI_MCP_ADAPTER_PACKAGE: "npm:pi-mcp-adapter@^2.12.1" })[0])
+      .toBe("npm:pi-mcp-adapter@^2.12.1");
+    expect(resolveQmdPackage({})).toBe("@tobilu/qmd@2.8.3");
+    expect(resolveQmdPackage({ COMPANION_PI_QMD_PACKAGE: "" })).toBe("@tobilu/qmd@2.8.3");
+    expect(resolveQmdPackage({ COMPANION_PI_QMD_PACKAGE: "none" })).toBeNull();
   });
 });
 

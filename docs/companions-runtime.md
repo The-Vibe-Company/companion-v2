@@ -270,6 +270,13 @@ does not match relayouts at the start of its next staging, which is the next tim
 a message. Nothing is restaged proactively, and a Box whose marker matches exits the layout script
 in milliseconds.
 
+The one wake that relayouts installs the whole pinned set, so it is the one wake that can outlive a
+turn's three-minute cold-start deadline and fail that turn with a retryable error. The layout
+command is given five minutes rather than three on purpose: the marker is written only after the
+install finishes, so a budget that stops the install short of the marker is a Box that repeats the
+same work on every retry and can never record it. Letting the install finish makes that cost
+one-time — the member's next message short-circuits on the marker.
+
 Runtime commits each supported event projection and its monotonic cursor in one PostgreSQL
 transaction. A supported `agent_settled` or Pi process-exit observation records the terminal
 checkpoint in that same commit. Only then may runtime acknowledge the cursor to the broker. After a
@@ -440,7 +447,10 @@ never while consuming an accepted attempt or decision.
 The projection boundary receives an in-memory dictionary built from every string leaf of those
 validated, decrypted credentials. Assistant text and decision copy are scrubbed against those exact
 values plus bounded generic credential patterns. Tool activity is deliberately metadata-only: it
-stores a safe kind/name/title and an opaque hashed call id, never tool arguments or results. A
+stores a safe kind/name/title and an opaque hashed call id, never tool arguments or results, with
+one exception — a delegated `subagent` run, whose child-agent name, task, and latest progress are
+redacted against the same dictionary and bounded before they are stored, because a card that says
+only "a tool ran" tells a reader nothing about a run that can last minutes. A
 complete Authorization or Cookie header value is removed before narrower generic matchers run. A
 decision request key that would require redaction fails closed and interrupts the turn. A config
 proposal message is fail-closed the same way: if redaction would change the JSON, the event is
@@ -549,6 +559,10 @@ Production cutover, kill-switch, purge, incident, rollback, and canary procedure
 `docs/runbooks/companions-runtime.md`.
 
 ## Explicit exclusions
+
+A `subagent` is not an exception to any of this. It is a child agent inside the one Pi harness on
+the Companion's own Box, with no Box, thread, ACL, or identity of its own; the exclusions below
+remain in force for Companion-to-Companion handoff and group Bot chat.
 
 Runtime v2 adds no generic Projects/skill runs, multi-Bot team or handoff, group Bot chat, routine,
 schedule, proactive task, voice, file library, file versioning, artifact surface outside a thread,
