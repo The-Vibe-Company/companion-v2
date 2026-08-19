@@ -436,6 +436,8 @@ export function CompanionThread({
           plugins={contextPlugins}
           models={contextModels}
           onSend={onSend}
+          onStop={onCancelInterrupted}
+          onCancelQueued={onCancelInterrupted}
           onThread={onThread}
         />
         {showContext && overlay && (

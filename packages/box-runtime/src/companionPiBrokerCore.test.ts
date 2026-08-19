@@ -291,6 +291,34 @@ describe("CompanionPiBroker", () => {
     expect(harness.journal.counters.unknownEvents).toBe(2);
   });
 
+  it("aborts the active attempt and clears the binding on a positive ACK", async () => {
+    const harness = brokerHarness();
+    await harness.broker.command({
+      id: "control-prompt-1",
+      type: "prompt",
+      attemptId: "attempt-1",
+      message: "Do the work",
+    });
+    expect(harness.broker.activeAttemptId).toBe("attempt-1");
+
+    const aborted = await harness.broker.command({
+      id: "control-abort-1",
+      type: "abort",
+      attemptId: "attempt-1",
+    });
+    expect(aborted).toMatchObject({
+      id: "control-abort-1",
+      success: true,
+      data: { aborted: true, attemptId: "attempt-1" },
+    });
+    expect(harness.transport.requests.map((request) => request.type)).toEqual([
+      "get_state",
+      "prompt",
+      "abort",
+    ]);
+    expect(harness.broker.activeAttemptId).toBeNull();
+  });
+
   it("binds the attempt before writing prompt so events racing its ACK stay correlated", async () => {
     const directory = temporaryDirectory("pi-broker-racing-ack-");
     const journal = new SegmentedCompanionPiJournal({ directory });
@@ -674,6 +702,14 @@ class FakePiTransport implements CompanionPiRpcTransport {
         type: "response",
         command: "prompt",
         success: this.promptResponseSuccess,
+      };
+    }
+    if (command.type === "abort") {
+      return {
+        id: command.id,
+        type: "response",
+        command: "abort",
+        success: true,
       };
     }
     throw new Error("unexpected Pi request");

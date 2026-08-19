@@ -581,6 +581,7 @@ export interface FakePorts {
   eventProjector: RuntimeEventProjector;
   log: string[];
   promptCalls: { attemptId: string; message: string }[];
+  abortCalls: { attemptId: string; boxId: string }[];
   decisionCalls: { attemptId: string }[];
   eventReads: unknown[];
   stagedAttachments: { messageEventId: string; filenames: string[] }[];
@@ -596,6 +597,7 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
   // the external ACK rather than merely that both happened.
   store.effectLog = log;
   const promptCalls: FakePorts["promptCalls"] = [];
+  const abortCalls: FakePorts["abortCalls"] = [];
   const decisionCalls: FakePorts["decisionCalls"] = [];
   const eventReads: unknown[] = [];
   const stagedAttachments: FakePorts["stagedAttachments"] = [];
@@ -643,6 +645,10 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
     }),
     prompt: async (input) => {
       promptCalls.push({ attemptId: input.attemptId, message: input.message });
+      return { outcome: "accepted", invocationId: PI_INVOCATION_ID };
+    },
+    abort: async (input) => {
+      abortCalls.push({ attemptId: input.attemptId, boxId: input.boxId });
       return { outcome: "accepted", invocationId: PI_INVOCATION_ID };
     },
     readBrokerEvents: async () => eventReads.shift() ?? {
@@ -723,6 +729,7 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
     eventProjector,
     log,
     promptCalls,
+    abortCalls,
     decisionCalls,
     eventReads,
     stagedAttachments,

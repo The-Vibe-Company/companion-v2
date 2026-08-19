@@ -197,4 +197,21 @@ describe("runtime SQL row refinement", () => {
     expect(claim.workKind).toBe("operation");
     if (claim.workKind === "operation") expect(claim.clientSurface).toBeNull();
   });
+
+  it("keeps Box identity on a stop denial so the executor can abort Pi", () => {
+    const authorization = decodeRuntimeAuthorizationRow(authorizationRow({
+      authorized: false,
+      denial_code: "turn_cancel_requested",
+      model_id: null,
+      persona: null,
+      can_write_skills: null,
+      desired_settings_revision: null,
+      skills_revision: null,
+    }), "attempt");
+    expect(authorization).toMatchObject({
+      authorized: false,
+      denialCode: "turn_cancel_requested",
+      boxId: "bx_23456789",
+    });
+  });
 });

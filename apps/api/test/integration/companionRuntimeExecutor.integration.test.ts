@@ -2262,6 +2262,124 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
+  it("dequeues a follow-up immediately and asks the executor to stop an accepted turn", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion({ boxReady: true });
+    let claimed: Claim | undefined;
+    try {
+      const followUpId = randomUUID();
+      const [enqueued] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ turn: { id: string; status: string } }>>`
+          select turn from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${followUpId}::uuid,
+            'Then this', 'web', '[]'::jsonb
+          )
+        `,
+      });
+      const followUpTurnId = enqueued?.turn.id;
+      if (typeof followUpTurnId !== "string") throw new Error("expected a queued follow-up");
+      expect(enqueued?.turn.status).toBe("queued");
+
+      const [queuedThread] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{
+          entries: Array<{ content: string; queued: boolean; turn_id: string | null }>;
+          queuedCount: number;
+        }>>`
+          select entries, queued_count as "queuedCount"
+          from public.companion_api_read_thread(${ids.orgA}::uuid, ${fixture.companionId}::uuid)
+        `,
+      });
+      expect(queuedThread?.queuedCount).toBe(1);
+      expect(queuedThread?.entries).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          content: fixture.prompt,
+          queued: false,
+          turn_id: fixture.turnId,
+        }),
+        expect.objectContaining({
+          content: "Then this",
+          queued: true,
+          turn_id: followUpTurnId,
+        }),
+      ]));
+
+      const [dequeued] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ turn: { status: string } }>>`
+          select turn from public.companion_api_cancel_turn(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${followUpTurnId}::uuid
+          )
+        `,
+      });
+      expect(dequeued?.turn.status).toBe("cancelled");
+      const [afterDequeue] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{
+          entries: Array<{ content: string }>;
+          queuedCount: number;
+        }>>`
+          select entries, queued_count as "queuedCount"
+          from public.companion_api_read_thread(${ids.orgA}::uuid, ${fixture.companionId}::uuid)
+        `,
+      });
+      expect(afterDequeue?.queuedCount).toBe(0);
+      expect(afterDequeue?.entries.map((entry) => entry.content)).toEqual([fixture.prompt]);
+
+      claimed = await claimWork();
+      expect(claimed.workKind).toBe("attempt");
+      expect(claimed.workId).toBe(fixture.attemptId);
+
+      const [stopped] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ turn: { id: string; status: string } }>>`
+          select turn from public.companion_api_cancel_turn(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${fixture.turnId}::uuid
+          )
+        `,
+      });
+      expect(stopped?.turn).toEqual(expect.objectContaining({
+        id: fixture.turnId,
+        status: "running",
+      }));
+      const [requested] = await sql<Array<{ cancelRequestedAt: Date | null; status: string }>>`
+        select cancel_requested_at as "cancelRequestedAt", status::text as status
+        from companion_turns where id = ${fixture.turnId}::uuid
+      `;
+      expect(requested?.status).toBe("running");
+      expect(requested?.cancelRequestedAt).toBeInstanceOf(Date);
+
+      const lease = claimed;
+      const [renewal] = await asRuntime((tx) => tx<Array<{
+        authorized: boolean;
+        denialCode: string | null;
+        boxId: string | null;
+      }>>`
+        select authorized, denial_code as "denialCode", box_id as "boxId"
+        from public.companion_runtime_renew_and_authorize(
+          ${lease.orgId}::uuid, ${lease.companionId}::uuid,
+          ${lease.claimToken}::uuid, ${lease.claimEpoch}::bigint,
+          ${lease.gateEpoch}::bigint, ${executorId},
+          ${lease.workKind}::companion_runtime_work_kind, ${lease.workId}::uuid, 30
+        )
+      `);
+      expect(renewal).toEqual({
+        authorized: false,
+        denialCode: "turn_cancel_requested",
+        boxId: "bx_23456789",
+      });
+    } finally {
+      if (claimed) await release(claimed);
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
   it("persists decision answers as a durable outbox and updates the PostgreSQL transcript", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     const fixture = await createCompanion({ boxReady: true });

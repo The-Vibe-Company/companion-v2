@@ -369,7 +369,7 @@ export async function retryCompanionTurn(
   return result.operation;
 }
 
-/** Cancel an interrupted turn and return the queue projection after it has been released. */
+/** Stop an active turn, dequeue a follow-up, or cancel an interrupted turn. */
 export async function cancelCompanionTurn(
   orgId: string,
   companionId: string,

@@ -701,6 +701,8 @@ describe("CompanionsApp conversation list", () => {
         attachments: [],
         reasoning: null,
         routine: null,
+        turn_id: null,
+        queued: false,
         created_at: "2026-08-14T09:05:00.000Z",
       }],
     }));
@@ -759,6 +761,8 @@ describe("CompanionsApp conversation list", () => {
     attachments: [],
     reasoning: null,
     routine: null,
+    turn_id: null,
+    queued: false,
     created_at: `2026-08-14T09:0${ordinal}:00.000Z`,
   });
 

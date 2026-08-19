@@ -113,6 +113,13 @@ export interface RuntimePiControl {
     message: string;
     signal: AbortSignal;
   }): Promise<BrokerWriteOutcome>;
+  /** Best-effort Pi abort for an Owner/Editor stop. Does not go through the turn lease signal. */
+  abort(input: {
+    boxId: string;
+    commandId: string;
+    attemptId: string;
+    signal: AbortSignal;
+  }): Promise<BrokerWriteOutcome>;
   readBrokerEvents(input: {
     boxId: string;
     after: bigint;

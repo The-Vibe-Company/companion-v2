@@ -57,6 +57,8 @@ function entry(overrides: Partial<CompanionTranscriptEntry> = {}): CompanionTran
     content: "Two services timed out.",
     reasoning: null,
     routine: null,
+    turn_id: null,
+    queued: false,
     author_id: null,
     author_name: null,
     tool: null,
@@ -210,6 +212,18 @@ describe("grouping a transcript into messages", () => {
     const groups = groupTranscriptEntries([said("Saved"), entry({ content: "Answered." })], context);
 
     expect(groups.every((group) => !group.sending)).toBe(true);
+  });
+
+  it("marks a saved follow-up as queued until Pi reaches it", () => {
+    const groups = groupTranscriptEntries([
+      said("Working"),
+      said("Then this", { queued: true, turn_id: "22222222-2222-4222-8222-222222222222" }),
+    ], context);
+
+    expect(groups.map((group) => ({ queued: group.queued, turnId: group.turnId }))).toEqual([
+      { queued: false, turnId: null },
+      { queued: true, turnId: "22222222-2222-4222-8222-222222222222" },
+    ]);
   });
 });
 
@@ -532,6 +546,19 @@ describe("holding message identity across polls", () => {
     update([{ ...sent, attachments: [{ ...sent.attachments[0]! }] }]);
 
     expect(seen.at(-1)![0]).toBe(first);
+  });
+
+  it("notices a follow-up that left the queue", () => {
+    const waiting = said("Then this", {
+      queued: true,
+      turn_id: "22222222-2222-4222-8222-222222222222",
+    });
+    const { seen, update } = renderHook(useStableEntries, [waiting]);
+    const first = seen[0]![0]!;
+
+    update([{ ...waiting, queued: false }]);
+
+    expect(seen.at(-1)![0]).not.toBe(first);
   });
 
   it("notices a reply that gained its reasoning", () => {
