@@ -19,6 +19,7 @@ const contextMocks = vi.hoisted(() => ({
 }));
 
 const coreMocks = vi.hoisted(() => ({
+  answerCompanionConfigDecisionV2: vi.fn(),
   answerCompanionDecisionV2: vi.fn(),
   readCompanionAttachmentV2: vi.fn(),
   cancelCompanionTurnV2: vi.fn(),
@@ -26,6 +27,7 @@ const coreMocks = vi.hoisted(() => ({
   duplicateCompanionV2: vi.fn(),
   enqueueCompanionOperationV2: vi.fn(),
   enqueueCompanionTurnV2: vi.fn(),
+  getCompanionDecisionV2: vi.fn(),
   getCompanionV2: vi.fn(),
   listCompanionsV2: vi.fn(),
   readCompanionThreadV2: vi.fn(),
@@ -279,6 +281,14 @@ describe("Companions Runtime v2 API", () => {
     storageMocks.putSkillArchive.mockResolvedValue(null);
     storageMocks.deleteStorageObject.mockResolvedValue(undefined);
     storageMocks.getSkillArchive.mockResolvedValue(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    coreMocks.answerCompanionConfigDecisionV2.mockResolvedValue(undefined);
+    coreMocks.getCompanionDecisionV2.mockResolvedValue({
+      requestKey: "question-1",
+      requestKind: "question",
+      decisionStatus: "pending",
+      proposal: null,
+      expiresAt: NOW,
+    });
     desktopMocks.mintCompanionDesktop.mockResolvedValue({
       desktop_url: "https://desktop.example.test/session",
       provisioning: false,
@@ -858,6 +868,33 @@ describe("Companions Runtime v2 API", () => {
       decision: "answer",
       text: "Use the conservative option",
     }));
+    expect(coreMocks.answerCompanionConfigDecisionV2).not.toHaveBeenCalled();
+  });
+
+  it("applies config proposals through the dedicated answer path", async () => {
+    coreMocks.getCompanionDecisionV2.mockResolvedValue({
+      requestKey: "config-1",
+      requestKind: "config_proposal",
+      decisionStatus: "pending",
+      proposal: {
+        kind: "config",
+        add_skill_ids: ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+      },
+      expiresAt: NOW,
+    });
+    const response = await appWithRoutes().request(
+      jsonPost(`/v1/companions/${COMPANION_ID}/decisions/config-1`, {
+        action: "allow",
+      }),
+    );
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toEqual({ thread });
+    expect(coreMocks.answerCompanionConfigDecisionV2).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: COMPANION_ID,
+      requestId: "config-1",
+      decision: "allow",
+    }));
+    expect(coreMocks.answerCompanionDecisionV2).not.toHaveBeenCalled();
   });
 
   it("denies Viewer desktop access before calling the private Runtime service", async () => {

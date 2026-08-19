@@ -708,6 +708,13 @@
       "when": 1788714400000,
       "tag": "0100_companion_config_proposal",
       "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "7",
+      "when": 1788800800000,
+      "tag": "0101_companion_answer_config_decision",
+      "breakpoints": true
     }
   ]
 }

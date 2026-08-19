@@ -477,6 +477,21 @@ BEGIN
       ];
     END IF;
 
+    -- 0099 lets the API login apply an approved config_proposal and read the
+    -- pending delivery so the HTTP layer can validate model_id first. Merge
+    -- remains owner-only; the worker and executor never receive these.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_api_answer_config_decision(uuid,uuid,text,text)'
+    ) IS NOT NULL THEN
+      companion_api_functions := companion_api_functions || ARRAY[
+        'public.companion_api_answer_config_decision(uuid,uuid,text,text)'::regprocedure,
+        'public.companion_api_get_decision(uuid,uuid,text)'::regprocedure
+      ];
+      internal_runtime_functions := internal_runtime_functions || ARRAY[
+        'public.companion_api_config_merge_ids(jsonb,jsonb,jsonb)'::regprocedure
+      ];
+    END IF;
+
     -- A migration owner can carry arbitrary ALTER DEFAULT PRIVILEGES grants installed by an
     -- earlier operator. Runtime v2 never relies on default function EXECUTE: erase every named
     -- non-owner grantee and PUBLIC before granting the exact executor surface below.

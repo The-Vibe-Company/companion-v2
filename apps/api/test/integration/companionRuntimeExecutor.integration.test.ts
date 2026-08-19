@@ -22,6 +22,7 @@ import {
   companionOperationSchema,
   companionTranscriptEntrySchema,
   companionTurnSchema,
+  type CompanionConfigProposal,
 } from "@companion/contracts";
 import {
   RuntimeDatabaseRoleError,
@@ -562,6 +563,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       "public.companion_api_retry_turn(uuid,uuid,uuid,uuid,public.companion_client_surface)",
       "public.companion_api_cancel_turn(uuid,uuid,uuid)",
       "public.companion_api_answer_decision(uuid,uuid,text,text,text)",
+      "public.companion_api_answer_config_decision(uuid,uuid,text,text)",
+      "public.companion_api_get_decision(uuid,uuid,text)",
       "public.companion_api_bump_skill_revision(uuid,uuid)",
     ];
     const apiAcl = await sql<Array<{
@@ -2375,6 +2378,221 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         kind: "config_proposal",
         payload: { type: "extension_ui_response", id: "config-1", confirmed: true },
       }]);
+    } finally {
+      await removeCompanion(fixture.companionId);
+    }
+  });
+
+  it("applies an approved config proposal under the approver and rolls back on validation failure", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion({ selectedSkillIds: [ids.skill] });
+    const requestKey = "config-apply-1";
+    const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
+    const proposal: CompanionConfigProposal = {
+      kind: "config",
+      add_skill_ids: [ids.orgSkill],
+      remove_skill_ids: [ids.skill],
+    };
+    const foreignProposal: CompanionConfigProposal = {
+      kind: "config",
+      add_skill_ids: [ids.editorSkill],
+    };
+    const connectProposal: CompanionConfigProposal = {
+      kind: "config",
+      connect_plugin: { server_name: "github", reason: "Need issues" },
+    };
+
+    // The module-level handle is optional, and TypeScript does not carry the guard above into a
+    // nested closure, so this helper holds the checked handle itself.
+    const db = sql;
+    async function insertPending(key: string, nextProposal: CompanionConfigProposal): Promise<string> {
+      const deliveryId = randomUUID();
+      const decision = {
+        request_id: key,
+        kind: "config",
+        name: "config",
+        title: "Apply these settings",
+        detail: "Apply these settings",
+        status: "pending",
+        answer: null,
+        decided_by_id: null,
+        decided_by_name: null,
+        decided_at: null,
+        expires_at: expiresAt,
+        proposal: nextProposal,
+      };
+      await db`
+        update companion_turn_attempts
+        set status = 'needs_input', checkpoint = 'needs_input', updated_at = now()
+        where id = ${fixture.attemptId}::uuid
+      `;
+      await db`
+        insert into companion_decision_deliveries(
+          id, org_id, companion_id, turn_id, attempt_id,
+          request_key, request_kind, expires_at, proposal
+        ) values (
+          ${deliveryId}::uuid, ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+          ${fixture.turnId}::uuid, ${fixture.attemptId}::uuid,
+          ${key}, 'config_proposal', ${expiresAt}, ${db.json(nextProposal)}
+        )
+      `;
+      await db`
+        insert into companion_transcript_entries(
+          org_id, companion_id, event_id, ordinal, role, content, decision
+        )
+        select ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+          ${`decision:${key}`}, next_ordinal, 'decision', ${decision.title},
+          ${db.json(decision)}
+        from companion_threads
+        where companion_id = ${fixture.companionId}::uuid
+      `;
+      await db`
+        update companion_threads set next_ordinal = next_ordinal + 1, updated_at = now()
+        where companion_id = ${fixture.companionId}::uuid
+      `;
+      return deliveryId;
+    }
+
+    try {
+      const deliveryId = await insertPending(requestKey, proposal);
+      const [read] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{
+          requestKind: string;
+          proposal: unknown;
+        }>>`
+          select request_kind::text as "requestKind", proposal
+          from public.companion_api_get_decision(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${requestKey}
+          )
+        `,
+      });
+      expect(read).toEqual({ requestKind: "config_proposal", proposal });
+
+      await expect(asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_answer_decision(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+            ${requestKey}, 'allow', null
+          )
+        `,
+      })).rejects.toMatchObject({ code: "22023" });
+
+      const allow = () => asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx: Tx) => tx<Array<{
+          deliveryId: string;
+          decisionStatus: string;
+        }>>`
+          select delivery_id::text as "deliveryId",
+            decision_status::text as "decisionStatus"
+          from public.companion_api_answer_config_decision(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+            ${requestKey}, 'allow'
+          )
+        `,
+      });
+      const allowed = await allow();
+      expect(allowed).toEqual([{ deliveryId, decisionStatus: "allowed" }]);
+      expect(await allow()).toEqual(allowed);
+
+      const [applied] = await sql<Array<{
+        selectedSkillIds: unknown;
+        skillsRevision: number;
+        desiredSettingsRevision: number;
+      }>>`
+        select companion.selected_skill_ids as "selectedSkillIds",
+          companion.skills_revision as "skillsRevision",
+          instance.desired_settings_revision::int as "desiredSettingsRevision"
+        from companions companion
+        join companion_runtime_instances instance
+          on instance.companion_id = companion.id
+        where companion.id = ${fixture.companionId}::uuid
+      `;
+      expect(applied).toMatchObject({
+        selectedSkillIds: [ids.orgSkill],
+        skillsRevision: 2,
+        desiredSettingsRevision: 2,
+      });
+
+      const foreignKey = "config-foreign-1";
+      await insertPending(foreignKey, foreignProposal);
+      await expect(asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_answer_config_decision(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+            ${foreignKey}, 'allow'
+          )
+        `,
+      })).rejects.toMatchObject({ code: "22023" });
+      const [stillPending] = await sql<Array<{ status: string }>>`
+        select decision_status::text as status
+        from companion_decision_deliveries
+        where companion_id = ${fixture.companionId}::uuid and request_key = ${foreignKey}
+      `;
+      expect(stillPending).toEqual({ status: "pending" });
+      const [unchanged] = await sql<Array<{ selectedSkillIds: unknown }>>`
+        select selected_skill_ids as "selectedSkillIds"
+        from companions where id = ${fixture.companionId}::uuid
+      `;
+      expect(unchanged?.selectedSkillIds).toEqual([ids.orgSkill]);
+
+      const connectKey = "config-connect-1";
+      const connectId = await insertPending(connectKey, connectProposal);
+      const [connected] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ deliveryId: string; decisionStatus: string }>>`
+          select delivery_id::text as "deliveryId",
+            decision_status::text as "decisionStatus"
+          from public.companion_api_answer_config_decision(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+            ${connectKey}, 'allow'
+          )
+        `,
+      });
+      expect(connected).toEqual({ deliveryId: connectId, decisionStatus: "allowed" });
+      const [afterConnect] = await sql<Array<{
+        selectedSkillIds: unknown;
+        desiredSettingsRevision: number;
+      }>>`
+        select companion.selected_skill_ids as "selectedSkillIds",
+          instance.desired_settings_revision::int as "desiredSettingsRevision"
+        from companions companion
+        join companion_runtime_instances instance on instance.companion_id = companion.id
+        where companion.id = ${fixture.companionId}::uuid
+      `;
+      expect(afterConnect).toMatchObject({
+        selectedSkillIds: [ids.orgSkill],
+        desiredSettingsRevision: 2,
+      });
+
+      // A Viewer who really can see this Companion is still refused the editor-gated read, rather
+      // than being refused only because the Companion was never shared with them.
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_set_workspace_access(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, 'viewer'
+          )
+        `,
+      });
+      await expect(asApi({
+        orgId: ids.orgA,
+        actorId: ids.viewerA,
+        action: (tx) => tx`
+          select * from public.companion_api_get_decision(
+            ${ids.orgA}::uuid, ${fixture.companionId}::uuid, ${requestKey}
+          )
+        `,
+      })).rejects.toMatchObject({ code: "42501" });
     } finally {
       await removeCompanion(fixture.companionId);
     }
