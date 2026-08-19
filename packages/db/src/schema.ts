@@ -785,6 +785,11 @@ export const companionTurns = pgTable(
      */
     routineId: uuid("routine_id").references(() => companionRoutines.id, { onDelete: "set null" }),
     routineName: text("routine_name"),
+    /**
+     * Set when an Owner/Editor asks to stop an active turn whose prompt may already be on Pi.
+     * The executor that holds the lease aborts Pi and settles; the API never contacts Box.
+     */
+    cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
     createdAt: now(),
     updatedAt: updatedAt(),
   },

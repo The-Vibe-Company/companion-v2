@@ -931,6 +931,17 @@ export const companionTranscriptEntrySchema = z.object({
     name: companionRoutineNameSchema,
   }).nullable().default(null),
   /**
+   * The durable turn this user message created, so a queued follow-up can be cancelled by id.
+   * Null on every other role, and on a message the composer is still sending.
+   */
+  turn_id: z.string().uuid().nullable().default(null),
+  /**
+   * True while this user message is saved and ordered behind other work. The composer can keep
+   * sending; these are the lines that have not reached Pi yet. Default keeps older projections
+   * parseable.
+   */
+  queued: z.boolean().default(false),
+  /**
    * Files this entry carries, in stable order. A member message carries what was sent with it; the
    * assistant outputs entry carries what Pi left in its outbox during that turn. Every other entry
    * carries an empty list, and the default keeps older projections parseable.
@@ -957,6 +968,13 @@ export const companionTranscriptEntrySchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["routine"],
       message: "only a user message may carry a routine origin",
+    });
+  }
+  if ((entry.turn_id !== null || entry.queued) && entry.role !== "user") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: entry.queued ? ["queued"] : ["turn_id"],
+      message: "only a user message may be queued or name its turn",
     });
   }
   if (entry.reasoning !== null && entry.role !== "assistant") {

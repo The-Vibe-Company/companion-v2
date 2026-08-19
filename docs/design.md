@@ -247,7 +247,8 @@ diffs from already-loaded skill/plugin/model names, and keeps the card pending w
 New explicit recovery actions are:
 
 - `POST /v1/companions/:id/turns/:turnId/retry` with a unique `retry_id`;
-- `POST /v1/companions/:id/turns/:turnId/cancel` for an interrupted turn.
+- `POST /v1/companions/:id/turns/:turnId/cancel` to stop an active turn, dequeue a follow-up, or
+  release an interrupted turn.
 
 The web retains polling: three seconds while activity is present, slower when settled. There is no
 SSE or Box push agent. “Companion is replying…” derives only from an acknowledged, non-terminal

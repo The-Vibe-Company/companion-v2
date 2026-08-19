@@ -286,6 +286,7 @@ const disabledPiControl: RuntimePiControl = {
   piDaemonStatus: async () => runtimeDisabled(),
   brokerState: async () => runtimeDisabled(),
   prompt: async () => runtimeDisabled(),
+  abort: async () => runtimeDisabled(),
   readBrokerEvents: async () => runtimeDisabled(),
   ackBrokerEvents: async () => runtimeDisabled(),
   respondExtensionUi: async () => runtimeDisabled(),

@@ -206,6 +206,8 @@ function controlPlane(options: { piAcceptsOnWake: boolean; holdSend?: boolean })
         attachments: [],
         reasoning: null,
         routine: null,
+        turn_id: null,
+        queued: false,
         created_at: new Date().toISOString(),
       });
     }
@@ -235,6 +237,8 @@ function controlPlane(options: { piAcceptsOnWake: boolean; holdSend?: boolean })
     attachments: [],
           reasoning: null,
           routine: null,
+          turn_id: null,
+          queued: false,
           created_at: new Date().toISOString(),
         });
       }

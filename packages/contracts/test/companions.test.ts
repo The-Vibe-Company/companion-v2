@@ -392,6 +392,33 @@ describe("Companion chat contracts", () => {
     expect(thread.entries[1]?.author_id).toBeNull();
     // A message is not a tool run, and the thread says so rather than leaving the field absent.
     expect(thread.entries[0]?.tool).toBeNull();
+    expect(thread.entries[0]?.queued).toBe(false);
+    expect(thread.entries[0]?.turn_id).toBeNull();
+  });
+
+  it("lets a user message name its queued turn and refuses that on any other role", () => {
+    const turnId = "22222222-2222-4222-8222-222222222222";
+    expect(companionTranscriptEntrySchema.parse({
+      event_id: "msg:1",
+      ordinal: 0,
+      role: "user",
+      content: "Follow up",
+      author_id: "user-1",
+      author_name: null,
+      turn_id: turnId,
+      queued: true,
+      created_at: "2026-08-12T12:00:00.000Z",
+    })).toMatchObject({ turn_id: turnId, queued: true });
+    expect(() => companionTranscriptEntrySchema.parse({
+      event_id: "pi:0",
+      ordinal: 1,
+      role: "assistant",
+      content: "Hi",
+      author_id: null,
+      author_name: null,
+      queued: true,
+      created_at: "2026-08-12T12:00:01.000Z",
+    })).toThrow();
   });
 
   it("carries reasoning only on a reply, and absent means none", () => {

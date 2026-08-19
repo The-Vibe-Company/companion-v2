@@ -169,6 +169,31 @@ describe("runtime Box/Pi port adapters", () => {
     expect(brokerState).not.toHaveBeenCalled();
   });
 
+  it("maps a Pi abort ACK without probing broker state afterwards", async () => {
+    const dispatchAbort = vi.fn(async () => ({
+      outcome: "accepted" as const,
+      attemptId: "attempt-1",
+      invocationId: "invocation-1",
+    }));
+    const brokerState = vi.fn();
+    const factory = vi.fn(() => boxRuntime({ dispatchAbort, brokerState }));
+    const pi = createRuntimePiControl({ lifecycle: lifecycle(), runtime: factory });
+
+    await expect(pi.abort({
+      boxId: "bx_23456789",
+      commandId: "command-abort",
+      attemptId: "attempt-1",
+      signal,
+    })).resolves.toEqual({ outcome: "accepted", invocationId: "invocation-1" });
+    expect(dispatchAbort).toHaveBeenCalledWith({
+      boxId: "bx_23456789",
+      requestId: "command-abort",
+      attemptId: "attempt-1",
+      signal,
+    });
+    expect(brokerState).not.toHaveBeenCalled();
+  });
+
   it("preserves refusal/ambiguity and converts broker cursors without precision loss", async () => {
     const dispatchPrompt = vi.fn()
       .mockResolvedValueOnce({ outcome: "refused", code: "pi_busy", message: "ignored" })

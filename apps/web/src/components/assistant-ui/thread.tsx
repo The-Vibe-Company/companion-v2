@@ -34,10 +34,10 @@ import {
  * Companion thread offers and adapted to the surface it lives in.
  *
  * Everything removed is a capability this thread does not have — attachments and their dropzone,
- * dictation, prompt suggestions, branching, editing a sent message, regeneration, cancelling a run —
- * because the model runs in a remote Box that the control plane only polls: there is no stream to
- * stop, no branch to pick, and no second attempt to ask for. Re-fetching from the registry is an
- * upgrade task, not a refresh: this file is the artifact.
+ * dictation, prompt suggestions, branching, editing a sent message, or regeneration — because the
+ * model runs in a remote Box that the control plane only polls. Stop is a control-plane cancel of
+ * the active turn, not a stream abort: there is still no live token stream in this thread.
+ * Re-fetching from the registry is an upgrade task, not a refresh: this file is the artifact.
  *
  * The one structural change from the registry layout is that the composer sits *below* the scrolling
  * viewport rather than sticky inside it. A phone keyboard shrinks the visual viewport and the shell

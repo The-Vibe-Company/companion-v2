@@ -211,8 +211,44 @@ export class RuntimeEngine {
       const released = await session.release();
       return this.#result(claim, released ? "released" : "fence_lost");
     }
+    if (code === "turn_cancel_requested") {
+      await this.#abortPiForStop(claim, session);
+      return await this.#finishSettlement(claim, session, {
+        terminalStatus: "cancelled",
+      }, thrown);
+    }
     const settlement = denialRuntimeError(code);
     return await this.#finishSettlement(claim, session, settlement, thrown);
+  }
+
+  /**
+   * Best-effort Pi abort on Owner/Editor stop. The lease signal is already aborted by the denial,
+   * so this uses a short independent deadline rather than the turn's lease.
+   */
+  async #abortPiForStop(
+    claim: RuntimeClaim,
+    session: LeaseSession,
+  ): Promise<void> {
+    if (claim.workKind !== "attempt") return;
+    const auth = session.authorization;
+    if (!auth?.boxId) return;
+    if (auth.dispatchState !== "accepted"
+      && auth.dispatchState !== "write_intent"
+      && auth.dispatchState !== "ambiguous") return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8_000);
+    try {
+      await this.#deps.pi.abort({
+        boxId: auth.boxId,
+        commandId: this.#deps.idFactory.uuid(),
+        attemptId: claim.workId,
+        signal: controller.signal,
+      });
+    } catch {
+      // Stop still settles. A leftover Pi run is recovered by the next turn's idle preflight.
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async #honorLocalControl(

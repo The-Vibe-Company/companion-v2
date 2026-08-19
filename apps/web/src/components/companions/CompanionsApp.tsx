@@ -165,6 +165,8 @@ function projectAcceptedMessage(input: {
         tool: null,
         decision: null,
         routine: null,
+        turn_id: input.turn.id,
+        queued: input.turn.status === "queued",
         // The 202 carries the turn, not the stored files, so this stands in with what the send
         // carried. Without it the just-sent message loses its chips until the next poll.
         attachments: input.attachments ?? [],
@@ -1077,11 +1079,19 @@ export function CompanionsApp({
   const onCancelInterrupted = async (turnId: string): Promise<void> => {
     if (!openedId) throw new Error("This Companion is no longer open.");
     const companionId = openedId;
-    const accepted = await cancelCompanionTurn(currentOrg.id, companionId, turnId);
-    if (openedIdRef.current !== companionId) return;
-    threadRequestRef.current += 1;
-    setThread(accepted.thread);
-    void refreshCompanion(companionId);
+    try {
+      const accepted = await cancelCompanionTurn(currentOrg.id, companionId, turnId);
+      if (openedIdRef.current !== companionId) return;
+      setThreadError(null);
+      threadRequestRef.current += 1;
+      setThread(accepted.thread);
+      void refreshCompanion(companionId);
+    } catch (cause) {
+      if (openedIdRef.current === companionId) {
+        setThreadError(cause instanceof Error ? cause.message : "This turn could not be stopped.");
+      }
+      throw cause;
+    }
   };
 
   /**

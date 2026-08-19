@@ -48,6 +48,10 @@ export interface TranscriptMessage {
   lead: boolean;
   /** True while the control plane has not confirmed this message yet. */
   sending: boolean;
+  /** True while this user message is saved and ordered behind other work. */
+  queued: boolean;
+  /** The durable turn this user message created, when the control plane has named it. */
+  turnId: string | null;
   /** The first source entry's timestamp: when the passage this message may open began. */
   createdAt: string;
   /**
@@ -146,6 +150,8 @@ export function groupTranscriptEntries(
       lead: true,
       sending: context.sendingEventId != null
         && grouped.some((entry) => entry.event_id === context.sendingEventId),
+      queued: grouped.some((entry) => entry.queued),
+      turnId: grouped.find((entry) => entry.turn_id)?.turn_id ?? null,
       createdAt: first.created_at,
       displayContent: role === "system"
         ? transcriptDisplayContent(first, context.companionName)
@@ -327,6 +333,8 @@ export function useStableEntries(
         && kept.decision?.decided_by_id === entry.decision?.decided_by_id
         && kept.routine?.id === entry.routine?.id
         && kept.routine?.name === entry.routine?.name
+        && kept.queued === entry.queued
+        && kept.turn_id === entry.turn_id
         // Attachments are written once with the entry and never move afterwards, so identity by
         // count and id is total: an entry that gains a file is a different entry.
         && kept.attachments.length === entry.attachments.length
@@ -352,6 +360,8 @@ function sameGroup(kept: TranscriptMessage, next: TranscriptMessage): boolean {
     && kept.author === next.author
     && kept.lead === next.lead
     && kept.sending === next.sending
+    && kept.queued === next.queued
+    && kept.turnId === next.turnId
     && kept.createdAt === next.createdAt
     && kept.displayContent === next.displayContent
     && kept.startsDay === next.startsDay

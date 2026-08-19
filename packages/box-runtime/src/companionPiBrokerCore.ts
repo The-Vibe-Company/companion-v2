@@ -542,6 +542,8 @@ export class CompanionPiBroker {
         return normalizePiState(await this.#piRequest("get_state", {}));
       case "prompt":
         return this.#prompt(command);
+      case "abort":
+        return this.#abort(command);
       case "extension_ui_response":
         return this.#extensionUiResponse(command);
       case "read_events": {
@@ -616,6 +618,43 @@ export class CompanionPiBroker {
       );
     }
     return { attemptId, invocationId: this.#invocationId, piAcknowledged: true };
+  }
+
+  async #abort(command: PiJsonObject): Promise<PiJsonObject> {
+    const activeAttemptId = this.#activeAttemptId;
+    if (command.attemptId !== undefined) {
+      const requestedAttemptId = requireOpaqueId(command.attemptId, "attemptId");
+      if (activeAttemptId && requestedAttemptId !== activeAttemptId) {
+        throw new BrokerCommandError("attempt_mismatch", "abort does not match the active Pi attempt");
+      }
+    }
+    if (!activeAttemptId) {
+      return { aborted: false, invocationId: this.#invocationId };
+    }
+    let response: PiJsonObject;
+    try {
+      response = await this.#piRequest("abort", {});
+    } catch {
+      throw new BrokerCommandError(
+        "pi_ack_ambiguous",
+        "Pi abort acknowledgement is unavailable",
+        true,
+      );
+    }
+    if (response.success === false) {
+      throw new BrokerCommandError("pi_abort_refused", "Pi refused the abort");
+    }
+    if (response.success !== true) {
+      throw new BrokerCommandError(
+        "pi_ack_ambiguous",
+        "Pi abort acknowledgement is unavailable",
+        true,
+      );
+    }
+    // Clear the binding on a positive ACK so the next queued turn does not see a stale active
+    // attempt while Pi's agent_settled event is still in flight.
+    this.#activeAttemptId = null;
+    return { aborted: true, attemptId: activeAttemptId, invocationId: this.#invocationId };
   }
 
   async #extensionUiResponse(command: PiJsonObject): Promise<PiJsonObject> {
