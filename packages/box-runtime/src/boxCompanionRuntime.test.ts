@@ -15,7 +15,6 @@ import {
   observedBoxStateFromProvider,
   parseOutboxManifest,
   resolvePiPackages,
-  resolveQmdPackage,
 } from "./boxCompanionRuntime";
 
 afterEach(() => {
@@ -473,7 +472,6 @@ describe("default Pi packages on the Box disk", () => {
     // it. A quoting slip in it is a Box that fails every staging, which is every message.
     const variants: Array<Record<string, string>> = [
       {},
-      { COMPANION_PI_QMD_PACKAGE: "none" },
       { COMPANION_PI_INSTALL_COMMAND: "curl -fsSL https://pi.test/install | bash" },
     ];
     for (const env of variants) {
@@ -495,70 +493,45 @@ describe("default Pi packages on the Box disk", () => {
   });
 
   it("makes every pin part of the layout marker, so an existing Box relayouts on its next wake", async () => {
-    const before = await stagedLayoutScript();
-    expect(before).toContain(
+    // The marker is the whole update system: changing a pin is what a Box holding the old one
+    // cannot short-circuit past.
+    expect(await stagedLayoutScript()).toContain(
       "expected_layout='14:npm:pi-mcp-adapter@2.12.1,npm:pi-web-access@0.24.0,"
       + "npm:pi-subagents@0.51.0,npm:pi-memory@0.4.2:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2'",
     );
-
-    const after = await stagedLayoutScript({
-      COMPANION_PI_DEFAULT_PACKAGES: "npm:pi-web-access@0.25.0",
-    });
-    // The marker is the whole update system: a Box holding the old one cannot short-circuit.
-    expect(after).toContain(
-      "expected_layout='14:npm:pi-mcp-adapter@2.12.1,npm:pi-web-access@0.25.0"
-      + ":qmd=@tobilu/qmd@2.8.3:pi>=0.84.2'",
-    );
-    expect(after).not.toContain("npm:pi-memory@0.4.2");
   });
 
-  it("installs nothing beyond the adapter, and no qmd, when the deployment asks for none", async () => {
+  it("gives a deployment no way to drop what a Companion can do", async () => {
+    // Web access, delegation, and memory are the Companion, not a deployment setting. The only pin
+    // an environment can still move is the MCP adapter, which was configurable before any of this.
     const script = await stagedLayoutScript({
       COMPANION_PI_DEFAULT_PACKAGES: "none",
       COMPANION_PI_QMD_PACKAGE: "none",
     });
 
-    expect(script).toContain(`"$pi_bin" install 'npm:pi-mcp-adapter@2.12.1'`);
-    expect(script).not.toContain("npm install --global");
-    expect(script).toContain("expected_layout='14:npm:pi-mcp-adapter@2.12.1:qmd=none:pi>=0.84.2'");
-    // A deployment that installs no memory package still gets the directory and the export: the
-    // wrapper is one shape, and an unused directory costs nothing.
-    expect(script).toContain('export PI_MEMORY_DIR="$root/memory"');
-  });
-
-  it("refuses a package specification that is not a package name", () => {
-    for (const spec of ["npm:pi-memory@0.4.2; rm -rf /", "$(id)", "pi memory", "a".repeat(201)]) {
-      for (const key of [
-        "COMPANION_PI_DEFAULT_PACKAGES",
-        "COMPANION_PI_QMD_PACKAGE",
-        "COMPANION_PI_MCP_ADAPTER_PACKAGE",
-      ]) {
-        expect(() => new AsciiBoxCompanionRuntime({
-          COMPANION_BOX_API_KEY: "box_test",
-          [key]: spec,
-        })).toThrow(BoxRuntimeConfigurationError);
-      }
+    for (const spec of [
+      "npm:pi-web-access@0.24.0",
+      "npm:pi-subagents@0.51.0",
+      "npm:pi-memory@0.4.2",
+    ]) {
+      expect(script).toContain(`"$pi_bin" install '${spec}'`);
     }
+    expect(script).toContain("npm install --global");
+    expect(script).not.toContain("qmd=none");
+    expect(resolvePiPackages({ COMPANION_PI_DEFAULT_PACKAGES: "none" }))
+      .toEqual(resolvePiPackages({}));
   });
 
-  it("reads the deployment's own spelling of the package list", () => {
-    // A variable that is present but blank is not a deployment asking for no packages: only the
-    // sentinel is, and losing that distinction silently strips every Companion's abilities.
-    expect(resolvePiPackages({ COMPANION_PI_DEFAULT_PACKAGES: "" }))
-      .toEqual(resolvePiPackages({}));
-    expect(resolvePiPackages({ COMPANION_PI_DEFAULT_PACKAGES: " npm:a@1 , npm:b@2, " })).toEqual([
-      "npm:pi-mcp-adapter@2.12.1",
-      "npm:a@1",
-      "npm:b@2",
-    ]);
-    expect(resolvePiPackages({ COMPANION_PI_DEFAULT_PACKAGES: "none" }))
-      .toEqual(["npm:pi-mcp-adapter@2.12.1"]);
+  it("refuses an adapter specification that is not a package name", () => {
+    for (const spec of ["npm:pi-memory@0.4.2; rm -rf /", "$(id)", "pi memory", "a".repeat(201)]) {
+      expect(() => new AsciiBoxCompanionRuntime({
+        COMPANION_BOX_API_KEY: "box_test",
+        COMPANION_PI_MCP_ADAPTER_PACKAGE: spec,
+      })).toThrow(BoxRuntimeConfigurationError);
+    }
     // A deployment that pinned a range before this existed keeps working.
     expect(resolvePiPackages({ COMPANION_PI_MCP_ADAPTER_PACKAGE: "npm:pi-mcp-adapter@^2.12.1" })[0])
       .toBe("npm:pi-mcp-adapter@^2.12.1");
-    expect(resolveQmdPackage({})).toBe("@tobilu/qmd@2.8.3");
-    expect(resolveQmdPackage({ COMPANION_PI_QMD_PACKAGE: "" })).toBe("@tobilu/qmd@2.8.3");
-    expect(resolveQmdPackage({ COMPANION_PI_QMD_PACKAGE: "none" })).toBeNull();
   });
 });
 

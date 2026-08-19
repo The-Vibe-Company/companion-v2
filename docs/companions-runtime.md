@@ -255,15 +255,19 @@ reads as "keep what the row already holds", so progress never erases the headlin
 never erases the last progress. Classification remains stateless per event, so replaying a page
 still produces byte-identical projection digests. An update with no readable text stays activity.
 
-**Installed Pi packages.** Every Box installs the MCP adapter plus a pinned default set:
-`pi-web-access` (search and fetch, zero-config), `pi-subagents` (delegation through a `subagent`
-tool), and `pi-memory` (memory that survives a Box wake, kept on the persistent disk at
-`~/.companion/runtime/memory` and exported as `PI_MEMORY_DIR`). pi-memory's optional semantic-search
-binary, `qmd`, installs best-effort under `~/.companion/tools`: memory degrades to recall without it,
-so a failed install reports on stdout and never fails a staging. Best-effort also means recorded
-once — the marker is written whether or not that optional install succeeded, so a Box that missed it
-keeps plain recall until a pin changes, rather than paying for the whole layout again on every wake. `COMPANION_PI_DEFAULT_PACKAGES` and
-`COMPANION_PI_QMD_PACKAGE` override the pins, and `none` disables either.
+**Installed Pi packages.** Every Box installs the MCP adapter plus a pinned set: `pi-web-access`
+(search and fetch, zero-config), `pi-subagents` (delegation through a `subagent` tool), and
+`pi-memory` (memory that survives a Box wake, kept on the persistent disk at
+`~/.companion/runtime/memory` and exported as `PI_MEMORY_DIR`). pi-memory's semantic-search binary,
+`qmd`, installs best-effort under `~/.companion/tools`: memory degrades to recall without it, so a
+failed install reports on stdout and never fails a staging. Best-effort also means recorded once —
+the marker is written whether or not that install succeeded, so a Box that missed it keeps plain
+recall until a pin changes, rather than paying for the whole layout again on every wake.
+
+None of that set is configurable. The pins live in `packages/box-runtime` and no environment variable
+can drop one: what a Companion can do is a product decision, and a deployment able to remove web
+access, delegation, or memory would be one where a Companion's abilities depend on which install its
+member happens to be talking to. Only the MCP adapter pin stays overridable, because it already was.
 
 Like the outbox, the package set rides within layout 14 rather than claiming a version, because the
 layout version gates the attempt state machine. Every pin is part of the layout marker string

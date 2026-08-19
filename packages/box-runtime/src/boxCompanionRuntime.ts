@@ -63,17 +63,22 @@ const DEFAULT_PI_MCP_ADAPTER_PACKAGE = "npm:pi-mcp-adapter@2.12.1";
  * useful without any plugin connected at all, subagents let one delegate a bounded piece of its own
  * work, and memory is what carries a fact from one thread session to the next. Each is pinned: a
  * floating range would let two Boxes laid out a day apart disagree about what a Companion can do.
+ *
+ * They are not configurable. What a Companion can do is a product decision, not a deployment's to
+ * make: a Box missing one of these is a Companion that quietly cannot do what its thread, its
+ * instructions, and this repository all say it can.
  */
-const DEFAULT_PI_PACKAGES = [
+const PI_PACKAGES = [
   "npm:pi-web-access@0.24.0",
   "npm:pi-subagents@0.51.0",
   "npm:pi-memory@0.4.2",
 ] as const;
 /**
- * pi-memory's optional semantic-search binary. It is not a Pi package and not required: memory works
- * without it, so its install is best-effort and never fails a staging.
+ * pi-memory's semantic-search binary. It is not a Pi package and memory recalls without it, so its
+ * install is best-effort and can never fail a staging — but it is always attempted, for the same
+ * reason the packages above are.
  */
-const DEFAULT_QMD_PACKAGE = "@tobilu/qmd@2.8.3";
+const QMD_PACKAGE = "@tobilu/qmd@2.8.3";
 /**
  * What a package specification may contain. Deliberately permissive about the grammar npm and Pi
  * already understand — exact pins, ranges, git refs — and closed to everything a shell would read as
@@ -82,8 +87,6 @@ const DEFAULT_QMD_PACKAGE = "@tobilu/qmd@2.8.3";
  */
 const PI_PACKAGE_SPEC = /^[@A-Za-z0-9:._/^~+#-]+$/;
 const MAX_PI_PACKAGE_SPEC_LENGTH = 200;
-/** An operator asking for no default packages, or no semantic-search binary, says so by name. */
-const NO_PACKAGES_SENTINEL = "none";
 /** First Pi release whose image resize runs outside the RPC event loop. */
 const MINIMUM_IMAGE_SAFE_PI_VERSION = "0.84.2";
 const MAX_COMPANION_RUNTIME_GENERATION = 2_147_483_647;
@@ -892,34 +895,20 @@ function parseBrokerJournalRecord(value: unknown): CompanionPiJournalRecord | nu
 const PI_LAYOUT_SCRIPT_PATH = ".companion/bin/ensure-pi-layout.sh";
 
 /**
- * Resolve the Pi packages one Box installs, adapter first.
+ * The Pi packages one Box installs, adapter first.
  *
- * The default set is deployment-overridable because a self-hosted deployment may run an image with
- * its own pins, or none at all. `none` is how an operator says none rather than by setting an empty
- * string, which is indistinguishable from an unset variable.
+ * Only the adapter is deployment-pinnable, and only because it already was. Everything after it is
+ * fixed: a deployment that could drop web access, delegation, or memory would be a deployment where
+ * a Companion's abilities depend on which install it happens to be talking to.
  */
 export function resolvePiPackages(env: NodeJS.ProcessEnv): string[] {
   const adapter = validPackageSpec(
     env.COMPANION_PI_MCP_ADAPTER_PACKAGE?.trim() || DEFAULT_PI_MCP_ADAPTER_PACKAGE,
     "COMPANION_PI_MCP_ADAPTER_PACKAGE",
   );
-  const configured = env.COMPANION_PI_DEFAULT_PACKAGES?.trim();
-  const defaults = configured === undefined || configured === ""
-    ? [...DEFAULT_PI_PACKAGES]
-    : configured === NO_PACKAGES_SENTINEL
-      ? []
-      : configured.split(",").map((spec) => spec.trim()).filter(Boolean);
-  return [
-    adapter,
-    ...defaults.map((spec) => validPackageSpec(spec, "COMPANION_PI_DEFAULT_PACKAGES")),
-  ];
-}
-
-/** The optional semantic-search binary pi-memory uses, or null when the deployment wants none. */
-export function resolveQmdPackage(env: NodeJS.ProcessEnv): string | null {
-  const configured = env.COMPANION_PI_QMD_PACKAGE?.trim();
-  if (configured === NO_PACKAGES_SENTINEL) return null;
-  return validPackageSpec(configured || DEFAULT_QMD_PACKAGE, "COMPANION_PI_QMD_PACKAGE");
+  // Validated too, though they are literals here: this is the one place a bad edit to them can be
+  // caught before it reaches a Box.
+  return [adapter, ...PI_PACKAGES.map((spec) => validPackageSpec(spec, "PI_PACKAGES"))];
 }
 
 function validPackageSpec(spec: string, variable: string): string {
@@ -934,7 +923,7 @@ function validPackageSpec(spec: string, variable: string): string {
 function setupScript(
   installCommand: string | undefined,
   piPackages: readonly string[],
-  qmdPackage: string | null,
+  qmdPackage: string,
 ): string {
   const configuredInstall = installCommand?.trim();
   const encodedBrokerSource = Buffer.from(COMPANION_PI_BROKER_SOURCE, "utf8").toString("base64");
@@ -990,7 +979,7 @@ set -euo pipefail
 layout_marker="$HOME/.companion/runtime/state/pi-layout.version"
 expected_layout=${shellQuote(
     `${COMPANION_PI_DISK_LAYOUT_VERSION}:${piPackages.join(",")}`
-    + `:qmd=${qmdPackage ?? NO_PACKAGES_SENTINEL}`
+    + `:qmd=${qmdPackage}`
     + `:pi>=${MINIMUM_IMAGE_SAFE_PI_VERSION}`,
   )}
 if [ -f "$layout_marker" ] \
@@ -1035,7 +1024,7 @@ COMPANION_PI_VERSION
 pi_bin_dir="$(dirname "$pi_bin")"
 ${piPackages
     .map((spec) => `PI_CODING_AGENT_DIR="$HOME/.companion/pi" "$pi_bin" install ${shellQuote(spec)}`)
-    .join("\n")}${qmdPackage ? `
+    .join("\n")}
 # Semantic memory search is an optimization: pi-memory recalls without it, so a Box that cannot
 # install it is still a working Box. Nothing in this block may end a staging, which is why it runs
 # outside errexit and why the reported line is a fixed shape rather than npm's own words: the
@@ -1049,8 +1038,8 @@ npm install --global --prefix "$HOME/.companion/tools" ${shellQuote(qmdPackage)}
 qmd_status=$?
 set -e
 if [ "$qmd_status" -ne 0 ]; then
-  printf 'Optional memory search binary %s did not install (exit %s); see runtime/logs/qmd-install.log\\n' ${shellQuote(qmdPackage)} "$qmd_status"
-fi` : ""}
+  printf 'Memory search binary %s did not install (exit %s); see runtime/logs/qmd-install.log\\n' ${shellQuote(qmdPackage)} "$qmd_status"
+fi
 # The broker is an autonomous ESM program. Encoding it keeps arbitrary JavaScript out of the shell
 # grammar while preserving one identical setup script for Box create and in-place layout repair.
 printf '%s' ${shellQuote(encodedBrokerSource)} | base64 --decode > "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
@@ -1395,7 +1384,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   readonly #daemonActiveTimeoutMs: number;
   readonly #installCommand: string | undefined;
   readonly #piPackages: readonly string[];
-  readonly #qmdPackage: string | null;
+  readonly #qmdPackage: string;
   /**
    * The current staging call's budget. Private file/command helpers share it so cancellation covers
    * the whole layout transaction without leaking into a later adapter call.
@@ -1424,7 +1413,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     );
     this.#installCommand = env.COMPANION_PI_INSTALL_COMMAND;
     this.#piPackages = resolvePiPackages(env);
-    this.#qmdPackage = resolveQmdPackage(env);
+    this.#qmdPackage = validPackageSpec(QMD_PACKAGE, "QMD_PACKAGE");
   }
 
   /**
