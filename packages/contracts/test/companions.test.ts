@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  COMPANION_HUB_TOKEN_SCOPES,
   COMPANION_CONFIG_PROPOSAL_MAX_IDS,
   COMPANION_LAST_MESSAGE_PREVIEW_MAX_CHARACTERS,
   COMPANION_PROVIDER_CATALOG,
@@ -93,11 +94,15 @@ describe("Companion provider contracts", () => {
       provider_id: "anthropic",
       model_id: "claude-sonnet-5",
       selected_skill_ids: ["11111111-1111-4111-8111-111111111111"],
-      can_write_skills: true,
     })).toMatchObject({
       selected_skill_ids: ["11111111-1111-4111-8111-111111111111"],
-      can_write_skills: true,
     });
+    // Skills Hub access is unconditional, so creation has nothing to say about it.
+    expect(() => createCompanionInputSchema.parse({
+      name: "Research",
+      provider_id: "anthropic",
+      can_write_skills: true,
+    })).toThrow();
     expect(createCompanionInputSchema.parse({
       name: "Luna",
       persona: "  Content marketing assistant  ",
@@ -129,11 +134,15 @@ describe("Companion provider contracts", () => {
     expect(() => restartCompanionRuntimeInputSchema.parse({ target: "box", continuation: false })).toThrow();
   });
 
-  it("persists skill selection and write-on-behalf on update", () => {
+  it("persists skill selection on update and refuses Skills Hub access fields", () => {
     expect(updateCompanionInputSchema.parse({
       selected_skill_ids: [],
-      can_write_skills: false,
-    })).toEqual({ selected_skill_ids: [], can_write_skills: false });
+    })).toEqual({ selected_skill_ids: [] });
+    // Neither field is configurable any more: every Companion holds the whole Skills Hub scope set.
+    expect(() => updateCompanionInputSchema.parse({ can_write_skills: false })).toThrow();
+    expect(() => updateCompanionInputSchema.parse({
+      hub_access: { skills_read: true },
+    })).toThrow();
     expect(updateCompanionInputSchema.parse({
       selected_mcp_account_ids: ["22222222-2222-4222-8222-222222222222"],
     })).toEqual({
@@ -190,6 +199,18 @@ describe("Companion provider contracts", () => {
     })).toMatchObject({ model_id: "gpt-5.6-sol" });
     expect(() => updateCompanionInputSchema.parse({})).toThrow();
     expect(() => updateCompanionInputSchema.parse({ owner_id: "user-2" })).toThrow();
+  });
+
+  it("mints the whole Skills Hub scope set and never a secrets:write or install capability", () => {
+    expect([...COMPANION_HUB_TOKEN_SCOPES]).toEqual([
+      "skills:read",
+      "skills:write",
+      "secrets:read",
+      "database:read",
+      "database:write",
+    ]);
+    expect(COMPANION_HUB_TOKEN_SCOPES).not.toContain("secrets:write");
+    expect(COMPANION_HUB_TOKEN_SCOPES).not.toContain("public-skills:install");
   });
 });
 
@@ -520,6 +541,11 @@ describe("Companion chat contracts", () => {
       kind: "config",
       can_write_skills: true,
       add_skill_ids: [skillId],
+    })).toThrow();
+    expect(() => companionConfigProposalSchema.parse({
+      kind: "config",
+      hub_access: { skills_read: true },
+      persona: "helpful",
     })).toThrow();
     expect(() => companionConfigProposalSchema.parse({
       kind: "config",

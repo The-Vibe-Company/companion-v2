@@ -428,10 +428,11 @@ export const companions = pgTable(
      */
     selectedSkillIds: jsonb("selected_skill_ids").$type<string[]>().notNull().default([]),
     /**
-     * When true, the Box may publish and update Skills Hub packages on the Companion owner's
-     * behalf. Off by default; Viewer never writes this flag.
+     * Legacy THE-360 flag, pinned true by 0101: Skills Hub access is unconditional and carried by
+     * the ephemeral token the runtime mints for each staging. It stays because operation snapshots
+     * and projections already read it.
      */
-    canWriteSkills: boolean("can_write_skills").notNull().default(false),
+    canWriteSkills: boolean("can_write_skills").notNull().default(true),
     /**
      * Exact companion_mcp_accounts ids this Companion may stage onto its Box. Empty means no
      * member MCP pins beyond whatever the Pi runtime itself requires (the adapter binary only).
@@ -2069,7 +2070,9 @@ export const skillCommentImages = pgTable(
  * Personal access tokens for programmatic publish/install over the API. The plaintext
  * `cmp_pat_<hex>` is shown to the caller once; only its sha256 `token_hash` is stored.
  * `scopes` gates capability; tokens expire and can be revoked. Agent-derived rows keep only
- * value-free provenance plus an optional explicit runtime target binding.
+ * value-free provenance plus an optional explicit runtime target binding. Companion-sourced
+ * rows are ephemeral Skills Hub tokens (not the THE-360 permanent PAT): scope-snapshotted at
+ * mint, re-checked against `companions.hub_access` on every request.
  */
 export const apiTokens = pgTable(
   "api_tokens",
@@ -2098,7 +2101,10 @@ export const apiTokens = pgTable(
     sourceProvenance: check(
       "api_tokens_source_provenance_check",
       sql`(${t.sourceType} = 'human' and ${t.sourceAgentId} is null and ${t.targetWorkspaceId} is null)
-        or (${t.sourceType} = 'agent_auth' and ${t.sourceAgentId} is not null)`,
+        or (${t.sourceType} = 'agent_auth' and ${t.sourceAgentId} is not null)
+        or (${t.sourceType} = 'companion' and ${t.sourceAgentId} is not null
+          and ${t.targetWorkspaceId} is null
+          and ${t.sourceAgentId} ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')`,
     ),
   }),
 );

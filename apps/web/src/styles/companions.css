@@ -769,32 +769,6 @@
   font-size: var(--text-xs);
 }
 
-.companions-skills-picker__write {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 10px;
-  align-items: start;
-  margin: 0;
-  padding: 12px;
-  border: 1px solid var(--color-line);
-  border-radius: 10px;
-}
-
-.companions-skills-picker__write span {
-  display: grid;
-  gap: 4px;
-}
-
-.companions-skills-picker__write strong {
-  color: var(--color-fg);
-  font-size: var(--text-sm);
-}
-
-.companions-skills-picker__write small {
-  color: var(--color-faint);
-  font-size: var(--text-xs);
-}
-
 .companions-settings__actions {
   display: flex;
   justify-content: flex-start;

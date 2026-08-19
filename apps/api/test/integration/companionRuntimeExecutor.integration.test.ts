@@ -2628,6 +2628,80 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
+  it("pins write-on-behalf true and accepts an ephemeral companion-sourced token", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    const companionTokenId = randomUUID();
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+    try {
+      const [created] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Hub access fixture', null::text,
+            null::text, null::text, '[]'::jsonb,
+            true, '[]'::jsonb, null::uuid
+          )
+        `,
+      });
+      companionId = created?.companionId ?? "";
+      // Skills Hub access is unconditional, so the legacy flag can never disagree with the token
+      // the Box receives.
+      const [initial] = await sql<Array<{ canWriteSkills: boolean }>>`
+        select can_write_skills as "canWriteSkills" from companions where id = ${companionId}::uuid
+      `;
+      expect(initial).toEqual({ canWriteSkills: true });
+
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          insert into api_tokens (
+            id, org_id, user_id, name, token_prefix, token_hash, scopes,
+            source_type, source_agent_id, expires_at
+          ) values (
+            ${companionTokenId}::uuid, ${ids.orgA}::uuid, ${ids.ownerA},
+            'Ephemeral companion hub token', 'cmp_pat_hub', ${`hub-${companionTokenId}`},
+            ${tx.json([
+              "skills:read",
+              "skills:write",
+              "secrets:read",
+              "database:read",
+              "database:write",
+            ])}::jsonb,
+            'companion', ${companionId}, ${expiresAt}
+          )
+        `,
+      });
+      const [token] = await sql<Array<{ sourceType: string; sourceAgentId: string }>>`
+        select source_type as "sourceType", source_agent_id as "sourceAgentId"
+        from api_tokens where id = ${companionTokenId}::uuid
+      `;
+      expect(token).toEqual({ sourceType: "companion", sourceAgentId: companionId });
+
+      // A companion-sourced token still must name a Companion: provenance stays fail-closed.
+      await expect(asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          insert into api_tokens (
+            id, org_id, user_id, name, token_prefix, token_hash, scopes,
+            source_type, source_agent_id, expires_at
+          ) values (
+            ${randomUUID()}::uuid, ${ids.orgA}::uuid, ${ids.ownerA},
+            'Companion token without provenance', 'cmp_pat_bad', ${`bad-${companionTokenId}`},
+            ${tx.json(["skills:read"])}::jsonb, 'companion', null, ${expiresAt}
+          )
+        `,
+      })).rejects.toMatchObject({ code: "23514" });
+    } finally {
+      if (sql) await sql`delete from api_tokens where id = ${companionTokenId}::uuid`;
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
   it("rejects effective CREATE inherited through PUBLIC in verification and the real grant hook", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     await sql.unsafe(`grant create on database "${databaseName}" to public`);

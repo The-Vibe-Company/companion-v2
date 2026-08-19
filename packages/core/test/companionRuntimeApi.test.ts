@@ -12,7 +12,7 @@ const companion: Companion = {
   persona: null,
   model_id: "model-1",
   selected_skill_ids: [],
-  can_write_skills: false,
+  can_write_skills: true,
   selected_mcp_account_ids: [],
   owner_id: "owner-1",
   access: "owner",

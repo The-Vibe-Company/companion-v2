@@ -65,7 +65,6 @@ export async function createCompanion(
     provider_id: string;
     model_id: string;
     selected_skill_ids?: string[];
-    can_write_skills?: boolean;
     selected_mcp_account_ids?: string[];
   },
 ): Promise<Companion> {
