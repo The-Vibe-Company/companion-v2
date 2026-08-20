@@ -154,6 +154,16 @@ the active lease, so `--resume` retries cleanup before any provider work.
 The evaluator checksum is fixed at campaign creation and rechecked in every controller-owned
 candidate checkout before Box contact. The controller binds results to the exact run, candidate,
 phase, tree, prefix, and cycle count; candidate messages cannot attest benchmark or cleanup output.
+Candidate checkouts run under a separate unprivileged OS identity with an isolated home and receive
+a random loopback proxy token, never the real Box or model credentials.
+The proxy allowlists the exact deterministic Box and snapshot identities, records provider-ready and
+correlated broker prompt-ACK timestamps, rejects reported metrics that outrun that evidence, and
+checks provider `404` directly after cleanup. Before allowing candidate commands or file writes, it
+captures Node and Pi digests directly from the pristine ready baker Box. Its prompt probe requires
+the live systemd main process to run the byte-pinned generated broker with those exact executables
+and to own the exact Unix socket before and after the ACK. The captured command UID must be non-root;
+the proxy rejects the campaign before candidate writes if that trust assumption changes. A pipe-bound kernel advisory lock rejects a concurrent
+controller for the same run and releases automatically when a crashed controller closes its pipe.
 Campaign state, Conductor links, the lease journal, cleanup proofs, and
 deduplicated metrics JSONL live under `.context/autoresearch/box-startup/<run-id>/`;
 `--resume <run-id>` reconciles exact workspace names and deterministic message ids rather than creating a

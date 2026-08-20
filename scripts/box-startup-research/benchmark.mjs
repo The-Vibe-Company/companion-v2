@@ -127,12 +127,32 @@ export function cleanupEnvironment(source = process.env) {
 }
 
 export function safeEnvironment(source = process.env, options = {}) {
-  const zaiKey = source.ZAI_API_KEY?.trim()
-    || source.COMPANION_BOX_E2E_ZAI_API_KEY?.trim();
-  if (!zaiKey) throw new Error("research ZAI credential is not configured");
+  const boxKey = options.boxApiKey ?? source.BOX_API_KEY?.trim()
+    ?? source.COMPANION_BOX_API_KEY?.trim();
+  const zaiKey = options.zaiApiKey ?? source.ZAI_API_KEY?.trim()
+    ?? source.COMPANION_BOX_E2E_ZAI_API_KEY?.trim();
+  if (!boxKey || !zaiKey) throw new Error("research evaluator credentials are not configured");
   return {
-    ...cleanupEnvironment(source),
+    ...evaluatorRuntimeEnvironment(source),
+    ...(typeof options.home === "string" ? {
+      HOME: options.home,
+      XDG_CACHE_HOME: resolve(options.home, ".cache"),
+      XDG_CONFIG_HOME: resolve(options.home, ".config"),
+      XDG_DATA_HOME: resolve(options.home, ".local/share"),
+    } : {}),
+    ...(typeof options.tempDirectory === "string" ? {
+      TMPDIR: options.tempDirectory,
+      TMP: options.tempDirectory,
+      TEMP: options.tempDirectory,
+    } : {}),
+    BOX_API_KEY: "",
+    COMPANION_BOX_API_KEY: boxKey,
+    ZAI_API_KEY: "",
     COMPANION_BOX_E2E_ZAI_API_KEY: zaiKey,
+    COMPANION_BOX_E2E_PROMPT_ACK_ONLY: "1",
+    ...(typeof options.boxApiBase === "string" ? {
+      COMPANION_BOX_API_BASE: options.boxApiBase,
+    } : {}),
     ...(typeof options.leaseTokenHash === "string" ? {
       BOX_STARTUP_RESEARCH_LEASE_TOKEN_HASH: options.leaseTokenHash,
     } : {}),
@@ -141,6 +161,9 @@ export function safeEnvironment(source = process.env, options = {}) {
     } : {}),
     ...(typeof options.logDirectory === "string" ? {
       BOX_STARTUP_RESEARCH_LOG_DIRECTORY: options.logDirectory,
+    } : {}),
+    ...(typeof options.snapshotName === "string" ? {
+      BOX_STARTUP_RESEARCH_SNAPSHOT_NAME: options.snapshotName,
     } : {}),
   };
 }
@@ -202,11 +225,11 @@ function nonNegativeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
-function sanitizeImageEvent(events, treeSha) {
+function sanitizeImageEvent(events, treeSha, snapshotName) {
   const matches = events.filter((event) => event.phase === "research_image" && event.status === "succeeded");
   if (matches.length !== 1) throw new Error("research image bake did not return one successful image");
   const event = matches[0];
-  if (event.tree_sha !== treeSha || typeof event.image !== "string" || !SNAPSHOT_PATTERN.test(event.image)) {
+  if (event.tree_sha !== treeSha || event.image !== snapshotName || !SNAPSHOT_PATTERN.test(event.image)) {
     throw new Error("research image bake returned an invalid image");
   }
   const durationMs = nonNegativeInteger(event.duration_ms);
@@ -399,6 +422,10 @@ export async function runLeasedBenchmark(raw = {}) {
     tokenHash: process.env.BOX_STARTUP_RESEARCH_LEASE_TOKEN_HASH,
     actualTreeSha: await currentTreeSha(),
   });
+  const snapshotName = process.env.BOX_STARTUP_RESEARCH_SNAPSHOT_NAME?.trim();
+  if (!snapshotName || !SNAPSHOT_PATTERN.test(snapshotName)) {
+    throw new Error("research snapshot identity is not configured");
+  }
   const expiresAt = Date.parse(lease.expiresAt);
 
   const env = safeEnvironment(process.env);
@@ -430,10 +457,11 @@ export async function runLeasedBenchmark(raw = {}) {
         ...env,
         BOX_STARTUP_RESEARCH_TREE_SHA: lease.treeSha,
         BOX_STARTUP_RESEARCH_BAKER_COMPANION_ID: bakerCompanionId,
+        BOX_STARTUP_RESEARCH_SNAPSHOT_NAME: snapshotName,
       },
       label: "research image bake",
     });
-    const imageEvent = sanitizeImageEvent(checkedOutput(baked, env), lease.treeSha);
+    const imageEvent = sanitizeImageEvent(checkedOutput(baked, env), lease.treeSha, snapshotName);
     snapshot = imageEvent.image;
     bakeDurationMs = imageEvent.duration_ms;
     if (imageEvent.snapshot_size_bytes !== undefined) {
@@ -467,7 +495,6 @@ export async function runLeasedBenchmark(raw = {}) {
     env,
     companionIds: [bakerCompanionId, ...companionIds],
     snapshot,
-    treeSha: lease.treeSha,
   });
   if (primaryError || !benchmark || !cleanupLedger.complete) {
     throw new Error(primaryError ? "leased benchmark failed" : "leased benchmark cleanup failed");

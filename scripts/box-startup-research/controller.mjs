@@ -2,8 +2,9 @@
 
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import { appendFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { appendFile, chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
@@ -15,6 +16,7 @@ import {
   safeEnvironment,
 } from "./benchmark.mjs";
 import { evaluatorChecksum } from "./evaluator-integrity.mjs";
+import { createBoxLeaseProxy } from "./provider-proxy.mjs";
 import {
   benchmarkScore,
   BOX_STARTUP_RESEARCH_SCHEMA_VERSION,
@@ -74,6 +76,64 @@ async function atomicJson(path, value) {
   const temporary = `${path}.next`;
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   await rename(temporary, path);
+}
+
+export async function acquireCampaignLock(runDirectory, options = {}) {
+  const lockPath = resolve(runDirectory, "controller.lock");
+  const ownerPath = resolve(runDirectory, "controller.owner.json");
+  const ownerId = randomBytes(24).toString("hex");
+  const flockPath = options.flockPath ?? "/usr/bin/flock";
+  const child = spawn(flockPath, [
+    "-n",
+    lockPath,
+    "/bin/sh",
+    "-c",
+    // flock owns the lock while cat owns this controller's stdin pipe. An unclean controller exit
+    // closes the only writer, cat sees EOF, and flock exits instead of surviving as an orphan.
+    "printf 'locked\\n'; exec /usr/bin/cat >/dev/null",
+  ], {
+    cwd: runDirectory,
+    env: evaluatorRuntimeEnvironment(process.env),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  await new Promise((resolveLock, rejectLock) => {
+    let settled = false;
+    const reject = () => {
+      if (settled) return;
+      settled = true;
+      rejectLock(new Error("research campaign already has an active controller"));
+    };
+    child.once("error", reject);
+    child.once("close", reject);
+    child.stdout.setEncoding("utf8");
+    child.stdout.once("data", (chunk) => {
+      if (settled || !chunk.startsWith("locked\n")) return reject();
+      settled = true;
+      resolveLock();
+    });
+  });
+  await atomicJson(ownerPath, { ownerId, pid: process.pid, acquiredAt: new Date().toISOString() });
+
+  const assertOwned = async () => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error("research campaign controller lock was lost");
+    }
+    const owner = JSON.parse(await readFile(ownerPath, "utf8"));
+    if (owner.ownerId !== ownerId) throw new Error("research campaign controller lock was lost");
+  };
+
+  return {
+    ownerId,
+    assertOwned,
+    async release() {
+      await assertOwned();
+      await new Promise((resolveClose) => {
+        child.once("close", resolveClose);
+        child.stdin.end();
+      });
+      await rm(ownerPath, { force: true });
+    },
+  };
 }
 
 function leaseJournalEvent(state, event, lease, cleanupProven = null) {
@@ -248,6 +308,46 @@ function evaluatorLogDirectory(state) {
   return resolve(".context/autoresearch/box-startup", state.runId, "evaluator-events");
 }
 
+export function evaluatorSnapshotName(runId, candidateId, phase, treeSha) {
+  const digest = createHash("sha256")
+    .update(`${runId}:${candidateId}:${phase}:${treeSha}`)
+    .digest("hex")
+    .slice(0, 12);
+  return `companion-l14-${digest}`;
+}
+
+function evaluatorCompanionIds(runId, candidateId, phase, cycles) {
+  return [
+    deterministicCompanionId(runId, candidateId, `${phase}-bake`, 0),
+    ...Array.from({ length: cycles }, (_, index) =>
+      deterministicCompanionId(runId, candidateId, phase, index + 1)),
+  ];
+}
+
+async function evaluatorProxy(state, candidate, phase, cycles, snapshotName) {
+  const apiKey = process.env.BOX_API_KEY?.trim() || process.env.COMPANION_BOX_API_KEY?.trim();
+  if (!apiKey) throw new Error("research Box credential is not configured");
+  const generatedBrokerSource = await readFile(
+    resolve("packages/box-runtime/src/companionPiBrokerSource.ts"),
+    "utf8",
+  );
+  const encodedBroker = /Buffer\.from\(\s*"([A-Za-z0-9+/=]+)",\s*"base64"/s.exec(
+    generatedBrokerSource,
+  )?.[1];
+  if (!encodedBroker) throw new Error("trusted Pi broker source is unavailable");
+  const brokerSha256 = createHash("sha256")
+    .update(Buffer.from(encodedBroker, "base64"))
+    .digest("hex");
+  return await createBoxLeaseProxy({
+    apiKey,
+    upstreamBase: process.env.COMPANION_BOX_API_BASE,
+    companionIds: evaluatorCompanionIds(state.runId, candidate.id, phase, cycles),
+    snapshotName,
+    brokerSha256,
+    assertLeaseOwner: state.assertControllerLock,
+  });
+}
+
 function jsonLines(contents) {
   return contents.split(/\r?\n/).flatMap((line) => {
     try {
@@ -268,15 +368,40 @@ export function validateControllerBenchmarkResult(value, expected) {
     || result.resourcePrefix !== expected.resourcePrefix
     || result.benchmark.cycles !== expected.cycles
     || !result.cleanup.complete
-    || result.cleanup.snapshots.length < 1) {
+    || !result.cleanup.snapshots.some((snapshot) =>
+      snapshot.name === expected.snapshotName && snapshot.deleted)) {
     throw new Error("controller benchmark result does not match its lease");
   }
   return result;
 }
 
+export function assertProviderBenchmarkEvidence(result, evidence, toleranceMs = 250) {
+  if (!evidence?.cleanupProven || !evidence.metrics || !Number.isSafeInteger(toleranceMs)
+    || toleranceMs < 0) {
+    throw new Error("controller provider evidence is invalid");
+  }
+  for (const name of [
+    "provider_start",
+    "ready_to_prompt_ack",
+    "resume_provider_start",
+    "resume_ready_to_prompt_ack",
+  ]) {
+    const reported = result.benchmark.metrics[name];
+    const observed = evidence.metrics[name];
+    if (!reported || !observed || reported.samples !== observed.samples
+      || !Number.isSafeInteger(observed.p50_ms) || !Number.isSafeInteger(observed.p95_ms)
+      || reported.p50_ms + toleranceMs < observed.p50_ms
+      || reported.p95_ms + toleranceMs < observed.p95_ms) {
+      throw new Error("candidate benchmark contradicts controller provider evidence");
+    }
+  }
+}
+
 function parseControllerBenchmarkOutput(output, expected, env) {
   assertSafeEvaluatorOutput(output.stdout, env);
   assertSafeEvaluatorOutput(output.stderr, env);
+  assertNoCredentialMaterial(output.stdout, process.env);
+  assertNoCredentialMaterial(output.stderr, process.env);
   if (output.code !== 0) throw new Error("controller benchmark failed");
   const values = parseSentinel(output.stdout, RESULT_SENTINEL, validateCandidateResult);
   if (values.length !== 1) throw new Error("controller benchmark did not return one result");
@@ -302,7 +427,7 @@ function cleanupArgs(lease) {
     `${lease.phase}-bake`,
     0,
   ));
-  args.push("--tree-sha", lease.treeSha);
+  args.push("--snapshot", lease.snapshotName);
   return args;
 }
 
@@ -325,24 +450,25 @@ async function runControllerCleanup(lease) {
 }
 
 async function removeEvaluatorCheckout(checkout) {
-  await command("git", ["worktree", "remove", "--force", checkout]).catch(() => undefined);
   await rm(checkout, { recursive: true, force: true });
 }
 
 async function createEvaluatorCheckout(state, candidate, phase) {
   await assertEvaluatorChecksum(state);
-  const root = resolve(".context/autoresearch/box-startup", state.runId, "evaluator-checkouts");
-  const checkout = resolve(root, `${candidate.id}-${phase}-${candidate.treeSha.slice(0, 12)}`);
-  if (dirname(checkout) !== root) throw new Error("evaluator checkout path is invalid");
-  await mkdir(root, { recursive: true });
-  await removeEvaluatorCheckout(checkout);
   await command("git", ["fetch", "origin", candidate.branch]);
   const fetchedCommit = await command("git", ["rev-parse", `origin/${candidate.branch}`]);
   if (fetchedCommit !== candidate.commitSha || await gitTreeSha(fetchedCommit) !== candidate.treeSha) {
     throw new Error("candidate commit changed after validation");
   }
-  await command("git", ["worktree", "add", "--detach", checkout, fetchedCommit]);
+  const checkout = await mkdtemp(resolve(tmpdir(), "companion-box-evaluator-"));
   try {
+    await command("git", ["clone", "--no-local", "--no-checkout", process.cwd(), checkout]);
+    await command("git", [
+      "fetch",
+      process.cwd(),
+      `refs/remotes/origin/${candidate.branch}:refs/research/candidate`,
+    ], { cwd: checkout });
+    await command("git", ["checkout", "--detach", fetchedCommit], { cwd: checkout });
     if (await command("git", ["rev-parse", "HEAD^{tree}"], { cwd: checkout }) !== candidate.treeSha) {
       throw new Error("evaluator checkout tree does not match the candidate");
     }
@@ -370,11 +496,51 @@ async function createEvaluatorCheckout(state, candidate, phase) {
     if (await evaluatorChecksum(checkout) !== state.evaluatorChecksum) {
       throw new Error("evaluator changed during dependency installation");
     }
+    await chmod(checkout, 0o755);
     return checkout;
   } catch (error) {
     await removeEvaluatorCheckout(checkout);
     throw error;
   }
+}
+
+async function evaluatorSandbox(checkout) {
+  const root = resolve(checkout, ".research-sandbox");
+  const home = resolve(root, "home");
+  const temporary = resolve(root, "tmp");
+  const logs = resolve(root, "events");
+  await Promise.all([
+    mkdir(home, { recursive: true }),
+    mkdir(temporary, { recursive: true }),
+    mkdir(logs, { recursive: true }),
+  ]);
+  await Promise.all([root, home, temporary, logs].map((path) => chmod(path, 0o777)));
+  return { home, temporary, logs };
+}
+
+async function runIsolatedEvaluator(checkout, args, env, expiresAt) {
+  const remainingSeconds = Math.max(1, Math.ceil((Date.parse(expiresAt) - Date.now()) / 1_000));
+  const assignments = Object.entries(env).map(([name, value]) => `${name}=${value}`);
+  return await runProcess("/usr/bin/timeout", [
+    "--signal=TERM",
+    "--kill-after=10s",
+    `${remainingSeconds}s`,
+    "/usr/bin/sudo",
+    "-n",
+    "-u",
+    "nobody",
+    "--",
+    "/usr/bin/env",
+    "-i",
+    ...assignments,
+    process.execPath,
+    resolve(checkout, "scripts/box-startup-research/benchmark.mjs"),
+    ...args,
+  ], {
+    cwd: checkout,
+    env: evaluatorRuntimeEnvironment(process.env),
+    label: "isolated controller benchmark",
+  });
 }
 
 export async function executeControllerBenchmark(state, candidate, phase, cycles) {
@@ -390,32 +556,50 @@ export async function executeControllerBenchmark(state, candidate, phase, cycles
     treeSha: candidate.treeSha,
     resourcePrefix: candidate.resourcePrefix,
     cycles,
+    snapshotName: state.activeLease?.snapshotName,
   };
-  const env = safeEnvironment(process.env, {
-    leaseTokenHash: leaseTokenHash(tokenFor(state, candidate.id)),
-    evaluatorChecksum: state.evaluatorChecksum,
-    logDirectory: evaluatorLogDirectory(state),
-  });
+  let leaseProxy;
   try {
-    const output = await runProcess("node", [
-      resolve(checkout, "scripts/box-startup-research/benchmark.mjs"),
-      ...benchmarkArgs(state, candidate, phase, cycles, expiresAt),
-    ], {
-      cwd: checkout,
-      env,
-      label: "controller benchmark",
+    leaseProxy = await evaluatorProxy(state, candidate, phase, cycles, expected.snapshotName);
+    const sandbox = await evaluatorSandbox(checkout);
+    const env = safeEnvironment(process.env, {
+      boxApiKey: leaseProxy.apiKey,
+      boxApiBase: leaseProxy.baseUrl,
+      zaiApiKey: "research-prompt-ack-only",
+      leaseTokenHash: leaseTokenHash(tokenFor(state, candidate.id)),
+      evaluatorChecksum: state.evaluatorChecksum,
+      logDirectory: sandbox.logs,
+      home: sandbox.home,
+      tempDirectory: sandbox.temporary,
+      snapshotName: expected.snapshotName,
     });
-    return parseControllerBenchmarkOutput(output, expected, env);
+    const output = await runIsolatedEvaluator(
+      checkout,
+      benchmarkArgs(state, candidate, phase, cycles, expiresAt),
+      env,
+      expiresAt,
+    );
+    const result = parseControllerBenchmarkOutput(output, expected, env);
+    const evidence = await leaseProxy.proxy.prove({ cycles });
+    assertProviderBenchmarkEvidence(result, evidence);
+    return result;
   } finally {
+    await leaseProxy?.proxy.close();
     await removeEvaluatorCheckout(checkout);
   }
 }
 
 async function executeLocalBenchmark(state, candidate, phase, cycles, expiresAt) {
+  const snapshotName = state.activeLease?.snapshotName;
+  const leaseProxy = await evaluatorProxy(state, candidate, phase, cycles, snapshotName);
   const env = safeEnvironment(process.env, {
+    boxApiKey: leaseProxy.apiKey,
+    boxApiBase: leaseProxy.baseUrl,
+    zaiApiKey: "research-prompt-ack-only",
     leaseTokenHash: leaseTokenHash(tokenFor(state, candidate.id)),
     evaluatorChecksum: state.evaluatorChecksum,
     logDirectory: evaluatorLogDirectory(state),
+    snapshotName,
   });
   const expected = {
     runId: state.runId,
@@ -424,15 +608,23 @@ async function executeLocalBenchmark(state, candidate, phase, cycles, expiresAt)
     treeSha: candidate.treeSha,
     resourcePrefix: candidate.resourcePrefix,
     cycles,
+    snapshotName,
   };
-  const output = await runProcess("node", [
-    resolve("scripts/box-startup-research/benchmark.mjs"),
-    ...benchmarkArgs(state, candidate, phase, cycles, expiresAt),
-  ], {
-    env,
-    label: "controller baseline benchmark",
-  });
-  return parseControllerBenchmarkOutput(output, expected, env);
+  try {
+    const output = await runProcess("node", [
+      resolve("scripts/box-startup-research/benchmark.mjs"),
+      ...benchmarkArgs(state, candidate, phase, cycles, expiresAt),
+    ], {
+      env,
+      label: "controller baseline benchmark",
+    });
+    const result = parseControllerBenchmarkOutput(output, expected, env);
+    const evidence = await leaseProxy.proxy.prove({ cycles });
+    assertProviderBenchmarkEvidence(result, evidence);
+    return result;
+  } finally {
+    await leaseProxy.proxy.close();
+  }
 }
 
 async function localBenchmark(state, phase, cycles) {
@@ -449,6 +641,7 @@ async function localBenchmark(state, phase, cycles) {
     phase,
     cycles,
     treeSha,
+    snapshotName: evaluatorSnapshotName(state.runId, id, phase, treeSha),
     local: true,
     expiresAt,
     resourcePrefix: candidate.resourcePrefix,
@@ -562,6 +755,8 @@ export async function recoverCandidateResources(state, client, candidate, phase,
     phase,
     cycles,
     treeSha: candidate.treeSha,
+    snapshotName: state.activeLease?.snapshotName
+      ?? evaluatorSnapshotName(state.runId, candidate.id, phase, candidate.treeSha),
     resourcePrefix: candidate.resourcePrefix,
   });
 }
@@ -583,6 +778,7 @@ export async function grantBenchmark(state, client, candidate, phase, cycles, op
     phase,
     cycles,
     treeSha: candidate.treeSha,
+    snapshotName: evaluatorSnapshotName(state.runId, candidate.id, phase, candidate.treeSha),
     expiresAt,
     resourcePrefix: candidate.resourcePrefix,
     tokenHash: leaseTokenHash(tokenFor(state, candidate.id)),
@@ -599,6 +795,7 @@ export async function grantBenchmark(state, client, candidate, phase, cycles, op
       treeSha: candidate.treeSha,
       resourcePrefix: candidate.resourcePrefix,
       cycles,
+      snapshotName: state.activeLease.snapshotName,
     });
     cleanupProven = true;
     await (options.recordResult ?? recordResult)(state, result);
@@ -832,11 +1029,19 @@ async function cleanupWorkspaceAndBranch(state, client, candidate, keepBranch = 
   await state.save();
 }
 
-function createState(value, path) {
+function createState(value, path, controllerLock) {
   const state = value;
+  Object.defineProperty(state, "assertControllerLock", {
+    enumerable: false,
+    value: async () => await controllerLock?.assertOwned(),
+  });
   Object.defineProperty(state, "save", {
     enumerable: false,
-    value: async () => await atomicJson(path, state),
+    value: async () => {
+      await state.assertControllerLock();
+      await atomicJson(path, state);
+      await state.assertControllerLock();
+    },
   });
   return state;
 }
@@ -848,6 +1053,7 @@ function validateActiveLease(value, runId) {
     || !["baseline-start", "baseline-end", "quick", "confirm", "final"].includes(value.phase)
     || !Number.isSafeInteger(value.cycles) || value.cycles < 1 || value.cycles > 20
     || !SHA_PATTERN.test(value.treeSha ?? "")
+    || !/^companion-l14-[a-f0-9]{12}$/.test(value.snapshotName ?? "")
     || value.resourcePrefix !== resourcePrefix(runId, value.candidateId)
     || !/^[a-f0-9]{64}$/.test(value.tokenHash ?? "")
     || !Number.isFinite(Date.parse(value.expiresAt ?? ""))
@@ -902,7 +1108,7 @@ export function validatePersistedState(value, runId) {
   return value;
 }
 
-async function initialize(runId, runDirectory, client) {
+async function initialize(runId, runDirectory, client, controllerLock) {
   const status = await command("git", ["status", "--porcelain"]);
   if (status) throw new Error("research controller requires a clean worktree");
   await command("git", ["fetch", "origin", "main"]);
@@ -942,7 +1148,7 @@ async function initialize(runId, runDirectory, client) {
     leaseSeed: randomBytes(32).toString("hex"),
     leaseJournal: [],
     cleanupLedger: [],
-  }, resolve(runDirectory, "state.json"));
+  }, resolve(runDirectory, "state.json"), controllerLock);
   await state.save();
   return state;
 }
@@ -985,13 +1191,19 @@ async function runCampaign() {
   if (!runId || !RUN_ID_PATTERN.test(runId)) throw new Error("--resume requires a valid run id");
   const runDirectory = resolve(".context/autoresearch/box-startup", runId);
   await mkdir(runDirectory, { recursive: true });
-  const statePath = resolve(runDirectory, "state.json");
-  const client = new ConductorCloudClient({ cwd: process.cwd() });
-  const state = resumeIndex >= 0
-    ? createState(validatePersistedState(JSON.parse(await readFile(statePath, "utf8")), runId), statePath)
-    : await initialize(runId, runDirectory, client);
-  const program = await readFile(resolve("scripts/box-startup-research/program.md"), "utf8");
+  const campaignLock = await acquireCampaignLock(runDirectory);
   try {
+    const statePath = resolve(runDirectory, "state.json");
+    const client = new ConductorCloudClient({ cwd: process.cwd() });
+    const state = resumeIndex >= 0
+      ? createState(
+        validatePersistedState(JSON.parse(await readFile(statePath, "utf8")), runId),
+        statePath,
+        campaignLock,
+      )
+      : await initialize(runId, runDirectory, client, campaignLock);
+    const program = await readFile(resolve("scripts/box-startup-research/program.md"), "utf8");
+    try {
     if (state.activeLease && !await retryActiveLeaseCleanup(state, client)) return;
     if (!state.baselineStart) {
       state.status = "baseline-start";
@@ -1187,19 +1399,22 @@ async function runCampaign() {
     await openReadyPullRequest(state, integration, integration.final);
     state.status = "pr-ready";
     await state.save();
+    } finally {
+      for (const candidate of state.candidates ?? []) {
+        await cleanupWorkspaceAndBranch(state, client, candidate).catch(() => undefined);
+      }
+      if (state.integration) {
+        await cleanupWorkspaceAndBranch(
+          state,
+          client,
+          state.integration,
+          state.status === "pr-ready",
+        ).catch(() => undefined);
+      }
+      await writeReport(state, runDirectory);
+    }
   } finally {
-    for (const candidate of state.candidates ?? []) {
-      await cleanupWorkspaceAndBranch(state, client, candidate).catch(() => undefined);
-    }
-    if (state.integration) {
-      await cleanupWorkspaceAndBranch(
-        state,
-        client,
-        state.integration,
-        state.status === "pr-ready",
-      ).catch(() => undefined);
-    }
-    await writeReport(state, runDirectory);
+    await campaignLock.release();
   }
 }
 

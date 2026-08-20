@@ -14,6 +14,9 @@ const INTEGRATION_DOCS = new Set([
 ]);
 const TEST_PATTERN = /(?:^|\/)(?:test|tests|__tests__)(?:\/|$)|\.(?:test|spec)\.[cm]?[jt]sx?$/;
 const PROTECTED_PREFIX = "scripts/box-startup-research/";
+const TRUSTED_RUNTIME_FILES = new Set([
+  "packages/box-runtime/src/companionPiBrokerSource.ts",
+]);
 const CREDENTIAL_SHAPE = /(?:box_[A-Za-z0-9_-]{24,}|(?:api[_-]?key|token|secret)\s*[:=]\s*["'][^"']{16,})/i;
 
 export function assertNoCredentialMaterial(value, env = process.env) {
@@ -63,6 +66,7 @@ export async function validateCandidateDiff(input) {
       if (!path) continue;
       if (status === "D" && TEST_PATTERN.test(path)) throw new Error("candidate deleted a protected test");
       if (path.startsWith(PROTECTED_PREFIX)) throw new Error("candidate modified the research evaluator");
+      if (TRUSTED_RUNTIME_FILES.has(path)) throw new Error("candidate modified runtime attestation code");
       const allowed = input.integration ? integrationPathAllowed(path) : candidatePathAllowed(path);
       if (!allowed) throw new Error(`candidate changed protected path: ${path}`);
       changed.push(path);

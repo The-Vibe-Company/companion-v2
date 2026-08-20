@@ -16,6 +16,19 @@ metadata writes on restore, moving regenerable work to Stop, or proving a cache 
 An expensive Stop is acceptable when it materially improves the next wake, provided Stop remains
 bounded and secrets are absent before snapshot publication.
 
+In particular, the current `reuseSkills` and wake-time Skill refresh behavior are hypotheses, not
+requirements. A candidate may remove unchanged Skill work from Start, validate only a revision-bound
+proof on wake, and move materialization or cache refresh to Stop/archive. It must still fail closed
+and rebuild before Pi starts when the authorized Skill revision changed while the Box was asleep.
+
+Broker-facing lifecycle and activation may change, but the generated broker executable itself is a
+controller attestation root and must remain byte-identical. The evaluator also proves that the live
+systemd process runs that executable, owns the expected socket, and has spawned the root-owned Pi
+binary before accepting its correlated prompt ACK.
+Provider commands must retain their controller-proven non-root identity. A root command boundary is
+not an experimental freedom: the evaluator stops before candidate writes because in-Box attestation
+would no longer be an independent measurement boundary.
+
 ## Immutable product constraints
 
 - One Companion remains one persistent Box, one Pi daemon, and one durable thread.

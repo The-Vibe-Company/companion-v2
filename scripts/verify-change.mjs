@@ -20,8 +20,10 @@ const HYGIENE_TESTS = [
   "scripts/verify-change.test.mjs",
   "scripts/box-startup-research/contracts.test.mjs",
   "scripts/box-startup-research/benchmark.test.mjs",
+  "scripts/box-startup-research/cleanup.test.mjs",
   "scripts/box-startup-research/conductor-client.test.mjs",
   "scripts/box-startup-research/policy.test.mjs",
+  "scripts/box-startup-research/provider-proxy.test.mjs",
   "scripts/box-startup-research/controller.test.mjs",
 ];
 

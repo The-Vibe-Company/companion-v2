@@ -719,16 +719,32 @@ The repository includes an operator-invoked Conductor Cloud research harness. Fo
 isolated `gpt-5.6-luna` workspaces may change runtime implementation details, while one controller
 holds a single real-provider benchmark lease at a time. Luna and Sol workspaces have provider
 credentials explicitly shadowed; the controller evaluates their validated commits in verified,
-disposable worktrees and treats no agent chat message as benchmark or cleanup evidence. `gpt-5.6-sol` audits and integrates the
-finalists in a clean workspace. This harness is not reachable from Companion runtime claims and is
-not multi-Companion orchestration.
+disposable worktrees and treats no agent chat message as benchmark or cleanup evidence. Those
+worktrees run as an unprivileged OS identity with an isolated home and receive a random local proxy
+token rather than the provider credential. The proxy permits
+only the exact deterministic Box/snapshot lease, observes real provider-ready states and correlated
+broker prompt ACKs, and proves deletion directly before promotion. Before accepting an ACK it
+byte-attests the generated broker, Node and Pi against hashes it captured from the pristine baker
+Box before permitting candidate writes, the live systemd main process, and that process's ownership
+of the broker socket. `gpt-5.6-sol` audits and
+integrates the finalists in a clean workspace. This harness is not reachable from Companion runtime
+claims and is not multi-Companion orchestration.
+
+The attestation boundary requires the provider command identity to be non-root so candidate commands
+cannot replace the absolute system verifiers or the captured runtime executables. The proxy proves
+that identity before permitting candidate commands or file writes and fails the campaign closed if a
+provider image ever exposes a root command boundary.
 
 Candidate snapshots include a development-only Git-tree salt in their image identity without
 changing the disk layout marker. The harness bakes, exercises, and deletes that image within the
 lease. It derives deterministic disposable Companion identities so controller-owned compensating
-cleanup can find every Box after a timeout. Credentials remain in an allowlisted evaluator process
-environment and are never copied into agent workspaces, prompts, result records, branches, or logs;
-raw candidate output is rejected before any structured event is persisted.
+cleanup can find every Box after a timeout. Credentials remain in the controller and its
+compensating cleanup process and are never copied into agent workspaces, candidate worktrees,
+prompts, result records, branches, or logs. Prompt-ACK-only evaluation stages a non-secret
+placeholder model key because response generation is outside the startup SLO; raw candidate output
+is rejected before any structured event is persisted. A kernel-held advisory lock prevents two
+controller processes from resuming the same campaign concurrently and is released automatically if
+its controller process dies.
 
 The evaluator checksum is pinned for the campaign. Measurements split provider readiness, staging,
 Pi/socket activation, broker preflight, prompt ACK, Skill bytes, snapshot size, and Stop/archive so

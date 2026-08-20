@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const EVALUATOR_FILES = [
+  "packages/box-runtime/src/companionPiBrokerSource.ts",
   "scripts/box-runtime-change-e2e.ts",
   "scripts/summarize-box-runtime-benchmark.mjs",
   "scripts/box-startup-research/benchmark.mjs",
@@ -12,6 +13,7 @@ const EVALUATOR_FILES = [
   "scripts/box-startup-research/controller.mjs",
   "scripts/box-startup-research/evaluator-integrity.mjs",
   "scripts/box-startup-research/policy.mjs",
+  "scripts/box-startup-research/provider-proxy.mjs",
   "scripts/box-startup-research/program.md",
 ];
 

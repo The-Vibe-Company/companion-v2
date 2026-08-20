@@ -47,6 +47,16 @@ test("rejects tests, evaluator changes and configured credential values", async 
     git: fakeGit({
       "rev-list --count": "1\n",
       "merge-base aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": `${BASE}\n`,
+      "diff --name-status": "M\tpackages/box-runtime/src/companionPiBrokerSource.ts\n",
+      "diff --no-ext-diff": "+const forged = true;\n",
+    }),
+  }), /attestation code/);
+
+  await assert.rejects(validateCandidateDiff({
+    ...common,
+    git: fakeGit({
+      "rev-list --count": "1\n",
+      "merge-base aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": `${BASE}\n`,
       "diff --name-status": "M\tpackages/box-runtime/src/runtime.ts\n",
       "diff --no-ext-diff": "+const value = 'sensitive-value';\n",
     }),

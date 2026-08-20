@@ -7,6 +7,7 @@ import { loadBundledCompanionRuntimeSkill } from "../../apps/runtime/src/materia
 
 const SHA_PATTERN = /^[a-f0-9]{40}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SNAPSHOT_PATTERN = /^companion-l14-[a-f0-9]{12}$/;
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -17,8 +18,10 @@ function required(name: string): string {
 async function main(): Promise<void> {
   const treeSha = required("BOX_STARTUP_RESEARCH_TREE_SHA");
   const bakerCompanionId = required("BOX_STARTUP_RESEARCH_BAKER_COMPANION_ID");
+  const snapshotName = required("BOX_STARTUP_RESEARCH_SNAPSHOT_NAME");
   if (!SHA_PATTERN.test(treeSha)) throw new Error("invalid research tree sha");
   if (!UUID_PATTERN.test(bakerCompanionId)) throw new Error("invalid research baker identity");
+  if (!SNAPSHOT_PATTERN.test(snapshotName)) throw new Error("invalid research snapshot name");
   const apiKey = process.env.BOX_API_KEY?.trim() || process.env.COMPANION_BOX_API_KEY?.trim();
   if (!apiKey) throw new Error("missing Box research credential");
   const env = { ...process.env, COMPANION_BOX_API_KEY: apiKey };
@@ -79,7 +82,7 @@ async function main(): Promise<void> {
   try {
     const firstRuntime = runtime();
     const baker = createCompanionRuntimeImageBaker({
-      identity: firstRuntime.layoutIdentity(),
+      identity: { ...firstRuntime.layoutIdentity(), imageName: snapshotName },
       lifecycle: bakerLifecycle,
       runtime: {
         existingBoxStatus: (input) => runtime().existingBoxStatus(input),

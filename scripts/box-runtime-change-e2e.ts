@@ -52,10 +52,12 @@ function configuration(env: NodeJS.ProcessEnv) {
   const modelId = env.COMPANION_BOX_E2E_MODEL_ID?.trim() || "glm-5.3";
   const companionId = env.COMPANION_BOX_E2E_COMPANION_ID?.trim() || randomUUID();
   const researchTag = env.COMPANION_BOX_E2E_RESEARCH_TAG?.trim() || null;
+  const promptAckOnly = env.COMPANION_BOX_E2E_PROMPT_ACK_ONLY === "1";
   if (
     (image !== null && !IMAGE_PATTERN.test(image))
     || !UUID_PATTERN.test(companionId)
     || (researchTag !== null && !RESEARCH_TAG_PATTERN.test(researchTag))
+    || (promptAckOnly && researchTag === null)
     || modelId.length > 200
     || /[\r\n\0]/.test(modelId)
   ) {
@@ -72,6 +74,7 @@ function configuration(env: NodeJS.ProcessEnv) {
     modelId,
     companionId,
     researchTag,
+    promptAckOnly,
     generation: positiveInteger(env.COMPANION_BOX_E2E_GENERATION, 1),
   };
 }
@@ -407,13 +410,15 @@ async function main(): Promise<number> {
           duration_ms: Date.now() - providerReadyAt,
         });
       }
-      await waitForReply({
-        runtime,
-        boxId,
-        attemptId,
-        marker,
-        cursor: initial.tailCursor,
-      });
+      if (!config.promptAckOnly) {
+        await waitForReply({
+          runtime,
+          boxId,
+          attemptId,
+          marker,
+          cursor: initial.tailCursor,
+        });
+      }
     });
 
     await phase("stop_archive", async () => {
@@ -502,7 +507,9 @@ async function main(): Promise<number> {
         status: "succeeded",
         duration_ms: Date.now() - resumeReadyAt,
       });
-      await waitForReply({ runtime, boxId, attemptId, marker, cursor: resumed.tailCursor });
+      if (!config.promptAckOnly) {
+        await waitForReply({ runtime, boxId, attemptId, marker, cursor: resumed.tailCursor });
+      }
     });
   } catch (error) {
     primaryError = error;

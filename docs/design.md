@@ -352,8 +352,12 @@ Box/Pi startup experiments are development tooling, not a Companion product surf
 operator-launched `pnpm research:box-startup -- --overnight` command uses Conductor Cloud to create
 isolated Luna candidate workspaces, then evaluates each validated commit from a controller-owned
 disposable checkout under one serialized real-provider lease. A clean Sol workspace integrates only
-measured compatible gains. Candidate workspaces have provider credentials explicitly shadowed. It never runs
-from API, worker, web, or the hosted Companion runtime, and adds no product orchestration feature.
+measured compatible gains. Candidate workspaces have provider credentials explicitly shadowed. The
+evaluator checkout runs under a separate unprivileged OS identity and receives only a short-lived
+local proxy capability scoped to the campaign's exact Box and snapshot identities; the controller
+retains the real provider credential and independently
+proves provider readiness, byte-attested broker prompt acceptance, and resource absence. It never runs from API, worker, web, or the
+hosted Companion runtime, and adds no product orchestration feature.
 
 The research evaluator and existing tests are immutable to candidate workspaces. Candidates may
 challenge lifecycle ordering, including moving credential-free, revision-bound Skill preparation

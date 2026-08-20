@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
+  acquireCampaignLock,
   assertLeaseAvailable,
+  assertProviderBenchmarkEvidence,
   candidateWorkspaceEnvironment,
+  evaluatorSnapshotName,
   grantBenchmark,
   recoverCandidateResources,
   validateControllerBenchmarkResult,
@@ -36,7 +43,10 @@ function benchmarkResult(cycles = 3) {
     cleanup: {
       schemaVersion: 1,
       boxes: [],
-      snapshots: [{ name: "companion-l14-abcdef012345", deleted: true }],
+      snapshots: [{
+        name: evaluatorSnapshotName(RUN_ID, "w1-c1", "quick", SHA),
+        deleted: true,
+      }],
       complete: true,
     },
     bakeDurationMs: 100,
@@ -69,6 +79,72 @@ function candidate() {
 test("serializes provider leases across candidates", () => {
   assert.doesNotThrow(() => assertLeaseAvailable(null, "w1-c1", "quick"));
   assert.throws(() => assertLeaseAvailable({ candidateId: "w1-c1", phase: "quick" }, "w1-c2", "quick"), /already held/);
+});
+
+test("rejects candidate timings that are faster than controller-observed provider evidence", () => {
+  const result = benchmarkResult(3);
+  const evidence = {
+    cleanupProven: true,
+    metrics: Object.fromEntries([
+      "provider_start",
+      "ready_to_prompt_ack",
+      "resume_provider_start",
+      "resume_ready_to_prompt_ack",
+    ].map((name) => [name, { samples: 3, p50_ms: 250, p95_ms: 300 }])),
+  };
+  assert.doesNotThrow(() => assertProviderBenchmarkEvidence(result, evidence));
+  evidence.metrics.ready_to_prompt_ack.p95_ms = 500;
+  assert.throws(
+    () => assertProviderBenchmarkEvidence(result, evidence),
+    /contradicts controller provider evidence/,
+  );
+});
+
+test("serializes controller processes for one campaign directory", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "box-startup-controller-lock-"));
+  try {
+    const first = await acquireCampaignLock(directory, { heartbeatMs: 60_000 });
+    await assert.rejects(
+      acquireCampaignLock(directory, { heartbeatMs: 60_000 }),
+      /active controller/,
+    );
+    await first.release();
+    const second = await acquireCampaignLock(directory, { heartbeatMs: 60_000 });
+    await second.release();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("releases the kernel campaign lock when its controller crashes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "box-startup-controller-crash-lock-"));
+  const moduleUrl = new URL("./controller.mjs", import.meta.url).href;
+  try {
+    const child = spawn(process.execPath, [
+      "--input-type=module",
+      "--eval",
+      `import { acquireCampaignLock } from ${JSON.stringify(moduleUrl)};
+await acquireCampaignLock(${JSON.stringify(directory)});
+process.stdout.write("locked\\n");
+process.exit(17);`,
+    ], { stdio: ["ignore", "pipe", "inherit"] });
+    let stdout = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    const exitCode = await new Promise((resolveExit) => child.once("close", resolveExit));
+    assert.equal(exitCode, 17);
+    assert.match(stdout, /locked/);
+
+    let recovered;
+    for (let attempt = 0; attempt < 20 && !recovered; attempt += 1) {
+      recovered = await acquireCampaignLock(directory).catch(() => null);
+      if (!recovered) await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    assert.ok(recovered, "the orphaned lock must release when the controller pipe closes");
+    await recovered.release();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("validates resume state before reusing external identities", () => {
@@ -234,6 +310,7 @@ test("controller binds benchmark evidence and ignores empty or fabricated candid
     treeSha: SHA,
     resourcePrefix: resourcePrefix(RUN_ID, "w1-c1"),
     cycles: 3,
+    snapshotName: evaluatorSnapshotName(RUN_ID, "w1-c1", "quick", SHA),
   }), /does not match/);
 });
 

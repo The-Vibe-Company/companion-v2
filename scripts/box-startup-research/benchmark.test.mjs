@@ -107,3 +107,24 @@ test("allowlists evaluator children and rejects raw credential-bearing output", 
   assert.throws(() => assertSafeEvaluatorOutput("api_key: 'abcdefghijklmnop'", env), /credential/);
   assert.throws(() => assertSafeEvaluatorOutput("box-research-value", env), /credential/);
 });
+
+test("can replace real provider credentials with controller-owned lease capabilities", () => {
+  const env = safeEnvironment({
+    PATH: "/bin",
+    HOME: "/tmp/research",
+    BOX_API_KEY: "box-real-controller-value",
+    ZAI_API_KEY: "zai-real-controller-value",
+  }, {
+    boxApiKey: "box-disposable-proxy-token",
+    boxApiBase: "http://127.0.0.1:34567",
+    zaiApiKey: "research-prompt-ack-only",
+    snapshotName: "companion-l14-abcdef123456",
+  });
+  assert.equal(env.COMPANION_BOX_API_KEY, "box-disposable-proxy-token");
+  assert.equal(env.COMPANION_BOX_API_BASE, "http://127.0.0.1:34567");
+  assert.equal(env.COMPANION_BOX_E2E_ZAI_API_KEY, "research-prompt-ack-only");
+  assert.equal(env.COMPANION_BOX_E2E_PROMPT_ACK_ONLY, "1");
+  assert.equal(env.BOX_STARTUP_RESEARCH_SNAPSHOT_NAME, "companion-l14-abcdef123456");
+  assert.equal(Object.values(env).includes("box-real-controller-value"), false);
+  assert.equal(Object.values(env).includes("zai-real-controller-value"), false);
+});
