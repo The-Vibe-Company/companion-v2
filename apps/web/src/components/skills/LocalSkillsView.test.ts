@@ -138,6 +138,31 @@ describe("LocalSkillsView", () => {
     expect(writeText).not.toHaveBeenCalledWith(expect.stringContaining("cmp_pat_"));
   });
 
+  it("cancels copied feedback when the install dialog closes", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const clearTimeout = vi.spyOn(window, "clearTimeout");
+    const container = await mount();
+    const copy = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Copy prompt"),
+    );
+
+    await act(async () => {
+      copy?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("Copied");
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(".ls-gate__close")?.click();
+    });
+    expect(clearTimeout).toHaveBeenCalled();
+  });
+
   it("reports OpenClaw as the installing assistant when selected", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
@@ -211,6 +236,37 @@ describe("LocalSkillsView", () => {
     });
 
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining("agent=Hermes"));
+  });
+
+  it("cancels copied feedback when the skill drawer closes", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const clearTimeout = vi.spyOn(window, "clearTimeout");
+    const container = await mount({
+      ...baseSkill,
+      status: "installed",
+      installedVersion: "1.0.0",
+    });
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[aria-label="View Companion details"]')?.click();
+    });
+    const copy = Array.from(container.querySelectorAll<HTMLButtonElement>(".ls-drawer__foot button"))
+      .find((button) => button.textContent?.includes("Copy prompt"));
+    await act(async () => {
+      copy?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("Copied to your clipboard");
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('.ls-drawer [aria-label="Close"]')?.click();
+    });
+    expect(clearTimeout).toHaveBeenCalled();
   });
 
   it("flips to the Connected banner when an out-of-band install is reported", async () => {
