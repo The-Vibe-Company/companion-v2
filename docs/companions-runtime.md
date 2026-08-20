@@ -172,6 +172,12 @@ Sending is the sole normal wake path. There is no Wake button and no first-keyst
 send moves through durable start/dispatch checkpoints and finishes or fails explicitly within three
 minutes. A successful Pi prompt acknowledgement refreshes the Box TTL to six hours.
 
+The golden runtime image precompiles Jiti's source-hashed Pi extension cache under the Companion's
+persistent `~/.companion/runtime/tmp`; `/tmp` is not used because Box discards it on archive. Pi
+activation and broker-socket readiness run inside one bounded Box command. Starting separate status
+commands while a restored image is paging in materially delays Pi, so the control plane performs no
+concurrent readiness polling and contacts the broker only after that command returns ready.
+
 Before every Box interaction, runtime re-evaluates:
 
 - current organization membership and Companion Owner/Editor ACL;
@@ -235,7 +241,8 @@ It is the only runtime protocol boundary to Pi.
 
 The broker provides:
 
-- an owner-only Unix socket (`0600`) for correlated commands;
+- an owner-only Unix socket (`0600`) for correlated commands, exposed only after Pi answers a
+  valid state request;
 - a segmented, monotonically ordered event journal;
 - explicit event acknowledgement and safe segment retention;
 - the current Pi invocation id and process-exit observation;

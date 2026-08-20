@@ -152,6 +152,67 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       .toEqual({ ttlSeconds: 21_600 });
   });
 
+  it("waits for Pi readiness inside one Box command instead of polling the provider", async () => {
+    const commands: Array<{ command: string; timeoutSeconds: number }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_rawUrl: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { command: string; timeoutSeconds: number };
+      commands.push(body);
+      if (body.command.includes("for companion_pi_probe")) {
+        return response(commandResult("active\ncompanion-pi-broker-ready\n"));
+      }
+      if (body.command.includes("COMPANION_PI_BROKER_COMMAND=")) {
+        const brokerCommand = decodeBrokerCommand(body.command);
+        return response(commandResult(JSON.stringify({
+          id: brokerCommand.id,
+          type: "response",
+          command: "runtime_state",
+          success: true,
+          data: {
+            invocationId: "invocation-1",
+            activeAttemptId: null,
+            tailCursor: 0,
+            acknowledgedCursor: 0,
+            modelInput: ["text", "image"],
+            counters: zeroCounters(),
+          },
+        }) + "\n"));
+      }
+      return response(commandResult());
+    }));
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS: "1000",
+    });
+
+    await expect(runtime.restartPiDaemon({ boxId: "bx_23456789" })).resolves.toEqual({
+      state: "idle",
+      invocationId: "invocation-1",
+    });
+
+    expect(commands).toHaveLength(2);
+    expect(commands[0]?.command).toContain("seq 1 10");
+    expect(commands[0]?.command).toContain("sleep 0.1");
+    expect(commands[0]?.command).toContain(
+      'stat -c \'%a\' "$HOME/.companion/pi" 2>/dev/null || true',
+    );
+    expect(commands[0]?.timeoutSeconds).toBe(120);
+  });
+
+  it("expunges persistent and runtime provider credentials for disposable Box cleanup", async () => {
+    let command = "";
+    vi.stubGlobal("fetch", vi.fn(async (_rawUrl: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { command: string };
+      command = body.command;
+      return response(commandResult());
+    }));
+
+    await expect(runtimeClient().clearPersistedProviderAuth({ boxId: "bx_23456789" }))
+      .resolves.toBeUndefined();
+    expect(command).toContain('rm -f "$HOME/.companion/pi/auth.json"');
+    expect(command).toContain('"$HOME/.companion/runtime/state/providers.env"');
+    expect(command).toContain('"/run/user/$(id -u)/companion/providers.env"');
+  });
+
   it("dispatches only correlated layout-14 commands and validates monotonic journal pages", async () => {
     const commandTypes: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (_rawUrl: string | URL | Request, init?: RequestInit) => {
@@ -473,8 +534,18 @@ describe("default Pi packages on the Box disk", () => {
     expect(script).not.toMatch(/npm install --global[^\n]*>&2/);
     // Memory has to survive one Pi restart and one Box wake, so it lives on the persistent disk.
     expect(script).toContain('export PI_MEMORY_DIR="$root/memory"');
+    // Jiti's compiled extension cache must survive /tmp being discarded on archive/resume, and the
+    // image bake pre-populates it once instead of charging the first user message.
+    expect(script).toContain('export TMPDIR="$root/tmp"');
+    expect(script).toContain("export JITI_RESPECT_TMPDIR_ENV=1");
+    expect(script).toContain('timeout 90 "$pi_bin" --help');
+    expect(script).toContain("pi-startup-cache.version");
+    expect(script).toContain('!= "$expected_layout"');
+    expect(script).toContain('\"$expected_layout\" > \"$startup_cache_marker\"');
     // Appended, not prepended: the resolved Pi directory stays ahead of the optional prefix.
     expect(script).toContain('PATH="$PATH:$HOME/.companion/tools/bin"');
+    expect(script).toContain('if [ ! -x "$NODE_BIN" ]; then');
+    expect(script).toContain('NODE_BIN="$(command -v node 2>/dev/null || true)"');
     // npm's own words never reach stdout, which is what the control plane falls back to for the
     // reason a later step failed.
     expect(script).not.toContain("awk 'NF { line=$0 } END { print line }' \"$qmd_log\"");
