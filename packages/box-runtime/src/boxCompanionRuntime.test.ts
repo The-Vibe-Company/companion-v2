@@ -1,5 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS,
@@ -192,6 +195,29 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
     expect(commands[0]?.timeoutSeconds).toBe(120);
   });
 
+  it.each(["archived", "archiving"] as const)(
+    "archives an already %s Box with one GET and no rejected cleanup command",
+    async (state) => {
+      const requests: Array<{ url: string; method: string }> = [];
+      vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const url = String(rawUrl);
+        const method = init?.method ?? "GET";
+        requests.push({ url, method });
+        if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+          return response({ box: box(state) });
+        }
+        throw new Error(`unexpected Box request: ${method} ${url}`);
+      }));
+
+      await expect(runtimeClient().archiveExistingBox({ boxId: "bx_23456789" }))
+        .resolves.toEqual({ boxId: "bx_23456789", state });
+      expect(requests).toEqual([{
+        url: "https://ascii.dev/api/box/v1/boxes/bx_23456789",
+        method: "GET",
+      }]);
+    },
+  );
+
   it("expunges persistent and runtime provider credentials for disposable Box cleanup", async () => {
     let command = "";
     vi.stubGlobal("fetch", vi.fn(async (_rawUrl: string | URL | Request, init?: RequestInit) => {
@@ -206,6 +232,9 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
     expect(command).toContain('"$HOME/.companion/runtime/state/providers.env"');
     expect(command).toContain('"$HOME/.companion/runtime/state/control-bundle-v1.json"');
     expect(command).toContain('"/run/user/$(id -u)/companion/providers.env"');
+    expect(command).toContain("control-transaction-v1");
+    expect(command).toContain("set -euo pipefail");
+    expect(command).toContain('if [ -e "$target" ] || [ -L "$target" ]; then exit 1; fi');
   });
 
   it("cleans and retries the idempotent control bundle when apply submission fails once", async () => {
@@ -250,9 +279,10 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
 
     expect(files.filter((path) => path.endsWith("control-bundle-v1.json"))).toHaveLength(2);
     expect(commands.filter((command) => command.includes("COMPANION_CONTROL_APPLY"))).toHaveLength(2);
-    expect(commands).toContain(
-      'rm -f "$HOME/.companion/runtime/state/control-bundle-v1.json"',
-    );
+    expect(commands.some((command) =>
+      command.includes('bundle="$HOME/.companion/runtime/state/control-bundle-v1.json"')
+      && command.includes('rm -f "$bundle"')
+      && command.includes("control-transaction-v1"))).toBe(true);
   });
 
   it("cleans the secret-bearing control bundle and fails after two rejected applies", async () => {
@@ -290,9 +320,116 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
     })).rejects.toThrow("control apply transport failed");
 
     expect(commands.filter((command) => command.includes("COMPANION_CONTROL_APPLY"))).toHaveLength(2);
-    expect(commands.at(-1)).toBe(
-      'rm -f "$HOME/.companion/runtime/state/control-bundle-v1.json"',
-    );
+    expect(commands.some((command) =>
+      command.includes('bundle="$HOME/.companion/runtime/state/control-bundle-v1.json"')
+      && command.includes('rm -f "$bundle"')
+      && command.includes("control-transaction-v1"))).toBe(true);
+    const providerCleanup = commands.at(-1)!;
+    expect(providerCleanup).toContain("runtime/state/providers.env");
+    expectCleanupFailsWhenRmFails(providerCleanup);
+  });
+
+  it("proves transient provider credentials absent when Git helper activation fails", async () => {
+    const commands: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        return response({ box: box("ready") });
+      }
+      if (url.endsWith("/files") && method === "PUT") return response({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = (JSON.parse(String(init?.body)) as { command: string }).command;
+        commands.push(command);
+        if (command.includes("credential.helper")) {
+          return response({ success: false, exitCode: 1, stdout: "", stderr: "git refused" });
+        }
+        return response(commandResult("companion-box-runnable\n"));
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+
+    await expect(runtimeClient().stageExistingBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      runtimeGeneration: 1,
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { provider: { token: "ephemeral-test-token" } },
+      replaceProviderAuth: true,
+      modelId: "glm-4.6",
+      mcpCredentials: [{ env_key: "GITHUB_TOKEN", value: "gho_test_token" }],
+      mcpAccounts: [],
+      skills: [],
+    })).rejects.toThrow("git refused");
+
+    const helper = commands.findIndex((command) => command.includes("credential.helper"));
+    const cleanup = commands.findIndex((command, index) =>
+      index > helper && command.includes("runtime/state/providers.env"));
+    expect(helper).toBeGreaterThanOrEqual(0);
+    expect(cleanup).toBeGreaterThan(helper);
+  });
+
+  it("rolls every control file back when a later atomic commit step fails", async () => {
+    let bundle = "";
+    let applyCommand = "";
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        return response({ box: box("ready") });
+      }
+      if (url.endsWith("/files") && method === "PUT") {
+        const body = JSON.parse(String(init?.body)) as { path: string; content: string };
+        if (body.path.endsWith("control-bundle-v1.json")) bundle = body.content;
+        return response({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = (JSON.parse(String(init?.body)) as { command: string }).command;
+        if (command.includes("COMPANION_CONTROL_APPLY")) applyCommand = command;
+        return response(commandResult("companion-box-runnable\n"));
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+    await runtimeClient().stageExistingBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      runtimeGeneration: 1,
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { provider: { token: "ephemeral-test-token" } },
+      replaceProviderAuth: true,
+      modelId: "glm-4.6",
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+    });
+
+    const home = mkdtempSync(join(tmpdir(), "companion-control-"));
+    try {
+      const state = join(home, ".companion/runtime/state");
+      const auth = join(home, ".companion/pi/auth.json");
+      mkdirSync(state, { recursive: true });
+      mkdirSync(join(home, ".companion/pi"), { recursive: true });
+      writeFileSync(join(state, "control-bundle-v1.json"), bundle);
+      writeFileSync(auth, "old-auth");
+
+      const injectedCommand = applyCommand.replace(
+        "    record.installed = true;\n",
+        "    record.installed = true;\n    if (records.indexOf(record) === 0) throw new Error(\"injected commit failure\");\n",
+      );
+      expect(injectedCommand).not.toBe(applyCommand);
+
+      const applied = spawnSync("bash", ["-c", injectedCommand], {
+        env: { ...process.env, HOME: home },
+        encoding: "utf8",
+      });
+
+      expect(applied.status).not.toBe(0);
+      expect(readFileSync(auth, "utf8")).toBe("old-auth");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("dispatches only correlated layout-14 commands and validates monotonic journal pages", async () => {
@@ -684,6 +821,8 @@ describe("default Pi packages on the Box disk", () => {
     expect(encodedBoxIgnore).toBeTruthy();
     expect(Buffer.from(encodedBoxIgnore!, "base64").toString("utf8"))
       .toContain(".companion/runtime/state/control-bundle-v1.json");
+    expect(Buffer.from(encodedBoxIgnore!, "base64").toString("utf8"))
+      .toContain(".companion/runtime/control-transaction-v1/");
 
     for (const spec of [
       "npm:pi-mcp-adapter@2.12.1",
@@ -777,11 +916,12 @@ describe("default Pi packages on the Box disk", () => {
       .toBeLessThan(script.indexOf(`"$pi_bin" install`));
   });
 
-  it("writes the baked Companion skill checksum into the installed broker marker", async () => {
+  it("keeps image-only Companion skill identity out of the installed broker marker", async () => {
     const checksum = "sha256:companion-skill-contract";
     const script = await stagedLayoutScript({}, [], checksum);
-    expect(script).toContain(`:skill=${checksum}:boot=`);
-    expect(script).not.toContain(":skill=none:boot=");
+    expect(script).not.toContain(checksum);
+    expect(script).not.toContain(":skill=");
+    expect(script).not.toContain(":boot=");
   });
 
   it("gives a deployment no way to drop what a Companion can do", async () => {
@@ -1271,6 +1411,22 @@ function box(state: "archived" | "ready" | "archiving" | "idle") {
 
 function commandResult(stdout = "") {
   return { success: true, exitCode: 0, stdout, stderr: "" };
+}
+
+function expectCleanupFailsWhenRmFails(command: string): void {
+  const root = mkdtempSync(join(tmpdir(), "companion-cleanup-"));
+  try {
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "rm"), "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+    const result = spawnSync("bash", ["-c", command], {
+      env: { ...process.env, HOME: root, PATH: `${bin}:${process.env.PATH ?? ""}` },
+      encoding: "utf8",
+    });
+    expect(result.status).not.toBe(0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 function response(value: unknown, status = 200): Response {

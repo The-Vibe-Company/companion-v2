@@ -55,6 +55,18 @@ class CompletingEngine extends HoldingEngine {
   }
 }
 
+class ImmediatelyCompletingEngine extends HoldingEngine {
+  override async execute(claim: RuntimeClaim): Promise<RuntimeExecutionResult> {
+    this.claims.push(claim);
+    return {
+      outcome: "succeeded",
+      workKind: claim.workKind,
+      workId: claim.workId,
+      companionId: claim.companionId,
+    };
+  }
+}
+
 class BlockingClock extends TestClock {
   override async sleep(_milliseconds: number, signal?: AbortSignal): Promise<void> {
     return await new Promise<void>((resolve, reject) => {
@@ -238,6 +250,27 @@ describe("RuntimeScheduler", () => {
       companionId: second.companionId,
     });
     await Promise.resolve();
+    await scheduler.shutdown();
+  });
+
+  it("retains a wake from an execution that resolves before recovery sleep is installed", async () => {
+    const base = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(base) });
+    store.claims.push(numberedClaim(0), numberedClaim(1));
+    const engine = new ImmediatelyCompletingEngine();
+    const scheduler = new RuntimeScheduler({
+      store,
+      engine,
+      clock: new BlockingClock(),
+      executorId: "scheduler-test",
+      concurrency: 1,
+      claimsEnabled: true,
+    });
+
+    scheduler.start();
+    while (engine.claims.length < 2) await Promise.resolve();
+
+    expect(engine.claims).toHaveLength(2);
     await scheduler.shutdown();
   });
 

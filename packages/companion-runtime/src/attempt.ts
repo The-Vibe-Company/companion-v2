@@ -620,6 +620,10 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           await checkpointDispatchAmbiguous(context, commandId);
           throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
         }
+        // The SLO ends when the provider returns Pi's positive acknowledgement. Persisting that
+        // acknowledgement is deliberately outside the measured interval: PostgreSQL latency must
+        // not be attributed to Box or Pi prompt acceptance.
+        const providerReturnedAt = context.deps.clock.now();
         if (outcome.outcome === "ambiguous") {
           await checkpointDispatchAmbiguous(context, commandId);
           throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
@@ -645,7 +649,7 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           await checkpointDispatchAmbiguous(context, commandId);
           throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
         }
-        const initialCursor = outcome.initialCursor ?? state.tailCursor;
+        const initialCursor = outcome.initialCursor;
         if (initialCursor < state.tailCursor) {
           await checkpointDispatchAmbiguous(context, commandId);
           throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
@@ -655,21 +659,25 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           commandId,
           piInvocationId: outcome.invocationId,
           eventCursor: initialCursor,
-          activityAt: context.deps.clock.now(),
+          activityAt: providerReturnedAt,
         });
-        const acceptedAt = context.deps.clock.now();
+        // The send transaction fixes cold_start_deadline_at to turn.created_at + three minutes and
+        // never moves it. Subtracting that immutable contract recovers the exact durable send time
+        // without a second timestamp or query on the dispatch path.
         const sentAt = auth.coldStartDeadlineAt
           ? auth.coldStartDeadlineAt.getTime() - 3 * 60_000
           : null;
         context.deps.log?.info({
-          ts: acceptedAt.toISOString(),
+          ts: providerReturnedAt.toISOString(),
           event: "runtime.prompt.ack",
           companionId: context.claim.companionId,
           attemptId: context.claim.workId,
           boxId: dispatchRuntime.boxId,
           invocationId: outcome.invocationId,
           initialCursor: initialCursor.toString(),
-          ...(sentAt === null ? {} : { sendToPromptAckMs: Math.max(0, acceptedAt.getTime() - sentAt) }),
+          ...(sentAt === null
+            ? {}
+            : { sendToPromptAckMs: Math.max(0, providerReturnedAt.getTime() - sentAt) }),
         });
         await refreshWarmTtl(context);
         break;

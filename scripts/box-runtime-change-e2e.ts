@@ -297,7 +297,7 @@ async function main(): Promise<number> {
         phase: "prompt_ack",
         status: "succeeded",
         duration_ms: Date.now() - promptAckStartedAt,
-        initial_cursor: dispatch.initialCursor ?? initial.tailCursor,
+        initial_cursor: dispatch.initialCursor,
       });
       if (providerReadyAt !== null) {
         write({
@@ -378,7 +378,7 @@ async function main(): Promise<number> {
         phase: "resume_prompt_ack",
         status: "succeeded",
         duration_ms: Date.now() - ackStartedAt,
-        initial_cursor: dispatch.initialCursor ?? resumed.tailCursor,
+        initial_cursor: dispatch.initialCursor,
       });
       write({
         phase: "resume_ready_to_prompt_ack",

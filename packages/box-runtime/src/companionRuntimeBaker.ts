@@ -61,6 +61,9 @@ export function createCompanionRuntimeImageBaker(input: {
   onCleanupError?: (error: unknown, cleanup: "baker_box_delete" | "snapshot_prune") => void;
   onEvent?: (event: CompanionRuntimeImageBakerEvent) => void;
 }): CompanionRuntimeImageBaker {
+  if (input.bundledSkill && !input.runtime.prepareRuntimeImage) {
+    throw new TypeError("The runtime image warmup adapter is required for a bundled Skill.");
+  }
   const now = input.now ?? Date.now;
   const sleep = input.sleep ?? defaultSleep;
   let readyName: string | null = null;

@@ -33,6 +33,7 @@ export interface CompanionPiLayoutIdentity {
   overlayMarker: string;
   baseMarker: string;
   fullMarker: string;
+  imageMarker: string;
   imageName: string;
 }
 
@@ -64,13 +65,9 @@ export function companionPiBaseLayoutMarker(input: {
   packages: readonly string[];
   qmdPackage: string;
   minimumPiVersion: string;
-  companionSkillChecksum?: string;
-  bootProfileRevision?: number;
 }): string {
   return `${input.layoutVersion.toString(10)}:${input.packages.join(",")}`
-    + `:qmd=${input.qmdPackage}:pi>=${input.minimumPiVersion}`
-    + `:skill=${input.companionSkillChecksum ?? "none"}`
-    + `:boot=${(input.bootProfileRevision ?? COMPANION_RUNTIME_BOOT_PROFILE_REVISION).toString(10)}`;
+    + `:qmd=${input.qmdPackage}:pi>=${input.minimumPiVersion}`;
 }
 
 export function companionPiLayoutIdentity(input: {
@@ -86,6 +83,8 @@ export function companionPiLayoutIdentity(input: {
   const overlayMarker = companionPiOverlayMarker(overlayRevision);
   const baseMarker = companionPiBaseLayoutMarker(input);
   const fullMarker = `${baseMarker}:overlay=${overlayMarker}`;
+  const imageMarker = `${fullMarker}:skill=${input.companionSkillChecksum ?? "none"}`
+    + `:boot=${(input.bootProfileRevision ?? COMPANION_RUNTIME_BOOT_PROFILE_REVISION).toString(10)}`;
   return {
     layoutVersion: input.layoutVersion,
     packages: input.packages,
@@ -97,7 +96,8 @@ export function companionPiLayoutIdentity(input: {
     overlayMarker,
     baseMarker,
     fullMarker,
-    imageName: companionRuntimeImageName(fullMarker, input.layoutVersion),
+    imageMarker,
+    imageName: companionRuntimeImageName(imageMarker, input.layoutVersion),
   };
 }
 

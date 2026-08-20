@@ -149,6 +149,7 @@ const RUNTIME_IMAGE_BOXIGNORE = [
   ".companion/runtime/logs/",
   ".companion/runtime/state/skill-archives/",
   ".companion/runtime/state/control-bundle-v1.json",
+  ".companion/runtime/control-transaction-v1/",
   ".companion/runtime/state/providers.env",
   "attachments/",
   "outbox/",
@@ -215,6 +216,7 @@ const BOX_RUNNABLE_MARKER = "companion-box-runnable";
 const PROVIDER_AUTH_PRESENT_MARKER = "companion-provider-auth-present";
 /** Secret-bearing aggregate file; every failure path must remove it from persistent Box disk. */
 const CONTROL_BUNDLE_PATH = ".companion/runtime/state/control-bundle-v1.json";
+const CONTROL_TRANSACTION_DIRECTORY = ".companion/runtime/control-transaction-v1";
 const CONTROL_BUNDLE_ATTEMPTS = 2;
 const CONTROL_BUNDLE_RETRYABLE_STATUSES = new Set([408, 425, 429]);
 /** Proves the extracted immutable Skill tree matches the exact archives staged by this deploy. */
@@ -660,11 +662,16 @@ export interface CompanionPiBrokerEventPage {
 
 /** Prompt dispatch never collapses an ambiguous write into a safe negative acknowledgement. */
 export type CompanionPiPromptDispatch =
-  | { outcome: "accepted"; attemptId: string; invocationId: string; initialCursor?: number }
+  | { outcome: "accepted"; attemptId: string; invocationId: string; initialCursor: number }
   | { outcome: "refused"; code: string; message: string }
   | { outcome: "ambiguous"; code: string; message: string };
 
-export type CompanionPiExtensionUiDispatch = CompanionPiPromptDispatch;
+export type CompanionPiControlDispatch =
+  | { outcome: "accepted"; attemptId: string; invocationId: string }
+  | { outcome: "refused"; code: string; message: string }
+  | { outcome: "ambiguous"; code: string; message: string };
+
+export type CompanionPiExtensionUiDispatch = CompanionPiControlDispatch;
 
 /** Narrow layout-14 Box/Pi port owned exclusively by the dedicated Runtime v2 service. */
 export interface CompanionBoxRuntimeV2 {
@@ -792,7 +799,7 @@ export interface CompanionBoxRuntimeV2 {
     attemptId: string;
     requestId?: string;
     signal?: AbortSignal;
-  }): Promise<CompanionPiPromptDispatch>;
+  }): Promise<CompanionPiControlDispatch>;
   /** Observe broker identity/cursors and Pi's current model input capabilities in one command. */
   brokerState(input: { boxId: string; signal?: AbortSignal }): Promise<CompanionPiBrokerState>;
   /** Deliver one durable decision without collapsing a lost Box response into a safe refusal. */
@@ -1987,11 +1994,30 @@ exit 0`,
   }
 
   async #removeProviderFile(boxId: string): Promise<void> {
-    await this.#command(
-      boxId,
-      `rm -f "$HOME/.companion/runtime/state/providers.env" \
-"/run/user/$(id -u)/companion/providers.env"`,
-    );
+    const removed = parseCommandEnvelope(await this.#request<unknown>(
+      `/boxes/${encodeURIComponent(boxId)}/commands`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          command: `set -euo pipefail
+persistent="$HOME/.companion/runtime/state/providers.env"
+runtime="/run/user/$(id -u)/companion/providers.env"
+transaction="$HOME/${CONTROL_TRANSACTION_DIRECTORY}"
+rm -f "$persistent" "$runtime"
+rm -rf "$transaction"
+for target in "$persistent" "$runtime" "$transaction"; do
+  if [ -e "$target" ] || [ -L "$target" ]; then exit 1; fi
+done`,
+          timeoutSeconds: 15,
+        }),
+      },
+      25_000,
+      null,
+      "execute_command",
+    ));
+    if (!removed.success) {
+      throw new BoxRuntimeProviderError("Runtime provider credentials failed to clear", 502);
+    }
   }
 
   /**
@@ -2078,29 +2104,69 @@ exit 0`,
           boxId,
       `set -euo pipefail
 bundle="$HOME/${CONTROL_BUNDLE_PATH}"
-trap 'rm -f "$bundle"' EXIT
+transaction="$HOME/${CONTROL_TRANSACTION_DIRECTORY}"
+trap 'rm -f "$bundle"; rm -rf "$transaction"' EXIT
 COMPANION_CONTROL_BUNDLE="$bundle" COMPANION_CONTROL_ALLOWED=${shellQuote(Buffer.from(allowedJson).toString("base64"))} node <<'COMPANION_CONTROL_APPLY'
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const home = process.env.HOME;
 const bundle = process.env.COMPANION_CONTROL_BUNDLE;
+const transaction = path.join(home, ${JSON.stringify(CONTROL_TRANSACTION_DIRECTORY)});
 const allowed = new Set(JSON.parse(Buffer.from(process.env.COMPANION_CONTROL_ALLOWED, "base64").toString("utf8")));
 const manifest = JSON.parse(fs.readFileSync(bundle, "utf8"));
 if (manifest.revision !== 1 || !Array.isArray(manifest.files) || manifest.files.length > allowed.size) throw new Error("invalid control manifest");
 const seen = new Set();
+const prepared = [];
 for (const file of manifest.files) {
   if (!allowed.has(file.path) || seen.has(file.path) || ![384, 448].includes(file.mode)) throw new Error("invalid control path or mode");
   seen.add(file.path);
   const bytes = Buffer.from(file.content, "base64");
   if (bytes.length !== file.byteSize || bytes.length > 4 * 1024 * 1024 || crypto.createHash("sha256").update(bytes).digest("hex") !== file.sha256) throw new Error("invalid control digest");
   const target = path.join(home, file.path);
-  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-  const temporary = target + ".next";
-  fs.writeFileSync(temporary, bytes, { mode: file.mode });
-  fs.chmodSync(temporary, file.mode);
-  fs.renameSync(temporary, target);
+  if (fs.existsSync(target) && !fs.lstatSync(target).isFile()) throw new Error("invalid control target");
+  prepared.push({ target, bytes, mode: file.mode });
 }
+fs.rmSync(transaction, { recursive: true, force: true });
+fs.mkdirSync(transaction, { recursive: true, mode: 0o700 });
+const records = prepared.map(({ target }, index) => ({
+  target,
+  temporary: path.join(transaction, index + ".next"),
+  backup: path.join(transaction, index + ".previous"),
+  hadTarget: false,
+  installed: false,
+}));
+try {
+  for (let index = 0; index < prepared.length; index += 1) {
+    const { target, bytes, mode } = prepared[index];
+    const { temporary } = records[index];
+    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(temporary, bytes, { mode });
+    fs.chmodSync(temporary, mode);
+  }
+  for (const record of records) {
+    fs.rmSync(record.backup, { force: true });
+    if (fs.existsSync(record.target)) {
+      fs.renameSync(record.target, record.backup);
+      record.hadTarget = true;
+    }
+    fs.renameSync(record.temporary, record.target);
+    record.installed = true;
+  }
+} catch (error) {
+  for (const record of [...records].reverse()) {
+    if (record.installed) fs.rmSync(record.target, { force: true });
+    if (record.hadTarget && fs.existsSync(record.backup)) {
+      fs.renameSync(record.backup, record.target);
+    }
+    fs.rmSync(record.temporary, { force: true });
+  }
+  throw error;
+}
+// The transaction is committed once every canonical path has been swapped. Backup deletion is
+// post-commit cleanup and must never enter the rollback path after an earlier backup is gone.
+for (const record of records) fs.rmSync(record.backup, { force: true });
+fs.rmSync(transaction, { recursive: true, force: true });
 COMPANION_CONTROL_APPLY`,
           60,
         );
@@ -2137,7 +2203,14 @@ COMPANION_CONTROL_APPLY`,
       {
         method: "POST",
         body: JSON.stringify({
-          command: `rm -f "$HOME/${CONTROL_BUNDLE_PATH}"`,
+          command: `set -euo pipefail
+bundle="$HOME/${CONTROL_BUNDLE_PATH}"
+transaction="$HOME/${CONTROL_TRANSACTION_DIRECTORY}"
+rm -f "$bundle"
+rm -rf "$transaction"
+for target in "$bundle" "$transaction"; do
+  if [ -e "$target" ] || [ -L "$target" ]; then exit 1; fi
+done`,
           timeoutSeconds: 15,
         }),
       },
@@ -2514,44 +2587,44 @@ fi`,
         mode: 0o700,
       });
     }
-    await this.#applyControlBundle(input.boxId, controlFiles);
-    if (input.mcpCredentials.some((credential) => credential.env_key === "GITHUB_TOKEN")) {
-      const gitHelper = await this.#command(input.boxId, companionGitCredentialHelperInstallCommand());
-      if (!gitHelper.success) {
-        throw new BoxRuntimeProviderError(
-          `Pi resource staging failed${commandFailureDetail(gitHelper)}`,
-          502,
-        );
-      }
-    }
-    const staged = new Map<string, string>();
-    let skillBytesTransferred = 0;
-    const uploads: Array<{ path: string; content: string; byteLength: number }> = [];
-    for (const skill of reuseSkills ? [] : injectedSkills) {
-      const path = runtimeSkillArchivePath(skill);
-      const content = skill.archive.toString("base64");
-      staged.set(path, content);
-      if (!(skill === bundledSkill && cleared.stdout.includes("companion-bundled-skill-reused"))) {
-        uploads.push({ path, content, byteLength: skill.archive.byteLength });
-      }
-    }
-    // Independent immutable archives can land in parallel. Keep the bound deliberately low so a
-    // large skill selection cannot monopolize the provider's command/file quota; #writeFile keeps
-    // its multipart path for archives over the provider limit.
-    let nextUpload = 0;
-    await Promise.all(Array.from(
-      { length: Math.min(3, uploads.length) },
-      async () => {
-        for (;;) {
-          const upload = uploads[nextUpload++];
-          if (!upload) return;
-          await this.#writeFile(input.boxId, upload.path, upload.content);
-          skillBytesTransferred += upload.byteLength;
-        }
-      },
-    ));
-    await this.#repairShortStagedArchives(input.boxId, staged);
     try {
+      await this.#applyControlBundle(input.boxId, controlFiles);
+      if (input.mcpCredentials.some((credential) => credential.env_key === "GITHUB_TOKEN")) {
+        const gitHelper = await this.#command(input.boxId, companionGitCredentialHelperInstallCommand());
+        if (!gitHelper.success) {
+          throw new BoxRuntimeProviderError(
+            `Pi resource staging failed${commandFailureDetail(gitHelper)}`,
+            502,
+          );
+        }
+      }
+      const staged = new Map<string, string>();
+      let skillBytesTransferred = 0;
+      const uploads: Array<{ path: string; content: string; byteLength: number }> = [];
+      for (const skill of reuseSkills ? [] : injectedSkills) {
+        const path = runtimeSkillArchivePath(skill);
+        const content = skill.archive.toString("base64");
+        staged.set(path, content);
+        if (!(skill === bundledSkill && cleared.stdout.includes("companion-bundled-skill-reused"))) {
+          uploads.push({ path, content, byteLength: skill.archive.byteLength });
+        }
+      }
+      // Independent immutable archives can land in parallel. Keep the bound deliberately low so a
+      // large skill selection cannot monopolize the provider's command/file quota; #writeFile keeps
+      // its multipart path for archives over the provider limit.
+      let nextUpload = 0;
+      await Promise.all(Array.from(
+        { length: Math.min(3, uploads.length) },
+        async () => {
+          for (;;) {
+            const upload = uploads[nextUpload++];
+            if (!upload) return;
+            await this.#writeFile(input.boxId, upload.path, upload.content);
+            skillBytesTransferred += upload.byteLength;
+          }
+        },
+      ));
+      await this.#repairShortStagedArchives(input.boxId, staged);
       const prepared = reuseSkills
         ? null
         : await this.#command(
@@ -2578,7 +2651,9 @@ fi`,
         skillBytesTransferred,
       };
     } catch (error) {
-      await this.#removeProviderFile(input.boxId).catch(() => undefined);
+      // providers.env is transient staging material. A staging failure must prove it absent from
+      // both persistent disk and tmpfs before the Box can later be archived or resumed.
+      await this.#removeProviderFile(input.boxId);
       throw error;
     }
   }
@@ -2789,10 +2864,21 @@ exit 1`,
     recoverArchive?: boolean;
     signal?: AbortSignal;
   }): Promise<{ boxId: string; state: BoxState }> {
+    const observed = await this.#get(input.boxId, input.signal);
+    if (observed.state === "archived" || observed.state === "archiving") {
+      return await this.#archiveBox(input, observed);
+    }
     // A previous staging transport failure may have landed the aggregate before its shell trap ran.
     // Never archive a tenant Box until absence of that secret-bearing transient file is proven.
-    await this.#removeControlBundle(input.boxId);
-    return await this.#archiveBox(input);
+    try {
+      await this.#removeControlBundle(input.boxId);
+    } catch (error) {
+      if (!(error instanceof BoxRuntimeProviderError) || error.status !== 409) throw error;
+      const raced = await this.#get(input.boxId, input.signal);
+      if (raced.state !== "archived" && raced.state !== "archiving") throw error;
+      return await this.#archiveBox(input, raced);
+    }
+    return await this.#archiveBox(input, observed);
   }
 
   async #archiveBox(input: {
@@ -2816,12 +2902,14 @@ exit 1`,
         );
         box = parseBoxEnvelope(response);
       } catch (error) {
+        if (!(error instanceof BoxRuntimeProviderError) || error.status !== 409) throw error;
+        const raced = await this.#get(input.boxId, input.signal);
         if (
-          input.recoverArchive !== true
-          || !(error instanceof BoxRuntimeProviderError)
-          || error.status !== 409
+          raced.state !== "archived"
+          && raced.state !== "archiving"
+          && input.recoverArchive !== true
         ) throw error;
-        box = await this.#get(input.boxId, input.signal);
+        box = raced;
       }
     }
     return { boxId: box.id, state: box.state };
@@ -3144,7 +3232,16 @@ exit 1`,
 rm -f "$HOME/.companion/pi/auth.json" \
   "$HOME/.companion/runtime/state/providers.env" \
   "$HOME/${CONTROL_BUNDLE_PATH}" \
-  "/run/user/$(id -u)/companion/providers.env"`,
+  "/run/user/$(id -u)/companion/providers.env"
+rm -rf "$HOME/${CONTROL_TRANSACTION_DIRECTORY}"
+for target in \
+  "$HOME/.companion/pi/auth.json" \
+  "$HOME/.companion/runtime/state/providers.env" \
+  "$HOME/${CONTROL_BUNDLE_PATH}" \
+  "/run/user/$(id -u)/companion/providers.env" \
+  "$HOME/${CONTROL_TRANSACTION_DIRECTORY}"; do
+  if [ -e "$target" ] || [ -L "$target" ]; then exit 1; fi
+done`,
       60,
       input.signal,
     );
@@ -3245,7 +3342,7 @@ rm -f "$HOME/.companion/pi/auth.json" \
     attemptId: string;
     requestId?: string;
     signal?: AbortSignal;
-  }): Promise<CompanionPiPromptDispatch> {
+  }): Promise<CompanionPiControlDispatch> {
     let response: Record<string, unknown> | null;
     try {
       response = await this.#rpcCommandResponse({

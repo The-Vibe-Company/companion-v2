@@ -84,7 +84,12 @@ export interface RuntimeBoxControl {
 }
 
 export type BrokerWriteOutcome =
-  | { outcome: "accepted"; invocationId: string; initialCursor?: bigint }
+  | { outcome: "accepted"; invocationId: string }
+  | { outcome: "rejected"; code: string }
+  | { outcome: "ambiguous"; code: string };
+
+export type BrokerPromptWriteOutcome =
+  | { outcome: "accepted"; invocationId: string; initialCursor: bigint }
   | { outcome: "rejected"; code: string }
   | { outcome: "ambiguous"; code: string };
 
@@ -119,7 +124,7 @@ export interface RuntimePiControl {
     attemptId: string;
     message: string;
     signal: AbortSignal;
-  }): Promise<BrokerWriteOutcome>;
+  }): Promise<BrokerPromptWriteOutcome>;
   /** Best-effort Pi abort for an Owner/Editor stop. Does not go through the turn lease signal. */
   abort(input: {
     boxId: string;

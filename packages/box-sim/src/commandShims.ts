@@ -2,6 +2,19 @@ import { createHash } from "node:crypto";
 
 import type { BoxSimCommandResult, BoxSimPiController } from "./protocol";
 
+const CONTROL_BUNDLE_ALLOWED_PATHS = new Set([
+  ".companion/pi/auth.json",
+  ".companion/pi/mcp.json",
+  ".companion/runtime/state/mcp-accounts.json",
+  ".companion/runtime/state/skills.json",
+  ".companion/runtime/state/config-catalog.json",
+  ".companion/runtime/state/instructions.txt",
+  ".companion/runtime/state/model.txt",
+  ".companion/runtime/state/providers.env",
+  ".companion/bin/git-credential-github",
+]);
+const CONTROL_BUNDLE_FILE_LIMIT_BYTES = 4 * 1024 * 1024;
+
 export type BoxSimCommandKind =
   | "box-runnable"
   | "warm-daemon-ready"
@@ -313,12 +326,17 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
   ) return "apply-control-bundle";
   if (command.includes("Pi daemon is still active after stop")) return "stop-daemon";
   if (
-    command.trim()
-    === 'rm -f "$HOME/.companion/runtime/state/control-bundle-v1.json"'
-  ) return "remove-control-bundle";
-  if (command.includes('rm -f "$HOME/.companion/runtime/state/providers.env"')) {
+    command.includes(".companion/runtime/state/providers.env")
+    && command.includes("/run/user/$(id -u)/companion/providers.env")
+    && command.includes("rm -f")
+  ) {
     return "remove-provider-files";
   }
+  if (
+    command.includes(".companion/runtime/state/control-bundle-v1.json")
+    && command.includes("control-transaction-v1")
+    && command.includes("rm -f")
+  ) return "remove-control-bundle";
   if (command.includes("companion-archive-bytes") && command.includes("wc -c")) {
     return "measure-skill-archives";
   }
@@ -692,6 +710,12 @@ async function executeRpc(
     && typeof brokerCommand.attemptId === "string"
     ? brokerCommand.attemptId
     : null;
+  const initialCursor = brokerCommand.type === "prompt" ? brokerTailCursor(machine) : null;
+  if (brokerCommand.type === "prompt" && brokerCommand.clearOutbox === true) {
+    for (const path of [...machine.persistentFiles.keys()]) {
+      if (path.startsWith("outbox/")) machine.persistentFiles.delete(path);
+    }
+  }
   // The production broker binds before writing to Pi: Pi may emit an event before its correlated
   // command response arrives. Roll this provisional binding back only when Pi proves rejection.
   if (promptAttemptId) machine.daemon.activeAttemptId = promptAttemptId;
@@ -713,17 +737,12 @@ async function executeRpc(
     response = responseFor(brokerCommand, response);
   }
   if (brokerCommand.type === "prompt") {
-    if (brokerCommand.clearOutbox === true) {
-      for (const path of [...machine.persistentFiles.keys()]) {
-        if (path.startsWith("outbox/")) machine.persistentFiles.delete(path);
-      }
-    }
     response = response.success === true
       ? responseFor(brokerCommand, {
           attemptId: brokerCommand.attemptId,
           invocationId: machine.daemon.invocationId,
           piAcknowledged: true,
-          initialCursor: brokerTailCursor(machine),
+          initialCursor,
           requiredInput: brokerCommand.requiredInput,
           clearOutbox: true,
         })
@@ -849,13 +868,19 @@ function appliedControlBundle(machine: BoxSimCommandMachine): BoxSimCommandResul
         content?: unknown;
       }>;
     };
-    if (manifest.revision !== 1 || !Array.isArray(manifest.files)) {
+    if (
+      manifest.revision !== 1
+      || !Array.isArray(manifest.files)
+      || manifest.files.length > CONTROL_BUNDLE_ALLOWED_PATHS.size
+    ) {
       return failed("simulated runtime control manifest is invalid");
     }
     const seen = new Set<string>();
+    const validated: Array<{ path: string; content: Buffer }> = [];
     for (const file of manifest.files) {
       if (
         typeof file.path !== "string"
+        || !CONTROL_BUNDLE_ALLOWED_PATHS.has(file.path)
         || seen.has(file.path)
         || ![0o600, 0o700].includes(Number(file.mode))
         || typeof file.content !== "string"
@@ -863,11 +888,13 @@ function appliedControlBundle(machine: BoxSimCommandMachine): BoxSimCommandResul
       const content = Buffer.from(file.content, "base64");
       if (
         content.byteLength !== file.byteSize
+        || content.byteLength > CONTROL_BUNDLE_FILE_LIMIT_BYTES
         || sha256(content) !== file.sha256
       ) return failed("simulated runtime control digest is invalid");
       seen.add(file.path);
-      machine.persistentFiles.set(normalizeBoxPath(file.path), content);
+      validated.push({ path: normalizeBoxPath(file.path), content });
     }
+    for (const file of validated) machine.persistentFiles.set(file.path, file.content);
     return ok();
   } catch {
     return failed("simulated runtime control bundle is unreadable");
@@ -961,10 +988,26 @@ export async function executeBoxCommand(
     }
     case "remove-control-bundle":
       machine.persistentFiles.delete(".companion/runtime/state/control-bundle-v1.json");
+      for (const path of [...machine.persistentFiles.keys()]) {
+        if (path.startsWith(".companion/runtime/control-transaction-v1/")) {
+          machine.persistentFiles.delete(path);
+        }
+      }
       return ok();
     case "remove-provider-files":
       machine.persistentFiles.delete(".companion/runtime/state/providers.env");
       machine.volatileFiles.delete("run/user/1000/companion/providers.env");
+      if (command.includes(".companion/pi/auth.json")) {
+        machine.persistentFiles.delete(".companion/pi/auth.json");
+      }
+      if (command.includes("control-bundle-v1.json")) {
+        machine.persistentFiles.delete(".companion/runtime/state/control-bundle-v1.json");
+      }
+      for (const path of [...machine.persistentFiles.keys()]) {
+        if (path.startsWith(".companion/runtime/control-transaction-v1/")) {
+          machine.persistentFiles.delete(path);
+        }
+      }
       return ok();
     case "stop-daemon":
       try {

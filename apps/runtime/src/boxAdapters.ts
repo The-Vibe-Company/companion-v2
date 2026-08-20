@@ -8,6 +8,7 @@ import {
 } from "@companion/box-runtime";
 import type {
   BrokerWriteOutcome,
+  BrokerPromptWriteOutcome,
   RuntimeBoxControl,
   RuntimePiControl,
   RuntimeProcessLog,
@@ -122,7 +123,7 @@ export function createRuntimeBoxControl(options: RuntimeBoxAdapterOptions): Runt
     async getStatus(input) {
       const observed = await options.runtime().existingBoxStatus({
         boxId: input.boxId,
-        ...(input.companionId ? { companionId: input.companionId } : {}),
+        ...(input.companionId !== undefined ? { companionId: input.companionId } : {}),
         ...(input.generation !== undefined
           ? { runtimeGeneration: generationNumber(input.generation) }
           : {}),
@@ -191,7 +192,7 @@ export function createRuntimePiControl(options: RuntimeBoxAdapterOptions): Runti
         requestId: input.commandId,
         signal: input.signal,
       });
-      return writeOutcome(result);
+      return promptWriteOutcome(result);
     },
     async abort(input) {
       input.signal.throwIfAborted();
@@ -235,16 +236,25 @@ export function createRuntimePiControl(options: RuntimeBoxAdapterOptions): Runti
 }
 
 function writeOutcome(
-  result: Awaited<ReturnType<CompanionBoxRuntimeV2["dispatchPrompt"]>>,
+  result: Awaited<ReturnType<CompanionBoxRuntimeV2["dispatchAbort"]>>,
 ): BrokerWriteOutcome {
   if (result.outcome === "refused") return { outcome: "rejected", code: result.code };
   if (result.outcome === "ambiguous") return { outcome: "ambiguous", code: result.code };
   return {
     outcome: "accepted",
     invocationId: result.invocationId,
-    ...(result.initialCursor === undefined
-      ? {}
-      : { initialCursor: BigInt(result.initialCursor) }),
+  };
+}
+
+function promptWriteOutcome(
+  result: Awaited<ReturnType<CompanionBoxRuntimeV2["dispatchPrompt"]>>,
+): BrokerPromptWriteOutcome {
+  if (result.outcome === "refused") return { outcome: "rejected", code: result.code };
+  if (result.outcome === "ambiguous") return { outcome: "ambiguous", code: result.code };
+  return {
+    outcome: "accepted",
+    invocationId: result.invocationId,
+    initialCursor: BigInt(result.initialCursor),
   };
 }
 

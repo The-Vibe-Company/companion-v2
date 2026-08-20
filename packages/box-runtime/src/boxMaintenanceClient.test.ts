@@ -465,6 +465,75 @@ describe("AsciiBoxMaintenanceClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("enforces each shared-list waiter's earlier absolute deadline", async () => {
+    vi.useFakeTimers();
+    let release!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(async () => await new Promise<Response>((resolve) => {
+      release = resolve;
+    })));
+    const lifecycle = client();
+    const first = lifecycle.findGenerationBoxes({
+      companionId: COMPANION_ID,
+      generation: 14,
+      deadlineAt: Date.now() + 1_000,
+    });
+    const second = lifecycle.findGenerationBoxes({
+      companionId: COMPANION_ID,
+      generation: 14,
+      deadlineAt: Date.now() + 20,
+    });
+    const secondResult = expect(second).rejects.toMatchObject({
+      stableCode: "box_request_deadline_exceeded",
+      status: 504,
+    });
+
+    await vi.advanceTimersByTimeAsync(20);
+    await secondResult;
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    release(json({
+      ok: true,
+      type: "box.list",
+      boxes: [],
+      pageInfo: { nextCursor: null, hasMore: false },
+    }));
+    await expect(first).resolves.toMatchObject({ canonical: null, duplicates: [] });
+  });
+
+  it("does not let the first waiter's short deadline abort a later shared-list waiter", async () => {
+    vi.useFakeTimers();
+    let release!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(async () => await new Promise<Response>((resolve) => {
+      release = resolve;
+    })));
+    const lifecycle = client();
+    const first = lifecycle.findGenerationBoxes({
+      companionId: COMPANION_ID,
+      generation: 14,
+      deadlineAt: Date.now() + 20,
+    });
+    const second = lifecycle.findGenerationBoxes({
+      companionId: COMPANION_ID,
+      generation: 14,
+      deadlineAt: Date.now() + 1_000,
+    });
+    const firstResult = expect(first).rejects.toMatchObject({
+      stableCode: "box_request_deadline_exceeded",
+      status: 504,
+    });
+
+    await vi.advanceTimersByTimeAsync(20);
+    await firstResult;
+    expect(fetch).toHaveBeenCalledTimes(1);
+    release(json({
+      ok: true,
+      type: "box.list",
+      boxes: [],
+      pageInfo: { nextCursor: null, hasMore: false },
+    }));
+    await expect(second).resolves.toMatchObject({ canonical: null, duplicates: [] });
+  });
+
   it("recovers the exact-name canonical and duplicates without issuing create", async () => {
     const fetchMock = vi.fn(async () => json({
       ok: true,

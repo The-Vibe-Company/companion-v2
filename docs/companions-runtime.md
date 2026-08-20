@@ -301,8 +301,9 @@ instead. That marker is split into two layers:
   (`companion-l14-<hash>`).
 - **overlay** — broker source, permission extension, and daemon unit. Cheap to rewrite in place.
 
-The image identity also includes the immutable bundled Companion-skill checksum and boot-profile
-revision. Runtime bakes the current full marker into a throwaway baker Box (never a tenant Companion), then
+The image identity extends the full disk-layout marker with the immutable bundled Companion-skill
+checksum and boot-profile revision; those image-only inputs never force an in-place tenant relayout.
+Runtime bakes the current image marker into a throwaway baker Box (never a tenant Companion), then
 creates new generation Boxes with `from` that snapshot so the first send skips the five-minute
 package install. The baker Box is created with the five-minute unnamed-orphan TTL, then patched to
 thirty minutes so layout and snapshot can finish; a failed or in-flight bake is retried until the

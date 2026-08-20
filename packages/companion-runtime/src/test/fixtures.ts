@@ -667,7 +667,11 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
     }),
     prompt: async (input) => {
       promptCalls.push({ attemptId: input.attemptId, message: input.message });
-      return { outcome: "accepted", invocationId: PI_INVOCATION_ID };
+      return {
+        outcome: "accepted",
+        invocationId: PI_INVOCATION_ID,
+        initialCursor: store.authorization.eventCursor ?? 0n,
+      };
     },
     abort: async (input) => {
       abortCalls.push({ attemptId: input.attemptId, boxId: input.boxId });

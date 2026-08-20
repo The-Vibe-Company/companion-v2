@@ -638,41 +638,57 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
     if (!this.#generationListInFlight) {
       // This is deliberately only an in-flight promise, never a temporal cache: after it settles,
       // the next discovery must be able to observe a Box another create has just accepted.
-      const pending = this.listAllBoxes({ deadlineAt: input.deadlineAt });
+      // The provider request belongs to all simultaneous callers, so no one caller may shorten it.
+      // Each waiter below enforces its own deadline without aborting this independently bounded call.
+      const pending = this.listAllBoxes();
       this.#generationListInFlight = pending;
       void pending.finally(() => {
         if (this.#generationListInFlight === pending) this.#generationListInFlight = null;
       }).catch(() => undefined);
     }
     const pending = this.#generationListInFlight;
-    if (!input.signal) return await pending;
-    if (input.signal.aborted) {
-      throw adapterError({
-        stableCode: "box_request_cancelled",
-        message: "The Box request was cancelled",
-        status: 499,
-        retryable: false,
-        outcomeUnknown: false,
-      });
-    }
+    const waiterDeadlineAt = deadlineMilliseconds(input.deadlineAt);
+    if (!input.signal && waiterDeadlineAt === undefined) return await pending;
     return await new Promise<BoxMaintenanceBox[]>((resolve, reject) => {
-      const aborted = () => reject(adapterError({
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let settled = false;
+      const finish = (settle: () => void): void => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        input.signal?.removeEventListener("abort", aborted);
+        settle();
+      };
+      const aborted = () => finish(() => reject(adapterError({
         stableCode: "box_request_cancelled",
         message: "The Box request was cancelled",
         status: 499,
         retryable: false,
         outcomeUnknown: false,
-      }));
-      input.signal!.addEventListener("abort", aborted, { once: true });
+      })));
+      const deadlineElapsed = () => finish(() => reject(adapterError({
+        stableCode: "box_request_deadline_exceeded",
+        message: "The Box request deadline elapsed",
+        status: 504,
+        retryable: true,
+        outcomeUnknown: false,
+      })));
+      if (input.signal?.aborted) {
+        aborted();
+        return;
+      }
+      input.signal?.addEventListener("abort", aborted, { once: true });
+      if (waiterDeadlineAt !== undefined) {
+        const remaining = waiterDeadlineAt - Date.now();
+        if (remaining <= 0) {
+          deadlineElapsed();
+          return;
+        }
+        timer = setTimeout(deadlineElapsed, remaining);
+      }
       void pending.then(
-        (boxes) => {
-          input.signal!.removeEventListener("abort", aborted);
-          resolve(boxes);
-        },
-        (error: unknown) => {
-          input.signal!.removeEventListener("abort", aborted);
-          reject(error);
-        },
+        (boxes) => finish(() => resolve(boxes)),
+        (error: unknown) => finish(() => reject(error)),
       );
     });
   }

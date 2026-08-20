@@ -42,6 +42,7 @@ export class RuntimeScheduler {
   readonly #active = new Map<string, Promise<RuntimeExecutionResult>>();
   #loopAbort = new AbortController();
   #sleepAbort: AbortController | null = null;
+  #wakePending = false;
   #loopTask: Promise<void> | null = null;
   #loopAlive = false;
   #acceptingClaims = true;
@@ -201,6 +202,10 @@ export class RuntimeScheduler {
           // Health exposes the stable error timestamp. The loop remains alive for DB recovery.
         }
         if (!this.#acceptingClaims) break;
+        if (this.#wakePending) {
+          this.#wakePending = false;
+          continue;
+        }
         const sleepAbort = new AbortController();
         this.#sleepAbort = sleepAbort;
         try {
@@ -224,6 +229,12 @@ export class RuntimeScheduler {
     this.#active.delete(companionId);
     // A completed start operation can have made the queued turn claimable. Interrupt only the
     // scheduler's recovery sleep; the main shutdown signal and periodic sweep remain unchanged.
-    if (this.#sleepAbort && !this.#sleepAbort.signal.aborted) this.#sleepAbort.abort();
+    if (this.#sleepAbort && !this.#sleepAbort.signal.aborted) {
+      this.#sleepAbort.abort();
+    } else {
+      // An already-resolved execution may finish in the microtask gap between sweepOnce() and the
+      // sleep controller being installed. Retain that wake so the loop never pays the full sweep.
+      this.#wakePending = true;
+    }
   }
 }

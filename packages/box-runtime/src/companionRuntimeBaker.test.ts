@@ -33,6 +33,24 @@ function lifecycle(overrides: Partial<BoxRuntimeLifecycleClient> = {}): BoxRunti
 }
 
 describe("companion runtime image baker", () => {
+  it("fails fast when a bundled Skill has no warmup adapter", () => {
+    expect(() => createCompanionRuntimeImageBaker({
+      identity,
+      lifecycle: lifecycle(),
+      bundledSkill: {
+        slug: "companion",
+        version: "1.0.0",
+        checksum: `sha256:${"1".repeat(64)}`,
+        archive: Buffer.from("bundled"),
+      },
+      runtime: {
+        existingBoxStatus: async () => ({ boxId: "bx_23456789", state: "ready" }),
+        refreshPiLayout: async () => ({ boxId: "bx_23456789", applied: "base" as const }),
+        refreshTtl: async () => undefined,
+      },
+    })).toThrow("warmup adapter is required");
+  });
+
   it("never publishes when archive/resume playbook warmup fails", async () => {
     const controller = new AbortController();
     const saveNamedSnapshot = vi.fn(async () => snapshot(identity.imageName));

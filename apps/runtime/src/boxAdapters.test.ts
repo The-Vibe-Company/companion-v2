@@ -332,6 +332,29 @@ describe("runtime Box/Pi port adapters", () => {
       .resolves.toEqual({ state: "idle" });
   });
 
+  it("forwards a present but invalid Companion identity instead of dropping its ownership proof", async () => {
+    const existingBoxStatus = vi.fn(async () => {
+      throw new Error("invalid Companion identity");
+    });
+    const control = createRuntimeBoxControl({
+      lifecycle: lifecycle(),
+      runtime: () => boxRuntime({ existingBoxStatus }),
+    });
+
+    await expect(control.getStatus({
+      boxId: "bx_23456789",
+      companionId: "",
+      generation: 4n,
+      signal,
+    })).rejects.toThrow("invalid Companion identity");
+    expect(existingBoxStatus).toHaveBeenCalledWith({
+      boxId: "bx_23456789",
+      companionId: "",
+      runtimeGeneration: 4,
+      signal,
+    });
+  });
+
   it("adds an explicit provider deadline to delete work without a turn deadline", async () => {
     const requestPermanentDeletion = vi.fn(async () => ({
       outcome: "accepted" as const,
@@ -384,6 +407,7 @@ describe("runtime Box/Pi port adapters", () => {
       outcome: "accepted" as const,
       attemptId: "attempt-1",
       invocationId: "invocation-1",
+      initialCursor: 7,
     }));
     const brokerState = vi.fn();
     const factory = vi.fn(() => boxRuntime({ dispatchPrompt, brokerState }));
@@ -395,7 +419,11 @@ describe("runtime Box/Pi port adapters", () => {
       attemptId: "attempt-1",
       message: "hello",
       signal,
-    })).resolves.toEqual({ outcome: "accepted", invocationId: "invocation-1" });
+    })).resolves.toEqual({
+      outcome: "accepted",
+      invocationId: "invocation-1",
+      initialCursor: 7n,
+    });
     expect(factory).toHaveBeenCalledOnce();
     expect(dispatchPrompt).toHaveBeenCalledWith({
       boxId: "bx_23456789",

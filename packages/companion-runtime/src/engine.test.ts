@@ -185,6 +185,38 @@ describe("RuntimeEngine attempts", () => {
     expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
   });
 
+  it("ends prompt ACK timing when Pi responds rather than after its durable checkpoint", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    const clock = new TestClock();
+    const records: Record<string, unknown>[] = [];
+    const checkpoint = store.checkpoint.bind(store);
+    store.checkpoint = async (fence, input) => {
+      if (input.nextCheckpoint === "dispatch_accepted") clock.advance(10_000);
+      return await checkpoint(fence, input);
+    };
+    ports.eventReads.push(assistantAndSettlementPage());
+
+    const result = await new RuntimeEngine(engineDependencies({
+      store,
+      ports,
+      clock,
+      log: {
+        error(record) { records.push(record); },
+        warn(record) { records.push(record); },
+        info(record) { records.push(record); },
+      },
+    })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(records).toContainEqual(expect.objectContaining({
+      event: "runtime.prompt.ack",
+      ts: "2026-08-16T12:00:00.000Z",
+      sendToPromptAckMs: 0,
+    }));
+  });
+
   it("recycles Pi after an overlay layout refresh before dispatch", async () => {
     const claim = attemptClaim();
     const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
@@ -208,7 +240,7 @@ describe("RuntimeEngine attempts", () => {
     };
     ports.pi.prompt = async (input) => {
       ports.promptCalls.push({ attemptId: input.attemptId, message: input.message });
-      return { outcome: "accepted", invocationId: overlayInvocationId };
+      return { outcome: "accepted", invocationId: overlayInvocationId, initialCursor: 0n };
     };
     ports.eventReads.push(assistantAndSettlementPage(overlayInvocationId));
     const engine = new RuntimeEngine(engineDependencies({ store, ports }));
@@ -236,7 +268,7 @@ describe("RuntimeEngine attempts", () => {
     });
     ports.pi.prompt = async (input) => {
       ports.promptCalls.push({ attemptId: input.attemptId, message: input.message });
-      return { outcome: "accepted", invocationId: liveInvocationId };
+      return { outcome: "accepted", invocationId: liveInvocationId, initialCursor: 0n };
     };
     ports.eventReads.push(assistantAndSettlementPage(liveInvocationId));
     const engine = new RuntimeEngine(engineDependencies({ store, ports }));
@@ -260,6 +292,10 @@ describe("RuntimeEngine attempts", () => {
       tailCursor: 10n,
       acknowledgedCursor: 10n,
     });
+    ports.pi.prompt = async (input) => {
+      ports.promptCalls.push({ attemptId: input.attemptId, message: input.message });
+      return { outcome: "accepted", invocationId: PI_INVOCATION_ID, initialCursor: 10n };
+    };
     ports.eventReads.push({
       events: [
         {
