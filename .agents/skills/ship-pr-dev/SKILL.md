@@ -69,6 +69,8 @@ Create `ship-state.json` with the goal, non-goals, base/branch, changed and unre
 
 Classify the change before dispatch:
 
+Use `impact.agent_workflow` for paths under agent skill roots. Do not infer application backend or security risk solely from executable or security-named files inside `.agents/skills`, `.claude/skills`, or `.codex/skills`. Treat agent-only documentation/metadata as trivial and agent-only executable workflow changes as standard unless their actual authority or remote effects justify deep review.
+
 | Tier | Typical change | Delegation budget | Local target / reassessment checkpoint (CI excluded) |
 | --- | --- | --- | --- |
 | trivial | docs, metadata, obvious one-file edit | no implementation worker; quick review, normally inline | 10 / 15 min |

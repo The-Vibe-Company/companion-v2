@@ -60,6 +60,11 @@
       "id": 12,
       "prompt": "Ship this normal backend fix from Claude Code and optimize credits.",
       "expected_output": "Bounded Claude workers request claude-sonnet-5 and high effort when the adapter supports it, without passing full conversation history. The standard tier uses at most one writer, one primary reviewer, and two focused reviewers, resumes the same worker for follow-up, and leaves deterministic verification and CI polling to the coordinator."
+    },
+    {
+      "id": 13,
+      "prompt": "Ship this PR that only updates packages under .agents/skills and .claude/skills.",
+      "expected_output": "The context collector marks agent_workflow true but does not infer application backend or security risk from Python scripts or security-named references inside agent packages. Documentation and metadata-only skill updates stay trivial; executable workflow changes are normally standard, so the skill does not launch a deep review solely because agent package paths contain backend or security keywords."
     }
   ]
 }

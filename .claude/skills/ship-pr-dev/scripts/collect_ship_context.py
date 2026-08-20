@@ -23,6 +23,7 @@ SECURITY_RE = re.compile(
     r"(auth|permission|policy|role|token|secret|privacy|pii|billing|export|upload|download)",
     re.IGNORECASE,
 )
+AGENT_SKILL_RE = re.compile(r"(^|/)(\.agents|\.claude|\.codex)/skills/", re.IGNORECASE)
 MANIFEST_NAMES = {
     "package.json",
     "pnpm-lock.yaml",
@@ -103,6 +104,24 @@ def parse_untracked_status(output: str) -> list[dict[str, str]]:
     ]
 
 
+def classify_impact(paths: list[str]) -> dict[str, bool]:
+    """Classify application risk without treating agent-package internals as product code."""
+    agent_paths = [path for path in paths if AGENT_SKILL_RE.search(path)]
+    application_paths = [path for path in paths if not AGENT_SKILL_RE.search(path)]
+    return {
+        "agent_workflow": bool(agent_paths),
+        "frontend": any(FRONTEND_RE.search(path) for path in application_paths),
+        "backend": any(BACKEND_RE.search(path) for path in application_paths),
+        "db": any(DB_RE.search(path) for path in application_paths),
+        "security_or_privacy": any(SECURITY_RE.search(path) for path in application_paths),
+        "docs_only": bool(application_paths)
+        and all(
+            re.search(r"(\.md$|^docs/|^README|^CHANGELOG)", path, re.IGNORECASE)
+            for path in application_paths
+        ),
+    }
+
+
 def find_project_files(repo_root: Path) -> tuple[list[str], list[str]]:
     manifests: list[str] = []
     ci_files: list[str] = []
@@ -181,14 +200,7 @@ def main() -> None:
             part for part in (branch_stat.stdout.strip(), local_stat.stdout.strip()) if part
         ),
         "changed_files": changed_files,
-        "impact": {
-            "frontend": any(FRONTEND_RE.search(path) for path in paths),
-            "backend": any(BACKEND_RE.search(path) for path in paths),
-            "db": any(DB_RE.search(path) for path in paths),
-            "security_or_privacy": any(SECURITY_RE.search(path) for path in paths),
-            "docs_only": bool(paths)
-            and all(re.search(r"(\.md$|^docs/|^README|^CHANGELOG)", path, re.IGNORECASE) for path in paths),
-        },
+        "impact": classify_impact(paths),
         "project_files": {
             "manifests": manifests,
             "ci": ci_files,

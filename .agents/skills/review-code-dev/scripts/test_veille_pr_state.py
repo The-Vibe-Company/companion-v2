@@ -3,9 +3,13 @@
 import argparse
 import importlib.util
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+
+sys.dont_write_bytecode = True
 
 
 SCRIPT = Path(__file__).with_name("veille_pr_state.py")
