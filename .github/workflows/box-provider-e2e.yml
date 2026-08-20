@@ -89,7 +89,7 @@ jobs:
           set -o pipefail
           if [ "$GITHUB_EVENT_NAME" = schedule ]; then
             : > "$RUNNER_TEMP/box-runtime-change-e2e.log"
-            for cycle in $(seq 1 10); do
+            for ((cycle = 1; cycle <= 10; cycle++)); do
               pnpm e2e:box-runtime-change 2>&1 \
                 | tee -a "$RUNNER_TEMP/box-runtime-change-e2e.log"
             done
