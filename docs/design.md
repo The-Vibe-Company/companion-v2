@@ -350,8 +350,9 @@ is documented in `docs/runbooks/companions-runtime.md`.
 
 Box/Pi startup experiments are development tooling, not a Companion product surface. The
 operator-launched `pnpm research:box-startup -- --overnight` command uses Conductor Cloud to create
-isolated Luna candidate workspaces, serializes their real-provider measurements through one explicit
-lease, and asks a clean Sol workspace to integrate only measured compatible gains. It never runs
+isolated Luna candidate workspaces, then evaluates each validated commit from a controller-owned
+disposable checkout under one serialized real-provider lease. A clean Sol workspace integrates only
+measured compatible gains. Candidate workspaces have provider credentials explicitly shadowed. It never runs
 from API, worker, web, or the hosted Companion runtime, and adds no product orchestration feature.
 
 The research evaluator and existing tests are immutable to candidate workspaces. Candidates may
@@ -359,4 +360,5 @@ challenge lifecycle ordering, including moving credential-free, revision-bound S
 to the Stop/archive path. Creation must remain correct without a preceding Stop, a sleeping
 settings/Skill change must invalidate prepared state, and credentials must be expunged before every
 snapshot. Disposable images are salted by the candidate Git tree and every Box/snapshot is deleted
-before another provider lease is granted.
+and provider-absence proven before another lease is granted. A failed proof keeps the lease durably
+blocked for controller-owned recovery on resume.

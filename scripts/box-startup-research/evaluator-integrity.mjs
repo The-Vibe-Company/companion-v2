@@ -9,6 +9,9 @@ const EVALUATOR_FILES = [
   "scripts/box-startup-research/bake-image.ts",
   "scripts/box-startup-research/cleanup.ts",
   "scripts/box-startup-research/contracts.mjs",
+  "scripts/box-startup-research/controller.mjs",
+  "scripts/box-startup-research/evaluator-integrity.mjs",
+  "scripts/box-startup-research/policy.mjs",
   "scripts/box-startup-research/program.md",
 ];
 

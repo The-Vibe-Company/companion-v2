@@ -14,8 +14,85 @@ import {
   resourcePrefix,
   RESULT_SENTINEL,
   validateBenchmarkLease,
+  validateCleanupLedger,
 } from "./contracts.mjs";
 import { evaluatorChecksum } from "./evaluator-integrity.mjs";
+import { assertNoCredentialMaterial } from "./policy.mjs";
+
+const ESSENTIAL_ENVIRONMENT_NAMES = [
+  "PATH",
+  "HOME",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "PNPM_HOME",
+  "COREPACK_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "LANG",
+  "LC_ALL",
+  "TZ",
+  "CI",
+  "COMPANION_BOX_API_BASE",
+  "COMPANION_BOX_TTL_SECONDS",
+  "COMPANION_BOX_POLL_INTERVAL_MS",
+  "COMPANION_BOX_READY_TIMEOUT_MS",
+  "COMPANION_BOX_DESKTOP_MINT_BUDGET_MS",
+  "COMPANION_PI_DAEMON_ACTIVE_TIMEOUT_MS",
+  "COMPANION_PI_INSTALL_COMMAND",
+  "COMPANION_PI_MCP_ADAPTER_PACKAGE",
+  "COMPANION_BOX_E2E_MODEL_ID",
+];
+const DURATION_PHASES = new Set([
+  "provider_start",
+  "send_to_prompt_ack",
+  "ready_to_prompt_ack",
+  "resume_provider_start",
+  "resume_send_to_prompt_ack",
+  "resume_ready_to_prompt_ack",
+  "stage_runtime",
+  "start_pi",
+  "broker_preflight",
+  "stop_archive",
+  "resume",
+  "resume_start_pi",
+  "resume_broker_preflight",
+  "prompt_ack",
+  "resume_prompt_ack",
+  "create_stage_identity_probe",
+  "create_stage_layout",
+  "create_stage_interaction_extension",
+  "create_stage_resource_preflight",
+  "create_stage_control_bundle",
+  "create_stage_skill_transfer",
+  "create_stage_skill_apply",
+  "resume_stage_identity_probe",
+  "resume_stage_layout",
+  "resume_stage_interaction_extension",
+  "resume_stage_resource_preflight",
+  "resume_stage_control_bundle",
+  "resume_stage_skill_transfer",
+  "resume_stage_skill_apply",
+]);
+const PROVIDER_OPERATIONS = new Set([
+  "list_boxes",
+  "create_box",
+  "apply_box_settings",
+  "get_box",
+  "resume_box",
+  "archive_box",
+  "write_file",
+  "execute_command",
+  "broker_state",
+  "prompt",
+  "desktop",
+]);
+const BOX_ID_PATTERN = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
+const SNAPSHOT_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
+const CREDENTIAL_SHAPE = /(?:authorization\s*[:=]\s*bearer\s+[A-Za-z0-9._-]{16,}|(?:api[_-]?key|token|secret|password)\s*[:=]\s*["'][^"']{16,})/i;
 
 function option(name) {
   const index = process.argv.indexOf(name);
@@ -28,15 +105,43 @@ function requiredOption(name) {
   return value;
 }
 
-function safeEnvironment() {
-  const boxKey = process.env.BOX_API_KEY?.trim() || process.env.COMPANION_BOX_API_KEY?.trim();
-  const zaiKey = process.env.ZAI_API_KEY?.trim()
-    || process.env.COMPANION_BOX_E2E_ZAI_API_KEY?.trim();
-  if (!boxKey || !zaiKey) throw new Error("research credentials are not configured");
+export function evaluatorRuntimeEnvironment(source = process.env) {
+  const env = {};
+  for (const name of ESSENTIAL_ENVIRONMENT_NAMES) {
+    const value = source[name];
+    if (typeof value === "string" && value.length > 0) env[name] = value;
+  }
+  return env;
+}
+
+export function cleanupEnvironment(source = process.env) {
+  const boxKey = source.BOX_API_KEY?.trim() || source.COMPANION_BOX_API_KEY?.trim();
+  if (!boxKey) throw new Error("research Box credential is not configured");
   return {
-    ...process.env,
+    ...evaluatorRuntimeEnvironment(source),
+    BOX_API_KEY: "",
     COMPANION_BOX_API_KEY: boxKey,
+    ZAI_API_KEY: "",
+    COMPANION_BOX_E2E_ZAI_API_KEY: "",
+  };
+}
+
+export function safeEnvironment(source = process.env, options = {}) {
+  const zaiKey = source.ZAI_API_KEY?.trim()
+    || source.COMPANION_BOX_E2E_ZAI_API_KEY?.trim();
+  if (!zaiKey) throw new Error("research ZAI credential is not configured");
+  return {
+    ...cleanupEnvironment(source),
     COMPANION_BOX_E2E_ZAI_API_KEY: zaiKey,
+    ...(typeof options.leaseTokenHash === "string" ? {
+      BOX_STARTUP_RESEARCH_LEASE_TOKEN_HASH: options.leaseTokenHash,
+    } : {}),
+    ...(typeof options.evaluatorChecksum === "string" ? {
+      BOX_STARTUP_RESEARCH_EVALUATOR_CHECKSUM: options.evaluatorChecksum,
+    } : {}),
+    ...(typeof options.logDirectory === "string" ? {
+      BOX_STARTUP_RESEARCH_LOG_DIRECTORY: options.logDirectory,
+    } : {}),
   };
 }
 
@@ -53,20 +158,33 @@ async function run(command, args, options = {}) {
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
       stdout += chunk;
-      if (options.forward) process.stdout.write(chunk);
     });
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
     });
     child.once("error", rejectRun);
-    child.once("close", (code, signal) => {
-      if (code === 0) {
-        resolveRun({ stdout, stderr });
-        return;
-      }
-      rejectRun(new Error(`${options.label ?? command} failed (${signal ?? code ?? "unknown"})`));
-    });
+    child.once("close", (code, signal) => resolveRun({
+      stdout,
+      stderr,
+      code: code ?? 1,
+      signal,
+      label: options.label ?? command,
+    }));
   });
+}
+
+export function assertSafeEvaluatorOutput(value, env = process.env) {
+  assertNoCredentialMaterial(value, env);
+  if (CREDENTIAL_SHAPE.test(value)) {
+    throw new Error("evaluator output contains credential-shaped material");
+  }
+}
+
+function checkedOutput(processResult, env) {
+  assertSafeEvaluatorOutput(processResult.stdout, env);
+  assertSafeEvaluatorOutput(processResult.stderr, env);
+  if (processResult.code !== 0) throw new Error(`${processResult.label} failed`);
+  return jsonEvents(processResult.stdout);
 }
 
 function jsonEvents(contents) {
@@ -80,8 +198,128 @@ function jsonEvents(contents) {
   });
 }
 
+function nonNegativeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function sanitizeImageEvent(events, treeSha) {
+  const matches = events.filter((event) => event.phase === "research_image" && event.status === "succeeded");
+  if (matches.length !== 1) throw new Error("research image bake did not return one successful image");
+  const event = matches[0];
+  if (event.tree_sha !== treeSha || typeof event.image !== "string" || !SNAPSHOT_PATTERN.test(event.image)) {
+    throw new Error("research image bake returned an invalid image");
+  }
+  const durationMs = nonNegativeInteger(event.duration_ms);
+  const providerCallCount = nonNegativeInteger(event.provider_call_count);
+  if (durationMs === null || providerCallCount === null) {
+    throw new Error("research image bake returned invalid timing data");
+  }
+  const safe = {
+    phase: "research_image",
+    status: "succeeded",
+    image: event.image,
+    tree_sha: treeSha,
+    duration_ms: durationMs,
+    provider_call_count: providerCallCount,
+  };
+  if (event.snapshot_size_bytes !== undefined) {
+    const snapshotSizeBytes = nonNegativeInteger(event.snapshot_size_bytes);
+    if (snapshotSizeBytes === null) throw new Error("research image bake returned an invalid snapshot size");
+    safe.snapshot_size_bytes = snapshotSizeBytes;
+  }
+  return safe;
+}
+
+export function sanitizeCycleEvents(events, resourcePrefixValue) {
+  const safe = [];
+  let resources = 0;
+  let cleanups = 0;
+  let terminals = 0;
+  for (const event of events) {
+    if (DURATION_PHASES.has(event.phase) && event.status === "succeeded") {
+      const durationMs = nonNegativeInteger(event.duration_ms);
+      if (durationMs === null) throw new Error("evaluator returned an invalid timing event");
+      safe.push({ phase: event.phase, status: "succeeded", duration_ms: durationMs });
+      continue;
+    }
+    if ((event.phase === "staging_stats" || event.phase === "resume_staging_stats")
+      && event.status === "succeeded") {
+      const bytes = nonNegativeInteger(event.skill_bytes_transferred);
+      if (bytes === null || !["refresh", "skills"].includes(event.staging_mode)) {
+        throw new Error("evaluator returned invalid staging diagnostics");
+      }
+      safe.push({
+        phase: event.phase,
+        status: "succeeded",
+        staging_mode: event.staging_mode,
+        skill_bytes_transferred: bytes,
+      });
+      continue;
+    }
+    if (event.phase === "provider_call_stats" && event.status === "succeeded") {
+      const calls = nonNegativeInteger(event.provider_call_count);
+      if (calls === null) throw new Error("evaluator returned invalid provider diagnostics");
+      safe.push({ phase: "provider_call_stats", status: "succeeded", provider_call_count: calls });
+      continue;
+    }
+    if (event.phase === "provider_call" && ["succeeded", "failed"].includes(event.status)) {
+      const durationMs = nonNegativeInteger(event.duration_ms);
+      if (durationMs === null || !PROVIDER_OPERATIONS.has(event.operation)) {
+        throw new Error("evaluator returned invalid provider timing");
+      }
+      safe.push({
+        phase: "provider_call",
+        status: event.status,
+        operation: event.operation,
+        duration_ms: durationMs,
+      });
+      continue;
+    }
+    if (event.phase === "resource" && event.status === "created") {
+      if (event.resource_kind !== "box" || typeof event.resource_id !== "string"
+        || !BOX_ID_PATTERN.test(event.resource_id) || event.research_tag !== resourcePrefixValue) {
+        throw new Error("evaluator created a resource outside the lease");
+      }
+      resources += 1;
+      safe.push({
+        phase: "resource",
+        status: "created",
+        resource_kind: "box",
+        resource_id: event.resource_id,
+        research_tag: resourcePrefixValue,
+      });
+      continue;
+    }
+    if (event.phase === "cleanup" && event.status === "succeeded") {
+      if (event.research_tag !== resourcePrefixValue) {
+        throw new Error("evaluator cleanup is outside the lease");
+      }
+      cleanups += 1;
+      safe.push({ phase: "cleanup", status: "succeeded", research_tag: resourcePrefixValue });
+      continue;
+    }
+    if (event.phase === "runtime_change_e2e" && event.status === "succeeded") {
+      terminals += 1;
+      safe.push({ phase: "runtime_change_e2e", status: "succeeded" });
+    }
+  }
+  if (resources !== 1 || cleanups !== 1 || terminals !== 1) {
+    throw new Error("evaluator cycle did not prove one leased resource and cleanup");
+  }
+  return safe;
+}
+
+async function appendStructuredEvents(path, events) {
+  if (events.length === 0) return;
+  await appendFile(path, `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, {
+    encoding: "utf8",
+  });
+}
+
 async function currentTreeSha() {
-  return (await run("git", ["rev-parse", "HEAD^{tree}"], { label: "git tree lookup" })).stdout.trim();
+  const lookedUp = await run("git", ["rev-parse", "HEAD^{tree}"], { label: "git tree lookup" });
+  if (lookedUp.code !== 0) throw new Error("git tree lookup failed");
+  return lookedUp.stdout.trim();
 }
 
 export function validateLeaseGrant(raw, verification) {
@@ -117,16 +355,19 @@ async function cleanup(input) {
   if (input.treeSha) args.push("--tree-sha", input.treeSha);
   try {
     const cleaned = await run("pnpm", args, { env: input.env, label: "research cleanup" });
-    const event = jsonEvents(cleaned.stdout).find((candidate) =>
-      candidate.phase === "research_cleanup");
+    const events = checkedOutput(cleaned, input.env);
+    const matches = events.filter((candidate) => candidate.phase === "research_cleanup");
+    if (matches.length !== 1) throw new Error("research cleanup did not return one result");
+    const event = matches[0];
     if (!event || event.status !== "succeeded" || event.complete !== true) {
       throw new Error("research cleanup was not proven");
     }
+    const ledger = validateCleanupLedger(event);
+    if (input.snapshot && !ledger.snapshots.some((item) => item.name === input.snapshot && item.deleted)) {
+      throw new Error("research cleanup did not prove its image deletion");
+    }
     return {
-      schemaVersion: BOX_STARTUP_RESEARCH_SCHEMA_VERSION,
-      boxes: event.boxes ?? [],
-      snapshots: event.snapshots ?? [],
-      complete: true,
+      ...ledger,
     };
   } catch {
     return {
@@ -160,8 +401,10 @@ export async function runLeasedBenchmark(raw = {}) {
   });
   const expiresAt = Date.parse(lease.expiresAt);
 
-  const env = safeEnvironment();
-  const runDirectory = resolve(".context/autoresearch/box-startup", lease.runId, lease.candidateId);
+  const env = safeEnvironment(process.env);
+  const logRoot = process.env.BOX_STARTUP_RESEARCH_LOG_DIRECTORY?.trim()
+    || resolve(".context/autoresearch/box-startup", lease.runId);
+  const runDirectory = resolve(logRoot, lease.candidateId);
   await mkdir(runDirectory, { recursive: true });
   const logPath = resolve(runDirectory, `${lease.phase}.jsonl`);
   const companionIds = Array.from({ length: lease.cycles }, (_, index) =>
@@ -190,18 +433,13 @@ export async function runLeasedBenchmark(raw = {}) {
       },
       label: "research image bake",
     });
-    const imageEvent = jsonEvents(baked.stdout).find((event) =>
-      event.phase === "research_image" && event.status === "succeeded");
-    if (!imageEvent || typeof imageEvent.image !== "string") {
-      throw new Error("research image bake did not return an image");
-    }
+    const imageEvent = sanitizeImageEvent(checkedOutput(baked, env), lease.treeSha);
     snapshot = imageEvent.image;
-    bakeDurationMs = Number(imageEvent.duration_ms) || 0;
-    if (Number.isSafeInteger(imageEvent.snapshot_size_bytes)
-      && imageEvent.snapshot_size_bytes >= 0) {
+    bakeDurationMs = imageEvent.duration_ms;
+    if (imageEvent.snapshot_size_bytes !== undefined) {
       snapshotSizeBytes = imageEvent.snapshot_size_bytes;
     }
-    await appendFile(logPath, `${baked.stdout.trim()}\n`, { encoding: "utf8" });
+    await appendStructuredEvents(logPath, [imageEvent]);
 
     for (let index = 0; index < lease.cycles; index += 1) {
       if (Date.now() >= expiresAt) throw new Error("benchmark lease expired during execution");
@@ -213,11 +451,12 @@ export async function runLeasedBenchmark(raw = {}) {
           COMPANION_BOX_E2E_COMPANION_ID: companionIds[index],
           COMPANION_BOX_E2E_RESEARCH_TAG: lease.resourcePrefix,
         },
-        forward: true,
         label: `benchmark cycle ${index + 1}`,
       });
-      cycleContents += cycle.stdout;
-      await appendFile(logPath, cycle.stdout, { encoding: "utf8" });
+      const events = sanitizeCycleEvents(checkedOutput(cycle, env), lease.resourcePrefix);
+      const contents = `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+      cycleContents += contents;
+      await appendStructuredEvents(logPath, events);
     }
     benchmark = summarizeBoxRuntimeBenchmark(cycleContents, lease.cycles);
   } catch (error) {

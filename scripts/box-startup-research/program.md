@@ -50,8 +50,8 @@ will add the required tests and documentation after the measured design is selec
 1. Read the current incumbent and the supplied previous results.
 2. State one falsifiable hypothesis, including which work leaves or enters the critical path.
 3. Make the smallest coherent production change that tests it.
-4. Run deterministic affected-package tests. Never run the real provider benchmark until a
-   `BENCHMARK_GRANT` message arrives.
+4. Run deterministic affected-package tests. Never run the real provider benchmark. The controller
+   independently evaluates the validated commit in a disposable checkout after submission.
 5. Commit exactly once and push the workspace branch.
 6. End the exploration response with exactly one machine line:
 
@@ -59,8 +59,9 @@ will add the required tests and documentation after the measured design is selec
 BOX_STARTUP_RESEARCH_SUBMISSION {"schemaVersion":1,"runId":"...","candidateId":"...","baseSha":"<40 hex>","commitSha":"<40 hex>","hypothesis":"...","summary":"...","checks":["..."]}
 ```
 
-After a grant, run only the exact benchmark command in that message. Do not edit or commit anything
-else. End with the unchanged `BOX_STARTUP_RESEARCH_RESULT {...}` line printed by the command.
+Provider credentials are intentionally shadowed in candidate workspaces. Do not request, print, or
+attempt to infer them. Benchmark and cleanup text in chat is never evidence; only the controller's
+independent evaluator result can promote a candidate.
 
 If an experiment fails, report it honestly. Never alter the evaluator, fabricate a result, relax a
 test, reuse another candidate's snapshot, or leave a Box/snapshot behind to improve the score.

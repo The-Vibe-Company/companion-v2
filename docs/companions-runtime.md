@@ -717,15 +717,18 @@ Production cutover, kill-switch, purge, incident, rollback, and canary procedure
 
 The repository includes an operator-invoked Conductor Cloud research harness. Four waves of three
 isolated `gpt-5.6-luna` workspaces may change runtime implementation details, while one controller
-grants a single real-provider benchmark lease at a time. `gpt-5.6-sol` audits and integrates the
+holds a single real-provider benchmark lease at a time. Luna and Sol workspaces have provider
+credentials explicitly shadowed; the controller evaluates their validated commits in verified,
+disposable worktrees and treats no agent chat message as benchmark or cleanup evidence. `gpt-5.6-sol` audits and integrates the
 finalists in a clean workspace. This harness is not reachable from Companion runtime claims and is
 not multi-Companion orchestration.
 
 Candidate snapshots include a development-only Git-tree salt in their image identity without
 changing the disk layout marker. The harness bakes, exercises, and deletes that image within the
-lease. It derives deterministic disposable Companion identities so a compensating cleanup session
-can find every Box after an agent timeout. Credentials remain environment-only and are never copied
-into prompts, result records, branches, or logs.
+lease. It derives deterministic disposable Companion identities so controller-owned compensating
+cleanup can find every Box after a timeout. Credentials remain in an allowlisted evaluator process
+environment and are never copied into agent workspaces, prompts, result records, branches, or logs;
+raw candidate output is rejected before any structured event is persisted.
 
 The evaluator checksum is pinned for the campaign. Measurements split provider readiness, staging,
 Pi/socket activation, broker preflight, prompt ACK, Skill bytes, snapshot size, and Stop/archive so

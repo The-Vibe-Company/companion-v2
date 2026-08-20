@@ -2,12 +2,18 @@
 
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { appendFile, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { ConductorCloudClient } from "./conductor-client.mjs";
+import {
+  assertSafeEvaluatorOutput,
+  cleanupEnvironment,
+  evaluatorRuntimeEnvironment,
+  safeEnvironment,
+} from "./benchmark.mjs";
 import { evaluatorChecksum } from "./evaluator-integrity.mjs";
 import {
   benchmarkScore,
@@ -83,7 +89,22 @@ function leaseJournalEvent(state, event, lease, cleanupProven = null) {
   });
 }
 
+async function settleLease(state, cleanupProven) {
+  const lease = state.activeLease;
+  if (!lease) return;
+  if (cleanupProven) {
+    leaseJournalEvent(state, "released", lease, true);
+    state.activeLease = null;
+  } else {
+    lease.cleanupStatus = "blocked";
+    state.status = "blocked-cleanup";
+    leaseJournalEvent(state, "blocked_cleanup", lease, false);
+  }
+  await state.save();
+}
+
 async function recordResult(state, result) {
+  assertNoCredentialMaterial(result, process.env);
   const key = `${result.candidateId}:${result.phase}:${result.treeSha}`;
   state.cleanupLedger ??= [];
   if (!state.cleanupLedger.some((entry) => entry.key === key)) {
@@ -158,28 +179,6 @@ function messageId(runId, candidate, purpose) {
   return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
 }
 
-function containsCleanupProof(value) {
-  if (typeof value === "string") {
-    return value.split(/\r?\n/).some((line) => {
-      try {
-        return containsCleanupProof(JSON.parse(line));
-      } catch {
-        return false;
-      }
-    });
-  }
-  if (Array.isArray(value)) return value.some(containsCleanupProof);
-  if (!value || typeof value !== "object") return false;
-  if (value.phase === "research_cleanup" && value.status === "succeeded") {
-    try {
-      return validateCleanupLedger(value).complete;
-    } catch {
-      return false;
-    }
-  }
-  return Object.values(value).some(containsCleanupProof);
-}
-
 export async function waitForSentinel(input) {
   const deadline = Date.now() + input.timeoutMs;
   let idlePolls = 0;
@@ -207,91 +206,84 @@ export async function waitForSentinel(input) {
 async function runProcess(name, args, options = {}) {
   return await new Promise((resolveRun, rejectRun) => {
     const child = spawn(name, args, {
-      cwd: process.cwd(),
+      cwd: options.cwd ?? process.cwd(),
       env: options.env ?? process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    let output = "";
+    let stdout = "";
+    let stderr = "";
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
-      output += chunk;
-      process.stdout.write(chunk);
+      stdout += chunk;
     });
-    child.stderr.on("data", () => undefined);
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
     child.once("error", rejectRun);
-    child.once("close", (code) => code === 0
-      ? resolveRun(output)
-      : rejectRun(new Error(`${name} exited with ${code ?? "unknown"}`)));
+    child.once("close", (code, signal) => resolveRun({
+      stdout,
+      stderr,
+      code: code ?? 1,
+      signal,
+      label: options.label ?? name,
+    }));
   });
 }
 
-function benchmarkCommand(state, candidate, phase, cycles, expiresAt) {
+function benchmarkArgs(state, candidate, phase, cycles, expiresAt) {
   return [
-    "pnpm research:box-startup:benchmark --",
-    `--lease-token ${tokenFor(state, candidate.id)}`,
-    `--run-id ${state.runId}`,
-    `--candidate-id ${candidate.id}`,
-    `--phase ${phase}`,
-    `--resource-prefix ${candidate.resourcePrefix}`,
-    `--expires-at ${expiresAt}`,
-    `--cycles ${cycles}`,
-    `--tree-sha ${candidate.treeSha}`,
-  ].join(" ");
+    "--lease-token", tokenFor(state, candidate.id),
+    "--run-id", state.runId,
+    "--candidate-id", candidate.id,
+    "--phase", phase,
+    "--resource-prefix", candidate.resourcePrefix,
+    "--expires-at", expiresAt,
+    "--cycles", String(cycles),
+    "--tree-sha", candidate.treeSha,
+  ];
 }
 
-async function localBenchmark(state, phase, cycles) {
-  await assertEvaluatorChecksum(state);
-  const id = phase;
-  const treeSha = await gitTreeSha(state.baseSha);
-  const candidate = { id, treeSha, resourcePrefix: resourcePrefix(state.runId, id) };
-  const token = tokenFor(state, id);
-  const expiresAt = new Date(Date.now() + state.config.leaseDurationMs).toISOString();
-  const args = benchmarkCommand(state, candidate, phase, cycles, expiresAt).split(" ").slice(3);
-  assertLeaseAvailable(state.activeLease, id, phase);
-  state.activeLease = {
-    runId: state.runId,
-    candidateId: id,
-    phase,
-    cycles,
-    treeSha,
-    local: true,
-    expiresAt,
-    resourcePrefix: candidate.resourcePrefix,
-    tokenHash: leaseTokenHash(token),
-  };
-  leaseJournalEvent(state, "granted", state.activeLease);
-  await state.save();
-  let cleanupProven = false;
-  try {
-    const output = await runProcess("node", [
-      resolve("scripts/box-startup-research/benchmark.mjs"),
-      ...args,
-    ], {
-      env: {
-        ...process.env,
-        BOX_STARTUP_RESEARCH_LEASE_TOKEN_HASH: leaseTokenHash(token),
-        BOX_STARTUP_RESEARCH_EVALUATOR_CHECKSUM: state.evaluatorChecksum,
-      },
-    });
-    const values = parseSentinel(output, RESULT_SENTINEL, validateCandidateResult);
-    const result = values.at(-1);
-    if (!result) throw new Error("local baseline did not return a valid result");
-    cleanupProven = result.cleanup.complete;
-    await recordResult(state, result);
-    return result;
-  } catch (error) {
-    await recoverLocalResources(state.activeLease);
-    cleanupProven = true;
-    throw error;
-  } finally {
-    leaseJournalEvent(state, "released", state.activeLease, cleanupProven);
-    state.activeLease = null;
-    await state.save();
+function evaluatorLogDirectory(state) {
+  return resolve(".context/autoresearch/box-startup", state.runId, "evaluator-events");
+}
+
+function jsonLines(contents) {
+  return contents.split(/\r?\n/).flatMap((line) => {
+    try {
+      const value = JSON.parse(line);
+      return value && typeof value === "object" && !Array.isArray(value) ? [value] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+export function validateControllerBenchmarkResult(value, expected) {
+  const result = validateCandidateResult(value);
+  if (result.runId !== expected.runId
+    || result.candidateId !== expected.candidateId
+    || result.phase !== expected.phase
+    || result.treeSha !== expected.treeSha
+    || result.resourcePrefix !== expected.resourcePrefix
+    || result.benchmark.cycles !== expected.cycles
+    || !result.cleanup.complete
+    || result.cleanup.snapshots.length < 1) {
+    throw new Error("controller benchmark result does not match its lease");
   }
+  return result;
 }
 
-async function recoverLocalResources(lease) {
+function parseControllerBenchmarkOutput(output, expected, env) {
+  assertSafeEvaluatorOutput(output.stdout, env);
+  assertSafeEvaluatorOutput(output.stderr, env);
+  if (output.code !== 0) throw new Error("controller benchmark failed");
+  const values = parseSentinel(output.stdout, RESULT_SENTINEL, validateCandidateResult);
+  if (values.length !== 1) throw new Error("controller benchmark did not return one result");
+  return validateControllerBenchmarkResult(values[0], expected);
+}
+
+function cleanupArgs(lease) {
   const args = [
     "--filter", "@companion/runtime", "exec", "tsx",
     resolve("scripts/box-startup-research/cleanup.ts"),
@@ -311,22 +303,204 @@ async function recoverLocalResources(lease) {
     0,
   ));
   args.push("--tree-sha", lease.treeSha);
-  await runProcess("pnpm", args);
+  return args;
+}
+
+async function runControllerCleanup(lease) {
+  const env = cleanupEnvironment(process.env);
+  const output = await runProcess("pnpm", cleanupArgs(lease), {
+    env,
+    label: "controller cleanup",
+  });
+  assertSafeEvaluatorOutput(output.stdout, env);
+  assertSafeEvaluatorOutput(output.stderr, env);
+  if (output.code !== 0) throw new Error("controller cleanup failed");
+  const matches = jsonLines(output.stdout).filter((event) => event.phase === "research_cleanup");
+  if (matches.length !== 1 || matches[0].status !== "succeeded") {
+    throw new Error("controller cleanup did not return one proof");
+  }
+  const ledger = validateCleanupLedger(matches[0]);
+  if (!ledger.complete) throw new Error("controller cleanup proof is incomplete");
+  return ledger;
+}
+
+async function removeEvaluatorCheckout(checkout) {
+  await command("git", ["worktree", "remove", "--force", checkout]).catch(() => undefined);
+  await rm(checkout, { recursive: true, force: true });
+}
+
+async function createEvaluatorCheckout(state, candidate, phase) {
+  await assertEvaluatorChecksum(state);
+  const root = resolve(".context/autoresearch/box-startup", state.runId, "evaluator-checkouts");
+  const checkout = resolve(root, `${candidate.id}-${phase}-${candidate.treeSha.slice(0, 12)}`);
+  if (dirname(checkout) !== root) throw new Error("evaluator checkout path is invalid");
+  await mkdir(root, { recursive: true });
+  await removeEvaluatorCheckout(checkout);
+  await command("git", ["fetch", "origin", candidate.branch]);
+  const fetchedCommit = await command("git", ["rev-parse", `origin/${candidate.branch}`]);
+  if (fetchedCommit !== candidate.commitSha || await gitTreeSha(fetchedCommit) !== candidate.treeSha) {
+    throw new Error("candidate commit changed after validation");
+  }
+  await command("git", ["worktree", "add", "--detach", checkout, fetchedCommit]);
+  try {
+    if (await command("git", ["rev-parse", "HEAD^{tree}"], { cwd: checkout }) !== candidate.treeSha) {
+      throw new Error("evaluator checkout tree does not match the candidate");
+    }
+    if (await evaluatorChecksum(checkout) !== state.evaluatorChecksum) {
+      throw new Error("evaluator checksum does not match the candidate checkout");
+    }
+    const [controllerLockfile, checkoutLockfile] = await Promise.all([
+      readFile(resolve("pnpm-lock.yaml")),
+      readFile(resolve(checkout, "pnpm-lock.yaml")),
+    ]);
+    if (!controllerLockfile.equals(checkoutLockfile)) {
+      throw new Error("candidate checkout lockfile changed");
+    }
+    const installed = await runProcess("pnpm", ["install", "--frozen-lockfile", "--offline"], {
+      cwd: checkout,
+      env: evaluatorRuntimeEnvironment(process.env),
+      label: "evaluator dependency install",
+    });
+    assertSafeEvaluatorOutput(installed.stdout, process.env);
+    assertSafeEvaluatorOutput(installed.stderr, process.env);
+    if (installed.code !== 0) throw new Error("evaluator dependency install failed");
+    if (await command("git", ["status", "--porcelain", "--untracked-files=no"], { cwd: checkout })) {
+      throw new Error("evaluator dependency install modified the candidate checkout");
+    }
+    if (await evaluatorChecksum(checkout) !== state.evaluatorChecksum) {
+      throw new Error("evaluator changed during dependency installation");
+    }
+    return checkout;
+  } catch (error) {
+    await removeEvaluatorCheckout(checkout);
+    throw error;
+  }
+}
+
+export async function executeControllerBenchmark(state, candidate, phase, cycles) {
+  const checkout = await createEvaluatorCheckout(state, candidate, phase);
+  const expiresAt = state.activeLease?.candidateId === candidate.id
+    && state.activeLease.phase === phase
+    ? state.activeLease.expiresAt
+    : new Date(Date.now() + state.config.leaseDurationMs).toISOString();
+  const expected = {
+    runId: state.runId,
+    candidateId: candidate.id,
+    phase,
+    treeSha: candidate.treeSha,
+    resourcePrefix: candidate.resourcePrefix,
+    cycles,
+  };
+  const env = safeEnvironment(process.env, {
+    leaseTokenHash: leaseTokenHash(tokenFor(state, candidate.id)),
+    evaluatorChecksum: state.evaluatorChecksum,
+    logDirectory: evaluatorLogDirectory(state),
+  });
+  try {
+    const output = await runProcess("node", [
+      resolve(checkout, "scripts/box-startup-research/benchmark.mjs"),
+      ...benchmarkArgs(state, candidate, phase, cycles, expiresAt),
+    ], {
+      cwd: checkout,
+      env,
+      label: "controller benchmark",
+    });
+    return parseControllerBenchmarkOutput(output, expected, env);
+  } finally {
+    await removeEvaluatorCheckout(checkout);
+  }
+}
+
+async function executeLocalBenchmark(state, candidate, phase, cycles, expiresAt) {
+  const env = safeEnvironment(process.env, {
+    leaseTokenHash: leaseTokenHash(tokenFor(state, candidate.id)),
+    evaluatorChecksum: state.evaluatorChecksum,
+    logDirectory: evaluatorLogDirectory(state),
+  });
+  const expected = {
+    runId: state.runId,
+    candidateId: candidate.id,
+    phase,
+    treeSha: candidate.treeSha,
+    resourcePrefix: candidate.resourcePrefix,
+    cycles,
+  };
+  const output = await runProcess("node", [
+    resolve("scripts/box-startup-research/benchmark.mjs"),
+    ...benchmarkArgs(state, candidate, phase, cycles, expiresAt),
+  ], {
+    env,
+    label: "controller baseline benchmark",
+  });
+  return parseControllerBenchmarkOutput(output, expected, env);
+}
+
+async function localBenchmark(state, phase, cycles) {
+  await assertEvaluatorChecksum(state);
+  const id = phase;
+  const treeSha = await gitTreeSha(state.baseSha);
+  const candidate = { id, treeSha, resourcePrefix: resourcePrefix(state.runId, id) };
+  const token = tokenFor(state, id);
+  const expiresAt = new Date(Date.now() + state.config.leaseDurationMs).toISOString();
+  assertLeaseAvailable(state.activeLease, id, phase);
+  state.activeLease = {
+    runId: state.runId,
+    candidateId: id,
+    phase,
+    cycles,
+    treeSha,
+    local: true,
+    expiresAt,
+    resourcePrefix: candidate.resourcePrefix,
+    tokenHash: leaseTokenHash(token),
+  };
+  leaseJournalEvent(state, "granted", state.activeLease);
+  await state.save();
+  let cleanupProven = false;
+  try {
+    const result = await executeLocalBenchmark(state, candidate, phase, cycles, expiresAt);
+    cleanupProven = true;
+    await recordResult(state, result);
+    return result;
+  } catch (error) {
+    try {
+      await runControllerCleanup(state.activeLease);
+      cleanupProven = true;
+    } catch {
+      throw new Error("controller cleanup proof is incomplete");
+    }
+    throw error;
+  } finally {
+    await settleLease(state, cleanupProven);
+  }
 }
 
 function explorationPrompt(program, state, candidate, hypothesis, previous) {
-  return `${program}\n\n## This experiment\n\n`
+  const prompt = `${program}\n\n## This experiment\n\n`
     + `runId: ${state.runId}\n`
     + `candidateId: ${candidate.id}\n`
     + `baseSha: ${candidate.baseSha}\n`
     + `hypothesis: ${hypothesis}\n\n`
     + `Previous measured results (no credentials):\n${JSON.stringify(previous, null, 2)}\n\n`
     + "Do not call Conductor or launch sub-workspaces. Work only on this hypothesis.";
+  assertNoCredentialMaterial(prompt, process.env);
+  return prompt;
+}
+
+export function candidateWorkspaceEnvironment(input) {
+  return {
+    BOX_API_KEY: "",
+    COMPANION_BOX_API_KEY: "",
+    ZAI_API_KEY: "",
+    COMPANION_BOX_E2E_ZAI_API_KEY: "",
+    BOX_STARTUP_RESEARCH_RUN_ID: input.runId,
+    BOX_STARTUP_RESEARCH_CANDIDATE_ID: input.candidateId,
+    BOX_STARTUP_RESEARCH_RESOURCE_PREFIX: input.resourcePrefix,
+  };
 }
 
 async function createCandidate(input) {
   await ensureRemoteBranch(input.baseSha, input.branch);
-  const token = tokenFor(input.state, input.id);
   const created = await input.client.createWorkspace({
     projectId: input.state.projectId,
     branch: input.branch,
@@ -336,13 +510,11 @@ async function createCandidate(input) {
     effort: "high",
     messageId: messageId(input.state.runId, input.id, "explore"),
     message: explorationPrompt(input.program, input.state, input, input.hypothesis, input.previous),
-    environment: {
-      BOX_STARTUP_RESEARCH_RUN_ID: input.state.runId,
-      BOX_STARTUP_RESEARCH_CANDIDATE_ID: input.id,
-      BOX_STARTUP_RESEARCH_RESOURCE_PREFIX: input.resourcePrefix,
-      BOX_STARTUP_RESEARCH_LEASE_TOKEN_HASH: leaseTokenHash(token),
-      BOX_STARTUP_RESEARCH_EVALUATOR_CHECKSUM: input.state.evaluatorChecksum,
-    },
+    environment: candidateWorkspaceEnvironment({
+      runId: input.state.runId,
+      candidateId: input.id,
+      resourcePrefix: input.resourcePrefix,
+    }),
   });
   return {
     id: input.id,
@@ -382,36 +554,16 @@ async function collectSubmission(state, client, candidate, integration = false) 
   return { ...candidate, submission, commitSha: remoteSha, treeSha: await gitTreeSha(remoteSha), status: "ready" };
 }
 
-export async function recoverCandidateResources(state, client, candidate, phase, cycles) {
+export async function recoverCandidateResources(state, client, candidate, phase, cycles, options = {}) {
   await client.cancelSession(candidate.sessionId).catch(() => undefined);
-  const companionIds = [
-    deterministicCompanionId(state.runId, candidate.id, `${phase}-bake`, 0),
-    ...Array.from({ length: cycles }, (_, index) =>
-      deterministicCompanionId(state.runId, candidate.id, phase, index + 1)),
-  ];
-  const cleanupCommand = [
-    "pnpm --filter @companion/runtime exec tsx ../../scripts/box-startup-research/cleanup.ts",
-    ...companionIds.map((id) => `--companion-id ${id}`),
-    `--tree-sha ${candidate.treeSha}`,
-  ].join(" ");
-  const recovery = await client.createSession({
-    workspaceId: candidate.workspaceId,
-    model: "gpt-5.6-sol",
-    effort: "low",
-    name: `Cleanup ${candidate.id}`,
-    messageId: messageId(state.runId, candidate.id, `cleanup-${phase}`),
-    message: `Run exactly this cleanup command. Do not edit files:\n\n${cleanupCommand}\n\n`
-      + "Return its final JSON line unchanged. A failed or incomplete cleanup is blocking.",
+  return await (options.cleanup ?? runControllerCleanup)({
+    runId: state.runId,
+    candidateId: candidate.id,
+    phase,
+    cycles,
+    treeSha: candidate.treeSha,
+    resourcePrefix: candidate.resourcePrefix,
   });
-  const deadline = Date.now() + 10 * 60_000;
-  while (Date.now() < deadline) {
-    const messages = await client.sessionMessages(recovery.sessionId);
-    if (containsCleanupProof(messages)) return;
-    const status = await client.sessionStatus(recovery.sessionId);
-    if (["failed", "cancelled", "archived"].includes(status)) break;
-    await new Promise((resolvePause) => setTimeout(resolvePause, POLL_MS));
-  }
-  throw new Error("timed-out candidate resources could not be cleanup-proven");
 }
 
 export function assertLeaseAvailable(activeLease, candidateId, phase) {
@@ -421,15 +573,16 @@ export function assertLeaseAvailable(activeLease, candidateId, phase) {
   if (!candidateId || !phase) throw new Error("provider lease identity is invalid");
 }
 
-async function grantBenchmark(state, client, candidate, phase, cycles) {
-  await assertEvaluatorChecksum(state);
+export async function grantBenchmark(state, client, candidate, phase, cycles, options = {}) {
+  await (options.assertEvaluatorChecksum ?? assertEvaluatorChecksum)(state);
   assertLeaseAvailable(state.activeLease, candidate.id, phase);
   const expiresAt = new Date(Date.now() + state.config.leaseDurationMs).toISOString();
-  const commandLine = benchmarkCommand(state, candidate, phase, cycles, expiresAt);
   state.activeLease = {
     runId: state.runId,
     candidateId: candidate.id,
     phase,
+    cycles,
+    treeSha: candidate.treeSha,
     expiresAt,
     resourcePrefix: candidate.resourcePrefix,
     tokenHash: leaseTokenHash(tokenFor(state, candidate.id)),
@@ -438,35 +591,30 @@ async function grantBenchmark(state, client, candidate, phase, cycles) {
   await state.save();
   let cleanupProven = false;
   try {
-    await client.sendMessage({
-      sessionId: candidate.sessionId,
-      messageId: messageId(state.runId, candidate.id, `grant-${phase}-${candidate.treeSha.slice(0, 12)}`),
-      message: `BENCHMARK_GRANT\nRun exactly this command and make no code changes:\n\n${commandLine}\n\n`
-        + `Return the unchanged ${RESULT_SENTINEL.trim()} line printed by it.`,
+    const result = await (options.execute ?? executeControllerBenchmark)(state, candidate, phase, cycles);
+    validateControllerBenchmarkResult(result, {
+      runId: state.runId,
+      candidateId: candidate.id,
+      phase,
+      treeSha: candidate.treeSha,
+      resourcePrefix: candidate.resourcePrefix,
+      cycles,
     });
-    const result = await waitForSentinel({
-      client,
-      sessionId: candidate.sessionId,
-      sentinel: RESULT_SENTINEL,
-      validate: validateCandidateResult,
-      matches: (value) => value.runId === state.runId
-        && value.candidateId === candidate.id
-        && value.phase === phase
-        && value.treeSha === candidate.treeSha,
-      timeoutMs: state.config.leaseDurationMs + 10 * 60_000,
-    });
-    if (!result.cleanup.complete) throw new Error("candidate cleanup was not proven");
     cleanupProven = true;
-    await recordResult(state, result);
+    await (options.recordResult ?? recordResult)(state, result);
     return result;
   } catch (error) {
-    await recoverCandidateResources(state, client, candidate, phase, cycles);
-    cleanupProven = true;
+    if (!cleanupProven) {
+      try {
+        await (options.recover ?? recoverCandidateResources)(state, client, candidate, phase, cycles);
+        cleanupProven = true;
+      } catch {
+        throw new Error("controller cleanup proof is incomplete");
+      }
+    }
     throw error;
   } finally {
-    leaseJournalEvent(state, "released", state.activeLease, cleanupProven);
-    state.activeLease = null;
-    await state.save();
+    await settleLease(state, cleanupProven);
   }
 }
 
@@ -523,7 +671,7 @@ function paretoFinalists(candidates) {
 }
 
 function integrationPrompt(program, state, finalists) {
-  return `${program}\n\n## Sol integration override\n\n`
+  const prompt = `${program}\n\n## Sol integration override\n\n`
     + "You are the final arbiter and integrator. You may add or update tests under the three runtime "
     + "source roots and may update docs/design.md, docs/companions-runtime.md, and docs/testing.md. "
     + "The evaluator and public/API/DB/auth surfaces remain protected. Start from this clean branch, "
@@ -539,6 +687,8 @@ function integrationPrompt(program, state, finalists) {
       confirm: item.confirm?.benchmark,
     })), null, 2)}\n\n`
     + "End with the normal BOX_STARTUP_RESEARCH_SUBMISSION line using candidateId sol-integration.";
+  assertNoCredentialMaterial(prompt, process.env);
+  return prompt;
 }
 
 async function createIntegration(state, client, program, finalists) {
@@ -547,7 +697,6 @@ async function createIntegration(state, client, program, finalists) {
   await command("git", ["fetch", "origin", "main"]);
   const baseSha = await command("git", ["rev-parse", "origin/main"]);
   await ensureRemoteBranch(baseSha, branch);
-  const token = tokenFor(state, id);
   const created = await client.createWorkspace({
     projectId: state.projectId,
     branch,
@@ -557,13 +706,11 @@ async function createIntegration(state, client, program, finalists) {
     effort: "xhigh",
     messageId: messageId(state.runId, id, "integrate"),
     message: integrationPrompt(program, { ...state, baseSha }, finalists),
-    environment: {
-      BOX_STARTUP_RESEARCH_RUN_ID: state.runId,
-      BOX_STARTUP_RESEARCH_CANDIDATE_ID: id,
-      BOX_STARTUP_RESEARCH_RESOURCE_PREFIX: resourcePrefix(state.runId, id),
-      BOX_STARTUP_RESEARCH_LEASE_TOKEN_HASH: leaseTokenHash(token),
-      BOX_STARTUP_RESEARCH_EVALUATOR_CHECKSUM: state.evaluatorChecksum,
-    },
+    environment: candidateWorkspaceEnvironment({
+      runId: state.runId,
+      candidateId: id,
+      resourcePrefix: resourcePrefix(state.runId, id),
+    }),
   });
   const candidate = {
     id,
@@ -694,6 +841,22 @@ function createState(value, path) {
   return state;
 }
 
+function validateActiveLease(value, runId) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || value.runId !== runId
+    || typeof value.candidateId !== "string" || !RUN_ID_PATTERN.test(value.candidateId)
+    || !["baseline-start", "baseline-end", "quick", "confirm", "final"].includes(value.phase)
+    || !Number.isSafeInteger(value.cycles) || value.cycles < 1 || value.cycles > 20
+    || !SHA_PATTERN.test(value.treeSha ?? "")
+    || value.resourcePrefix !== resourcePrefix(runId, value.candidateId)
+    || !/^[a-f0-9]{64}$/.test(value.tokenHash ?? "")
+    || !Number.isFinite(Date.parse(value.expiresAt ?? ""))
+    || (value.local !== undefined && typeof value.local !== "boolean")
+    || (value.cleanupStatus !== undefined && !["blocked"].includes(value.cleanupStatus))) {
+    throw new Error("persisted active lease is invalid");
+  }
+}
+
 export function validatePersistedState(value, runId) {
   if (!value || typeof value !== "object" || Array.isArray(value)
     || value.schemaVersion !== BOX_STARTUP_RESEARCH_SCHEMA_VERSION
@@ -732,6 +895,9 @@ export function validatePersistedState(value, runId) {
       || !SHA_PATTERN.test(integration.treeSha ?? "")) {
       throw new Error("persisted integration state is invalid");
     }
+  }
+  if (value.activeLease !== null && value.activeLease !== undefined) {
+    validateActiveLease(value.activeLease, runId);
   }
   return value;
 }
@@ -781,6 +947,35 @@ async function initialize(runId, runDirectory, client) {
   return state;
 }
 
+async function retryActiveLeaseCleanup(state, client) {
+  const lease = state.activeLease;
+  if (!lease) return true;
+  try {
+    if (lease.local === true) {
+      await runControllerCleanup(lease);
+      await settleLease(state, true);
+      state.status = "interrupted-baseline";
+      await state.save();
+      return false;
+    }
+    const interrupted = state.candidates.find((item) => item.id === lease.candidateId)
+      ?? (state.integration?.id === lease.candidateId ? state.integration : null);
+    if (!interrupted) throw new Error("active lease has no owning workspace");
+    await recoverCandidateResources(state, client, interrupted, lease.phase, lease.cycles);
+    interrupted.failedPhases ??= [];
+    if (!interrupted.failedPhases.includes(lease.phase)) {
+      interrupted.failedPhases.push(lease.phase);
+    }
+    interrupted.status = `rejected_interrupted_${lease.phase}`;
+    await settleLease(state, true);
+    await state.save();
+    return true;
+  } catch {
+    await settleLease(state, false);
+    return false;
+  }
+}
+
 async function runCampaign() {
   if (!process.argv.includes("--overnight")) {
     throw new Error("pass --overnight to acknowledge the 72-cycle provider campaign");
@@ -797,41 +992,7 @@ async function runCampaign() {
     : await initialize(runId, runDirectory, client);
   const program = await readFile(resolve("scripts/box-startup-research/program.md"), "utf8");
   try {
-    if (state.activeLease) {
-      if (state.activeLease.local === true) {
-        await recoverLocalResources(state.activeLease);
-        leaseJournalEvent(state, "recovered", state.activeLease, true);
-        state.activeLease = null;
-        state.status = "interrupted-baseline";
-        await state.save();
-        return;
-      } else {
-        const interrupted = state.candidates.find((item) =>
-        item.id === state.activeLease.candidateId)
-        ?? (state.integration?.id === state.activeLease.candidateId ? state.integration : null);
-        if (!interrupted) throw new Error("active lease has no owning workspace");
-        const cycles = state.activeLease.phase === "quick"
-          ? state.config.quickCycles
-          : state.activeLease.phase === "confirm"
-            ? state.config.confirmationCycles
-            : state.config.finalCycles;
-        await recoverCandidateResources(
-          state,
-          client,
-          interrupted,
-          state.activeLease.phase,
-          cycles,
-        );
-        leaseJournalEvent(state, "recovered", state.activeLease, true);
-        interrupted.failedPhases ??= [];
-        if (!interrupted.failedPhases.includes(state.activeLease.phase)) {
-          interrupted.failedPhases.push(state.activeLease.phase);
-        }
-        interrupted.status = `rejected_interrupted_${state.activeLease.phase}`;
-        state.activeLease = null;
-        await state.save();
-      }
-    }
+    if (state.activeLease && !await retryActiveLeaseCleanup(state, client)) return;
     if (!state.baselineStart) {
       state.status = "baseline-start";
       await state.save();
@@ -899,6 +1060,11 @@ async function runCampaign() {
               state.config.quickCycles,
             );
           } catch {
+            if (state.activeLease) {
+              state.status = "blocked-cleanup";
+              await state.save();
+              return;
+            }
             candidate.status = "rejected_benchmark";
             await state.save();
             continue;
@@ -930,6 +1096,11 @@ async function runCampaign() {
             state.config.confirmationCycles,
           );
         } catch {
+          if (state.activeLease) {
+            state.status = "blocked-cleanup";
+            await state.save();
+            return;
+          }
           finalist.status = "rejected_confirmation";
           await state.save();
           continue;
@@ -991,6 +1162,11 @@ async function runCampaign() {
           state.config.finalCycles,
         );
       } catch {
+        if (state.activeLease) {
+          state.status = "blocked-cleanup";
+          await state.save();
+          return;
+        }
         integration.final = null;
       }
       await state.save();

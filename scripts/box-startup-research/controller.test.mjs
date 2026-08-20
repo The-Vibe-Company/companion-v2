@@ -3,7 +3,10 @@ import test from "node:test";
 
 import {
   assertLeaseAvailable,
+  candidateWorkspaceEnvironment,
+  grantBenchmark,
   recoverCandidateResources,
+  validateControllerBenchmarkResult,
   validatePersistedState,
   waitForSentinel,
 } from "./controller.mjs";
@@ -11,6 +14,57 @@ import { resourcePrefix } from "./contracts.mjs";
 
 const RUN_ID = "bsr-20260820-aaaaaa";
 const SHA = "a".repeat(40);
+
+function benchmarkResult(cycles = 3) {
+  const metric = (value) => ({ samples: cycles, p50_ms: value, p95_ms: value + 1 });
+  return {
+    schemaVersion: 1,
+    runId: RUN_ID,
+    candidateId: "w1-c1",
+    phase: "quick",
+    treeSha: SHA,
+    resourcePrefix: resourcePrefix(RUN_ID, "w1-c1"),
+    benchmark: {
+      cycles,
+      metrics: {
+        provider_start: metric(100),
+        ready_to_prompt_ack: metric(200),
+        resume_provider_start: metric(100),
+        resume_ready_to_prompt_ack: metric(200),
+      },
+    },
+    cleanup: {
+      schemaVersion: 1,
+      boxes: [],
+      snapshots: [{ name: "companion-l14-abcdef012345", deleted: true }],
+      complete: true,
+    },
+    bakeDurationMs: 100,
+  };
+}
+
+function benchmarkState() {
+  return {
+    runId: RUN_ID,
+    controllerWorkspaceId: "11111111-1111-4111-a111-111111111111",
+    evaluatorChecksum: "b".repeat(64),
+    leaseSeed: "c".repeat(64),
+    config: { leaseDurationMs: 45 * 60_000 },
+    activeLease: null,
+    cleanupLedger: [],
+    leaseJournal: [],
+    save: async () => undefined,
+  };
+}
+
+function candidate() {
+  return {
+    id: "w1-c1",
+    sessionId: "22222222-2222-4222-a222-222222222222",
+    treeSha: SHA,
+    resourcePrefix: resourcePrefix(RUN_ID, "w1-c1"),
+  };
+}
 
 test("serializes provider leases across candidates", () => {
   assert.doesNotThrow(() => assertLeaseAvailable(null, "w1-c1", "quick"));
@@ -111,29 +165,89 @@ test("fails promptly when an idle session omitted its structured result", async 
   }), /completed without a valid result/);
 });
 
-test("uses a separate session to cleanup deterministic timeout resources", async () => {
-  const created = [];
+test("uses controller-owned cleanup instead of a candidate session", async () => {
+  const cleaned = [];
   await recoverCandidateResources({
     runId: "bsr-run",
   }, {
     cancelSession: async () => undefined,
-    createSession: async (input) => {
-      created.push(input);
-      return { sessionId: "cleanup-session" };
-    },
-    sessionMessages: async () => ({
-      messages: [{
-        text: '{"phase":"research_cleanup","status":"succeeded","schemaVersion":1,"boxes":[],"snapshots":[],"complete":true}',
-      }],
-    }),
-    sessionStatus: async () => "idle",
+    createSession: async () => { throw new Error("candidate cleanup must not create a session"); },
   }, {
     id: "w1-c1",
-    workspaceId: "workspace",
     treeSha: "a".repeat(40),
-  }, "quick", 3);
+    resourcePrefix: resourcePrefix("bsr-run", "w1-c1"),
+  }, "quick", 3, {
+    cleanup: async (lease) => {
+      cleaned.push(lease);
+      return { complete: true };
+    },
+  });
 
-  assert.equal(created.length, 1);
-  assert.match(created[0].message, /--tree-sha a{40}/);
-  assert.equal((created[0].message.match(/--companion-id/g) ?? []).length, 4);
+  assert.equal(cleaned.length, 1);
+  assert.equal(cleaned[0].candidateId, "w1-c1");
+  assert.equal(cleaned[0].cycles, 3);
+});
+
+test("candidate workspaces explicitly shadow provider credentials", () => {
+  const env = candidateWorkspaceEnvironment({
+    runId: RUN_ID,
+    candidateId: "w1-c1",
+    resourcePrefix: resourcePrefix(RUN_ID, "w1-c1"),
+  });
+  for (const name of [
+    "BOX_API_KEY",
+    "COMPANION_BOX_API_KEY",
+    "ZAI_API_KEY",
+    "COMPANION_BOX_E2E_ZAI_API_KEY",
+  ]) assert.equal(env[name], "");
+});
+
+test("controller binds benchmark evidence and ignores empty or fabricated candidate chat", async () => {
+  const state = benchmarkState();
+  const submitted = candidate();
+  let sessionMessageReads = 0;
+  let executed = null;
+  const result = await grantBenchmark(state, {
+    sessionMessages: async () => {
+      sessionMessageReads += 1;
+      return { messages: [{ text: "BOX_STARTUP_RESEARCH_RESULT {\"fabricated\":true}" }] };
+    },
+    sendMessage: async () => { throw new Error("benchmark grants are controller-owned"); },
+    cancelSession: async () => undefined,
+  }, submitted, "quick", 3, {
+    assertEvaluatorChecksum: async () => undefined,
+    execute: async (...input) => {
+      executed = input;
+      return benchmarkResult();
+    },
+    recordResult: async () => undefined,
+  });
+
+  assert.equal(sessionMessageReads, 0);
+  assert.equal(executed[1], submitted);
+  assert.equal(result.benchmark.cycles, 3);
+  assert.equal(state.activeLease, null);
+  assert.throws(() => validateControllerBenchmarkResult(benchmarkResult(2), {
+    runId: RUN_ID,
+    candidateId: "w1-c1",
+    phase: "quick",
+    treeSha: SHA,
+    resourcePrefix: resourcePrefix(RUN_ID, "w1-c1"),
+    cycles: 3,
+  }), /does not match/);
+});
+
+test("failed controller cleanup leaves the provider lease durably blocked", async () => {
+  const state = benchmarkState();
+  await assert.rejects(grantBenchmark(state, {
+    cancelSession: async () => undefined,
+  }, candidate(), "quick", 3, {
+    assertEvaluatorChecksum: async () => undefined,
+    execute: async () => { throw new Error("benchmark failed"); },
+    recover: async () => { throw new Error("cleanup failed"); },
+  }), /cleanup proof is incomplete/);
+
+  assert.equal(state.status, "blocked-cleanup");
+  assert.equal(state.activeLease?.cleanupStatus, "blocked");
+  assert.equal(state.leaseJournal.at(-1)?.event, "blocked_cleanup");
 });
