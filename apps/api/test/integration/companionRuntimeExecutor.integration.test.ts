@@ -63,6 +63,7 @@ interface Claim {
   gateEpoch: string;
   workKind: "operation" | "decision" | "attempt" | "settings" | "health";
   workId: string;
+  checkpoint: string;
   checkpointSequence: string;
   runtimeGeneration: string;
 }
@@ -299,11 +300,12 @@ async function claimWork(): Promise<Claim> {
     select org_id::text as "orgId", companion_id::text as "companionId",
       claim_token::text as "claimToken", claim_epoch::text as "claimEpoch",
       gate_epoch::text as "gateEpoch", work_kind::text as "workKind",
-      work_id::text as "workId", checkpoint_sequence::text as "checkpointSequence",
+      work_id::text as "workId", checkpoint,
+      checkpoint_sequence::text as "checkpointSequence",
       runtime_generation::text as "runtimeGeneration"
     from public.companion_runtime_claim_work(${executorId}, 1, 30, (
       select gate_epoch from public.companion_runtime_gate_status()
-    ))
+    ), 1)
   `);
   if (!rows[0]) throw new Error("expected one Runtime v2 claim");
   return rows[0];
@@ -529,6 +531,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'public.companion_runtime_get_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
             'public.companion_runtime_get_config_catalog(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
             'public.companion_runtime_mint_hub_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)',
+            'public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)',
+            'public.companion_runtime_publish_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text)',
             'public.companion_runtime_get_attempt_terminal_projection(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)',
             'public.companion_runtime_cas_mcp_oauth(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,uuid,uuid,uuid,text,text,text,text,text,text,text)',
             'public.companion_runtime_register_duplicate_cleanups(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text[])',
@@ -544,9 +548,28 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           ${runtimeRole}, 'public.companion_runtime_guard_duplicate_cleanup()', 'EXECUTE'
         ) as "helperCallable"
     `;
-    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 11, helperCallable: false });
+    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 13, helperCallable: false });
     await expect(asRuntime((tx) => tx`select * from companion_turn_attempts`))
       .rejects.toThrow(/permission denied/i);
+
+    const materialSignatures = [
+      "public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)",
+      "public.companion_runtime_publish_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text)",
+    ];
+    const materialAcl = await sql<Array<{
+      signature: string;
+      api: boolean;
+      worker: boolean;
+      runtime: boolean;
+    }>>`
+      select signature,
+        has_function_privilege(${apiRole}, signature, 'EXECUTE') as api,
+        has_function_privilege(${workerRole}, signature, 'EXECUTE') as worker,
+        has_function_privilege(${runtimeRole}, signature, 'EXECUTE') as runtime
+      from unnest(${materialSignatures}::text[]) signatures(signature)
+      order by signature
+    `;
+    expect(materialAcl.every((entry) => entry.runtime && !entry.api && !entry.worker)).toBe(true);
 
     await expect(asRuntime(async (tx) => {
       await verifyRuntimeDatabaseRole(tx as unknown as Pick<Sql, "unsafe">, runtimeRole);
@@ -703,7 +726,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
 
     await sql`
       update companion_routines
-      set next_fire_at = now()
+      set next_fire_at = now() - interval '1 second'
       where id = ${standupId}::uuid
     `;
     const due = await asWorker((tx) => tx<Array<{
@@ -729,7 +752,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
 
     await sql`
       update companion_routines
-      set next_fire_at = now(), claimed_by = null, lease_expires_at = null
+      set next_fire_at = now() - interval '1 second', claimed_by = null, lease_expires_at = null
       where id = ${standupId}::uuid
     `;
     const piled = await asWorker((tx) => tx<Array<{
@@ -1882,6 +1905,12 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           last_observed_at = now()
         where companion_id = ${companionId}::uuid
       `;
+      await sql`
+        update companion_runtime_instances
+        set material_client_surface = 'web', material_pi_invocation_id = 'pi-already-warm',
+            material_expires_at = now() + interval '6 hours'
+        where companion_id = ${companionId}::uuid
+      `;
 
       const clientMessageId = randomUUID();
       const enqueued = await asApi({
@@ -1943,6 +1972,631 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       expect(instance).toEqual({
         boxState: "ready", piState: "idle", piInvocationId: "pi-already-warm",
       });
+    } finally {
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("quarantines pre-0109 claimers while the material-aware executor can claim the work", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    try {
+      const [created] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Legacy claimer quarantine', null, null, null,
+            '[]'::jsonb, false, '[]'::jsonb
+          )
+        `,
+      });
+      companionId = created?.companionId ?? "";
+
+      const legacyClaims = await asRuntime((tx) => tx<Array<{ workId: string }>>`
+        select work_id::text as "workId"
+        from public.companion_runtime_claim_work(${executorId}, 1, 30, (
+          select gate_epoch from public.companion_runtime_gate_status()
+        ))
+      `);
+      expect(legacyClaims).toEqual([]);
+      const [unclaimed] = await sql<Array<{ workKind: string | null; workId: string | null }>>`
+        select work_kind::text as "workKind", work_id::text as "workId"
+        from companion_runtime_leases where companion_id = ${companionId}::uuid
+      `;
+      expect(unclaimed).toEqual({ workKind: null, workId: null });
+
+      const versionedClaim = await claimWork();
+      expect(versionedClaim).toMatchObject({ companionId, workKind: "health" });
+      await release(versionedClaim);
+    } finally {
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("rewinds a proof-less legacy operation before a material-aware lease takeover", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    try {
+      const [created] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Legacy operation takeover', null, null, null,
+            '[]'::jsonb, false, '[]'::jsonb
+          )
+        `,
+      });
+      companionId = created?.companionId ?? "";
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_enqueue_operation(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${randomUUID()}::uuid,
+            'start', 'web'
+          )
+        `,
+      });
+      const legacyLease = await claimWork();
+      expect(legacyLease).toMatchObject({ companionId, workKind: "operation" });
+      await sql.begin(async (tx) => {
+        await tx`
+          update companion_operations
+          set checkpoint = 'starting_pi', checkpoint_sequence = 7,
+              material_staged_at = null, material_expires_at = null
+          where id = ${legacyLease.workId}::uuid
+        `;
+        await tx`
+          update companion_runtime_leases
+          set claimed_at = now() - interval '1 minute',
+              renewed_at = now() - interval '2 seconds',
+              expires_at = now() - interval '1 second'
+          where companion_id = ${companionId}::uuid
+        `;
+      });
+
+      const takeover = await claimWork();
+      expect(takeover).toMatchObject({
+        companionId,
+        workKind: "operation",
+        workId: legacyLease.workId,
+        checkpoint: "installing_layout",
+        checkpointSequence: "8",
+      });
+      const [operation] = await sql<Array<{
+        checkpoint: string;
+        stagedAt: Date | null;
+      }>>`
+        select checkpoint, material_staged_at as "stagedAt"
+        from companion_operations where id = ${takeover.workId}::uuid
+      `;
+      expect(operation).toEqual({ checkpoint: "installing_layout", stagedAt: null });
+      await release(takeover);
+    } finally {
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("rewinds proof-less legacy settings before a material-aware lease takeover", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    try {
+      const [created] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Legacy settings takeover', null, null, null,
+            '[]'::jsonb, false, '[]'::jsonb
+          )
+        `,
+      });
+      companionId = created?.companionId ?? "";
+      await sql`
+        update companion_runtime_instances
+        set box_id = 'bx_2345678h', box_state = 'ready', pi_state = 'idle',
+            pi_invocation_id = 'pi-legacy-settings', disk_layout_version = 14,
+            last_observed_at = now(), health_due_at = now() + interval '1 day'
+        where companion_id = ${companionId}::uuid
+      `;
+      const legacyLease = await claimWork();
+      expect(legacyLease).toMatchObject({ companionId, workKind: "settings" });
+      await sql.begin(async (tx) => {
+        await tx`
+          update companion_runtime_instances
+          set settings_checkpoint = 'applied', settings_checkpoint_sequence = 4,
+              settings_claim_material_staged_at = null,
+              settings_claim_material_expires_at = null
+          where companion_id = ${companionId}::uuid
+        `;
+        await tx`
+          update companion_runtime_leases
+          set claimed_at = now() - interval '1 minute',
+              renewed_at = now() - interval '2 seconds',
+              expires_at = now() - interval '1 second'
+          where companion_id = ${companionId}::uuid
+        `;
+      });
+
+      const takeover = await claimWork();
+      expect(takeover).toMatchObject({
+        companionId,
+        workKind: "settings",
+        workId: companionId,
+        checkpoint: "applying",
+        checkpointSequence: "6",
+      });
+      await release(takeover);
+    } finally {
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("restages exactly once when warm material is missing, near expiry, or from another surface", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const companions: string[] = [];
+    try {
+      for (const variant of [
+        { name: "missing", boxId: "bx_2345678a", surface: "web", materialSurface: null, expires: null },
+        { name: "near-expiry", boxId: "bx_2345678b", surface: "web", materialSurface: "web", expires: "2 hours 4 minutes" },
+        { name: "native-boundary", boxId: "bx_2345678c", surface: "native_mobile", materialSurface: "web", expires: "6 hours" },
+      ] as const) {
+        const [created] = await asApi({
+          orgId: ids.orgA,
+          actorId: ids.ownerA,
+          action: (tx) => tx<Array<{ companionId: string }>>`
+            select companion_id::text as "companionId"
+            from public.companion_api_create_companion(
+              ${ids.orgA}::uuid, ${`Material ${variant.name}`}, null, null, null,
+              '[]'::jsonb, false, '[]'::jsonb
+            )
+          `,
+        });
+        const companionId = created?.companionId ?? "";
+        companions.push(companionId);
+        await sql`
+          update companion_runtime_instances
+          set box_id = ${variant.boxId},
+              box_state = 'ready', pi_state = 'idle', pi_invocation_id = 'pi-warm-material',
+              disk_layout_version = 14, applied_settings_revision = desired_settings_revision,
+              applied_skills_revision = 1, applied_client_surface = 'web',
+              last_observed_at = now()
+          where companion_id = ${companionId}::uuid
+        `;
+        await sql`
+          update companion_runtime_instances
+          set material_client_surface = ${variant.materialSurface}::public.companion_client_surface,
+              material_pi_invocation_id = CASE WHEN ${variant.materialSurface}::text IS NULL
+                THEN NULL ELSE 'pi-warm-material' END,
+              material_expires_at = CASE WHEN ${variant.expires}::text IS NULL THEN NULL
+                ELSE now() + ${variant.expires}::interval END
+          where companion_id = ${companionId}::uuid
+        `;
+        const clientMessageId = randomUUID();
+        const [enqueued] = await asApi({
+          orgId: ids.orgA,
+          actorId: ids.ownerA,
+          action: (tx: Tx) => tx<Array<{ operation: Record<string, unknown> | null }>>`
+            select operation from public.companion_api_enqueue_turn(
+              ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
+              ${`Restage ${variant.name}`},
+              ${variant.surface}::public.companion_client_surface, '[]'::jsonb
+            )
+          `,
+        });
+        expect(enqueued?.operation).toMatchObject({ kind: "start", status: "pending" });
+
+        const [replayed] = await asApi({
+          orgId: ids.orgA,
+          actorId: ids.ownerA,
+          action: (tx: Tx) => tx<Array<{ replayed: boolean }>>`
+            select replayed from public.companion_api_enqueue_turn(
+              ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
+              ${`Restage ${variant.name}`},
+              ${variant.surface}::public.companion_client_surface, '[]'::jsonb
+            )
+          `,
+        });
+        expect(replayed).toEqual({ replayed: true });
+        const [count] = await sql<Array<{ count: number }>>`
+          select count(*)::int as count from companion_operations
+          where companion_id = ${companionId}::uuid and kind = 'start'
+        `;
+        expect(count).toEqual({ count: 1 });
+      }
+    } finally {
+      for (const companionId of companions) await removeCompanion(companionId);
+    }
+  });
+
+  it("rechecks the material reserve at claim time for a turn that waited in the warm queue", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    try {
+      const [created] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Queued material expiry', null, null, null,
+            '[]'::jsonb, false, '[]'::jsonb
+          )
+        `,
+      });
+      companionId = created?.companionId ?? "";
+      await sql`
+        update companion_runtime_instances
+        set box_id = 'bx_2345678d', box_state = 'ready', pi_state = 'idle',
+            pi_invocation_id = 'pi-queued-material', disk_layout_version = 14,
+            applied_settings_revision = desired_settings_revision,
+            applied_skills_revision = 1, applied_client_surface = 'web',
+            last_observed_at = now()
+        where companion_id = ${companionId}::uuid
+      `;
+      await sql`
+        update companion_runtime_instances
+        set material_client_surface = 'web', material_pi_invocation_id = 'pi-queued-material',
+            material_expires_at = now() + interval '6 hours'
+        where companion_id = ${companionId}::uuid
+      `;
+      const clientMessageId = randomUUID();
+      const [enqueued] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx: Tx) => tx<Array<{ operation: Record<string, unknown> | null }>>`
+          select operation from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${clientMessageId}::uuid,
+            'Wait beyond the material reserve', 'web', '[]'::jsonb
+          )
+        `,
+      });
+      expect(enqueued?.operation).toBeNull();
+
+      await sql`
+        update companion_runtime_instances
+        set material_expires_at = now() + interval '2 hours 4 minutes'
+        where companion_id = ${companionId}::uuid
+      `;
+      const claim = await claimWork();
+      expect(claim).toMatchObject({ companionId, workKind: "operation" });
+      const [operation] = await sql<Array<{ kind: string; sourceTurnId: string }>>`
+        select kind::text as kind, source_turn_id::text as "sourceTurnId"
+        from companion_operations where id = ${claim.workId}::uuid
+      `;
+      expect(operation).toMatchObject({ kind: "start", sourceTurnId: expect.any(String) });
+      await release(claim);
+    } finally {
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it.each([
+    { from: "native_mobile", to: "web", oldPi: "pi-old-native", newPi: "pi-new-web" },
+    { from: "web", to: "native_mobile", oldPi: "pi-old-web", newPi: "pi-new-native" },
+  ] as const)("invalidates a $from snapshot when an old executor observes a new $to Pi", async ({
+    from,
+    to,
+    oldPi,
+    newPi,
+  }) => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    try {
+      const [created] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, ${`Mixed runtime ${from} to ${to}`}, null, null, null,
+            '[]'::jsonb, false, '[]'::jsonb
+          )
+        `,
+      });
+      companionId = created?.companionId ?? "";
+      await sql`
+        update companion_runtime_instances
+        set box_id = 'bx_2345678e', box_state = 'ready', pi_state = 'idle',
+            pi_invocation_id = ${oldPi}, disk_layout_version = 14,
+            applied_settings_revision = desired_settings_revision,
+            applied_skills_revision = 1,
+            applied_client_surface = ${from}::public.companion_client_surface,
+            last_observed_at = now()
+        where companion_id = ${companionId}::uuid
+      `;
+      await sql`
+        update companion_runtime_instances
+        set material_client_surface = ${from}::public.companion_client_surface,
+            material_pi_invocation_id = ${oldPi},
+            material_expires_at = CASE WHEN ${from} = 'native_mobile' THEN NULL
+              ELSE now() + interval '6 hours' END
+        where companion_id = ${companionId}::uuid
+      `;
+
+      // This is the observation shape an executor deployed before 0109 can still write.
+      await sql`
+        update companion_runtime_instances
+        set pi_invocation_id = ${newPi},
+            applied_client_surface = ${to}::public.companion_client_surface,
+            last_observed_at = now()
+        where companion_id = ${companionId}::uuid
+      `;
+      const [invalidated] = await sql<Array<{
+        surface: string | null;
+        piInvocationId: string | null;
+        expiresAt: Date | null;
+      }>>`
+        select material_client_surface::text as surface,
+          material_pi_invocation_id as "piInvocationId", material_expires_at as "expiresAt"
+        from companion_runtime_instances where companion_id = ${companionId}::uuid
+      `;
+      expect(invalidated).toEqual({ surface: null, piInvocationId: null, expiresAt: null });
+
+      const [enqueued] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx: Tx) => tx<Array<{ operation: Record<string, unknown> | null }>>`
+          select operation from public.companion_api_enqueue_turn(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${randomUUID()}::uuid,
+            'Mixed runtime send', ${to}::public.companion_client_surface, '[]'::jsonb
+          )
+        `,
+      });
+      expect(enqueued?.operation).toMatchObject({ kind: "start", status: "pending" });
+    } finally {
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("publishes staged material only after the claimed operation observes a new idle Pi", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    try {
+      const [created] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Material activation proof', null, null, null,
+            '[]'::jsonb, false, '[]'::jsonb
+          )
+        `,
+      });
+      companionId = created?.companionId ?? "";
+      await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx`
+          select * from public.companion_api_enqueue_operation(
+            ${ids.orgA}::uuid, ${companionId}::uuid, ${randomUUID()}::uuid,
+            'start', 'web'
+          )
+        `,
+      });
+      const claim = await claimWork();
+      expect(claim).toMatchObject({ companionId, workKind: "operation" });
+
+      // Fault-injection fixture: staging committed, but Pi has not restarted yet.
+      await sql`
+        update companion_operations set checkpoint = 'installing_layout'
+        where id = ${claim.workId}::uuid
+      `;
+      const expiresAt = new Date(Date.now() + 6 * 60 * 60 * 1_000);
+      const [recorded] = await asRuntime((tx) => tx<Array<{ recorded: boolean }>>`
+        select public.companion_runtime_record_material_snapshot(
+          ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+          ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+          ${claim.workKind}, ${claim.workId}::uuid, 'web', ${expiresAt}
+        ) as recorded
+      `);
+      expect(recorded).toEqual({ recorded: true });
+      const [beforePi] = await sql<Array<{ surface: string | null; expiresAt: Date | null }>>`
+        select material_client_surface::text as surface, material_expires_at as "expiresAt"
+        from companion_runtime_instances where companion_id = ${companionId}::uuid
+      `;
+      expect(beforePi).toEqual({ surface: null, expiresAt: null });
+
+      const publish = (piInvocationId: string) => asRuntime((tx) => tx<Array<{
+        published: boolean;
+      }>>`
+        select public.companion_runtime_publish_material_snapshot(
+          ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+          ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+          ${claim.workKind}, ${claim.workId}::uuid, ${piInvocationId}
+        ) as published
+      `);
+      expect(await publish("pi-not-observed")).toEqual([{ published: false }]);
+
+      await sql.begin(async (tx) => {
+        await tx`
+          update companion_operations set checkpoint = 'pi_observed'
+          where id = ${claim.workId}::uuid
+        `;
+        await tx`
+          update companion_runtime_instances
+          set pi_state = 'idle', pi_invocation_id = 'pi-material-new'
+          where companion_id = ${companionId}::uuid
+        `;
+      });
+      expect(await publish("pi-material-new")).toEqual([{ published: true }]);
+      expect(await publish("pi-old")).toEqual([{ published: false }]);
+      const [activated] = await sql<Array<{ surface: string; expiresAt: Date }>>`
+        select material_client_surface::text as surface, material_expires_at as "expiresAt"
+        from companion_runtime_instances where companion_id = ${companionId}::uuid
+      `;
+      expect(activated?.surface).toBe("web");
+      expect(activated?.expiresAt.toISOString()).toBe(expiresAt.toISOString());
+      await release(claim);
+    } finally {
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("preserves settings material across takeover but clears it at the claim boundary", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const runtimeSql = sql;
+    let companionId = "";
+    try {
+      const [created] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Settings material takeover', null, null, null,
+            '[]'::jsonb, false, '[]'::jsonb
+          )
+        `,
+      });
+      companionId = created?.companionId ?? "";
+
+      // Starting genuinely new settings work clears any value a caller attempted to carry across
+      // the unclaimed boundary. Recording happens only after the new claim exists.
+      await runtimeSql`
+        update companion_runtime_instances
+        set settings_claim_epoch = 11,
+            settings_claim_actor_id = ${ids.ownerA},
+            settings_claim_client_surface = 'web',
+            settings_claim_revision = desired_settings_revision,
+            settings_claim_skills_revision = 1,
+            settings_claim_can_write_skills = false,
+            settings_claim_provider_ids = '[]'::jsonb,
+            settings_claim_selected_skill_ids = '[]'::jsonb,
+            settings_claim_skill_refs = '[]'::jsonb,
+            settings_claim_selected_mcp_account_ids = '[]'::jsonb,
+            settings_claim_material_client_surface = 'web',
+            settings_claim_material_staged_at = now(),
+            settings_claim_material_expires_at = now() + interval '6 hours'
+        where companion_id = ${companionId}::uuid
+      `;
+      const readStaged = () => runtimeSql<Array<{
+        epoch: number | null;
+        surface: string | null;
+        stagedAt: Date | null;
+      }>>`
+        select settings_claim_epoch::int as epoch,
+          settings_claim_material_client_surface::text as surface,
+          settings_claim_material_staged_at as "stagedAt"
+        from companion_runtime_instances where companion_id = ${companionId}::uuid
+      `;
+      expect(await readStaged()).toEqual([{ epoch: 11, surface: null, stagedAt: null }]);
+
+      await runtimeSql`
+        update companion_runtime_instances
+        set settings_claim_material_client_surface = 'web',
+            settings_claim_material_staged_at = now(),
+            settings_claim_material_expires_at = now() + interval '6 hours'
+        where companion_id = ${companionId}::uuid
+      `;
+      await runtimeSql`
+        update companion_runtime_instances set settings_claim_epoch = 12
+        where companion_id = ${companionId}::uuid
+      `;
+      const [takenOver] = await readStaged();
+      expect(takenOver).toMatchObject({ epoch: 12, surface: "web" });
+      expect(takenOver?.stagedAt).toBeInstanceOf(Date);
+
+      await runtimeSql`
+        update companion_runtime_instances
+        set settings_claim_epoch = null,
+            settings_claim_actor_id = null,
+            settings_claim_client_surface = null,
+            settings_claim_revision = null,
+            settings_claim_skills_revision = null,
+            settings_claim_can_write_skills = null,
+            settings_claim_provider_ids = null,
+            settings_claim_selected_skill_ids = null,
+            settings_claim_skill_refs = null,
+            settings_claim_selected_mcp_account_ids = null
+        where companion_id = ${companionId}::uuid
+      `;
+      expect(await readStaged()).toEqual([{ epoch: null, surface: null, stagedAt: null }]);
+    } finally {
+      if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("records and publishes settings material through a real lease takeover", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    let companionId = "";
+    try {
+      const [created] = await asApi({
+        orgId: ids.orgA,
+        actorId: ids.ownerA,
+        action: (tx) => tx<Array<{ companionId: string }>>`
+          select companion_id::text as "companionId"
+          from public.companion_api_create_companion(
+            ${ids.orgA}::uuid, 'Settings material functions', null, null, null,
+            '[]'::jsonb, false, '[]'::jsonb
+          )
+        `,
+      });
+      companionId = created?.companionId ?? "";
+      await sql`
+        update companion_runtime_instances
+        set box_id = 'bx_2345678g', box_state = 'ready', pi_state = 'idle',
+            pi_invocation_id = 'pi-settings-old', disk_layout_version = 14,
+            last_observed_at = now(), health_due_at = now() + interval '1 day'
+        where companion_id = ${companionId}::uuid
+      `;
+
+      const firstClaim = await claimWork();
+      expect(firstClaim).toMatchObject({ companionId, workKind: "settings", workId: companionId });
+      const expiresAt = new Date(Date.now() + 6 * 60 * 60 * 1_000);
+      const record = (claim: Claim) => asRuntime((tx) => tx<Array<{ recorded: boolean }>>`
+        select public.companion_runtime_record_material_snapshot(
+          ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+          ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+          ${claim.workKind}, ${claim.workId}::uuid, 'web', ${expiresAt}
+        ) as recorded
+      `);
+      expect(await record(firstClaim)).toEqual([{ recorded: true }]);
+      await release(firstClaim);
+
+      const takeover = await claimWork();
+      expect(takeover).toMatchObject({ companionId, workKind: "settings", workId: companionId });
+      expect(BigInt(takeover.claimEpoch)).toBeGreaterThan(BigInt(firstClaim.claimEpoch));
+      const publish = (claim: Claim, piInvocationId: string) => asRuntime((tx) => tx<Array<{
+        published: boolean;
+      }>>`
+        select public.companion_runtime_publish_material_snapshot(
+          ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+          ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+          ${claim.workKind}, ${claim.workId}::uuid, ${piInvocationId}
+        ) as published
+      `);
+      expect(await publish(takeover, "pi-settings-old")).toEqual([{ published: false }]);
+
+      await sql`
+        update companion_runtime_instances
+        set settings_checkpoint = 'applied', settings_checkpoint_sequence = 1,
+            pi_state = 'idle', pi_invocation_id = 'pi-settings-new',
+            applied_settings_revision = desired_settings_revision,
+            applied_skills_revision = 1, applied_client_surface = 'web',
+            last_observed_at = now()
+        where companion_id = ${companionId}::uuid
+      `;
+      expect(await publish(takeover, "pi-settings-new")).toEqual([{ published: true }]);
+      const [activated] = await sql<Array<{
+        surface: string;
+        piInvocationId: string;
+        expiresAt: Date;
+      }>>`
+        select material_client_surface::text as surface,
+          material_pi_invocation_id as "piInvocationId", material_expires_at as "expiresAt"
+        from companion_runtime_instances where companion_id = ${companionId}::uuid
+      `;
+      expect(activated?.surface).toBe("web");
+      expect(activated?.piInvocationId).toBe("pi-settings-new");
+      expect(activated?.expiresAt.toISOString()).toBe(expiresAt.toISOString());
+      await release(takeover);
     } finally {
       if (companionId) await removeCompanion(companionId);
     }
@@ -2976,8 +3630,24 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     const fixture = await createCompanion();
     try {
       const claim = await claimWork();
-      const mint = () => asRuntime((tx) => tx<Array<{ token: string }>>`
-        select token
+      // An expired settings lease may leave its snapshot populated while higher-priority work is
+      // claimed. The fenced work actor/surface must win over that stale native-mobile claim.
+      await sql`
+        update companion_runtime_instances
+        set settings_claim_epoch = 77,
+            settings_claim_actor_id = ${ids.viewerA},
+            settings_claim_client_surface = 'native_mobile',
+            settings_claim_revision = desired_settings_revision,
+            settings_claim_skills_revision = 1,
+            settings_claim_can_write_skills = false,
+            settings_claim_provider_ids = '[]'::jsonb,
+            settings_claim_selected_skill_ids = '[]'::jsonb,
+            settings_claim_skill_refs = '[]'::jsonb,
+            settings_claim_selected_mcp_account_ids = '[]'::jsonb
+        where companion_id = ${fixture.companionId}::uuid
+      `;
+      const mint = () => asRuntime((tx) => tx<Array<{ token: string; expiresAt: Date }>>`
+        select token, expires_at as "expiresAt"
         from public.companion_runtime_mint_hub_token(
           ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
           ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
@@ -2986,9 +3656,36 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       `);
       const [first] = await mint();
       expect(first?.token).toMatch(/^cmp_pat_[0-9a-f]{48}$/);
+      expect(first?.expiresAt.getTime()).toBeGreaterThan(Date.now() + 5 * 60 * 60 * 1_000);
+      expect(first?.expiresAt.getTime()).toBeLessThan(Date.now() + 7 * 60 * 60 * 1_000);
+      await sql`
+        update companion_runtime_instances
+        set box_id = 'bx_2345678f', box_state = 'ready', pi_state = 'idle',
+            pi_invocation_id = 'pi-hub-mint', disk_layout_version = 14,
+            applied_settings_revision = desired_settings_revision,
+            applied_skills_revision = 1, applied_client_surface = 'web',
+            last_observed_at = now()
+        where companion_id = ${fixture.companionId}::uuid
+      `;
+      await sql`
+        update companion_runtime_instances
+        set material_client_surface = 'web', material_pi_invocation_id = 'pi-hub-mint',
+            material_expires_at = now() + interval '6 hours'
+        where companion_id = ${fixture.companionId}::uuid
+      `;
       const [second] = await mint();
       expect(second?.token).toMatch(/^cmp_pat_[0-9a-f]{48}$/);
       expect(second?.token).not.toEqual(first?.token);
+      const [afterMint] = await sql<Array<{
+        surface: string | null;
+        piInvocationId: string | null;
+        expiresAt: Date | null;
+      }>>`
+        select material_client_surface::text as surface,
+          material_pi_invocation_id as "piInvocationId", material_expires_at as "expiresAt"
+        from companion_runtime_instances where companion_id = ${fixture.companionId}::uuid
+      `;
+      expect(afterMint).toEqual({ surface: null, piInvocationId: null, expiresAt: null });
       const [counts] = await sql<Array<{ live: number; revoked: number }>>`
         select
           count(*) filter (where revoked_at is null)::int as live,
@@ -2999,11 +3696,12 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       expect(counts).toEqual({ live: 1, revoked: 1 });
       expect(JSON.stringify(counts)).not.toContain("cmp_pat_");
       // Access is unconditional, so the scope set is fixed — and never widens past reading secrets.
-      const [live] = await sql<Array<{ scopes: string[] }>>`
-        select scopes from api_tokens
+      const [live] = await sql<Array<{ scopes: string[]; userId: string }>>`
+        select scopes, user_id as "userId" from api_tokens
         where source_type = 'companion' and source_agent_id = ${fixture.companionId}
           and revoked_at is null
       `;
+      expect(live?.userId).toBe(ids.ownerA);
       expect(live?.scopes).toEqual([
         "skills:read",
         "skills:write",

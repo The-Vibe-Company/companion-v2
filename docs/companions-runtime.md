@@ -163,7 +163,18 @@ claim new work within five seconds either way.
 
 Sending is the sole normal wake path. There is no Wake button and no first-keystroke prewarm. A cold
 send moves through durable start/dispatch checkpoints and finishes or fails explicitly within three
-minutes. A successful Pi prompt acknowledgement refreshes the Box TTL to six hours.
+minutes. A successful Pi prompt acknowledgement refreshes the Box TTL to six hours. That TTL is not
+credential freshness: before direct warm dispatch, a non-native material snapshot must remain valid
+for the two-hour absolute turn deadline plus five minutes. A missing or shorter expiry creates the
+ordinary `start` operation, which restages and recycles Pi without restarting the Box. Runtime
+rechecks the same Pi-invocation binding, freshness, surface, and reserve under the lease immediately
+before it claims a queued turn, so waiting behind another turn cannot consume the safety margin.
+The 0109 migration makes this a claim-protocol boundary as well as a data invariant. A pre-0109
+runtime may finish work it already holds but its legacy claim signature is quarantined and returns
+no new rows. The material-aware claimer takes over expired legacy work and rewinds a start,
+`restart_pi`, settings operation, or implicit settings claim to its staging boundary whenever the
+new staged-expiry ledger is absent. The takeover therefore restages and recycles Pi once instead of
+publishing an expiry for an old invocation or synthesizing start operations indefinitely.
 
 Before every Box interaction, runtime re-evaluates:
 
@@ -424,8 +435,9 @@ transcript keeps what the member wrote and the 16 KB message cap is unchanged.
 **Staged instructions.** Every staging composes `~/.companion/runtime/state/instructions.txt` from a
 constant operating brief plus the owner's persona line. The file carries no credential and no member
 data. Pi receives it as `--append-system-prompt`. It lives at the same path within layout 14, so an
-existing Box gains the current brief at its next staging (`start`, `restart_box`, or
-`apply_settings`) without a forced restage; `restart_pi` re-reads the file without restaging. Native
+existing Box gains the current brief at its next staging (`start`, `restart_pi`, `restart_box`, or
+`apply_settings`). `restart_pi` refreshes the same frozen credentials before it recycles the daemon.
+Native
 mobile receives a narrowed brief that omits Skills, plugins, the Skills Hub, and the config-catalog
 pointer, because that surface stages none of them. Routines and `propose_routine` stay on every
 surface: the interaction extension is staged for all of them, and a fire is an ordinary turn.
@@ -501,7 +513,12 @@ rotates after Pi accepted the prompt, runtime interrupts rather than projecting 
 different redaction dictionary. Once a terminal projection is already committed, takeover reads
 only its fenced cursor/output proof and may ACK and settle without loading credentials. OAuth
 refresh compare-and-swap is allowed only while applying settings or another pre-dispatch operation,
-never while consuming an accepted attempt or decision.
+never while consuming an accepted attempt or decision. The refresh token remains encrypted in the
+control plane; staging injects only the access token. A failed refresh is persisted as
+`mcp_oauth_refresh_failed` with action `retry`, and neither provider body nor token material is
+logged. A refreshed access token that cannot outlive the two-hour-five-minute reserve is rejected
+before any Box write with the same safe code; runtime does not pretend it can keep that credential
+alive during a two-hour turn.
 
 The projection boundary receives an in-memory dictionary built from every string leaf of those
 validated, decrypted credentials. Assistant text and decision copy are scrubbed against those exact
@@ -531,7 +548,13 @@ authority.
 
 Access is not a stored credential. Every staging calls `companion_runtime_mint_hub_token` under the
 fenced claim: it issues a `source_type = 'companion'` token acting as the settings actor with the
-Box's six-hour warm TTL, revokes the Companion's previous token, and returns the plaintext once. The
+Box's six-hour warm TTL, revokes the Companion's previous token, and returns the plaintext once with
+its database-authored expiry. Revoking that previous token invalidates the active material proof in
+the same transaction, so a staging or restart failure cannot leave the old Pi warm-dispatch eligible.
+Runtime takes the minimum of that expiry and each bounded selected OAuth access-token expiry. The
+staged value stays on the active operation/settings claim across takeover, but the instance snapshot
+is bound and published only after a new idle Pi invocation proves activation. A changed invocation
+clears the proof as a mixed-version rollout guard. The
 runtime injects it as `COMPANION_DELEGATION_TOKEN` in `providers.env`, which is tmpfs-only, never
 snapshotted, and erased on stop; the bundled Companion skill's client already prefers that variable,
 so no client change is needed. `COMPANION_API_URL` is staged as `<origin>/v1` to match it. Native

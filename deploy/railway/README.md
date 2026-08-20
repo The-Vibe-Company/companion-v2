@@ -53,6 +53,18 @@ entrypoint.
 The GitHub MCP OAuth client id and secret also belong on API and runtime. API owns the browser OAuth
 flow; runtime uses the same deployment credential only to refresh an expiring encrypted MCP account
 immediately before staging. Runtime must not write either value into Box files or Pi environment.
+Define both once as Railway shared variables, then reference them from both services:
+
+```dotenv
+COMPANION_MCP_GITHUB_CLIENT_ID=${{shared.COMPANION_MCP_GITHUB_CLIENT_ID}}
+COMPANION_MCP_GITHUB_CLIENT_SECRET=${{shared.COMPANION_MCP_GITHUB_CLIENT_SECRET}}
+```
+
+Never keep independent direct copies: API performs the initial exchange, while runtime must present
+the exact same OAuth App credential during refresh. After correcting drift, redeploy runtime and
+send a new message; a previously failed turn remains terminal and must not be replayed. If the client
+id itself changed, restore the OAuth App that issued existing grants or reconnect GitHub in Plugins:
+sharing a new id cannot refresh a grant issued to the old client.
 
 ### Runtime private address
 
@@ -154,6 +166,12 @@ this two-phase sequence from one immutable commit:
    exact same commit; if it advanced, restart at step 3 for the new commit.
 5. Require API `/health`, runtime `/healthz`, login, Skills browser smoke, and public package checks.
 6. Leave Companions disabled until the Runtime v2 cutover below is complete.
+
+For the 0109 credential-snapshot migration, step 3 intentionally quarantines new claims from
+pre-0109 runtime replicas while allowing their existing leases to finish or expire. Deploy runtime
+from the same commit promptly in step 4; its versioned claimer rewinds and restages any expired
+legacy operation/settings work that crossed staging without the new expiry ledger. Never restore
+the legacy claim path or publish material metadata manually during this window.
 
 ## Historical Skills Hub-only guard
 

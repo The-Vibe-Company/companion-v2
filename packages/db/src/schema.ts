@@ -667,6 +667,9 @@ export const companionRuntimeInstances = pgTable(
     appliedSettingsRevision: bigint("applied_settings_revision", { mode: "number" }).notNull().default(0),
     appliedSkillsRevision: integer("applied_skills_revision").notNull().default(0),
     appliedClientSurface: companionClientSurfaceEnum("applied_client_surface"),
+    materialClientSurface: companionClientSurfaceEnum("material_client_surface"),
+    materialPiInvocationId: text("material_pi_invocation_id"),
+    materialExpiresAt: timestamp("material_expires_at", { withTimezone: true }),
     settingsActorId: text("settings_actor_id"),
     settingsCheckpoint: text("settings_checkpoint").notNull().default("pending"),
     settingsCheckpointSequence: bigint("settings_checkpoint_sequence", { mode: "number" }).notNull().default(0),
@@ -684,6 +687,9 @@ export const companionRuntimeInstances = pgTable(
     settingsClaimSelectedSkillIds: jsonb("settings_claim_selected_skill_ids").$type<string[]>(),
     settingsClaimSkillRefs: jsonb("settings_claim_skill_refs").$type<Array<{ skill_id: string; current_version_id: string | null }>>(),
     settingsClaimSelectedMcpAccountIds: jsonb("settings_claim_selected_mcp_account_ids").$type<string[]>(),
+    settingsClaimMaterialClientSurface: companionClientSurfaceEnum("settings_claim_material_client_surface"),
+    settingsClaimMaterialStagedAt: timestamp("settings_claim_material_staged_at", { withTimezone: true }),
+    settingsClaimMaterialExpiresAt: timestamp("settings_claim_material_expires_at", { withTimezone: true }),
     settingsAvailableAt: timestamp("settings_available_at", { withTimezone: true }).notNull().defaultNow(),
     settingsAttemptCount: integer("settings_attempt_count").notNull().default(0),
     healthCheckpoint: text("health_checkpoint").notNull().default("pending"),
@@ -729,6 +735,20 @@ export const companionRuntimeInstances = pgTable(
     boxIdCheck: check("companion_runtime_instances_box_id_check", sql`${t.boxId} is null or ${t.boxId} ~ '^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$'`),
     invocationCheck: check("companion_runtime_instances_pi_invocation_check", sql`${t.piInvocationId} is null or (char_length(${t.piInvocationId}) between 1 and 200 and ${t.piInvocationId} !~ E'[\\n\\r]')`),
     revisionCheck: check("companion_runtime_instances_revision_check", sql`${t.diskLayoutVersion} >= 0 and ${t.desiredSettingsRevision} >= 1 and ${t.appliedSettingsRevision} >= 0 and ${t.appliedSettingsRevision} <= ${t.desiredSettingsRevision} and ${t.appliedSkillsRevision} >= 0 and ((${t.appliedSettingsRevision} = 0) = (${t.appliedClientSurface} is null)) and ${t.nextTurnSequence} >= 1 and ${t.nextOperationSequence} >= 1 and ${t.lastWriteEpoch} >= 0`),
+    materialSnapshotCheck: check("companion_runtime_instances_material_snapshot_check", sql`
+      ((${t.materialClientSurface} is null) = (${t.materialPiInvocationId} is null))
+      and (${t.materialClientSurface} is not null or ${t.materialExpiresAt} is null)
+      and (${t.materialPiInvocationId} is null or
+        (char_length(${t.materialPiInvocationId}) between 1 and 200
+          and ${t.materialPiInvocationId} !~ E'[\\n\\r]'))
+      and (${t.materialClientSurface} is null
+        or ${t.materialClientSurface} = 'native_mobile' and ${t.materialExpiresAt} is null
+        or ${t.materialClientSurface} in ('web','mobile_web') and ${t.materialExpiresAt} is not null)
+      and ((${t.settingsClaimMaterialClientSurface} is null) = (${t.settingsClaimMaterialStagedAt} is null))
+      and (${t.settingsClaimMaterialStagedAt} is null
+        or ${t.settingsClaimMaterialClientSurface} = 'native_mobile' and ${t.settingsClaimMaterialExpiresAt} is null
+        or ${t.settingsClaimMaterialClientSurface} in ('web','mobile_web') and ${t.settingsClaimMaterialExpiresAt} is not null)
+    `),
     settingsActorCheck: check("companion_runtime_instances_settings_actor_check", sql`
       (${t.settingsActorId} is null or (char_length(${t.settingsActorId}) between 1 and 200 and ${t.settingsActorId} !~ E'[\\n\\r]'))
       and (${t.settingsClaimActorId} is null or (char_length(${t.settingsClaimActorId}) between 1 and 200 and ${t.settingsClaimActorId} !~ E'[\\n\\r]'))
@@ -921,6 +941,8 @@ export const companionOperations = pgTable(
     selectedSkillIds: jsonb("selected_skill_ids").$type<string[]>(),
     skillRefs: jsonb("skill_refs").$type<Array<{ skill_id: string; current_version_id: string | null }>>(),
     selectedMcpAccountIds: jsonb("selected_mcp_account_ids").$type<string[]>(),
+    materialStagedAt: timestamp("material_staged_at", { withTimezone: true }),
+    materialExpiresAt: timestamp("material_expires_at", { withTimezone: true }),
     providerOperationId: text("provider_operation_id"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     settledAt: timestamp("settled_at", { withTimezone: true }),
@@ -945,6 +967,12 @@ export const companionOperations = pgTable(
     checkpointCheck: check("companion_operations_checkpoint_check", sql`${t.checkpoint} in ('pending','resolving_box','box_resolved','box_absence_observed','creating_box','box_created','waiting_ready','box_ready_observed','installing_layout','starting_pi','pi_observed','pi_ready','stopping_pi','provider_stop_requested','waiting_archived','box_archived','restarting_pi','restarting_box','applying_settings','settings_applied','provider_delete_requested','waiting_deleted','provider_deleted','box_absent','completed') and ${t.checkpointSequence} >= 0 and ${t.attemptCount} >= 0`),
     targetRevisionCheck: check("companion_operations_target_revision_check", sql`(${t.targetSettingsRevision} is null or ${t.targetSettingsRevision} >= 1) and (${t.targetSkillsRevision} is null or ${t.targetSkillsRevision} >= 1) and ((${t.kind} in ('start','restart_pi','restart_box','apply_settings') and ${t.targetSettingsRevision} is not null and ${t.targetSkillsRevision} is not null) or (${t.kind} not in ('start','restart_pi','restart_box','apply_settings') and ${t.targetSettingsRevision} is null and ${t.targetSkillsRevision} is null))`),
     resourceSnapshotCheck: check("companion_operations_resource_snapshot_check", sql`((${t.kind} in ('start','restart_pi','restart_box','apply_settings') and ${t.clientSurface} is not null and (${t.modelId} is null or (char_length(${t.modelId}) between 1 and 200 and ${t.modelId} !~ E'[\n\r]')) and (${t.persona} is null or char_length(${t.persona}) <= 280) and ${t.canWriteSkills} is not null and jsonb_typeof(${t.providerIds}) = 'array' and jsonb_typeof(${t.selectedSkillIds}) = 'array' and jsonb_typeof(${t.skillRefs}) = 'array' and jsonb_typeof(${t.selectedMcpAccountIds}) = 'array') or (${t.kind} not in ('start','restart_pi','restart_box','apply_settings') and ${t.clientSurface} is null and ${t.modelId} is null and ${t.persona} is null and ${t.canWriteSkills} is null and ${t.providerIds} is null and ${t.selectedSkillIds} is null and ${t.skillRefs} is null and ${t.selectedMcpAccountIds} is null))`),
+    materialSnapshotCheck: check("companion_operations_material_snapshot_check", sql`
+      (${t.materialStagedAt} is not null or ${t.materialExpiresAt} is null)
+      and (${t.materialStagedAt} is null
+        or ${t.clientSurface} = 'native_mobile' and ${t.materialExpiresAt} is null
+        or ${t.clientSurface} in ('web','mobile_web') and ${t.materialExpiresAt} is not null)
+    `),
     providerOperationCheck: check("companion_operations_provider_operation_check", sql`${t.providerOperationId} is null or (char_length(${t.providerOperationId}) between 1 and 200 and ${t.providerOperationId} !~ E'[\\n\\r]')`),
     terminalCheck: check("companion_operations_terminal_check", sql`(${t.status} in ('succeeded','failed','interrupted','cancelled')) = (${t.settledAt} is not null)`),
     terminalProofCheck: check("companion_operations_terminal_proof_check", sql`${t.status} <> 'succeeded' or ((${t.kind} in ('start','restart_pi','restart_box') and ${t.checkpoint} = 'pi_ready') or (${t.kind} = 'stop' and ${t.checkpoint} = 'box_archived') or (${t.kind} = 'apply_settings' and ${t.checkpoint} = 'settings_applied') or (${t.kind} = 'delete' and ${t.checkpoint} in ('provider_deleted','box_absent')))`),

@@ -523,6 +523,24 @@ BEGIN
       ];
     END IF;
 
+    -- 0109 records staged credential expiry and publishes it only after a new Pi invocation.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)'
+    ) IS NOT NULL THEN
+      companion_runtime_functions := companion_runtime_functions || ARRAY[
+        'public.companion_runtime_claim_work(text,integer,integer,bigint,integer)'::regprocedure,
+        'public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)'::regprocedure,
+        'public.companion_runtime_publish_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text)'::regprocedure
+      ];
+      internal_runtime_functions := internal_runtime_functions || ARRAY[
+        'public.companion_runtime_reset_material_on_pi_change()'::regprocedure,
+        'public.companion_runtime_reset_settings_material_snapshot()'::regprocedure,
+        'public.companion_runtime_repair_legacy_material_work(bigint)'::regprocedure,
+        'public.companion_runtime_prepare_queued_turn_material(bigint)'::regprocedure,
+        'public.companion_runtime_claim_work_without_material_guard(text,integer,integer,bigint)'::regprocedure
+      ];
+    END IF;
+
     -- 0105/0106 add Companion routines. Resolved on sentinels so a database stopped before those
     -- migrations still grants a complete, self-consistent surface.
     IF pg_catalog.to_regprocedure(

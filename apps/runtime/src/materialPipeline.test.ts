@@ -121,7 +121,10 @@ describe("runtime material provider and Box stager", () => {
     const store = {
       getMaterial: vi.fn(async () => material),
       getConfigCatalog: vi.fn(async () => catalog),
-      mintHubToken: vi.fn(async () => "cmp_pat_hubtokenfixture000000000000000000000000"),
+      mintHubToken: vi.fn(async () => ({
+        token: "cmp_pat_hubtokenfixture000000000000000000000000",
+        expiresAt: new Date("2027-01-01T04:00:00.000Z"),
+      })),
       casMcpOauth,
     } as unknown as RuntimeStore;
     const stageExistingBox = vi.fn(async () => ({
@@ -141,7 +144,10 @@ describe("runtime material provider and Box stager", () => {
       loadSkillArchive: vi.fn(),
       loadAttachment: vi.fn(),
       storeAttachment: vi.fn(),
-      refreshOauth: async () => oauth("new-token"),
+      refreshOauth: async () => ({
+        ...oauth("new-token"),
+        accessExpiresAt: "2027-01-01T08:00:00.000Z",
+      }),
       uuid: () => nextGeneration,
       now: () => Date.parse("2027-01-01T00:00:00.000Z"),
     });
@@ -176,6 +182,7 @@ describe("runtime material provider and Box stager", () => {
       diskLayoutVersion: 14,
       appliedSettingsRevision: 3n,
       appliedSkillsRevision: 4,
+      materialExpiresAt: new Date("2027-01-01T04:00:00.000Z"),
     });
     expect(stageExistingBox).toHaveBeenCalledWith(expect.objectContaining({
       boxId: "bx_23456789",
@@ -190,6 +197,68 @@ describe("runtime material provider and Box stager", () => {
       configCatalog: catalog,
       signal: expect.any(AbortSignal),
     }));
+  });
+
+  it.each([
+    { label: "below", ttlMs: 125 * 60 * 1_000 - 1, accepted: false },
+    { label: "at", ttlMs: 125 * 60 * 1_000, accepted: false },
+    { label: "above", ttlMs: 125 * 60 * 1_000 + 1, accepted: true },
+  ])("rejects an OAuth token $label the turn reserve before Box staging", async ({
+    ttlMs,
+    accepted,
+  }) => {
+    const nowMs = Date.parse("2027-01-01T00:00:00.000Z");
+    const material = workMaterial();
+    const store = {
+      getMaterial: vi.fn(async () => material),
+      casMcpOauth: vi.fn(async () => ({
+        updated: true,
+        credentialGeneration: nextGeneration,
+      })),
+      getConfigCatalog: vi.fn(async () => ({
+        companion: { model_id: "model", provider_id: "provider", persona: null },
+        skills: [],
+        plugins: [],
+        note: "note",
+      })),
+      mintHubToken: vi.fn(async () => ({
+        token: "cmp_pat_hubtokenfixture000000000000000000000000",
+        expiresAt: new Date(nowMs + 6 * 60 * 60 * 1_000),
+      })),
+    } as unknown as RuntimeStore;
+    const stageExistingBox = vi.fn();
+    const pipeline = createRuntimeMaterialPipeline({
+      masterKey,
+      apiUrl: "https://api.example.test",
+      bundledSkill: {
+        slug: "companion",
+        version: "1.0.0",
+        checksum: `sha256:${"1".repeat(64)}`,
+        archive: Buffer.from("bundled"),
+      },
+      runtime: () => ({ stageExistingBox }) as unknown as CompanionBoxRuntimeV2,
+      loadSkillArchive: vi.fn(),
+      loadAttachment: vi.fn(),
+      storeAttachment: vi.fn(),
+      refreshOauth: async () => ({
+        ...oauth("short-lived-token"),
+        accessExpiresAt: new Date(nowMs + ttlMs).toISOString(),
+      }),
+      uuid: () => nextGeneration,
+      now: () => nowMs,
+    });
+
+    const reading = pipeline.materialProvider.getMaterial({ store, fence });
+    if (accepted) {
+      await expect(reading).resolves.toBe(material);
+    } else {
+      await expect(reading).rejects.toMatchObject({
+        stableCode: "mcp_oauth_refresh_failed",
+        action: "retry",
+      });
+      expect(store.mintHubToken).not.toHaveBeenCalled();
+    }
+    expect(stageExistingBox).not.toHaveBeenCalled();
   });
 
   it("treats a lost OAuth CAS as fence loss and never stages the token", async () => {

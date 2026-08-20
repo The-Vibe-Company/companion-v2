@@ -222,7 +222,21 @@ An attempt pins the exact provider and MCP credential revisions before prompt di
 that observes a later revision interrupts an already-accepted attempt instead of interpreting
 unprojected events with new credentials. A terminal projection already committed is read through a
 separate fenced metadata-only function, then ACKed and settled without credential material. OAuth
-refresh compare-and-swap is limited to pre-dispatch settings and operation staging. Projection
+refresh compare-and-swap is limited to pre-dispatch settings and operation staging. Staging records
+the earliest bounded expiry across the Skills Hub token and selected OAuth access tokens. That
+expiry becomes active only after a different idle Pi invocation is observed. A warm non-native send
+dispatches directly only while the snapshot is bound to the current Pi invocation and has more than
+two hours and five minutes remaining. Eligibility is checked both at enqueue and again under the
+runtime lease immediately before claim; otherwise the ordinary `start` operation restages and
+recycles Pi without a Full Box restart. Changing the observed invocation or minting a replacement
+Hub token invalidates the old proof before another turn can use it.
+Migration 0109 also versions the Runtime claim entrypoint. Replicas from before 0109 retain their
+current lease but the legacy four-argument claim returns no new work after the migration commits.
+The material-aware five-argument claimer repairs an expired legacy lease by rewinding any
+post-staging operation or settings checkpoint that has no staged-expiry ledger, then restages under
+the new fence. This prevents a rolling deploy from either publishing an unproven snapshot or
+repeating proof-less start operations.
+Projection
 redaction uses every string leaf of the validated plaintext material in memory plus generic
 credential patterns; tool projections retain metadata and an opaque hashed call id only, never
 arguments or results, except a delegated `subagent` run, whose child-agent name, task, and latest
