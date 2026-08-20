@@ -101,8 +101,7 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
     // already has one on disk in --session-dir, silently discarding its conversation on every
     // broker (re)start. Assert the exact argv the broker spawns Pi with so a future regeneration of
     // the bundled broker source cannot lose this flag unnoticed.
-    await waitFor(() => existsSync(piArgvPath));
-    expect(JSON.parse(readFileSync(piArgvPath, "utf8"))).toEqual([
+    expect(await waitForJsonFile<string[]>(piArgvPath)).toEqual([
       "--mode", "rpc", "--session-dir", join(runtimeRoot, "sessions"), "--continue", "--no-skills",
     ]);
 
@@ -278,8 +277,7 @@ describe("Pi broker --append-system-prompt", () => {
       stdio: ["pipe", "pipe", "pipe"],
     });
     processes.push(broker);
-    await waitFor(() => existsSync(piArgvPath));
-    return JSON.parse(readFileSync(piArgvPath, "utf8")) as string[];
+    return waitForJsonFile<string[]>(piArgvPath);
   }
 
   it("passes a present instructions file as --append-system-prompt", async () => {
@@ -300,13 +298,16 @@ describe("Pi broker --append-system-prompt", () => {
 
 function fakePiSource(): string {
   return `#!/usr/bin/env node
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, renameSync, writeFileSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 const capture = process.env.FAKE_PI_CAPTURE_PATH;
 process.stdout.on("error", () => process.exit(1));
 writeFileSync(process.env.FAKE_PI_PID_PATH, String(process.pid), { mode: 0o600 });
 if (process.env.FAKE_PI_ARGV_PATH) {
-  writeFileSync(process.env.FAKE_PI_ARGV_PATH, JSON.stringify(process.argv.slice(2)), { mode: 0o600 });
+  const argvPath = process.env.FAKE_PI_ARGV_PATH;
+  const temporary = argvPath + ".tmp";
+  writeFileSync(temporary, JSON.stringify(process.argv.slice(2)), { mode: 0o600 });
+  renameSync(temporary, argvPath);
 }
 const decoder = new StringDecoder("utf8");
 let buffered = "";
@@ -363,6 +364,21 @@ async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs = 5_00
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error("condition did not become true before timeout");
+}
+
+async function waitForJsonFile<T>(path: string, timeoutMs = 5_000): Promise<T> {
+  let parsed: T | undefined;
+  await waitFor(() => {
+    if (!existsSync(path)) return false;
+    try {
+      parsed = JSON.parse(readFileSync(path, "utf8")) as T;
+      return true;
+    } catch {
+      // writeFileSync creates the path before the bytes land; wait until JSON is complete.
+      return false;
+    }
+  }, timeoutMs);
+  return parsed as T;
 }
 
 function waitForExit(child: ChildProcessWithoutNullStreams): Promise<{
