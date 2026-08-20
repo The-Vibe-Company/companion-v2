@@ -23,6 +23,7 @@ import type {
   CompanionTranscriptEntry,
   CompanionTurn,
   CompanionRoutine,
+  CompanionTrigger,
 } from "@companion/contracts";
 import {
   COMPANION_PROVIDER_CATALOG,
@@ -44,6 +45,7 @@ import {
   listCompanions,
   listCompanionProviders,
   listCompanionRoutines,
+  listCompanionTriggers,
   openCompanionDesktop,
   retryCompanionTurn,
   sendCompanionMessage,
@@ -165,6 +167,7 @@ function projectAcceptedMessage(input: {
         tool: null,
         decision: null,
         routine: null,
+        trigger: null,
         turn_id: input.turn.id,
         queued: input.turn.status === "queued",
         // The 202 carries the turn, not the stored files, so this stands in with what the send
@@ -508,6 +511,7 @@ export function CompanionsApp({
   const [thread, setThread] = useState<Thread | null>(null);
   const [threadError, setThreadError] = useState<string | null>(null);
   const [routines, setRoutines] = useState<CompanionRoutine[]>([]);
+  const [triggers, setTriggers] = useState<CompanionTrigger[]>([]);
   /**
    * Consecutive open-thread polls that failed. One miss is network weather and changes nothing; from
    * the second the surface says "Reconnecting" beside the chip and the poll cadence backs off, and
@@ -645,11 +649,13 @@ export function CompanionsApp({
         name: companion.name,
         status: status.label,
         tone: status.tone,
-        // A routine's prompt is hidden everywhere it could be mistaken for something a member
-        // typed, so the list names the routine exactly as the thread header does.
+        // A routine's or trigger's prompt is hidden everywhere it could be mistaken for something
+        // a member typed, so the list names the origin exactly as the thread header does.
         preview: companion.last_message?.routine_name
           ? `Routine: ${companion.last_message.routine_name}`
-          : companion.last_message?.preview ?? null,
+          : companion.last_message?.trigger_name
+            ? `Trigger: ${companion.last_message.trigger_name}`
+            : companion.last_message?.preview ?? null,
         previewAt: companion.last_message?.created_at ?? null,
         // The reader's own watermark, from the control plane. The thread on screen is being read
         // right now, so it is never the one with a dot on it.
@@ -739,6 +745,7 @@ export function CompanionsApp({
     setThread(null);
     setThreadError(null);
     setRoutines([]);
+    setTriggers([]);
     setDesktopError(null);
     setPluginsOpen(false);
     setSettingsId(null);
@@ -757,6 +764,7 @@ export function CompanionsApp({
     setThread(null);
     setThreadError(null);
     setRoutines([]);
+    setTriggers([]);
     setDesktopError(null);
     threadUrl(null);
     // Leaving the thread unmounts the back button, so focus returns to the row it came from.
@@ -775,6 +783,7 @@ export function CompanionsApp({
     setThread(null);
     setThreadError(null);
     setRoutines([]);
+    setTriggers([]);
     setSettingsId(null);
     if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
@@ -842,6 +851,7 @@ export function CompanionsApp({
   useEffect(() => {
     if (!openedId) {
       setRoutines([]);
+      setTriggers([]);
       return;
     }
     const companionId = openedId;
@@ -852,6 +862,13 @@ export function CompanionsApp({
       }
     }).catch(() => {
       if (!cancelled && openedIdRef.current === companionId) setRoutines([]);
+    });
+    void listCompanionTriggers(currentOrg.id, companionId).then((next) => {
+      if (!cancelled && openedIdRef.current === companionId) {
+        setTriggers(Array.isArray(next) ? next : []);
+      }
+    }).catch(() => {
+      if (!cancelled && openedIdRef.current === companionId) setTriggers([]);
     });
     return () => {
       cancelled = true;
@@ -1390,6 +1407,8 @@ export function CompanionsApp({
               contextSkills={skills}
               contextRoutines={routines}
               onRoutinesChange={setRoutines}
+              contextTriggers={triggers}
+              onTriggersChange={setTriggers}
               contextPlugins={initialPlugins.map((plugin) => ({
                 id: plugin.id,
                 label: `${plugin.provider} · ${plugin.label}`,

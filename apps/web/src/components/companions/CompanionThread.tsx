@@ -7,6 +7,7 @@ import type {
   CompanionOperation,
   CompanionRoutine,
   CompanionThread as Thread,
+  CompanionTrigger,
 } from "@companion/contracts";
 import { ApiFetchError } from "@/lib/apiClient";
 import { Icon } from "../Icon";
@@ -195,6 +196,8 @@ export function CompanionThread({
   contextSkills,
   contextRoutines = [],
   onRoutinesChange,
+  contextTriggers = [],
+  onTriggersChange,
   contextPlugins = [],
   contextModels = [],
   lastReadOrdinal,
@@ -220,6 +223,8 @@ export function CompanionThread({
   contextSkills: CompanionContextSkill[];
   contextRoutines?: CompanionRoutine[];
   onRoutinesChange?: (routines: CompanionRoutine[]) => void;
+  contextTriggers?: CompanionTrigger[];
+  onTriggersChange?: (triggers: CompanionTrigger[]) => void;
   /** Connected plugins this reader can already name on a config card. */
   contextPlugins?: Array<{ id: string; label: string }>;
   /** Provider catalog models this surface already loaded. */
@@ -459,6 +464,8 @@ export function CompanionThread({
             orgId={orgId}
             routines={contextRoutines}
             onRoutinesChange={onRoutinesChange ?? (() => undefined)}
+            triggers={contextTriggers}
+            onTriggersChange={onTriggersChange ?? (() => undefined)}
             onJoin={context.onJoin}
             onDesktop={onDesktop}
             onSettings={onSettings}

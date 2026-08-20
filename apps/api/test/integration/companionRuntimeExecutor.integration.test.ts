@@ -588,7 +588,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       "public.companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)",
       "public.companion_api_update_member_state(uuid,uuid,boolean,boolean,boolean)",
       "public.companion_api_mark_thread_read(uuid,uuid)",
-      "public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface,jsonb,uuid,text)",
+      "public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface,jsonb,uuid,text,uuid,text)",
       "public.companion_api_read_attachment(uuid,uuid,uuid)",
       "public.companion_api_read_runtime(uuid,uuid)",
       "public.companion_api_list_runtime(uuid)",
@@ -605,6 +605,15 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       "public.companion_api_create_routine(uuid,uuid,uuid,text,text,text,text,boolean,timestamp with time zone)",
       "public.companion_api_update_routine(uuid,uuid,uuid,text,text,text,text,boolean,timestamp with time zone)",
       "public.companion_api_delete_routine(uuid,uuid,uuid)",
+      "public.companion_api_answer_trigger_decision(uuid,uuid,text,text,uuid,text)",
+      "public.companion_api_list_triggers(uuid,uuid)",
+      "public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,text,boolean)",
+      "public.companion_api_update_trigger(uuid,uuid,uuid,text,text,text,boolean)",
+      "public.companion_api_rotate_trigger_secret(uuid,uuid,uuid,text)",
+      "public.companion_api_delete_trigger(uuid,uuid,uuid)",
+      "public.companion_webhook_get_trigger(uuid)",
+      "public.companion_api_fire_trigger(uuid,uuid,uuid,text)",
+      "public.companion_api_fail_trigger_fire(uuid,uuid,text,text)",
     ];
     const apiAcl = await sql<Array<{
       signature: string;

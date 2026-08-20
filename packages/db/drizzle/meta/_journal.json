@@ -778,6 +778,20 @@
       "when": 1789492000000,
       "tag": "0110_companion_material_snapshot_expiry",
       "breakpoints": true
+    },
+    {
+      "idx": 111,
+      "version": "7",
+      "when": 1789578400000,
+      "tag": "0111_companion_triggers",
+      "breakpoints": true
+    },
+    {
+      "idx": 112,
+      "version": "7",
+      "when": 1789664800000,
+      "tag": "0112_companion_answer_trigger_decision",
+      "breakpoints": true
     }
   ]
 }

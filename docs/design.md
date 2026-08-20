@@ -179,8 +179,8 @@ Layout 14 installs a small Node broker under systemd between runtime commands an
 
 Staging writes a composed operating brief to `~/.companion/runtime/state/instructions.txt` and Pi
 receives it as `--append-system-prompt`. The brief describes the runtime contract Pi is held to —
-the thread, the durable disk, turn bounds, tools, routines, and the ask/propose surface — not how
-to speak.
+the thread, the durable disk, turn bounds, tools, routines, triggers, and the ask/propose surface —
+not how to speak.
 The owner's persona remains one operator-authored line rather than a system prompt, and it is
 appended last so it has the final word on voice.
 
@@ -278,6 +278,15 @@ New explicit recovery actions are:
 - `POST /v1/companions/:id/turns/:turnId/cancel` to stop an active turn, dequeue a follow-up, or
   release an interrupted turn.
 
+`POST /v1/hooks/triggers/:triggerId/:secret` fires a webhook-fired Companion trigger — the
+event-driven sibling of a routine. Like the Stripe webhook it is registered before session
+middleware, gated on the feature flag, and capped at 1 MB; the URL secret is compared with
+`timingSafeEqual`, and there is deliberately no per-provider HMAC because the sources are services
+the user controls. The route only persists an ordinary turn as the immutable Companion Owner
+through `companion_api_fire_trigger` and never contacts Box or Pi. A delivery id derived from
+provider headers, or from the body hash, collapses redeliveries to one turn; disabled, throttled,
+and pileup fires are skipped without enqueuing.
+
 The web retains polling: three seconds while activity is present, slower when settled. There is no
 SSE or Box push agent. “Companion is replying…” derives only from an acknowledged, non-terminal
 attempt. Viewer/list/thread/status reads remain PostgreSQL-only.
@@ -323,7 +332,8 @@ them.
 No generic Projects or skill runs, multi-Bot coordination, group Bot chat, handoffs, proactive jobs,
 voice, file library, file versioning, artifact surface outside a thread, second harness, second Box
 provider, Box pool, generic provider marketplace, container catalog, deployment manager, or AI app
-builder. Bounded chat files and scheduled Companion routines are in scope.
+builder. Bounded chat files, scheduled Companion routines, and webhook-fired Companion triggers are
+in scope.
 No SSE, Box-to-control-plane push agent, detached API executor, automatic Full Box recovery,
 automatic ambiguous-prompt replay, or global learned model-capability table.
 
