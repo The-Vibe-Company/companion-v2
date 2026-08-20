@@ -64,6 +64,11 @@ describe("Skills Hub runtime-role grants", () => {
       "companion_runtime_reject_attempt_snapshot_change()",
       "companion_runtime_reject_operation_snapshot_change()",
       "companion_runtime_reject_responder_change()",
+      "companion_runtime_reset_material_on_pi_change()",
+      "companion_runtime_reset_settings_material_snapshot()",
+      "companion_runtime_repair_legacy_material_work(bigint)",
+      "companion_runtime_prepare_queued_turn_material(bigint)",
+      "companion_runtime_claim_work_without_material_guard(text,integer,integer,bigint)",
       "companion_runtime_close_attempt_decisions(uuid,uuid,uuid,text,text,public.companion_runtime_error_action,uuid)",
     ]) {
       expect(sql).toContain(`'public.${helper}'::regprocedure`);
@@ -77,6 +82,15 @@ describe("Skills Hub runtime-role grants", () => {
     );
     expect(sql).toContain(
       "companion_runtime_mint_hub_token(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)",
+    );
+    expect(sql).toContain(
+      "companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)",
+    );
+    expect(sql).toContain(
+      "companion_runtime_publish_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text)",
+    );
+    expect(sql).toContain(
+      "companion_runtime_claim_work(text,integer,integer,bigint,integer)",
     );
     expect(sql).toContain("pg_catalog.aclexplode(");
     expect(sql).toContain("acl.grantee <> protected_proc.proowner");

@@ -69,7 +69,20 @@ export async function handleSettings(
 
   for (;;) {
     const authorization = await context.session.reauthorize();
-    if (authorization.workCheckpoint === "applied") return runtimeSucceeded;
+    if (authorization.workCheckpoint === "applied") {
+      if (!authorization.piInvocationId) {
+        throw new RuntimeInvariantError({
+          code: "settings_activation_missing",
+          message: "The activated Pi invocation is unavailable.",
+          action: "retry",
+        });
+      }
+      await context.session.fencedMutation(async () =>
+        await context.deps.store.publishMaterialSnapshot(context.session.fence, {
+          piInvocationId: authorization.piInvocationId!,
+        }));
+      return runtimeSucceeded;
+    }
     if (authorization.workCheckpoint !== "applying") {
       throw new RuntimeInvariantError({
         code: "settings_checkpoint_invalid",
@@ -97,7 +110,7 @@ export async function handleSettings(
           // mandatory pre-Box reauthorization performed by `external` is therefore
           // the authoritative ref set to pair with those material bytes.
           const live = snapshot(context);
-          return await context.deps.resourceStager.stageExistingBox({
+          const staged = await context.deps.resourceStager.stageExistingBox({
             orgId: context.claim.orgId,
             companionId: context.claim.companionId,
             boxId: live.boxId,
@@ -109,6 +122,12 @@ export async function handleSettings(
             targetSkillsRevision: live.skillsRevision,
             signal,
           });
+          await context.session.fencedMutation(async () =>
+            await context.deps.store.recordMaterialSnapshot(context.session.fence, {
+              clientSurface: live.clientSurface,
+              materialExpiresAt: staged.materialExpiresAt,
+            }));
+          return staged;
         });
       },
       restartPi: async () => await lifecycle("restart_pi", async (signal) => {
@@ -130,5 +149,10 @@ export async function handleSettings(
         ? {}
         : { appliedSkillsRevision: activated.appliedSkillsRevision }),
     });
+    await context.session.fencedMutation(async () =>
+      await context.deps.store.publishMaterialSnapshot(context.session.fence, {
+        piInvocationId: activated.piInvocationId,
+      }));
+    return runtimeSucceeded;
   }
 }

@@ -19,6 +19,7 @@ describe("activateRuntimeSettings", () => {
         diskLayoutVersion: 14,
         appliedSettingsRevision: 2n,
         appliedSkillsRevision: 3,
+        materialExpiresAt: new Date("2026-08-16T18:00:00.000Z"),
       }),
       restartPi: async () => ({ state: "starting", invocationId: null }),
       observePi: async () => {

@@ -6,6 +6,7 @@ export interface StagedRuntimeSettings {
   diskLayoutVersion: 14;
   appliedSettingsRevision: bigint;
   appliedSkillsRevision: number | null;
+  materialExpiresAt: Date | null;
 }
 
 interface PiActivationObservation {
@@ -18,6 +19,7 @@ export interface ActivatedRuntimeSettings {
   piInvocationId: string;
   appliedSettingsRevision: bigint;
   appliedSkillsRevision: number | null;
+  materialExpiresAt: Date | null;
 }
 
 /**
@@ -77,6 +79,7 @@ export async function activateRuntimeSettings(input: {
         piInvocationId: pi.invocationId,
         appliedSettingsRevision: staged.appliedSettingsRevision,
         appliedSkillsRevision: staged.appliedSkillsRevision,
+        materialExpiresAt: staged.materialExpiresAt,
       };
     }
     await input.clock.sleep(1_000, input.signal);

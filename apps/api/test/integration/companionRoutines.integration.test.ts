@@ -294,9 +294,12 @@ describe("Companion routines over the real database", () => {
       ...draft("Precision"),
       database,
     }));
-    // now() carries microseconds; the column keeps milliseconds so the claim can be handed back.
+    // PostgreSQL now() carries microseconds while the column keeps milliseconds. Keep the instant
+    // unambiguously due as well, so a fast transaction boundary cannot make this precision test
+    // depend on the wall clock advancing before the worker claim.
     await integrationSql`
-      update companion_routines set next_fire_at = now() where id = ${created.id}::uuid
+      update companion_routines set next_fire_at = now() - interval '1 second'
+      where id = ${created.id}::uuid
     `;
     const [claim] = await claimDueCompanionRoutines({
       workerId: "integration-routine-worker",
