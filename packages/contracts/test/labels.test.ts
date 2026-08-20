@@ -73,8 +73,11 @@ describe("labelColorSchema / labelIconSchema", () => {
     expect(() => labelColorSchema.parse("#fff")).toThrow();
   });
 
-  it("exposes six concrete swatches", () => {
-    expect(LABEL_COLORS).toHaveLength(6);
+  it("exposes twelve concrete swatches", () => {
+    expect(LABEL_COLORS).toHaveLength(12);
+    for (const color of ["oklch(0.58 0.14 340)", "oklch(0.58 0.11 220)", "oklch(0.50 0.035 265)"]) {
+      expect(LABEL_COLORS).toContain(color);
+    }
   });
 
   it("accepts each allowed icon glyph and null; rejects unknown glyphs", () => {
@@ -83,9 +86,12 @@ describe("labelColorSchema / labelIconSchema", () => {
     expect(() => labelIconSchema.parse("nope")).toThrow();
   });
 
-  it("exposes the full 17-glyph allowlist including the new menu icons", () => {
-    expect(LABEL_ICONS).toHaveLength(17);
+  it("exposes the full 32-glyph allowlist including the expanded menu icons", () => {
+    expect(LABEL_ICONS).toHaveLength(32);
     for (const glyph of ["megaphone", "code", "rocket", "package", "heart", "zap", "flame", "pen-tool"]) {
+      expect(LABEL_ICONS).toContain(glyph);
+    }
+    for (const glyph of ["archive", "calendar", "shield", "terminal", "building-2"]) {
       expect(LABEL_ICONS).toContain(glyph);
     }
   });
