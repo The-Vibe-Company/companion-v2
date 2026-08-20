@@ -107,7 +107,7 @@ function pause(milliseconds: number): Promise<void> {
 type RuntimeChangeCreateInput = Omit<BoxGenerationCreateInput, "from">;
 type RuntimeChangeCreateClient = Pick<
   BoxRuntimeLifecycleClient,
-  "createOrRecoverGenerationBox" | "createGenerationBoxAfterObservedAbsence"
+  "findGenerationBoxes" | "createGenerationBoxAfterObservedAbsence"
 >;
 
 export async function createRuntimeChangeGenerationBox(input: {
@@ -118,8 +118,24 @@ export async function createRuntimeChangeGenerationBox(input: {
   box: BoxGenerationCreateResult;
   source: "base" | "named_snapshot" | "base_fallback";
 }> {
+  const discovered = await input.lifecycle.findGenerationBoxes({
+    companionId: input.create.companionId,
+    generation: input.create.generation,
+    deadlineAt: input.create.deadlineAt,
+    ...(input.create.signal ? { signal: input.create.signal } : {}),
+  });
+  if (discovered.canonical) {
+    return {
+      box: {
+        ...discovered,
+        outcome: "recovered",
+        boxId: discovered.canonical.id,
+      },
+      source: input.image === null ? "base" : "named_snapshot",
+    };
+  }
   try {
-    const box = await input.lifecycle.createOrRecoverGenerationBox({
+    const box = await input.lifecycle.createGenerationBoxAfterObservedAbsence({
       ...input.create,
       ...(input.image === null ? {} : { from: input.image }),
     });
@@ -130,7 +146,7 @@ export async function createRuntimeChangeGenerationBox(input: {
       && !error.retryable
       && error.status < 500
       && error.stableCode === "box_not_found"
-      && error.providerCode === "unknown_snapshot";
+      && (error.providerCode === "unknown_snapshot" || error.providerCode === "box_not_found");
     if (input.image === null || !missingSnapshot) throw error;
     const box = await input.lifecycle.createGenerationBoxAfterObservedAbsence(input.create);
     return { box, source: "base_fallback" };
