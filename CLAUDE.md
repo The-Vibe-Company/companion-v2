@@ -25,7 +25,9 @@ one persistent box.ascii.dev Box, one Pi daemon, and one durable chat thread. Re
 Do not introduce generic Projects or skill runs, multi-Bot orchestration, agent-to-agent handoffs,
 voice, another agent harness, another Box provider, or a deployment platform. Scheduled Companion
 routines are in scope: they enqueue ordinary turns as the immutable Companion Owner and never
-contact Box or Pi from the worker. Chat files are in scope and bounded: a member may attach images
+contact Box or Pi from the worker. Webhook-fired Companion triggers are in scope: the API webhook
+route only persists an ordinary turn as the immutable Companion Owner and never contacts Box or
+Pi. Chat files are in scope and bounded: a member may attach images
 and documents to a message, and Pi may hand back images it leaves in its outbox. Nothing else is
 an artifact — there is no file library, no versioning, and no artifact surface outside the thread
 the file was sent in. Pi remains the only harness and box.ascii.dev the only runtime provider. Keep
@@ -108,7 +110,8 @@ and runtime database URL only to `apps/runtime` without changing the published w
   `~/.companion/runtime/state/instructions.txt` and passed as `--append-system-prompt`) are how Pi
   learns what this runtime actually provides. A Companion capability is not shipped until that brief
   names it: web, subagents, memory, files/outbox, skills, plugins, the Skills Hub, ask_user,
-  propose_config, request_plugin_connection, and routines (`propose_routine`). Interpolate the real
+  propose_config, request_plugin_connection, routines (`propose_routine`), and triggers
+  (`propose_trigger`). Interpolate the real
   constants rather than literals. Omit what a surface does not receive (`native_mobile`). Do not
   describe a capability the Box does not have. Voice stays in the persona line.
 - A turn stalls after ten minutes without correlated activity and has a two-hour absolute deadline.

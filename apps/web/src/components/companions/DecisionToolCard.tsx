@@ -2,7 +2,12 @@
 
 import { useState } from "react";
 import type { ToolCallMessagePartComponent } from "@assistant-ui/react";
-import type { CompanionConfigProposal, CompanionDecisionKind, CompanionRoutineProposal } from "@companion/contracts";
+import type {
+  CompanionConfigProposal,
+  CompanionDecisionKind,
+  CompanionRoutineProposal,
+  CompanionTriggerProposal,
+} from "@companion/contracts";
 import {
   AlertTriangleIcon,
   CalendarClockIcon,
@@ -12,6 +17,7 @@ import {
   MessageSquareIcon,
   Settings2Icon,
   TerminalIcon,
+  WebhookIcon,
   type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -42,6 +48,7 @@ const DECISION_ICONS: Record<CompanionDecisionKind, LucideIcon> = {
   question: MessageSquareIcon,
   config: Settings2Icon,
   routine: CalendarClockIcon,
+  trigger: WebhookIcon,
 };
 
 const DECISION_KIND_LABELS: Record<CompanionDecisionKind, string> = {
@@ -50,6 +57,7 @@ const DECISION_KIND_LABELS: Record<CompanionDecisionKind, string> = {
   question: "asks",
   config: "these settings",
   routine: "this routine",
+  trigger: "this trigger",
 };
 
 const DECISION_STATUS_LABELS = {
@@ -148,6 +156,24 @@ function ConfigChangeList({
   );
 }
 
+function TriggerProposal({ proposal }: { proposal: CompanionTriggerProposal }) {
+  return (
+    <div className="mt-1.5 space-y-1.5 text-sm">
+      <p>
+        <span className="font-medium">{proposal.name}</span>
+        <span className="text-muted-foreground"> · </span>
+        <span className="font-mono text-xs">{proposal.provider}</span>
+      </p>
+      <details>
+        <summary className="text-muted-foreground cursor-pointer select-none">Prompt</summary>
+        <p className="text-foreground mt-1 max-h-40 overflow-auto whitespace-pre-wrap">
+          {proposal.prompt}
+        </p>
+      </details>
+    </div>
+  );
+}
+
 function RoutineProposal({ proposal }: { proposal: CompanionRoutineProposal }) {
   return (
     <div className="mt-1.5 space-y-1.5 text-sm">
@@ -183,6 +209,7 @@ export const DecisionToolCard: ToolCallMessagePartComponent<CompanionDecisionArg
   const requestId = decision.request_id;
   const config = decision.kind === "config";
   const routine = decision.kind === "routine";
+  const trigger = decision.kind === "trigger";
 
   async function act(input: DecisionAction) {
     if (!interactive) return;
@@ -219,9 +246,11 @@ export const DecisionToolCard: ToolCallMessagePartComponent<CompanionDecisionArg
               ? `${companionName} proposes these changes`
               : routine
                 ? `${companionName} proposes this routine`
-                : `Allow ${DECISION_KIND_LABELS[decision.kind]}`}
+                : trigger
+                  ? `${companionName} proposes this trigger`
+                  : `Allow ${DECISION_KIND_LABELS[decision.kind]}`}
         </span>
-        {!config && !routine && (
+        {!config && !routine && !trigger && (
           <span className="text-muted-foreground min-w-0 flex-1 truncate font-mono text-xs">
             {decision.name}
           </span>
@@ -250,6 +279,8 @@ export const DecisionToolCard: ToolCallMessagePartComponent<CompanionDecisionArg
         )
         : routine && decision.proposal?.kind === "routine"
           ? <RoutineProposal proposal={decision.proposal} />
+        : trigger && decision.proposal?.kind === "trigger"
+          ? <TriggerProposal proposal={decision.proposal} />
         : (
           <pre className="text-foreground mt-1.5 max-h-40 overflow-auto font-mono text-xs leading-relaxed whitespace-pre-wrap">
             {decision.title}
@@ -258,6 +289,11 @@ export const DecisionToolCard: ToolCallMessagePartComponent<CompanionDecisionArg
 
       {decision.kind === "question" && decision.answer && (
         <p className="text-foreground mt-1.5 text-sm">{decision.answer}</p>
+      )}
+      {trigger && decision.status === "allowed" && canAct && (
+        <p className="text-muted-foreground mt-1.5 text-xs">
+          Copy the webhook URL from the Triggers panel.
+        </p>
       )}
       {!pending && decision.decided_by_name && (
         <p className="text-muted-foreground mt-1.5 text-xs">
@@ -304,7 +340,7 @@ export const DecisionToolCard: ToolCallMessagePartComponent<CompanionDecisionArg
       {interactive && decision.kind !== "question" && (
         <div className="mt-2 flex items-center gap-2">
           <Button type="button" size="sm" disabled={busy} onClick={() => void act({ action: "allow" })}>
-            {config || routine ? "Approve" : "Allow"}
+            {config || routine || trigger ? "Approve" : "Allow"}
           </Button>
           <Button
             type="button"

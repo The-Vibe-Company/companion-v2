@@ -269,7 +269,7 @@ import { buildInlineCompanionManifest, uploadDependencyValues, withResolvedManif
 import { buildCompanionSkillRow, getCompanionSkillPackage } from "@companion/companion-skill/package";
 import { parseSkillListQuery } from "./skillListQuery";
 import { registerAgentAuthRoutes } from "./agentAuthRoutes";
-import { registerCompanionRoutes } from "./companionRoutes";
+import { registerCompanionRoutes, registerCompanionTriggerWebhookRoutes } from "./companionRoutes";
 import { syncPublishedSkillToOnlineCompanions } from "./companionSkillSync";
 import { COMPANION_SKILL_KEY } from "@companion/companion-skill";
 import { StripeBillingGateway } from "@companion/billing";
@@ -570,6 +570,10 @@ app.post(
     }
   },
 );
+
+// Like the Stripe webhook above: an external caller with no session and no CORS origin of ours, so
+// the route must exist before the CORS and attachSession middleware are installed.
+registerCompanionTriggerWebhookRoutes(app);
 
 /** Set the `companion_org` selection cookie (readable client-side, so not httpOnly). */
 function setOrgCookie(c: Context<{ Variables: ApiVariables }>, orgId: string): void {

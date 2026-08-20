@@ -9,6 +9,7 @@ import {
   COMPANION_ROUTINE_MAX_PER_COMPANION,
   COMPANION_ROUTINE_MIN_INTERVAL_MS,
   COMPANION_TOOL_RUN_TIMEOUT_MS,
+  COMPANION_TRIGGER_MAX_PER_COMPANION,
 } from "@companion/contracts";
 import { COMPANION_RUNTIME_ERROR_MAX_LENGTH } from "@companion/core";
 
@@ -982,10 +983,12 @@ describe("staged Companion instructions", () => {
       expect(text).toContain("config-catalog.json");
       expect(text).toContain("- Plugins:");
       expect(text).toContain("- Routines:");
+      expect(text).toContain("- Triggers:");
       expect(text).toContain(COMPANION_OUTBOX_INSTRUCTIONS);
       expect(text).toContain("ask_user");
       expect(text).toContain("propose_config");
       expect(text).toContain("propose_routine");
+      expect(text).toContain("propose_trigger");
     }
     const native = composedInstructions(null, "native_mobile");
     expect(native).not.toContain("Skills Hub");
@@ -993,10 +996,12 @@ describe("staged Companion instructions", () => {
     expect(native).not.toContain("- Plugins:");
     expect(native).not.toContain("- Skills:");
     expect(native).toContain("- Routines:");
+    expect(native).toContain("- Triggers:");
     expect(native).toContain(COMPANION_OUTBOX_INSTRUCTIONS);
     expect(native).toContain("ask_user");
     expect(native).toContain("propose_config");
     expect(native).toContain("propose_routine");
+    expect(native).toContain("propose_trigger");
   });
 
   it("interpolates tool-run timeout constants rather than literals", () => {
@@ -1006,6 +1011,9 @@ describe("staged Companion instructions", () => {
     );
     expect(text).toContain(
       `At most ${COMPANION_ROUTINE_MAX_PER_COMPANION} per Companion, at least ${COMPANION_ROUTINE_MIN_INTERVAL_MS / 60_000} minutes apart.`,
+    );
+    expect(text).toContain(
+      `At most ${COMPANION_TRIGGER_MAX_PER_COMPANION} per Companion. You cannot create one yourself.`,
     );
   });
 

@@ -16,6 +16,7 @@ const SCENARIOS = new Set([
   "ask_user",
   "propose_config",
   "propose_routine",
+  "propose_trigger",
   "retry",
   "errors",
   "crash",
@@ -296,6 +297,36 @@ function run() {
     pendingUiRequest = { requestId, toolCallId, toolName: "propose_routine" };
   }
 
+  function runProposeTrigger() {
+    const toolCallId = `call-trigger-${promptSequence}`;
+    const requestId = `ui-sim-${promptSequence}`;
+    const proposal = {
+      kind: "trigger",
+      name: "ci-failed",
+      prompt: "Summarize the failed workflow run and post the likely cause.",
+      provider: "github",
+    };
+    beginRun();
+    writeJson({
+      type: "tool_execution_start",
+      toolCallId,
+      toolName: "propose_trigger",
+      args: proposal,
+    });
+    writeJson({
+      type: "extension_ui_request",
+      id: requestId,
+      method: "confirm",
+      title: "companion:trigger:ci-failed",
+      message: JSON.stringify({
+        summary: "Summarize failed CI runs when GitHub calls the webhook",
+        proposal,
+      }),
+      timeout: 300_000,
+    });
+    pendingUiRequest = { requestId, toolCallId, toolName: "propose_trigger" };
+  }
+
   function continueAskUser(command) {
     if (!pendingUiRequest || command.id !== pendingUiRequest.requestId) return;
     const { toolCallId, toolName } = pendingUiRequest;
@@ -304,6 +335,7 @@ function run() {
     const approved = command.confirmed === true;
     const config = toolName === "propose_config";
     const routine = toolName === "propose_routine";
+    const trigger = toolName === "propose_trigger";
     writeJson({
       type: "tool_execution_end",
       toolCallId,
@@ -319,7 +351,11 @@ function run() {
               ? (approved
                 ? "Approved. The routine is created after this turn ends."
                 : "User denied or timed out. No routine was created.")
-            : (cancelled ? "Question cancelled." : "Answer received."),
+              : trigger
+                ? (approved
+                  ? "Approved. The trigger is created after this turn ends; the person pastes its webhook URL into the external service."
+                  : "User denied or timed out. No trigger was created.")
+                : (cancelled ? "Question cancelled." : "Answer received."),
         }],
         details: {},
       },
@@ -333,9 +369,13 @@ function run() {
         ? (approved
           ? "The simulated routine proposal was approved."
           : "The simulated routine proposal was denied.")
-      : (cancelled
-        ? "The simulated question was cancelled."
-        : "The simulated answer was received."));
+        : trigger
+          ? (approved
+            ? "The simulated trigger proposal was approved."
+            : "The simulated trigger proposal was denied.")
+          : (cancelled
+            ? "The simulated question was cancelled."
+            : "The simulated answer was received."));
     finishRun([reply]);
   }
 
@@ -394,6 +434,9 @@ function run() {
         return;
       case "propose_routine":
         runProposeRoutine();
+        return;
+      case "propose_trigger":
+        runProposeTrigger();
         return;
       case "retry":
         runRetry();

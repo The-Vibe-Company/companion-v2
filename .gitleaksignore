@@ -22,3 +22,10 @@
 
 # Synthetic private-key fixture used to prove review-context redaction.
 dfae59e733906b13197c6563b3fb2d9813ab6f7d:.agents/skills/review-code-dev/scripts/test_collect_review_context.py:private-key:144
+
+# Audited Companion trigger test fixtures: the placeholder webhook secret 0123456789abcdef... used
+# to exercise the secret grammar and the timingSafeEqual route check. Never a live credential.
+a30e3cf92fcfbe99e33402deee30505dc2b3d3b7:apps/api/src/companionRoutes.test.ts:generic-api-key:22
+a30e3cf92fcfbe99e33402deee30505dc2b3d3b7:packages/contracts/test/companions.test.ts:generic-api-key:1027
+a30e3cf92fcfbe99e33402deee30505dc2b3d3b7:packages/contracts/test/companions.test.ts:generic-api-key:1048
+a30e3cf92fcfbe99e33402deee30505dc2b3d3b7:packages/contracts/test/companions.test.ts:generic-api-key:1079

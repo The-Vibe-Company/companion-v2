@@ -6,12 +6,19 @@ import {
   COMPANION_PROVIDER_CATALOG,
   COMPANION_REASONING_MAX_CHARACTERS,
   COMPANION_TOOL_RUN_SCREENSHOT_MAX_CHARACTERS,
+  COMPANION_TRIGGER_NAME_MAX_CHARACTERS,
+  COMPANION_TRIGGER_PROMPT_MAX_CHARACTERS,
   companionConfigProposalMessageSchema,
   companionConfigProposalSchema,
   companionDecisionSchema,
   companionRoutineProposalMessageSchema,
   companionRoutineProposalSchema,
   companionRoutineSchema,
+  companionTriggerProposalMessageSchema,
+  companionTriggerProposalSchema,
+  companionTriggerSchema,
+  createCompanionTriggerInputSchema,
+  updateCompanionTriggerInputSchema,
   companionProviderOAuthCompleteInputSchema,
   companionProviderOAuthStartInputSchema,
   companionDesktopSchema,
@@ -945,6 +952,219 @@ describe("Companion conversation-list contracts", () => {
       author_id: "user-1",
       author_name: "Ada",
       created_at: "2026-08-14T09:05:00.000Z",
+    })).toThrow();
+  });
+
+  it("masks a trigger fire like a routine and defaults trigger_name to null", () => {
+    // A row stored before triggers existed reads back as an ordinary message, not a broken one.
+    const plain = companionLastMessageSchema.parse({
+      preview: "Drafted the launch note.",
+      role: "assistant",
+      author_id: null,
+      author_name: null,
+      created_at: "2026-08-14T09:05:00.000Z",
+    });
+    expect(plain.trigger_name).toBeNull();
+
+    // A webhook fire's composed prompt embeds an external payload; the list names the trigger and
+    // carries no preview text at all.
+    expect(companionLastMessageSchema.parse({
+      preview: "",
+      role: "user",
+      author_id: "user-1",
+      author_name: "Ada",
+      trigger_name: "CI failed on main",
+      created_at: "2026-08-14T09:05:00.000Z",
+    })).toMatchObject({ preview: "", trigger_name: "CI failed on main" });
+
+    expect(() => companionLastMessageSchema.parse({
+      preview: "",
+      role: "user",
+      author_id: "user-1",
+      author_name: "Ada",
+      trigger_name: "x".repeat(COMPANION_TRIGGER_NAME_MAX_CHARACTERS + 1),
+      created_at: "2026-08-14T09:05:00.000Z",
+    })).toThrow();
+  });
+});
+
+describe("Companion trigger contracts", () => {
+  const triggerRow = {
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    companion_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    name: "CI failed on main",
+    prompt: "Investigate the failing workflow and summarize the break.",
+    provider: "github" as const,
+    enabled: true,
+    webhook_url: "https://companions.example.test/v1/hooks/triggers/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/0123456789abcdef0123456789abcdef",
+    last_fired_at: null,
+    last_error_code: null,
+    last_error_message: null,
+    last_error_at: null,
+    consecutive_failures: 0,
+    created_at: "2026-08-19T12:00:00.000Z",
+    updated_at: "2026-08-19T12:00:00.000Z",
+  };
+
+  it("accepts a trigger row with or without a webhook URL and refuses everything else", () => {
+    expect(companionTriggerSchema.parse(triggerRow).provider).toBe("github");
+    // A Viewer projection has no secret, so it has no URL either — never an empty string.
+    expect(companionTriggerSchema.parse({ ...triggerRow, webhook_url: null }).webhook_url)
+      .toBeNull();
+    expect(() => companionTriggerSchema.parse({ ...triggerRow, webhook_url: "not-a-url" }))
+      .toThrow();
+    // The provider is a closed label list, not a free-form string.
+    expect(() => companionTriggerSchema.parse({ ...triggerRow, provider: "slack" })).toThrow();
+    expect(() => companionTriggerSchema.parse({
+      ...triggerRow,
+      name: "x".repeat(COMPANION_TRIGGER_NAME_MAX_CHARACTERS + 1),
+    })).toThrow();
+    // A name that is only line-break whitespace trims to nothing and is refused.
+    expect(() => companionTriggerSchema.parse({ ...triggerRow, name: "\r\n" })).toThrow();
+    // A bare secret never rides a wire trigger; only the composed URL does.
+    expect(() => companionTriggerSchema.parse({
+      ...triggerRow,
+      secret: "0123456789abcdef0123456789abcdef",
+    })).toThrow();
+  });
+
+  it("bounds the create and update payloads and never accepts a client-supplied secret", () => {
+    expect(createCompanionTriggerInputSchema.parse({
+      id: triggerRow.id,
+      name: "  CI failed on main  ",
+      prompt: triggerRow.prompt,
+      provider: "github",
+    })).toMatchObject({ id: triggerRow.id, name: "CI failed on main", enabled: true });
+    expect(() => createCompanionTriggerInputSchema.parse({
+      name: triggerRow.name,
+      prompt: triggerRow.prompt,
+      provider: "github",
+    })).toThrow();
+    expect(() => createCompanionTriggerInputSchema.parse({
+      id: triggerRow.id,
+      name: triggerRow.name,
+      prompt: triggerRow.prompt,
+      provider: "github",
+      secret: "0123456789abcdef0123456789abcdef",
+    })).toThrow();
+    expect(() => createCompanionTriggerInputSchema.parse({
+      id: triggerRow.id,
+      name: triggerRow.name,
+      prompt: "x".repeat(COMPANION_TRIGGER_PROMPT_MAX_CHARACTERS + 1),
+      provider: "github",
+    })).toThrow();
+    expect(updateCompanionTriggerInputSchema.parse({ enabled: false })).toEqual({ enabled: false });
+    expect(() => updateCompanionTriggerInputSchema.parse({ webhook_url: "https://x.test" }))
+      .toThrow();
+  });
+
+  it("accepts a bounded trigger proposal and refuses extra keys or an oversized payload", () => {
+    const proposal = companionTriggerProposalSchema.parse({
+      kind: "trigger",
+      name: "CI failed on main",
+      prompt: "Investigate the failing workflow.",
+      provider: "github",
+    });
+    expect(proposal.provider).toBe("github");
+    expect(companionTriggerProposalMessageSchema.parse({
+      summary: "Wake me when CI on main fails",
+      proposal,
+    }).proposal.name).toBe("CI failed on main");
+    // Pi never names a secret, a URL, or anything else beyond the four allowed keys.
+    expect(() => companionTriggerProposalSchema.parse({
+      kind: "trigger",
+      name: "CI failed on main",
+      prompt: "Investigate the failing workflow.",
+      provider: "github",
+      secret: "0123456789abcdef0123456789abcdef",
+    })).toThrow();
+    expect(() => companionTriggerProposalSchema.parse({
+      kind: "trigger",
+      name: "CI failed on main",
+      prompt: "Investigate the failing workflow.",
+      provider: "jira",
+    })).toThrow();
+    // A maximum-length prompt plus the envelope exceeds the 16 KiB stored-proposal cap.
+    expect(() => companionTriggerProposalSchema.parse({
+      kind: "trigger",
+      name: "CI failed on main",
+      prompt: "p".repeat(COMPANION_TRIGGER_PROMPT_MAX_CHARACTERS),
+      provider: "github",
+    })).toThrow();
+  });
+
+  it("binds the trigger card to its proposal and to no other kind", () => {
+    const proposal = companionTriggerProposalSchema.parse({
+      kind: "trigger",
+      name: "CI failed on main",
+      prompt: "Investigate the failing workflow.",
+      provider: "github",
+    });
+    const decision = {
+      request_id: "ui-trigger-1",
+      kind: "trigger" as const,
+      name: "propose_trigger",
+      title: "Create the CI trigger",
+      detail: "Wake me when CI on main fails",
+      status: "pending" as const,
+      answer: null,
+      decided_by_id: null,
+      decided_by_name: null,
+      decided_at: null,
+      expires_at: "2026-08-19T12:05:00.000Z",
+      proposal,
+    };
+    expect(companionDecisionSchema.parse(decision).proposal).toEqual(proposal);
+    expect(() => companionDecisionSchema.parse({ ...decision, proposal: null })).toThrow();
+    // A trigger card cannot smuggle a routine proposal, and a question card carries none at all.
+    expect(() => companionDecisionSchema.parse({
+      ...decision,
+      proposal: companionRoutineProposalSchema.parse({
+        kind: "routine",
+        name: "Standup",
+        prompt: "Write the standup.",
+        cron: "0 9 * * 1-5",
+        timezone: "UTC",
+      }),
+    })).toThrow();
+    expect(() => companionDecisionSchema.parse({
+      ...decision,
+      kind: "question",
+      name: "ask_user",
+    })).toThrow();
+  });
+
+  it("carries a trigger origin only on a user message and never beside a routine origin", () => {
+    const entry = {
+      event_id: "msg:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      ordinal: 1,
+      role: "user" as const,
+      content: "Investigate the failing workflow.",
+      author_id: "user-1",
+      author_name: "Ada",
+      created_at: "2026-08-19T09:00:00.000Z",
+    };
+    expect(companionTranscriptEntrySchema.parse({
+      ...entry,
+      trigger: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "CI failed on main" },
+    }).trigger).toEqual({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      name: "CI failed on main",
+    });
+    // An entry stored before triggers existed reads back with an explicit null origin.
+    expect(companionTranscriptEntrySchema.parse(entry).trigger).toBeNull();
+    expect(() => companionTranscriptEntrySchema.parse({
+      ...entry,
+      role: "assistant",
+      author_id: null,
+      author_name: null,
+      trigger: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "CI failed on main" },
+    })).toThrow();
+    // One origin per message: a turn was enqueued by a routine or by a trigger, never both.
+    expect(() => companionTranscriptEntrySchema.parse({
+      ...entry,
+      routine: { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", name: "Standup" },
+      trigger: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "CI failed on main" },
     })).toThrow();
   });
 });

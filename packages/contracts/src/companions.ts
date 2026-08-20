@@ -199,6 +199,21 @@ export const COMPANION_ROUTINE_MIN_INTERVAL_MS = 5 * 60 * 1000;
 export const COMPANION_ROUTINE_MISSED_GRACE_MS = 10 * 60 * 1000;
 export const COMPANION_ROUTINE_MAX_CONSECUTIVE_FAILURES = 5;
 
+/**
+ * Upper bounds for a Companion trigger — the event-driven sibling of a routine. A trigger is a
+ * named prompt an external webhook fires; the provider label only picks the UI mark and the
+ * delivery-id header, never an authentication scheme.
+ */
+export const COMPANION_TRIGGER_NAME_MAX_CHARACTERS = 80;
+export const COMPANION_TRIGGER_PROMPT_MAX_CHARACTERS = 16_384;
+export const COMPANION_TRIGGER_MAX_PER_COMPANION = 10;
+export const COMPANION_TRIGGER_MIN_INTERVAL_MS = 60 * 1000;
+export const COMPANION_TRIGGER_MAX_CONSECUTIVE_FAILURES = 5;
+export const COMPANION_TRIGGER_PAYLOAD_EXCERPT_MAX_CHARACTERS = 4_096;
+export const COMPANION_TRIGGER_PROVIDERS = ["linear", "github", "custom"] as const;
+export const companionTriggerProviderSchema = z.enum(COMPANION_TRIGGER_PROVIDERS);
+export type CompanionTriggerProvider = z.infer<typeof companionTriggerProviderSchema>;
+
 
 /**
  * The newest chat line on a Companion's thread, projected onto reads so a conversation list can say
@@ -222,6 +237,11 @@ export const companionLastMessageSchema = z.object({
    * rather than the preview, exactly as the thread does; the prompt itself never leaves the thread.
    */
   routine_name: z.string().max(COMPANION_ROUTINE_NAME_MAX_CHARACTERS).nullable().default(null),
+  /**
+   * Name of the trigger whose webhook enqueued this message, when one did. Masked exactly like a
+   * routine: the list names the trigger and the composed prompt never leaves the thread.
+   */
+  trigger_name: z.string().max(COMPANION_TRIGGER_NAME_MAX_CHARACTERS).nullable().default(null),
   created_at: z.string().datetime(),
 }).strict();
 export type CompanionLastMessage = z.infer<typeof companionLastMessageSchema>;
@@ -413,7 +433,14 @@ export type CompanionToolRun = z.infer<typeof companionToolRunSchema>;
  * an answer; a config proposal needs Owner/Editor confirmation. Browse and computer stay ungated —
  * they already surface through THE-352 chips and the Computer panel rather than a broker card.
  */
-export const companionDecisionKindSchema = z.enum(["shell", "file", "question", "config", "routine"]);
+export const companionDecisionKindSchema = z.enum([
+  "shell",
+  "file",
+  "question",
+  "config",
+  "routine",
+  "trigger",
+]);
 export type CompanionDecisionKind = z.infer<typeof companionDecisionKindSchema>;
 
 /** A card is `pending` until Allow / Deny / answer, or until the fail-closed timeout expires. */
@@ -593,9 +620,79 @@ export const companionRoutineProposalMessageSchema = z.object({
 }).strict();
 export type CompanionRoutineProposalMessage = z.infer<typeof companionRoutineProposalMessageSchema>;
 
+export const companionTriggerNameSchema = z.string().trim().min(1).max(
+  COMPANION_TRIGGER_NAME_MAX_CHARACTERS,
+);
+export const companionTriggerPromptSchema = z.string().trim().min(1).max(
+  COMPANION_TRIGGER_PROMPT_MAX_CHARACTERS,
+);
+
+export const companionTriggerSchema = z.object({
+  id: z.string().uuid(),
+  companion_id: z.string().uuid(),
+  name: companionTriggerNameSchema,
+  prompt: companionTriggerPromptSchema,
+  provider: companionTriggerProviderSchema,
+  enabled: z.boolean(),
+  /** Full URL an external service posts to. Null for Viewers, who never see the secret. */
+  webhook_url: z.string().url().nullable(),
+  last_fired_at: z.string().datetime().nullable(),
+  last_error_code: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/).nullable(),
+  last_error_message: z.string().max(500).nullable(),
+  last_error_at: z.string().datetime().nullable(),
+  consecutive_failures: z.number().int().nonnegative(),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime(),
+}).strict();
+export type CompanionTrigger = z.infer<typeof companionTriggerSchema>;
+
+/** Create/update payload. The secret is always generated server-side, never client-supplied. */
+export const companionTriggerDraftSchema = z.object({
+  name: companionTriggerNameSchema,
+  prompt: companionTriggerPromptSchema,
+  provider: companionTriggerProviderSchema,
+  enabled: z.boolean().default(true),
+}).strict();
+export type CompanionTriggerDraft = z.infer<typeof companionTriggerDraftSchema>;
+
+export const createCompanionTriggerInputSchema = companionTriggerDraftSchema.extend({
+  id: z.string().uuid(),
+}).strict();
+export type CreateCompanionTriggerInput = z.infer<typeof createCompanionTriggerInputSchema>;
+
+export const updateCompanionTriggerInputSchema = companionTriggerDraftSchema.partial().strict();
+export type UpdateCompanionTriggerInput = z.infer<typeof updateCompanionTriggerInputSchema>;
+
+/**
+ * Structured trigger Pi may propose. `.strict()` refuses extra fields; the webhook secret does not
+ * exist yet — approval generates it server-side.
+ */
+export const companionTriggerProposalSchema = z.object({
+  kind: z.literal("trigger"),
+  name: companionTriggerNameSchema,
+  prompt: companionTriggerPromptSchema,
+  provider: companionTriggerProviderSchema,
+}).strict().superRefine((proposal, context) => {
+  if (utf8ByteLength(JSON.stringify(proposal)) > COMPANION_CONFIG_PROPOSAL_MAX_BYTES) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "trigger proposal exceeds 16 KiB",
+    });
+  }
+});
+export type CompanionTriggerProposal = z.infer<typeof companionTriggerProposalSchema>;
+
+/** Pi `extension_ui_request` message for `companion:trigger:<name>`: confirm copy plus the proposal. */
+export const companionTriggerProposalMessageSchema = z.object({
+  summary: z.string().trim().min(1).max(COMPANION_CONFIG_PROPOSAL_SUMMARY_MAX_CHARACTERS),
+  proposal: companionTriggerProposalSchema,
+}).strict();
+export type CompanionTriggerProposalMessage = z.infer<typeof companionTriggerProposalMessageSchema>;
+
 export const companionDecisionProposalSchema = z.union([
   companionConfigProposalSchema,
   companionRoutineProposalSchema,
+  companionTriggerProposalSchema,
 ]);
 export type CompanionDecisionProposal = z.infer<typeof companionDecisionProposalSchema>;
 
@@ -620,7 +717,7 @@ export const companionDecisionSchema = z.object({
   decided_by_name: z.string().nullable(),
   decided_at: z.string().datetime().nullable(),
   expires_at: z.string().datetime(),
-  /** Present on `kind: "config"` and `kind: "routine"` cards; null on shell, file, and question. */
+  /** Present on `config`, `routine`, and `trigger` cards; null on shell, file, and question. */
   proposal: companionDecisionProposalSchema.nullable().default(null),
 }).strict().superRefine((decision, context) => {
   if (decision.kind === "config") {
@@ -639,11 +736,19 @@ export const companionDecisionSchema = z.object({
         message: "a routine card carries the proposed schedule",
       });
     }
+  } else if (decision.kind === "trigger") {
+    if (decision.proposal === null || decision.proposal.kind !== "trigger") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["proposal"],
+        message: "a trigger card carries the proposed webhook trigger",
+      });
+    }
   } else if (decision.proposal !== null) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["proposal"],
-      message: "only a config or routine card may carry a proposal",
+      message: "only a config, routine, or trigger card may carry a proposal",
     });
   }
 });
@@ -931,6 +1036,14 @@ export const companionTranscriptEntrySchema = z.object({
     name: companionRoutineNameSchema,
   }).nullable().default(null),
   /**
+   * Present on a user entry that was enqueued by a trigger's webhook. Masked exactly like a
+   * routine fire: the composed prompt stays in `content` and the UI shows this header instead.
+   */
+  trigger: z.object({
+    id: z.string().uuid().nullable(),
+    name: companionTriggerNameSchema,
+  }).nullable().default(null),
+  /**
    * The durable turn this user message created, so a queued follow-up can be cancelled by id.
    * Null on every other role, and on a message the composer is still sending.
    */
@@ -968,6 +1081,20 @@ export const companionTranscriptEntrySchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["routine"],
       message: "only a user message may carry a routine origin",
+    });
+  }
+  if (entry.trigger !== null && entry.role !== "user") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["trigger"],
+      message: "only a user message may carry a trigger origin",
+    });
+  }
+  if (entry.routine !== null && entry.trigger !== null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["trigger"],
+      message: "a message has one origin: routine or trigger, never both",
     });
   }
   if ((entry.turn_id !== null || entry.queued) && entry.role !== "user") {

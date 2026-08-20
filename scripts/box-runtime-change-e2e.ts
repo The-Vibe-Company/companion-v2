@@ -18,6 +18,9 @@ const SAFE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const POLL_INTERVAL_MS = 1_000;
 const REPLY_TIMEOUT_MS = 3 * 60_000;
 const IMAGE_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
+// A missing named snapshot must still exercise the same cold install as production. Pin Pi to the
+// layout-14 fixture rather than letting a fallback float to an untested release.
+const E2E_PI_INSTALL_COMMAND = "npm install --global @earendil-works/pi-coding-agent@0.84.2";
 
 interface ReportEvent {
   phase: string;
@@ -36,8 +39,6 @@ type BrokerEvent = Extract<
   CompanionPiBrokerEventPage["events"][number],
   { kind: "pi_event" }
 >["event"];
-type GenerationBoxCreator = Pick<BoxRuntimeLifecycleClient, "createOrRecoverGenerationBox">;
-
 const assistantTextBlockSchema = z.object({
   type: z.literal("text"),
   text: z.string(),
@@ -86,8 +87,12 @@ function configuration(env: NodeJS.ProcessEnv) {
   ) {
     throw new RuntimeChangeE2EError("invalid_configuration");
   }
+  const runtimeEnv: NodeJS.ProcessEnv = {
+    ...env,
+    COMPANION_BOX_API_KEY: required(env, "COMPANION_BOX_API_KEY"),
+  };
   return {
-    env: { ...env, COMPANION_BOX_API_KEY: required(env, "COMPANION_BOX_API_KEY") },
+    env: runtimeEnv,
     zaiApiKey: required(env, "COMPANION_BOX_E2E_ZAI_API_KEY"),
     image,
     modelId,
@@ -131,6 +136,41 @@ async function phase<T>(name: string, action: () => Promise<T>): Promise<T> {
 
 function pause(milliseconds: number): Promise<void> {
   return new Promise((resolvePause) => setTimeout(resolvePause, milliseconds));
+}
+
+type RuntimeChangeCreateInput = Omit<BoxGenerationCreateInput, "from">;
+type RuntimeChangeCreateClient = Pick<
+  BoxRuntimeLifecycleClient,
+  "createOrRecoverGenerationBox" | "createGenerationBoxAfterObservedAbsence"
+>;
+interface RuntimeChangeCreation {
+  box: BoxGenerationCreateResult;
+  source: "base" | "named_snapshot" | "base_fallback";
+}
+
+function isConfirmedMissingSnapshot(cause: unknown): boolean {
+  return cause instanceof BoxRuntimeAdapterError
+    && !cause.outcomeUnknown
+    && !cause.retryable
+    && cause.status < 500
+    && (cause.providerCode === "unknown_snapshot" || cause.stableCode === "box_not_found");
+}
+
+export async function createRuntimeChangeGenerationBox(input: {
+  lifecycle: RuntimeChangeCreateClient;
+  create: RuntimeChangeCreateInput;
+  image: string | null;
+}): Promise<RuntimeChangeCreation> {
+  const createInput: BoxGenerationCreateInput = { ...input.create };
+  if (input.image !== null) createInput.from = input.image;
+  try {
+    const box = await input.lifecycle.createOrRecoverGenerationBox(createInput);
+    return { box, source: input.image === null ? "base" : "named_snapshot" };
+  } catch (cause) {
+    if (input.image === null || !isConfirmedMissingSnapshot(cause)) throw cause;
+    const box = await input.lifecycle.createGenerationBoxAfterObservedAbsence(input.create);
+    return { box, source: "base_fallback" };
+  }
 }
 
 async function waitForReadyBox(runtime: AsciiBoxCompanionRuntime, boxId: string): Promise<void> {
@@ -186,23 +226,6 @@ function assistantText(event: BrokerEvent): string | null {
     .join("");
 }
 
-export async function createGenerationBoxWithImageFallback(
-  lifecycle: GenerationBoxCreator,
-  input: Omit<BoxGenerationCreateInput, "from">,
-  image: string | null,
-): Promise<BoxGenerationCreateResult> {
-  const createInput: BoxGenerationCreateInput = { ...input };
-  if (image !== null) createInput.from = image;
-  try {
-    return await lifecycle.createOrRecoverGenerationBox(createInput);
-  } catch (cause) {
-    const staleImage = cause instanceof BoxRuntimeAdapterError
-      && (cause.providerCode === "unknown_snapshot" || cause.stableCode === "box_not_found");
-    if (image === null || !staleImage) throw cause;
-    return await lifecycle.createOrRecoverGenerationBox(input);
-  }
-}
-
 async function waitForReply(input: {
   runtime: AsciiBoxCompanionRuntime;
   boxId: string;
@@ -250,7 +273,11 @@ async function main(): Promise<number> {
 
   const providerCalls: string[] = [];
   const recordProviderCall = (sample: { operation: string }) => providerCalls.push(sample.operation);
-  const runtime = new AsciiBoxCompanionRuntime(config.env, { onTiming: recordProviderCall });
+  const runtime = new AsciiBoxCompanionRuntime({
+    ...config.env,
+    COMPANION_PI_INSTALL_COMMAND:
+      config.env.COMPANION_PI_INSTALL_COMMAND?.trim() || E2E_PI_INSTALL_COMMAND,
+  }, { onTiming: recordProviderCall });
   const lifecycle = new AsciiBoxMaintenanceClient(config.env, { onTiming: recordProviderCall });
   const companionId = randomUUID();
   const orgId = randomUUID();
@@ -264,12 +291,24 @@ async function main(): Promise<number> {
   try {
     await phase("create", async () => {
       providerStartAt = Date.now();
-      const created = await createGenerationBoxWithImageFallback(lifecycle, {
-        companionId,
-        generation,
-        ttlSeconds: 300,
-        deadlineAt: Date.now() + 30_000,
-      }, config.image);
+      const creation = await createRuntimeChangeGenerationBox({
+        lifecycle,
+        image: config.image,
+        create: {
+          companionId,
+          generation,
+          ttlSeconds: 300,
+          deadlineAt: Date.now() + 30_000,
+        },
+      });
+      const created = creation.box;
+      if (creation.source === "base_fallback") {
+        write({
+          phase: "create_image_fallback",
+          status: "succeeded",
+          code: "unknown_snapshot",
+        });
+      }
       if (!BOX_ID_PATTERN.test(created.boxId)) {
         throw new RuntimeChangeE2EError("invalid_provider_response");
       }

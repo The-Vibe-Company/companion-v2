@@ -14,6 +14,8 @@ export * from "./companionRuntimeApi";
 export * from "./companionRoutines";
 export * from "./companionRoutineFireId";
 export * from "./companionRoutinesApi";
+export * from "./companionTriggerFireId";
+export * from "./companionTriggersApi";
 export * from "./companionProviderCatalog";
 export * from "./companionProviderOAuth";
 export * from "./companionPluginOAuth";
