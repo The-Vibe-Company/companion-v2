@@ -335,3 +335,18 @@ worker, and runtime use separate database credentials and least-privilege grants
 must start the same four-process topology with the deterministic Box/Pi simulator where applicable.
 The as-built operational sequence, including the owner-only gate transition and rollback boundary,
 is documented in `docs/runbooks/companions-runtime.md`.
+
+## Internal Box startup research
+
+Box/Pi startup experiments are development tooling, not a Companion product surface. The
+operator-launched `pnpm research:box-startup -- --overnight` command uses Conductor Cloud to create
+isolated Luna candidate workspaces, serializes their real-provider measurements through one explicit
+lease, and asks a clean Sol workspace to integrate only measured compatible gains. It never runs
+from API, worker, web, or the hosted Companion runtime, and adds no product orchestration feature.
+
+The research evaluator and existing tests are immutable to candidate workspaces. Candidates may
+challenge lifecycle ordering, including moving credential-free, revision-bound Skill preparation
+to the Stop/archive path. Creation must remain correct without a preceding Stop, a sleeping
+settings/Skill change must invalidate prepared state, and credentials must be expunged before every
+snapshot. Disposable images are salted by the candidate Git tree and every Box/snapshot is deleted
+before another provider lease is granted.

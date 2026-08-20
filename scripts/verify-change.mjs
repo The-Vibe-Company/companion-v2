@@ -18,6 +18,11 @@ const HYGIENE_TESTS = [
   "scripts/ci-playwright-policy.test.mjs",
   "scripts/ci-gate.test.mjs",
   "scripts/verify-change.test.mjs",
+  "scripts/box-startup-research/contracts.test.mjs",
+  "scripts/box-startup-research/benchmark.test.mjs",
+  "scripts/box-startup-research/conductor-client.test.mjs",
+  "scripts/box-startup-research/policy.test.mjs",
+  "scripts/box-startup-research/controller.test.mjs",
 ];
 
 function splitNullTerminated(output) {

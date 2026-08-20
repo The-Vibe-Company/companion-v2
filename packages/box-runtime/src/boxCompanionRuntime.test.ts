@@ -285,6 +285,53 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       && command.includes("control-transaction-v1"))).toBe(true);
   });
 
+  it("reports safe semantic timings for every staging boundary", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        return response({ box: box("ready") });
+      }
+      if (url.endsWith("/files") && method === "PUT") return response({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        return response(commandResult("companion-box-runnable\n"));
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+    const timings: Array<{ phase: string; ok: boolean }> = [];
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      COMPANION_BOX_READY_TIMEOUT_MS: "100",
+    }, {
+      onStageTiming: (sample) => timings.push({ phase: sample.phase, ok: sample.ok }),
+    });
+
+    await runtime.stageExistingBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      runtimeGeneration: 1,
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { provider: { token: "ephemeral-test-token" } },
+      replaceProviderAuth: true,
+      modelId: "glm-4.6",
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+    });
+
+    expect(timings).toEqual([
+      { phase: "identity_probe", ok: true },
+      { phase: "layout", ok: true },
+      { phase: "interaction_extension", ok: true },
+      { phase: "resource_preflight", ok: true },
+      { phase: "control_bundle", ok: true },
+      { phase: "skill_transfer", ok: true },
+      { phase: "skill_apply", ok: true },
+    ]);
+  });
+
   it("cleans the secret-bearing control bundle and fails after two rejected applies", async () => {
     const commands: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {

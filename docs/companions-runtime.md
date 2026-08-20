@@ -673,6 +673,29 @@ The deterministic simulator and real-provider canary requirements live in `docs/
 Production cutover, kill-switch, purge, incident, rollback, and canary procedures live in
 `docs/runbooks/companions-runtime.md`.
 
+### Development-only startup autoresearch
+
+The repository includes an operator-invoked Conductor Cloud research harness. Four waves of three
+isolated `gpt-5.6-luna` workspaces may change runtime implementation details, while one controller
+grants a single real-provider benchmark lease at a time. `gpt-5.6-sol` audits and integrates the
+finalists in a clean workspace. This harness is not reachable from Companion runtime claims and is
+not multi-Companion orchestration.
+
+Candidate snapshots include a development-only Git-tree salt in their image identity without
+changing the disk layout marker. The harness bakes, exercises, and deletes that image within the
+lease. It derives deterministic disposable Companion identities so a compensating cleanup session
+can find every Box after an agent timeout. Credentials remain environment-only and are never copied
+into prompts, result records, branches, or logs.
+
+The evaluator checksum is pinned for the campaign. Measurements split provider readiness, staging,
+Pi/socket activation, broker preflight, prompt ACK, Skill bytes, snapshot size, and Stop/archive so
+moving immutable preparation off wake remains visible instead of being mistaken for removed work.
+
+Research may move immutable, credential-free work from Start/Resume to Stop when that reduces the
+next wake. Such a result is valid only when Stop remains bounded, credential removal precedes
+snapshot publication, cold creation still works, and settings or Skills changed during sleep force
+the ordinary authorized restage.
+
 ## Explicit exclusions
 
 A `subagent` is not an exception to any of this. It is a child agent inside the one Pi harness on
