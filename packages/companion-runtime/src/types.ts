@@ -307,7 +307,12 @@ export interface RuntimeSettlementInput {
   error?: SafeRuntimeError;
 }
 
-export type DecisionRequestKind = "question" | "confirmation" | "config_proposal" | "routine_proposal";
+export type DecisionRequestKind =
+  | "question"
+  | "confirmation"
+  | "config_proposal"
+  | "routine_proposal"
+  | "trigger_proposal";
 export type ModelInputCapability = "text" | "image";
 
 /**

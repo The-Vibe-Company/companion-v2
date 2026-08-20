@@ -217,7 +217,8 @@ export function companionLastMessagePreview(content: string): string {
  * the Owner just typed. It carries the routine name instead and no preview text at all, which is the
  * same masking the thread applies. The name is read from the entry's own snapshot column: the turn
  * carries one too, but `companion_turns` is private to the runtime function owner and this query
- * runs as the API role.
+ * runs as the API role. A trigger's webhook fire is masked the same way: the list names the
+ * trigger and the composed prompt — which embeds an external payload — never leaves the thread.
  *
  * Callers pass only Companion ids the actor may already read, so this adds no visibility of its own.
  */
@@ -235,6 +236,7 @@ export async function loadCompanionLastMessages(
       authorId: schema.companionTranscriptEntries.authorId,
       authorName: schema.profiles.name,
       routineName: schema.companionTranscriptEntries.routineName,
+      triggerName: schema.companionTranscriptEntries.triggerName,
       createdAt: schema.companionTranscriptEntries.createdAt,
     })
     .from(schema.companionTranscriptEntries)
@@ -252,12 +254,16 @@ export async function loadCompanionLastMessages(
   for (const row of rows) {
     if (row.role !== "user" && row.role !== "assistant") continue;
     const routineName = row.routineName ?? null;
+    const triggerName = row.triggerName ?? null;
     previews.set(row.companionId, {
-      preview: routineName === null ? companionLastMessagePreview(row.content) : "",
+      preview: routineName === null && triggerName === null
+        ? companionLastMessagePreview(row.content)
+        : "",
       role: row.role,
       author_id: row.authorId,
       author_name: row.authorName,
       routine_name: routineName,
+      trigger_name: triggerName,
       created_at: row.createdAt.toISOString(),
     });
   }

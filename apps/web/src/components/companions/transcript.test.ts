@@ -27,6 +27,7 @@ function entry(overrides: Partial<CompanionTranscriptEntry> = {}): CompanionTran
     attachments: [],
     reasoning: null,
     routine: null,
+    trigger: null,
     turn_id: null,
     queued: false,
     created_at: now,

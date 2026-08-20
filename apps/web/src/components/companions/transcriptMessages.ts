@@ -333,6 +333,8 @@ export function useStableEntries(
         && kept.decision?.decided_by_id === entry.decision?.decided_by_id
         && kept.routine?.id === entry.routine?.id
         && kept.routine?.name === entry.routine?.name
+        && kept.trigger?.id === entry.trigger?.id
+        && kept.trigger?.name === entry.trigger?.name
         && kept.queued === entry.queued
         && kept.turn_id === entry.turn_id
         // Attachments are written once with the entry and never move afterwards, so identity by

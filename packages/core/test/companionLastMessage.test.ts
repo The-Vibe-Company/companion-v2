@@ -21,6 +21,7 @@ type TranscriptRow = {
   authorId: string | null;
   authorName: string | null;
   routineName?: string | null;
+  triggerName?: string | null;
   createdAt: Date;
 };
 
@@ -117,6 +118,7 @@ describe("companion last-message projection", () => {
       author_id: null,
       author_name: null,
       routine_name: null,
+      trigger_name: null,
       created_at: "2026-08-14T09:05:00.000Z",
     });
     expect(previews.get(MILO)).toEqual({
@@ -125,6 +127,7 @@ describe("companion last-message projection", () => {
       author_id: "user-2",
       author_name: "Ada Lovelace",
       routine_name: null,
+      trigger_name: null,
       created_at: "2026-08-14T08:00:00.000Z",
     });
   });
@@ -167,6 +170,33 @@ describe("companion last-message projection", () => {
       author_id: "user-2",
       author_name: "Ada Lovelace",
       routine_name: "Daily standup",
+      trigger_name: null,
+      created_at: "2026-08-14T09:05:00.000Z",
+    }]]));
+  });
+
+  it("names the trigger instead of previewing a prompt no member wrote", async () => {
+    // A webhook fire is recorded as the Companion Owner too, so the same masking applies: the list
+    // names the trigger and the composed prompt never leaves the thread.
+    const { database } = fakeDb([
+      {
+        companionId: LUNA,
+        role: "user",
+        content: "Summarize the failed workflow run.",
+        authorId: "user-2",
+        authorName: "Ada Lovelace",
+        triggerName: "ci-failed",
+        createdAt: new Date("2026-08-14T09:05:00.000Z"),
+      },
+    ]);
+
+    expect(await loadCompanionLastMessages(database, ORG, [LUNA])).toEqual(new Map([[LUNA, {
+      preview: "",
+      role: "user",
+      author_id: "user-2",
+      author_name: "Ada Lovelace",
+      routine_name: null,
+      trigger_name: "ci-failed",
       created_at: "2026-08-14T09:05:00.000Z",
     }]]));
   });
@@ -284,6 +314,7 @@ describe("companion list previews", () => {
       author_id: actor.id,
       author_name: "Ada",
       routine_name: null,
+      trigger_name: null,
       created_at: "2026-08-14T09:30:00.000Z",
     });
     // A thread nobody has written in yet says so, rather than borrowing another Companion's line.

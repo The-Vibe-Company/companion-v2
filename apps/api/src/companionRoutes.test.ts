@@ -2,7 +2,15 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ApiVariables } from "./context";
-import { registerCompanionRoutes as registerCompanionRoutesImpl } from "./companionRoutes";
+import {
+  registerCompanionRoutes as registerCompanionRoutesImpl,
+  registerCompanionTriggerWebhookRoutes,
+} from "./companionRoutes";
+import {
+  CompanionTriggerNotFoundError,
+  composeTriggerPrompt,
+  triggerFireMessageId,
+} from "@companion/core";
 
 const COMPANION_ID = "11111111-1111-4111-8111-111111111111";
 const TURN_ID = "22222222-2222-4222-8222-222222222222";
@@ -10,6 +18,8 @@ const MESSAGE_ID = "33333333-3333-4333-8333-333333333333";
 const RETRY_ID = "44444444-4444-4444-8444-444444444444";
 const OPERATION_ID = "55555555-5555-4555-8555-555555555555";
 const ORG_ID = "66666666-6666-4666-8666-666666666666";
+const TRIGGER_ID = "99999999-9999-4999-8999-999999999999";
+const TRIGGER_SECRET = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const NOW = "2026-08-17T00:00:00.000Z";
 
 const contextMocks = vi.hoisted(() => ({
@@ -35,6 +45,15 @@ const coreMocks = vi.hoisted(() => ({
   updateCompanionRoutineV2: vi.fn(),
   deleteCompanionRoutineV2: vi.fn(),
   answerCompanionRoutineDecisionV2: vi.fn(),
+  listCompanionTriggersV2: vi.fn(),
+  createCompanionTriggerV2: vi.fn(),
+  updateCompanionTriggerV2: vi.fn(),
+  deleteCompanionTriggerV2: vi.fn(),
+  rotateCompanionTriggerSecretV2: vi.fn(),
+  answerCompanionTriggerDecisionV2: vi.fn(),
+  getCompanionTriggerForWebhook: vi.fn(),
+  fireCompanionTrigger: vi.fn(),
+  failCompanionTriggerFire: vi.fn(),
   readCompanionThreadV2: vi.fn(),
   retryCompanionTurnV2: vi.fn(),
   setCompanionProviderV2: vi.fn(),
@@ -289,6 +308,8 @@ describe("Companions Runtime v2 API", () => {
     coreMocks.answerCompanionConfigDecisionV2.mockResolvedValue(undefined);
     coreMocks.answerCompanionRoutineDecisionV2.mockResolvedValue(undefined);
     coreMocks.listCompanionRoutinesV2.mockResolvedValue([]);
+    coreMocks.answerCompanionTriggerDecisionV2.mockResolvedValue(undefined);
+    coreMocks.listCompanionTriggersV2.mockResolvedValue([]);
     coreMocks.getCompanionDecisionV2.mockResolvedValue({
       requestKey: "question-1",
       requestKind: "question",
@@ -974,6 +995,207 @@ describe("Companions Runtime v2 API", () => {
     await expect(created.json()).resolves.toEqual({ routine });
   });
 
+  it("applies trigger proposals through the dedicated answer path", async () => {
+    coreMocks.getCompanionDecisionV2.mockResolvedValue({
+      requestKey: "trigger-1",
+      requestKind: "trigger_proposal",
+      decisionStatus: "pending",
+      proposal: {
+        kind: "trigger",
+        name: "CI failed on main",
+        prompt: "Investigate the failing workflow.",
+        provider: "github",
+      },
+      expiresAt: NOW,
+    });
+    const response = await appWithRoutes().request(
+      jsonPost(`/v1/companions/${COMPANION_ID}/decisions/trigger-1`, {
+        action: "allow",
+      }),
+    );
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toEqual({ thread });
+    expect(coreMocks.answerCompanionTriggerDecisionV2).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: COMPANION_ID,
+      requestId: "trigger-1",
+      decision: "allow",
+    }));
+    expect(coreMocks.answerCompanionConfigDecisionV2).not.toHaveBeenCalled();
+    expect(coreMocks.answerCompanionRoutineDecisionV2).not.toHaveBeenCalled();
+    expect(coreMocks.answerCompanionDecisionV2).not.toHaveBeenCalled();
+  });
+
+  it("refuses free text on a trigger proposal card", async () => {
+    coreMocks.getCompanionDecisionV2.mockResolvedValue({
+      requestKey: "trigger-1",
+      requestKind: "trigger_proposal",
+      decisionStatus: "pending",
+      proposal: {
+        kind: "trigger",
+        name: "CI failed on main",
+        prompt: "Investigate the failing workflow.",
+        provider: "github",
+      },
+      expiresAt: NOW,
+    });
+    const response = await appWithRoutes().request(
+      jsonPost(`/v1/companions/${COMPANION_ID}/decisions/trigger-1`, {
+        action: "answer",
+        answer: "Sure",
+      }),
+    );
+    expect(response.status).toBe(400);
+    expect(coreMocks.answerCompanionTriggerDecisionV2).not.toHaveBeenCalled();
+    expect(coreMocks.answerCompanionDecisionV2).not.toHaveBeenCalled();
+  });
+
+  it("lists, creates, updates, rotates, and deletes Companion triggers", async () => {
+    const trigger = {
+      id: TRIGGER_ID,
+      companion_id: COMPANION_ID,
+      name: "CI failed on main",
+      prompt: "Investigate the failing workflow.",
+      provider: "github",
+      enabled: true,
+      webhook_url: `http://127.0.0.1:3000/v1/hooks/triggers/${TRIGGER_ID}/${TRIGGER_SECRET}`,
+      last_fired_at: null,
+      last_error_code: null,
+      last_error_message: null,
+      last_error_at: null,
+      consecutive_failures: 0,
+      created_at: NOW,
+      updated_at: NOW,
+    };
+    coreMocks.listCompanionTriggersV2.mockResolvedValue([trigger]);
+    coreMocks.createCompanionTriggerV2.mockResolvedValue(trigger);
+    coreMocks.updateCompanionTriggerV2.mockResolvedValue({ ...trigger, enabled: false });
+    coreMocks.rotateCompanionTriggerSecretV2.mockResolvedValue(trigger);
+    coreMocks.deleteCompanionTriggerV2.mockResolvedValue(undefined);
+    const app = appWithRoutes();
+
+    const listed = await app.request(`/v1/companions/${COMPANION_ID}/triggers`);
+    expect(listed.status).toBe(200);
+    await expect(listed.json()).resolves.toEqual({ triggers: [trigger] });
+    // Each Owner/Editor row embeds the webhook secret in its URL.
+    expect(listed.headers.get("cache-control")).toBe("private, no-store");
+
+    const created = await app.request(
+      jsonPost(`/v1/companions/${COMPANION_ID}/triggers`, {
+        id: trigger.id,
+        name: trigger.name,
+        prompt: trigger.prompt,
+        provider: trigger.provider,
+        enabled: true,
+      }),
+    );
+    expect(created.status).toBe(201);
+    await expect(created.json()).resolves.toEqual({ trigger });
+    expect(coreMocks.createCompanionTriggerV2).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: COMPANION_ID,
+      id: trigger.id,
+      name: trigger.name,
+      provider: "github",
+      webhookBaseUrl: "http://127.0.0.1:3000",
+    }));
+
+    const updated = await app.request(`/v1/companions/${COMPANION_ID}/triggers/${TRIGGER_ID}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(updated.status).toBe(200);
+    await expect(updated.json()).resolves.toEqual({ trigger: { ...trigger, enabled: false } });
+    expect(coreMocks.updateCompanionTriggerV2).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: COMPANION_ID,
+      triggerId: TRIGGER_ID,
+      enabled: false,
+    }));
+
+    const rotated = await app.request(
+      `/v1/companions/${COMPANION_ID}/triggers/${TRIGGER_ID}/rotate-secret`,
+      { method: "POST" },
+    );
+    expect(rotated.status).toBe(200);
+    await expect(rotated.json()).resolves.toEqual({ trigger });
+    expect(coreMocks.rotateCompanionTriggerSecretV2).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: COMPANION_ID,
+      triggerId: TRIGGER_ID,
+    }));
+
+    const deleted = await app.request(`/v1/companions/${COMPANION_ID}/triggers/${TRIGGER_ID}`, {
+      method: "DELETE",
+    });
+    expect(deleted.status).toBe(204);
+    expect(coreMocks.deleteCompanionTriggerV2).toHaveBeenCalledWith(expect.objectContaining({
+      companionId: COMPANION_ID,
+      triggerId: TRIGGER_ID,
+    }));
+  });
+
+  it("maps trigger authorization, absence, and conflict failures onto their statuses", async () => {
+    const app = appWithRoutes();
+    // The SQL boundary refuses a Viewer write with SQLSTATE 42501; the route translates, only.
+    coreMocks.createCompanionTriggerV2.mockRejectedValue(
+      Object.assign(new Error("Companion editor access is required"), { code: "42501" }),
+    );
+    const forbidden = await app.request(
+      jsonPost(`/v1/companions/${COMPANION_ID}/triggers`, {
+        id: TRIGGER_ID,
+        name: "CI failed on main",
+        prompt: "Investigate.",
+        provider: "github",
+      }),
+    );
+    expect(forbidden.status).toBe(403);
+
+    // The dedicated not-found error and the raw SQLSTATE both read as an absent trigger.
+    coreMocks.updateCompanionTriggerV2.mockRejectedValue(new CompanionTriggerNotFoundError());
+    const missingPatch = await app.request(
+      `/v1/companions/${COMPANION_ID}/triggers/${TRIGGER_ID}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: false }),
+      },
+    );
+    expect(missingPatch.status).toBe(404);
+    coreMocks.deleteCompanionTriggerV2.mockRejectedValue(
+      Object.assign(new Error("Companion trigger not found"), { code: "P0002" }),
+    );
+    const missing = await app.request(`/v1/companions/${COMPANION_ID}/triggers/${TRIGGER_ID}`, {
+      method: "DELETE",
+    });
+    expect(missing.status).toBe(404);
+
+    coreMocks.createCompanionTriggerV2.mockRejectedValue(
+      Object.assign(new Error("trigger id was reused with different trigger intent"), {
+        code: "23505",
+      }),
+    );
+    const conflicted = await app.request(
+      jsonPost(`/v1/companions/${COMPANION_ID}/triggers`, {
+        id: TRIGGER_ID,
+        name: "CI failed on main",
+        prompt: "Investigate.",
+        provider: "github",
+      }),
+    );
+    expect(conflicted.status).toBe(409);
+
+    // A malformed body never reaches the core layer at all.
+    coreMocks.createCompanionTriggerV2.mockClear();
+    const malformed = await app.request(
+      jsonPost(`/v1/companions/${COMPANION_ID}/triggers`, {
+        id: TRIGGER_ID,
+        name: "CI failed on main",
+        prompt: "Investigate.",
+        provider: "slack",
+      }),
+    );
+    expect(malformed.status).toBe(400);
+    expect(coreMocks.createCompanionTriggerV2).not.toHaveBeenCalled();
+  });
+
   it("denies Viewer desktop access before calling the private Runtime service", async () => {
     coreMocks.getCompanionV2.mockResolvedValue({ ...companion, access: "viewer" });
     const response = await appWithRoutes().request(
@@ -1001,5 +1223,188 @@ describe("Companions Runtime v2 API", () => {
       orgId: ORG_ID,
       companionId: COMPANION_ID,
     }));
+  });
+});
+
+describe("Companion trigger webhook", () => {
+  const webhookRow = {
+    orgId: ORG_ID,
+    companionId: COMPANION_ID,
+    name: "CI failed on main",
+    prompt: "Investigate the failing workflow.",
+    provider: "github" as const,
+    secret: TRIGGER_SECRET,
+    enabled: true,
+  };
+  const firedTurn = {
+    id: TURN_ID,
+    companion_id: COMPANION_ID,
+    client_message_id: MESSAGE_ID,
+    status: "queued" as const,
+    queue_sequence: 1,
+    latest_attempt: null,
+    replying: false,
+    error: null,
+    state_changed_at: NOW,
+    settled_at: null,
+    created_at: NOW,
+    updated_at: NOW,
+  };
+
+  function webhookApp(env: NodeJS.ProcessEnv = {
+    COMPANION_COMPANIONS_ENABLED: "true",
+    COMPANION_COMPANIONS_ALLOWED_EMAIL_DOMAINS: "example.test",
+  }) {
+    const app = new Hono<{ Variables: ApiVariables }>();
+    registerCompanionTriggerWebhookRoutes(app, env);
+    return app;
+  }
+
+  function fire(input: {
+    triggerId?: string;
+    secret?: string;
+    body?: string;
+    headers?: Record<string, string>;
+  } = {}): Request {
+    return new Request(
+      `http://localhost/v1/hooks/triggers/${input.triggerId ?? TRIGGER_ID}/${input.secret ?? TRIGGER_SECRET}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...input.headers },
+        body: input.body ?? '{"action":"opened"}',
+      },
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // The webhook path is pre-session: no actor, no tenant resolution, only the URL secret.
+    contextMocks.jsonError.mockImplementation((_context, error: unknown, status: number) =>
+      Response.json(
+        { ok: false, error: error instanceof Error ? error.message : String(error) },
+        { status },
+      ));
+    coreMocks.getCompanionTriggerForWebhook.mockResolvedValue(webhookRow);
+    coreMocks.fireCompanionTrigger.mockResolvedValue({
+      outcome: "fired",
+      turn: firedTurn,
+      replayed: false,
+    });
+    coreMocks.failCompanionTriggerFire.mockResolvedValue(undefined);
+  });
+
+  it("does not exist at all while the Companions flag is off", async () => {
+    const response = await webhookApp({}).request(fire());
+    expect(response.status).toBe(404);
+    expect(coreMocks.getCompanionTriggerForWebhook).not.toHaveBeenCalled();
+    expect(coreMocks.fireCompanionTrigger).not.toHaveBeenCalled();
+  });
+
+  it("treats a malformed trigger id exactly like an unknown one", async () => {
+    const response = await webhookApp().request(fire({ triggerId: "not-a-uuid" }));
+    expect(response.status).toBe(404);
+    expect(coreMocks.getCompanionTriggerForWebhook).not.toHaveBeenCalled();
+
+    coreMocks.getCompanionTriggerForWebhook.mockResolvedValue(null);
+    const unknown = await webhookApp().request(fire());
+    expect(unknown.status).toBe(404);
+    expect(coreMocks.fireCompanionTrigger).not.toHaveBeenCalled();
+  });
+
+  it("refuses a wrong secret before anything fires and never echoes the stored one", async () => {
+    const app = webhookApp();
+    const wrongOfSameLength = `${TRIGGER_SECRET.slice(0, -1)}0`;
+    for (const secret of [wrongOfSameLength, "deadbeef"]) {
+      const response = await app.request(fire({ secret }));
+      expect(response.status).toBe(401);
+      expect(await response.text()).not.toContain(TRIGGER_SECRET);
+    }
+    expect(coreMocks.fireCompanionTrigger).not.toHaveBeenCalled();
+    expect(coreMocks.failCompanionTriggerFire).not.toHaveBeenCalled();
+  });
+
+  it("fires with the provider delivery id collapsed into a deterministic message id", async () => {
+    const body = '{"action":"opened","number":7}';
+    const response = await webhookApp().request(fire({
+      body,
+      headers: { "x-github-delivery": "gh-delivery-42" },
+    }));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      received: true,
+      outcome: "fired",
+      replayed: false,
+    });
+    expect(coreMocks.fireCompanionTrigger).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: ORG_ID,
+      triggerId: TRIGGER_ID,
+      clientMessageId: triggerFireMessageId({
+        triggerId: TRIGGER_ID,
+        deliveryId: "gh-delivery-42",
+      }),
+      content: composeTriggerPrompt(webhookRow.prompt, body),
+    }));
+    expect(coreMocks.failCompanionTriggerFire).not.toHaveBeenCalled();
+  });
+
+  it("reports a replayed delivery without inventing a second turn", async () => {
+    coreMocks.fireCompanionTrigger.mockResolvedValue({
+      outcome: "replayed",
+      turn: firedTurn,
+      replayed: true,
+    });
+    const response = await webhookApp().request(fire());
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      received: true,
+      outcome: "replayed",
+      replayed: true,
+    });
+  });
+
+  it("answers 409 when the same delivery id arrives with a different payload", async () => {
+    coreMocks.fireCompanionTrigger.mockRejectedValue(Object.assign(
+      new Error("query failed"),
+      { cause: Object.assign(new Error("message intent differs"), { code: "23505" }) },
+    ));
+    const response = await webhookApp().request(fire());
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: "a different payload already used this delivery id",
+    });
+    // A conflicting intent is the caller's fault, not the trigger failing.
+    expect(coreMocks.failCompanionTriggerFire).not.toHaveBeenCalled();
+  });
+
+  it("books an expurgated failure and answers a fixed 500 on an unexpected error", async () => {
+    coreMocks.fireCompanionTrigger.mockRejectedValue(
+      new Error("provider exploded with token sk-secret-42"),
+    );
+    const response = await webhookApp().request(fire());
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({ ok: false, error: "trigger fire failed" });
+    expect(coreMocks.failCompanionTriggerFire).toHaveBeenCalledWith(expect.objectContaining({
+      orgId: ORG_ID,
+      triggerId: TRIGGER_ID,
+      errorCode: "fire_failed",
+    }));
+  });
+
+  it("still answers the fixed 500 when the failure bookkeeping itself fails", async () => {
+    coreMocks.fireCompanionTrigger.mockRejectedValue(new Error("boom"));
+    coreMocks.failCompanionTriggerFire.mockRejectedValue(new Error("bookkeeping down"));
+    const response = await webhookApp().request(fire());
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({ ok: false, error: "trigger fire failed" });
+  });
+
+  it("answers a fixed 500 when the trigger lookup itself fails", async () => {
+    coreMocks.getCompanionTriggerForWebhook.mockRejectedValue(new Error("database down"));
+    const response = await webhookApp().request(fire());
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({ ok: false, error: "trigger fire failed" });
+    expect(coreMocks.fireCompanionTrigger).not.toHaveBeenCalled();
   });
 });

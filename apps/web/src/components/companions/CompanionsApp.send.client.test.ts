@@ -147,6 +147,7 @@ function controlPlane(
           attachments: [],
           reasoning: null,
           routine: null,
+          trigger: null,
           turn_id: null,
           queued: false,
           created_at: "2026-08-15T18:00:00.000Z",
@@ -163,6 +164,7 @@ function controlPlane(
           attachments: [],
           reasoning: null,
           routine: null,
+          trigger: null,
           turn_id: null,
           queued: false,
           created_at: `2026-08-15T18:0${index + 1}:00.000Z`,
@@ -233,6 +235,7 @@ function controlPlane(
         attachments: [],
         reasoning: null,
         routine: null,
+        trigger: null,
         turn_id: null,
         queued: false,
         created_at: new Date().toISOString(),
@@ -283,6 +286,7 @@ function controlPlane(
     attachments: [],
           reasoning: null,
           routine: null,
+          trigger: null,
           turn_id: null,
           queued: false,
           created_at: new Date().toISOString(),
@@ -307,6 +311,7 @@ function controlPlane(
       });
     }
     if (url.includes("/routines")) return json({ routines: [] });
+    if (url.includes("/triggers")) return json({ triggers: [] });
     if (url.includes("/thread")) {
       if (holdNextThreadRead) {
         holdNextThreadRead = false;

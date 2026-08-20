@@ -21,19 +21,23 @@ from this delegated skill. Agent Auth authorizes external clients to use Skills 
 does not authorize Companion chat, turns, decisions, desktop, provider settings, or Box/Pi lifecycle.
 
 A hosted Pi teammate may propose settings with `propose_config` (skills, plugins, model, persona)
-and `request_plugin_connection` (Linear, GitHub, or Notion), and may propose a scheduled routine with
-`propose_routine` (name, prompt, cron, timezone). Those tools only emit a decision card; they never
-apply changes themselves and never touch hub access, name, or provider. Owner/Editor approval in the
-thread applies after the current turn. After a plugin connection is approved, the human finishes it
-in the web Plugins UI; Pi may propose attaching that account on a later turn. Approved routines fire
-as ordinary turns whose prompt is hidden in the thread. Agent Auth clients must not call those tools.
+and `request_plugin_connection` (Linear, GitHub, or Notion), may propose a scheduled routine with
+`propose_routine` (name, prompt, cron, timezone), and may propose a webhook trigger with
+`propose_trigger` (name, prompt, provider — `linear`, `github`, or `custom`, a display label rather
+than an auth scheme). Those tools only emit a decision card; they never apply changes themselves and
+never touch hub access, name, or provider. Owner/Editor approval in the thread applies after the
+current turn. After a plugin connection is approved, the human finishes it in the web Plugins UI; Pi
+may propose attaching that account on a later turn. After a trigger is approved, the human copies its
+webhook URL from the Triggers panel and pastes it into the external service; a proposed trigger never
+fires in the turn that proposed it. Approved routines and triggers fire as ordinary turns whose
+prompt is hidden in the thread. Agent Auth clients must not call those tools.
 
 Treat runtime provider/model settings, provider credentials, MCP accounts, and Companion
 Owner/Editor/Viewer sharing as browser-session workspace administration. Never request, read, store,
 forward, or manage them through this skill or its Agent Auth client. Never use a skill command to
 wake, retry, cancel, restart, stop, or delete a hosted Companion. Scheduled routines are the
-sanctioned wake-on-a-schedule path, and they are gated by Owner/Editor approval rather than by this
-skill. The control plane never executes package scripts; Pi may consume the selected skill
+sanctioned wake-on-a-schedule path and webhook triggers are the sanctioned wake-on-an-event path;
+both are gated by Owner/Editor approval rather than by this skill. The control plane never executes package scripts; Pi may consume the selected skill
 instructions inside its isolated Box runtime.
 
 ## Configuration
@@ -1368,7 +1372,7 @@ skills view shows the correct status and version. Report the version from this s
 `companion.json.version`:
 
 ```sh
-printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.79.0","agent":"<your assistant name>"}}' \
+printf '%s' '{"action":"api","method":"POST","path":"/local-skills/companion/installed","body":{"version":"1.80.0","agent":"<your assistant name>"}}' \
   | node scripts/companion-agent-client.mjs
 ```
 

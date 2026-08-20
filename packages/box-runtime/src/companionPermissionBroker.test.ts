@@ -1,3 +1,4 @@
+import { COMPANION_TRIGGER_PROVIDERS } from "@companion/contracts";
 import { describe, expect, it } from "vitest";
 import {
   COMPANION_PERMISSION_BROKER_EXTENSION_FILE,
@@ -56,6 +57,10 @@ describe("Companion Pi interaction extension", () => {
       kind: "routine",
       name: "Standup",
     });
+    expect(parseCompanionDecisionTitle("companion:trigger:ci-failed")).toEqual({
+      kind: "trigger",
+      name: "ci-failed",
+    });
     expect(parseCompanionDecisionTitle("companion:question:ask_user")?.kind).toBe("question");
     expect(parseCompanionDecisionTitle("companion:hub:write")).toBeNull();
   });
@@ -64,6 +69,26 @@ describe("Companion Pi interaction extension", () => {
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain('name: "propose_routine"');
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("companion:routine:");
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("never claim a routine is active");
+  });
+
+  it("proposes triggers through confirm with a companion:trigger title and the contract providers", () => {
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain('name: "propose_trigger"');
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("companion:trigger:");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("never claim a trigger is active");
+    // The provider list is interpolated from the contract constant, never hardcoded in the tool.
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain(
+      `const TRIGGER_PROVIDERS = ${JSON.stringify(COMPANION_TRIGGER_PROVIDERS)} as string[]`,
+    );
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
+      .toContain("TRIGGER_PROVIDERS.includes(provider)");
+    // The trigger card is a five-minute interactive decision, exempt from the execution timer.
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain(
+      '"propose_routine", "propose_trigger", "request_plugin_connection"',
+    );
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
+      .toContain("the person pastes its webhook URL into the external service");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
+      .toContain("User denied or timed out. No trigger was created.");
   });
 
   it("classifies shell runs with the control plane's own catalog, priority order included", () => {

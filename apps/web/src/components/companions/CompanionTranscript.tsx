@@ -231,6 +231,7 @@ function UserFrame({ children }: { children: ReactNode }) {
   const message = useTranscriptMessage();
   const { canSend, onCancelQueued, dequeueingTurnId } = useChrome();
   const routine = message?.entries[0]?.routine ?? null;
+  const trigger = message?.entries[0]?.trigger ?? null;
   const queued = message?.queued === true;
   return (
     <div
@@ -246,6 +247,10 @@ function UserFrame({ children }: { children: ReactNode }) {
       <div className={cn("flex w-full flex-col items-end", (message?.sending || queued) && "opacity-60")}>
         {routine ? (
           <p className="chat-routine-header">Routine: {routine.name}</p>
+        ) : trigger ? (
+          // A trigger's composed prompt carries an untrusted event payload nobody typed, so it is
+          // masked behind the same compact header a routine fire gets.
+          <p className="chat-routine-header">Trigger: {trigger.name}</p>
         ) : children}
         {message && <AttachmentList attachments={attachmentsOf(message)} />}
       </div>
@@ -500,6 +505,7 @@ export function CompanionTranscript({
       tool: null,
       decision: null,
       routine: null,
+      trigger: null,
       turn_id: null,
       queued: thread?.active_turn != null
         || thread?.interrupted_turn != null
