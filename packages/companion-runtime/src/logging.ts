@@ -24,11 +24,13 @@ export interface RuntimeLogRecord {
 export interface RuntimeProcessLog {
   error(record: RuntimeLogRecord): void;
   warn(record: RuntimeLogRecord): void;
+  info(record: RuntimeLogRecord): void;
 }
 
 export const silentRuntimeProcessLog: RuntimeProcessLog = {
   error() {},
   warn() {},
+  info() {},
 };
 
 export type ThrownErrorLog = {
@@ -97,7 +99,7 @@ export function createJsonRuntimeProcessLog(
     console.error(line);
   },
 ): RuntimeProcessLog {
-  const emit = (level: "error" | "warn", record: RuntimeLogRecord): void => {
+  const emit = (level: "error" | "warn" | "info", record: RuntimeLogRecord): void => {
     const payload: Record<string, JsonLogValue> = {
       level,
       ts: record.ts,
@@ -116,6 +118,7 @@ export function createJsonRuntimeProcessLog(
   return {
     error: (record) => emit("error", record),
     warn: (record) => emit("warn", record),
+    info: (record) => emit("info", record),
   };
 }
 

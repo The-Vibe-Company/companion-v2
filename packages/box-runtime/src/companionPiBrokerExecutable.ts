@@ -26,6 +26,8 @@ const maxLineBytes = optionalPositiveInteger("COMPANION_PI_MAX_LINE_BYTES")
   ?? COMPANION_PI_BROKER_MAX_LINE_BYTES;
 const segmentBytes = optionalPositiveInteger("COMPANION_PI_SEGMENT_BYTES");
 const rpcTimeoutMs = optionalPositiveInteger("COMPANION_PI_RPC_TIMEOUT_MS") ?? 8_000;
+const PI_STARTUP_READY_TIMEOUT_MS = 150_000;
+const PI_STARTUP_READY_RETRY_MS = 250;
 
 class SpawnedPiTransport implements CompanionPiRpcTransport {
   readonly #child: ChildProcessWithoutNullStreams;
@@ -207,6 +209,7 @@ async function main(): Promise<void> {
   let server;
   try {
     await transport.ready;
+    await awaitPiState(broker, transport.exited);
     server = await startCompanionPiBrokerSocket({ broker, socketPath });
   } catch (error) {
     // A spawned Pi and its pipes would otherwise keep this failed systemd invocation alive forever.
@@ -236,6 +239,42 @@ async function main(): Promise<void> {
     // A broker without its Pi child must fail so systemd restarts the whole control boundary.
     process.exitCode = 1;
   });
+}
+
+async function awaitPiState(
+  broker: CompanionPiBroker,
+  exited: Promise<{ code: number | null; signal: string | null }>,
+): Promise<void> {
+  const deadline = Date.now() + PI_STARTUP_READY_TIMEOUT_MS;
+  const exitedBeforeReady = exited.then(() => {
+    const error = new Error("Pi process exited before its state became ready");
+    error.name = "PiProcessExitedBeforeReadyError";
+    throw error;
+  });
+  let attempt = 0;
+  for (;;) {
+    attempt += 1;
+    const response = await Promise.race([
+      broker.command({
+        id: `startup:${invocationId}:${attempt}`,
+        type: "get_state",
+      }),
+      exitedBeforeReady,
+    ]);
+    if (response.success === true) return;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      const error = new Error("Pi state did not become ready");
+      error.name = "PiStateReadinessError";
+      throw error;
+    }
+    await Promise.race([
+      new Promise((resolveReady) => {
+        setTimeout(resolveReady, Math.min(PI_STARTUP_READY_RETRY_MS, remaining));
+      }),
+      exitedBeforeReady,
+    ]);
+  }
 }
 
 function piArguments(runtimeRoot: string): string[] {
@@ -309,8 +348,16 @@ function optionalPositiveInteger(name: string): number | undefined {
   return value;
 }
 
-void main().catch(() => {
-  // Startup diagnostics are intentionally stable and value-free. No provider/Pi payload is logged.
-  process.stderr.write("companion-pi-broker: startup failed\n");
+void main().catch((error: unknown) => {
+  const code = (error as { code?: unknown } | null)?.code;
+  const syscall = (error as { syscall?: unknown } | null)?.syscall;
+  const errorName = error instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.name)
+    ? error.name
+    : "Error";
+  const reason = typeof code === "string" && /^[A-Z0-9_]{1,32}$/.test(code)
+    ? typeof syscall === "string" && /^[a-z0-9_]{1,32}$/.test(syscall) ? `${code} ${syscall}` : code
+    : errorName;
+  // Never log the raw error: it may contain a Box path or provider payload.
+  process.stderr.write(`companion-pi-broker: startup failed (${reason})\n`);
   process.exitCode = 1;
 });

@@ -63,7 +63,9 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
     const capturePath = join(home, "pi-commands.ndjson");
     const piPidPath = join(home, "pi.pid");
     const piArgvPath = join(home, "pi.argv.json");
-    const socketPath = join(home, COMPANION_PI_BROKER_SOCKET_PATH);
+    // macOS has a short Unix-socket path limit; the production relative layout is covered by the
+    // adapter tests, while this subprocess test only needs a private socket in its temp directory.
+    const socketPath = join(home, "broker.sock");
     mkdirSync(join(runtimeRoot, "state"), { recursive: true, mode: 0o700 });
     mkdirSync(join(runtimeRoot, "logs"), { recursive: true, mode: 0o700 });
     mkdirSync(join(runtimeRoot, "sessions"), { recursive: true, mode: 0o700 });
@@ -87,7 +89,13 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
       stdio: ["pipe", "pipe", "pipe"],
     });
     processes.push(broker);
-    await waitFor(() => existsSync(socketPath));
+    let startupStderr = "";
+    broker.stderr.on("data", (chunk: Buffer) => {
+      startupStderr += chunk.toString("utf8");
+    });
+    await waitFor(() => existsSync(socketPath)).catch((error) => {
+      throw new Error(`${error instanceof Error ? error.message : "startup failed"}: ${startupStderr}`);
+    });
 
     // Without --continue, Pi's own CLI always starts a brand-new session even when a Companion
     // already has one on disk in --session-dir, silently discarding its conversation on every
@@ -154,8 +162,8 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
     expect(ack).toMatchObject({ success: true, data: { acknowledgedCursor: 3 } });
 
     const commands = readFileSync(capturePath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    expect(commands.map((command) => command.type)).toEqual(["get_state", "prompt"]);
-    expect(commands[1]).not.toHaveProperty("streamingBehavior");
+    expect(commands.map((command) => command.type)).toEqual(["get_state", "get_state", "prompt"]);
+    expect(commands[2]).not.toHaveProperty("streamingBehavior");
     const piPid = Number(readFileSync(piPidPath, "utf8"));
     expect(Number.isSafeInteger(piPid)).toBe(true);
     process.kill(piPid, "SIGKILL");
@@ -166,7 +174,7 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
     expect(journalRecords.some((record) => record.kind === "pi_process_exit")).toBe(false);
     expect(JSON.parse(readFileSync(join(runtimeRoot, "events", "counters.json"), "utf8")))
       .toMatchObject({ unboundEvents: 1 });
-  });
+  }, 10_000);
 
   it("terminates a spawned Pi when the command socket cannot start", async () => {
     const home = temporaryDirectory("pi-broker-start-failure-");
@@ -178,10 +186,7 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
     mkdirSync(join(runtimeRoot, "logs"), { recursive: true, mode: 0o700 });
     writeFileSync(invalidSocketPath, "regular file", { mode: 0o600 });
     writeFileSync(brokerPath, COMPANION_PI_BROKER_SOURCE, { mode: 0o700 });
-    writeFileSync(piPath, `#!/usr/bin/env node
-process.stdin.resume();
-setInterval(() => {}, 1_000);
-`, { mode: 0o700 });
+    writeFileSync(piPath, fakePiSource(), { mode: 0o700 });
 
     const broker = spawn(process.execPath, [brokerPath], {
       env: {
@@ -190,6 +195,9 @@ setInterval(() => {}, 1_000);
         COMPANION_PI_BIN: piPath,
         COMPANION_PI_INVOCATION_ID: "invocation-start-failure",
         COMPANION_PI_SOCKET_PATH: invalidSocketPath,
+        FAKE_PI_CAPTURE_PATH: join(home, "pi-commands.ndjson"),
+        FAKE_PI_PID_PATH: join(home, "pi.pid"),
+        FAKE_PI_ARGV_PATH: join(home, "pi.argv.json"),
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -200,7 +208,42 @@ setInterval(() => {}, 1_000);
     });
 
     await expect(waitForExitWithin(broker, 5_000)).resolves.toEqual({ code: 1, signal: null });
-    expect(stderr).toBe("companion-pi-broker: startup failed\n");
+    expect(stderr).toBe("companion-pi-broker: startup failed (Error)\n");
+  });
+
+  it("fails immediately when Pi exits before its initial state is ready", async () => {
+    const home = temporaryDirectory("pi-broker-early-exit-");
+    const runtimeRoot = join(home, ".companion", "runtime");
+    const brokerPath = join(home, "companion-pi-broker.mjs");
+    const piPath = join(home, "exiting-pi.mjs");
+    const socketPath = join(home, "broker.sock");
+    mkdirSync(join(runtimeRoot, "state"), { recursive: true, mode: 0o700 });
+    mkdirSync(join(runtimeRoot, "logs"), { recursive: true, mode: 0o700 });
+    writeFileSync(brokerPath, COMPANION_PI_BROKER_SOURCE, { mode: 0o700 });
+    writeFileSync(piPath, "#!/usr/bin/env node\nprocess.exit(23);\n", { mode: 0o700 });
+
+    const broker = spawn(process.execPath, [brokerPath], {
+      env: {
+        ...process.env,
+        COMPANION_PI_ROOT: runtimeRoot,
+        COMPANION_PI_BIN: piPath,
+        COMPANION_PI_INVOCATION_ID: "invocation-early-exit",
+        COMPANION_PI_SOCKET_PATH: socketPath,
+        COMPANION_PI_RPC_TIMEOUT_MS: "10000",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    processes.push(broker);
+    let stderr = "";
+    broker.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    await expect(waitForExitWithin(broker, 2_000)).resolves.toEqual({ code: 1, signal: null });
+    expect(stderr).toBe(
+      "companion-pi-broker: startup failed (PiProcessExitedBeforeReadyError)\n",
+    );
+    expect(existsSync(socketPath)).toBe(false);
   });
 });
 

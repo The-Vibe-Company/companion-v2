@@ -287,6 +287,11 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
   if (command.includes("companion-pi-journal") && command.includes("companion-pi-restarts")) {
     return "daemon-diagnostics";
   }
+  // Activation now waits for the ready/unready marker inside the same Box command. Match its
+  // credential and daemon-reload side effects before the narrower read-only status probe.
+  if (command.includes("staged_credential_file=") && command.includes("systemctl --user daemon-reload")) {
+    return "start-or-restart-daemon";
+  }
   if (
     command.includes("companion-pi-broker-ready")
     && command.includes("companion-pi-broker-unready")
@@ -295,9 +300,6 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
   }
   if (command.includes("companion-pi-warm-ready")) return "warm-daemon-ready";
   if (command.includes("companion-box-runnable")) return "box-runnable";
-  if (command.includes("staged_credential_file=") && command.includes("systemctl --user daemon-reload")) {
-    return "start-or-restart-daemon";
-  }
   if (command.includes("Pi daemon is still active after stop")) return "stop-daemon";
   if (command.includes('rm -f "$HOME/.companion/runtime/state/providers.env"')) {
     return "remove-provider-files";
@@ -465,7 +467,7 @@ async function startDaemon(machine: BoxSimCommandMachine, restart: boolean): Pro
   if (!restart && machine.daemon.status === "active") {
     // `systemctl start` is idempotent for an already active unit. In particular it does not create
     // a new Pi invocation; configuration changes use the explicit restart path.
-    return ok();
+    return ok("active\ncompanion-pi-broker-ready\n");
   }
   if (restart) {
     machine.daemon.restartCount += 1;
@@ -490,7 +492,7 @@ async function startDaemon(machine: BoxSimCommandMachine, restart: boolean): Pro
     machine.daemon.stderrLog += "simulated Pi controller failed to start\n";
     return failed("simulated Pi controller failed to start");
   }
-  return ok();
+  return ok("active\ncompanion-pi-broker-ready\n");
 }
 
 function responseFor(command: Record<string, unknown>, data?: Record<string, unknown>): Record<string, unknown> {
