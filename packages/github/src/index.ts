@@ -897,7 +897,7 @@ export async function renderSkillRepository(input: {
   const rows = [...input.skills]
     .sort((a, b) => bytewise(a.slug, b.slug))
     .map((skill) => {
-      const href = `${origin}/s/${encodeURIComponent(skill.shareToken)}`;
+      const href = `./skills/${encodeURIComponent(skill.slug)}/SKILL.md`;
       return `<tr>\n<td><strong><a href="${escapeHtml(href)}">${escapeHtml(skill.title || skill.slug)}</a></strong><br><sub>${escapeHtml(summary(skill.description))}</sub></td>\n<td><code>${escapeHtml(skill.version)}</code></td>\n</tr>`;
     }).join("\n");
   const readme = `${COMPANION_README_START}\n<p align="center">\n  <a href="${escapeHtml(origin)}">\n    <picture>\n      <source media="(prefers-color-scheme: dark)" srcset="${escapeHtml(`${origin}/brand/companion-wordmark-dark.png`)}">\n      <img src="${escapeHtml(`${origin}/brand/companion-wordmark.png`)}" alt="Companion" width="420">\n    </picture>\n  </a>\n</p>\n\n# ${escapeHtml(input.repo)}\n\nA curated library of agent skills, published and kept up to date by [Companion](${escapeHtml(origin)}).\n\n## Install\n\n\`\`\`bash\nnpx skills add ${input.owner}/${input.repo}\n\`\`\`\n\n## Skills\n\n${rows ? `<table>\n<thead><tr><th>Skill</th><th>Version</th></tr></thead>\n<tbody>\n${rows}\n</tbody>\n</table>` : "No skills are currently mirrored."}\n\n---\n\n<sub>Companion manages only the content between the COMPANION markers. Content outside them is preserved.</sub>\n${COMPANION_README_END}`;
