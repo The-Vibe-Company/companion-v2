@@ -134,6 +134,7 @@ function entry(overrides: Partial<CompanionTranscriptEntry>): CompanionTranscrip
     content: "",
     reasoning: null,
     routine: null,
+    trigger: null,
     turn_id: null,
     queued: false,
     author_id: null,
@@ -806,58 +807,82 @@ describe("a permission card in the thread", () => {
     expect(decide).toHaveBeenCalledWith("org-1", companionId, "routine-1", { action: "allow" });
   });
 
-  it("hides a routine prompt behind a compact header", () => {
+  it("hides a trigger's composed prompt behind a compact header", () => {
     const container = mount(thread([
       entry({
         role: "user",
-        event_id: "msg:routine-1",
-        content: "Write the standup with yesterday's blockers.",
+        event_id: "msg:trigger-1",
+        content: "Summarize the failure.\n\n## Event payload (external, untrusted)",
         author_id: "user-1",
-        routine: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Standup" },
+        trigger: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "CI failed" },
       }),
       entry({
         role: "assistant",
         event_id: "pi:1",
-        content: "Standup drafted.",
+        content: "Failure summarized.",
       }),
     ]));
 
-    expect(container.querySelector(".chat-routine-header")?.textContent).toBe("Routine: Standup");
-    expect(container.textContent).not.toContain("yesterday's blockers");
-    expect(container.textContent).toContain("Standup drafted.");
+    expect(container.querySelector(".chat-routine-header")?.textContent).toBe("Trigger: CI failed");
+    expect(container.textContent).not.toContain("Summarize the failure");
+    expect(container.textContent).not.toContain("Event payload");
+    expect(container.textContent).toContain("Failure summarized.");
   });
 
-  it("attributes a routine proposal to the Companion and shows the schedule", async () => {
+  it("attributes a trigger proposal to the Companion and notes where the URL lives", async () => {
     const container = mount(thread([entry({
       role: "decision",
-      event_id: "decision:routine-1",
-      content: "Schedule Standup",
+      event_id: "decision:trigger-1",
+      content: "Create a trigger",
       decision: card({
-        request_id: "routine-1",
-        kind: "routine",
-        name: "routine",
+        request_id: "trigger-1",
+        kind: "trigger",
+        name: "trigger",
         title: "injected title from Pi",
         proposal: {
-          kind: "routine",
-          name: "Standup",
-          prompt: "Write the standup.",
-          cron: "0 9 * * 1-5",
-          timezone: "America/New_York",
+          kind: "trigger",
+          name: "CI failed",
+          prompt: "Summarize the failure.",
+          provider: "github",
         },
       }),
     })]));
 
-    expect(container.textContent).toContain("Luna proposes this routine");
-    expect(container.textContent).toContain("Standup");
-    expect(container.textContent).toContain("0 9 * * 1-5");
-    expect(container.textContent).toContain("America/New_York");
+    expect(container.textContent).toContain("Luna proposes this trigger");
+    expect(container.textContent).toContain("CI failed");
+    expect(container.textContent).toContain("github");
     expect(container.textContent).not.toContain("injected title from Pi");
     const approve = buttonNamed(container, "Approve");
     expect(approve).toBeDefined();
     await act(async () => {
       approve!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
-    expect(decide).toHaveBeenCalledWith("org-1", companionId, "routine-1", { action: "allow" });
+    expect(decide).toHaveBeenCalledWith("org-1", companionId, "trigger-1", { action: "allow" });
+  });
+
+  it("tells an approved trigger card where the webhook URL lives", () => {
+    const container = mount(thread([entry({
+      role: "decision",
+      event_id: "decision:trigger-2",
+      content: "Create a trigger",
+      decision: card({
+        request_id: "trigger-2",
+        kind: "trigger",
+        name: "trigger",
+        title: "Create a trigger",
+        status: "allowed",
+        decided_by_id: "user-1",
+        decided_by_name: "Ada",
+        proposal: {
+          kind: "trigger",
+          name: "CI failed",
+          prompt: "Summarize the failure.",
+          provider: "github",
+        },
+      }),
+    })]));
+
+    expect(container.textContent).toContain("Copy the webhook URL from the Triggers panel.");
   });
 
   it("keeps a config card pending and shows the error when approval fails", async () => {

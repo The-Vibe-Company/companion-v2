@@ -72,7 +72,7 @@ export const companionDecisionDeliveryStateEnum = pgEnum("companion_decision_del
   "pending", "write_intent", "delivered", "ambiguous", "cancelled",
 ]);
 export const companionDecisionRequestKindEnum = pgEnum("companion_decision_request_kind", [
-  "question", "confirmation", "config_proposal", "routine_proposal",
+  "question", "confirmation", "config_proposal", "routine_proposal", "trigger_proposal",
 ]);
 export const companionDuplicateCleanupStatusEnum = pgEnum("companion_duplicate_cleanup_status", [
   "pending", "delete_requested", "waiting_deleted", "deleted", "already_deleted", "blocked",
@@ -517,6 +517,48 @@ export const companionRoutines = pgTable(
 );
 
 /**
+ * Webhook-fired Companion prompts — the event-driven sibling of `companion_routines`. The secret is
+ * a share-token-style URL credential: generated server-side, stored as text, compared with a
+ * constant-time check, and shown only to Owner/Editor. No worker claims these; the API fires them
+ * synchronously in the webhook request through the same Owner-impersonating enqueue as routines.
+ */
+export const companionTriggers = pgTable(
+  "companion_triggers",
+  {
+    id: uuid("id").primaryKey().notNull(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "restrict" }),
+    companionId: uuid("companion_id").notNull(),
+    name: text("name").notNull(),
+    prompt: text("prompt").notNull(),
+    provider: text("provider").notNull(),
+    secret: text("secret").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    lastFiredAt: timestamp("last_fired_at", { withTimezone: true }),
+    lastErrorCode: text("last_error_code"),
+    lastErrorMessage: text("last_error_message"),
+    lastErrorAt: timestamp("last_error_at", { withTimezone: true }),
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+    createdAt: now(),
+    updatedAt: updatedAt(),
+  },
+  (t) => ({
+    uniqueOrgCompanionId: unique("companion_triggers_org_companion_id_uq").on(t.orgId, t.companionId, t.id),
+    companionFk: foreignKey({
+      columns: [t.orgId, t.companionId],
+      foreignColumns: [companions.orgId, companions.id],
+      name: "companion_triggers_companion_fk",
+    }).onDelete("cascade"),
+    nameUnique: uniqueIndex("companion_triggers_name_uq").on(t.companionId, sql`lower(${t.name})`),
+    nameCheck: check("companion_triggers_name_check", sql`char_length(btrim(${t.name})) between 1 and 80 and ${t.name} !~ E'[\\n\\r]'`),
+    promptCheck: check("companion_triggers_prompt_check", sql`char_length(btrim(${t.prompt})) between 1 and 16384`),
+    providerCheck: check("companion_triggers_provider_check", sql`${t.provider} in ('linear', 'github', 'custom')`),
+    secretCheck: check("companion_triggers_secret_check", sql`${t.secret} ~ '^[0-9a-f]{32,128}$'`),
+    errorCheck: check("companion_triggers_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAt} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]')) and ${t.consecutiveFailures} >= 0`),
+  }),
+);
+
+/**
  * Global one-shot maintenance ledger for the Runtime v2 cutover. These rows intentionally have no
  * tenant or Companion foreign key: they are inaccessible to application roles and must outlive the
  * legacy ownership rows so a partial provider purge can resume and PR4 can prove completion.
@@ -806,6 +848,12 @@ export const companionTurns = pgTable(
     routineId: uuid("routine_id").references(() => companionRoutines.id, { onDelete: "set null" }),
     routineName: text("routine_name"),
     /**
+     * Originating trigger, if this turn was a webhook fire. Same snapshot rules as a routine:
+     * `trigger_id` is SET NULL if the trigger is deleted; `trigger_name` still labels the transcript.
+     */
+    triggerId: uuid("trigger_id").references(() => companionTriggers.id, { onDelete: "set null" }),
+    triggerName: text("trigger_name"),
+    /**
      * Set when an Owner/Editor asks to stop an active turn whose prompt may already be on Pi.
      * The executor that holds the lease aborts Pi and settles; the API never contacts Box.
      */
@@ -829,6 +877,7 @@ export const companionTurns = pgTable(
     errorCheck: check("companion_turns_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAction} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]')) and (${t.status} not in ('failed','interrupted') or ${t.lastErrorCode} is not null) and (${t.status} not in ('succeeded','cancelled') or ${t.lastErrorCode} is null)`),
     messageEvent: index("companion_turns_message_event_idx").on(t.companionId, t.messageEventId),
     routineOriginCheck: check("companion_turns_routine_origin_check", sql`(${t.routineId} is null or ${t.routineName} is not null) and (${t.routineName} is null or (char_length(${t.routineName}) between 1 and 80 and ${t.routineName} !~ E'[\\n\\r]'))`),
+    triggerOriginCheck: check("companion_turns_trigger_origin_check", sql`(${t.triggerId} is null or ${t.triggerName} is not null) and (${t.triggerName} is null or (char_length(${t.triggerName}) between 1 and 80 and ${t.triggerName} !~ E'[\\n\\r]')) and not (${t.routineName} is not null and ${t.triggerName} is not null)`),
   }),
 );
 
@@ -1030,9 +1079,9 @@ export const companionDecisionDeliveries = pgTable(
     deliveryCheck: check("companion_decision_deliveries_delivery_check", sql`${t.deliveryCheckpoint} in ('pending','write_intent','delivered','ambiguous','cancelled') and ${t.deliveryCheckpointSequence} >= 0 and ${t.deliveryAttemptCount} >= 0 and (${t.claimEpoch} is null or ${t.claimEpoch} >= 1) and ((${t.deliveryState} in ('pending','cancelled') and ${t.commandId} is null) or (${t.deliveryState} in ('write_intent','delivered','ambiguous') and ${t.commandId} is not null)) and ((${t.deliveryState} = 'delivered') = (${t.deliveredAt} is not null))`),
     errorCheck: check("companion_decision_deliveries_error_check", sql`((${t.lastErrorCode} is null) = (${t.lastErrorMessage} is null)) and ((${t.lastErrorCode} is null) = (${t.lastErrorAction} is null)) and (${t.lastErrorCode} is null or ${t.lastErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.lastErrorMessage} is null or (char_length(${t.lastErrorMessage}) <= 500 and ${t.lastErrorMessage} !~ E'[\\n\\r]'))`),
     proposalCheck: check("companion_decision_deliveries_proposal_check", sql`(
-      (${t.proposal} is null and ${t.requestKind}::text not in ('config_proposal', 'routine_proposal'))
+      (${t.proposal} is null and ${t.requestKind}::text not in ('config_proposal', 'routine_proposal', 'trigger_proposal'))
       or (
-        ${t.requestKind}::text in ('config_proposal', 'routine_proposal')
+        ${t.requestKind}::text in ('config_proposal', 'routine_proposal', 'trigger_proposal')
         and ${t.proposal} is not null
         and jsonb_typeof(${t.proposal}) = 'object'
         and octet_length(${t.proposal}::text) <= 16384
@@ -1337,6 +1386,11 @@ export const companionTranscriptEntries = pgTable(
      * transcript. Null on every entry a member or Pi actually wrote.
      */
     routineName: text("routine_name"),
+    /**
+     * Name of the trigger whose webhook enqueued this user message, snapshotted for the same reason
+     * as `routine_name` and masked the same way by every surface outside the thread.
+     */
+    triggerName: text("trigger_name"),
     createdAt: now(),
   },
   (t) => ({
@@ -1393,6 +1447,11 @@ export const companionTranscriptEntries = pgTable(
     routineOnUserEntries: check(
       "companion_transcript_entries_routine_check",
       sql`${t.routineName} is null or (${t.role}::text = 'user' and char_length(${t.routineName}) between 1 and 80 and ${t.routineName} !~ E'[\n\r]')`,
+    ),
+    // Same shape for a trigger origin, and a message never carries both origins at once.
+    triggerOnUserEntries: check(
+      "companion_transcript_entries_trigger_check",
+      sql`(${t.triggerName} is null or (${t.role}::text = 'user' and char_length(${t.triggerName}) between 1 and 80 and ${t.triggerName} !~ E'[\n\r]')) and not (${t.routineName} is not null and ${t.triggerName} is not null)`,
     ),
   }),
 );

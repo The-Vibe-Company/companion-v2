@@ -806,6 +806,115 @@ describe("Pi journal validation and projection", () => {
       typeof value === "bigint" ? value.toString() : value);
     expect(serialized).not.toContain(secret);
   });
+
+  it("projects a valid trigger proposal and ignores malformed, redacted, or mis-method ones", () => {
+    const proposal = {
+      kind: "trigger" as const,
+      name: "ci-failed",
+      prompt: "Investigate the failing build.",
+      provider: "github" as const,
+    };
+    const summary = "Fire ci-failed on github webhook events";
+    const now = new Date("2026-08-19T12:00:00.000Z");
+    const secret = "opaque-trigger-secret";
+    const validMessage = JSON.stringify({ summary, proposal });
+    const page = validatePiJournalRead({
+      value: {
+        events: [
+          {
+            sequence: 1,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "extension_ui_request",
+              id: "trigger-1",
+              method: "confirm",
+              title: "companion:trigger:ci-failed",
+              message: validMessage,
+            },
+          },
+          {
+            sequence: 2,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "extension_ui_request",
+              id: "trigger-malformed",
+              method: "confirm",
+              title: "companion:trigger:ci-failed",
+              message: "{not json",
+            },
+          },
+          {
+            sequence: 3,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "extension_ui_request",
+              id: "trigger-wrong-method",
+              method: "input",
+              title: "companion:trigger:ci-failed",
+              message: validMessage,
+            },
+          },
+          {
+            sequence: 4,
+            invocationId: PI_INVOCATION_ID,
+            attemptId: ATTEMPT_ID,
+            kind: "pi_event",
+            event: {
+              type: "extension_ui_request",
+              id: "trigger-secret",
+              method: "confirm",
+              title: "companion:trigger:ci-failed",
+              message: JSON.stringify({
+                summary: `Fire ${secret}`,
+                proposal,
+              }),
+            },
+          },
+        ],
+        nextCursor: 4,
+        acknowledgedCursor: 0,
+        hasMore: false,
+      },
+      after: 0n,
+      attemptId: ATTEMPT_ID,
+      invocationId: PI_INVOCATION_ID,
+    });
+
+    const classified = classifyPiJournalPage(
+      page,
+      now,
+      createRuntimeVisibleTextRedactor([secret]),
+    );
+
+    expect(classified.unknownEvents).toBe(3);
+    expect(classified.needsInput).toBe(true);
+    expect(classified.projections).toEqual([
+      expect.objectContaining({
+        type: "decision",
+        entry_key: "decision:1",
+        request_key: "trigger-1",
+        request_kind: "trigger_proposal",
+        content: summary,
+        proposal,
+        decision: expect.objectContaining({
+          kind: "trigger",
+          name: "trigger",
+          title: summary,
+          status: "pending",
+          proposal,
+        }),
+      }),
+    ]);
+    const serialized = JSON.stringify(classified.projections, (_key, value) =>
+      typeof value === "bigint" ? value.toString() : value);
+    expect(serialized).not.toContain(secret);
+  });
 });
 
 describe("delegated subagent runs", () => {

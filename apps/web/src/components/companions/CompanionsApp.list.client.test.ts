@@ -28,6 +28,7 @@ const companionsApi = vi.hoisted(() => ({
   listCompanions: vi.fn(),
   listCompanionProviders: vi.fn(),
   listCompanionRoutines: vi.fn(),
+  listCompanionTriggers: vi.fn(),
   openCompanionDesktop: vi.fn(),
   saveCompanionProvider: vi.fn(),
   sendCompanionMessage: vi.fn(),
@@ -111,6 +112,7 @@ function companion(overrides: Partial<Companion> = {}): Companion {
       author_id: null,
       author_name: null,
       routine_name: null,
+      trigger_name: null,
       created_at: "2026-08-14T09:05:00.000Z",
     },
     runtime: {
@@ -215,6 +217,7 @@ describe("CompanionsApp conversation list", () => {
     companionsApi.getCompanionThread.mockResolvedValue(thread());
     companionsApi.getCompanionRuntime.mockResolvedValue(companion());
     companionsApi.listCompanionRoutines.mockResolvedValue([]);
+    companionsApi.listCompanionTriggers.mockResolvedValue([]);
     companionsApi.deleteCompanionProvider.mockResolvedValue(undefined);
     companionsApi.saveCompanionProvider.mockResolvedValue({
       ...providers.connections[0]!,
@@ -701,6 +704,7 @@ describe("CompanionsApp conversation list", () => {
         attachments: [],
         reasoning: null,
         routine: null,
+        trigger: null,
         turn_id: null,
         queued: false,
         created_at: "2026-08-14T09:05:00.000Z",
@@ -741,12 +745,30 @@ describe("CompanionsApp conversation list", () => {
         author_id: "owner-1",
         author_name: "Ada",
         routine_name: "Daily standup",
+        trigger_name: null,
         created_at: "2026-08-14T09:30:00.000Z",
       },
     })]);
 
     expect(row(container).textContent).toContain("Routine: Daily standup");
     expect(row(container).textContent).not.toContain("Write the standup");
+  });
+
+  it("names the trigger in the list instead of leaking the composed webhook prompt", async () => {
+    const container = await render([companion({
+      last_message: {
+        preview: "",
+        role: "user",
+        author_id: "owner-1",
+        author_name: "Ada",
+        routine_name: null,
+        trigger_name: "CI failed",
+        created_at: "2026-08-14T09:30:00.000Z",
+      },
+    })]);
+
+    expect(row(container).textContent).toContain("Trigger: CI failed");
+    expect(row(container).textContent).not.toContain("Summarize the failure");
   });
 
   const said = (ordinal: number) => ({
@@ -761,6 +783,7 @@ describe("CompanionsApp conversation list", () => {
     attachments: [],
     reasoning: null,
     routine: null,
+    trigger: null,
     turn_id: null,
     queued: false,
     created_at: `2026-08-14T09:0${ordinal}:00.000Z`,
@@ -851,6 +874,7 @@ describe("CompanionsApp conversation list", () => {
         author_id: null,
         author_name: null,
         routine_name: null,
+        trigger_name: null,
         created_at: "2026-08-14T09:30:00.000Z",
       },
     })]);

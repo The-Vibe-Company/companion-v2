@@ -1,9 +1,10 @@
 "use client";
 
-import type { Companion, CompanionDesktop, CompanionRoutine } from "@companion/contracts";
+import type { Companion, CompanionDesktop, CompanionRoutine, CompanionTrigger } from "@companion/contracts";
 import { Icon } from "../Icon";
 import { companionStatus } from "./status";
 import { CompanionRoutines } from "./CompanionRoutines";
+import { CompanionTriggers } from "./CompanionTriggers";
 
 /** One library skill this Companion may stage on its Box, named the way the Skills list names it. */
 export type CompanionContextSkill = { id: string; slug: string };
@@ -32,6 +33,8 @@ export function CompanionContext({
   orgId,
   routines,
   onRoutinesChange,
+  triggers,
+  onTriggersChange,
   onJoin,
   onDesktop,
   onSettings,
@@ -47,6 +50,8 @@ export function CompanionContext({
   orgId: string;
   routines: CompanionRoutine[];
   onRoutinesChange: (routines: CompanionRoutine[]) => void;
+  triggers: CompanionTrigger[];
+  onTriggersChange: (triggers: CompanionTrigger[]) => void;
   onJoin: () => void;
   onDesktop: () => void;
   /** Null for a Viewer, who does not receive the runner-only context panel. */
@@ -196,6 +201,14 @@ export function CompanionContext({
           routines={routines}
           canEdit={onSettings !== null}
           onChange={onRoutinesChange}
+        />
+
+        <CompanionTriggers
+          orgId={orgId}
+          companionId={companion.id}
+          triggers={triggers}
+          canEdit={onSettings !== null}
+          onChange={onTriggersChange}
         />
       </div>
     </aside>
