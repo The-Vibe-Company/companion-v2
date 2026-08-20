@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createRuntimeChangeGenerationBox } from "../../../scripts/box-runtime-change-e2e";
+import {
+  createRuntimeChangeGenerationBox,
+  shouldExerciseRuntimeChangeResume,
+} from "../../../scripts/box-runtime-change-e2e";
 import { BoxRuntimeAdapterError } from "./boxMaintenanceClient";
 
 const create = {
@@ -150,5 +153,17 @@ describe("runtime-change Box creation", () => {
       image: "companion-l14-aaaaaaaaaaaa",
     })).rejects.toBe(failure);
     expect(createGenerationBoxAfterObservedAbsence).not.toHaveBeenCalled();
+  });
+});
+
+describe("runtime-change Box scenario", () => {
+  it("keeps the full cycle for named images and scheduled cold benchmarks", () => {
+    expect(shouldExerciseRuntimeChangeResume("named_snapshot", "pull_request")).toBe(true);
+    expect(shouldExerciseRuntimeChangeResume("base_fallback", "schedule")).toBe(true);
+  });
+
+  it("finishes a non-scheduled cold fallback after its first correlated reply", () => {
+    expect(shouldExerciseRuntimeChangeResume("base_fallback", "pull_request")).toBe(false);
+    expect(shouldExerciseRuntimeChangeResume("base_fallback", "push")).toBe(false);
   });
 });

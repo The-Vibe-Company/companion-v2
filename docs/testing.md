@@ -150,8 +150,10 @@ runtime image, falling back once to an empty Box when that named snapshot is mis
 the exact checkout's Pi layout and broker with the dedicated z.ai canary credential. Ambiguous
 create failures are never replayed. The job starts Pi, dispatches a unique first message, requires
 both the correlated assistant marker and `agent_settled`, then requests irrevocable deletion in
-`finally` and confirms the Box is no longer readable. Only a same-repository PR authored and
-triggered by the repository's `COMPANION_BOX_E2E_TRUSTED_LOGIN` receives the dedicated canary
+`finally` and confirms the Box is no longer readable. A non-scheduled cold fallback stops after
+that first correlated reply; the scheduled benchmark retains the full archive/resume cycle and its
+five-second SLO, so a persistently unavailable named image remains visible. Only a same-repository
+PR authored and triggered by the repository's `COMPANION_BOX_E2E_TRUSTED_LOGIN` receives the dedicated canary
 credentials; forks and other contributors skip this real-provider job and retain the mandatory
 deterministic simulator gates. Before deletion the probe expunges persisted provider authentication,
 and a failed deletion is retried and reports only the safe disposable Box id needed for operator
