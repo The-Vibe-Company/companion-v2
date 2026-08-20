@@ -208,9 +208,55 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
     expect(command).toContain('"/run/user/$(id -u)/companion/providers.env"');
   });
 
-  it("removes the secret-bearing control bundle when apply command submission fails", async () => {
+  it("cleans and retries the idempotent control bundle when apply submission fails once", async () => {
     const commands: string[] = [];
+    const files: string[] = [];
     let rejectedApply = false;
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        return response({ box: box("ready") });
+      }
+      if (url.endsWith("/files") && method === "PUT") {
+        files.push((JSON.parse(String(init?.body)) as { path: string }).path);
+        return response({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        const body = JSON.parse(String(init?.body)) as { command: string };
+        commands.push(body.command);
+        if (body.command.includes("COMPANION_CONTROL_APPLY") && !rejectedApply) {
+          rejectedApply = true;
+          throw new BoxRuntimeProviderError("control apply rate limited", 429);
+        }
+        return response(commandResult("companion-box-runnable\n"));
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+
+    await expect(runtimeClient().stageExistingBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      runtimeGeneration: 1,
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { provider: { token: "ephemeral-test-token" } },
+      replaceProviderAuth: true,
+      modelId: "glm-4.6",
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+    })).resolves.toMatchObject({ stagingMode: "skills" });
+
+    expect(files.filter((path) => path.endsWith("control-bundle-v1.json"))).toHaveLength(2);
+    expect(commands.filter((command) => command.includes("COMPANION_CONTROL_APPLY"))).toHaveLength(2);
+    expect(commands).toContain(
+      'rm -f "$HOME/.companion/runtime/state/control-bundle-v1.json"',
+    );
+  });
+
+  it("cleans the secret-bearing control bundle and fails after two rejected applies", async () => {
+    const commands: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
       const method = init?.method ?? "GET";
@@ -221,8 +267,7 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       if (url.endsWith("/commands") && method === "POST") {
         const body = JSON.parse(String(init?.body)) as { command: string };
         commands.push(body.command);
-        if (body.command.includes("COMPANION_CONTROL_APPLY") && !rejectedApply) {
-          rejectedApply = true;
+        if (body.command.includes("COMPANION_CONTROL_APPLY")) {
           throw new Error("control apply transport failed");
         }
         return response(commandResult("companion-box-runnable\n"));
@@ -244,6 +289,7 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       skills: [],
     })).rejects.toThrow("control apply transport failed");
 
+    expect(commands.filter((command) => command.includes("COMPANION_CONTROL_APPLY"))).toHaveLength(2);
     expect(commands.at(-1)).toBe(
       'rm -f "$HOME/.companion/runtime/state/control-bundle-v1.json"',
     );

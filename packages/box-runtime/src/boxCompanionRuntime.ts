@@ -215,6 +215,8 @@ const BOX_RUNNABLE_MARKER = "companion-box-runnable";
 const PROVIDER_AUTH_PRESENT_MARKER = "companion-provider-auth-present";
 /** Secret-bearing aggregate file; every failure path must remove it from persistent Box disk. */
 const CONTROL_BUNDLE_PATH = ".companion/runtime/state/control-bundle-v1.json";
+const CONTROL_BUNDLE_ATTEMPTS = 2;
+const CONTROL_BUNDLE_RETRYABLE_STATUSES = new Set([408, 425, 429]);
 /** Proves the extracted immutable Skill tree matches the exact archives staged by this deploy. */
 const SKILLS_TREE_REVISION_PATH = ".companion/runtime/state/skills-tree.version";
 const SKILLS_TREE_REUSED_MARKER = "companion-skills-tree-reused";
@@ -2068,11 +2070,12 @@ exit 0`,
       }),
     };
     const allowedJson = JSON.stringify([...allowed]);
-    let applied: CommandEnvelope;
-    try {
-      await this.#writeFile(boxId, CONTROL_BUNDLE_PATH, JSON.stringify(manifest));
-      applied = await this.#command(
-        boxId,
+    const content = JSON.stringify(manifest);
+    for (let attempt = 1; attempt <= CONTROL_BUNDLE_ATTEMPTS; attempt += 1) {
+      try {
+        await this.#writeFile(boxId, CONTROL_BUNDLE_PATH, content);
+        const applied = await this.#command(
+          boxId,
       `set -euo pipefail
 bundle="$HOME/${CONTROL_BUNDLE_PATH}"
 trap 'rm -f "$bundle"' EXIT
@@ -2099,21 +2102,32 @@ for (const file of manifest.files) {
   fs.renameSync(temporary, target);
 }
 COMPANION_CONTROL_APPLY`,
-        60,
-      );
-    } catch (error) {
-      // The remote EXIT trap cannot run if the file PUT succeeded but command submission never
-      // reached a shell. Cleanup deliberately ignores the cancelled staging budget and gets its own
-      // short request. If that also fails, propagate the cleanup failure and keep the Box runnable:
-      // the archive path refuses to persist the disk until it can prove the bundle absent.
-      await this.#removeControlBundle(boxId);
-      throw error;
-    }
-    if (!applied.success) {
-      throw new BoxRuntimeProviderError(
-        `Runtime control bundle failed to apply${commandFailureDetail(applied)}`,
-        502,
-      );
+          60,
+        );
+        if (!applied.success) {
+          throw new BoxRuntimeProviderError(
+            `Runtime control bundle failed to apply${commandFailureDetail(applied)}`,
+            502,
+          );
+        }
+        return;
+      } catch (error) {
+        // The remote EXIT trap cannot run if the file PUT succeeded but command submission never
+        // reached a shell. Cleanup deliberately ignores the cancelled staging budget and gets its
+        // own short request. If that also fails, propagate the cleanup failure and keep the Box
+        // runnable: the archive path refuses to persist the disk until it can prove the bundle
+        // absent. The whole transaction is digest-checked and atomically replaces fixed paths, so
+        // one retry is safe before Pi starts and covers the provider's observed short-write and
+        // transient command-transport failures.
+        await this.#removeControlBundle(boxId);
+        const retryable = !this.#stagingSignal?.aborted
+          && (
+            !(error instanceof BoxRuntimeProviderError)
+            || error.status >= 500
+            || CONTROL_BUNDLE_RETRYABLE_STATUSES.has(error.status)
+          );
+        if (!retryable || attempt === CONTROL_BUNDLE_ATTEMPTS) throw error;
+      }
     }
   }
 
