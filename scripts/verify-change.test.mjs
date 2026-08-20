@@ -8,12 +8,19 @@ import test from "node:test";
 import { classifyFiles } from "./ci-scope.mjs";
 import {
   affectedWorkspaceNames,
+  changedPathsFromNameStatus,
   collectChangedFiles,
   createVerificationPlan,
   executeFastSteps,
   parseArguments,
   verificationExitCode,
 } from "./verify-change.mjs";
+
+test("copy records can omit the untouched source for incremental file gates", () => {
+  const copyRecord = Buffer.from("C100\0src/legacy.ts\0src/copied.ts\0");
+  assert.deepEqual(changedPathsFromNameStatus(copyRecord), ["src/legacy.ts", "src/copied.ts"]);
+  assert.deepEqual(changedPathsFromNameStatus(copyRecord, { includeCopySources: false }), ["src/copied.ts"]);
+});
 
 const workspaces = [
   { name: "@companion/api", path: "apps/api" },
@@ -179,17 +186,33 @@ test("a web change selects the web workspace and browser validation", () => {
     env: { CONDUCTOR_PORT: "4310" },
   });
   assert.deepEqual(plan.workspaceNames, ["@companion/web"]);
-  assert.deepEqual(plan.fastSteps.map(({ id }) => id), ["hygiene", "quality", "build"]);
+  assert.deepEqual(plan.fastSteps.map(({ id }) => id), [
+    "hygiene",
+    "anti-slop-tests",
+    "anti-slop",
+    "quality",
+    "build",
+  ]);
   assert.deepEqual(plan.deferredGates.map(({ id }) => id), ["browser", "containers"]);
   assert.match(plan.deferredGates[0].command, /APP_URL=http:\/\/127\.0\.0\.1:4310/);
 });
 
-test("a core change selects its workspace and requires database integration", () => {
-  const plan = createVerificationPlan(["packages/core/src/services.ts"], { workspaces });
+test("a core change selects its workspace and runs anti-slop against the requested base", () => {
+  const plan = createVerificationPlan(["packages/core/src/services.ts"], {
+    workspaces,
+    baseRef: "upstream/trunk",
+  });
   assert.deepEqual(plan.workspaceNames, ["@companion/core"]);
   assert.ok(plan.deferredGates.some(({ id }) => id === "database"));
+  const antiSlop = plan.fastSteps.find(({ id }) => id === "anti-slop");
+  assert.deepEqual(antiSlop, {
+    id: "anti-slop",
+    command: "pnpm",
+    args: ["lint:anti-slop", "--", "--base", "upstream/trunk"],
+  });
   const quality = plan.fastSteps.find(({ id }) => id === "quality");
   assert.deepEqual(quality.args.slice(-2), ["--filter", "...@companion/core"]);
+  assert.ok(plan.fastSteps.indexOf(antiSlop) < plan.fastSteps.indexOf(quality));
 });
 
 test("a bundled-skill input change verifies the committed agent-client bundle", () => {

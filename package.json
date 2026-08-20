@@ -2,11 +2,12 @@
   "name": "companion-v2",
   "version": "0.0.0",
   "private": true,
+  "type": "module",
   "description": "Companion v2 — self-hostable Skills Hub for organizations and coding agents.",
   "license": "MIT",
   "packageManager": "pnpm@9.12.0",
   "engines": {
-    "node": ">=20"
+    "node": "^20.19.0 || >=22.12.0"
   },
   "pnpm": {
     "overrides": {
@@ -33,9 +34,11 @@
     "dev:conductor": "bash scripts/dev-conductor.sh",
     "dev:app": "pnpm exec concurrently -k -n api,worker,runtime,web \"bash scripts/dev-process.sh api env COMPANION_API_HOST=${COMPANION_API_HOST:-127.0.0.1} pnpm --filter @companion/api dev\" \"bash scripts/dev-worker.sh pnpm --filter @companion/worker dev\" \"bash scripts/dev-runtime.sh pnpm --filter @companion/runtime dev\" \"bash scripts/dev-process.sh web pnpm --filter @companion/web dev --hostname ${COMPANION_WEB_HOST:-127.0.0.1} --port ${COMPANION_WEB_PORT:-3000}\"",
     "dev:check": "bash scripts/dev-stack-check.sh",
-    "lint": "turbo run lint",
+    "lint": "pnpm lint:anti-slop && turbo run lint",
+    "lint:anti-slop": "node scripts/lint-anti-slop.mjs",
     "typecheck": "turbo run typecheck",
-    "test": "TZ=UTC turbo run test",
+    "test": "pnpm test:anti-slop && TZ=UTC turbo run test",
+    "test:anti-slop": "node --test scripts/lint-anti-slop.test.mjs scripts/lint-anti-slop.integration.test.mjs",
     "test:coverage": "turbo run coverage",
     "test:integration": "pnpm --filter @companion/api test:integration",
     "test:e2e": "node scripts/ci-playwright-policy.mjs && playwright test",
@@ -51,9 +54,11 @@
     "design:lint": "npx --yes @google/design.md@0.2.0 lint DESIGN.md --format json"
   },
   "devDependencies": {
+    "@oxlint/plugins": "1.79.0",
     "@playwright/test": "1.61.1",
     "@vitest/coverage-v8": "3.2.7",
     "concurrently": "^9.2.1",
+    "oxlint": "1.79.0",
     "turbo": "^2.3.3",
     "typescript": "^5.7.2"
   }

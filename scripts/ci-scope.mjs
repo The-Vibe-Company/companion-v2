@@ -40,7 +40,7 @@ function matchesRuntimePackage(file) {
 }
 
 function matchesAny(file, patterns) {
-  return patterns.some((pattern) => (typeof pattern === "string" ? file.startsWith(pattern) : pattern.test(file)));
+  return patterns.some((pattern) => (pattern instanceof RegExp ? pattern.test(file) : file.startsWith(pattern)));
 }
 
 export function classifyFiles(files, { forceFull = false } = {}) {
@@ -57,6 +57,7 @@ export function classifyFiles(files, { forceFull = false } = {}) {
       /^\.github\/dependabot\.yml$/,
       /^docker-compose\.yml$/,
       /^eslint\.config\.[^.]+$/,
+      /^oxlint\.config\.[^.]+$/,
       /^tsconfig(?:\.[^.]+)?\.json$/,
       /^playwright\.config\.[cm]?[jt]s$/,
       /^scripts\/ci-scope(?:\.test)?\.mjs$/,

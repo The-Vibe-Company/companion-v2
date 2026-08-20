@@ -180,6 +180,13 @@ git diff --check
 pnpm verify:change
 ```
 
+The anti-slop gate is incremental while the existing codebase is brought into compliance. It lints
+added, copied, modified, renamed, and untracked JavaScript/TypeScript files against their entire
+contents; deletions and agent-tooling directories are ignored. The default comparison base is
+`origin/main`. Override it with `pnpm lint:anti-slop -- --base <ref>`. Touching a legacy source file
+therefore requires resolving all anti-slop findings in that file rather than only findings on the
+changed lines.
+
 `verify:change` exit code 2 means its selected checks passed but the printed database, browser,
 container, or dependency gates remain mandatory. Report exact commands and outcomes; static
 inspection is not a passing test.
