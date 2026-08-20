@@ -1050,7 +1050,7 @@ describe("RuntimeEngine attempts", () => {
     const engine = new RuntimeEngine(engineDependencies({
       store,
       ports,
-      log: { error: () => {}, warn: (record) => logged.push(record) },
+      log: { error: () => {}, warn: (record) => logged.push(record), info: () => {} },
     }));
 
     expect((await engine.execute(claim)).outcome).toBe("succeeded");
@@ -1468,6 +1468,7 @@ describe("RuntimeEngine process error logs", () => {
       log: {
         error(record) { records.push({ level: "error", ...record }); },
         warn(record) { records.push({ level: "warn", ...record }); },
+        info(record) { records.push({ level: "info", ...record }); },
       },
     };
   }
@@ -1616,5 +1617,80 @@ describe("RuntimeEngine health observation", () => {
       piState: "idle",
       piInvocationId: "health-overlay-pi",
     });
+  });
+
+  it("persists the live idle Pi identity on the health tick after a crashed Pi start", async () => {
+    const claim = healthClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(attemptClaim(), {
+        authorizationActorId: null,
+        clientSurface: null,
+        workCheckpoint: "observing",
+        workCheckpointSequence: 0n,
+        turnId: null,
+        turnStatus: null,
+        attemptStatus: null,
+        dispatchState: null,
+        eventCursor: null,
+        unknownEventCount: null,
+        malformedEventCount: null,
+        oversizedEventCount: null,
+        coldStartDeadlineAt: null,
+        inactivityDeadlineAt: null,
+        absoluteDeadlineAt: null,
+        operationKind: null,
+        boxState: "ready",
+        piState: "running",
+        piInvocationId: null,
+      }),
+    });
+    const ports = fakePorts(store);
+    ports.pi.piDaemonStatus = async () => ({ state: "idle", invocationId: "live-pi-after-crash" });
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(store.authorization.piInvocationId).toBe("live-pi-after-crash");
+    expect(store.observations.at(-1)).toMatchObject({
+      boxState: "ready",
+      piState: "idle",
+      piInvocationId: "live-pi-after-crash",
+    });
+  });
+
+  it("omits a mismatched Pi invocation without idle proof instead of failing health", async () => {
+    const claim = healthClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: attemptAuthorization(attemptClaim(), {
+        authorizationActorId: null,
+        clientSurface: null,
+        workCheckpoint: "observing",
+        workCheckpointSequence: 0n,
+        turnId: null,
+        turnStatus: null,
+        attemptStatus: null,
+        dispatchState: null,
+        eventCursor: null,
+        unknownEventCount: null,
+        malformedEventCount: null,
+        oversizedEventCount: null,
+        coldStartDeadlineAt: null,
+        inactivityDeadlineAt: null,
+        absoluteDeadlineAt: null,
+        operationKind: null,
+        boxState: "ready",
+        piState: "running",
+      }),
+    });
+    const ports = fakePorts(store);
+    ports.pi.piDaemonStatus = async () => ({ state: "running", invocationId: "live-pi-busy" });
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(store.authorization.piInvocationId).toBe(PI_INVOCATION_ID);
+    const observation = store.observations.at(-1);
+    expect(observation).toMatchObject({ boxState: "ready", piState: "running" });
+    expect(observation && "piInvocationId" in observation).toBe(false);
   });
 });

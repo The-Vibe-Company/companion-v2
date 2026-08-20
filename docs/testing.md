@@ -124,6 +124,34 @@ Missing secrets report `not configured`, never success. Keep the canary separate
 simulator tests; legacy removal requires seven consecutive green days and no remaining purge-owned
 resources.
 
+The Box provider lifecycle job uses only the `COMPANION_BOX_E2E_API_KEY` repository secret. It
+creates a five-minute disposable Box, exercises file reads, metadata, hashing, and execution,
+archives and resumes the Box, proves those files remain usable, archives it again, and permanently
+deletes the exact provider resource in `finally`. Cleanup requires the provider's irrevocable
+deletion operation plus an immediate `404` for that Box; physical data removal may finish later in
+the provider's background operation. It runs only on a daily schedule or manual dispatch, never on
+pull requests. The optional `COMPANION_BOX_E2E_IMAGE` repository variable makes it clone a named runtime
+snapshot; without it, the test uses a base Box and still covers the provider restore/syscall path.
+
+Every commit pushed to an internal pull request also creates a disposable Box from the configured
+runtime image, then stages the exact checkout's Pi layout and broker with the dedicated z.ai canary
+credential. The job starts Pi, dispatches a unique first message, requires both the correlated
+assistant marker and `agent_settled`, then requests irrevocable deletion in `finally` and confirms
+the Box is no longer readable. Only a same-repository PR authored and triggered by the repository's
+`COMPANION_BOX_E2E_TRUSTED_LOGIN` receives the dedicated canary credentials; forks and other
+contributors skip this real-provider job and retain the mandatory deterministic simulator gates.
+Before deletion the probe expunges persisted provider authentication, and a failed deletion is
+retried and reports only the safe disposable Box id needed for operator cleanup.
+
+The real Box/Pi delivery test runs for every commit pushed to an internal pull request. After the
+Box is deleted, CI replaces a marked performance block at the very end of the pull request
+description with the tested commit, result, phase timings, total duration, and workflow link. A run
+for an older head SHA never overwrites the report for a newer commit. GitHub does not support an
+`If-Match` precondition on pull-request updates, so the globally serialized reporter re-reads both
+the head SHA and description immediately before writing and retries a concurrent edit from its fresh
+body. Test failures still publish the timings collected before failure and only a stable error code;
+credentials, provider payloads, and raw Pi output are never copied into the description.
+
 ## Frontend gate
 
 Run the application, then:

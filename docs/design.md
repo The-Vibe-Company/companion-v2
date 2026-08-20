@@ -230,7 +230,7 @@ two hours and five minutes remaining. Eligibility is checked both at enqueue and
 runtime lease immediately before claim; otherwise the ordinary `start` operation restages and
 recycles Pi without a Full Box restart. Changing the observed invocation or minting a replacement
 Hub token invalidates the old proof before another turn can use it.
-Migration 0109 also versions the Runtime claim entrypoint. Replicas from before 0109 retain their
+Migration 0110 also versions the Runtime claim entrypoint. Replicas from before 0110 retain their
 current lease but the legacy four-argument claim returns no new work after the migration commits.
 The material-aware five-argument claimer repairs an expired legacy lease by rewinding any
 post-staging operation or settings checkpoint that has no staged-expiry ledger, then restages under

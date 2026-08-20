@@ -136,7 +136,7 @@ const BOX_FILE_PART_TIMEOUT_MS = 120_000;
  * daemon that is merely slow and one that is crash-looping both answer `activating` for the first
  * seconds. Reading a single probe as the verdict is what turned healthy starts into wake failures.
  */
-const PI_DAEMON_ACTIVE_TIMEOUT_MS = 20_000;
+const PI_DAEMON_ACTIVE_TIMEOUT_MS = 180_000;
 /**
  * Pi acknowledges an RPC command as soon as it accepts it. The layout-14 broker forwards that
  * correlated response over its owner-only socket, so a completed Box command proves an application
@@ -1167,8 +1167,8 @@ layout_marker="$HOME/.companion/runtime/state/pi-layout.version"
 base_layout=${shellQuote(layoutIdentity.baseMarker)}
 expected_layout=${shellQuote(layoutIdentity.fullMarker)}
 companion_layout_apply_overlay() {
-  mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/pi/extensions" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/.companion/tools" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}" "$HOME/.config/systemd/user"
-  chmod 700 "$HOME/.companion/runtime" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}"
+  mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/pi/extensions" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/.companion/runtime/tmp" "$HOME/.companion/tools" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}" "$HOME/.config/systemd/user"
+  chmod 700 "$HOME/.companion/runtime" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/.companion/runtime/tmp" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}"
   # The broker is an autonomous ESM program. Encoding it keeps arbitrary JavaScript out of the shell
   # grammar while preserving one identical setup script for Box create and in-place layout repair.
   printf '%s' ${shellQuote(encodedBrokerSource)} | base64 --decode > "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
@@ -1178,13 +1178,12 @@ companion_layout_apply_overlay() {
     printf '%s\n' 'set -euo pipefail'
     printf 'PI_BIN=%q\n' "$pi_bin"
     printf 'NODE_BIN=%q\n' "$node_bin"
-    printf 'MINIMUM_IMAGE_SAFE_PI_VERSION=%q\n' ${shellQuote(MINIMUM_IMAGE_SAFE_PI_VERSION)}
     printf 'PATH=%q:"$PATH"\n' "$pi_bin_dir"
     printf '%s\n' 'export PATH'
     cat <<'COMPANION_PI_DAEMON'
 root="$HOME/.companion/runtime"
 stderr_log="$root/logs/pi.stderr.log"
-mkdir -p "$root/sessions" "$root/state" "$root/logs" "$root/memory"
+mkdir -p "$root/sessions" "$root/state" "$root/logs" "$root/memory" "$root/tmp"
 # A crash loop appends one line every couple of seconds for as long as it runs, so the log is rolled
 # once instead of growing until the Box disk notices.
 if [ -f "$stderr_log" ] && [ -n "$(find "$stderr_log" -size +${PI_DAEMON_STDERR_ROLL_KILOBYTES}k 2>/dev/null)" ]; then
@@ -1196,12 +1195,26 @@ fi
 exec 2>>"$stderr_log"
 trap 'companion_status=$?; printf "pi-daemon: line %s: %s failed with status %s\\n" "$LINENO" "$BASH_COMMAND" "$companion_status" >&2' ERR
 export PI_CODING_AGENT_DIR="$HOME/.companion/pi"
+# Jiti otherwise compiles TypeScript extensions into /tmp, which Box discards on every archive. A
+# private persistent TMPDIR lets the baked cache survive restore instead of recompiling thousands of
+# modules on the first message.
+export TMPDIR="$root/tmp"
+export JITI_RESPECT_TMPDIR_ENV=1
 # The optional memory search binary is installed under the Companion's own prefix, which no login
 # shell contributes to a systemd user unit's PATH. It is appended, not prepended: the resolved Pi
 # directory has to stay ahead of it so nothing landing in this prefix can shadow the pinned Pi or
 # node for a process Pi spawns.
 PATH="$PATH:$HOME/.companion/tools/bin"
 export PATH
+# A Box restore may remount the image with Node at a different absolute path than the baker used.
+# Keep the baked path when it still exists, otherwise resolve Node from the unit's controlled PATH.
+if [ ! -x "$NODE_BIN" ]; then
+  NODE_BIN="$(command -v node 2>/dev/null || true)"
+fi
+if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
+  echo 'pi-daemon: node is unavailable after Box restore' >&2
+  exit 1
+fi
 # Memory outlives one Pi start and one Box wake, so it lives on the snapshotted Box disk rather than
 # under /run/user/<uid>, which is tmpfs and is where the provider credentials live.
 export PI_MEMORY_DIR="$root/memory"
@@ -1209,31 +1222,7 @@ broker_socket="$HOME/${COMPANION_PI_BROKER_SOCKET_PATH}"
 broker_journal="$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}"
 rm -f "$broker_socket"
 mkdir -p "$broker_journal"
-chmod 700 "$root" "$root/state" "$root/logs" "$root/memory" "$broker_journal"
-pi_version="$("$PI_BIN" --version 2>/dev/null || true)"
-"$NODE_BIN" - "$pi_version" "$MINIMUM_IMAGE_SAFE_PI_VERSION" <<'COMPANION_PI_DAEMON_VERSION'
-const actualText = process.argv[2] ?? "";
-const minimumText = process.argv[3] ?? "";
-const parse = (value) => {
-  const match = value.match(/(\\d+)\\.(\\d+)\\.(\\d+)/);
-  return match ? match.slice(1).map(Number) : null;
-};
-const actual = parse(actualText);
-const minimum = parse(minimumText);
-const currentEnough = actual && minimum && (
-  actual.every((part, index) => part === minimum[index])
-  || actual.some((part, index) =>
-    part > minimum[index]
-    && actual.slice(0, index).every((prior, priorIndex) => prior === minimum[priorIndex]))
-);
-if (!currentEnough) {
-  console.error(
-    "Pi " + minimumText + " or newer is required for bounded image reads; found "
-      + (actualText || "an unknown version"),
-  );
-  process.exit(1);
-}
-COMPANION_PI_DAEMON_VERSION
+chmod 700 "$root" "$root/state" "$root/logs" "$root/memory" "$root/tmp" "$broker_journal"
 if [ -z "\${INVOCATION_ID:-}" ]; then
   echo 'pi-broker: systemd invocation id is missing' >&2
   exit 1
@@ -1276,6 +1265,24 @@ KillMode=control-group
 WantedBy=default.target
 COMPANION_PI_SERVICE_TAIL
   } > "$HOME/.config/systemd/user/companion-pi-daemon.service"
+  # Populate Jiti's source-hashed extension cache before the image is snapshotted. The cache is an
+  # optimization only: a failure leaves Pi's normal compilation path intact and never blocks layout.
+  startup_cache_marker="$HOME/.companion/runtime/state/pi-startup-cache.version"
+  startup_cache_log="$HOME/.companion/runtime/logs/pi-startup-cache.log"
+  if [ "$(cat "$startup_cache_marker" 2>/dev/null || true)" != "$expected_layout" ]; then
+    set +e
+    PI_CODING_AGENT_DIR="$HOME/.companion/pi" \
+      TMPDIR="$HOME/.companion/runtime/tmp" \
+      JITI_RESPECT_TMPDIR_ENV=1 \
+      timeout 90 "$pi_bin" --help > /dev/null 2>"$startup_cache_log"
+    startup_cache_status=$?
+    set -e
+    if [ "$startup_cache_status" -eq 0 ]; then
+      printf '%s\n' "$expected_layout" > "$startup_cache_marker"
+    else
+      printf 'Pi startup cache did not warm (exit %s); see runtime/logs/pi-startup-cache.log\n' "$startup_cache_status"
+    fi
+  fi
 }
 recorded="$(cat "$layout_marker" 2>/dev/null || true)"
 if [ -f "$layout_marker" ] \
@@ -1302,8 +1309,8 @@ fi
 ${ensureInstalled}
 command -v pi >/dev/null 2>&1
 command -v node >/dev/null 2>&1
-mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/pi/extensions" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/.companion/tools" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}" "$HOME/.config/systemd/user"
-chmod 700 "$HOME/.companion/runtime" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}"
+mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/pi/extensions" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/.companion/runtime/tmp" "$HOME/.companion/tools" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}" "$HOME/.config/systemd/user"
+chmod 700 "$HOME/.companion/runtime" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/.companion/runtime/tmp" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}"
 # Resolve Pi's absolute path now so the daemon does not depend on a login-shell PATH it will never
 # have under the minimal systemd user manager environment.
 pi_bin="$(command -v pi)"
@@ -1488,6 +1495,18 @@ function observation(box: BoxInfo, daemonState: CompanionDaemonState): Companion
     daemonState,
     desktopAvailable: box.desktopAvailable,
   };
+}
+
+function daemonStateFromOutput(stdout: string): CompanionDaemonState {
+  const lines = stdout.trim().split(/\r?\n/);
+  // Exact `active` remains accepted for older Box command fakes. The real probe always prints an
+  // RPC marker, and an explicit unready marker prevents systemd Type=simple from becoming Online
+  // before the broker has bound and permissioned the command socket.
+  return lines[0] === "active"
+    && !lines.includes("companion-pi-broker-unready")
+    && !lines.includes("companion-pi-rpc-unready")
+    ? "running"
+    : "stopped";
 }
 
 /** The stream URL one desktop answer carries, whichever of the two names Box gave it. */
@@ -1761,33 +1780,7 @@ fi`,
       60,
       signal,
     );
-    const lines = result.stdout.trim().split(/\r?\n/);
-    // Exact `active` remains accepted for older Box command fakes. The real probe always prints an
-    // RPC marker, and an explicit unready marker prevents systemd Type=simple from becoming Online
-    // before the broker has bound and permissioned the command socket.
-    return lines[0] === "active"
-      && !lines.includes("companion-pi-broker-unready")
-      && !lines.includes("companion-pi-rpc-unready")
-      ? "running"
-      : "stopped";
-  }
-
-  /**
-   * Wait for the started unit and its RPC input to actually be ready. A successful `start` only
-   * means systemd accepted the job, and Type=simple becomes active before the broker binds its
-   * socket, so the wait ends only when both signals say the protocol boundary is ready.
-   */
-  async #waitDaemonActive(
-    boxId: string,
-    signal?: AbortSignal,
-  ): Promise<CompanionDaemonState> {
-    const deadline = Date.now() + this.#daemonActiveTimeoutMs;
-    let daemonState = await this.#daemonState(boxId, signal);
-    while (daemonState !== "running" && Date.now() < deadline) {
-      await this.#pause(signal);
-      daemonState = await this.#daemonState(boxId, signal);
-    }
-    return daemonState;
+    return daemonStateFromOutput(result.stdout);
   }
 
   /**
@@ -2352,6 +2345,11 @@ fi`,
     restart: boolean;
     signal?: AbortSignal;
   }): Promise<{ state: "idle"; invocationId: string }> {
+    const readinessAttempts = Math.max(1, Math.ceil(this.#daemonActiveTimeoutMs / 100));
+    const commandTimeoutSeconds = Math.max(
+      120,
+      Math.ceil(this.#daemonActiveTimeoutMs / 1_000) + 5,
+    );
     let started: CommandEnvelope;
     try {
       started = await this.#command(
@@ -2362,8 +2360,11 @@ runtime_credential_file="/run/user/$(id -u)/companion/providers.env"
 trap 'rm -f "$staged_credential_file" "$runtime_credential_file"' EXIT
 auth_file="$HOME/.companion/pi/auth.json"
 if [ ! -f "$auth_file" ]; then echo 'Companion provider auth file is missing' >&2; exit 1; fi
-chmod 700 "$HOME/.companion/pi"
-chmod 600 "$auth_file"
+# A no-op chmod still dirties metadata on a restored Box snapshot and makes Pi's next reads take tens
+# of seconds. Preserve the security gate without touching already-correct inodes on every wake.
+[ "$(stat -c '%a' "$HOME/.companion/pi" 2>/dev/null || true)" = 700 ] \
+  || chmod 700 "$HOME/.companion/pi"
+[ "$(stat -c '%a' "$auth_file" 2>/dev/null || true)" = 600 ] || chmod 600 "$auth_file"
 ${PREPARE_USER_BUS}
 runtime_credential_dir="$XDG_RUNTIME_DIR/companion"
 runtime_credential_file="$runtime_credential_dir/providers.env"
@@ -2380,8 +2381,32 @@ chmod 600 "$runtime_credential_file"
 systemctl --user daemon-reload
 systemctl --user reset-failed companion-pi-daemon.service >/dev/null 2>&1 || true
 systemctl --user ${input.restart ? "restart" : "start"} companion-pi-daemon.service
-trap - EXIT`,
-        120,
+trap - EXIT
+# Starting another Box command while Pi faults its image pages back in can stretch a one-second boot
+# past thirty seconds. Keep readiness in this same command so the daemon starts without competing
+# provider command processes, and return only the same safe markers used by ordinary status probes.
+companion_pi_socket="$HOME/${COMPANION_PI_BROKER_SOCKET_PATH}"
+companion_pi_ready=no
+for companion_pi_probe in $(seq 1 ${readinessAttempts}); do
+  companion_pi_state="$(systemctl --user is-active companion-pi-daemon.service 2>/dev/null || true)"
+  companion_pi_invocation="$(systemctl --user show companion-pi-daemon.service -p InvocationID --value 2>/dev/null || true)"
+  companion_pi_socket_mode="$(stat -c '%a' "$companion_pi_socket" 2>/dev/null || true)"
+  if [ "$companion_pi_state" = active ] &&
+    [ -n "$companion_pi_invocation" ] &&
+    [ -S "$companion_pi_socket" ] &&
+    [ "$companion_pi_socket_mode" = 600 ]; then
+    companion_pi_ready=yes
+    break
+  fi
+  if [ "$companion_pi_probe" -lt ${readinessAttempts} ]; then sleep 0.1; fi
+done
+printf '%s\n' "$companion_pi_state"
+if [ "$companion_pi_ready" = yes ]; then
+  printf '%s\n' companion-pi-broker-ready
+else
+  printf '%s\n' companion-pi-broker-unready
+fi`,
+        commandTimeoutSeconds,
         input.signal,
       );
     } catch (error) {
@@ -2395,7 +2420,7 @@ trap - EXIT`,
         502,
       );
     }
-    const daemonState = await this.#waitDaemonActive(input.boxId, input.signal);
+    const daemonState = daemonStateFromOutput(started.stdout);
     if (daemonState !== "running") {
       throw new BoxRuntimeProviderError(
         `${PI_DAEMON_FAILURE_MESSAGE}${await this.#daemonFailureDetail(input.boxId, input.signal)}`,
@@ -2794,6 +2819,21 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
 
   async stopPiDaemon(input: { boxId: string; signal?: AbortSignal }): Promise<void> {
     await this.#deactivatePiDaemon(input);
+  }
+
+  async clearPersistedProviderAuth(input: { boxId: string; signal?: AbortSignal }): Promise<void> {
+    const cleared = await this.#command(
+      input.boxId,
+      `set -euo pipefail
+rm -f "$HOME/.companion/pi/auth.json" \
+  "$HOME/.companion/runtime/state/providers.env" \
+  "/run/user/$(id -u)/companion/providers.env"`,
+      60,
+      input.signal,
+    );
+    if (!cleared.success) {
+      throw new BoxRuntimeProviderError("Persisted provider credentials failed to clear", 502);
+    }
   }
 
   async piDaemonStatus(input: { boxId: string; signal?: AbortSignal }): Promise<{

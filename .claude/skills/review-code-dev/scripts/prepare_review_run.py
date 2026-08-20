@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare a non-committable artifact directory for Mega Code Review."""
+"""Prepare a non-committable artifact directory for Review Code."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Any
 
 
 ARTIFACT_ROOT = Path("plans/review-code-dev")
-EXCLUDE_MARKER = "# Mega Code Review artifacts"
+EXCLUDE_MARKER = "# Review Code artifacts"
 EXCLUDE_LINES = ("/plans/review-code-dev/",)
 
 
@@ -94,7 +94,7 @@ def main() -> int:
     cwd = Path(args.cwd).resolve()
     repo = detect_repo(cwd)
     if repo is None:
-        raise SystemExit("Mega Code Review requires a Git repository for non-committable artifacts.")
+        raise SystemExit("Review Code requires a Git repository for non-committable artifacts.")
 
     tracked = tracked_artifacts(repo)
     if tracked:

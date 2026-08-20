@@ -7,7 +7,7 @@ import { COMPANION_PI_BROKER_SOURCE } from "./companionPiBrokerSource";
  * Bump when the daemon wrapper or systemd unit changes without a broker/extension source change.
  * Overlay writes are the cheap in-place path for companions that are already running.
  */
-export const COMPANION_PI_OVERLAY_REVISION = 1;
+export const COMPANION_PI_OVERLAY_REVISION = 4;
 
 /** What a Box reports after `ensure-pi-layout.sh`. */
 export type CompanionPiLayoutRefresh = "none" | "overlay" | "base";

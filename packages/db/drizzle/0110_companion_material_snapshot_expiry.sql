@@ -773,7 +773,7 @@ REVOKE ALL ON FUNCTION public.companion_runtime_prepare_queued_turn_material(big
 --> statement-breakpoint
 
 -- The release migration lands before every Runtime replica has necessarily restarted. The old
--- executor can finish a lease it already owns, but it cannot write the 0109 staged-material ledger.
+-- executor can finish a lease it already owns, but it cannot write the 0110 staged-material ledger.
 -- Before a new executor takes over such work, rewind every checkpoint past the staging boundary
 -- that would otherwise start or publish Pi with a ledger the old binary never recorded.
 CREATE FUNCTION public.companion_runtime_repair_legacy_material_work(p_gate_epoch bigint)
@@ -878,7 +878,7 @@ ALTER FUNCTION public.companion_runtime_claim_work(text, integer, integer, bigin
   RENAME TO companion_runtime_claim_work_without_material_guard;
 --> statement-breakpoint
 
--- Pre-0109 executors keep calling this exact signature. Quarantine them after migration so they
+-- Pre-0110 executors keep calling this exact signature. Quarantine them after migration so they
 -- cannot repeatedly complete proof-less Starts during the rolling deploy. Already-held leases are
 -- unaffected and can reach a normal checkpoint or expiry for the versioned claimer to recover.
 CREATE FUNCTION public.companion_runtime_claim_work(

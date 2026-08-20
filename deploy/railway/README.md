@@ -167,8 +167,8 @@ this two-phase sequence from one immutable commit:
 5. Require API `/health`, runtime `/healthz`, login, Skills browser smoke, and public package checks.
 6. Leave Companions disabled until the Runtime v2 cutover below is complete.
 
-For the 0109 credential-snapshot migration, step 3 intentionally quarantines new claims from
-pre-0109 runtime replicas while allowing their existing leases to finish or expire. Deploy runtime
+For the 0110 credential-snapshot migration, step 3 intentionally quarantines new claims from
+pre-0110 runtime replicas while allowing their existing leases to finish or expire. Deploy runtime
 from the same commit promptly in step 4; its versioned claimer rewinds and restages any expired
 legacy operation/settings work that crossed staging without the new expiry ledger. Never restore
 the legacy claim path or publish material metadata manually during this window.

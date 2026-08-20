@@ -1,10 +1,37 @@
 import { describe, expect, it, vi } from "vitest";
 import { BoxRuntimeAdapterError, type BoxRuntimeLifecycleClient, type CompanionBoxRuntimeV2 } from "@companion/box-runtime";
+import type { RuntimeProcessLog } from "@companion/companion-runtime";
 
-import { createRuntimeBoxControl, createRuntimePiControl } from "./boxAdapters";
+import {
+  createRuntimeBoxControl,
+  createRuntimePiControl,
+  RUNTIME_IMAGE_WAIT_MS,
+  type RuntimeImageSource,
+} from "./boxAdapters";
 
 const signal = new AbortController().signal;
 const deadlineAt = new Date("2027-01-01T00:00:00.000Z");
+
+function runtimeImage(overrides: Partial<RuntimeImageSource> = {}): RuntimeImageSource {
+  return {
+    expectedName: () => "companion-l14-aaaaaaaaaaaa",
+    cloneName: () => null,
+    initialResolution: async () => ({ outcome: "none" }),
+    ...overrides,
+  };
+}
+
+function capturingLog(): { log: RuntimeProcessLog; records: Record<string, unknown>[] } {
+  const records: Record<string, unknown>[] = [];
+  return {
+    records,
+    log: {
+      error(record) { records.push({ level: "error", ...record }); },
+      warn(record) { records.push({ level: "warn", ...record }); },
+      info(record) { records.push({ level: "info", ...record }); },
+    },
+  };
+}
 
 function lifecycle(overrides: Partial<BoxRuntimeLifecycleClient> = {}): BoxRuntimeLifecycleClient {
   return {
@@ -94,7 +121,8 @@ describe("runtime Box/Pi port adapters", () => {
     const control = createRuntimeBoxControl({
       lifecycle: lifecycle({ createOrRecoverGenerationBox }),
       runtime: () => boxRuntime(),
-      runtimeImageName: () => "companion-l14-aaaaaaaaaaaa",
+      runtimeImage: runtimeImage({ cloneName: () => "companion-l14-aaaaaaaaaaaa" }),
+
       now: () => deadlineAt.getTime() - 10_000,
     });
 
@@ -112,6 +140,145 @@ describe("runtime Box/Pi port adapters", () => {
     expect(createOrRecoverGenerationBox).toHaveBeenNthCalledWith(2, expect.not.objectContaining({
       from: expect.anything(),
     }));
+  });
+
+  it("waits for the baker's initial resolution within a bound, then creates without from", async () => {
+    vi.useFakeTimers();
+    try {
+      const createOrRecoverGenerationBox = vi.fn(async () => ({
+        outcome: "created" as const,
+        boxId: "bx_23456789",
+        name: "canonical",
+      }));
+      const captured = capturingLog();
+      const control = createRuntimeBoxControl({
+        lifecycle: lifecycle({ createOrRecoverGenerationBox }),
+        runtime: () => boxRuntime(),
+        runtimeImage: runtimeImage({
+          initialResolution: () => new Promise(() => {}),
+        }),
+        log: captured.log,
+        now: () => Date.now(),
+      });
+
+      const pending = control.createGenerationBox({
+        companionId: "11111111-1111-4111-8111-111111111111",
+        generation: 4n,
+        ttlSeconds: 21_600,
+        deadlineAt,
+        signal,
+      });
+      await vi.advanceTimersByTimeAsync(RUNTIME_IMAGE_WAIT_MS);
+      await expect(pending).resolves.toMatchObject({ outcome: "created", boxId: "bx_23456789" });
+
+      expect(createOrRecoverGenerationBox).toHaveBeenCalledTimes(1);
+      expect(createOrRecoverGenerationBox).toHaveBeenCalledWith(expect.not.objectContaining({
+        from: expect.anything(),
+      }));
+      expect(captured.records).toEqual([expect.objectContaining({
+        level: "info",
+        event: "runtime.box.create",
+        companionId: "11111111-1111-4111-8111-111111111111",
+        generation: 4,
+        expectedImage: "companion-l14-aaaaaaaaaaaa",
+        fromImage: null,
+        fallbackReason: "baker_pending",
+        imageWaitMs: RUNTIME_IMAGE_WAIT_MS,
+        outcome: "created",
+      })]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never sleeps when the baker already resolved to no snapshot", async () => {
+    const createOrRecoverGenerationBox = vi.fn(async () => ({
+      outcome: "created" as const,
+      boxId: "bx_23456789",
+      name: "canonical",
+    }));
+    const captured = capturingLog();
+    const control = createRuntimeBoxControl({
+      lifecycle: lifecycle({ createOrRecoverGenerationBox }),
+      runtime: () => boxRuntime(),
+      runtimeImage: runtimeImage(),
+      log: captured.log,
+      now: () => 1_000_000,
+    });
+
+    await expect(control.createGenerationBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      generation: 4n,
+      ttlSeconds: 21_600,
+      deadlineAt,
+      signal,
+    })).resolves.toMatchObject({ outcome: "created", boxId: "bx_23456789" });
+
+    expect(createOrRecoverGenerationBox).toHaveBeenCalledTimes(1);
+    expect(createOrRecoverGenerationBox).toHaveBeenCalledWith(expect.not.objectContaining({
+      from: expect.anything(),
+    }));
+    expect(captured.records).toEqual([expect.objectContaining({
+      event: "runtime.box.create",
+      fromImage: null,
+      fallbackReason: "no_snapshot",
+      imageWaitMs: 0,
+    })]);
+  });
+
+  it("clones the parent image the baker resolved mid-race", async () => {
+    const createOrRecoverGenerationBox = vi.fn(async () => ({
+      outcome: "created" as const,
+      boxId: "bx_23456789",
+      name: "canonical",
+    }));
+    let clone: string | null = null;
+    const control = createRuntimeBoxControl({
+      lifecycle: lifecycle({ createOrRecoverGenerationBox }),
+      runtime: () => boxRuntime(),
+      runtimeImage: runtimeImage({
+        cloneName: () => clone,
+        initialResolution: async () => {
+          clone = "companion-l13-bbbbbbbbbbbb";
+          return { outcome: "parent", name: "companion-l13-bbbbbbbbbbbb" };
+        },
+      }),
+      now: () => deadlineAt.getTime() - 10_000,
+    });
+
+    await expect(control.createGenerationBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      generation: 4n,
+      ttlSeconds: 21_600,
+      deadlineAt,
+      signal,
+    })).resolves.toMatchObject({ outcome: "created", boxId: "bx_23456789" });
+
+    expect(createOrRecoverGenerationBox).toHaveBeenCalledWith(expect.objectContaining({
+      from: "companion-l13-bbbbbbbbbbbb",
+    }));
+  });
+
+  it("propagates abort while waiting on the baker's initial resolution", async () => {
+    const controller = new AbortController();
+    const control = createRuntimeBoxControl({
+      lifecycle: lifecycle(),
+      runtime: () => boxRuntime(),
+      runtimeImage: runtimeImage({
+        initialResolution: () => new Promise(() => {}),
+      }),
+      now: () => deadlineAt.getTime() - 10_000,
+    });
+
+    const pending = control.createGenerationBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      generation: 4n,
+      ttlSeconds: 21_600,
+      deadlineAt,
+      signal: controller.signal,
+    });
+    controller.abort();
+    await expect(pending).rejects.toThrow();
   });
 
   it("keeps provisioned and cloning in the provisioning bucket until the Box is ready", async () => {

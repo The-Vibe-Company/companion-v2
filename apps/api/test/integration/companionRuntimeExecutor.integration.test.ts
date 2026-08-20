@@ -1977,7 +1977,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
-  it("quarantines pre-0109 claimers while the material-aware executor can claim the work", async () => {
+  it("quarantines pre-0110 claimers while the material-aware executor can claim the work", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     let companionId = "";
     try {
@@ -2319,7 +2319,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         where companion_id = ${companionId}::uuid
       `;
 
-      // This is the observation shape an executor deployed before 0109 can still write.
+      // This is the observation shape an executor deployed before 0110 can still write.
       await sql`
         update companion_runtime_instances
         set pi_invocation_id = ${newPi},

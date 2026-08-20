@@ -15,11 +15,33 @@ const BOX_READY_TIMEOUT_MS = 180_000;
 const SNAPSHOT_READY_TIMEOUT_MS = 600_000;
 const READY_STATES = new Set(["ready", "idle", "running"]);
 
+export type CompanionRuntimeImageInitialResolution =
+  | { outcome: "ready"; name: string }
+  | { outcome: "parent"; name: string }
+  | { outcome: "none" };
+
+export type CompanionRuntimeImageBakerEvent =
+  | {
+    kind: "resolved";
+    outcome: "ready" | "parent" | "none";
+    image: string | null;
+    durationMs: number;
+  }
+  | { kind: "bake_started"; expectedImage: string; parentImage: string | null }
+  | { kind: "bake_completed"; image: string; ready: boolean; durationMs: number }
+  | { kind: "snapshot_pruned"; name: string };
+
 export interface CompanionRuntimeImageBaker {
   readonly identity: CompanionPiLayoutIdentity;
   readyName(): string | null;
   /** Current image if baked, otherwise the previous companion snapshot a new Box can clone. */
   cloneName(): string | null;
+  /**
+   * Once-settled result of the first resolution attempt: a ready image, a cloneable parent, or
+   * nothing available (also after a failed first attempt or an early abort). It settles before any
+   * bake work, so awaiting it never blocks on a bake.
+   */
+  initialResolution(): Promise<CompanionRuntimeImageInitialResolution>;
   ensure(signal: AbortSignal): Promise<{ name: string; ready: boolean; baked: boolean }>;
 }
 
@@ -30,17 +52,38 @@ export function createCompanionRuntimeImageBaker(input: {
   now?: () => number;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   onAttemptError?: (error: unknown) => void;
+  /** Cleanup failure never fails a successful bake; the next run retries. This is how it is seen. */
+  onCleanupError?: (error: unknown, cleanup: "baker_box_delete" | "snapshot_prune") => void;
+  onEvent?: (event: CompanionRuntimeImageBakerEvent) => void;
 }): CompanionRuntimeImageBaker {
   const now = input.now ?? Date.now;
   const sleep = input.sleep ?? defaultSleep;
   let readyName: string | null = null;
   let parentName: string | null = null;
   let inflight: Promise<{ name: string; ready: boolean; baked: boolean }> | null = null;
+  const startedAt = now();
+  let settleInitial: ((resolution: CompanionRuntimeImageInitialResolution) => void) | null = null;
+  const initial = new Promise<CompanionRuntimeImageInitialResolution>((resolve) => {
+    settleInitial = resolve;
+  });
+  const resolved = (resolution: CompanionRuntimeImageInitialResolution): void => {
+    const settle = settleInitial;
+    if (!settle) return;
+    settleInitial = null;
+    input.onEvent?.({
+      kind: "resolved",
+      outcome: resolution.outcome,
+      image: resolution.outcome === "none" ? null : resolution.name,
+      durationMs: Math.max(0, now() - startedAt),
+    });
+    settle(resolution);
+  };
 
   const baker: CompanionRuntimeImageBaker = {
     identity: input.identity,
     readyName: () => readyName,
     cloneName: () => readyName ?? parentName,
+    initialResolution: () => initial,
     async ensure(signal) {
       const pending = inflight ??= (async () => {
         try {
@@ -57,6 +100,9 @@ export function createCompanionRuntimeImageBaker(input: {
                 onParent: (name) => {
                   parentName = name;
                 },
+                onResolved: resolved,
+                onCleanupError: input.onCleanupError,
+                ...(input.onEvent ? { onEvent: input.onEvent } : {}),
               });
               if (result.ready) {
                 readyName = result.name;
@@ -64,12 +110,15 @@ export function createCompanionRuntimeImageBaker(input: {
               }
               input.onAttemptError?.(new Error("The companion runtime image was not ready after a bake attempt."));
             } catch (error) {
+              // The first resolution is sticky: a racing Box create must not wait for a retry loop.
+              resolved({ outcome: "none" });
               if (signal.aborted) throw error;
               input.onAttemptError?.(error);
             }
             await sleep(BAKE_RETRY_INTERVAL_MS, signal);
           }
         } finally {
+          resolved({ outcome: "none" });
           inflight = null;
         }
       })();
@@ -87,6 +136,9 @@ async function ensureImage(input: {
   sleep: (ms: number, signal: AbortSignal) => Promise<void>;
   signal: AbortSignal;
   onParent?: (name: string) => void;
+  onResolved?: (resolution: CompanionRuntimeImageInitialResolution) => void;
+  onCleanupError?: (error: unknown, cleanup: "baker_box_delete" | "snapshot_prune") => void;
+  onEvent?: (event: CompanionRuntimeImageBakerEvent) => void;
 }): Promise<{ name: string; ready: boolean; baked: boolean }> {
   const current = await input.lifecycle.getNamedSnapshot({
     name: input.identity.imageName,
@@ -94,11 +146,14 @@ async function ensureImage(input: {
     deadlineAt: input.now() + 30_000,
   });
   if (current?.status === "ready") {
+    input.onResolved?.({ outcome: "ready", name: input.identity.imageName });
     return { name: input.identity.imageName, ready: true, baked: false };
   }
   if (current?.status === "saving") {
     const parent = await selectParentSnapshot(input);
     if (parent) input.onParent?.(parent);
+    // Resolve before waiting on the in-flight save: a racing create must never wait on a bake.
+    input.onResolved?.(parent ? { outcome: "parent", name: parent } : { outcome: "none" });
     const settled = await waitNamedSnapshot(input, input.identity.imageName);
     if (settled?.status === "ready") {
       return { name: input.identity.imageName, ready: true, baked: false };
@@ -107,6 +162,13 @@ async function ensureImage(input: {
 
   const parent = await selectParentSnapshot(input);
   if (parent) input.onParent?.(parent);
+  input.onResolved?.(parent ? { outcome: "parent", name: parent } : { outcome: "none" });
+  input.onEvent?.({
+    kind: "bake_started",
+    expectedImage: input.identity.imageName,
+    parentImage: parent ?? null,
+  });
+  const bakeStartedAt = input.now();
   await pruneStaleImages({ ...input, keep: parent ? [parent] : [] });
   let boxId: string | null = null;
   try {
@@ -131,9 +193,21 @@ async function ensureImage(input: {
     }
     const saved = await waitNamedSnapshot(input, input.identity.imageName);
     if (saved?.status !== "ready") {
+      input.onEvent?.({
+        kind: "bake_completed",
+        image: input.identity.imageName,
+        ready: false,
+        durationMs: Math.max(0, input.now() - bakeStartedAt),
+      });
       return { name: input.identity.imageName, ready: false, baked: false };
     }
     await pruneStaleImages({ ...input, keep: parent ? [parent] : [] });
+    input.onEvent?.({
+      kind: "bake_completed",
+      image: input.identity.imageName,
+      ready: true,
+      durationMs: Math.max(0, input.now() - bakeStartedAt),
+    });
     return { name: input.identity.imageName, ready: true, baked: true };
   } finally {
     if (boxId) {
@@ -141,7 +215,9 @@ async function ensureImage(input: {
         boxId,
         deadlineAt: input.now() + 120_000,
         signal: input.signal,
-      }).catch(() => undefined);
+      }).catch((error: unknown) => {
+        input.onCleanupError?.(error, "baker_box_delete");
+      });
     }
   }
 }
@@ -241,6 +317,8 @@ async function pruneStaleImages(input: {
   signal: AbortSignal;
   now: () => number;
   keep?: readonly string[];
+  onCleanupError?: (error: unknown, cleanup: "baker_box_delete" | "snapshot_prune") => void;
+  onEvent?: (event: CompanionRuntimeImageBakerEvent) => void;
 }): Promise<void> {
   const keep = new Set([input.identity.imageName, ...(input.keep ?? [])]);
   const snapshots = await input.lifecycle.listNamedSnapshots({
@@ -250,11 +328,16 @@ async function pruneStaleImages(input: {
   const stale = snapshots.filter((snapshot) =>
     isCompanionRuntimeImageName(snapshot.name) && !keep.has(snapshot.name));
   for (const snapshot of stale) {
-    await input.lifecycle.deleteNamedSnapshot({
-      name: snapshot.name,
-      signal: input.signal,
-      deadlineAt: input.now() + 30_000,
-    }).catch(() => undefined);
+    try {
+      await input.lifecycle.deleteNamedSnapshot({
+        name: snapshot.name,
+        signal: input.signal,
+        deadlineAt: input.now() + 30_000,
+      });
+      input.onEvent?.({ kind: "snapshot_pruned", name: snapshot.name });
+    } catch (error) {
+      input.onCleanupError?.(error, "snapshot_prune");
+    }
   }
 }
 

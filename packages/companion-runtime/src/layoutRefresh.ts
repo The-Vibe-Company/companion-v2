@@ -8,7 +8,8 @@ import type { RuntimeAuthorization } from "./types";
  * are seconds; a pin change still installs in place. Full Box restart remains an explicit user action.
  *
  * This does not persist a new Pi invocation. Attempt work cannot observe instances, so callers that
- * can (health, still at `observing`) record the returned id themselves.
+ * can (health, still at `observing`) record the returned id themselves — with idle proof, per the
+ * companion_runtime_observe_instance health identity rule.
  */
 export async function refreshWarmCompanionLayout(input: {
   session: LeaseSession;

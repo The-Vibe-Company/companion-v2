@@ -36,6 +36,10 @@ describe("semantic Box command shims", () => {
       ["cat '.part0' > '.target'; rm -f '.part0'", "join-file-parts"],
       ["skills.next base64 --decode tar --extract", "prepare-skills"],
       ["staged_credential_file=x; systemctl --user daemon-reload", "start-or-restart-daemon"],
+      [
+        "staged_credential_file=x; systemctl --user daemon-reload; companion-pi-broker-ready companion-pi-broker-unready",
+        "start-or-restart-daemon",
+      ],
       ["companion-pi-broker-ready companion-pi-broker-unready", "daemon-state"],
       [brokerShell({ id: "one", type: "prompt", attemptId: "attempt-1" }), "rpc-command"],
       [brokerShell({

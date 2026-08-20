@@ -100,7 +100,20 @@ export async function handleHealth(
       // Layout refresh is opportunistic on health. The next send retries it on the warm path.
     }
   }
-  await observeHealth(context, { boxState, ...piObservation });
+  // Health may persist a recycled or orphaned Pi identity only with idle proof (migration 0109
+  // mirrors the operation rule). A busy Pi whose live id differs from the durable projection keeps
+  // its observed states but omits the id, so the SQL guard remains a true bug detector.
+  const observedInvocationId = piObservation.piInvocationId;
+  const mayRecordIdentity = observedInvocationId === undefined
+    || observedInvocationId === authorization.piInvocationId
+    || piObservation.piState === "idle";
+  await observeHealth(context, {
+    boxState,
+    ...(piObservation.piState ? { piState: piObservation.piState } : {}),
+    ...(observedInvocationId !== undefined && mayRecordIdentity
+      ? { piInvocationId: observedInvocationId }
+      : {}),
+  });
   return runtimeSucceeded;
 }
 

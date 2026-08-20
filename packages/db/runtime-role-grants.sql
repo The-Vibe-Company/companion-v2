@@ -523,7 +523,7 @@ BEGIN
       ];
     END IF;
 
-    -- 0109 records staged credential expiry and publishes it only after a new Pi invocation.
+    -- 0110 records staged credential expiry and publishes it only after a new Pi invocation.
     IF pg_catalog.to_regprocedure(
       'public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)'
     ) IS NOT NULL THEN

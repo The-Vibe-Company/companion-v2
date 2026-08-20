@@ -12,6 +12,7 @@ import type {
 import type { RuntimePiProjection } from "../piEvents";
 import {
   RUNTIME_LEASE_SECONDS,
+  RuntimeStoreContractError,
   type RuntimeStore,
 } from "../store";
 import type {
@@ -367,6 +368,20 @@ export class MemoryRuntimeStore implements RuntimeStore {
 
   async observeInstance(fence: LeaseFence, input: RuntimeObservationInput): Promise<bigint | null> {
     if (input.expectedSequence !== this.authorization.workCheckpointSequence) return null;
+    // Mirror the companion_runtime_observe_instance health guard: health may refresh typed states
+    // but cannot attach a Box, apply layout/revisions, or replace the Pi identity without idle
+    // proof. Unit tests must see the same RuntimeStoreContractError the SQL contract raises.
+    if (fence.workKind === "health" && (
+      (input.boxId !== undefined && input.boxId !== (this.authorization.boxId ?? undefined))
+      || (input.piInvocationId !== undefined
+        && input.piInvocationId !== (this.authorization.piInvocationId ?? undefined)
+        && input.piState !== "idle")
+      || input.diskLayoutVersion !== undefined
+      || input.appliedSettingsRevision !== undefined
+      || input.appliedSkillsRevision !== undefined
+    )) {
+      throw new RuntimeStoreContractError();
+    }
     const previousPiInvocationId = this.authorization.piInvocationId;
     this.observations.push(input);
     if (input.boxId) this.authorization.boxId = input.boxId;

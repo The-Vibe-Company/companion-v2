@@ -2,6 +2,7 @@ import {
   AsciiBoxCompanionRuntime,
   AsciiBoxMaintenanceClient,
   createCompanionRuntimeImageBaker,
+  type AsciiBoxMaintenanceClientOptions,
   type BoxRuntimeLifecycleClient,
   type CompanionBoxRuntimeV2,
   type CompanionRuntimeSkill,
@@ -59,7 +60,10 @@ export interface RuntimeArchiveStorage {
 export interface RuntimeProductionFactories {
   createDatabase(config: RuntimeServiceConfig): RuntimeDatabase;
   createStore(database: RuntimeDatabase): RuntimeStore;
-  createLifecycle(env: NodeJS.ProcessEnv): BoxRuntimeLifecycleClient;
+  createLifecycle(
+    env: NodeJS.ProcessEnv,
+    options?: AsciiBoxMaintenanceClientOptions,
+  ): BoxRuntimeLifecycleClient;
   createBoxRuntime(env: NodeJS.ProcessEnv): CompanionBoxRuntimeV2;
   createArchiveStorage(): RuntimeArchiveStorage;
   loadBundledSkill(): Promise<CompanionRuntimeSkill>;
@@ -74,7 +78,7 @@ export interface BuildProductionRuntimeOptions {
 const defaultFactories: RuntimeProductionFactories = {
   createDatabase: createRuntimeDatabase,
   createStore: (database) => new PostgresRuntimeStore(database.sql),
-  createLifecycle: (env) => new AsciiBoxMaintenanceClient(env),
+  createLifecycle: (env, options) => new AsciiBoxMaintenanceClient(env, options),
   createBoxRuntime: (env) => new AsciiBoxCompanionRuntime(env),
   createArchiveStorage: () => {
     const config = getStorageConfig();
@@ -144,7 +148,17 @@ export async function buildProductionRuntimeService(
     }
 
     const boxEnv = runtimeBoxEnvironment(config, env);
-    const lifecycle = factories.createLifecycle(boxEnv);
+    const lifecycle = factories.createLifecycle(boxEnv, {
+      onTiming: (sample) => {
+        log.info({
+          ts: new Date().toISOString(),
+          event: "runtime.box.provider_call",
+          operation: sample.operation,
+          durationMs: sample.durationMs,
+          ok: sample.ok,
+        });
+      },
+    });
     // Staging is a multi-request transaction with one shared abort budget. Keep adapter instances
     // call-local so that budget cannot leak into a later lifecycle or broker operation.
     const freshRuntime = (): CompanionBoxRuntimeV2 => factories.createBoxRuntime(boxEnv);
@@ -164,6 +178,47 @@ export async function buildProductionRuntimeService(
           event: "companion_runtime_image_baker_failed",
           error: describeThrownError(error),
         });
+      },
+      onCleanupError: (error, cleanup) => {
+        log.warn({
+          ts: new Date().toISOString(),
+          event: cleanup === "baker_box_delete"
+            ? "companion_runtime_baker_box_delete_failed"
+            : "companion_runtime_baker_cleanup_failed",
+          error: describeThrownError(error),
+        });
+      },
+      onEvent: (event) => {
+        if (event.kind === "resolved") {
+          log.info({
+            ts: new Date().toISOString(),
+            event: "companion_runtime_image_baker_resolved",
+            outcome: event.outcome,
+            image: event.image,
+            durationMs: event.durationMs,
+          });
+        } else if (event.kind === "bake_started") {
+          log.info({
+            ts: new Date().toISOString(),
+            event: "companion_runtime_image_baker_bake_started",
+            expectedImage: event.expectedImage,
+            parentImage: event.parentImage,
+          });
+        } else if (event.kind === "bake_completed") {
+          log.info({
+            ts: new Date().toISOString(),
+            event: "companion_runtime_image_baker_bake_completed",
+            image: event.image,
+            ready: event.ready,
+            durationMs: event.durationMs,
+          });
+        } else {
+          log.info({
+            ts: new Date().toISOString(),
+            event: "companion_runtime_image_baker_snapshot_pruned",
+            image: event.name,
+          });
+        }
       },
     });
     void baker.ensure(bakerAbortController.signal).catch((error) => {
@@ -202,7 +257,12 @@ export async function buildProductionRuntimeService(
     const adapters = {
       lifecycle,
       runtime: freshRuntime,
-      runtimeImageName: () => baker.cloneName(),
+      runtimeImage: {
+        expectedName: () => baker.identity.imageName,
+        cloneName: () => baker.cloneName(),
+        initialResolution: () => baker.initialResolution(),
+      },
+      log,
     };
     const kernel = factories.createKernel({
       store,

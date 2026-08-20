@@ -10,6 +10,8 @@ export const DEFERRED_GATES_EXIT_CODE = 2;
 const HYGIENE_TESTS = [
   "scripts/agent-browser-box-center.test.mjs",
   "scripts/companion-runtime-canary.test.mjs",
+  "scripts/box-provider-e2e.test.mjs",
+  "scripts/update-pr-box-e2e-report.test.mjs",
   "scripts/companions-env-defaults.test.mjs",
   "scripts/railway-config.test.mjs",
   "scripts/ci-scope.test.mjs",

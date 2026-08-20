@@ -54,8 +54,8 @@ For ordinary compatible Runtime v2 releases, use rolling deployment. One runtime
 SIGTERM stops new claims, reaches bounded safe checkpoints, and releases or loses its leases; another
 replica must take over within 45 seconds. Do not clear lease rows or edit epochs manually.
 
-Migration 0109 is deliberately migration-first during that rolling deploy. As soon as it commits,
-the pre-0109 four-argument runtime claimer receives no new work; already-held leases remain valid.
+Migration 0110 is deliberately migration-first during that rolling deploy. As soon as it commits,
+the pre-0110 four-argument runtime claimer receives no new work; already-held leases remain valid.
 Deploy the matching runtime immediately after the release job. If an old replica loses a lease after
 staging without the new expiry ledger, the five-argument claimer rewinds that operation/settings
 checkpoint and restages before Pi is recycled. Do not re-enable the legacy claimer or manually mark

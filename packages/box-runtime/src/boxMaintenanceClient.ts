@@ -567,6 +567,19 @@ function checkedOperation(
   return operation;
 }
 
+export type BoxProviderCallOperation = "list_boxes" | "create_box" | "apply_box_settings";
+
+export interface BoxProviderCallTiming {
+  operation: BoxProviderCallOperation;
+  durationMs: number;
+  ok: boolean;
+}
+
+export interface AsciiBoxMaintenanceClientOptions {
+  /** Structured per-call provider timings; no tokens, URLs, or payloads. */
+  onTiming?: (sample: BoxProviderCallTiming) => void;
+}
+
 /**
  * Narrow Box lifecycle client used by durable purge/runtime code. It exposes generation-qualified
  * create/recovery and permanent deletion, but no command, file, desktop, archive, or Pi surface.
@@ -574,8 +587,9 @@ function checkedOperation(
 export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
   readonly #apiKey: string;
   readonly #baseUrl: string;
+  readonly #onTiming: ((sample: BoxProviderCallTiming) => void) | undefined;
 
-  constructor(env: NodeJS.ProcessEnv = process.env) {
+  constructor(env: NodeJS.ProcessEnv = process.env, options?: AsciiBoxMaintenanceClientOptions) {
     const apiKey = env.COMPANION_BOX_API_KEY?.trim();
     if (!apiKey) {
       throw new BoxRuntimeConfigurationError(
@@ -584,6 +598,20 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
     }
     this.#apiKey = apiKey;
     this.#baseUrl = (env.COMPANION_BOX_API_BASE?.trim() || DEFAULT_BOX_API_BASE).replace(/\/+$/, "");
+    this.#onTiming = options?.onTiming;
+  }
+
+  async #timed<T>(operation: BoxProviderCallOperation, call: () => Promise<T>): Promise<T> {
+    if (!this.#onTiming) return await call();
+    const startedAt = Date.now();
+    try {
+      const result = await call();
+      this.#onTiming({ operation, durationMs: Date.now() - startedAt, ok: true });
+      return result;
+    } catch (error) {
+      this.#onTiming({ operation, durationMs: Date.now() - startedAt, ok: false });
+      throw error;
+    }
   }
 
   #requestSignal(control: BoxCallControl): {
@@ -684,7 +712,8 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
   }
 
   async listAllBoxes(input: BoxCallControl = {}): Promise<BoxMaintenanceBox[]> {
-    const boxes: BoxMaintenanceBox[] = [];
+    return await this.#timed("list_boxes", async () => {
+      const boxes: BoxMaintenanceBox[] = [];
     const seenBoxIds = new Set<string>();
     const seenCursors = new Set<string>();
     let cursor: string | null = null;
@@ -734,7 +763,8 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
       }
     } while (cursor !== null);
 
-    return boxes;
+      return boxes;
+    });
   }
 
   async requestPermanentDeletion(input: {
@@ -836,7 +866,7 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
       };
     }
 
-    const response = await this.#request(
+    const response = await this.#timed("create_box", async () => await this.#request(
       "/boxes",
       {
         method: "POST",
@@ -851,7 +881,7 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
       },
       input,
       true,
-    );
+    ));
     if (response.status !== 202) {
       throw invalidProviderResponse(providerEnvelopeDetail({
         summary: "Box API returned an unexpected create status",
@@ -886,7 +916,7 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
     const boxId = assertBoxId(input.boxId);
     const name = companionGenerationBoxName(input);
     const ttlSeconds = assertBoxTtlSeconds(input.ttlSeconds);
-    const response = await this.#request(
+    const response = await this.#timed("apply_box_settings", async () => await this.#request(
       `/boxes/${encodeURIComponent(boxId)}`,
       {
         method: "PATCH",
@@ -894,7 +924,7 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
       },
       input,
       true,
-    );
+    ));
     if (response.status !== 200) {
       throw invalidProviderResponse(providerEnvelopeDetail({
         summary: "Box API returned an unexpected update status",
@@ -924,7 +954,7 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
 
   async createEphemeralBox(input: BoxEphemeralCreateInput): Promise<{ boxId: string }> {
     const ttlSeconds = Math.min(assertBoxTtlSeconds(input.ttlSeconds), BOX_UNASSIGNED_CREATE_TTL_SECONDS);
-    const response = await this.#request(
+    const response = await this.#timed("create_box", async () => await this.#request(
       "/boxes",
       {
         method: "POST",
@@ -936,7 +966,7 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
       },
       input,
       true,
-    );
+    ));
     if (response.status !== 202) {
       throw invalidProviderResponse(providerEnvelopeDetail({
         summary: "Box API returned an unexpected create status",

@@ -20,6 +20,8 @@ Required files:
 Optional files:
 
 - `delegation-brief.md`
+- `agent-budget.json`
+- `phase-timing.json`
 - `subagents.md`
 - `scope-audit.md`
 - `rejected-findings.md`
@@ -32,7 +34,7 @@ Optional files:
 - `notes.md`
 - `pr-link.md`
 
-`delegation-brief.md` and `subagents.md` are required when the main context launches an isolated primary reviewer.
+`delegation-brief.md`, `agent-budget.json`, `phase-timing.json`, and `subagents.md` are required when the main context launches an isolated primary reviewer.
 
 ## Non-Committable Artifacts
 
@@ -59,10 +61,10 @@ Use this structure:
 # Sub-Reviewer Log
 
 ## Plan
-| ID | Adapter | Focus | Scope | Reason |
-| --- | --- | --- | --- | --- |
-| primary-reviewer | helper | full review | context.json | isolate review context |
-| security-1 | helper | auth/input validation | src/api/* | security-sensitive diff |
+| ID | Adapter | Requested model/effort | Effective model/effort | Focus | Scope | Reason |
+| --- | --- | --- | --- | --- | --- | --- |
+| primary-reviewer | helper | gpt-5.6-luna/max | unknown | full review | context.json | isolate review context |
+| security-1 | helper | gpt-5.6-luna/max | unknown | auth/input validation | src/api/* | security-sensitive diff |
 
 ## Results
 | ID | Status | Candidate findings | Accepted findings | Notes |
@@ -78,7 +80,7 @@ Use this structure:
 <short pasted summary, not hidden reasoning>
 ```
 
-`Adapter` is the mechanism used: `helper`, `child-context`, `agent-process`, `inline`, or a clearer runtime-specific label when useful. Do not include hidden reasoning or secret values.
+`Adapter` is the mechanism used: `helper`, `child-context`, `agent-process`, `inline`, or a clearer runtime-specific label when useful. Use `unknown` for unreported effective routing and `null` for unavailable usage. Do not include hidden reasoning or secret values.
 
 ## candidate-findings.json
 

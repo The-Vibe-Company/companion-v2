@@ -4,19 +4,33 @@ import {
   type BoxRuntimeLifecycleClient,
   type CompanionBoxRuntimeV2,
   type BoxState,
+  type CompanionRuntimeImageInitialResolution,
 } from "@companion/box-runtime";
 import type {
   BrokerWriteOutcome,
   RuntimeBoxControl,
   RuntimePiControl,
+  RuntimeProcessLog,
 } from "@companion/companion-runtime";
+
+/** How long a Box create may wait for the baker's first snapshot resolution before cloning nothing. */
+export const RUNTIME_IMAGE_WAIT_MS = 10_000;
+
+/** The baker as seen by Box creation: a bounded look at whether a clone source exists yet. */
+export interface RuntimeImageSource {
+  expectedName(): string;
+  cloneName(): string | null;
+  initialResolution(): Promise<CompanionRuntimeImageInitialResolution>;
+}
 
 export interface RuntimeBoxAdapterOptions {
   lifecycle: BoxRuntimeLifecycleClient;
   /** Fresh adapter per port call prevents one staging call's signal budget leaking into another. */
   runtime(): CompanionBoxRuntimeV2;
-  /** Named snapshot to clone when the baker has a ready layout image. */
-  runtimeImageName?: () => string | null;
+  /** Named snapshot source to clone when the baker has a ready layout image. */
+  runtimeImage?: RuntimeImageSource;
+  /** Structured create evidence: fromImage, fallback reason, and timings. Never secrets. */
+  log?: RuntimeProcessLog;
   /** Each provider operation gets a bound even when delete/health work has no turn deadline. */
   providerDeadlineMs?: number;
   now?: () => number;
@@ -24,6 +38,7 @@ export interface RuntimeBoxAdapterOptions {
 
 export function createRuntimeBoxControl(options: RuntimeBoxAdapterOptions): RuntimeBoxControl {
   const deadline = providerDeadlineFactory(options);
+  const now = options.now ?? Date.now;
   return {
     async findGenerationBoxes(input) {
       const result = await options.lifecycle.findGenerationBoxes({
@@ -35,27 +50,65 @@ export function createRuntimeBoxControl(options: RuntimeBoxAdapterOptions): Runt
       return normalizeDiscovery(result);
     },
     async createGenerationBox(input) {
-      const from = options.runtimeImageName?.() ?? undefined;
-      const create = (image?: string) => options.lifecycle.createOrRecoverGenerationBox({
+      const startedAt = now();
+      const image = options.runtimeImage;
+      let from = image?.cloneName() ?? undefined;
+      let imageWaitMs = 0;
+      let fallbackReason: "baker_pending" | "no_snapshot" | "unknown_snapshot_fallback" | undefined;
+      if (image && from === undefined) {
+        // The baker resolves its first snapshot lookup within seconds; beyond this bound a cold
+        // install is cheaper than an unbounded wait, and the provider deadline still has ≥20s.
+        const waitStartedAt = now();
+        const resolution = await Promise.race([
+          image.initialResolution().then((value) => ({ kind: "resolved" as const, value })),
+          abortableWait(RUNTIME_IMAGE_WAIT_MS, input.signal).then(() => ({ kind: "timeout" as const })),
+        ]);
+        imageWaitMs = now() - waitStartedAt;
+        if (resolution.kind === "timeout") {
+          fallbackReason = "baker_pending";
+        } else if (resolution.value.outcome === "none") {
+          fallbackReason = "no_snapshot";
+        }
+        // The baker settles its first resolution before its own ready-name assignment lands, so
+        // the resolved name is itself valid clone evidence when cloneName() has not caught up.
+        from = image.cloneName()
+          ?? (resolution.kind === "resolved" && resolution.value.outcome !== "none"
+            ? resolution.value.name
+            : undefined);
+      }
+      const create = (fromImage?: string) => options.lifecycle.createOrRecoverGenerationBox({
         companionId: input.companionId,
         generation: generationNumber(input.generation),
         ttlSeconds: input.ttlSeconds,
         deadlineAt: deadline(input.deadlineAt),
         signal: input.signal,
-        ...(image ? { from: image } : {}),
+        ...(fromImage ? { from: fromImage } : {}),
       });
+      let created: Awaited<ReturnType<typeof create>>;
       try {
-        const result = await create(from);
-        return result.outcome === "created"
-          ? result
-          : { ...normalizeDiscovery(result), outcome: "recovered", boxId: result.boxId };
+        created = await create(from);
       } catch (error) {
         if (!from || !isUnknownSnapshot(error)) throw error;
-        const result = await create();
-        return result.outcome === "created"
-          ? result
-          : { ...normalizeDiscovery(result), outcome: "recovered", boxId: result.boxId };
+        fallbackReason = "unknown_snapshot_fallback";
+        from = undefined;
+        created = await create();
       }
+      const result = created.outcome === "created"
+        ? created
+        : { ...normalizeDiscovery(created), outcome: "recovered" as const, boxId: created.boxId };
+      options.log?.info({
+        ts: new Date(now()).toISOString(),
+        event: "runtime.box.create",
+        companionId: input.companionId,
+        generation: generationNumber(input.generation),
+        expectedImage: image?.expectedName() ?? null,
+        fromImage: from ?? null,
+        ...(fallbackReason ? { fallbackReason } : {}),
+        imageWaitMs,
+        durationMs: now() - startedAt,
+        outcome: result.outcome,
+      });
+      return result;
     },
     async applyGenerationBoxSettings(input) {
       await options.lifecycle.applyGenerationBoxSettings({
@@ -229,6 +282,21 @@ function cursorNumber(value: bigint): number {
 function isUnknownSnapshot(error: unknown): boolean {
   if (!(error instanceof BoxRuntimeAdapterError)) return false;
   return error.providerCode === "unknown_snapshot" || error.stableCode === "box_not_found";
+}
+
+function abortableWait(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason instanceof Error ? signal.reason : new Error("aborted"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
 }
 
 const DEFAULT_PROVIDER_DEADLINE_MS = 30_000;
