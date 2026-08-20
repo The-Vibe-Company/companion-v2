@@ -9,12 +9,12 @@ This reviewer depends on `design-frontend-dev` for frontend design-review judgme
 Preferred runtime behavior:
 
 1. If the agent runtime can attach skills to focused helpers, attach `design-frontend-dev` to the frontend helper.
-2. Otherwise, read the installed `design-frontend-dev/SKILL.md` and only the smallest relevant subset of its `reference/` files.
-3. If Impeccable is unavailable, continue with this brief and record `design-frontend-dev unavailable` in `subagents.md`.
+2. Otherwise, read the installed `design-frontend-dev/SKILL.md` and only the smallest relevant subset of its reference files.
+3. If `design-frontend-dev` is unavailable, continue with this brief and record that in `subagents.md`.
 
 Read-only override:
 
-- Mega Code Review's read-only rules always win.
+- Review Code's read-only rules always win.
 - Do not run Impeccable commands that create, edit, polish, document, teach, live-edit, or mutate project files.
 - Do not run browser live mode, screenshot tooling, tests, builds, lint, or typecheck unless the user explicitly requested verification.
 - If `PRODUCT.md` or `DESIGN.md` exists, read it as context. If missing, do not create it.

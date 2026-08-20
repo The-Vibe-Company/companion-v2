@@ -19,7 +19,7 @@
     {
       "id": 4,
       "prompt": "Run a deep review of this branch against main. The diff touches auth middleware, export jobs, and a shared schema package, so use focused sub-reviewers if the environment supports them, but keep the whole review read-only.",
-      "expected_output": "A deep base-branch review that uses direct inspection first, coordinates distinct focused sub-reviewers or inline fallback checks, records subagents.md, vets all candidates, and reports only confirmed P0-P3 findings."
+      "expected_output": "A deep base-branch review that uses one isolated primary direct pass, launches at most three distinct focused reviewers for unresolved independent questions, records agent-budget.json and subagents.md, vets all candidates, and reports only confirmed P0-P3 findings."
     },
     {
       "id": 5,
@@ -34,7 +34,7 @@
     {
       "id": 7,
       "prompt": "Run a frontend review of this branch. The diff changes React components, Tailwind classes, form state, and responsive layout. Use Impeccable if available, but keep the review read-only.",
-      "expected_output": "A focused frontend review that routes through references/reviewers/frontend.md, uses the design-frontend-dev skill or its local read-only references when available, does not run Impeccable write/live/polish commands, and reports only confirmed P0-P3 UI, accessibility, responsive, state, performance, copy, or visual-system findings."
+      "expected_output": "A focused frontend review that routes through references/reviewers/frontend.md, uses design-frontend-dev or its smallest read-only references when available, does not run write/live/polish commands, and reports only confirmed P0-P3 UI, accessibility, responsive, state, performance, copy, or visual-system findings."
     },
     {
       "id": 8,
@@ -49,7 +49,7 @@
     {
       "id": 10,
       "prompt": "Run a deep review of a large branch with frontend, backend, tests, security, architecture, and performance risks. Respect the helper budget.",
-      "expected_output": "A deep review that builds a finite check queue, runs no more than the allowed focused sub-reviewer budget, records skipped lower-priority checks in loop-state.json or subagents.md, and avoids relaunching the whole primary reviewer."
+      "expected_output": "A deep review that builds a finite check queue, runs no more than three focused reviewers total, keeps at most three read-only workers concurrent, records skipped lower-priority checks, and avoids relaunching the whole primary reviewer."
     },
     {
       "id": 11,
@@ -75,6 +75,31 @@
       "id": 15,
       "prompt": "Run a standard review and reject any helper finding that cannot show the motivating line, failure path, introduced risk, impact, and false-positive check.",
       "expected_output": "The primary reviewer applies the pre-emit verification gate from review-intelligence.md, records rejected or unverified candidates outside review.md, and leaves the final parseable report limited to verified findings."
+    },
+    {
+      "id": 16,
+      "prompt": "Run this standard review from Codex using the credit-efficient reviewer setup.",
+      "expected_output": "The isolated primary and any focused Codex reviewers request gpt-5.6-luna with max effort and fresh self-contained context, standard stays at two focused reviewers maximum, and agent-budget.json distinguishes requested from effective routing with null usage when unavailable."
+    },
+    {
+      "id": 17,
+      "prompt": "Run this review from Claude Code with the efficient setup.",
+      "expected_output": "The skill requests claude-sonnet-5 for bounded review workers, normally high effort when supported, passes only the work order and paths, and reserves max effort for deep or unresolved P0/P1 validation."
+    },
+    {
+      "id": 18,
+      "prompt": "Review this from OpenCode without changing my model configuration.",
+      "expected_output": "The skill omits model and effort overrides for OpenCode, inherits the default model, and still records adapter, outcome, resume status, and unknown effective usage honestly."
+    },
+    {
+      "id": 19,
+      "prompt": "Quick review this tiny docs-only diff. Avoid unnecessary subagents.",
+      "expected_output": "The skill reviews inline when dispatch overhead exceeds the work, uses zero focused reviewers, reassesses around five minutes without blocking solely on time, records the budget, and preserves read-only coverage and parseable artifacts."
+    },
+    {
+      "id": 20,
+      "prompt": "This small review has already spent twenty minutes retrying agents. Finish efficiently.",
+      "expected_output": "The skill treats twenty minutes as a reassessment point, inspects progress, resumes or narrows the same worker when useful, avoids a wasteful full-review restart, and continues beyond the checkpoint whenever correctness requires it. Time alone never causes partial coverage or a blocker."
     }
   ]
 }
