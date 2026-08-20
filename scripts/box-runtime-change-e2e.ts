@@ -7,6 +7,7 @@ import {
   AsciiBoxMaintenanceClient,
   BoxRuntimeAdapterError,
   BoxRuntimeProviderError,
+  isCompanionRuntimeImageName,
   type BoxGenerationCreateInput,
   type BoxGenerationCreateResult,
   type BoxRuntimeLifecycleClient,
@@ -141,11 +142,13 @@ function pause(milliseconds: number): Promise<void> {
 type RuntimeChangeCreateInput = Omit<BoxGenerationCreateInput, "from">;
 type RuntimeChangeCreateClient = Pick<
   BoxRuntimeLifecycleClient,
-  "createOrRecoverGenerationBox" | "createGenerationBoxAfterObservedAbsence"
+  | "createOrRecoverGenerationBox"
+  | "createGenerationBoxAfterObservedAbsence"
+  | "listNamedSnapshots"
 >;
 interface RuntimeChangeCreation {
   box: BoxGenerationCreateResult;
-  source: "base" | "named_snapshot" | "base_fallback";
+  source: "base" | "named_snapshot" | "replacement_snapshot" | "base_fallback";
 }
 
 function isConfirmedMissingSnapshot(cause: unknown): boolean {
@@ -168,8 +171,18 @@ export async function createRuntimeChangeGenerationBox(input: {
     return { box, source: input.image === null ? "base" : "named_snapshot" };
   } catch (cause) {
     if (input.image === null || !isConfirmedMissingSnapshot(cause)) throw cause;
-    const box = await input.lifecycle.createGenerationBoxAfterObservedAbsence(input.create);
-    return { box, source: "base_fallback" };
+    const snapshots = await input.lifecycle.listNamedSnapshots({
+      deadlineAt: input.create.deadlineAt,
+    });
+    const replacement = snapshots
+      .filter((snapshot) => snapshot.status === "ready"
+        && snapshot.name !== input.image
+        && isCompanionRuntimeImageName(snapshot.name))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    const fallbackInput: BoxGenerationCreateInput = { ...input.create };
+    if (replacement !== undefined) fallbackInput.from = replacement.name;
+    const box = await input.lifecycle.createGenerationBoxAfterObservedAbsence(fallbackInput);
+    return { box, source: replacement === undefined ? "base_fallback" : "replacement_snapshot" };
   }
 }
 
@@ -302,11 +315,11 @@ async function main(): Promise<number> {
         },
       });
       const created = creation.box;
-      if (creation.source === "base_fallback") {
+      if (creation.source === "base_fallback" || creation.source === "replacement_snapshot") {
         write({
           phase: "create_image_fallback",
           status: "succeeded",
-          code: "unknown_snapshot",
+          code: creation.source,
         });
       }
       if (!BOX_ID_PATTERN.test(created.boxId)) {

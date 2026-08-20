@@ -19,9 +19,14 @@ describe("runtime-change Box creation", () => {
   it("uses the configured runtime snapshot when it is available", async () => {
     const createOrRecoverGenerationBox = vi.fn(async () => created);
     const createGenerationBoxAfterObservedAbsence = vi.fn(async () => created);
+    const listNamedSnapshots = vi.fn(async () => []);
 
     await expect(createRuntimeChangeGenerationBox({
-      lifecycle: { createOrRecoverGenerationBox, createGenerationBoxAfterObservedAbsence },
+      lifecycle: {
+        createOrRecoverGenerationBox,
+        createGenerationBoxAfterObservedAbsence,
+        listNamedSnapshots,
+      },
       create,
       image: "companion-l14-aaaaaaaaaaaa",
     })).resolves.toEqual({ box: created, source: "named_snapshot" });
@@ -48,16 +53,71 @@ describe("runtime-change Box creation", () => {
       });
     });
     const createGenerationBoxAfterObservedAbsence = vi.fn(async () => created);
+    const listNamedSnapshots = vi.fn(async () => []);
 
     await expect(createRuntimeChangeGenerationBox({
-      lifecycle: { createOrRecoverGenerationBox, createGenerationBoxAfterObservedAbsence },
+      lifecycle: {
+        createOrRecoverGenerationBox,
+        createGenerationBoxAfterObservedAbsence,
+        listNamedSnapshots,
+      },
       create,
       image: "companion-l14-aaaaaaaaaaaa",
     })).resolves.toEqual({ box: created, source: "base_fallback" });
 
     expect(createOrRecoverGenerationBox).toHaveBeenCalledOnce();
+    expect(listNamedSnapshots).toHaveBeenCalledOnce();
     expect(createGenerationBoxAfterObservedAbsence).toHaveBeenCalledOnce();
     expect(createGenerationBoxAfterObservedAbsence).toHaveBeenCalledWith(create);
+  });
+
+  it("uses the newest ready runtime snapshot when the configured one was pruned", async () => {
+    const createOrRecoverGenerationBox = vi.fn(async () => {
+      throw new BoxRuntimeAdapterError({
+        stableCode: "box_not_found",
+        message: "The Box provider resource was not found",
+        status: 404,
+        providerCode: "unknown_snapshot",
+        retryable: false,
+        outcomeUnknown: false,
+      });
+    });
+    const createGenerationBoxAfterObservedAbsence = vi.fn(async () => created);
+    const listNamedSnapshots = vi.fn(async () => [
+      {
+        name: "companion-l14-aaaaaaaaaaaa",
+        status: "ready" as const,
+        sourceBoxId: "bx_3456789a",
+        createdAt: "2026-08-19T10:00:00.000Z",
+      },
+      {
+        name: "companion-l14-bbbbbbbbbbbb",
+        status: "ready" as const,
+        sourceBoxId: "bx_456789ab",
+        createdAt: "2026-08-20T10:00:00.000Z",
+      },
+      {
+        name: "companion-l14-cccccccccccc",
+        status: "failed" as const,
+        sourceBoxId: "bx_56789abc",
+        createdAt: "2026-08-21T10:00:00.000Z",
+      },
+    ]);
+
+    await expect(createRuntimeChangeGenerationBox({
+      lifecycle: {
+        createOrRecoverGenerationBox,
+        createGenerationBoxAfterObservedAbsence,
+        listNamedSnapshots,
+      },
+      create,
+      image: "companion-l14-dddddddddddd",
+    })).resolves.toEqual({ box: created, source: "replacement_snapshot" });
+
+    expect(createGenerationBoxAfterObservedAbsence).toHaveBeenCalledWith({
+      ...create,
+      from: "companion-l14-bbbbbbbbbbbb",
+    });
   });
 
   it.each([
@@ -89,9 +149,14 @@ describe("runtime-change Box creation", () => {
       throw failure;
     });
     const createGenerationBoxAfterObservedAbsence = vi.fn(async () => created);
+    const listNamedSnapshots = vi.fn(async () => []);
 
     await expect(createRuntimeChangeGenerationBox({
-      lifecycle: { createOrRecoverGenerationBox, createGenerationBoxAfterObservedAbsence },
+      lifecycle: {
+        createOrRecoverGenerationBox,
+        createGenerationBoxAfterObservedAbsence,
+        listNamedSnapshots,
+      },
       create,
       image: "companion-l14-aaaaaaaaaaaa",
     })).rejects.toBe(failure);
