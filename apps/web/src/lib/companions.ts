@@ -13,13 +13,16 @@ import type {
   CompanionShareRole,
   CompanionShares,
   CompanionThread,
+  CompanionTrigger,
   CancelCompanionTurnAcceptedResponse,
   CreateCompanionRoutineInput,
+  CreateCompanionTriggerInput,
   SendCompanionMessageAcceptedResponse,
   SaveCompanionProviderInput,
   SaveCompanionPluginInput,
   UpdateCompanionInput,
   UpdateCompanionRoutineInput,
+  UpdateCompanionTriggerInput,
 } from "@companion/contracts";
 import {
   COMPANION_OPERATION_IDEMPOTENCY_HEADER,
@@ -503,4 +506,76 @@ export async function deleteCompanionRoutine(
     `/v1/companions/${encodeURIComponent(companionId)}/routines/${encodeURIComponent(routineId)}`,
     { method: "DELETE", headers: orgHeaders(orgId) },
   );
+}
+
+/**
+ * Triggers are the event-driven siblings of routines. The list carries each trigger's webhook URL
+ * for Owner/Editor readers; a Viewer receives `webhook_url: null` and no secret ever travels bare.
+ */
+export async function listCompanionTriggers(
+  orgId: string,
+  companionId: string,
+): Promise<CompanionTrigger[]> {
+  const result = await apiFetch<{ triggers: CompanionTrigger[] }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/triggers`,
+    { headers: orgHeaders(orgId) },
+  );
+  return result.triggers;
+}
+
+export async function createCompanionTrigger(
+  orgId: string,
+  companionId: string,
+  input: CreateCompanionTriggerInput,
+): Promise<CompanionTrigger> {
+  const result = await apiFetch<{ trigger: CompanionTrigger }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/triggers`,
+    {
+      method: "POST",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify(input),
+    },
+  );
+  return result.trigger;
+}
+
+export async function updateCompanionTrigger(
+  orgId: string,
+  companionId: string,
+  triggerId: string,
+  input: UpdateCompanionTriggerInput,
+): Promise<CompanionTrigger> {
+  const result = await apiFetch<{ trigger: CompanionTrigger }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/triggers/${encodeURIComponent(triggerId)}`,
+    {
+      method: "PATCH",
+      headers: orgHeaders(orgId),
+      body: JSON.stringify(input),
+    },
+  );
+  return result.trigger;
+}
+
+export async function deleteCompanionTrigger(
+  orgId: string,
+  companionId: string,
+  triggerId: string,
+): Promise<void> {
+  await apiFetch(
+    `/v1/companions/${encodeURIComponent(companionId)}/triggers/${encodeURIComponent(triggerId)}`,
+    { method: "DELETE", headers: orgHeaders(orgId) },
+  );
+}
+
+/** Invalidate the old webhook URL and mint a new one; the response carries the updated trigger. */
+export async function rotateCompanionTriggerSecret(
+  orgId: string,
+  companionId: string,
+  triggerId: string,
+): Promise<CompanionTrigger> {
+  const result = await apiFetch<{ trigger: CompanionTrigger }>(
+    `/v1/companions/${encodeURIComponent(companionId)}/triggers/${encodeURIComponent(triggerId)}/rotate-secret`,
+    { method: "POST", headers: orgHeaders(orgId), body: "{}" },
+  );
+  return result.trigger;
 }

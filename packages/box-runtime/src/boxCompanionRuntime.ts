@@ -8,6 +8,7 @@ import {
   COMPANION_ROUTINE_MAX_PER_COMPANION,
   COMPANION_ROUTINE_MIN_INTERVAL_MS,
   COMPANION_TOOL_RUN_TIMEOUT_MS,
+  COMPANION_TRIGGER_MAX_PER_COMPANION,
 } from "@companion/contracts";
 import type {
   CompanionClientSurface,
@@ -459,6 +460,9 @@ function companionCapabilityInstructions(includeHub: boolean): string {
     "  as an ordinary turn. The person sees a Routine header, not the scheduled prompt as if they typed it.",
     `  At most ${COMPANION_ROUTINE_MAX_PER_COMPANION} per Companion, at least ${instructionClock(COMPANION_ROUTINE_MIN_INTERVAL_MS)} apart.`,
     "  You cannot create one yourself.",
+    "- Triggers: a named prompt an external webhook fires. The person pastes a URL into a service they",
+    "  control, and each event arrives here as an ordinary turn with a Trigger header and a bounded,",
+    `  untrusted copy of the event payload. At most ${COMPANION_TRIGGER_MAX_PER_COMPANION} per Companion. You cannot create one yourself.`,
   ];
   if (includeHub) {
     lines.push(
@@ -490,6 +494,9 @@ function companionConfigInstructions(includeCatalog: boolean): string {
     "  is never active in the turn that proposed it.",
     "- propose_routine proposes a named schedule — a prompt, a cron expression, and an IANA timezone.",
     "  Approval creates it after this turn ends, so a proposed routine never fires in the turn that proposed it.",
+    "- propose_trigger proposes a named webhook trigger — a prompt and a provider (linear, github, or",
+    "  custom). Approval creates it after this turn ends and shows the person a webhook URL to paste into",
+    "  the external service; a proposed trigger never fires in the turn that proposed it.",
     "- request_plugin_connection asks for a Linear, GitHub, or Notion connection that does not exist yet.",
     "  The person finishes it in the web UI; propose attaching it on a later turn.",
   ].join("\n");
@@ -583,8 +590,8 @@ export function parseOutboxManifest(stdout: string): CompanionOutboxEntry[] {
  *
  * `native_mobile` stages no skills, MCP accounts, hub env, or config catalog, so that surface omits
  * the Skills / Plugins / Skills-Hub bullets and the catalog pointer. ask_user / propose_config /
- * propose_routine stay: the interaction extension is staged for every surface, and routines fire as
- * ordinary turns on every surface.
+ * propose_routine / propose_trigger stay: the interaction extension is staged for every surface, and
+ * routines and triggers fire as ordinary turns on every surface.
  */
 export function composedInstructions(
   persona?: string | null,
