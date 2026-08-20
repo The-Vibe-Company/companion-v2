@@ -28,13 +28,12 @@ Examples:
 
 ## CI
 - Latest commit: `<sha>`
-- Status: <all required checks passed / blocked>
+- Status: <all visible non-skipped checks green / blocked>
 - Checks: <short summary>
 
 ## Review Gate
 - `review-code-dev`: <passed / findings fixed / blocked>
-- Review board: <passed / local equivalent / N/A>
-- Frontend gate: <passed / N/A / blocked>
+- Required lenses: <frontend/security/API/etc. / none>
 - Artifacts: `<path or PR-safe summary>`
 
 ## Risk
@@ -57,9 +56,9 @@ PR ready to merge by a human: <url>
 Branch: <branch> -> <base>
 Latest commit: <sha>
 Verification: <short check summary>
-CI: <checks green on latest commit>
-Review gate: <review-code-dev summary>
-Frontend gate: <passed / N/A>
+CI: <all visible non-skipped checks green on latest commit>
+Review gate: <review-code-dev summary and relevant lens coverage>
+Learning loop: <completed / blocked>
 Remaining human decisions: <none / list>
 Artifacts: <local RUN_DIR>
 ```

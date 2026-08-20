@@ -5,7 +5,7 @@ There are two isolation layers:
 - **Primary reviewer**: one isolated reviewer that performs the full review by default so the main conversation does not absorb full code context.
 - **Focused sub-reviewers**: optional helpers launched by the primary reviewer for independent risk questions.
 
-Both can be implemented by any agent runtime: a task tool, a spawned agent, a child thread, a parallel model call, another terminal agent, or an inline pass when no helper mechanism exists.
+Both can be implemented by any agent runtime: a task tool, a spawned agent, a child context, or an inline pass when no helper mechanism exists. Prefer the host-native adapter; do not start a second CLI merely because it is installed.
 
 The protocol is tool-agnostic:
 
@@ -14,6 +14,7 @@ The protocol is tool-agnostic:
 - use inline focused checks when no helper adapter exists
 - never let a helper edit files or run write commands
 - record the plan and result in `subagents.md`
+- write the budget and routing ledger to `agent-budget.json` before dispatch
 - when a focused check maps to `references/reviewers/`, load that specialist brief and pass only that brief plus the bounded scope to the helper
 - require focused helpers to return candidate JSONL so the primary reviewer can deduplicate, verify, and render final P0-P3 markdown
 
@@ -30,6 +31,33 @@ Inspect the capabilities visible in the current runtime and choose the first mat
 
 Do not mention unavailable mechanisms in the final answer. Only record the adapter actually used.
 
+## Host Model Routing
+
+Request the cheapest approved capable model for every primary or focused reviewer:
+
+| Host | Requested model | Requested effort | Context |
+| --- | --- | --- | --- |
+| Codex | `gpt-5.6-luna` | `max` | fresh/self-contained; when the adapter exposes `fork_turns`, use `none`, never full history |
+| Claude Code | `claude-sonnet-5` | `high` when supported; `max` only for an unresolved P0/P1 or explicitly deep adversarial pass | minimal prompt and paths |
+| OpenCode | omit override | omit override | inherit the user's default model |
+| Other/unknown | omit override | omit override | use the first safe isolated adapter |
+
+Routing is best-effort. If the host rejects an override, retry once with its default rather than abandoning review. Record the rejected request and `effective_model: unknown` unless the adapter reports the effective model. Never infer actual token or credit usage.
+
+For follow-ups, resume the same worker/context when the host supports it. Create a fresh worker only for a genuinely independent question or when isolation is required to validate an ambiguous finding.
+
+`agent-budget.json` uses this portable shape:
+
+```json
+{
+  "tier": "standard",
+  "limits": {"primary_reviewers": 1, "focused_reviewers": 2, "max_concurrent_read_only": 3},
+  "workers": [
+    {"role": "primary-reviewer", "adapter": "helper", "requested_model": "gpt-5.6-luna", "requested_effort": "max", "effective_model": null, "effective_effort": null, "resumed": false, "outcome": "pending", "tokens": null}
+  ]
+}
+```
+
 ## Primary Reviewer Default
 
 Launch a `primary-reviewer` whenever the selected adapter is not `inline`. The main context does not review the diff directly in that case. It creates `context.json`, writes `delegation-brief.md`, launches the isolated primary reviewer, then reads the resulting artifacts.
@@ -43,7 +71,7 @@ Do not pass the whole conversation to the primary reviewer. Pass only the minima
 Write this content to `delegation-brief.md` and pass the same content to the primary-reviewer adapter:
 
 ```text
-You are the isolated primary reviewer for Mega Code Review.
+You are the isolated primary reviewer for Review Code.
 
 Goal:
 Review the scoped code changes and report only confirmed P0-P3 issues.
@@ -92,10 +120,12 @@ References to read:
 | Effort | Helper budget | Required behavior |
 | --- | --- | --- |
 | quick | 0 by default, 1 for security-sensitive diffs | direct review first; only add a helper for a clearly independent high-risk check |
-| standard | up to 4 | cover the highest-risk independent checks from the diff |
-| deep | up to 6 | cover security plus the most relevant frontend/backend/tests/API/migration/design/performance checks, including optional red-team |
+| standard | up to 2 | cover only the highest-risk independent questions left after the direct pass |
+| deep | up to 3 | cover the highest-risk independent questions; use red-team only when release/security risk justifies it |
 
-Local custom rules may add one focused check per enabled rule. If the total exceeds the budget, keep the rules most likely to affect changed production behavior and record skipped checks in `subagents.md`.
+Local custom rules consume the same budget; they do not increase it. If the queue exceeds the cap, keep the checks most likely to affect changed production behavior and record skipped checks in `subagents.md`.
+
+Reassessment checkpoints are 5 minutes for quick, 20 minutes for standard, and 35 minutes for deep review. Within standard/deep, check primary progress around 12/20 minutes and focused reviewer progress around 8/12 minutes. These are not blocking timeouts: extend or resume work when the remaining risk justifies it. Avoid relaunching the entire review merely because a checkpoint was crossed.
 
 ## Specialist Reviewer Briefs
 
@@ -113,7 +143,7 @@ Specialist briefs live under `references/reviewers/`. They are internal review l
 | `reviewers/data-migration.md` | migrations, indexes, backfills, rollbacks, mixed-version deploys, data compatibility, large table operations | none |
 | `reviewers/red-team.md` | adversarial gap-finding after normal review for large, security-sensitive, cross-module, or release-critical diffs | none |
 
-For frontend checks, attach or invoke the `design-frontend-dev` skill only if the runtime supports passing skills to helpers. Otherwise the helper should read the installed `design-frontend-dev/SKILL.md` and only the relevant Impeccable reference files. Mega Code Review's read-only hard rules override Impeccable commands that would create, edit, run live mode, or polish code.
+For frontend checks, attach or invoke `design-frontend-dev` only if the runtime supports passing skills to helpers. Otherwise read its installed `SKILL.md` and the smallest relevant read-only references. Review Code's hard rules override any command that would create, edit, run live mode, or polish code.
 
 ## When To Use Focused Sub-Reviewers
 
@@ -221,10 +251,10 @@ Do not include summaries, recommendations, or unrelated notes.
 
 ## Adapter Notes
 
-- **Task/subagent tool**: launch one helper per independent focus. If the tool supports parallel calls, launch all helper calls together.
+- **Task/subagent tool**: launch one helper per independent focus. If the tool supports parallel calls, launch up to three read-only calls together. Use the host model routing above.
 - **Child thread or separate agent process**: pass the same prompt template and the absolute paths to `context.json` and relevant files.
 - **No helper support**: run the same focus as an inline pass and mark the adapter as `inline` in `subagents.md`.
-- **Custom rules**: create one focused check per enabled local custom rule. If no custom rules exist, say nothing about custom checks.
+- **Custom rules**: add only high-value independent checks inside the existing cap. If no custom rules exist, say nothing about custom checks.
 
 ## Candidate Status
 
@@ -265,7 +295,7 @@ Read references/reviewers/tests.md, then review whether the diff introduces risk
 ## Frontend Review
 
 ```text
-Read references/reviewers/frontend.md. Use the `design-frontend-dev` skill as the required design-review dependency when available; otherwise read the installed Impeccable skill and the smallest relevant subset of its reference files. Review only changed frontend behavior and directly related UI context. Return only `No issues found.` or Focused Candidate JSONL for user-visible behavior, accessibility, responsive/layout regressions, state/form bugs, frontend performance, UX copy, and visual-system drift.
+Read references/reviewers/frontend.md. Use `design-frontend-dev` as the design-review dependency when available; otherwise continue with this brief and record the missing dependency. Review only changed frontend behavior and directly related UI context. Return only `No issues found.` or Focused Candidate JSONL for user-visible behavior, accessibility, responsive/layout regressions, state/form bugs, frontend performance, UX copy, and visual-system drift.
 ```
 
 ## Design Quality Review
