@@ -3,7 +3,6 @@
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { z } from "zod";
 
 const DEFAULT_API_BASE = "https://ascii.dev/api/box/v1";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -16,12 +15,6 @@ const IMAGE_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const SAFE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const RUNNING_STATES = new Set(["ready", "idle", "running"]);
 const STARTING_STATES = new Set(["init", "provisioning", "provisioned", "cloning"]);
-const boxStateEnvelopeSchema = z.object({
-  box: z.object({
-    id: z.string(),
-    state: z.string(),
-  }),
-});
 
 export class BoxProviderE2EError extends Error {
   constructor(code) {
@@ -79,11 +72,12 @@ function safeErrorCode(error) {
 }
 
 function boxState(body, expectedId) {
-  const parsed = boxStateEnvelopeSchema.safeParse(body);
-  if (!parsed.success || parsed.data.box.id !== expectedId) {
+  const id = body?.box?.id;
+  const state = body?.box?.state;
+  if (id !== expectedId || state?.constructor !== String) {
     throw new BoxProviderE2EError("invalid_provider_response");
   }
-  return parsed.data.box.state;
+  return state;
 }
 
 function createClient(config, fetchImpl) {
