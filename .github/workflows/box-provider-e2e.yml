@@ -46,14 +46,18 @@ jobs:
 
   runtime-change-e2e:
     name: Current change first-message delivery
+    # Both jobs share one provider account. Serialize them on main while still letting this job run
+    # after the archive/resume job is skipped on pull requests.
+    needs: box-provider-e2e
     if: >-
-      github.event_name == 'push'
-      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
-      || (github.event_name == 'pull_request'
-      && github.event.pull_request.head.repo.full_name == github.repository
-      && github.event.pull_request.user.login == vars.COMPANION_BOX_E2E_TRUSTED_LOGIN
-      && github.actor == vars.COMPANION_BOX_E2E_TRUSTED_LOGIN
-      && github.triggering_actor == vars.COMPANION_BOX_E2E_TRUSTED_LOGIN)
+      !cancelled()
+      && (github.event_name == 'push'
+        || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+        || (github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository
+          && github.event.pull_request.user.login == vars.COMPANION_BOX_E2E_TRUSTED_LOGIN
+          && github.actor == vars.COMPANION_BOX_E2E_TRUSTED_LOGIN
+          && github.triggering_actor == vars.COMPANION_BOX_E2E_TRUSTED_LOGIN))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
