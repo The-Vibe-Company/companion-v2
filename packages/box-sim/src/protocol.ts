@@ -179,6 +179,7 @@ export interface BoxSimStateSnapshot {
     daemon: {
       status: "inactive" | "active" | "failed";
       invocationId: string | null;
+      layoutMarker: string | null;
       rpcReady: boolean;
       activeAttemptId: string | null;
       tailCursor: number;

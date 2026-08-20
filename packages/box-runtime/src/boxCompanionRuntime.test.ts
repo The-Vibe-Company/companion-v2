@@ -1,5 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS,
@@ -150,6 +153,15 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       .toBe(false);
     expect(requests.find((request) => request.method === "PATCH")?.body)
       .toEqual({ ttlSeconds: 21_600 });
+    const archiveCleanup = requests.findIndex((request) =>
+      request.url.endsWith("/commands")
+      && typeof request.body === "object"
+      && request.body !== null
+      && "command" in request.body
+      && String(request.body.command).includes("control-bundle-v1.json"));
+    const archiveRequest = requests.findIndex((request) => request.url.endsWith("/stop"));
+    expect(archiveCleanup).toBeGreaterThanOrEqual(0);
+    expect(archiveCleanup).toBeLessThan(archiveRequest);
   });
 
   it("waits for Pi readiness inside one Box command instead of polling the provider", async () => {
@@ -158,24 +170,9 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       const body = JSON.parse(String(init?.body)) as { command: string; timeoutSeconds: number };
       commands.push(body);
       if (body.command.includes("for companion_pi_probe")) {
-        return response(commandResult("active\ncompanion-pi-broker-ready\n"));
-      }
-      if (body.command.includes("COMPANION_PI_BROKER_COMMAND=")) {
-        const brokerCommand = decodeBrokerCommand(body.command);
-        return response(commandResult(JSON.stringify({
-          id: brokerCommand.id,
-          type: "response",
-          command: "runtime_state",
-          success: true,
-          data: {
-            invocationId: "invocation-1",
-            activeAttemptId: null,
-            tailCursor: 0,
-            acknowledgedCursor: 0,
-            modelInput: ["text", "image"],
-            counters: zeroCounters(),
-          },
-        }) + "\n"));
+        return response(commandResult(
+          "active\ncompanion-pi-broker-ready\ncompanion-pi-invocation invocation-1\n",
+        ));
       }
       return response(commandResult());
     }));
@@ -189,7 +186,7 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       invocationId: "invocation-1",
     });
 
-    expect(commands).toHaveLength(2);
+    expect(commands).toHaveLength(1);
     expect(commands[0]?.command).toContain("seq 1 10");
     expect(commands[0]?.command).toContain("sleep 0.1");
     expect(commands[0]?.command).toContain(
@@ -197,6 +194,29 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
     );
     expect(commands[0]?.timeoutSeconds).toBe(120);
   });
+
+  it.each(["archived", "archiving"] as const)(
+    "archives an already %s Box with one GET and no rejected cleanup command",
+    async (state) => {
+      const requests: Array<{ url: string; method: string }> = [];
+      vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+        const url = String(rawUrl);
+        const method = init?.method ?? "GET";
+        requests.push({ url, method });
+        if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+          return response({ box: box(state) });
+        }
+        throw new Error(`unexpected Box request: ${method} ${url}`);
+      }));
+
+      await expect(runtimeClient().archiveExistingBox({ boxId: "bx_23456789" }))
+        .resolves.toEqual({ boxId: "bx_23456789", state });
+      expect(requests).toEqual([{
+        url: "https://ascii.dev/api/box/v1/boxes/bx_23456789",
+        method: "GET",
+      }]);
+    },
+  );
 
   it("expunges persistent and runtime provider credentials for disposable Box cleanup", async () => {
     let command = "";
@@ -210,7 +230,206 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       .resolves.toBeUndefined();
     expect(command).toContain('rm -f "$HOME/.companion/pi/auth.json"');
     expect(command).toContain('"$HOME/.companion/runtime/state/providers.env"');
+    expect(command).toContain('"$HOME/.companion/runtime/state/control-bundle-v1.json"');
     expect(command).toContain('"/run/user/$(id -u)/companion/providers.env"');
+    expect(command).toContain("control-transaction-v1");
+    expect(command).toContain("set -euo pipefail");
+    expect(command).toContain('if [ -e "$target" ] || [ -L "$target" ]; then exit 1; fi');
+  });
+
+  it("cleans and retries the idempotent control bundle when apply submission fails once", async () => {
+    const commands: string[] = [];
+    const files: string[] = [];
+    let rejectedApply = false;
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        return response({ box: box("ready") });
+      }
+      if (url.endsWith("/files") && method === "PUT") {
+        files.push((JSON.parse(String(init?.body)) as { path: string }).path);
+        return response({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        const body = JSON.parse(String(init?.body)) as { command: string };
+        commands.push(body.command);
+        if (body.command.includes("COMPANION_CONTROL_APPLY") && !rejectedApply) {
+          rejectedApply = true;
+          throw new BoxRuntimeProviderError("control apply rate limited", 429);
+        }
+        return response(commandResult("companion-box-runnable\n"));
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+
+    await expect(runtimeClient().stageExistingBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      runtimeGeneration: 1,
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { provider: { token: "ephemeral-test-token" } },
+      replaceProviderAuth: true,
+      modelId: "glm-4.6",
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+    })).resolves.toMatchObject({ stagingMode: "skills" });
+
+    expect(files.filter((path) => path.endsWith("control-bundle-v1.json"))).toHaveLength(2);
+    expect(commands.filter((command) => command.includes("COMPANION_CONTROL_APPLY"))).toHaveLength(2);
+    expect(commands.some((command) =>
+      command.includes('bundle="$HOME/.companion/runtime/state/control-bundle-v1.json"')
+      && command.includes('rm -f "$bundle"')
+      && command.includes("control-transaction-v1"))).toBe(true);
+  });
+
+  it("cleans the secret-bearing control bundle and fails after two rejected applies", async () => {
+    const commands: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        return response({ box: box("ready") });
+      }
+      if (url.endsWith("/files") && method === "PUT") return response({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        const body = JSON.parse(String(init?.body)) as { command: string };
+        commands.push(body.command);
+        if (body.command.includes("COMPANION_CONTROL_APPLY")) {
+          throw new Error("control apply transport failed");
+        }
+        return response(commandResult("companion-box-runnable\n"));
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+
+    await expect(runtimeClient().stageExistingBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      runtimeGeneration: 1,
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { provider: { token: "ephemeral-test-token" } },
+      replaceProviderAuth: true,
+      modelId: "glm-4.6",
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+    })).rejects.toThrow("control apply transport failed");
+
+    expect(commands.filter((command) => command.includes("COMPANION_CONTROL_APPLY"))).toHaveLength(2);
+    expect(commands.some((command) =>
+      command.includes('bundle="$HOME/.companion/runtime/state/control-bundle-v1.json"')
+      && command.includes('rm -f "$bundle"')
+      && command.includes("control-transaction-v1"))).toBe(true);
+    const providerCleanup = commands.at(-1)!;
+    expect(providerCleanup).toContain("runtime/state/providers.env");
+    expectCleanupFailsWhenRmFails(providerCleanup);
+  });
+
+  it("proves transient provider credentials absent when Git helper activation fails", async () => {
+    const commands: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        return response({ box: box("ready") });
+      }
+      if (url.endsWith("/files") && method === "PUT") return response({ ok: true });
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = (JSON.parse(String(init?.body)) as { command: string }).command;
+        commands.push(command);
+        if (command.includes("credential.helper")) {
+          return response({ success: false, exitCode: 1, stdout: "", stderr: "git refused" });
+        }
+        return response(commandResult("companion-box-runnable\n"));
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+
+    await expect(runtimeClient().stageExistingBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      runtimeGeneration: 1,
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { provider: { token: "ephemeral-test-token" } },
+      replaceProviderAuth: true,
+      modelId: "glm-4.6",
+      mcpCredentials: [{ env_key: "GITHUB_TOKEN", value: "gho_test_token" }],
+      mcpAccounts: [],
+      skills: [],
+    })).rejects.toThrow("git refused");
+
+    const helper = commands.findIndex((command) => command.includes("credential.helper"));
+    const cleanup = commands.findIndex((command, index) =>
+      index > helper && command.includes("runtime/state/providers.env"));
+    expect(helper).toBeGreaterThanOrEqual(0);
+    expect(cleanup).toBeGreaterThan(helper);
+  });
+
+  it("rolls every control file back when a later atomic commit step fails", async () => {
+    let bundle = "";
+    let applyCommand = "";
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        return response({ box: box("ready") });
+      }
+      if (url.endsWith("/files") && method === "PUT") {
+        const body = JSON.parse(String(init?.body)) as { path: string; content: string };
+        if (body.path.endsWith("control-bundle-v1.json")) bundle = body.content;
+        return response({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        const command = (JSON.parse(String(init?.body)) as { command: string }).command;
+        if (command.includes("COMPANION_CONTROL_APPLY")) applyCommand = command;
+        return response(commandResult("companion-box-runnable\n"));
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+    await runtimeClient().stageExistingBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      runtimeGeneration: 1,
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { provider: { token: "ephemeral-test-token" } },
+      replaceProviderAuth: true,
+      modelId: "glm-4.6",
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [],
+    });
+
+    const home = mkdtempSync(join(tmpdir(), "companion-control-"));
+    try {
+      const state = join(home, ".companion/runtime/state");
+      const auth = join(home, ".companion/pi/auth.json");
+      mkdirSync(state, { recursive: true });
+      mkdirSync(join(home, ".companion/pi"), { recursive: true });
+      writeFileSync(join(state, "control-bundle-v1.json"), bundle);
+      writeFileSync(auth, "old-auth");
+
+      const injectedCommand = applyCommand.replace(
+        "    record.installed = true;\n",
+        "    record.installed = true;\n    if (records.indexOf(record) === 0) throw new Error(\"injected commit failure\");\n",
+      );
+      expect(injectedCommand).not.toBe(applyCommand);
+
+      const applied = spawnSync("bash", ["-c", injectedCommand], {
+        env: { ...process.env, HOME: home },
+        encoding: "utf8",
+      });
+
+      expect(applied.status).not.toBe(0);
+      expect(readFileSync(auth, "utf8")).toBe("old-auth");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it("dispatches only correlated layout-14 commands and validates monotonic journal pages", async () => {
@@ -230,6 +449,8 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
             attemptId: command.attemptId,
             invocationId: "invocation-1",
             piAcknowledged: true,
+            initialCursor: 0,
+            clearOutbox: true,
           },
         }) + "\n"));
       }
@@ -291,6 +512,7 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       outcome: "accepted",
       attemptId: "attempt-1",
       invocationId: "invocation-1",
+      initialCursor: 0,
     });
     await expect(runtime.brokerState({ boxId: "bx_23456789" })).resolves.toMatchObject({
       invocationId: "invocation-1",
@@ -322,16 +544,13 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
     });
   });
 
-  it("propagates abort while probing the daemon during Box resume", async () => {
+  it("sends exactly one abortable resume request without polling Box or Pi", async () => {
     const controller = new AbortController();
     let commandStarted!: () => void;
     const started = new Promise<void>((resolve) => { commandStarted = resolve; });
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
-      if (url.endsWith("/boxes/bx_23456789") && (!init?.method || init.method === "GET")) {
-        return response({ box: box("ready") });
-      }
-      if (url.endsWith("/commands") && init?.method === "POST") {
+      if (url.endsWith("/boxes/bx_23456789/resume") && init?.method === "POST") {
         commandStarted();
         return await new Promise<Response>((_resolve, reject) => {
           init.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
@@ -437,6 +656,21 @@ describe("provider Box lifecycle states", () => {
       state: "idle",
     });
   });
+
+  it("rejects a durable Box id that does not belong to the expected Companion generation", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => response({
+      box: {
+        ...box("archived"),
+        name: "Companion 22222222-2222-4222-8222-222222222222 g1",
+      },
+    })));
+
+    await expect(runtimeClient().existingBoxStatus({
+      boxId: "bx_23456789",
+      companionId: "11111111-1111-4111-8111-111111111111",
+      runtimeGeneration: 1,
+    })).rejects.toThrow("durable Box identity does not match");
+  });
 });
 
 describe("bounded daemon diagnostics", () => {
@@ -470,6 +704,7 @@ describe("default Pi packages on the Box disk", () => {
   async function stagedLayoutScript(
     env: Record<string, string> = {},
     mcpCredentials: Array<{ env_key: string; value: string }> = [],
+    companionSkillChecksum?: string,
   ): Promise<string> {
     stagedFiles.clear();
     layoutCommands.length = 0;
@@ -480,6 +715,14 @@ describe("default Pi packages on the Box disk", () => {
       if (url.endsWith("/files") && method === "PUT") {
         const body = JSON.parse(String(init?.body)) as { path: string; content: string };
         stagedFiles.set(body.path, body.content);
+        if (body.path.endsWith("control-bundle-v1.json")) {
+          const bundle = JSON.parse(body.content) as {
+            files: Array<{ path: string; content: string }>;
+          };
+          for (const file of bundle.files) {
+            stagedFiles.set(file.path, Buffer.from(file.content, "base64").toString("utf8"));
+          }
+        }
         return response({ ok: true });
       }
       if (url.endsWith("/commands") && method === "POST") {
@@ -495,7 +738,10 @@ describe("default Pi packages on the Box disk", () => {
       throw new Error(`unexpected Box request: ${method} ${url}`);
     }));
 
-    await new AsciiBoxCompanionRuntime({ COMPANION_BOX_API_KEY: "box_test", ...env })
+    await new AsciiBoxCompanionRuntime(
+      { COMPANION_BOX_API_KEY: "box_test", ...env },
+      companionSkillChecksum ? { companionSkillChecksum } : undefined,
+    )
       .stageExistingBox({
         companionId: "11111111-1111-4111-8111-111111111111",
         runtimeGeneration: 1,
@@ -514,8 +760,69 @@ describe("default Pi packages on the Box disk", () => {
     return script;
   }
 
+  it("rebuilds a requested reusable Skill tree when its archive checksum marker is stale", async () => {
+    const stagedPaths: string[] = [];
+    const commands: string[] = [];
+    const runtime = runtimeClient();
+    const layoutMarker = runtime.layoutIdentity().fullMarker;
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        return response({ box: box("ready") });
+      }
+      if (url.endsWith("/files") && method === "PUT") {
+        const body = JSON.parse(String(init?.body)) as { path: string };
+        stagedPaths.push(body.path);
+        return response({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        const body = JSON.parse(String(init?.body)) as { command: string };
+        commands.push(body.command);
+        if (body.command.includes("pi-layout.version")) return response(commandResult(`${layoutMarker}\n`));
+        return response(commandResult("companion-box-runnable\n"));
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+
+    const staged = await runtime.stageExistingBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      runtimeGeneration: 1,
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: {},
+      replaceProviderAuth: false,
+      modelId: "glm-4.6",
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [{
+        slug: "companion",
+        version: "1.0.0",
+        checksum: `sha256:${"1".repeat(64)}`,
+        archive: Buffer.from("updated-companion-skill"),
+      }],
+      reuseSkills: true,
+    });
+
+    expect(staged.stagingMode).toBe("skills");
+    expect(stagedPaths).toContain(
+      ".companion/runtime/state/skill-archives/companion.tar.gz.b64",
+    );
+    expect(commands.some((command) => command.includes("skills-tree.version.next"))).toBe(true);
+  });
+
   it("installs the pinned default set beside the adapter, and qmd without being able to fail", async () => {
     const script = await stagedLayoutScript();
+
+    expect(script).toContain('> "$HOME/.boxignore"');
+    const encodedBoxIgnore = /printf '%s' '([^']+)' \| base64 --decode > "\$HOME\/\.boxignore"/
+      .exec(script)?.[1];
+    expect(encodedBoxIgnore).toBeTruthy();
+    expect(Buffer.from(encodedBoxIgnore!, "base64").toString("utf8"))
+      .toContain(".companion/runtime/state/control-bundle-v1.json");
+    expect(Buffer.from(encodedBoxIgnore!, "base64").toString("utf8"))
+      .toContain(".companion/runtime/control-transaction-v1/");
 
     for (const spec of [
       "npm:pi-mcp-adapter@2.12.1",
@@ -607,6 +914,14 @@ describe("default Pi packages on the Box disk", () => {
     expect(script).toContain("companion-layout-base");
     expect(script.indexOf("companion-layout-overlay"))
       .toBeLessThan(script.indexOf(`"$pi_bin" install`));
+  });
+
+  it("keeps image-only Companion skill identity out of the installed broker marker", async () => {
+    const checksum = "sha256:companion-skill-contract";
+    const script = await stagedLayoutScript({}, [], checksum);
+    expect(script).not.toContain(checksum);
+    expect(script).not.toContain(":skill=");
+    expect(script).not.toContain(":boot=");
   });
 
   it("gives a deployment no way to drop what a Companion can do", async () => {
@@ -1096,6 +1411,22 @@ function box(state: "archived" | "ready" | "archiving" | "idle") {
 
 function commandResult(stdout = "") {
   return { success: true, exitCode: 0, stdout, stderr: "" };
+}
+
+function expectCleanupFailsWhenRmFails(command: string): void {
+  const root = mkdtempSync(join(tmpdir(), "companion-cleanup-"));
+  try {
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "rm"), "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+    const result = spawnSync("bash", ["-c", command], {
+      env: { ...process.env, HOME: root, PATH: `${bin}:${process.env.PATH ?? ""}` },
+      encoding: "utf8",
+    });
+    expect(result.status).not.toBe(0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 function response(value: unknown, status = 200): Response {

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -31,7 +32,10 @@ describe("semantic Box command shims", () => {
       ['bash "$HOME/.companion/bin/ensure-pi-layout.sh"', "install-layout"],
       ['recorded="$(cat "$HOME/.companion/runtime/state/pi-layout.version" 2>/dev/null || true)"\nif [ "$recorded" = \'14:pins:overlay=abc\' ] \\\n  && [ -x "$HOME/.companion/bin/companion-pi-broker.mjs" ]; then\n  printf \'%s\\n\' companion-layout-unchanged\nfi', "probe-layout"],
       ['mkdir -p "$HOME/.companion/pi/extensions"', "mkdir-extensions"],
-      ["state/skill-archives companion-provider-auth-present", "clear-skill-archives"],
+      [
+        'root="$HOME/.companion/runtime"; printf companion-provider-auth-present',
+        "clear-skill-archives",
+      ],
       ["companion-archive-bytes wc -c", "measure-skill-archives"],
       ["cat '.part0' > '.target'; rm -f '.part0'", "join-file-parts"],
       ["skills.next base64 --decode tar --extract", "prepare-skills"],
@@ -48,11 +52,70 @@ describe("semantic Box command shims", () => {
         response: { id: "question-1", type: "extension_ui_response", value: "yes" },
       }), "extension-ui-response"],
       ["companion-pi-journal companion-pi-restarts", "daemon-diagnostics"],
-      ['rm -f "$HOME/.companion/runtime/state/providers.env"', "remove-provider-files"],
+      [
+        'bundle="$HOME/.companion/runtime/state/control-bundle-v1.json"; '
+          + 'rm -f "$bundle"; rm -rf "$HOME/.companion/runtime/control-transaction-v1"',
+        "remove-control-bundle",
+      ],
+      [
+        'persistent="$HOME/.companion/runtime/state/providers.env"; '
+          + 'runtime="/run/user/$(id -u)/companion/providers.env"; rm -f "$persistent" "$runtime"',
+        "remove-provider-files",
+      ],
       ["Pi daemon is still active after stop", "stop-daemon"],
     ];
     for (const [command, kind] of commands) expect(classifyBoxCommand(command)).toBe(kind);
     expect(classifyBoxCommand("uname -a")).toBe("unsupported");
+  });
+
+  it("removes a stale control bundle before Box archive", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    const path = ".companion/runtime/state/control-bundle-v1.json";
+    putBoxFile(machine, path, Buffer.from("secret-bearing-bundle"));
+    const sidecar = ".companion/runtime/control-transaction-v1/0.previous";
+    putBoxFile(machine, sidecar, Buffer.from("secret-bearing-backup"));
+
+    await expect(executeBoxCommand(
+      machine,
+      'bundle="$HOME/.companion/runtime/state/control-bundle-v1.json"\n'
+        + 'transaction="$HOME/.companion/runtime/control-transaction-v1"\n'
+        + 'rm -f "$bundle"\nrm -rf "$transaction"',
+    )).resolves.toMatchObject({ success: true });
+    expect(machine.persistentFiles.has(path)).toBe(false);
+    expect(machine.persistentFiles.has(sidecar)).toBe(false);
+  });
+
+  it.each([
+    ["unknown path", "outside/secret.env", Buffer.from("secret")],
+    ["oversized file", ".companion/runtime/state/providers.env", Buffer.alloc(4 * 1024 * 1024 + 1)],
+  ])("rejects a control bundle with an %s before applying any file", async (_case, badPath, badBytes) => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    const bundlePath = ".companion/runtime/state/control-bundle-v1.json";
+    const validBytes = Buffer.from("model");
+    const entry = (path: string, bytes: Buffer) => ({
+      path,
+      mode: 0o600,
+      byteSize: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      content: bytes.toString("base64"),
+    });
+    putBoxFile(machine, bundlePath, Buffer.from(JSON.stringify({
+      revision: 1,
+      files: [
+        entry(".companion/runtime/state/model.txt", validBytes),
+        entry(badPath, badBytes),
+      ],
+    })));
+
+    const result = await executeBoxCommand(
+      machine,
+      "COMPANION_CONTROL_BUNDLE=x COMPANION_CONTROL_APPLY node",
+    );
+
+    expect(result.success).toBe(false);
+    expect(machine.persistentFiles.has(".companion/runtime/state/model.txt")).toBe(false);
+    expect(machine.persistentFiles.has(badPath)).toBe(false);
+    expect(machine.persistentFiles.has(bundlePath)).toBe(false);
   });
 
   it("prints overlay vs base layout labels from the staged marker", async () => {
@@ -318,6 +381,9 @@ describe("semantic Box command shims", () => {
     }));
 
     expect(result.success).toBe(true);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      data: { initialCursor: 0 },
+    });
     expect(machine.daemon.activeAttemptId).toBe("attempt-before-ack");
     expect(machine.daemon.brokerCounters.unboundEvents).toBe(0);
     expect(machine.daemon.brokerJournal).toEqual([
@@ -328,6 +394,30 @@ describe("semantic Box command shims", () => {
         event: expect.objectContaining({ type: "extension_ui_request" }),
       }),
     ]);
+  });
+
+  it("clears the outbox before a prompt whose Pi RPC fails", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    machine.daemon.status = "active";
+    machine.daemon.rpcReady = true;
+    machine.daemon.invocationId = "00000000000000000000000000000001";
+    putBoxFile(machine, "outbox/stale.png", Buffer.from("stale"));
+    machine.piController = {
+      start: vi.fn(), restart: vi.fn(), stop: vi.fn(),
+      handleRpc: vi.fn(async () => { throw new Error("Pi failed"); }),
+      respondExtensionUi: vi.fn(), crash: vi.fn(), setScenario: vi.fn(), dispose: vi.fn(),
+    };
+
+    const result = await executeBoxCommand(machine, brokerShell({
+      id: "prompt-failure",
+      type: "prompt",
+      attemptId: "attempt-failure",
+      message: "Fail after cleanup.",
+      clearOutbox: true,
+    }));
+
+    expect(result.success).toBe(false);
+    expect(machine.persistentFiles.has("outbox/stale.png")).toBe(false);
   });
 
   it.each([

@@ -287,7 +287,7 @@ describe("AsciiBoxMaintenanceClient", () => {
   });
 
   it("requires HTTP 202 and the official accepted-delete envelope", async () => {
-    const fetchMock = vi.fn(async () => json({
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => json({
       ok: true,
       type: "box.deleting",
       operation: operation(),
@@ -433,6 +433,136 @@ describe("AsciiBoxMaintenanceClient", () => {
     });
   });
 
+  it("shares only a simultaneous account listing and never caches it after settlement", async () => {
+    let release!: (response: Response) => void;
+    const first = new Promise<Response>((resolve) => { release = resolve; });
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(async () => await first)
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "box.list",
+        boxes: [],
+        pageInfo: { nextCursor: null, hasMore: false },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    const lifecycle = client();
+    const input = {
+      companionId: COMPANION_ID,
+      generation: 14,
+      deadlineAt: Date.now() + 1_000,
+    };
+    const left = lifecycle.findGenerationBoxes(input);
+    const right = lifecycle.findGenerationBoxes(input);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    release(json({
+      ok: true,
+      type: "box.list",
+      boxes: [],
+      pageInfo: { nextCursor: null, hasMore: false },
+    }));
+    await expect(Promise.all([left, right])).resolves.toHaveLength(2);
+    await lifecycle.findGenerationBoxes(input);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not start a shared provider listing for an already expired or cancelled caller", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const lifecycle = client();
+
+    await expect(lifecycle.findGenerationBoxes({
+      companionId: COMPANION_ID,
+      generation: 14,
+      deadlineAt: Date.now() - 1,
+    })).rejects.toMatchObject({
+      stableCode: "box_request_deadline_exceeded",
+      status: 504,
+    });
+
+    const cancelled = new AbortController();
+    cancelled.abort();
+    await expect(lifecycle.findGenerationBoxes({
+      companionId: COMPANION_ID,
+      generation: 14,
+      deadlineAt: Date.now() + 1_000,
+      signal: cancelled.signal,
+    })).rejects.toMatchObject({
+      stableCode: "box_request_cancelled",
+      status: 499,
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("enforces each shared-list waiter's earlier absolute deadline", async () => {
+    vi.useFakeTimers();
+    let release!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(async () => await new Promise<Response>((resolve) => {
+      release = resolve;
+    })));
+    const lifecycle = client();
+    const first = lifecycle.findGenerationBoxes({
+      companionId: COMPANION_ID,
+      generation: 14,
+      deadlineAt: Date.now() + 1_000,
+    });
+    const second = lifecycle.findGenerationBoxes({
+      companionId: COMPANION_ID,
+      generation: 14,
+      deadlineAt: Date.now() + 20,
+    });
+    const secondResult = expect(second).rejects.toMatchObject({
+      stableCode: "box_request_deadline_exceeded",
+      status: 504,
+    });
+
+    await vi.advanceTimersByTimeAsync(20);
+    await secondResult;
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    release(json({
+      ok: true,
+      type: "box.list",
+      boxes: [],
+      pageInfo: { nextCursor: null, hasMore: false },
+    }));
+    await expect(first).resolves.toMatchObject({ canonical: null, duplicates: [] });
+  });
+
+  it("does not let the first waiter's short deadline abort a later shared-list waiter", async () => {
+    vi.useFakeTimers();
+    let release!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(async () => await new Promise<Response>((resolve) => {
+      release = resolve;
+    })));
+    const lifecycle = client();
+    const first = lifecycle.findGenerationBoxes({
+      companionId: COMPANION_ID,
+      generation: 14,
+      deadlineAt: Date.now() + 20,
+    });
+    const second = lifecycle.findGenerationBoxes({
+      companionId: COMPANION_ID,
+      generation: 14,
+      deadlineAt: Date.now() + 1_000,
+    });
+    const firstResult = expect(first).rejects.toMatchObject({
+      stableCode: "box_request_deadline_exceeded",
+      status: 504,
+    });
+
+    await vi.advanceTimersByTimeAsync(20);
+    await firstResult;
+    expect(fetch).toHaveBeenCalledTimes(1);
+    release(json({
+      ok: true,
+      type: "box.list",
+      boxes: [],
+      pageInfo: { nextCursor: null, hasMore: false },
+    }));
+    await expect(second).resolves.toMatchObject({ canonical: null, duplicates: [] });
+  });
+
   it("recovers the exact-name canonical and duplicates without issuing create", async () => {
     const fetchMock = vi.fn(async () => json({
       ok: true,
@@ -502,6 +632,31 @@ describe("AsciiBoxMaintenanceClient", () => {
       environment: "prod",
       env: { COMPANION_ID },
     });
+  });
+
+  it("creates after observed absence with exactly one POST and no hidden listing", async () => {
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => json({
+      ok: true,
+      type: "box.created",
+      status: "provisioning",
+      ttlSeconds: 300,
+      box: { id: OTHER_BOX_ID, name: "temporary" },
+    }, 202));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(client().createGenerationBoxAfterObservedAbsence({
+      companionId: COMPANION_ID,
+      generation: 14,
+      ttlSeconds: 21_600,
+      deadlineAt: Date.now() + 1_000,
+    })).resolves.toEqual({
+      outcome: "created",
+      boxId: OTHER_BOX_ID,
+      name: GENERATION_NAME,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("https://box.test/v1/boxes");
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).method).toBe("POST");
   });
 
   it("clones a named snapshot on create when from is supplied", async () => {

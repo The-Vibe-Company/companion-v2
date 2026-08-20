@@ -16,6 +16,8 @@ export async function refreshWarmCompanionLayout(input: {
   deps: RuntimeEngineDependencies;
   authorization: RuntimeAuthorization;
   restartPi: boolean;
+  /** Broker evidence can be stale even when a previous executor already updated the disk marker. */
+  restartPiWhenUnchanged?: boolean;
 }): Promise<{
   applied: "none" | "overlay" | "base";
   restartedPi: boolean;
@@ -28,7 +30,7 @@ export async function refreshWarmCompanionLayout(input: {
   }
   const refresh = await input.session.external(async (signal) =>
     await input.deps.resourceStager.refreshLayout({ boxId, signal }));
-  if (refresh.applied === "none" || !input.restartPi) {
+  if (!input.restartPi || (refresh.applied === "none" && !input.restartPiWhenUnchanged)) {
     return { applied: refresh.applied, restartedPi: false, piInvocationId: currentInvocationId };
   }
   try {

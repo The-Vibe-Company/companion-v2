@@ -12,6 +12,7 @@ on:
       - "packages/companion-runtime/**"
       - "pnpm-lock.yaml"
       - "scripts/box-runtime-change-e2e.ts"
+      - "scripts/summarize-box-runtime-benchmark.mjs"
   schedule:
     - cron: "47 4 * * *"
   workflow_dispatch:
@@ -52,6 +53,7 @@ jobs:
     if: >-
       !cancelled()
       && (github.event_name == 'push'
+        || github.event_name == 'schedule'
         || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
         || (github.event_name == 'pull_request'
           && github.event.pull_request.head.repo.full_name == github.repository
@@ -59,7 +61,7 @@ jobs:
           && github.actor == vars.COMPANION_BOX_E2E_TRUSTED_LOGIN
           && github.triggering_actor == vars.COMPANION_BOX_E2E_TRUSTED_LOGIN))
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 90
     permissions:
       contents: read
       pull-requests: write
@@ -85,7 +87,18 @@ jobs:
         id: runtime_e2e
         run: |
           set -o pipefail
-          pnpm e2e:box-runtime-change 2>&1 | tee "$RUNNER_TEMP/box-runtime-change-e2e.log"
+          if [ "$GITHUB_EVENT_NAME" = schedule ]; then
+            : > "$RUNNER_TEMP/box-runtime-change-e2e.log"
+            for ((cycle = 1; cycle <= 10; cycle++)); do
+              pnpm e2e:box-runtime-change 2>&1 \
+                | tee -a "$RUNNER_TEMP/box-runtime-change-e2e.log"
+            done
+            node scripts/summarize-box-runtime-benchmark.mjs \
+              "$RUNNER_TEMP/box-runtime-change-e2e.log"
+          else
+            pnpm e2e:box-runtime-change 2>&1 \
+              | tee "$RUNNER_TEMP/box-runtime-change-e2e.log"
+          fi
         env:
           COMPANION_BOX_API_KEY: ${{ secrets.COMPANION_BOX_E2E_API_KEY }}
           COMPANION_BOX_E2E_ZAI_API_KEY: ${{ secrets.COMPANION_BOX_E2E_ZAI_API_KEY }}

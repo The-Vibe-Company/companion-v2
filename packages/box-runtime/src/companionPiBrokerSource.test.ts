@@ -112,6 +112,8 @@ describe("COMPANION_PI_BROKER_SOURCE", () => {
         type: "prompt",
         attemptId: "attempt-source-1",
         message: "Run through the standalone broker",
+        requiredInput: ["text"],
+        clearOutbox: true,
       },
     });
     expect(prompt).toMatchObject({

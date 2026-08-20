@@ -46,6 +46,38 @@ class HangingDrainEngine extends HoldingEngine {
   }
 }
 
+class CompletingEngine extends HoldingEngine {
+  readonly completions: Array<(result: RuntimeExecutionResult) => void> = [];
+
+  override execute(claim: RuntimeClaim): Promise<RuntimeExecutionResult> {
+    this.claims.push(claim);
+    return new Promise((resolve) => this.completions.push(resolve));
+  }
+}
+
+class ImmediatelyCompletingEngine extends HoldingEngine {
+  override async execute(claim: RuntimeClaim): Promise<RuntimeExecutionResult> {
+    this.claims.push(claim);
+    return {
+      outcome: "succeeded",
+      workKind: claim.workKind,
+      workId: claim.workId,
+      companionId: claim.companionId,
+    };
+  }
+}
+
+class BlockingClock extends TestClock {
+  override async sleep(_milliseconds: number, signal?: AbortSignal): Promise<void> {
+    return await new Promise<void>((resolve, reject) => {
+      const aborted = () => reject(signal?.reason ?? new Error("woken"));
+      signal?.addEventListener("abort", aborted, { once: true });
+      if (signal?.aborted) aborted();
+      void resolve;
+    });
+  }
+}
+
 function numberedClaim(index: number, companionIndex = index): RuntimeClaim {
   const companionHex = (companionIndex + 16).toString(16).padStart(12, "0");
   const workHex = (index + 32).toString(16).padStart(12, "0");
@@ -182,6 +214,64 @@ describe("RuntimeScheduler", () => {
   it("publishes the two-second sweep contract", () => {
     expect(DEFAULT_RUNTIME_SWEEP_INTERVAL_MS).toBe(2_000);
     expect(DEFAULT_RUNTIME_CONCURRENCY).toBe(8);
+  });
+
+  it("wakes the claim loop immediately when an operation frees the Companion slot", async () => {
+    const base = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(base) });
+    store.claims.push(numberedClaim(0), numberedClaim(1));
+    const engine = new CompletingEngine();
+    const scheduler = new RuntimeScheduler({
+      store,
+      engine,
+      clock: new BlockingClock(),
+      executorId: "scheduler-test",
+      concurrency: 1,
+      claimsEnabled: true,
+    });
+
+    scheduler.start();
+    while (engine.claims.length < 1) await Promise.resolve();
+    const completed = engine.claims[0]!;
+    engine.completions[0]!({
+      outcome: "succeeded",
+      workKind: completed.workKind,
+      workId: completed.workId,
+      companionId: completed.companionId,
+    });
+    while (engine.claims.length < 2) await Promise.resolve();
+
+    expect(engine.claims).toHaveLength(2);
+    const second = engine.claims[1]!;
+    engine.completions[1]!({
+      outcome: "succeeded",
+      workKind: second.workKind,
+      workId: second.workId,
+      companionId: second.companionId,
+    });
+    await Promise.resolve();
+    await scheduler.shutdown();
+  });
+
+  it("retains a wake from an execution that resolves before recovery sleep is installed", async () => {
+    const base = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(base) });
+    store.claims.push(numberedClaim(0), numberedClaim(1));
+    const engine = new ImmediatelyCompletingEngine();
+    const scheduler = new RuntimeScheduler({
+      store,
+      engine,
+      clock: new BlockingClock(),
+      executorId: "scheduler-test",
+      concurrency: 1,
+      claimsEnabled: true,
+    });
+
+    scheduler.start();
+    while (engine.claims.length < 2) await Promise.resolve();
+
+    expect(engine.claims).toHaveLength(2);
+    await scheduler.shutdown();
   });
 
   it("bounds shutdown drain instead of waiting forever", async () => {

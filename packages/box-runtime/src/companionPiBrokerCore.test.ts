@@ -331,7 +331,12 @@ describe("CompanionPiBroker", () => {
             type: "response",
             command: "get_state",
             success: true,
-            data: { isStreaming: false, isCompacting: false, pendingMessageCount: 0 },
+            data: {
+              isStreaming: false,
+              isCompacting: false,
+              pendingMessageCount: 0,
+              model: { input: ["text"] },
+            },
           };
         }
         broker.acceptPiRecord({ type: "agent_start" });
@@ -346,7 +351,10 @@ describe("CompanionPiBroker", () => {
       attemptId: "attempt-racing-ack",
       message: "Race",
     });
-    expect(response).toMatchObject({ success: true });
+    expect(response).toMatchObject({
+      success: true,
+      data: { initialCursor: 0 },
+    });
     expect(journal.read(0).events).toEqual([
       expect.objectContaining({ attemptId: "attempt-racing-ack", event: { type: "agent_start" } }),
     ]);

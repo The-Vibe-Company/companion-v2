@@ -185,6 +185,38 @@ describe("RuntimeEngine attempts", () => {
     expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
   });
 
+  it("ends prompt ACK timing when Pi responds rather than after its durable checkpoint", async () => {
+    const claim = attemptClaim();
+    const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
+    const ports = fakePorts(store);
+    const clock = new TestClock();
+    const records: Record<string, unknown>[] = [];
+    const checkpoint = store.checkpoint.bind(store);
+    store.checkpoint = async (fence, input) => {
+      if (input.nextCheckpoint === "dispatch_accepted") clock.advance(10_000);
+      return await checkpoint(fence, input);
+    };
+    ports.eventReads.push(assistantAndSettlementPage());
+
+    const result = await new RuntimeEngine(engineDependencies({
+      store,
+      ports,
+      clock,
+      log: {
+        error(record) { records.push(record); },
+        warn(record) { records.push(record); },
+        info(record) { records.push(record); },
+      },
+    })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect(records).toContainEqual(expect.objectContaining({
+      event: "runtime.prompt.ack",
+      ts: "2026-08-16T12:00:00.000Z",
+      sendToPromptAckMs: 0,
+    }));
+  });
+
   it("recycles Pi after an overlay layout refresh before dispatch", async () => {
     const claim = attemptClaim();
     const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
@@ -197,13 +229,18 @@ describe("RuntimeEngine attempts", () => {
     ports.resourceStager.refreshLayout = async () => ({ applied: "overlay" });
     ports.pi.restartPiDaemon = restartPiDaemon;
     const baseBrokerState = ports.pi.brokerState;
-    ports.pi.brokerState = async (input) => ({
-      ...await baseBrokerState(input),
-      invocationId: overlayInvocationId,
-    });
+    let brokerReads = 0;
+    ports.pi.brokerState = async (input) => {
+      brokerReads += 1;
+      return {
+        ...await baseBrokerState(input),
+        invocationId: overlayInvocationId,
+        layoutCurrent: brokerReads > 1,
+      };
+    };
     ports.pi.prompt = async (input) => {
       ports.promptCalls.push({ attemptId: input.attemptId, message: input.message });
-      return { outcome: "accepted", invocationId: overlayInvocationId };
+      return { outcome: "accepted", invocationId: overlayInvocationId, initialCursor: 0n };
     };
     ports.eventReads.push(assistantAndSettlementPage(overlayInvocationId));
     const engine = new RuntimeEngine(engineDependencies({ store, ports }));
@@ -231,7 +268,7 @@ describe("RuntimeEngine attempts", () => {
     });
     ports.pi.prompt = async (input) => {
       ports.promptCalls.push({ attemptId: input.attemptId, message: input.message });
-      return { outcome: "accepted", invocationId: liveInvocationId };
+      return { outcome: "accepted", invocationId: liveInvocationId, initialCursor: 0n };
     };
     ports.eventReads.push(assistantAndSettlementPage(liveInvocationId));
     const engine = new RuntimeEngine(engineDependencies({ store, ports }));
@@ -255,6 +292,10 @@ describe("RuntimeEngine attempts", () => {
       tailCursor: 10n,
       acknowledgedCursor: 10n,
     });
+    ports.pi.prompt = async (input) => {
+      ports.promptCalls.push({ attemptId: input.attemptId, message: input.message });
+      return { outcome: "accepted", invocationId: PI_INVOCATION_ID, initialCursor: 10n };
+    };
     ports.eventReads.push({
       events: [
         {
@@ -860,7 +901,7 @@ describe("RuntimeEngine attempts", () => {
     expect(store.settlements[0]?.error?.code).toBe("actor_access_revoked");
   });
 
-  it("stages attachments, names them in the prompt, and empties the outbox first", async () => {
+  it("preflights and stages attachments before the broker atomically clears and accepts", async () => {
     const claim = attemptClaim();
     const store = new MemoryRuntimeStore({
       authorization: attemptAuthorization(claim),
@@ -882,9 +923,9 @@ describe("RuntimeEngine attempts", () => {
       messageEventId: MESSAGE_EVENT_ID,
       filenames: ["chart.png", "report.pdf"],
     }]);
-    // The outbox is emptied before the prompt is written, so nothing a previous attempt left
-    // behind can be harvested as this turn's output.
-    expect(ports.log.indexOf("clear-outbox")).toBeLessThan(ports.log.indexOf("stage-attachments"));
+    // The control plane no longer runs a separate clear command; the broker serializes it with the
+    // prompt after attachment staging.
+    expect(ports.log).not.toContain("clear-outbox");
     const message = ports.promptCalls[0]?.message ?? "";
     expect(message.startsWith("Hello from a durable turn")).toBe(true);
     expect(message).toContain("The user attached 2 files, staged read-only at:");
@@ -1064,25 +1105,20 @@ describe("RuntimeEngine attempts", () => {
     })]);
   });
 
-  it("fails a turn whose outbox cannot be emptied, and never dispatches it", async () => {
+  it("treats a broker outbox-clear refusal as a proven prompt rejection", async () => {
     const claim = attemptClaim();
     const store = new MemoryRuntimeStore({ authorization: attemptAuthorization(claim) });
     const ports = fakePorts(store);
-    ports.outboxHarvester.clearOutbox = async () => {
-      throw new Error("the Box refused to empty its outbox");
-    };
+    ports.pi.prompt = async () => ({ outcome: "rejected", code: "outbox_clear_failed" });
     const engine = new RuntimeEngine(engineDependencies({ store, ports }));
 
     const result = await engine.execute(claim);
 
-    // Without a clear, a later harvest could attribute a previous attempt's leftovers to this turn,
-    // so the turn fails before any dispatch intent exists and the queue is released.
     expect(result.outcome).toBe("failed");
-    expect(store.checkpoints).toHaveLength(0);
     expect(ports.promptCalls).toHaveLength(0);
     expect(store.settlements[0]?.error).toMatchObject({
-      code: "outbox_clear_failed",
-      action: "retry",
+      code: "pi_prompt_rejected",
+      action: "restart_pi",
     });
   });
 
