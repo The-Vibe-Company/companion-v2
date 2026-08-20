@@ -16,6 +16,10 @@ const SAFE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const POLL_INTERVAL_MS = 1_000;
 const REPLY_TIMEOUT_MS = 3 * 60_000;
 const IMAGE_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
+// The provider canary must be able to exercise the same cold path as an operator-configured runtime
+// when its optional snapshot disappears. Keep this pinned to the Pi version baked into the current
+// deterministic runtime fixture rather than letting a fallback install float to an untested release.
+const E2E_PI_INSTALL_COMMAND = "npm install --global @earendil-works/pi-coding-agent@0.84.2";
 
 class RuntimeChangeE2EError extends Error {
   readonly code: string;
@@ -239,7 +243,11 @@ async function main(): Promise<number> {
 
   const providerCalls: string[] = [];
   const recordProviderCall = (sample: { operation: string }) => providerCalls.push(sample.operation);
-  const runtime = new AsciiBoxCompanionRuntime(config.env, { onTiming: recordProviderCall });
+  const runtime = new AsciiBoxCompanionRuntime({
+    ...config.env,
+    COMPANION_PI_INSTALL_COMMAND:
+      config.env.COMPANION_PI_INSTALL_COMMAND?.trim() || E2E_PI_INSTALL_COMMAND,
+  }, { onTiming: recordProviderCall });
   const lifecycle = new AsciiBoxMaintenanceClient(config.env, { onTiming: recordProviderCall });
   const companionId = randomUUID();
   const orgId = randomUUID();
