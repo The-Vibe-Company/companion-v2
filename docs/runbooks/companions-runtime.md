@@ -54,6 +54,13 @@ For ordinary compatible Runtime v2 releases, use rolling deployment. One runtime
 SIGTERM stops new claims, reaches bounded safe checkpoints, and releases or loses its leases; another
 replica must take over within 45 seconds. Do not clear lease rows or edit epochs manually.
 
+Migration 0110 is deliberately migration-first during that rolling deploy. As soon as it commits,
+the pre-0110 four-argument runtime claimer receives no new work; already-held leases remain valid.
+Deploy the matching runtime immediately after the release job. If an old replica loses a lease after
+staging without the new expiry ledger, the five-argument claimer rewinds that operation/settings
+checkpoint and restages before Pi is recycled. Do not re-enable the legacy claimer or manually mark
+material current to speed the rollout.
+
 ## Legacy purge
 
 The purge is mandatory for an installation with pre-v2 Companions. It deletes legacy Companions,
@@ -222,6 +229,26 @@ The ten-minute inactivity deadline and two-hour absolute deadline must settle vi
 write/ACK outcome is ambiguous, warn that earlier external effects may have succeeded and expose
 Retry/Cancel only. Retry creates a new attempt and recycles Pi; it does not restart the Box. Never
 manually mark an ambiguous attempt queued.
+
+### MCP OAuth refresh failed
+
+`mcp_oauth_refresh_failed` with action `retry` means runtime could not obtain a selected MCP access
+token that outlives the full turn reserve. Check only the safe OAuth code; never capture the provider
+response. Diagnose by cause:
+
+- for GitHub deployment-secret drift, verify `api` and `runtime` both reference the same shared
+  `COMPANION_MCP_GITHUB_CLIENT_ID` and `COMPANION_MCP_GITHUB_CLIENT_SECRET`; the API-side value is the
+  reference after a successful initial exchange, and runtime must be redeployed after correction;
+- if the GitHub client id changed, restore the OAuth App that issued the stored grant or reconnect
+  the GitHub account in Plugins — a different client id cannot refresh that grant;
+- if GitHub configuration is absent, restore both shared variables before retrying;
+- for GitHub, Linear, Notion, or another revoked/expired user grant, reconnect that account in
+  Plugins; repeated messages cannot repair a revoked grant;
+- if a provider returns a token shorter than two hours and five minutes, no Box write occurred, but
+  that provider cannot safely back a maximum-length turn until its grant/token policy changes.
+
+After repair, send a new message. Do not inject the refresh token into Box, restart the Box, or replay
+the failed turn.
 
 ### A turn's attachments failed
 

@@ -354,8 +354,21 @@ async function stageCapturedResources(context: OperationContext): Promise<Staged
       targetSkillsRevision,
       signal,
     }));
+  await context.session.fencedMutation(async () =>
+    await context.deps.store.recordMaterialSnapshot(context.session.fence, {
+      clientSurface,
+      materialExpiresAt: staged.materialExpiresAt,
+    }));
   logStageTiming(context, "installing_layout", startedAt);
   return staged;
+}
+
+async function publishStagedResources(
+  context: OperationContext,
+  piInvocationId: string,
+): Promise<void> {
+  await context.session.fencedMutation(async () =>
+    await context.deps.store.publishMaterialSnapshot(context.session.fence, { piInvocationId }));
 }
 
 async function observeStagedResources(
@@ -374,11 +387,8 @@ async function observeStagedResources(
 async function startAndObservePi(context: OperationContext): Promise<void> {
   const startedAt = context.deps.clock.now().getTime();
   const previousInvocationId = requiredAuthorization(context.session).piInvocationId;
-  const recycleWarmPi = context.claim.operationKind === "start" && previousInvocationId !== null;
   const result = await lifecycle(context, "start_pi", async ({ signal }) =>
-    recycleWarmPi
-      ? await context.deps.pi.restartPiDaemon({ boxId: requiredBoxId(context.session), signal })
-      : await context.deps.pi.startPiDaemon({ boxId: requiredBoxId(context.session), signal }));
+    await context.deps.pi.restartPiDaemon({ boxId: requiredBoxId(context.session), signal }));
   if (
     result.state !== "idle"
     || !result.invocationId
@@ -528,6 +538,7 @@ async function handleStart(context: OperationContext): Promise<RuntimeWorkDispos
         await startAndObservePi(context);
         break;
       case "pi_observed":
+        await publishStagedResources(context, requiredAuthorization(context.session).piInvocationId!);
         await context.session.checkpoint({ nextCheckpoint: "pi_ready" });
         break;
       case "pi_ready":
@@ -612,6 +623,7 @@ async function handleRestartPi(context: OperationContext): Promise<RuntimeWorkDi
     const authorization = await context.session.reauthorize();
     switch (authorization.workCheckpoint) {
       case "pending":
+        await stageCapturedResources(context);
         await context.session.checkpoint({ nextCheckpoint: "restarting_pi" });
         break;
       case "restarting_pi":
@@ -646,6 +658,7 @@ async function handleRestartPi(context: OperationContext): Promise<RuntimeWorkDi
         break;
       }
       case "pi_observed":
+        await publishStagedResources(context, requiredAuthorization(context.session).piInvocationId!);
         await context.session.checkpoint({ nextCheckpoint: "pi_ready" });
         break;
       case "pi_ready":
@@ -705,6 +718,7 @@ async function handleRestartBox(context: OperationContext): Promise<RuntimeWorkD
         await startAndObservePi(context);
         break;
       case "pi_observed":
+        await publishStagedResources(context, requiredAuthorization(context.session).piInvocationId!);
         await context.session.checkpoint({ nextCheckpoint: "pi_ready" });
         break;
       case "pi_ready":
@@ -766,9 +780,11 @@ async function handleApplySettings(context: OperationContext): Promise<RuntimeWo
             ? {}
             : { appliedSkillsRevision: activated.appliedSkillsRevision }),
         });
-        break;
+        await publishStagedResources(context, activated.piInvocationId);
+        return runtimeSucceeded;
       }
       case "settings_applied":
+        await publishStagedResources(context, requiredAuthorization(context.session).piInvocationId!);
         return runtimeSucceeded;
       default:
         throw new RuntimeInvariantError({

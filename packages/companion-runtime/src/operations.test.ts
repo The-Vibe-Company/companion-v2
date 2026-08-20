@@ -14,38 +14,41 @@ import {
 } from "./test/fixtures";
 
 describe("runtime lifecycle operations", () => {
-  it("recycles only Pi when a warm Send already has an invocation", async () => {
-    const claim = operationClaim({ checkpoint: "starting_pi", checkpointSequence: 6n });
-    const store = new MemoryRuntimeStore({
-      authorization: operationAuthorization(claim, {
-        boxId: BOX_ID,
-        boxState: "ready",
-        piState: "idle",
-        piInvocationId: "old-pi-invocation",
-      }),
-    });
-    const ports = fakePorts(store);
-    let starts = 0;
-    let restarts = 0;
-    let boxRestarts = 0;
-    ports.pi.startPiDaemon = async () => {
-      starts += 1;
-      return { state: "idle", invocationId: PI_INVOCATION_ID };
-    };
-    ports.pi.restartPiDaemon = async () => {
-      restarts += 1;
-      return { state: "idle", invocationId: PI_INVOCATION_ID };
-    };
-    ports.box.stopExistingBox = async () => { boxRestarts += 1; };
+  it.each([null, "old-pi-invocation"])(
+    "recycles Pi after staging when the previous invocation is %s",
+    async (previousInvocationId) => {
+      const claim = operationClaim({ checkpoint: "starting_pi", checkpointSequence: 6n });
+      const store = new MemoryRuntimeStore({
+        authorization: operationAuthorization(claim, {
+          boxId: BOX_ID,
+          boxState: "ready",
+          piState: "idle",
+          piInvocationId: previousInvocationId,
+        }),
+      });
+      const ports = fakePorts(store);
+      let starts = 0;
+      let restarts = 0;
+      let boxRestarts = 0;
+      ports.pi.startPiDaemon = async () => {
+        starts += 1;
+        return { state: "idle", invocationId: PI_INVOCATION_ID };
+      };
+      ports.pi.restartPiDaemon = async () => {
+        restarts += 1;
+        return { state: "idle", invocationId: PI_INVOCATION_ID };
+      };
+      ports.box.stopExistingBox = async () => { boxRestarts += 1; };
 
-    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+      const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
 
-    expect(result.outcome).toBe("succeeded");
-    expect(starts).toBe(0);
-    expect(restarts).toBe(1);
-    expect(boxRestarts).toBe(0);
-    expect(store.authorization.piInvocationId).toBe(PI_INVOCATION_ID);
-  });
+      expect(result.outcome).toBe("succeeded");
+      expect(starts).toBe(0);
+      expect(restarts).toBe(1);
+      expect(boxRestarts).toBe(0);
+      expect(store.authorization.piInvocationId).toBe(PI_INVOCATION_ID);
+    },
+  );
 
   it("durably deletes a duplicate discovered by create recovery before attaching canonical", async () => {
     const claim = operationClaim();
@@ -625,8 +628,8 @@ describe("runtime lifecycle operations", () => {
       return { state };
     };
     ports.box.resumeExistingBox = async () => { effects.push("resume"); };
-    ports.pi.startPiDaemon = async () => {
-      effects.push("start-pi");
+    ports.pi.restartPiDaemon = async () => {
+      effects.push("restart-pi");
       return { state: "idle", invocationId: PI_INVOCATION_ID };
     };
     const engine = new RuntimeEngine(engineDependencies({ store, ports }));
@@ -642,7 +645,7 @@ describe("runtime lifecycle operations", () => {
       "status:ready",
     ]);
     expect(effects.indexOf("resume")).toBeGreaterThan(effects.indexOf("status:archived"));
-    expect(effects).toContain("start-pi");
+    expect(effects).toContain("restart-pi");
   });
 
   it("waits for a different idle Pi invocation after an explicit Pi restart", async () => {
@@ -656,11 +659,17 @@ describe("runtime lifecycle operations", () => {
       }),
     });
     const ports = fakePorts(store);
+    const effects: string[] = [];
+    const originalStage = ports.resourceStager.stageExistingBox;
+    ports.resourceStager.stageExistingBox = async (input) => {
+      effects.push("stage");
+      return await originalStage(input);
+    };
     let statusCalls = 0;
-    ports.pi.restartPiDaemon = async () => ({
-      state: "starting",
-      invocationId: "old-pi-invocation",
-    });
+    ports.pi.restartPiDaemon = async () => {
+      effects.push("restart-pi");
+      return { state: "starting", invocationId: "old-pi-invocation" };
+    };
     ports.pi.piDaemonStatus = async () => {
       statusCalls += 1;
       return statusCalls === 1
@@ -673,6 +682,12 @@ describe("runtime lifecycle operations", () => {
 
     expect(result.outcome).toBe("succeeded");
     expect(statusCalls).toBe(2);
+    expect(effects).toEqual(["stage", "restart-pi"]);
+    expect(store.recordedMaterialSnapshots).toEqual([{
+      clientSurface: "web",
+      materialExpiresAt: new Date("2026-08-16T18:00:00.000Z"),
+    }]);
+    expect(store.publishedMaterialSnapshots).toEqual([PI_INVOCATION_ID]);
     expect(store.authorization.piInvocationId).toBe(PI_INVOCATION_ID);
   });
 
@@ -732,6 +747,11 @@ describe("runtime lifecycle operations", () => {
       appliedSkillsRevision: 2,
     });
     expect(store.observations.at(-1)).not.toHaveProperty("diskLayoutVersion");
+    expect(store.recordedMaterialSnapshots).toEqual([{
+      clientSurface: "web",
+      materialExpiresAt: new Date("2026-08-16T18:00:00.000Z"),
+    }]);
+    expect(store.publishedMaterialSnapshots).toEqual([PI_INVOCATION_ID]);
     expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
   });
 
@@ -761,6 +781,7 @@ describe("runtime lifecycle operations", () => {
         diskLayoutVersion: 14,
         appliedSettingsRevision: input.targetSettingsRevision,
         appliedSkillsRevision: null,
+        materialExpiresAt: null,
       };
     };
     ports.pi.restartPiDaemon = async () => ({
@@ -780,6 +801,11 @@ describe("runtime lifecycle operations", () => {
       appliedSettingsRevision: 2n,
     });
     expect(store.observations.at(-1)).not.toHaveProperty("appliedSkillsRevision");
+    expect(store.recordedMaterialSnapshots).toEqual([{
+      clientSurface: "native_mobile",
+      materialExpiresAt: null,
+    }]);
+    expect(store.publishedMaterialSnapshots).toEqual(["new-native-pi"]);
   });
 
   it("does not publish staged revisions when settings activation lacks a new idle Pi", async () => {
@@ -826,6 +852,8 @@ describe("runtime lifecycle operations", () => {
     expect(store.authorization.appliedSkillsRevision).toBe(1);
     expect(store.authorization.workCheckpoint).toBe("applying_settings");
     expect(store.observations).toHaveLength(0);
+    expect(store.recordedMaterialSnapshots).toHaveLength(1);
+    expect(store.publishedMaterialSnapshots).toHaveLength(0);
     expect(store.settlements[0]?.error?.code).toBe("pi_start_failed");
   });
 
@@ -887,6 +915,8 @@ describe("runtime lifecycle operations", () => {
     expect(stages).toBe(2);
     expect(restarts).toBe(2);
     expect(boxLifecycleCalls).toBe(0);
+    expect(store.recordedMaterialSnapshots).toHaveLength(2);
+    expect(store.publishedMaterialSnapshots).toEqual(["settings-pi-2"]);
     expect(store.authorization.piInvocationId).toBe("settings-pi-2");
     expect(store.authorization.appliedSettingsRevision).toBe(2n);
     expect(store.authorization.workCheckpoint).toBe("settings_applied");

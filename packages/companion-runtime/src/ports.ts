@@ -170,6 +170,8 @@ export interface RuntimeResourceStager {
     diskLayoutVersion: 14;
     appliedSettingsRevision: bigint;
     appliedSkillsRevision: number | null;
+    /** Earliest expiry among the bounded credentials written into this snapshot. */
+    materialExpiresAt: Date | null;
   }>;
   /**
    * Apply the current Pi layout to a Box that is already running. Overlay-only changes rewrite the

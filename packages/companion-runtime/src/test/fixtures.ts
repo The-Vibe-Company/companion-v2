@@ -17,6 +17,7 @@ import {
 } from "../store";
 import type {
   AttemptRuntimeClaim,
+  ClientSurface,
   DuplicateCleanup,
   GateStatus,
   LeaseFence,
@@ -279,6 +280,8 @@ export class MemoryRuntimeStore implements RuntimeStore {
   renewReturnsNull = false;
   renewals = 0;
   duplicateCleanups = new Map<string, DuplicateCleanup>();
+  recordedMaterialSnapshots: Array<{ clientSurface: ClientSurface; materialExpiresAt: Date | null }> = [];
+  publishedMaterialSnapshots: string[] = [];
 
   constructor(input: {
     authorization: RuntimeAuthorization;
@@ -448,8 +451,23 @@ export class MemoryRuntimeStore implements RuntimeStore {
     return this.material.configCatalog;
   }
 
-  async mintHubToken(): Promise<string | null> {
+  async mintHubToken(): Promise<{ token: string; expiresAt: Date } | null> {
     return null;
+  }
+
+  async recordMaterialSnapshot(_fence: LeaseFence, input: {
+    clientSurface: ClientSurface;
+    materialExpiresAt: Date | null;
+  }): Promise<true> {
+    this.recordedMaterialSnapshots.push(input);
+    return true;
+  }
+
+  async publishMaterialSnapshot(_fence: LeaseFence, input: {
+    piInvocationId: string;
+  }): Promise<true> {
+    this.publishedMaterialSnapshots.push(input.piInvocationId);
+    return true;
   }
 
   async getAttemptTerminalProjection(): Promise<{
@@ -686,6 +704,9 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
       diskLayoutVersion: 14,
       appliedSettingsRevision: input.targetSettingsRevision,
       appliedSkillsRevision: input.targetSkillsRevision,
+      materialExpiresAt: input.clientSurface === "native_mobile"
+        ? null
+        : new Date("2026-08-16T18:00:00.000Z"),
     }),
     refreshLayout: async () => ({ applied: "none" }),
     invalidateLayout: async () => undefined,

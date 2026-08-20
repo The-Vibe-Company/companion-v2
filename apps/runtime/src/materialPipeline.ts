@@ -7,6 +7,7 @@ import {
 } from "@companion/box-runtime";
 import {
   COMPANION_MCP_OAUTH_REFRESH_SKEW_MS,
+  CompanionPluginOAuthError,
   encryptCompanionMcpRuntimeCredential,
   githubUserIdentity,
   refreshCompanionPluginOAuth,
@@ -14,6 +15,7 @@ import {
 } from "@companion/core";
 import {
   RUNTIME_LEASE_SECONDS,
+  COMPANION_RUNTIME_MATERIAL_MIN_TTL_MS,
   RuntimeStoreSerializationError,
   createRuntimeVisibleTextRedactor,
   type RuntimeAttachmentStager,
@@ -88,7 +90,11 @@ export function createRuntimeMaterialPipeline(input: {
   const uuid = input.uuid ?? randomUUID;
   const refreshOauth = input.refreshOauth
     ?? (async (credential, signal) => await refreshCompanionPluginOAuth({ credential, signal }));
-  const hubTokensByMaterial = new WeakMap<RuntimeWorkMaterial, string>();
+  const hubTokensByMaterial = new WeakMap<
+    RuntimeWorkMaterial,
+    { token: string; expiresAt: Date }
+  >();
+  const oauthExpiresAtByMaterial = new WeakMap<RuntimeWorkMaterial, Date | null>();
 
   const materialProvider: RuntimeMaterialProvider = {
     async getMaterial({ store, fence, signal }) {
@@ -108,7 +114,10 @@ export function createRuntimeMaterialPipeline(input: {
           : Date.parse(row.decrypted.credential.accessExpiresAt);
         if (
           expiresAt === null
-          || expiresAt > now() + COMPANION_MCP_OAUTH_REFRESH_SKEW_MS
+          || expiresAt > now() + Math.max(
+            COMPANION_MCP_OAUTH_REFRESH_SKEW_MS,
+            COMPANION_RUNTIME_MATERIAL_MIN_TTL_MS,
+          )
         ) continue;
         const active = await refreshOauth(row.decrypted.credential, signal);
         if (signal?.aborted) throw signal.reason ?? new Error("Runtime material refresh aborted");
@@ -150,6 +159,31 @@ export function createRuntimeMaterialPipeline(input: {
         });
         refreshed.set(oauthKey(row.accountId, nextGeneration), active);
       }
+      let oauthExpiresAt: Date | null = null;
+      for (const row of decryptRuntimeMcpRows({
+        orgId: fence.orgId,
+        mcpMaterial: material.mcpMaterial,
+        masterKey: input.masterKey,
+      })) {
+        if (row.decrypted.kind !== "oauth" || row.decrypted.credential.accessExpiresAt === null) {
+          continue;
+        }
+        const expiresAt = new Date(row.decrypted.credential.accessExpiresAt);
+        if (!Number.isFinite(expiresAt.getTime())) {
+          throw new RuntimeMaterialError("runtime_material_invalid");
+        }
+        if (oauthExpiresAt === null || expiresAt < oauthExpiresAt) oauthExpiresAt = expiresAt;
+      }
+      if (
+        oauthExpiresAt !== null
+        && oauthExpiresAt.getTime() <= now() + COMPANION_RUNTIME_MATERIAL_MIN_TTL_MS
+      ) {
+        throw new CompanionPluginOAuthError(
+          "The MCP authorization expires too soon for a Companion turn. Reconnect it in Plugins.",
+          "oauth_refresh_failed",
+        );
+      }
+      oauthExpiresAtByMaterial.set(material, oauthExpiresAt);
       if (fence.workKind === "settings" || fence.workKind === "operation") {
         material.configCatalog = await store.getConfigCatalog(fence, RUNTIME_LEASE_SECONDS);
         const hubToken = await store.mintHubToken(fence, RUNTIME_LEASE_SECONDS);
@@ -205,7 +239,14 @@ export function createRuntimeMaterialPipeline(input: {
         now,
       });
       const nativeMobile = stage.clientSurface === "native_mobile";
-      const hubToken = nativeMobile ? undefined : hubTokensByMaterial.get(stage.material);
+      const hubCredential = nativeMobile ? undefined : hubTokensByMaterial.get(stage.material);
+      if (!nativeMobile && !hubCredential) {
+        throw new RuntimeMaterialError("runtime_material_invalid");
+      }
+      const oauthExpiresAt = oauthExpiresAtByMaterial.get(stage.material) ?? null;
+      const materialExpiresAt = nativeMobile
+        ? null
+        : earliestDate(hubCredential?.expiresAt ?? null, oauthExpiresAt);
       const skills = nativeMobile
         ? []
         : [
@@ -237,7 +278,9 @@ export function createRuntimeMaterialPipeline(input: {
             COMPANION_API_URL: companionHubApiUrl(input.apiUrl),
             COMPANION_WORKSPACE_ID: stage.orgId,
             ...resources.extraEnv,
-            ...(hubToken ? { COMPANION_DELEGATION_TOKEN: hubToken } : {}),
+            ...(hubCredential
+              ? { COMPANION_DELEGATION_TOKEN: hubCredential.token }
+              : {}),
           },
         configCatalog: nativeMobile ? null : stage.material.configCatalog,
         signal: stage.signal,
@@ -246,6 +289,7 @@ export function createRuntimeMaterialPipeline(input: {
         diskLayoutVersion: observed.diskLayoutVersion,
         appliedSettingsRevision: stage.targetSettingsRevision,
         appliedSkillsRevision: nativeMobile ? null : stage.targetSkillsRevision,
+        materialExpiresAt,
       };
     },
     async refreshLayout(stage) {
@@ -385,6 +429,12 @@ export function createRuntimeMaterialPipeline(input: {
     attachmentStager,
     outboxHarvester,
   };
+}
+
+function earliestDate(left: Date | null, right: Date | null): Date | null {
+  if (left === null) return right;
+  if (right === null) return left;
+  return left <= right ? left : right;
 }
 
 const MESSAGE_EVENT_ID_PATTERN
