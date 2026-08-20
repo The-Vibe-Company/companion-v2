@@ -81,7 +81,15 @@ describe("runtime-change Box creation", () => {
       retryable: true,
       outcomeUnknown: false,
     }),
-  ])("does not replay an ambiguous, timed-out, or 5xx create failure", async (failure) => {
+    new BoxRuntimeAdapterError({
+      stableCode: "box_not_found",
+      message: "An unrelated Box provider resource was not found",
+      status: 404,
+      providerCode: "box_not_found",
+      retryable: false,
+      outcomeUnknown: false,
+    }),
+  ])("does not replay an ambiguous, timed-out, 5xx, or generic 404 failure", async (failure) => {
     const createOrRecoverGenerationBox = vi.fn(async () => {
       throw failure;
     });

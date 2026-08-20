@@ -56,8 +56,12 @@ function configuration(env: NodeJS.ProcessEnv) {
   ) {
     throw new RuntimeChangeE2EError("invalid_configuration");
   }
+  const runtimeEnv: NodeJS.ProcessEnv = {
+    ...env,
+    COMPANION_BOX_API_KEY: required(env, "COMPANION_BOX_API_KEY"),
+  };
   return {
-    env: { ...env, COMPANION_BOX_API_KEY: required(env, "COMPANION_BOX_API_KEY") },
+    env: runtimeEnv,
     zaiApiKey: required(env, "COMPANION_BOX_E2E_ZAI_API_KEY"),
     image,
     modelId,
@@ -125,7 +129,8 @@ export async function createRuntimeChangeGenerationBox(input: {
       && !error.outcomeUnknown
       && !error.retryable
       && error.status < 500
-      && (error.providerCode === "unknown_snapshot" || error.stableCode === "box_not_found");
+      && error.stableCode === "box_not_found"
+      && error.providerCode === "unknown_snapshot";
     if (input.image === null || !missingSnapshot) throw error;
     const box = await input.lifecycle.createGenerationBoxAfterObservedAbsence(input.create);
     return { box, source: "base_fallback" };
