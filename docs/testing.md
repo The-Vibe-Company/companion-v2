@@ -142,8 +142,10 @@ archives and resumes the Box, proves those files remain usable, archives it agai
 deletes the exact provider resource in `finally`. Cleanup requires the provider's irrevocable
 deletion operation plus an immediate `404` for that Box; physical data removal may finish later in
 the provider's background operation. It runs only on a daily schedule or manual dispatch, never on
-pull requests. The optional `COMPANION_BOX_E2E_IMAGE` repository variable makes it clone a named runtime
-snapshot; without it, the test uses a base Box and still covers the provider restore/syscall path.
+pull requests. The optional `COMPANION_BOX_E2E_IMAGE` repository variable makes it clone a named
+runtime snapshot. If that snapshot has expired or was deleted, both real-provider probes retry once
+with a base Box; without the variable, they use a base Box directly. The archive/resume probe still
+covers the provider restore/syscall path in either base-Box case.
 
 Every commit pushed to an internal pull request also creates a disposable Box from the configured
 runtime image, then stages the exact checkout's Pi layout and broker with the dedicated z.ai canary
