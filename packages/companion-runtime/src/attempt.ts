@@ -155,6 +155,8 @@ async function material(context: AttemptContext): Promise<RuntimeWorkMaterial> {
 
 async function brokerState(context: AttemptContext): Promise<{
   invocationId: string;
+  layoutMarker: string | null;
+  layoutCurrent: boolean;
   activeAttemptId: string | null;
   tailCursor: bigint;
   acknowledgedCursor: bigint;
@@ -551,13 +553,26 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           orgId: context.claim.orgId,
           material: workMaterial,
         });
-        await refreshWarmCompanionLayout({
-          session: context.session,
-          deps: context.deps,
-          authorization: authorization(context),
-          restartPi: true,
-        });
-        const state = await brokerState(context);
+        let state = await brokerState(context);
+        if (!state.layoutCurrent) {
+          await refreshWarmCompanionLayout({
+            session: context.session,
+            deps: context.deps,
+            authorization: authorization(context),
+            restartPi: true,
+            // `state` is the running broker's startup marker. If disk was updated by an executor
+            // that died before recycle, refresh returns `none` but this stale process still must go.
+            restartPiWhenUnchanged: true,
+          });
+          state = await brokerState(context);
+          if (!state.layoutCurrent) {
+            throw new RuntimeInvariantError({
+              code: "pi_layout_stale",
+              message: "Pi did not report the current runtime layout after refresh.",
+              action: "restart_pi",
+            });
+          }
+        }
         const runtime = requiredRuntime(context);
         requireModelInputCapability(state.modelInput, "text");
         // A turn carrying an image is refused here, against Pi's live report of what the selected
@@ -580,7 +595,6 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           });
         }
         const dispatchRuntime = { boxId: runtime.boxId, piInvocationId: state.invocationId };
-        await clearOutbox(context);
         const promptText = workMaterial.promptText!
           + attachmentPromptSuffix(await stageAttachments(context, workMaterial));
         commandId = context.deps.idFactory.uuid();
@@ -606,6 +620,10 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           await checkpointDispatchAmbiguous(context, commandId);
           throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
         }
+        // The SLO ends when the provider returns Pi's positive acknowledgement. Persisting that
+        // acknowledgement is deliberately outside the measured interval: PostgreSQL latency must
+        // not be attributed to Box or Pi prompt acceptance.
+        const providerReturnedAt = context.deps.clock.now();
         if (outcome.outcome === "ambiguous") {
           await checkpointDispatchAmbiguous(context, commandId);
           throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
@@ -631,12 +649,35 @@ export async function handleAttempt(context: AttemptContext): Promise<RuntimeWor
           await checkpointDispatchAmbiguous(context, commandId);
           throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
         }
+        const initialCursor = outcome.initialCursor;
+        if (initialCursor < state.tailCursor) {
+          await checkpointDispatchAmbiguous(context, commandId);
+          throw new AmbiguousExternalEffectError("prompt_dispatch_ambiguous");
+        }
         await context.session.checkpoint({
           nextCheckpoint: "dispatch_accepted",
           commandId,
           piInvocationId: outcome.invocationId,
-          eventCursor: state.tailCursor,
-          activityAt: context.deps.clock.now(),
+          eventCursor: initialCursor,
+          activityAt: providerReturnedAt,
+        });
+        // The send transaction fixes cold_start_deadline_at to turn.created_at + three minutes and
+        // never moves it. Subtracting that immutable contract recovers the exact durable send time
+        // without a second timestamp or query on the dispatch path.
+        const sentAt = auth.coldStartDeadlineAt
+          ? auth.coldStartDeadlineAt.getTime() - 3 * 60_000
+          : null;
+        context.deps.log?.info({
+          ts: providerReturnedAt.toISOString(),
+          event: "runtime.prompt.ack",
+          companionId: context.claim.companionId,
+          attemptId: context.claim.workId,
+          boxId: dispatchRuntime.boxId,
+          invocationId: outcome.invocationId,
+          initialCursor: initialCursor.toString(),
+          ...(sentAt === null
+            ? {}
+            : { sendToPromptAckMs: Math.max(0, providerReturnedAt.getTime() - sentAt) }),
         });
         await refreshWarmTtl(context);
         break;
@@ -714,38 +755,6 @@ async function stageAttachments(
     throw new RuntimeInvariantError({
       code: "attachment_staging_failed",
       message: "The files attached to this message could not be staged on the Companion's Box.",
-      action: "retry",
-    });
-  }
-}
-
-/**
- * Empty Pi's outbox before this attempt's prompt is written.
- *
- * This is what makes a harvest attributable: whatever is in the outbox after Pi settles was produced
- * by this turn, not left over from a previous one that failed, was cancelled, or was retried. It runs
- * as an idempotent lifecycle call and, when exhausted, fails the turn the same way staging does —
- * before any dispatch intent exists, so the negative is proven and the queue is released.
- */
-async function clearOutbox(context: AttemptContext): Promise<void> {
-  try {
-    await retryIdempotentLifecycle({
-      call: "clear_outbox",
-      clock: context.deps.clock,
-      jitter: context.deps.jitter,
-      signal: context.session.signal,
-      deadlineAt: authorization(context).absoluteDeadlineAt ?? undefined,
-      operation: async () => await context.session.external(async (signal) =>
-        await context.deps.outboxHarvester.clearOutbox({
-          boxId: requiredRuntime(context).boxId,
-          signal,
-        })),
-    });
-  } catch (error) {
-    if (mustAbandonRuntimeExecution(error)) throw error;
-    throw new RuntimeInvariantError({
-      code: "outbox_clear_failed",
-      message: "The Companion's Box could not clear its outbox before this turn.",
       action: "retry",
     });
   }

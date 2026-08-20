@@ -42,6 +42,7 @@ describe("production Box runtime v2 against the simulator", () => {
       outcome: "accepted",
       attemptId: "attempt-contract-1",
       invocationId: "00000000000000000000000000000001",
+      initialCursor: 0,
     });
 
     const settled = await waitForBrokerEvent(runtime, boxId, 0, "agent_settled");
@@ -79,8 +80,9 @@ describe("production Box runtime v2 against the simulator", () => {
     });
     const { boxId, runtime } = harness;
 
-    await expect(runtime.brokerState({ boxId })).resolves.toEqual({
+    await expect(runtime.brokerState({ boxId })).resolves.toMatchObject({
       invocationId: "00000000000000000000000000000001",
+      layoutMarker: expect.any(String),
       activeAttemptId: null,
       tailCursor: 0,
       acknowledgedCursor: 0,
@@ -103,6 +105,7 @@ describe("production Box runtime v2 against the simulator", () => {
       outcome: "accepted",
       attemptId: "attempt-journal-1",
       invocationId: "00000000000000000000000000000001",
+      initialCursor: 0,
     });
 
     const waiting = await waitForBrokerEvent(runtime, boxId, 0, "extension_ui_request");
@@ -196,7 +199,15 @@ async function provision(input: {
     ttlSeconds: 21_600,
     deadlineAt,
   });
-  await runtime.resumeExistingBox({ boxId });
+  for (;;) {
+    const status = await fetch(`${server.baseUrl}/boxes/${boxId}`, {
+      headers: { Authorization: `Bearer ${input.apiKey}` },
+    });
+    const body = await status.json() as { box?: { state?: string } };
+    if (["ready", "running", "idle"].includes(body.box?.state ?? "")) break;
+    if (Date.now() >= deadlineAt) throw new Error("simulated Box did not become ready");
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
   await runtime.stageExistingBox({
     companionId: input.companionId,
     runtimeGeneration: input.generation,

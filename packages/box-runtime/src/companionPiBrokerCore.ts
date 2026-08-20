@@ -11,6 +11,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmSync,
   statSync,
   truncateSync,
   unlinkSync,
@@ -430,6 +431,8 @@ export interface CompanionPiBrokerOptions {
   invocationId: string;
   transport: CompanionPiRpcTransport;
   journal: SegmentedCompanionPiJournal;
+  layoutMarker?: string;
+  outboxPath?: string;
 }
 
 /** One-at-a-time Pi command broker and sole owner of event-to-attempt association. */
@@ -437,6 +440,8 @@ export class CompanionPiBroker {
   readonly #invocationId: string;
   readonly #transport: CompanionPiRpcTransport;
   readonly #journal: SegmentedCompanionPiJournal;
+  readonly #layoutMarker: string | null;
+  readonly #outboxPath: string | null;
   #activeAttemptId: string | null = null;
   #commandSequence = 0;
   #commandTail: Promise<void> = Promise.resolve();
@@ -446,6 +451,10 @@ export class CompanionPiBroker {
     this.#invocationId = options.invocationId;
     this.#transport = options.transport;
     this.#journal = options.journal;
+    this.#layoutMarker = typeof options.layoutMarker === "string" && options.layoutMarker.length > 0
+      ? options.layoutMarker.slice(0, 1024)
+      : null;
+    this.#outboxPath = options.outboxPath ?? null;
     this.#journal.beginInvocation(options.invocationId);
   }
 
@@ -586,6 +595,24 @@ export class CompanionPiBroker {
     }
 
     const state = normalizePiState(await this.#piRequest("get_state", {}));
+    const requiredInput = command.requiredInput === undefined
+      ? ["text"]
+      : Array.isArray(command.requiredInput)
+      && command.requiredInput.length > 0
+      && command.requiredInput.every((item) => item === "text" || item === "image")
+        ? [...new Set(command.requiredInput)]
+        : null;
+    if (!requiredInput) {
+      throw new BrokerCommandError("invalid_command", "requiredInput is required");
+    }
+    const model = isJsonObject(state.model) ? state.model : null;
+    const modelInput = Array.isArray(model?.input) ? model.input : [];
+    if (requiredInput.some((item) => !modelInput.includes(item))) {
+      throw new BrokerCommandError(
+        "model_input_unsupported",
+        "The selected Pi model does not support the required prompt input",
+      );
+    }
     if (
       state.isStreaming !== false
       || state.isCompacting !== false
@@ -594,6 +621,20 @@ export class CompanionPiBroker {
       throw new BrokerCommandError("pi_not_idle", "Pi is not idle with an empty queue");
     }
 
+    if (this.#outboxPath && command.clearOutbox !== true) {
+      throw new BrokerCommandError("invalid_command", "clearOutbox is required");
+    }
+    if (this.#outboxPath) {
+      mkdirSync(this.#outboxPath, { recursive: true, mode: 0o700 });
+      for (const entry of readdirSync(this.#outboxPath)) {
+        rmSync(join(this.#outboxPath, entry), { recursive: true, force: true });
+      }
+    }
+
+    // Runtime reads strictly after the cursor returned with the ACK. Capture the boundary before
+    // binding/writing the prompt so events emitted in the same stdout burst as Pi's response remain
+    // visible to the attempt instead of being mistaken for already-consumed history.
+    const initialCursor = this.#journal.tailCursor;
     this.#activeAttemptId = attemptId;
     let response: PiJsonObject;
     try {
@@ -617,7 +658,14 @@ export class CompanionPiBroker {
         true,
       );
     }
-    return { attemptId, invocationId: this.#invocationId, piAcknowledged: true };
+    return {
+      attemptId,
+      invocationId: this.#invocationId,
+      piAcknowledged: true,
+      initialCursor,
+      requiredInput,
+      clearOutbox: true,
+    };
   }
 
   async #abort(command: PiJsonObject): Promise<PiJsonObject> {
@@ -711,6 +759,7 @@ export class CompanionPiBroker {
   #brokerState(): PiJsonObject {
     return {
       invocationId: this.#invocationId,
+      layoutMarker: this.#layoutMarker,
       activeAttemptId: this.#activeAttemptId,
       tailCursor: this.#journal.tailCursor,
       acknowledgedCursor: this.#journal.acknowledgedCursor,

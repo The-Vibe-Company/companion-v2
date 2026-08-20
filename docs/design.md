@@ -128,7 +128,8 @@ invocation; takeover repeats those idempotent steps if their final observation w
 ## Dedicated runtime execution
 
 `apps/runtime` sweeps every two seconds, claims with a 30-second lease, renews every ten seconds,
-and defaults to eight concurrent Companions. `/healthz` fails when PostgreSQL, the claim loop, or the
+and defaults to eight concurrent Companions. A completed execution interrupts only the scheduler's
+recovery sleep so a start can hand its newly idle Pi directly to the queued turn. `/healthz` fails when PostgreSQL, the claim loop, or the
 latest sweep is unhealthy.
 
 Work precedence is permanent delete, explicit stop/restart, decision response, active attempt,
@@ -137,7 +138,9 @@ idempotent retry network, `429`, and `5xx` failures up to five times with jitter
 1/2/5/10/30-second backoff. Epoch predicates prevent an expired executor from committing after a
 replacement claims the work, but database fencing never pretends to fence a provider side effect.
 
-Box identity uses the generation-qualified name `Companion <id> g<generation>`. Before create,
+Box identity uses the generation-qualified name `Companion <id> g<generation>`. Known ids are read
+and resumed directly; global discovery is reserved for absence, `404`, and ambiguous-create
+reconciliation. Before create,
 runtime searches every Box-list page for that exact name and adopts one canonical Box. Because the
 public create request cannot set a name or supply an idempotency key, runtime issues one create with
 a five-minute provisional TTL, checkpoints the acknowledged Box id, then applies the name and
@@ -210,6 +213,10 @@ references where possible; transient connector values use the owner-only runtime
 appear in logs, API responses, audit metadata, or projections. The provider auth file remains on
 Box disk only where Pi must refresh it.
 
+Runtime may reuse the extracted Skills tree only after both the durable selected-Skills revision and
+an on-disk digest of the exact archive checksums match. That digest includes the bundled Companion
+skill, whose deployment checksum changes independently of tenant selections.
+
 Every Companion may also call the Skills Hub API itself, with the same scopes: skills read/write,
 secret reads, and Skill Database read/write. Access is unconditional, so no surface asks anyone to
 choose it, neither creation nor settings carries a grant field, and Pi cannot propose one. Staging
@@ -222,7 +229,21 @@ An attempt pins the exact provider and MCP credential revisions before prompt di
 that observes a later revision interrupts an already-accepted attempt instead of interpreting
 unprojected events with new credentials. A terminal projection already committed is read through a
 separate fenced metadata-only function, then ACKed and settled without credential material. OAuth
-refresh compare-and-swap is limited to pre-dispatch settings and operation staging. Projection
+refresh compare-and-swap is limited to pre-dispatch settings and operation staging. Staging records
+the earliest bounded expiry across the Skills Hub token and selected OAuth access tokens. That
+expiry becomes active only after a different idle Pi invocation is observed. A warm non-native send
+dispatches directly only while the snapshot is bound to the current Pi invocation and has more than
+two hours and five minutes remaining. Eligibility is checked both at enqueue and again under the
+runtime lease immediately before claim; otherwise the ordinary `start` operation restages and
+recycles Pi without a Full Box restart. Changing the observed invocation or minting a replacement
+Hub token invalidates the old proof before another turn can use it.
+Migration 0110 also versions the Runtime claim entrypoint. Replicas from before 0110 retain their
+current lease but the legacy four-argument claim returns no new work after the migration commits.
+The material-aware five-argument claimer repairs an expired legacy lease by rewinding any
+post-staging operation or settings checkpoint that has no staged-expiry ledger, then restages under
+the new fence. This prevents a rolling deploy from either publishing an unproven snapshot or
+repeating proof-less start operations.
+Projection
 redaction uses every string leaf of the validated plaintext material in memory plus generic
 credential patterns; tool projections retain metadata and an opaque hashed call id only, never
 arguments or results, except a delegated `subagent` run, whose child-agent name, task, and latest

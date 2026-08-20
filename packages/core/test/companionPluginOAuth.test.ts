@@ -99,6 +99,19 @@ describe("Companion plugin OAuth broker", () => {
       refreshToken: "refresh-one",
     });
 
+    const rotatingFetch = vi.fn(async () => jsonResponse({
+      access_token: "access-three",
+      refresh_token: "refresh-two",
+      expires_in: 3600,
+    })) as unknown as typeof fetch;
+    await expect(refreshCompanionPluginOAuth({
+      credential,
+      fetchImpl: rotatingFetch,
+    })).resolves.toMatchObject({
+      accessToken: "access-three",
+      refreshToken: "refresh-two",
+    });
+
     const failedFetch = vi.fn(async () =>
       jsonResponse({ error: "invalid_grant", error_description: "secret provider detail" }, 400)
     ) as unknown as typeof fetch;
@@ -108,6 +121,20 @@ describe("Companion plugin OAuth broker", () => {
     })).rejects.toEqual(expect.objectContaining({
       code: "oauth_refresh_failed",
       message: expect.not.stringContaining("secret provider detail"),
+    }));
+
+    const malformedSuccess = vi.fn(async () => jsonResponse({
+      refresh_token: "provider-secret-that-must-not-leak",
+      expires_in: 3600,
+    })) as unknown as typeof fetch;
+    await expect(refreshCompanionPluginOAuth({
+      credential,
+      fetchImpl: malformedSuccess,
+    })).rejects.toEqual(expect.objectContaining({
+      code: "oauth_refresh_failed",
+      stableCode: "mcp_oauth_refresh_failed",
+      action: "retry",
+      message: expect.not.stringContaining("provider-secret-that-must-not-leak"),
     }));
   });
 
@@ -219,6 +246,18 @@ describe("Companion plugin OAuth broker", () => {
         email: "stan@users.noreply.github.com",
       },
     });
+
+    const missingConfigFetch = vi.fn();
+    await expect(refreshCompanionPluginOAuth({
+      credential,
+      env: {},
+      fetchImpl: missingConfigFetch as unknown as typeof fetch,
+    })).rejects.toEqual(expect.objectContaining({
+      code: "oauth_refresh_failed",
+      stableCode: "mcp_oauth_refresh_failed",
+      action: "retry",
+    }));
+    expect(missingConfigFetch).not.toHaveBeenCalled();
   });
 
   it("keeps a GitHub grant when the profile lookup fails", async () => {

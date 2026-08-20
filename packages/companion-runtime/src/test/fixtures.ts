@@ -17,6 +17,7 @@ import {
 } from "../store";
 import type {
   AttemptRuntimeClaim,
+  ClientSurface,
   DuplicateCleanup,
   GateStatus,
   LeaseFence,
@@ -279,6 +280,8 @@ export class MemoryRuntimeStore implements RuntimeStore {
   renewReturnsNull = false;
   renewals = 0;
   duplicateCleanups = new Map<string, DuplicateCleanup>();
+  recordedMaterialSnapshots: Array<{ clientSurface: ClientSurface; materialExpiresAt: Date | null }> = [];
+  publishedMaterialSnapshots: string[] = [];
 
   constructor(input: {
     authorization: RuntimeAuthorization;
@@ -399,6 +402,11 @@ export class MemoryRuntimeStore implements RuntimeStore {
     const kind = this.authorization.operationKind;
     if (kind === "start" && current === "resolving_box" && !input.boxId && input.boxState === "absent") {
       nextCheckpoint = "box_absence_observed";
+    } else if (kind === "start" && current === "resolving_box" && input.boxId
+      && (input.boxState === "ready" || input.boxState === "idle" || input.boxState === "running")) {
+      nextCheckpoint = "box_ready_observed";
+    } else if (kind === "start" && current === "resolving_box" && input.boxId) {
+      nextCheckpoint = "box_resolved";
     } else if (kind === "start" && current === "creating_box" && input.boxId) {
       nextCheckpoint = input.boxState === "ready" ? "box_ready_observed" : "box_created";
     } else if ((kind === "start" || kind === "restart_box") && current === "waiting_ready"
@@ -448,8 +456,23 @@ export class MemoryRuntimeStore implements RuntimeStore {
     return this.material.configCatalog;
   }
 
-  async mintHubToken(): Promise<string | null> {
+  async mintHubToken(): Promise<{ token: string; expiresAt: Date } | null> {
     return null;
+  }
+
+  async recordMaterialSnapshot(_fence: LeaseFence, input: {
+    clientSurface: ClientSurface;
+    materialExpiresAt: Date | null;
+  }): Promise<true> {
+    this.recordedMaterialSnapshots.push(input);
+    return true;
+  }
+
+  async publishMaterialSnapshot(_fence: LeaseFence, input: {
+    piInvocationId: string;
+  }): Promise<true> {
+    this.publishedMaterialSnapshots.push(input.piInvocationId);
+    return true;
   }
 
   async getAttemptTerminalProjection(): Promise<{
@@ -645,6 +668,8 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
     piDaemonStatus: async () => ({ state: "idle", invocationId: PI_INVOCATION_ID }),
     brokerState: async () => ({
       invocationId: PI_INVOCATION_ID,
+      layoutMarker: "layout-current",
+      layoutCurrent: true,
       activeAttemptId: store.authorization.dispatchState === "accepted" ? ATTEMPT_ID : null,
       tailCursor: store.authorization.eventCursor ?? 0n,
       acknowledgedCursor: store.authorization.eventCursor ?? 0n,
@@ -660,7 +685,11 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
     }),
     prompt: async (input) => {
       promptCalls.push({ attemptId: input.attemptId, message: input.message });
-      return { outcome: "accepted", invocationId: PI_INVOCATION_ID };
+      return {
+        outcome: "accepted",
+        invocationId: PI_INVOCATION_ID,
+        initialCursor: store.authorization.eventCursor ?? 0n,
+      };
     },
     abort: async (input) => {
       abortCalls.push({ attemptId: input.attemptId, boxId: input.boxId });
@@ -686,6 +715,9 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
       diskLayoutVersion: 14,
       appliedSettingsRevision: input.targetSettingsRevision,
       appliedSkillsRevision: input.targetSkillsRevision,
+      materialExpiresAt: input.clientSurface === "native_mobile"
+        ? null
+        : new Date("2026-08-16T18:00:00.000Z"),
     }),
     refreshLayout: async () => ({ applied: "none" }),
     invalidateLayout: async () => undefined,

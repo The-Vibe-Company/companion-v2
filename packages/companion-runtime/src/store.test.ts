@@ -295,13 +295,41 @@ describe("PostgresRuntimeStore", () => {
 
   it("reads a claim-fenced ephemeral hub token once", async () => {
     const sql = new RecordingSql();
-    sql.rows = [{ token: "cmp_pat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }];
+    const expiresAt = new Date("2026-08-16T18:00:00.000Z");
+    sql.rows = [{
+      token: "cmp_pat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      expires_at: expiresAt,
+    }];
     const store = new PostgresRuntimeStore(sql);
 
     const result = await store.mintHubToken(fence, 30);
 
     expect(sql.calls[0]?.query).toContain("public.companion_runtime_mint_hub_token(");
-    expect(result).toBe("cmp_pat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(result).toEqual({
+      token: "cmp_pat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      expiresAt,
+    });
+  });
+
+  it("records and publishes material only through the narrow fenced functions", async () => {
+    const sql = new RecordingSql();
+    const store = new PostgresRuntimeStore(sql);
+    const materialExpiresAt = new Date("2026-08-16T18:00:00.000Z");
+    sql.rows = [{ recorded: true }];
+
+    await expect(store.recordMaterialSnapshot(fence, {
+      clientSurface: "web",
+      materialExpiresAt,
+    })).resolves.toBe(true);
+    expect(sql.calls[0]?.query).toContain("public.companion_runtime_record_material_snapshot(");
+    expect(sql.calls[0]?.parameters.slice(-2)).toEqual(["web", materialExpiresAt]);
+
+    sql.rows = [{ published: true }];
+    await expect(store.publishMaterialSnapshot(fence, {
+      piInvocationId: "pi-new",
+    })).resolves.toBe(true);
+    expect(sql.calls[1]?.query).toContain("public.companion_runtime_publish_material_snapshot(");
+    expect(sql.calls[1]?.parameters.at(-1)).toBe("pi-new");
   });
 
   it("rejects material whose dispatch-time credential snapshot changed", async () => {

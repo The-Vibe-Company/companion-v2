@@ -63,7 +63,12 @@ export interface RuntimeBoxControl {
     deadlineAt?: Date;
     signal: AbortSignal;
   }): Promise<void>;
-  getStatus(input: { boxId: string; signal: AbortSignal }): Promise<{ state: BoxObservedState }>;
+  getStatus(input: {
+    boxId: string;
+    companionId?: string;
+    generation?: bigint;
+    signal: AbortSignal;
+  }): Promise<{ state: BoxObservedState }>;
   setTtl(input: { boxId: string; ttlSeconds: number; signal: AbortSignal }): Promise<void>;
   stopExistingBox(input: { boxId: string; signal: AbortSignal }): Promise<void>;
   resumeExistingBox(input: { boxId: string; signal: AbortSignal }): Promise<void>;
@@ -83,6 +88,11 @@ export type BrokerWriteOutcome =
   | { outcome: "rejected"; code: string }
   | { outcome: "ambiguous"; code: string };
 
+export type BrokerPromptWriteOutcome =
+  | { outcome: "accepted"; invocationId: string; initialCursor: bigint }
+  | { outcome: "rejected"; code: string }
+  | { outcome: "ambiguous"; code: string };
+
 export interface RuntimePiControl {
   stopPiDaemon(input: { boxId: string; signal: AbortSignal }): Promise<void>;
   startPiDaemon(input: { boxId: string; signal: AbortSignal }): Promise<{
@@ -99,6 +109,8 @@ export interface RuntimePiControl {
   }>;
   brokerState(input: { boxId: string; signal: AbortSignal }): Promise<{
     invocationId: string;
+    layoutMarker: string | null;
+    layoutCurrent: boolean;
     activeAttemptId: string | null;
     tailCursor: bigint;
     acknowledgedCursor: bigint;
@@ -112,7 +124,7 @@ export interface RuntimePiControl {
     attemptId: string;
     message: string;
     signal: AbortSignal;
-  }): Promise<BrokerWriteOutcome>;
+  }): Promise<BrokerPromptWriteOutcome>;
   /** Best-effort Pi abort for an Owner/Editor stop. Does not go through the turn lease signal. */
   abort(input: {
     boxId: string;
@@ -170,6 +182,10 @@ export interface RuntimeResourceStager {
     diskLayoutVersion: 14;
     appliedSettingsRevision: bigint;
     appliedSkillsRevision: number | null;
+    stagingMode?: "refresh" | "skills";
+    skillBytesTransferred?: number;
+    /** Earliest expiry among the bounded credentials written into this snapshot. */
+    materialExpiresAt: Date | null;
   }>;
   /**
    * Apply the current Pi layout to a Box that is already running. Overlay-only changes rewrite the

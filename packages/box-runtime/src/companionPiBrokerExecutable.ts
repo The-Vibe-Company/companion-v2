@@ -22,6 +22,8 @@ const socketPath = optionalAbsolutePath("COMPANION_PI_SOCKET_PATH")
   ?? join(root, "state", "pi-broker.sock");
 const journalPath = optionalAbsolutePath("COMPANION_PI_JOURNAL_PATH")
   ?? join(root, "events");
+const outboxPath = resolve(root, "..", "..", "outbox");
+const layoutMarker = process.env.PI_BROKER_LAYOUT_MARKER;
 const maxLineBytes = optionalPositiveInteger("COMPANION_PI_MAX_LINE_BYTES")
   ?? COMPANION_PI_BROKER_MAX_LINE_BYTES;
 const segmentBytes = optionalPositiveInteger("COMPANION_PI_SEGMENT_BYTES");
@@ -186,6 +188,8 @@ async function main(): Promise<void> {
     invocationId,
     transport,
     journal,
+    outboxPath,
+    ...(layoutMarker ? { layoutMarker } : {}),
   });
   transport.bind({
     onEvent(record) {

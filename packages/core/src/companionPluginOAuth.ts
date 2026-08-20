@@ -87,6 +87,9 @@ export interface CompanionPluginStoredOAuthCredential extends CompanionPluginOAu
 }
 
 export class CompanionPluginOAuthError extends Error {
+  readonly stableCode: string | undefined;
+  readonly action = "retry" as const;
+
   constructor(
     message: string,
     readonly code:
@@ -99,6 +102,9 @@ export class CompanionPluginOAuthError extends Error {
   ) {
     super(message);
     this.name = "CompanionPluginOAuthError";
+    this.stableCode = code === "oauth_refresh_failed"
+      ? "mcp_oauth_refresh_failed"
+      : undefined;
   }
 }
 
@@ -324,12 +330,9 @@ function clientAuthentication(
 
 function parseTokens(
   raw: Record<string, unknown>,
+  failure: CompanionPluginOAuthError,
   previousRefreshToken: string | null = null,
 ): CompanionPluginOAuthTokens {
-  const failure = new CompanionPluginOAuthError(
-    "The MCP server did not return a usable OAuth credential.",
-    "oauth_exchange_failed",
-  );
   const accessToken = requiredString(raw.access_token, failure);
   if (/[\r\n\0]/.test(accessToken)) throw failure;
   const tokenType = typeof raw.token_type === "string" ? raw.token_type : "Bearer";
@@ -383,7 +386,10 @@ export async function completeCompanionPluginOAuth(input: {
     input.fetchImpl ?? fetch,
     failure,
   );
-  const tokens = parseTokens(raw);
+  const tokens = parseTokens(raw, new CompanionPluginOAuthError(
+    "The MCP server did not return a usable OAuth credential.",
+    "oauth_exchange_failed",
+  ));
   const github = input.flow.serverName === "io.github.github/github-mcp-server";
   const githubIdentity = github
     ? await githubUserIdentity({
@@ -429,7 +435,14 @@ export async function refreshCompanionPluginOAuth(input: {
   });
   const github = input.credential.serverName === "io.github.github/github-mcp-server";
   if (!github) body.set("resource", input.credential.resource);
-  const client = github ? githubClient(input.env ?? process.env) : input.credential.client;
+  let client = input.credential.client;
+  if (github) {
+    try {
+      client = githubClient(input.env ?? process.env);
+    } catch {
+      throw failure;
+    }
+  }
   if (client.clientId !== input.credential.client.clientId) throw failure;
   const authentication = clientAuthentication(client, body);
   const raw = await oauthJson(
@@ -443,7 +456,7 @@ export async function refreshCompanionPluginOAuth(input: {
     failure,
     input.signal,
   );
-  const tokens = parseTokens(raw, input.credential.refreshToken);
+  const tokens = parseTokens(raw, failure, input.credential.refreshToken);
   const githubIdentity = github
     ? await githubUserIdentity({
       accessToken: tokens.accessToken,

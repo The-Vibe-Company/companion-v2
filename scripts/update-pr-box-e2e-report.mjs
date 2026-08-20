@@ -9,12 +9,26 @@ export const REPORT_END = "<!-- companion-box-e2e:end -->";
 const SHA_PATTERN = /^[a-f0-9]{40}$/;
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const SAFE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
-const PHASES = ["create", "stage_current_change", "start_pi", "first_message", "cleanup"];
+const PHASES = [
+  "create", "provider_start", "stage_current_change", "start_pi", "prompt_ack",
+  "ready_to_prompt_ack", "first_message", "stop_archive", "resume",
+  "resume_provider_start", "resume_prompt_ack", "resume_ready_to_prompt_ack", "resume_message",
+  "cleanup",
+];
 const PHASE_LABELS = new Map([
   ["create", "Création de la Box"],
   ["stage_current_change", "Installation du checkout courant"],
+  ["provider_start", "Démarrage provider → Box prête"],
   ["start_pi", "Démarrage de Pi"],
+  ["prompt_ack", "Prompt accepté par Pi"],
+  ["ready_to_prompt_ack", "Box prête → prompt accepté"],
   ["first_message", "Premier message accepté et répondu"],
+  ["stop_archive", "Arrêt de Pi et archivage"],
+  ["resume", "Reprise et réactivation"],
+  ["resume_provider_start", "Reprise provider → Box prête"],
+  ["resume_prompt_ack", "Prompt de reprise accepté par Pi"],
+  ["resume_ready_to_prompt_ack", "Box reprise prête → prompt accepté"],
+  ["resume_message", "Message après reprise accepté et répondu"],
   ["cleanup", "Suppression de la Box"],
 ]);
 

@@ -8,7 +8,7 @@ import {
 } from "./companionRuntimeImage";
 
 describe("companion runtime image identity", () => {
-  it("names the golden snapshot from the full layout marker, not a new layout version", () => {
+  it("names the golden snapshot from image inputs without polluting the disk layout marker", () => {
     const identity = companionPiLayoutIdentity({
       layoutVersion: 14,
       packages: ["npm:pi-mcp-adapter@2.12.1", "npm:pi-web-access@0.24.0"],
@@ -20,9 +20,34 @@ describe("companion runtime image identity", () => {
       "14:npm:pi-mcp-adapter@2.12.1,npm:pi-web-access@0.24.0:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2",
     );
     expect(identity.fullMarker).toBe(`${identity.baseMarker}:overlay=${identity.overlayMarker}`);
-    expect(identity.imageName).toBe(companionRuntimeImageName(identity.fullMarker, 14));
+    expect(identity.imageMarker).toBe(`${identity.fullMarker}:skill=none:boot=1`);
+    expect(identity.imageName).toBe(companionRuntimeImageName(identity.imageMarker, 14));
     expect(isCompanionRuntimeImageName(identity.imageName)).toBe(true);
     expect(identity.imageName).toMatch(/^companion-l14-[a-f0-9]{12}$/);
+  });
+
+  it("changes only the snapshot identity for a new bundled Skill or boot profile", () => {
+    const common = {
+      layoutVersion: 14,
+      packages: ["npm:pi-mcp-adapter@2.12.1"],
+      qmdPackage: "@tobilu/qmd@2.8.3",
+      minimumPiVersion: "0.84.2",
+    };
+    const first = companionPiLayoutIdentity({
+      ...common,
+      companionSkillChecksum: "sha256:first",
+      bootProfileRevision: 1,
+    });
+    const second = companionPiLayoutIdentity({
+      ...common,
+      companionSkillChecksum: "sha256:second",
+      bootProfileRevision: 2,
+    });
+
+    expect(second.baseMarker).toBe(first.baseMarker);
+    expect(second.fullMarker).toBe(first.fullMarker);
+    expect(second.imageMarker).not.toBe(first.imageMarker);
+    expect(second.imageName).not.toBe(first.imageName);
   });
 
   it("keeps overlay changes off the package marker so a broker bump does not reinstall Pi", () => {

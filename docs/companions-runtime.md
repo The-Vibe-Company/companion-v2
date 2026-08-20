@@ -166,17 +166,30 @@ It never creates a Box, observes Pi, opens a runtime lease, or waits for deliver
 the expected HTTP acknowledgement is under one second outside load. A send carrying files is bounded
 by the upload instead: the request stores up to five files of at most 10 MB each before it answers,
 so its acknowledgement is the transfer time plus the same sub-second durable write. Runtime should
-claim new work within five seconds either way.
+claim new work within five seconds either way. Completion of a start operation wakes the claim loop
+immediately; the two-second sweep remains recovery rather than normal dispatch delay.
 
 Sending is the sole normal wake path. There is no Wake button and no first-keystroke prewarm. A cold
 send moves through durable start/dispatch checkpoints and finishes or fails explicitly within three
-minutes. A successful Pi prompt acknowledgement refreshes the Box TTL to six hours.
+minutes. A successful Pi prompt acknowledgement refreshes the Box TTL to six hours. That TTL is not
+credential freshness: before direct warm dispatch, a non-native material snapshot must remain valid
+for the two-hour absolute turn deadline plus five minutes. A missing or shorter expiry creates the
+ordinary `start` operation, which restages and recycles Pi without restarting the Box. Runtime
+rechecks the same Pi-invocation binding, freshness, surface, and reserve under the lease immediately
+before it claims a queued turn, so waiting behind another turn cannot consume the safety margin.
+The 0110 migration makes this a claim-protocol boundary as well as a data invariant. A pre-0110
+runtime may finish work it already holds but its legacy claim signature is quarantined and returns
+no new rows. The material-aware claimer takes over expired legacy work and rewinds a start,
+`restart_pi`, settings operation, or implicit settings claim to its staging boundary whenever the
+new staged-expiry ledger is absent. The takeover therefore restages and recycles Pi once instead of
+publishing an expiry for an old invocation or synthesizing start operations indefinitely.
 
 The golden runtime image precompiles Jiti's source-hashed Pi extension cache under the Companion's
 persistent `~/.companion/runtime/tmp`; `/tmp` is not used because Box discards it on archive. Pi
 activation and broker-socket readiness run inside one bounded Box command. Starting separate status
 commands while a restored image is paging in materially delays Pi, so the control plane performs no
-concurrent readiness polling and contacts the broker only after that command returns ready.
+concurrent readiness polling. The same command returns the systemd/broker invocation id, so start
+does not issue a second broker-state command.
 
 Before every Box interaction, runtime re-evaluates:
 
@@ -202,7 +215,10 @@ Box identity is generation-qualified:
 Companion <companion-id> g<runtime-generation>
 ```
 
-Before create, runtime searches every provider list page for the exact name. It chooses one canonical
+When a durable Box id exists, runtime reads that exact id first. It lists the account only when the
+id is absent, returns `404`, or a takeover must reconcile an ambiguous create. An archived known Box
+receives one resume POST with the six-hour TTL and one runtime-owned ready loop; resume itself never
+polls Box or probes Pi. Before create, runtime searches every provider list page for the exact name. It chooses one canonical
 Box and permanently deletes duplicates. The public Box create contract cannot assign that name and
 has no idempotency key: runtime therefore writes `creating_box`, performs exactly one `POST /boxes`
 with a five-minute provisional TTL, and never retries an ambiguous result. A positive `202` exposes
@@ -296,11 +312,17 @@ instead. That marker is split into two layers:
   (`companion-l14-<hash>`).
 - **overlay** — broker source, permission extension, and daemon unit. Cheap to rewrite in place.
 
-Runtime bakes the current full marker into a throwaway baker Box (never a tenant Companion), then
+The image identity extends the full disk-layout marker with the immutable bundled Companion-skill
+checksum and boot-profile revision; those image-only inputs never force an in-place tenant relayout.
+Runtime bakes the current image marker into a throwaway baker Box (never a tenant Companion), then
 creates new generation Boxes with `from` that snapshot so the first send skips the five-minute
 package install. The baker Box is created with the five-minute unnamed-orphan TTL, then patched to
 thirty minutes so layout and snapshot can finish; a failed or in-flight bake is retried until the
-named snapshot is ready. While that bake is in flight, new generation Boxes clone the previous
+named snapshot is ready. Before publishing, it writes a `.boxignore` that excludes only regenerable
+logs, transient staging archives, credentials, attachments, and outbox data; embeds the static
+Companion-skill archive; archives and resumes the baker Box; warms Node/Pi; and requires a stable
+`.ascii/playbook.json`. A failed warmup never publishes the candidate, retains the parent, and is
+retried. While that bake is in flight, new generation Boxes clone the previous
 ready companion snapshot when one exists, then overlay on first staging. If the snapshot is missing,
 create falls back to an empty Box and installs in place. Running Companions keep their disk: health (every 30 seconds while idle) and the next warm
 send apply overlay or base in place and recycle **Pi only**. If that recycle fails, runtime writes
@@ -310,7 +332,14 @@ as current. Full Box restart remains an explicit Owner/Editor action.
 A Box whose full marker already matches exits the layout script in milliseconds. The same-base
 overlay path rewrites the broker without `pi install`. Only a pin change reruns the package set,
 and that command still has five minutes so a budget that stops short of the marker cannot loop.
-The member's next message short-circuits on the marker.
+The member's next message short-circuits on the marker. Staging writes the bounded control-plane
+files as one versioned bundle whose allowlisted paths, modes, sizes, and SHA-256 digests are checked
+before atomic rename. The bundle is deleted on every command exit, explicitly retried for deletion
+when command submission fails, and its absence is a fail-closed precondition of Box archive. If the Skills revision
+already matches, staging also proves an on-disk tree digest over every selected archive checksum,
+including the independently versioned bundled Companion skill. Only then may it refresh
+credentials/configuration without transferring or rebuilding the Skills tree; otherwise the baked
+Companion archive is copied locally and only additional Skill bytes cross the provider file API.
 
 Runtime commits each supported event projection and its monotonic cursor in one PostgreSQL
 transaction. A supported `agent_settled` or Pi process-exit observation records the terminal
@@ -442,15 +471,17 @@ transcript keeps what the member wrote and the 16 KB message cap is unchanged.
 **Staged instructions.** Every staging composes `~/.companion/runtime/state/instructions.txt` from a
 constant operating brief plus the owner's persona line. The file carries no credential and no member
 data. Pi receives it as `--append-system-prompt`. It lives at the same path within layout 14, so an
-existing Box gains the current brief at its next staging (`start`, `restart_box`, or
-`apply_settings`) without a forced restage; `restart_pi` re-reads the file without restaging. Native
+existing Box gains the current brief at its next staging (`start`, `restart_pi`, `restart_box`, or
+`apply_settings`). `restart_pi` refreshes the same frozen credentials before it recycles the daemon.
+Native
 mobile receives a narrowed brief that omits Skills, plugins, the Skills Hub, and the config-catalog
 pointer, because that surface stages none of them. Routines and `propose_routine` stay on every
 surface: the interaction extension is staged for all of them, and a fire is an ordinary turn.
 
-**Outputs.** `~/outbox` is created and emptied before every dispatch, still within layout 14 rather
-than as a new layout version, so a Box provisioned before this change gains it on its next turn
-without a forced restage, and the attempt state machine's layout gate is unchanged.
+**Outputs.** The layout-14 broker creates and empties `~/outbox` inside the serialized prompt
+command, after proving Pi idle and immediately before prompt delivery. The positive ACK includes the
+initial journal cursor. A known validation or filesystem failure is a proven rejection; loss of the
+Box response remains ambiguous and is never replayed.
 
 After `agent_settled`, and before the turn settles, runtime harvests at most ten images of at most
 10 MB each, records them under a new assistant entry `v2:<attempt-id>:outputs`, and marks the durable
@@ -463,16 +494,12 @@ turn that produced only an image a visible output rather than `empty_response`.
 A harvest failure is a degradation, not a turn failure: a reply already projected durably never
 becomes a failure. The shortfall is emitted as the stable `outbox_harvest_failed` process log rather
 than persisted on the attempt, because a succeeded attempt carries no error by construction. The
-outbox is emptied before dispatch as well as after harvest, so one attempt's leftovers are never
+outbox is emptied atomically with dispatch as well as after harvest, so one attempt's leftovers are never
 attributed to the next turn.
 
-Emptying it is the one part of this that is not attachment-specific. It runs on **every** dispatch,
-including turns with no attachments and Companions nobody has ever sent a file to, because
-attribution has to hold before anyone knows whether this turn will produce an image. So
-`outbox_clear_failed` — action `retry`, raised before dispatch like `attachment_staging_failed`, and
-therefore also a proven negative that releases the queue — is the code to expect when a Box's disk is
-full, read-only, or otherwise unwritable, and it will present as *every* send failing rather than as
-an attachment problem. Triage it as Box disk health, not as an attachment bug.
+Emptying it runs on **every** prompt, including turns with no attachments. A broker refusal is a
+proven negative; an unavailable provider response stays `prompt_dispatch_ambiguous` because runtime
+cannot know whether the broker cleared the directory and delivered the prompt.
 
 **Reads and purge.** `GET /v1/companions/:id/attachments/:attachmentId` re-authorizes on every
 request and answers `private, no-cache` with `nosniff`; a Viewer may read and download attachments,
@@ -519,7 +546,12 @@ rotates after Pi accepted the prompt, runtime interrupts rather than projecting 
 different redaction dictionary. Once a terminal projection is already committed, takeover reads
 only its fenced cursor/output proof and may ACK and settle without loading credentials. OAuth
 refresh compare-and-swap is allowed only while applying settings or another pre-dispatch operation,
-never while consuming an accepted attempt or decision.
+never while consuming an accepted attempt or decision. The refresh token remains encrypted in the
+control plane; staging injects only the access token. A failed refresh is persisted as
+`mcp_oauth_refresh_failed` with action `retry`, and neither provider body nor token material is
+logged. A refreshed access token that cannot outlive the two-hour-five-minute reserve is rejected
+before any Box write with the same safe code; runtime does not pretend it can keep that credential
+alive during a two-hour turn.
 
 The projection boundary receives an in-memory dictionary built from every string leaf of those
 validated, decrypted credentials. Assistant text and decision copy are scrubbed against those exact
@@ -549,7 +581,13 @@ authority.
 
 Access is not a stored credential. Every staging calls `companion_runtime_mint_hub_token` under the
 fenced claim: it issues a `source_type = 'companion'` token acting as the settings actor with the
-Box's six-hour warm TTL, revokes the Companion's previous token, and returns the plaintext once. The
+Box's six-hour warm TTL, revokes the Companion's previous token, and returns the plaintext once with
+its database-authored expiry. Revoking that previous token invalidates the active material proof in
+the same transaction, so a staging or restart failure cannot leave the old Pi warm-dispatch eligible.
+Runtime takes the minimum of that expiry and each bounded selected OAuth access-token expiry. The
+staged value stays on the active operation/settings claim across takeover, but the instance snapshot
+is bound and published only after a new idle Pi invocation proves activation. A changed invocation
+clears the proof as a mixed-version rollout guard. The
 runtime injects it as `COMPANION_DELEGATION_TOKEN` in `providers.env`, which is tmpfs-only, never
 snapshotted, and erased on stop; the bundled Companion skill's client already prefers that variable,
 so no client change is needed. `COMPANION_API_URL` is staged as `<origin>/v1` to match it. Native

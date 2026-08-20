@@ -52,6 +52,24 @@ describe("warm Companion layout refresh", () => {
     expect(restartPiDaemon).not.toHaveBeenCalled();
   });
 
+  it("recycles a stale broker even when a previous executor already updated the disk", async () => {
+    const restartPiDaemon = vi.fn(async () => ({ state: "idle", invocationId: "new-pi" }));
+    const result = await refreshWarmCompanionLayout({
+      session: session(),
+      deps: deps({ restartPiDaemon }),
+      authorization: attemptAuthorization(attemptClaim()),
+      restartPi: true,
+      restartPiWhenUnchanged: true,
+    });
+
+    expect(result).toEqual({
+      applied: "none",
+      restartedPi: true,
+      piInvocationId: "new-pi",
+    });
+    expect(restartPiDaemon).toHaveBeenCalledOnce();
+  });
+
   it("recycles only Pi after an overlay or package refresh", async () => {
     const result = await refreshWarmCompanionLayout({
       session: session(),

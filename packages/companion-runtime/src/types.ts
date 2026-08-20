@@ -4,6 +4,9 @@ export type WorkKind = (typeof WORK_KINDS)[number];
 export const CLIENT_SURFACES = ["web", "mobile_web", "native_mobile"] as const;
 export type ClientSurface = (typeof CLIENT_SURFACES)[number];
 
+/** Maximum two-hour turn deadline plus five minutes of staging/dispatch reserve. */
+export const COMPANION_RUNTIME_MATERIAL_MIN_TTL_MS = 125 * 60 * 1_000;
+
 export const TURN_STATUSES = [
   "queued",
   "starting",

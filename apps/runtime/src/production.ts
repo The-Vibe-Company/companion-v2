@@ -3,6 +3,7 @@ import {
   AsciiBoxMaintenanceClient,
   createCompanionRuntimeImageBaker,
   type AsciiBoxMaintenanceClientOptions,
+  type BoxProviderCallTiming,
   type BoxRuntimeLifecycleClient,
   type CompanionBoxRuntimeV2,
   type CompanionRuntimeSkill,
@@ -64,7 +65,13 @@ export interface RuntimeProductionFactories {
     env: NodeJS.ProcessEnv,
     options?: AsciiBoxMaintenanceClientOptions,
   ): BoxRuntimeLifecycleClient;
-  createBoxRuntime(env: NodeJS.ProcessEnv): CompanionBoxRuntimeV2;
+  createBoxRuntime(
+    env: NodeJS.ProcessEnv,
+    options?: {
+      onTiming?: (sample: BoxProviderCallTiming) => void;
+      companionSkillChecksum?: string;
+    },
+  ): CompanionBoxRuntimeV2;
   createArchiveStorage(): RuntimeArchiveStorage;
   loadBundledSkill(): Promise<CompanionRuntimeSkill>;
   createKernel(input: CreateRuntimeKernelInput): { scheduler: RuntimeKernelScheduler };
@@ -79,7 +86,7 @@ const defaultFactories: RuntimeProductionFactories = {
   createDatabase: createRuntimeDatabase,
   createStore: (database) => new PostgresRuntimeStore(database.sql),
   createLifecycle: (env, options) => new AsciiBoxMaintenanceClient(env, options),
-  createBoxRuntime: (env) => new AsciiBoxCompanionRuntime(env),
+  createBoxRuntime: (env, options) => new AsciiBoxCompanionRuntime(env, options),
   createArchiveStorage: () => {
     const config = getStorageConfig();
     const client = createStorageClient(config);
@@ -159,9 +166,25 @@ export async function buildProductionRuntimeService(
         });
       },
     });
+    const bundledSkill = await factories.loadBundledSkill();
     // Staging is a multi-request transaction with one shared abort budget. Keep adapter instances
     // call-local so that budget cannot leak into a later lifecycle or broker operation.
-    const freshRuntime = (): CompanionBoxRuntimeV2 => factories.createBoxRuntime(boxEnv);
+    const runtimeTiming = {
+      onTiming: (sample: BoxProviderCallTiming) => {
+        log.info({
+          ts: new Date().toISOString(),
+          event: "runtime.box.provider_call",
+          operation: sample.operation,
+          durationMs: sample.durationMs,
+          ok: sample.ok,
+        });
+      },
+      companionSkillChecksum: bundledSkill.checksum,
+    };
+    const freshRuntime = (): CompanionBoxRuntimeV2 => factories.createBoxRuntime(
+      boxEnv,
+      runtimeTiming,
+    );
     const bakerAbortController = new AbortController();
     bakerAbort = bakerAbortController;
     const baker = createCompanionRuntimeImageBaker({
@@ -171,7 +194,9 @@ export async function buildProductionRuntimeService(
         existingBoxStatus: (input) => freshRuntime().existingBoxStatus(input),
         refreshPiLayout: (input) => freshRuntime().refreshPiLayout(input),
         refreshTtl: (input) => freshRuntime().refreshTtl(input),
+        prepareRuntimeImage: (input) => freshRuntime().prepareRuntimeImage(input),
       },
+      bundledSkill,
       onAttemptError: (error) => {
         log.warn({
           ts: new Date().toISOString(),
@@ -230,7 +255,6 @@ export async function buildProductionRuntimeService(
       });
     });
     archiveStorage = factories.createArchiveStorage();
-    const bundledSkill = await factories.loadBundledSkill();
     const material = createRuntimeMaterialPipeline({
       masterKey: config.masterKey,
       apiUrl: config.apiUrl,

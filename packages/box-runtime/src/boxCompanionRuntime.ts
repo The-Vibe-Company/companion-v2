@@ -46,6 +46,7 @@ import {
   type CompanionPiLayoutIdentity,
   type CompanionPiLayoutRefresh,
 } from "./companionRuntimeImage";
+import type { BoxProviderCallOperation, BoxProviderCallTiming } from "./boxMaintenanceClient";
 
 /** Credential-free snapshot Pi reads before proposing settings. Omitted on native_mobile. */
 export type CompanionConfigCatalog = {
@@ -143,6 +144,16 @@ const PI_DAEMON_ACTIVE_TIMEOUT_MS = 180_000;
  * response rather than merely a successful transport write.
  */
 const PI_RPC_ACCEPT_TIMEOUT_SECONDS = 8;
+const RUNTIME_IMAGE_PLAYBOOK_READY = "companion-runtime-playbook-ready";
+const RUNTIME_IMAGE_BOXIGNORE = [
+  ".companion/runtime/logs/",
+  ".companion/runtime/state/skill-archives/",
+  ".companion/runtime/state/control-bundle-v1.json",
+  ".companion/runtime/control-transaction-v1/",
+  ".companion/runtime/state/providers.env",
+  "attachments/",
+  "outbox/",
+].join("\n") + "\n";
 /** Labels the diagnostic command prints so each fragment can be recovered from one stdout. */
 const PI_DAEMON_DIAGNOSTIC_LABELS = {
   state: "companion-pi-state",
@@ -203,6 +214,14 @@ const STARTING_STATES = new Set<BoxState>(["init", "provisioning", "provisioned"
 const BOX_RUNNABLE_MARKER = "companion-box-runnable";
 /** Printed by the staging command when Pi's auth file already exists on the Box disk. */
 const PROVIDER_AUTH_PRESENT_MARKER = "companion-provider-auth-present";
+/** Secret-bearing aggregate file; every failure path must remove it from persistent Box disk. */
+const CONTROL_BUNDLE_PATH = ".companion/runtime/state/control-bundle-v1.json";
+const CONTROL_TRANSACTION_DIRECTORY = ".companion/runtime/control-transaction-v1";
+const CONTROL_BUNDLE_ATTEMPTS = 2;
+const CONTROL_BUNDLE_RETRYABLE_STATUSES = new Set([408, 425, 429]);
+/** Proves the extracted immutable Skill tree matches the exact archives staged by this deploy. */
+const SKILLS_TREE_REVISION_PATH = ".companion/runtime/state/skills-tree.version";
+const SKILLS_TREE_REUSED_MARKER = "companion-skills-tree-reused";
 /** Where staged skill archives wait on the Box disk between the file writes and the extract. */
 const STAGED_ARCHIVE_DIRECTORY = ".companion/runtime/state/skill-archives";
 /** Labels each staged archive's size so one stdout can be read back as a measurement. */
@@ -623,6 +642,8 @@ export interface CompanionRuntimeObservation {
 /** Durable broker cursors and bounded protocol telemetry, observed without sending a command to Pi. */
 export interface CompanionPiBrokerState {
   invocationId: string;
+  /** Complete package + overlay marker reported by the running broker. */
+  layoutMarker: string | null;
   activeAttemptId: string | null;
   tailCursor: number;
   acknowledgedCursor: number;
@@ -641,17 +662,24 @@ export interface CompanionPiBrokerEventPage {
 
 /** Prompt dispatch never collapses an ambiguous write into a safe negative acknowledgement. */
 export type CompanionPiPromptDispatch =
+  | { outcome: "accepted"; attemptId: string; invocationId: string; initialCursor: number }
+  | { outcome: "refused"; code: string; message: string }
+  | { outcome: "ambiguous"; code: string; message: string };
+
+export type CompanionPiControlDispatch =
   | { outcome: "accepted"; attemptId: string; invocationId: string }
   | { outcome: "refused"; code: string; message: string }
   | { outcome: "ambiguous"; code: string; message: string };
 
-export type CompanionPiExtensionUiDispatch = CompanionPiPromptDispatch;
+export type CompanionPiExtensionUiDispatch = CompanionPiControlDispatch;
 
 /** Narrow layout-14 Box/Pi port owned exclusively by the dedicated Runtime v2 service. */
 export interface CompanionBoxRuntimeV2 {
   /** Read the provider's exact lifecycle state without probing Pi or waking the Box. */
   existingBoxStatus(input: {
     boxId: string;
+    companionId?: string;
+    runtimeGeneration?: number;
     signal?: AbortSignal;
   }): Promise<{ boxId: string; state: BoxState }>;
   /** Resume only the exact durable Box. Never searches by name, creates, stages, or starts Pi. */
@@ -681,6 +709,12 @@ export interface CompanionBoxRuntimeV2 {
   invalidatePiLayoutOverlay(input: { boxId: string; signal?: AbortSignal }): Promise<void>;
   /** Current package/overlay identity used to name and reuse the golden Box snapshot. */
   layoutIdentity(): CompanionPiLayoutIdentity;
+  /** Prepare and prove the archive/resume boot profile before a golden snapshot is published. */
+  prepareRuntimeImage(input: {
+    boxId: string;
+    bundledSkill: CompanionRuntimeSkill;
+    signal?: AbortSignal;
+  }): Promise<void>;
   /**
    * Install layout 14 and concrete, already-authorized resources on one runnable Box. It never
    * creates/resumes a Box and never starts Pi; apps/runtime owns decryption and material loading.
@@ -698,10 +732,16 @@ export interface CompanionBoxRuntimeV2 {
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
+    reuseSkills?: boolean;
     hubEnv?: Record<string, string>;
     configCatalog?: CompanionConfigCatalog | null;
     signal?: AbortSignal;
-  }): Promise<{ boxId: string; diskLayoutVersion: typeof COMPANION_PI_DISK_LAYOUT_VERSION }>;
+  }): Promise<{
+    boxId: string;
+    diskLayoutVersion: typeof COMPANION_PI_DISK_LAYOUT_VERSION;
+    stagingMode: "refresh" | "skills";
+    skillBytesTransferred: number;
+  }>;
   /** Pi-only lifecycle controls. None may resume/archive/create the Box. */
   startPiDaemon(input: { boxId: string; signal?: AbortSignal }): Promise<{
     state: "idle";
@@ -759,7 +799,7 @@ export interface CompanionBoxRuntimeV2 {
     attemptId: string;
     requestId?: string;
     signal?: AbortSignal;
-  }): Promise<CompanionPiPromptDispatch>;
+  }): Promise<CompanionPiControlDispatch>;
   /** Observe broker identity/cursors and Pi's current model input capabilities in one command. */
   brokerState(input: { boxId: string; signal?: AbortSignal }): Promise<CompanionPiBrokerState>;
   /** Deliver one durable decision without collapsing a lost Box response into a safe refusal. */
@@ -1104,15 +1144,11 @@ function setupScript(
   installCommand: string | undefined,
   piPackages: readonly string[],
   qmdPackage: string,
+  layoutIdentity: CompanionPiLayoutIdentity,
 ): string {
   const configuredInstall = installCommand?.trim();
   const encodedBrokerSource = Buffer.from(COMPANION_PI_BROKER_SOURCE, "utf8").toString("base64");
-  const layoutIdentity = companionPiLayoutIdentity({
-    layoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
-    packages: piPackages,
-    qmdPackage,
-    minimumPiVersion: MINIMUM_IMAGE_SAFE_PI_VERSION,
-  });
+  const encodedBoxIgnore = Buffer.from(RUNTIME_IMAGE_BOXIGNORE, "utf8").toString("base64");
   const encodedInstallScript = configuredInstall
     ? Buffer.from(`#!/usr/bin/env bash
 set -euo pipefail
@@ -1169,6 +1205,10 @@ expected_layout=${shellQuote(layoutIdentity.fullMarker)}
 companion_layout_apply_overlay() {
   mkdir -p "$HOME/.companion/bin" "$HOME/.companion/pi" "$HOME/.companion/pi/extensions" "$HOME/.companion/runtime/sessions" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/.companion/runtime/tmp" "$HOME/.companion/tools" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}" "$HOME/.config/systemd/user"
   chmod 700 "$HOME/.companion/runtime" "$HOME/.companion/runtime/state" "$HOME/.companion/runtime/logs" "$HOME/.companion/runtime/memory" "$HOME/.companion/runtime/tmp" "$HOME/${COMPANION_PI_BROKER_JOURNAL_PATH}"
+  # Provider TTL can archive a Box without the control-plane stop path. Keep every secret-bearing
+  # transient excluded even if staging transport disappears before its explicit cleanup request.
+  printf '%s' ${shellQuote(encodedBoxIgnore)} | base64 --decode > "$HOME/.boxignore"
+  chmod 600 "$HOME/.boxignore"
   # The broker is an autonomous ESM program. Encoding it keeps arbitrary JavaScript out of the shell
   # grammar while preserving one identical setup script for Box create and in-place layout repair.
   printf '%s' ${shellQuote(encodedBrokerSource)} | base64 --decode > "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
@@ -1178,6 +1218,7 @@ companion_layout_apply_overlay() {
     printf '%s\n' 'set -euo pipefail'
     printf 'PI_BIN=%q\n' "$pi_bin"
     printf 'NODE_BIN=%q\n' "$node_bin"
+    printf 'PI_BROKER_LAYOUT_MARKER=%q\n' "$expected_layout"
     printf 'PATH=%q:"$PATH"\n' "$pi_bin_dir"
     printf '%s\n' 'export PATH'
     cat <<'COMPANION_PI_DAEMON'
@@ -1230,6 +1271,7 @@ fi
 export COMPANION_PI_BIN="$PI_BIN"
 export COMPANION_PI_ROOT="$root"
 export COMPANION_PI_INVOCATION_ID="$INVOCATION_ID"
+export PI_BROKER_LAYOUT_MARKER
 export COMPANION_PI_SOCKET_PATH="$broker_socket"
 export COMPANION_PI_JOURNAL_PATH="$broker_journal"
 # One line per start leaves an attributable breadcrumb even if the broker dies before it records
@@ -1609,13 +1651,21 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   readonly #installCommand: string | undefined;
   readonly #piPackages: readonly string[];
   readonly #qmdPackage: string;
+  readonly #onTiming: ((sample: BoxProviderCallTiming) => void) | undefined;
+  readonly #companionSkillChecksum: string | undefined;
   /**
    * The current staging call's budget. Private file/command helpers share it so cancellation covers
    * the whole layout transaction without leaking into a later adapter call.
    */
   #stagingSignal: AbortSignal | undefined;
 
-  constructor(env: NodeJS.ProcessEnv = process.env) {
+  constructor(
+    env: NodeJS.ProcessEnv = process.env,
+    options?: {
+      onTiming?: (sample: BoxProviderCallTiming) => void;
+      companionSkillChecksum?: string;
+    },
+  ) {
     const apiKey = env.COMPANION_BOX_API_KEY?.trim();
     if (!apiKey) {
       throw new BoxRuntimeConfigurationError(
@@ -1638,6 +1688,8 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     this.#installCommand = env.COMPANION_PI_INSTALL_COMMAND;
     this.#piPackages = resolvePiPackages(env);
     this.#qmdPackage = validPackageSpec(QMD_PACKAGE, "QMD_PACKAGE");
+    this.#onTiming = options?.onTiming;
+    this.#companionSkillChecksum = options?.companionSkillChecksum;
   }
 
   layoutIdentity() {
@@ -1646,6 +1698,9 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
       packages: this.#piPackages,
       qmdPackage: this.#qmdPackage,
       minimumPiVersion: MINIMUM_IMAGE_SAFE_PI_VERSION,
+      ...(this.#companionSkillChecksum
+        ? { companionSkillChecksum: this.#companionSkillChecksum }
+        : {}),
     });
   }
 
@@ -1669,33 +1724,45 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     init?: RequestInit,
     timeoutMs = 30_000,
     budget: AbortSignal | null = this.#stagingSignal ?? null,
+    operation: BoxProviderCallOperation = "execute_command",
   ): Promise<T> {
-    const response = await fetch(`${this.#baseUrl}${path}`, {
-      ...init,
-      headers: {
-        Authorization: `Bearer ${this.#apiKey}`,
-        ...(init?.body ? { "Content-Type": "application/json" } : {}),
-        ...init?.headers,
-      },
-      signal: this.#requestSignal(timeoutMs, init?.signal, budget),
-    });
-    if (!response.ok) {
-      const body = await response.json().catch(() => null) as
-        | { code?: string; message?: string; error?: { message?: string } }
-        | null;
-      throw new BoxRuntimeProviderError(
-        body?.message || body?.error?.message || `Box API request failed with ${response.status}`,
-        response.status,
-        body?.code,
-      );
+    const startedAt = Date.now();
+    try {
+      const response = await fetch(`${this.#baseUrl}${path}`, {
+        ...init,
+        headers: {
+          Authorization: `Bearer ${this.#apiKey}`,
+          ...(init?.body ? { "Content-Type": "application/json" } : {}),
+          ...init?.headers,
+        },
+        signal: this.#requestSignal(timeoutMs, init?.signal, budget),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as
+          | { code?: string; message?: string; error?: { message?: string } }
+          | null;
+        throw new BoxRuntimeProviderError(
+          body?.message || body?.error?.message || `Box API request failed with ${response.status}`,
+          response.status,
+          body?.code,
+        );
+      }
+      const result = await response.json() as T;
+      this.#onTiming?.({ operation, durationMs: Date.now() - startedAt, ok: true });
+      return result;
+    } catch (error) {
+      this.#onTiming?.({ operation, durationMs: Date.now() - startedAt, ok: false });
+      throw error;
     }
-    return await response.json() as T;
   }
 
   async #get(boxId: string, signal?: AbortSignal): Promise<BoxInfo> {
     return parseBoxEnvelope(await this.#request<unknown>(
       `/boxes/${encodeURIComponent(boxId)}`,
       signal ? { signal } : undefined,
+      30_000,
+      this.#stagingSignal ?? null,
+      "get_box",
     ));
   }
 
@@ -1730,6 +1797,9 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
         body: JSON.stringify({ noEnv: true, ttlSeconds: this.#ttlSeconds }),
         ...(signal ? { signal } : {}),
       },
+      30_000,
+      this.#stagingSignal ?? null,
+      "resume_box",
     ));
   }
 
@@ -1748,6 +1818,7 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     command: string,
     timeoutSeconds = 60,
     signal?: AbortSignal,
+    operation: BoxProviderCallOperation = "execute_command",
   ): Promise<CommandEnvelope> {
     return parseCommandEnvelope(await this.#request<unknown>(
       `/boxes/${encodeURIComponent(boxId)}/commands`,
@@ -1757,6 +1828,8 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
         ...(signal ? { signal } : {}),
       },
       (timeoutSeconds + 10) * 1_000,
+      this.#stagingSignal ?? null,
+      operation,
     ));
   }
 
@@ -1794,6 +1867,7 @@ fi`,
     responseCommand: string;
     acceptTimeoutSeconds?: number;
     signal?: AbortSignal;
+    operation?: "broker_state" | "prompt" | "execute_command";
   }): Promise<Record<string, unknown> | null> {
     const encodedCommand = Buffer.from(JSON.stringify(input.command), "utf8").toString("base64");
     const acceptTimeoutSeconds = Math.max(
@@ -1854,6 +1928,7 @@ socket.on("error", () => fail("Pi broker command transport failed"));
 COMPANION_PI_BROKER_CLIENT`,
       acceptTimeoutSeconds + 5,
       input.signal,
+      input.operation ?? "execute_command",
     );
     if (!result.success) return null;
     for (const line of result.stdout.trim().split(/[\r\n]+/).reverse()) {
@@ -1919,11 +1994,30 @@ exit 0`,
   }
 
   async #removeProviderFile(boxId: string): Promise<void> {
-    await this.#command(
-      boxId,
-      `rm -f "$HOME/.companion/runtime/state/providers.env" \
-"/run/user/$(id -u)/companion/providers.env"`,
-    );
+    const removed = parseCommandEnvelope(await this.#request<unknown>(
+      `/boxes/${encodeURIComponent(boxId)}/commands`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          command: `set -euo pipefail
+persistent="$HOME/.companion/runtime/state/providers.env"
+runtime="/run/user/$(id -u)/companion/providers.env"
+transaction="$HOME/${CONTROL_TRANSACTION_DIRECTORY}"
+rm -f "$persistent" "$runtime"
+rm -rf "$transaction"
+for target in "$persistent" "$runtime" "$transaction"; do
+  if [ -e "$target" ] || [ -L "$target" ]; then exit 1; fi
+done`,
+          timeoutSeconds: 15,
+        }),
+      },
+      25_000,
+      null,
+      "execute_command",
+    ));
+    if (!removed.success) {
+      throw new BoxRuntimeProviderError("Runtime provider credentials failed to clear", 502);
+    }
   }
 
   /**
@@ -1949,6 +2043,8 @@ exit 0`,
           }),
         },
         options?.timeoutMs,
+        this.#stagingSignal ?? null,
+        "write_file",
       );
     } catch (error) {
       if (error instanceof BoxRuntimeProviderError) {
@@ -1959,6 +2055,171 @@ exit 0`,
         );
       }
       throw error;
+    }
+  }
+
+  /** Land bounded control files through one verified, atomically-applied bundle. */
+  async #applyControlBundle(
+    boxId: string,
+    files: Array<{ path: string; content: string; mode: 0o600 | 0o700 }>,
+  ): Promise<void> {
+    const allowed = new Set([
+      ".companion/pi/auth.json",
+      ".companion/pi/mcp.json",
+      ".companion/runtime/state/mcp-accounts.json",
+      ".companion/runtime/state/skills.json",
+      ".companion/runtime/state/config-catalog.json",
+      ".companion/runtime/state/instructions.txt",
+      ".companion/runtime/state/model.txt",
+      ".companion/runtime/state/providers.env",
+      COMPANION_GIT_CREDENTIAL_HELPER_PATH,
+    ]);
+    if (
+      files.length === 0
+      || files.length > allowed.size
+      || files.some((file) => !allowed.has(file.path))
+      || new Set(files.map((file) => file.path)).size !== files.length
+    ) {
+      throw new BoxRuntimeProviderError("Runtime control bundle contains an invalid path", 400);
+    }
+    const manifest = {
+      revision: 1,
+      files: files.map((file) => {
+        const bytes = Buffer.from(file.content, "utf8");
+        return {
+          path: file.path,
+          mode: file.mode,
+          byteSize: bytes.byteLength,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          content: bytes.toString("base64"),
+        };
+      }),
+    };
+    const allowedJson = JSON.stringify([...allowed]);
+    const content = JSON.stringify(manifest);
+    for (let attempt = 1; attempt <= CONTROL_BUNDLE_ATTEMPTS; attempt += 1) {
+      try {
+        await this.#writeFile(boxId, CONTROL_BUNDLE_PATH, content);
+        const applied = await this.#command(
+          boxId,
+      `set -euo pipefail
+bundle="$HOME/${CONTROL_BUNDLE_PATH}"
+transaction="$HOME/${CONTROL_TRANSACTION_DIRECTORY}"
+trap 'rm -f "$bundle"; rm -rf "$transaction"' EXIT
+COMPANION_CONTROL_BUNDLE="$bundle" COMPANION_CONTROL_ALLOWED=${shellQuote(Buffer.from(allowedJson).toString("base64"))} node <<'COMPANION_CONTROL_APPLY'
+const fs = require("node:fs");
+const path = require("node:path");
+const crypto = require("node:crypto");
+const home = process.env.HOME;
+const bundle = process.env.COMPANION_CONTROL_BUNDLE;
+const transaction = path.join(home, ${JSON.stringify(CONTROL_TRANSACTION_DIRECTORY)});
+const allowed = new Set(JSON.parse(Buffer.from(process.env.COMPANION_CONTROL_ALLOWED, "base64").toString("utf8")));
+const manifest = JSON.parse(fs.readFileSync(bundle, "utf8"));
+if (manifest.revision !== 1 || !Array.isArray(manifest.files) || manifest.files.length > allowed.size) throw new Error("invalid control manifest");
+const seen = new Set();
+const prepared = [];
+for (const file of manifest.files) {
+  if (!allowed.has(file.path) || seen.has(file.path) || ![384, 448].includes(file.mode)) throw new Error("invalid control path or mode");
+  seen.add(file.path);
+  const bytes = Buffer.from(file.content, "base64");
+  if (bytes.length !== file.byteSize || bytes.length > 4 * 1024 * 1024 || crypto.createHash("sha256").update(bytes).digest("hex") !== file.sha256) throw new Error("invalid control digest");
+  const target = path.join(home, file.path);
+  if (fs.existsSync(target) && !fs.lstatSync(target).isFile()) throw new Error("invalid control target");
+  prepared.push({ target, bytes, mode: file.mode });
+}
+fs.rmSync(transaction, { recursive: true, force: true });
+fs.mkdirSync(transaction, { recursive: true, mode: 0o700 });
+const records = prepared.map(({ target }, index) => ({
+  target,
+  temporary: path.join(transaction, index + ".next"),
+  backup: path.join(transaction, index + ".previous"),
+  hadTarget: false,
+  installed: false,
+}));
+try {
+  for (let index = 0; index < prepared.length; index += 1) {
+    const { target, bytes, mode } = prepared[index];
+    const { temporary } = records[index];
+    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(temporary, bytes, { mode });
+    fs.chmodSync(temporary, mode);
+  }
+  for (const record of records) {
+    fs.rmSync(record.backup, { force: true });
+    if (fs.existsSync(record.target)) {
+      fs.renameSync(record.target, record.backup);
+      record.hadTarget = true;
+    }
+    fs.renameSync(record.temporary, record.target);
+    record.installed = true;
+  }
+} catch (error) {
+  for (const record of [...records].reverse()) {
+    if (record.installed) fs.rmSync(record.target, { force: true });
+    if (record.hadTarget && fs.existsSync(record.backup)) {
+      fs.renameSync(record.backup, record.target);
+    }
+    fs.rmSync(record.temporary, { force: true });
+  }
+  throw error;
+}
+// The transaction is committed once every canonical path has been swapped. Backup deletion is
+// post-commit cleanup and must never enter the rollback path after an earlier backup is gone.
+for (const record of records) fs.rmSync(record.backup, { force: true });
+fs.rmSync(transaction, { recursive: true, force: true });
+COMPANION_CONTROL_APPLY`,
+          60,
+        );
+        if (!applied.success) {
+          throw new BoxRuntimeProviderError(
+            `Runtime control bundle failed to apply${commandFailureDetail(applied)}`,
+            502,
+          );
+        }
+        return;
+      } catch (error) {
+        // The remote EXIT trap cannot run if the file PUT succeeded but command submission never
+        // reached a shell. Cleanup deliberately ignores the cancelled staging budget and gets its
+        // own short request. If that also fails, propagate the cleanup failure and keep the Box
+        // runnable: the archive path refuses to persist the disk until it can prove the bundle
+        // absent. The whole transaction is digest-checked and atomically replaces fixed paths, so
+        // one retry is safe before Pi starts and covers the provider's observed short-write and
+        // transient command-transport failures.
+        await this.#removeControlBundle(boxId);
+        const retryable = !this.#stagingSignal?.aborted
+          && (
+            !(error instanceof BoxRuntimeProviderError)
+            || error.status >= 500
+            || CONTROL_BUNDLE_RETRYABLE_STATUSES.has(error.status)
+          );
+        if (!retryable || attempt === CONTROL_BUNDLE_ATTEMPTS) throw error;
+      }
+    }
+  }
+
+  async #removeControlBundle(boxId: string): Promise<void> {
+    const cleaned = parseCommandEnvelope(await this.#request<unknown>(
+      `/boxes/${encodeURIComponent(boxId)}/commands`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          command: `set -euo pipefail
+bundle="$HOME/${CONTROL_BUNDLE_PATH}"
+transaction="$HOME/${CONTROL_TRANSACTION_DIRECTORY}"
+rm -f "$bundle"
+rm -rf "$transaction"
+for target in "$bundle" "$transaction"; do
+  if [ -e "$target" ] || [ -L "$target" ]; then exit 1; fi
+done`,
+          timeoutSeconds: 15,
+        }),
+      },
+      25_000,
+      null,
+      "execute_command",
+    ));
+    if (!cleaned.success) {
+      throw new BoxRuntimeProviderError("Runtime control bundle failed to clear", 502);
     }
   }
 
@@ -2049,7 +2310,12 @@ exit 0`,
     await this.#writeFile(
       boxId,
       PI_LAYOUT_SCRIPT_PATH,
-      setupScript(this.#installCommand, this.#piPackages, this.#qmdPackage),
+      setupScript(
+        this.#installCommand,
+        this.#piPackages,
+        this.#qmdPackage,
+        this.layoutIdentity(),
+      ),
     );
     // A Box whose marker already matches exits in milliseconds. The budget is for the run that does
     // relayout: it installs the whole pinned package set, and the marker is written only once that
@@ -2195,15 +2461,9 @@ fi`,
     return sizes;
   }
 
-  /**
-   * Replace the legacy approval broker and stage the bounded guard before layout 11 is published.
-   * If Pi restarts during migration, it can only load the current unrestricted extension from disk.
-   */
+  /** Stage the interaction extension only when a layout refresh actually changed the overlay. */
   async #stageCompanionInteractionExtension(boxId: string): Promise<void> {
-    await this.#command(
-      boxId,
-      'mkdir -p "$HOME/.companion/pi/extensions"',
-    );
+    await this.#command(boxId, 'mkdir -p "$HOME/.companion/pi/extensions"');
     await this.#writeFile(
       boxId,
       `.companion/pi/extensions/${COMPANION_PERMISSION_BROKER_EXTENSION_FILE}`,
@@ -2223,14 +2483,36 @@ fi`,
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
+    reuseSkills: boolean;
     hubEnv?: Record<string, string>;
     configCatalog?: CompanionConfigCatalog | null;
-  }): Promise<void> {
+  }): Promise<{ stagingMode: "refresh" | "skills"; skillBytesTransferred: number }> {
     const injectedSkills = input.clientSurface === "native_mobile" ? [] : input.skills;
     const mcp = buildMcpAdapterInjection(input.mcpAccounts);
+    const bundledSkill = injectedSkills.find((skill) => skill.slug === "companion");
+    const bundledArchivePath = bundledSkill ? runtimeSkillArchivePath(bundledSkill) : null;
+    const bakedBundledArchivePath = bundledSkill
+      ? `.companion/runtime/image/companion-${bundledSkill.checksum}.tar.gz.b64`
+      : null;
+    const skillsTreeRevision = createHash("sha256")
+      .update(JSON.stringify(injectedSkills.map(({ slug, version, checksum }) => ({
+        slug,
+        version,
+        checksum,
+      }))))
+      .digest("hex");
+    const prepareSkillArchives =
+      ` rm -rf "$root/state/skill-archives"; mkdir -p "$root/state/skill-archives";`
+      + (bundledArchivePath && bakedBundledArchivePath
+        ? ` if [ -s "$HOME/${bakedBundledArchivePath}" ]; then cp "$HOME/${bakedBundledArchivePath}" "$HOME/${bundledArchivePath}"; printf '%s\\n' companion-bundled-skill-reused; fi;`
+        : "");
     const cleared = await this.#command(
       input.boxId,
-      `set -e; root="$HOME/.companion/runtime"; rm -rf "$root/state/skill-archives"; mkdir -p "$root/state/skill-archives"; if [ -f "$HOME/.companion/pi/auth.json" ]; then printf '%s\\n' ${shellQuote(PROVIDER_AUTH_PRESENT_MARKER)}; fi`,
+      `set -e; root="$HOME/.companion/runtime";`
+      + (input.reuseSkills
+        ? ` if [ "$(cat "$HOME/${SKILLS_TREE_REVISION_PATH}" 2>/dev/null || true)" = ${shellQuote(skillsTreeRevision)} ]; then printf '%s\\n' ${SKILLS_TREE_REUSED_MARKER}; else${prepareSkillArchives} fi;`
+        : prepareSkillArchives)
+      + ` if [ -f "$HOME/.companion/pi/auth.json" ]; then printf '%s\\n' ${shellQuote(PROVIDER_AUTH_PRESENT_MARKER)}; fi`,
     );
     if (!cleared.success) {
       throw new BoxRuntimeProviderError(
@@ -2238,104 +2520,140 @@ fi`,
         502,
       );
     }
+    const reuseSkills = input.reuseSkills && cleared.stdout.includes(SKILLS_TREE_REUSED_MARKER);
     // Pi keeps refreshed subscription tokens in its own agent directory, so the auth file is
     // replaced only when the encrypted workspace connection generation changes. The disk itself is
     // the authority on whether the file exists: a Box the control plane recorded at the current
     // generation can still be a replacement disk that never received it, for example when an earlier
     // start failed after the new Box id was persisted.
+    const controlFiles: Array<{ path: string; content: string; mode: 0o600 | 0o700 }> = [];
     if (input.replaceProviderAuth || !cleared.stdout.includes(PROVIDER_AUTH_PRESENT_MARKER)) {
-      await this.#writeFile(
-        input.boxId,
-        ".companion/pi/auth.json",
-        `${JSON.stringify(input.providerAuth)}\n`,
-      );
+      controlFiles.push({
+        path: ".companion/pi/auth.json",
+        content: `${JSON.stringify(input.providerAuth)}\n`,
+        mode: 0o600,
+      });
     }
-    await this.#writeFile(
-      input.boxId,
-      ".companion/pi/mcp.json",
-      `${JSON.stringify(mcp.config, null, 2)}\n`,
-    );
-    await this.#writeFile(
-      input.boxId,
-      ".companion/runtime/state/mcp-accounts.json",
-      `${JSON.stringify({ accounts: mcp.accounts }, null, 2)}\n`,
-    );
-    await this.#writeFile(
-      input.boxId,
-      ".companion/runtime/state/skills.json",
-      `${JSON.stringify({
-        client_surface: input.clientSurface,
-        skills: injectedSkills.map(({ slug, version, checksum }) => ({ slug, version, checksum })),
-      }, null, 2)}\n`,
+    controlFiles.push(
+      {
+        path: ".companion/pi/mcp.json",
+        content: `${JSON.stringify(mcp.config, null, 2)}\n`,
+        mode: 0o600,
+      },
+      {
+        path: ".companion/runtime/state/mcp-accounts.json",
+        content: `${JSON.stringify({ accounts: mcp.accounts }, null, 2)}\n`,
+        mode: 0o600,
+      },
+      {
+        path: ".companion/runtime/state/skills.json",
+        content: `${JSON.stringify({
+          client_surface: input.clientSurface,
+          skills: injectedSkills.map(({ slug, version, checksum }) => ({ slug, version, checksum })),
+        }, null, 2)}\n`,
+        mode: 0o600,
+      },
     );
     if (input.clientSurface !== "native_mobile" && input.configCatalog) {
-      await this.#writeFile(
-        input.boxId,
-        ".companion/runtime/state/config-catalog.json",
-        `${JSON.stringify(input.configCatalog)}\n`,
-      );
+      controlFiles.push({
+        path: ".companion/runtime/state/config-catalog.json",
+        content: `${JSON.stringify(input.configCatalog)}\n`,
+        mode: 0o600,
+      });
     }
-    await this.#writeFile(
-      input.boxId,
-      ".companion/runtime/state/instructions.txt",
-      composedInstructions(input.instructions, input.clientSurface),
-    );
-    await this.#writeFile(
-      input.boxId,
-      ".companion/runtime/state/model.txt",
-      `${input.modelId}\n`,
+    controlFiles.push(
+      {
+        path: ".companion/runtime/state/instructions.txt",
+        content: composedInstructions(input.instructions, input.clientSurface),
+        mode: 0o600,
+      },
+      {
+        path: ".companion/runtime/state/model.txt",
+        content: `${input.modelId}\n`,
+        mode: 0o600,
+      },
+      {
+        path: ".companion/runtime/state/providers.env",
+        content: encodeEnvironmentFile(input.mcpCredentials, input.hubEnv),
+        mode: 0o600,
+      },
     );
     if (input.mcpCredentials.some((credential) => credential.env_key === "GITHUB_TOKEN")) {
-      await this.#writeFile(
-        input.boxId,
-        COMPANION_GIT_CREDENTIAL_HELPER_PATH,
-        COMPANION_GIT_CREDENTIAL_HELPER_SOURCE.endsWith("\n")
+      controlFiles.push({
+        path: COMPANION_GIT_CREDENTIAL_HELPER_PATH,
+        content: COMPANION_GIT_CREDENTIAL_HELPER_SOURCE.endsWith("\n")
           ? COMPANION_GIT_CREDENTIAL_HELPER_SOURCE
           : `${COMPANION_GIT_CREDENTIAL_HELPER_SOURCE}\n`,
-      );
-      const gitHelper = await this.#command(input.boxId, companionGitCredentialHelperInstallCommand());
-      if (!gitHelper.success) {
-        throw new BoxRuntimeProviderError(
-          `Pi resource staging failed${commandFailureDetail(gitHelper)}`,
-          502,
-        );
-      }
+        mode: 0o700,
+      });
     }
-    const staged = new Map<string, string>();
-    for (const skill of injectedSkills) {
-      const path = runtimeSkillArchivePath(skill);
-      const content = skill.archive.toString("base64");
-      staged.set(path, content);
-      await this.#writeFile(input.boxId, path, content);
-    }
-    await this.#repairShortStagedArchives(input.boxId, staged);
     try {
-      await this.#writeFile(
-        input.boxId,
-        ".companion/runtime/state/providers.env",
-        encodeEnvironmentFile(input.mcpCredentials, input.hubEnv),
-      );
-      const prepared = await this.#command(
-        input.boxId,
+      await this.#applyControlBundle(input.boxId, controlFiles);
+      if (input.mcpCredentials.some((credential) => credential.env_key === "GITHUB_TOKEN")) {
+        const gitHelper = await this.#command(input.boxId, companionGitCredentialHelperInstallCommand());
+        if (!gitHelper.success) {
+          throw new BoxRuntimeProviderError(
+            `Pi resource staging failed${commandFailureDetail(gitHelper)}`,
+            502,
+          );
+        }
+      }
+      const staged = new Map<string, string>();
+      let skillBytesTransferred = 0;
+      const uploads: Array<{ path: string; content: string; byteLength: number }> = [];
+      for (const skill of reuseSkills ? [] : injectedSkills) {
+        const path = runtimeSkillArchivePath(skill);
+        const content = skill.archive.toString("base64");
+        staged.set(path, content);
+        if (!(skill === bundledSkill && cleared.stdout.includes("companion-bundled-skill-reused"))) {
+          uploads.push({ path, content, byteLength: skill.archive.byteLength });
+        }
+      }
+      // Independent immutable archives can land in parallel. Keep the bound deliberately low so a
+      // large skill selection cannot monopolize the provider's command/file quota; #writeFile keeps
+      // its multipart path for archives over the provider limit.
+      let nextUpload = 0;
+      await Promise.all(Array.from(
+        { length: Math.min(3, uploads.length) },
+        async () => {
+          for (;;) {
+            const upload = uploads[nextUpload++];
+            if (!upload) return;
+            await this.#writeFile(input.boxId, upload.path, upload.content);
+            skillBytesTransferred += upload.byteLength;
+          }
+        },
+      ));
+      await this.#repairShortStagedArchives(input.boxId, staged);
+      const prepared = reuseSkills
+        ? null
+        : await this.#command(
+          input.boxId,
         // One archive that will not decode or extract has to name itself. `tar` reports a failed
         // member over three lines and ends on `Error is not recoverable`, which is the one line a
         // stored reason has room for and the only one that says nothing, so the loop appends the slug
         // it was working on after tar has finished complaining.
-        "set -euo pipefail; root=\"$HOME/.companion/runtime\"; rm -rf \"$root/skills.next\"; mkdir -p \"$root/skills.next\"; shopt -s nullglob; for archive in \"$root/state/skill-archives\"/*.tar.gz.b64; do slug=\"$(basename \"$archive\" .tar.gz.b64)\"; mkdir -p \"$root/skills.next/$slug\"; if ! base64 --decode \"$archive\" | tar --extract --gzip --file=- --directory=\"$root/skills.next/$slug\" --no-same-owner --no-same-permissions; then echo \"skill package $slug did not extract\" >&2; exit 1; fi; done; rm -rf \"$root/skills.prev\"; if [ -d \"$root/skills\" ]; then mv \"$root/skills\" \"$root/skills.prev\"; fi; mv \"$root/skills.next\" \"$root/skills\"; rm -rf \"$root/skills.prev\" \"$root/state/skill-archives\"",
-        180,
-      );
+        `set -euo pipefail; root="$HOME/.companion/runtime"; rm -rf "$root/skills.next"; mkdir -p "$root/skills.next"; shopt -s nullglob; for archive in "$root/state/skill-archives"/*.tar.gz.b64; do slug="$(basename "$archive" .tar.gz.b64)"; mkdir -p "$root/skills.next/$slug"; if ! base64 --decode "$archive" | tar --extract --gzip --file=- --directory="$root/skills.next/$slug" --no-same-owner --no-same-permissions; then echo "skill package $slug did not extract" >&2; exit 1; fi; done; rm -rf "$root/skills.prev"; if [ -d "$root/skills" ]; then mv "$root/skills" "$root/skills.prev"; fi; mv "$root/skills.next" "$root/skills"; rm -rf "$root/skills.prev" "$root/state/skill-archives"; printf '%s\\n' ${shellQuote(skillsTreeRevision)} > "$HOME/${SKILLS_TREE_REVISION_PATH}.next"; mv "$HOME/${SKILLS_TREE_REVISION_PATH}.next" "$HOME/${SKILLS_TREE_REVISION_PATH}"`,
+          180,
+        );
       // Production read this failure as the bare sentence, which named the step and nothing else: the
       // same wake could have died decoding a staged archive, extracting one, or swapping the tree in,
       // and every one of those is a different fault. The failing line travels with it for the same
       // reason it travels with a failed layout install.
-      if (!prepared.success) {
+      if (prepared && !prepared.success) {
         throw new BoxRuntimeProviderError(
           `Pi resources failed to prepare${commandFailureDetail(prepared)}`,
           502,
         );
       }
+      return {
+        stagingMode: reuseSkills ? "refresh" : "skills",
+        skillBytesTransferred,
+      };
     } catch (error) {
-      await this.#removeProviderFile(input.boxId).catch(() => undefined);
+      // providers.env is transient staging material. A staging failure must prove it absent from
+      // both persistent disk and tmpfs before the Box can later be archived or resumed.
+      await this.#removeProviderFile(input.boxId);
       throw error;
     }
   }
@@ -2403,6 +2721,7 @@ done
 printf '%s\n' "$companion_pi_state"
 if [ "$companion_pi_ready" = yes ]; then
   printf '%s\n' companion-pi-broker-ready
+  printf 'companion-pi-invocation %s\n' "$companion_pi_invocation"
 else
   printf '%s\n' companion-pi-broker-unready
 fi`,
@@ -2427,11 +2746,14 @@ fi`,
         502,
       );
     }
-    const broker = await this.brokerState({ boxId: input.boxId, signal: input.signal });
-    if (broker.activeAttemptId !== null) {
-      throw new BoxRuntimeProviderError("Pi became active with an unexpected turn", 409);
+    const invocationId = labeledDiagnosticLines(
+      started.stdout,
+      "companion-pi-invocation",
+    )[0];
+    if (!invocationId || !opaqueBrokerId(invocationId)) {
+      throw new BoxRuntimeProviderError("Pi broker invocation identity is unavailable", 502);
     }
-    return { state: "idle", invocationId: broker.invocationId };
+    return { state: "idle", invocationId };
   }
 
   async #deactivatePiDaemon(input: { boxId: string; signal?: AbortSignal }): Promise<void> {
@@ -2457,32 +2779,84 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     boxId: string;
     signal?: AbortSignal;
   }): Promise<CompanionRuntimeObservation> {
-    let box = await this.#get(input.boxId, input.signal);
-    if (box.state === "archiving") {
-      throw new BoxRuntimeProviderError("Box is still archiving", 409, "box_already_stopping");
-    }
-    if (box.state === "archived") {
-      box = await this.#resume(input.boxId, input.signal);
-    }
-    if (STARTING_STATES.has(box.state)) {
-      box = await this.#waitReady(input.boxId, input.signal);
-    }
-    if (!READY_STATES.has(box.state)) {
-      throw new BoxRuntimeProviderError(`Box cannot resume from state ${box.state}`, 409);
-    }
-    const daemonState = await this.#daemonState(input.boxId, input.signal).catch((error: unknown) => {
-      if (input.signal?.aborted) throw input.signal.reason ?? error;
-      return "stopped" as const;
-    });
-    return observation(box, daemonState);
+    // The durable lifecycle has already observed the exact Box and is the sole owner of readiness
+    // polling. Keeping this adapter to one POST prevents a concurrent status loop or Pi command from
+    // competing with the provider's lazy restore path.
+    const box = await this.#resume(input.boxId, input.signal);
+    return observation(box, "stopped");
   }
 
   async existingBoxStatus(input: {
     boxId: string;
+    companionId?: string;
+    runtimeGeneration?: number;
     signal?: AbortSignal;
   }): Promise<{ boxId: string; state: BoxState }> {
     const box = await this.#get(input.boxId, input.signal);
+    if (
+      input.companionId !== undefined
+      && !isCompanionOwnBox(box, input.companionId, input.runtimeGeneration)
+    ) {
+      throw new BoxRuntimeProviderError("The durable Box identity does not match this Companion", 409);
+    }
     return { boxId: box.id, state: box.state };
+  }
+
+  async prepareRuntimeImage(input: {
+    boxId: string;
+    bundledSkill: CompanionRuntimeSkill;
+    signal?: AbortSignal;
+  }): Promise<void> {
+    if (
+      this.#companionSkillChecksum
+      && input.bundledSkill.checksum !== this.#companionSkillChecksum
+    ) {
+      throw new BoxRuntimeProviderError("Runtime image Companion skill identity changed", 409);
+    }
+    const bakedSkillPath = `.companion/runtime/image/companion-${input.bundledSkill.checksum}.tar.gz.b64`;
+    await this.#writeFile(input.boxId, ".boxignore", RUNTIME_IMAGE_BOXIGNORE);
+    await this.#writeFile(input.boxId, bakedSkillPath, input.bundledSkill.archive.toString("base64"));
+
+    await this.#archiveBox({ boxId: input.boxId, signal: input.signal });
+    const archiveDeadline = Date.now() + this.#readyTimeoutMs;
+    for (;;) {
+      const archived = await this.#get(input.boxId, input.signal);
+      if (archived.state === "archived") break;
+      if (archived.state === "error" || Date.now() >= archiveDeadline) {
+        throw new BoxRuntimeProviderError("Runtime image Box did not archive for warmup", 504);
+      }
+      await this.#pause(input.signal);
+    }
+    await this.#resume(input.boxId, input.signal);
+    await this.#waitReady(input.boxId, input.signal);
+
+    const warmed = await this.#command(
+      input.boxId,
+      `set -euo pipefail
+test -s "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
+test -s "$HOME/${bakedSkillPath}"
+node --check "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}" >/dev/null
+pi --version >/dev/null
+playbook="$HOME/.ascii/playbook.json"
+previous=""
+stable=0
+for companion_playbook_probe in $(seq 1 100); do
+  if [ -s "$playbook" ]; then
+    current="$(sha256sum "$playbook" | cut -c1-64)"
+    if [ "$current" = "$previous" ]; then stable=$((stable + 1)); else stable=0; fi
+    previous="$current"
+    if [ "$stable" -ge 2 ]; then printf '%s\n' ${shellQuote(RUNTIME_IMAGE_PLAYBOOK_READY)}; exit 0; fi
+  fi
+  sleep 0.1
+done
+echo 'Runtime image playbook did not stabilize' >&2
+exit 1`,
+      30,
+      input.signal,
+    );
+    if (!warmed.success || !warmed.stdout.includes(RUNTIME_IMAGE_PLAYBOOK_READY)) {
+      throw new BoxRuntimeProviderError("Runtime image playbook warmup failed", 502);
+    }
   }
 
   async archiveExistingBox(input: {
@@ -2490,7 +2864,21 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     recoverArchive?: boolean;
     signal?: AbortSignal;
   }): Promise<{ boxId: string; state: BoxState }> {
-    return await this.#archiveBox(input);
+    const observed = await this.#get(input.boxId, input.signal);
+    if (observed.state === "archived" || observed.state === "archiving") {
+      return await this.#archiveBox(input, observed);
+    }
+    // A previous staging transport failure may have landed the aggregate before its shell trap ran.
+    // Never archive a tenant Box until absence of that secret-bearing transient file is proven.
+    try {
+      await this.#removeControlBundle(input.boxId);
+    } catch (error) {
+      if (!(error instanceof BoxRuntimeProviderError) || error.status !== 409) throw error;
+      const raced = await this.#get(input.boxId, input.signal);
+      if (raced.state !== "archived" && raced.state !== "archiving") throw error;
+      return await this.#archiveBox(input, raced);
+    }
+    return await this.#archiveBox(input, observed);
   }
 
   async #archiveBox(input: {
@@ -2508,15 +2896,20 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
             body: JSON.stringify({ force: false }),
             ...(input.signal ? { signal: input.signal } : {}),
           },
+          30_000,
+          null,
+          "archive_box",
         );
         box = parseBoxEnvelope(response);
       } catch (error) {
+        if (!(error instanceof BoxRuntimeProviderError) || error.status !== 409) throw error;
+        const raced = await this.#get(input.boxId, input.signal);
         if (
-          input.recoverArchive !== true
-          || !(error instanceof BoxRuntimeProviderError)
-          || error.status !== 409
+          raced.state !== "archived"
+          && raced.state !== "archiving"
+          && input.recoverArchive !== true
         ) throw error;
-        box = await this.#get(input.boxId, input.signal);
+        box = raced;
       }
     }
     return { boxId: box.id, state: box.state };
@@ -2535,10 +2928,16 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     mcpCredentials: McpRuntimeCredential[];
     mcpAccounts: CompanionMcpAccount[];
     skills: CompanionRuntimeSkill[];
+    reuseSkills?: boolean;
     hubEnv?: Record<string, string>;
     configCatalog?: CompanionConfigCatalog | null;
     signal?: AbortSignal;
-  }): Promise<{ boxId: string; diskLayoutVersion: typeof COMPANION_PI_DISK_LAYOUT_VERSION }> {
+  }): Promise<{
+    boxId: string;
+    diskLayoutVersion: typeof COMPANION_PI_DISK_LAYOUT_VERSION;
+    stagingMode: "refresh" | "skills";
+    skillBytesTransferred: number;
+  }> {
     companionBoxName(input.companionId, input.runtimeGeneration);
     this.#stagingSignal = input.signal;
     try {
@@ -2550,9 +2949,9 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
         throw new BoxRuntimeProviderError("Box must be resumed before staging runtime resources", 409);
       }
       await this.#assertBoxRunnable(box);
-      await this.#ensurePiLayout(box.id);
-      await this.#stageCompanionInteractionExtension(box.id);
-      await this.#injectPiResources({
+      const layoutApplied = await this.#ensurePiLayout(box.id);
+      if (layoutApplied !== "none") await this.#stageCompanionInteractionExtension(box.id);
+      const staged = await this.#injectPiResources({
         boxId: box.id,
         clientSurface: input.clientSurface,
         providerAuth: input.providerAuth,
@@ -2562,10 +2961,15 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
         mcpCredentials: input.mcpCredentials,
         mcpAccounts: input.mcpAccounts,
         skills: input.skills,
+        reuseSkills: input.reuseSkills === true,
         hubEnv: input.hubEnv,
         configCatalog: input.configCatalog,
       });
-      return { boxId: box.id, diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION };
+      return {
+        boxId: box.id,
+        diskLayoutVersion: COMPANION_PI_DISK_LAYOUT_VERSION,
+        ...staged,
+      };
     } finally {
       this.#stagingSignal = undefined;
     }
@@ -2827,7 +3231,17 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
       `set -euo pipefail
 rm -f "$HOME/.companion/pi/auth.json" \
   "$HOME/.companion/runtime/state/providers.env" \
-  "/run/user/$(id -u)/companion/providers.env"`,
+  "$HOME/${CONTROL_BUNDLE_PATH}" \
+  "/run/user/$(id -u)/companion/providers.env"
+rm -rf "$HOME/${CONTROL_TRANSACTION_DIRECTORY}"
+for target in \
+  "$HOME/.companion/pi/auth.json" \
+  "$HOME/.companion/runtime/state/providers.env" \
+  "$HOME/${CONTROL_BUNDLE_PATH}" \
+  "/run/user/$(id -u)/companion/providers.env" \
+  "$HOME/${CONTROL_TRANSACTION_DIRECTORY}"; do
+  if [ -e "$target" ] || [ -L "$target" ]; then exit 1; fi
+done`,
       60,
       input.signal,
     );
@@ -2871,8 +3285,11 @@ rm -f "$HOME/.companion/pi/auth.json" \
           type: "prompt",
           attemptId: input.attemptId,
           message: input.message,
+          requiredInput: ["text"],
+          clearOutbox: true,
         },
         signal: input.signal,
+        operation: "prompt",
       });
     } catch {
       // The Box command can have written the prompt and lost its HTTP response. Conservatively keep
@@ -2892,11 +3309,14 @@ rm -f "$HOME/.companion/pi/auth.json" \
         data?.piAcknowledged === true
         && data.attemptId === input.attemptId
         && opaqueBrokerId(data.invocationId)
+        && nonNegativeSafeInteger(data.initialCursor)
+        && data.clearOutbox === true
       ) {
         return {
           outcome: "accepted",
           attemptId: input.attemptId,
           invocationId: data.invocationId,
+          initialCursor: data.initialCursor,
         };
       }
       return {
@@ -2922,7 +3342,7 @@ rm -f "$HOME/.companion/pi/auth.json" \
     attemptId: string;
     requestId?: string;
     signal?: AbortSignal;
-  }): Promise<CompanionPiPromptDispatch> {
+  }): Promise<CompanionPiControlDispatch> {
     let response: Record<string, unknown> | null;
     try {
       response = await this.#rpcCommandResponse({
@@ -2992,8 +3412,12 @@ rm -f "$HOME/.companion/pi/auth.json" \
       responseCommand: "runtime_state",
       command: { id: `companion-runtime-state:${randomUUID()}`, type: "runtime_state" },
       signal: input.signal,
+      operation: "broker_state",
     });
     const data = response?.success === true && isJsonObject(response.data) ? response.data : null;
+    const layoutMarker = typeof data?.layoutMarker === "string" && data.layoutMarker.length <= 1024
+      ? data.layoutMarker
+      : null;
     const counters = parseBrokerCounters(data?.counters);
     const modelInput = Array.isArray(data?.modelInput)
       && data.modelInput.every((item) => item === "text" || item === "image")
@@ -3013,6 +3437,7 @@ rm -f "$HOME/.companion/pi/auth.json" \
     }
     return {
       invocationId: data.invocationId,
+      layoutMarker,
       activeAttemptId: data.activeAttemptId,
       tailCursor: data.tailCursor,
       acknowledgedCursor: data.acknowledgedCursor,
@@ -3095,7 +3520,7 @@ rm -f "$HOME/.companion/pi/auth.json" \
       method: "PATCH",
       body: JSON.stringify({ ttlSeconds: input.ttlSeconds ?? this.#ttlSeconds }),
       ...(input.signal ? { signal: input.signal } : {}),
-    });
+    }, 30_000, null, "apply_box_settings");
   }
 
   async ackEvents(input: {
@@ -3186,12 +3611,12 @@ rm -f "$HOME/.companion/pi/auth.json" \
         method: "POST",
         body: "{}",
         ...(input.signal ? { signal: input.signal } : {}),
-      }),
+      }, 30_000, null, "desktop"),
       webrtc: () => this.#request<DesktopEnvelope>(desktopPath, {
         method: "POST",
         body: "{}",
         ...(input.signal ? { signal: input.signal } : {}),
-      }),
+      }, 30_000, null, "desktop"),
       budgetMs: this.#desktopMintBudgetMs,
       pause: () => this.#pause(input.signal),
     });

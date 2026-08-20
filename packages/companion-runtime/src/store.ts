@@ -4,6 +4,7 @@ import {
   decodeRuntimeClaimRow,
   RuntimeRowDecodeError,
   type GateStatus,
+  type ClientSurface,
   type DuplicateCleanup,
   type DuplicateCleanupStatus,
   type LeaseFence,
@@ -56,7 +57,14 @@ export interface RuntimeStore {
   mintHubToken(
     fence: LeaseFence,
     leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
-  ): Promise<string | null>;
+  ): Promise<{ token: string; expiresAt: Date } | null>;
+  recordMaterialSnapshot(fence: LeaseFence, input: {
+    clientSurface: ClientSurface;
+    materialExpiresAt: Date | null;
+  }): Promise<true | null>;
+  publishMaterialSnapshot(fence: LeaseFence, input: {
+    piInvocationId: string;
+  }): Promise<true | null>;
   getAttemptTerminalProjection(fence: LeaseFence): Promise<{
     checkpoint: "agent_settled" | "process_exited";
     eventCursor: bigint;
@@ -380,12 +388,16 @@ function decodeConfigCatalog(row: Record<string, unknown>): RuntimeConfigCatalog
   };
 }
 
-function decodeHubToken(row: Record<string, unknown>): string {
+function decodeHubToken(row: Record<string, unknown>): { token: string; expiresAt: Date } {
   const token = row.token;
-  if (typeof token !== "string" || !token.startsWith("cmp_pat_") || token.length > 80) {
+  const expiresAt = row.expires_at;
+  if (
+    typeof token !== "string" || !token.startsWith("cmp_pat_") || token.length > 80
+    || !(expiresAt instanceof Date) || !Number.isFinite(expiresAt.getTime())
+  ) {
     throw new RuntimeStoreContractError();
   }
-  return token;
+  return { token, expiresAt };
 }
 
 function decodeAttemptTerminalProjection(row: Record<string, unknown>): {
@@ -565,7 +577,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
       const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
         SELECT ${CLAIM_COLUMNS}
         FROM public.companion_runtime_claim_work(
-          $1::text, $2::integer, $3::integer, $4::bigint
+          $1::text, $2::integer, $3::integer, $4::bigint, 1::integer
         )
       `, [input.executorId, input.limit, input.leaseSeconds, input.gateEpoch.toString()]);
       return rows.map(decodeRuntimeClaimRow);
@@ -682,10 +694,10 @@ export class PostgresRuntimeStore implements RuntimeStore {
   async mintHubToken(
     fence: LeaseFence,
     leaseSeconds: typeof RUNTIME_LEASE_SECONDS,
-  ): Promise<string | null> {
+  ): Promise<{ token: string; expiresAt: Date } | null> {
     return await mapped(async () => {
       const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
-        SELECT token
+        SELECT token, expires_at
         FROM public.companion_runtime_mint_hub_token(
           $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
           $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::integer
@@ -693,6 +705,40 @@ export class PostgresRuntimeStore implements RuntimeStore {
       `, [...fenceParameters(fence), leaseSeconds]);
       if (rows.length === 0) return null;
       return decodeHubToken(one(rows, "hub token"));
+    }, true);
+  }
+
+  async recordMaterialSnapshot(fence: LeaseFence, input: {
+    clientSurface: ClientSurface;
+    materialExpiresAt: Date | null;
+  }): Promise<true | null> {
+    return await mapped(async () => {
+      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+        SELECT public.companion_runtime_record_material_snapshot(
+          $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
+          $6::text, $7::public.companion_runtime_work_kind, $8::uuid,
+          $9::public.companion_client_surface, $10::timestamptz
+        ) AS recorded
+      `, [...fenceParameters(fence), input.clientSurface, input.materialExpiresAt]);
+      const recorded = one(rows, "record material snapshot").recorded;
+      if (typeof recorded !== "boolean") throw new RuntimeStoreContractError();
+      return recorded ? true : null;
+    }, true);
+  }
+
+  async publishMaterialSnapshot(fence: LeaseFence, input: {
+    piInvocationId: string;
+  }): Promise<true | null> {
+    return await mapped(async () => {
+      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+        SELECT public.companion_runtime_publish_material_snapshot(
+          $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
+          $6::text, $7::public.companion_runtime_work_kind, $8::uuid, $9::text
+        ) AS published
+      `, [...fenceParameters(fence), input.piInvocationId]);
+      const published = one(rows, "publish material snapshot").published;
+      if (typeof published !== "boolean") throw new RuntimeStoreContractError();
+      return published ? true : null;
     }, true);
   }
 

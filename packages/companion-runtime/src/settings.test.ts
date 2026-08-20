@@ -111,6 +111,11 @@ describe("implicit settings activation", () => {
       appliedSettingsRevision: 2n,
       appliedSkillsRevision: 2,
     })]);
+    expect(store.recordedMaterialSnapshots).toEqual([{
+      clientSurface: "web",
+      materialExpiresAt: new Date("2026-08-16T18:00:00.000Z"),
+    }]);
+    expect(store.publishedMaterialSnapshots).toEqual([PI_INVOCATION_ID]);
     expect(store.settlements).toEqual([{ terminalStatus: "succeeded" }]);
   });
 
@@ -141,6 +146,8 @@ describe("implicit settings activation", () => {
     expect(store.authorization.appliedSkillsRevision).toBe(1);
     expect(store.authorization.workCheckpoint).toBe("applying");
     expect(store.observations).toHaveLength(0);
+    expect(store.recordedMaterialSnapshots).toHaveLength(1);
+    expect(store.publishedMaterialSnapshots).toHaveLength(0);
     expect(store.settlements[0]?.error?.code).toBe("pi_start_failed");
   });
 
@@ -163,6 +170,7 @@ describe("implicit settings activation", () => {
         diskLayoutVersion: 14,
         appliedSettingsRevision: input.targetSettingsRevision,
         appliedSkillsRevision: null,
+        materialExpiresAt: null,
       };
     };
     ports.pi.restartPiDaemon = async () => ({
@@ -182,6 +190,11 @@ describe("implicit settings activation", () => {
       appliedSettingsRevision: 2n,
     })]);
     expect(store.observations[0]).not.toHaveProperty("appliedSkillsRevision");
+    expect(store.recordedMaterialSnapshots).toEqual([{
+      clientSurface: "native_mobile",
+      materialExpiresAt: null,
+    }]);
+    expect(store.publishedMaterialSnapshots).toEqual(["native-settings-pi"]);
   });
 
   it("repeats stage and restart after takeover when the activation observation was lost", async () => {
@@ -219,6 +232,8 @@ describe("implicit settings activation", () => {
     expect(takeover.outcome).toBe("succeeded");
     expect(stages).toBe(2);
     expect(restarts).toBe(2);
+    expect(store.recordedMaterialSnapshots).toHaveLength(2);
+    expect(store.publishedMaterialSnapshots).toEqual(["settings-pi-2"]);
     expect(store.authorization.piInvocationId).toBe("settings-pi-2");
     expect(store.authorization.appliedSettingsRevision).toBe(2n);
     expect(store.authorization.workCheckpoint).toBe("applied");

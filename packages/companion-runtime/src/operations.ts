@@ -154,7 +154,10 @@ function normalizedDiscovery(
   };
 }
 
-async function discover(context: OperationContext): Promise<{
+async function discover(
+  context: OperationContext,
+  preferredBoxId = requiredAuthorization(context.session).boxId,
+): Promise<{
   canonical: GenerationBox | null;
   duplicates: GenerationBox[];
 }> {
@@ -165,7 +168,7 @@ async function discover(context: OperationContext): Promise<{
       deadlineAt: providerCallDeadline(context),
       signal,
     }));
-  return normalizedDiscovery(context.claim, result, requiredAuthorization(context.session).boxId);
+  return normalizedDiscovery(context.claim, result, preferredBoxId);
 }
 
 async function updateDuplicate(
@@ -263,7 +266,12 @@ async function cleanDuplicates(context: OperationContext, duplicates: Generation
 async function boxStatus(context: OperationContext, boxId: string): Promise<GenerationBox["state"]> {
   try {
     return (await lifecycle(context, "get_status", async ({ signal }) =>
-      await context.deps.box.getStatus({ boxId, signal }))).state;
+      await context.deps.box.getStatus({
+        boxId,
+        companionId: context.claim.companionId,
+        generation: context.claim.runtimeGeneration,
+        signal,
+      }))).state;
   } catch (error) {
     if (isProviderNotFound(error)) return "absent";
     throw error;
@@ -278,6 +286,7 @@ function logStageTiming(
   context: OperationContext,
   stage: "waiting_ready" | "installing_layout" | "starting_pi",
   startedAt: number,
+  detail: Record<string, unknown> = {},
 ): void {
   context.deps.log?.info({
     ts: context.deps.clock.now().toISOString(),
@@ -287,6 +296,7 @@ function logStageTiming(
     companionId: context.claim.companionId,
     operationKind: context.claim.operationKind,
     boxId: context.session.authorization?.boxId ?? null,
+    ...detail,
   });
 }
 
@@ -303,6 +313,13 @@ async function waitForReadyBox(context: OperationContext): Promise<void> {
     await observe(context, { boxId, boxState: state ?? "unknown" });
     if (isReady(state)) {
       logStageTiming(context, "waiting_ready", startedAt);
+      context.deps.log?.info({
+        ts: context.deps.clock.now().toISOString(),
+        event: "runtime.box.provider_ready",
+        companionId: context.claim.companionId,
+        operationKind: context.claim.operationKind,
+        boxId,
+      });
       return;
     }
     if (state === "absent" || state === "archived" || state === "error") {
@@ -354,8 +371,24 @@ async function stageCapturedResources(context: OperationContext): Promise<Staged
       targetSkillsRevision,
       signal,
     }));
-  logStageTiming(context, "installing_layout", startedAt);
+  await context.session.fencedMutation(async () =>
+    await context.deps.store.recordMaterialSnapshot(context.session.fence, {
+      clientSurface,
+      materialExpiresAt: staged.materialExpiresAt,
+    }));
+  logStageTiming(context, "installing_layout", startedAt, {
+    stagingMode: staged.stagingMode ?? "skills",
+    skillBytesTransferred: staged.skillBytesTransferred ?? 0,
+  });
   return staged;
+}
+
+async function publishStagedResources(
+  context: OperationContext,
+  piInvocationId: string,
+): Promise<void> {
+  await context.session.fencedMutation(async () =>
+    await context.deps.store.publishMaterialSnapshot(context.session.fence, { piInvocationId }));
 }
 
 async function observeStagedResources(
@@ -374,11 +407,8 @@ async function observeStagedResources(
 async function startAndObservePi(context: OperationContext): Promise<void> {
   const startedAt = context.deps.clock.now().getTime();
   const previousInvocationId = requiredAuthorization(context.session).piInvocationId;
-  const recycleWarmPi = context.claim.operationKind === "start" && previousInvocationId !== null;
   const result = await lifecycle(context, "start_pi", async ({ signal }) =>
-    recycleWarmPi
-      ? await context.deps.pi.restartPiDaemon({ boxId: requiredBoxId(context.session), signal })
-      : await context.deps.pi.startPiDaemon({ boxId: requiredBoxId(context.session), signal }));
+    await context.deps.pi.restartPiDaemon({ boxId: requiredBoxId(context.session), signal }));
   if (
     result.state !== "idle"
     || !result.invocationId
@@ -402,7 +432,17 @@ async function handleStart(context: OperationContext): Promise<RuntimeWorkDispos
         await context.session.checkpoint({ nextCheckpoint: "resolving_box" });
         break;
       case "resolving_box": {
-        const discovery = await discover(context);
+        const knownBoxId = authorization.boxId;
+        if (knownBoxId) {
+          const state = await boxStatus(context, knownBoxId);
+          if (state !== "absent") {
+            await observe(context, { boxId: knownBoxId, boxState: state ?? "unknown" });
+            break;
+          }
+        }
+        // An absent durable id can still be the aftermath of an ambiguous replacement. Only this
+        // fallback (and the no-id path) pays for a full account listing.
+        const discovery = await discover(context, null);
         await cleanDuplicates(context, discovery.duplicates);
         if (!discovery.canonical) {
           await observe(context, { boxState: "absent" });
@@ -411,15 +451,6 @@ async function handleStart(context: OperationContext): Promise<RuntimeWorkDispos
         const state = discovery.canonical.state
           ?? await boxStatus(context, discovery.canonical.id)
           ?? "unknown";
-        await lifecycle(context, "apply_box_settings", async ({ signal }) =>
-          await context.deps.box.applyGenerationBoxSettings({
-            boxId: discovery.canonical!.id,
-            companionId: context.claim.companionId,
-            generation: context.claim.runtimeGeneration,
-            ttlSeconds: BOX_WARM_TTL_SECONDS,
-            deadlineAt: providerCallDeadline(context),
-            signal,
-          }));
         await observe(context, {
           boxId: discovery.canonical.id,
           boxState: state,
@@ -486,31 +517,32 @@ async function handleStart(context: OperationContext): Promise<RuntimeWorkDispos
       case "box_created": {
         const boxId = requiredBoxId(context.session);
         if (authorization.workCheckpoint === "box_resolved") {
-          await lifecycle(context, "resume_box", async ({ signal }) =>
-            await context.deps.box.resumeExistingBox({ boxId, signal }));
+          if (authorization.boxState === "archived") {
+            await lifecycle(context, "resume_box", async ({ signal }) =>
+              await context.deps.box.resumeExistingBox({ boxId, signal }));
+          }
+        } else {
+          await lifecycle(context, "apply_box_settings", async ({ signal }) =>
+            await context.deps.box.applyGenerationBoxSettings({
+              boxId,
+              companionId: context.claim.companionId,
+              generation: context.claim.runtimeGeneration,
+              ttlSeconds: BOX_WARM_TTL_SECONDS,
+              deadlineAt: providerCallDeadline(context),
+              signal,
+            }));
+          // Naming is the create idempotency boundary. Re-list once after the PATCH so a
+          // concurrent create is recorded in the durable child ledger before work advances.
+          const namedDiscovery = await discover(context);
+          if (namedDiscovery.canonical?.id !== boxId) {
+            throw new RuntimeInvariantError({
+              code: "box_identity_conflict",
+              message: "Provider discovery did not preserve the recorded Companion Box.",
+              action: "none",
+            });
+          }
+          await cleanDuplicates(context, namedDiscovery.duplicates);
         }
-        await lifecycle(context, "apply_box_settings", async ({ signal }) =>
-          await context.deps.box.applyGenerationBoxSettings({
-            boxId,
-            companionId: context.claim.companionId,
-            generation: context.claim.runtimeGeneration,
-            ttlSeconds: BOX_WARM_TTL_SECONDS,
-            deadlineAt: providerCallDeadline(context),
-            signal,
-          }));
-        // Naming is the create/recovery idempotency boundary. Re-list after the
-        // deterministic PATCH so a concurrent create that appeared during that
-        // window is recorded in the durable child ledger before canonical work
-        // can advance. Discovery keeps the already-recorded Box canonical.
-        const namedDiscovery = await discover(context);
-        if (namedDiscovery.canonical?.id !== boxId) {
-          throw new RuntimeInvariantError({
-            code: "box_identity_conflict",
-            message: "Provider discovery did not preserve the recorded Companion Box.",
-            action: "none",
-          });
-        }
-        await cleanDuplicates(context, namedDiscovery.duplicates);
         await context.session.checkpoint({ nextCheckpoint: "waiting_ready" });
         break;
       }
@@ -528,6 +560,7 @@ async function handleStart(context: OperationContext): Promise<RuntimeWorkDispos
         await startAndObservePi(context);
         break;
       case "pi_observed":
+        await publishStagedResources(context, requiredAuthorization(context.session).piInvocationId!);
         await context.session.checkpoint({ nextCheckpoint: "pi_ready" });
         break;
       case "pi_ready":
@@ -612,6 +645,7 @@ async function handleRestartPi(context: OperationContext): Promise<RuntimeWorkDi
     const authorization = await context.session.reauthorize();
     switch (authorization.workCheckpoint) {
       case "pending":
+        await stageCapturedResources(context);
         await context.session.checkpoint({ nextCheckpoint: "restarting_pi" });
         break;
       case "restarting_pi":
@@ -646,6 +680,7 @@ async function handleRestartPi(context: OperationContext): Promise<RuntimeWorkDi
         break;
       }
       case "pi_observed":
+        await publishStagedResources(context, requiredAuthorization(context.session).piInvocationId!);
         await context.session.checkpoint({ nextCheckpoint: "pi_ready" });
         break;
       case "pi_ready":
@@ -705,6 +740,7 @@ async function handleRestartBox(context: OperationContext): Promise<RuntimeWorkD
         await startAndObservePi(context);
         break;
       case "pi_observed":
+        await publishStagedResources(context, requiredAuthorization(context.session).piInvocationId!);
         await context.session.checkpoint({ nextCheckpoint: "pi_ready" });
         break;
       case "pi_ready":
@@ -766,9 +802,11 @@ async function handleApplySettings(context: OperationContext): Promise<RuntimeWo
             ? {}
             : { appliedSkillsRevision: activated.appliedSkillsRevision }),
         });
-        break;
+        await publishStagedResources(context, activated.piInvocationId);
+        return runtimeSucceeded;
       }
       case "settings_applied":
+        await publishStagedResources(context, requiredAuthorization(context.session).piInvocationId!);
         return runtimeSucceeded;
       default:
         throw new RuntimeInvariantError({
@@ -914,6 +952,13 @@ async function requestPermanentDelete(
 export async function handleOperation(
   context: OperationContext,
 ): Promise<RuntimeWorkDisposition> {
+  context.deps.log?.info({
+    ts: context.deps.clock.now().toISOString(),
+    event: "runtime.operation.claimed",
+    companionId: context.claim.companionId,
+    operationKind: context.claim.operationKind,
+    checkpoint: context.claim.checkpoint,
+  });
   switch (context.claim.operationKind) {
     case "start":
       return await handleStart(context);
