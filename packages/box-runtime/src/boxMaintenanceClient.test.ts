@@ -465,6 +465,35 @@ describe("AsciiBoxMaintenanceClient", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("does not start a shared provider listing for an already expired or cancelled caller", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const lifecycle = client();
+
+    await expect(lifecycle.findGenerationBoxes({
+      companionId: COMPANION_ID,
+      generation: 14,
+      deadlineAt: Date.now() - 1,
+    })).rejects.toMatchObject({
+      stableCode: "box_request_deadline_exceeded",
+      status: 504,
+    });
+
+    const cancelled = new AbortController();
+    cancelled.abort();
+    await expect(lifecycle.findGenerationBoxes({
+      companionId: COMPANION_ID,
+      generation: 14,
+      deadlineAt: Date.now() + 1_000,
+      signal: cancelled.signal,
+    })).rejects.toMatchObject({
+      stableCode: "box_request_cancelled",
+      status: 499,
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("enforces each shared-list waiter's earlier absolute deadline", async () => {
     vi.useFakeTimers();
     let release!: (response: Response) => void;

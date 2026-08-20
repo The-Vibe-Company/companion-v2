@@ -635,6 +635,27 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
   }
 
   async #sharedGenerationList(input: BoxDeadlineControl): Promise<BoxMaintenanceBox[]> {
+    const waiterDeadlineAt = deadlineMilliseconds(input.deadlineAt);
+    // A caller that cannot wait must not be the one that starts an account-wide provider request.
+    // Recheck below after listener registration to close the abort/deadline race for live waiters.
+    if (input.signal?.aborted) {
+      throw adapterError({
+        stableCode: "box_request_cancelled",
+        message: "The Box request was cancelled",
+        status: 499,
+        retryable: false,
+        outcomeUnknown: false,
+      });
+    }
+    if (waiterDeadlineAt !== undefined && waiterDeadlineAt <= Date.now()) {
+      throw adapterError({
+        stableCode: "box_request_deadline_exceeded",
+        message: "The Box request deadline elapsed",
+        status: 504,
+        retryable: true,
+        outcomeUnknown: false,
+      });
+    }
     if (!this.#generationListInFlight) {
       // This is deliberately only an in-flight promise, never a temporal cache: after it settles,
       // the next discovery must be able to observe a Box another create has just accepted.
@@ -647,7 +668,6 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
       }).catch(() => undefined);
     }
     const pending = this.#generationListInFlight;
-    const waiterDeadlineAt = deadlineMilliseconds(input.deadlineAt);
     if (!input.signal && waiterDeadlineAt === undefined) return await pending;
     return await new Promise<BoxMaintenanceBox[]>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | null = null;
