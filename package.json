@@ -37,12 +37,13 @@
     "lint": "pnpm lint:anti-slop && turbo run lint",
     "lint:anti-slop": "node scripts/lint-anti-slop.mjs",
     "typecheck": "turbo run typecheck",
-    "test": "pnpm test:anti-slop && TZ=UTC turbo run test",
+    "test": "pnpm test:anti-slop && pnpm test:ci-scripts && TZ=UTC turbo run test",
     "test:anti-slop": "node --test scripts/lint-anti-slop.test.mjs scripts/lint-anti-slop.integration.test.mjs",
+    "test:ci-scripts": "pnpm --filter @companion/api exec tsx --test \"$PWD/scripts/box-runtime-change-e2e.test.ts\"",
     "test:coverage": "turbo run coverage",
     "test:integration": "pnpm --filter @companion/api test:integration",
     "test:e2e": "node scripts/ci-playwright-policy.mjs && playwright test",
-    "ci:quality": "turbo run lint typecheck test --continue=dependencies-successful",
+    "ci:quality": "pnpm test:ci-scripts && turbo run lint typecheck test --continue=dependencies-successful",
     "verify:change": "node scripts/verify-change.mjs",
     "browser:smoke": "bash scripts/agent-browser-smoke.sh",
     "e2e:box-provider": "node scripts/box-provider-e2e.mjs",
@@ -60,6 +61,7 @@
     "concurrently": "^9.2.1",
     "oxlint": "1.79.0",
     "turbo": "^2.3.3",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "zod": "^4.0.0"
   }
 }

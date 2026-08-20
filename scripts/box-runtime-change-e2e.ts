@@ -1,9 +1,16 @@
 import { randomUUID } from "node:crypto";
+import { pathToFileURL } from "node:url";
+import { z } from "zod";
 
 import {
   AsciiBoxCompanionRuntime,
   AsciiBoxMaintenanceClient,
+  BoxRuntimeAdapterError,
   BoxRuntimeProviderError,
+  type BoxGenerationCreateInput,
+  type BoxGenerationCreateResult,
+  type BoxRuntimeLifecycleClient,
+  type CompanionPiBrokerEventPage,
 } from "../packages/box-runtime/src/index";
 
 const BOX_ID_PATTERN = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
@@ -11,6 +18,33 @@ const SAFE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const POLL_INTERVAL_MS = 1_000;
 const REPLY_TIMEOUT_MS = 3 * 60_000;
 const IMAGE_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+interface ReportEvent {
+  phase: string;
+  status: string;
+  duration_ms?: number;
+  total_duration_ms?: number;
+  code?: string;
+  resource_id?: string;
+}
+type BrokerEvent = Extract<
+  CompanionPiBrokerEventPage["events"][number],
+  { kind: "pi_event" }
+>["event"];
+type GenerationBoxCreator = Pick<BoxRuntimeLifecycleClient, "createOrRecoverGenerationBox">;
+
+const assistantTextBlockSchema = z.object({
+  type: z.literal("text"),
+  text: z.string(),
+}).passthrough();
+const ignoredAssistantBlockSchema = z.object({}).passthrough().transform(() => null);
+const assistantMessageEndSchema = z.object({
+  type: z.literal("message_end"),
+  message: z.object({
+    role: z.literal("assistant"),
+    content: z.array(z.union([assistantTextBlockSchema, ignoredAssistantBlockSchema])),
+  }).passthrough(),
+}).passthrough();
 
 class RuntimeChangeE2EError extends Error {
   readonly code: string;
@@ -56,16 +90,19 @@ function configuration(env: NodeJS.ProcessEnv) {
   };
 }
 
-function safeCode(error: unknown): string {
-  if (error instanceof RuntimeChangeE2EError) return error.code;
-  if (error && typeof error === "object" && "stableCode" in error) {
-    const value = String(error.stableCode);
-    if (SAFE_CODE_PATTERN.test(value)) return value;
+function errorFromCause(cause: unknown): Error {
+  return cause instanceof Error ? cause : new RuntimeChangeE2EError("runtime_change_e2e_failed");
+}
+
+function safeCode(cause: unknown): string {
+  if (cause instanceof RuntimeChangeE2EError) return cause.code;
+  if (cause instanceof BoxRuntimeProviderError && SAFE_CODE_PATTERN.test(cause.stableCode)) {
+    return cause.stableCode;
   }
   return "runtime_change_e2e_failed";
 }
 
-function write(event: Record<string, unknown>): void {
+function write(event: ReportEvent): void {
   process.stdout.write(`${JSON.stringify(event)}\n`);
 }
 
@@ -95,38 +132,44 @@ async function requestPermanentDeletionWithRetry(
   lifecycle: AsciiBoxMaintenanceClient,
   boxId: string,
 ): Promise<Awaited<ReturnType<AsciiBoxMaintenanceClient["requestPermanentDeletion"]>>> {
-  let lastError: unknown = new RuntimeChangeE2EError("cleanup_failed");
+  let lastError: Error = new RuntimeChangeE2EError("cleanup_failed");
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
       return await lifecycle.requestPermanentDeletion({
         boxId,
         deadlineAt: Date.now() + 30_000,
       });
-    } catch (error) {
-      lastError = error;
+    } catch (cause) {
+      lastError = errorFromCause(cause);
       if (attempt < 3) await pause(1_000);
     }
   }
   throw lastError;
 }
 
-function assistantText(event: Record<string, unknown>): string | null {
-  if (event.type !== "message_end") return null;
-  const message = event.message;
-  if (!message || typeof message !== "object" || !("role" in message) || message.role !== "assistant") {
-    return null;
-  }
-  if (!("content" in message) || !Array.isArray(message.content)) return null;
-  return message.content
-    .filter((block): block is { type: "text"; text: string } =>
-      Boolean(block)
-      && typeof block === "object"
-      && "type" in block
-      && block.type === "text"
-      && "text" in block
-      && typeof block.text === "string")
-    .map((block) => block.text)
+function assistantText(event: BrokerEvent): string | null {
+  const parsed = assistantMessageEndSchema.safeParse(event);
+  if (!parsed.success) return null;
+  return parsed.data.message.content
+    .flatMap((block) => block === null ? [] : [block.text])
     .join("");
+}
+
+export async function createGenerationBoxWithImageFallback(
+  lifecycle: GenerationBoxCreator,
+  input: Omit<BoxGenerationCreateInput, "from">,
+  image: string | null,
+): Promise<BoxGenerationCreateResult> {
+  const createInput: BoxGenerationCreateInput = { ...input };
+  if (image !== null) createInput.from = image;
+  try {
+    return await lifecycle.createOrRecoverGenerationBox(createInput);
+  } catch (cause) {
+    const staleImage = cause instanceof BoxRuntimeAdapterError
+      && (cause.providerCode === "unknown_snapshot" || cause.stableCode === "box_not_found");
+    if (image === null || !staleImage) throw cause;
+    return await lifecycle.createOrRecoverGenerationBox(input);
+  }
 }
 
 async function waitForReply(input: {
@@ -180,18 +223,17 @@ async function main(): Promise<number> {
   const orgId = randomUUID();
   const generation = config.generation;
   let boxId: string | null = null;
-  let primaryError: unknown = null;
-  let cleanupError: unknown = null;
+  let primaryError: Error | null = null;
+  let cleanupError: Error | null = null;
   const startedAt = Date.now();
   try {
     await phase("create", async () => {
-      const created = await lifecycle.createOrRecoverGenerationBox({
+      const created = await createGenerationBoxWithImageFallback(lifecycle, {
         companionId,
         generation,
         ttlSeconds: 300,
         deadlineAt: Date.now() + 30_000,
-        ...(config.image === null ? {} : { from: config.image }),
-      });
+      }, config.image);
       if (!BOX_ID_PATTERN.test(created.boxId)) {
         throw new RuntimeChangeE2EError("invalid_provider_response");
       }
@@ -255,8 +297,8 @@ async function main(): Promise<number> {
         cursor: initial.tailCursor,
       });
     });
-  } catch (error) {
-    primaryError = error;
+  } catch (cause) {
+    primaryError = errorFromCause(cause);
   } finally {
     const cleanupStartedAt = Date.now();
     try {
@@ -271,11 +313,11 @@ async function main(): Promise<number> {
         let deletion;
         try {
           deletion = await requestPermanentDeletionWithRetry(lifecycle, boxId);
-        } catch (error) {
+        } catch (cause) {
           if (!credentialsCleared) {
             throw new RuntimeChangeE2EError("credentials_and_delete_cleanup_failed");
           }
-          throw error;
+          throw cause;
         }
         if (deletion.outcome !== "absent" && deletion.operation.targetId !== boxId) {
           throw new RuntimeChangeE2EError("invalid_provider_response");
@@ -283,32 +325,37 @@ async function main(): Promise<number> {
         try {
           await runtime.existingBoxStatus({ boxId });
           throw new RuntimeChangeE2EError("box_still_visible_after_delete");
-        } catch (error) {
-          if (!(error instanceof BoxRuntimeProviderError) || error.status !== 404) throw error;
+        } catch (cause) {
+          if (!(cause instanceof BoxRuntimeProviderError) || cause.status !== 404) throw cause;
         }
       }
-    } catch (error) {
-      cleanupError = error;
+    } catch (cause) {
+      cleanupError = errorFromCause(cause);
     }
-    write({
+    const cleanupEvent: ReportEvent = {
       phase: "cleanup",
       status: cleanupError === null ? "succeeded" : "failed",
       duration_ms: Date.now() - cleanupStartedAt,
-      ...(cleanupError === null ? {} : { code: safeCode(cleanupError) }),
-      ...(cleanupError === null || boxId === null ? {} : { resource_id: boxId }),
-    });
+    };
+    if (cleanupError !== null) cleanupEvent.code = safeCode(cleanupError);
+    if (cleanupError !== null && boxId !== null) cleanupEvent.resource_id = boxId;
+    write(cleanupEvent);
   }
 
   const failed = primaryError !== null || cleanupError !== null;
-  write({
+  const resultEvent: ReportEvent = {
     phase: "runtime_change_e2e",
     status: failed ? "failed" : "succeeded",
     total_duration_ms: Date.now() - startedAt,
-    ...(failed ? { code: primaryError ? safeCode(primaryError) : "cleanup_failed" } : {}),
-  });
+  };
+  if (failed) resultEvent.code = primaryError ? safeCode(primaryError) : "cleanup_failed";
+  write(resultEvent);
   return failed ? 1 : 0;
 }
 
-void main().then((exitCode) => {
-  process.exitCode = exitCode;
-});
+const entryPath = process.argv[1];
+if (entryPath !== undefined && import.meta.url === pathToFileURL(entryPath).href) {
+  void main().then((exitCode) => {
+    process.exitCode = exitCode;
+  });
+}

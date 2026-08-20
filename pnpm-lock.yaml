@@ -41,6 +41,9 @@ importers:
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
+      zod:
+        specifier: ^4.0.0
+        version: 4.4.3
 
   apps/api:
     dependencies:
