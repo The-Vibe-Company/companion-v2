@@ -33,6 +33,37 @@ function lifecycle(overrides: Partial<BoxRuntimeLifecycleClient> = {}): BoxRunti
 }
 
 describe("companion runtime image baker", () => {
+  it("never publishes when archive/resume playbook warmup fails", async () => {
+    const controller = new AbortController();
+    const saveNamedSnapshot = vi.fn(async () => snapshot(identity.imageName));
+    const deletePermanentlyAndWait = vi.fn(async () => ({
+      outcome: "already_deleted" as const,
+      boxId: "bx_23456789",
+    }));
+    const warmupFailure = new Error("playbook did not stabilize");
+    const baker = createCompanionRuntimeImageBaker({
+      identity,
+      lifecycle: lifecycle({ saveNamedSnapshot, deletePermanentlyAndWait }),
+      bundledSkill: {
+        slug: "companion",
+        version: "1.0.0",
+        checksum: `sha256:${"1".repeat(64)}`,
+        archive: Buffer.from("bundled"),
+      },
+      runtime: {
+        existingBoxStatus: async () => ({ boxId: "bx_23456789", state: "ready" }),
+        refreshPiLayout: async () => ({ boxId: "bx_23456789", applied: "base" as const }),
+        refreshTtl: async () => undefined,
+        prepareRuntimeImage: async () => { throw warmupFailure; },
+      },
+      onAttemptError: () => controller.abort(warmupFailure),
+    });
+
+    await expect(baker.ensure(controller.signal)).rejects.toBe(warmupFailure);
+    expect(saveNamedSnapshot).not.toHaveBeenCalled();
+    expect(deletePermanentlyAndWait).toHaveBeenCalledOnce();
+  });
+
   it("reuses a ready named snapshot without creating a baker Box", async () => {
     const client = lifecycle({
       getNamedSnapshot: vi.fn(async () => snapshot(identity.imageName)),

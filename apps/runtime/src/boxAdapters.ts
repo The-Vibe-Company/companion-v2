@@ -76,14 +76,15 @@ export function createRuntimeBoxControl(options: RuntimeBoxAdapterOptions): Runt
             ? resolution.value.name
             : undefined);
       }
-      const create = (fromImage?: string) => options.lifecycle.createOrRecoverGenerationBox({
+      const create = (fromImage?: string) =>
+        options.lifecycle.createGenerationBoxAfterObservedAbsence({
         companionId: input.companionId,
         generation: generationNumber(input.generation),
         ttlSeconds: input.ttlSeconds,
         deadlineAt: deadline(input.deadlineAt),
         signal: input.signal,
         ...(fromImage ? { from: fromImage } : {}),
-      });
+        });
       let created: Awaited<ReturnType<typeof create>>;
       try {
         created = await create(from);
@@ -93,9 +94,7 @@ export function createRuntimeBoxControl(options: RuntimeBoxAdapterOptions): Runt
         from = undefined;
         created = await create();
       }
-      const result = created.outcome === "created"
-        ? created
-        : { ...normalizeDiscovery(created), outcome: "recovered" as const, boxId: created.boxId };
+      const result = created;
       options.log?.info({
         ts: new Date(now()).toISOString(),
         event: "runtime.box.create",
@@ -121,7 +120,14 @@ export function createRuntimeBoxControl(options: RuntimeBoxAdapterOptions): Runt
       });
     },
     async getStatus(input) {
-      const observed = await options.runtime().existingBoxStatus(input);
+      const observed = await options.runtime().existingBoxStatus({
+        boxId: input.boxId,
+        ...(input.companionId ? { companionId: input.companionId } : {}),
+        ...(input.generation !== undefined
+          ? { runtimeGeneration: generationNumber(input.generation) }
+          : {}),
+        signal: input.signal,
+      });
       return { state: observedBoxStateFromProvider(observed.state) };
     },
     async setTtl(input) {
@@ -169,7 +175,11 @@ export function createRuntimePiControl(options: RuntimeBoxAdapterOptions): Runti
       return await options.runtime().piDaemonStatus(input);
     },
     async brokerState(input) {
-      return brokerState(await options.runtime().brokerState(input));
+      const runtime = options.runtime();
+      return brokerState(
+        await runtime.brokerState(input),
+        runtime.layoutIdentity().fullMarker,
+      );
     },
     async prompt(input) {
       input.signal.throwIfAborted();
@@ -229,14 +239,22 @@ function writeOutcome(
 ): BrokerWriteOutcome {
   if (result.outcome === "refused") return { outcome: "rejected", code: result.code };
   if (result.outcome === "ambiguous") return { outcome: "ambiguous", code: result.code };
-  return { outcome: "accepted", invocationId: result.invocationId };
+  return {
+    outcome: "accepted",
+    invocationId: result.invocationId,
+    ...(result.initialCursor === undefined
+      ? {}
+      : { initialCursor: BigInt(result.initialCursor) }),
+  };
 }
 
 function brokerState(
   state: Awaited<ReturnType<CompanionBoxRuntimeV2["brokerState"]>>,
+  expectedLayoutMarker: string,
 ): Awaited<ReturnType<RuntimePiControl["brokerState"]>> {
   return {
     ...state,
+    layoutCurrent: state.layoutMarker === expectedLayoutMarker,
     tailCursor: BigInt(state.tailCursor),
     acknowledgedCursor: BigInt(state.acknowledgedCursor),
   };

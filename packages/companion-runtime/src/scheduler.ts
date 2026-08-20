@@ -41,6 +41,7 @@ export class RuntimeScheduler {
   readonly #log: RuntimeProcessLog | undefined;
   readonly #active = new Map<string, Promise<RuntimeExecutionResult>>();
   #loopAbort = new AbortController();
+  #sleepAbort: AbortController | null = null;
   #loopTask: Promise<void> | null = null;
   #loopAlive = false;
   #acceptingClaims = true;
@@ -86,6 +87,7 @@ export class RuntimeScheduler {
   stopClaims(): void {
     this.#acceptingClaims = false;
     if (!this.#loopAbort.signal.aborted) this.#loopAbort.abort();
+    if (this.#sleepAbort && !this.#sleepAbort.signal.aborted) this.#sleepAbort.abort();
   }
 
   async shutdown(input: { drainTimeoutMs?: number } = {}): Promise<void> {
@@ -199,10 +201,17 @@ export class RuntimeScheduler {
           // Health exposes the stable error timestamp. The loop remains alive for DB recovery.
         }
         if (!this.#acceptingClaims) break;
+        const sleepAbort = new AbortController();
+        this.#sleepAbort = sleepAbort;
         try {
-          await this.#clock.sleep(this.#sweepIntervalMs, this.#loopAbort.signal);
+          await this.#clock.sleep(
+            this.#sweepIntervalMs,
+            AbortSignal.any([this.#loopAbort.signal, sleepAbort.signal]),
+          );
         } catch {
-          break;
+          if (!this.#acceptingClaims || this.#loopAbort.signal.aborted) break;
+        } finally {
+          if (this.#sleepAbort === sleepAbort) this.#sleepAbort = null;
         }
       }
     } finally {
@@ -211,6 +220,10 @@ export class RuntimeScheduler {
   }
 
   #removeActive(companionId: string, execution: Promise<RuntimeExecutionResult>): void {
-    if (this.#active.get(companionId) === execution) this.#active.delete(companionId);
+    if (this.#active.get(companionId) !== execution) return;
+    this.#active.delete(companionId);
+    // A completed start operation can have made the queued turn claimable. Interrupt only the
+    // scheduler's recovery sleep; the main shutdown signal and periodic sweep remain unchanged.
+    if (this.#sleepAbort && !this.#sleepAbort.signal.aborted) this.#sleepAbort.abort();
   }
 }

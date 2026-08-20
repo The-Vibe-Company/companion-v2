@@ -297,6 +297,14 @@ export interface BoxRuntimeLifecycleClient extends BoxMaintenanceClient {
     generation: number;
   } & BoxDeadlineControl): Promise<BoxGenerationDiscovery>;
   createOrRecoverGenerationBox(input: BoxGenerationCreateInput): Promise<BoxGenerationCreateResult>;
+  /**
+   * Issue exactly one create POST after the durable runtime has already observed that the exact
+   * generation name is absent. This deliberately performs no discovery of its own: a lost response
+   * stays ambiguous and a takeover reconciles it through the separately checkpointed list path.
+   */
+  createGenerationBoxAfterObservedAbsence(
+    input: BoxGenerationCreateInput,
+  ): Promise<Extract<BoxGenerationCreateResult, { outcome: "created" }>>;
   applyGenerationBoxSettings(
     input: BoxGenerationSettingsInput,
   ): Promise<BoxGenerationSettingsResult>;
@@ -567,7 +575,18 @@ function checkedOperation(
   return operation;
 }
 
-export type BoxProviderCallOperation = "list_boxes" | "create_box" | "apply_box_settings";
+export type BoxProviderCallOperation =
+  | "list_boxes"
+  | "create_box"
+  | "apply_box_settings"
+  | "get_box"
+  | "resume_box"
+  | "archive_box"
+  | "write_file"
+  | "execute_command"
+  | "broker_state"
+  | "prompt"
+  | "desktop";
 
 export interface BoxProviderCallTiming {
   operation: BoxProviderCallOperation;
@@ -588,6 +607,7 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
   readonly #apiKey: string;
   readonly #baseUrl: string;
   readonly #onTiming: ((sample: BoxProviderCallTiming) => void) | undefined;
+  #generationListInFlight: Promise<BoxMaintenanceBox[]> | null = null;
 
   constructor(env: NodeJS.ProcessEnv = process.env, options?: AsciiBoxMaintenanceClientOptions) {
     const apiKey = env.COMPANION_BOX_API_KEY?.trim();
@@ -612,6 +632,49 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
       this.#onTiming({ operation, durationMs: Date.now() - startedAt, ok: false });
       throw error;
     }
+  }
+
+  async #sharedGenerationList(input: BoxDeadlineControl): Promise<BoxMaintenanceBox[]> {
+    if (!this.#generationListInFlight) {
+      // This is deliberately only an in-flight promise, never a temporal cache: after it settles,
+      // the next discovery must be able to observe a Box another create has just accepted.
+      const pending = this.listAllBoxes({ deadlineAt: input.deadlineAt });
+      this.#generationListInFlight = pending;
+      void pending.finally(() => {
+        if (this.#generationListInFlight === pending) this.#generationListInFlight = null;
+      }).catch(() => undefined);
+    }
+    const pending = this.#generationListInFlight;
+    if (!input.signal) return await pending;
+    if (input.signal.aborted) {
+      throw adapterError({
+        stableCode: "box_request_cancelled",
+        message: "The Box request was cancelled",
+        status: 499,
+        retryable: false,
+        outcomeUnknown: false,
+      });
+    }
+    return await new Promise<BoxMaintenanceBox[]>((resolve, reject) => {
+      const aborted = () => reject(adapterError({
+        stableCode: "box_request_cancelled",
+        message: "The Box request was cancelled",
+        status: 499,
+        retryable: false,
+        outcomeUnknown: false,
+      }));
+      input.signal!.addEventListener("abort", aborted, { once: true });
+      void pending.then(
+        (boxes) => {
+          input.signal!.removeEventListener("abort", aborted);
+          resolve(boxes);
+        },
+        (error: unknown) => {
+          input.signal!.removeEventListener("abort", aborted);
+          reject(error);
+        },
+      );
+    });
   }
 
   #requestSignal(control: BoxCallControl): {
@@ -843,7 +906,7 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
     generation: number;
   } & BoxDeadlineControl): Promise<BoxGenerationDiscovery> {
     const name = companionGenerationBoxName(input);
-    return selectGenerationBoxes(await this.listAllBoxes(input), name);
+    return selectGenerationBoxes(await this.#sharedGenerationList(input), name);
   }
 
   /**
@@ -855,9 +918,7 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
     input: BoxGenerationCreateInput,
   ): Promise<BoxGenerationCreateResult> {
     const name = companionGenerationBoxName(input);
-    const ttlSeconds = assertBoxTtlSeconds(input.ttlSeconds);
-    const createTtlSeconds = Math.min(ttlSeconds, BOX_UNASSIGNED_CREATE_TTL_SECONDS);
-    const initial = selectGenerationBoxes(await this.listAllBoxes(input), name);
+    const initial = selectGenerationBoxes(await this.#sharedGenerationList(input), name);
     if (initial.canonical) {
       return {
         ...initial,
@@ -865,6 +926,16 @@ export class AsciiBoxMaintenanceClient implements BoxRuntimeLifecycleClient {
         boxId: initial.canonical.id,
       };
     }
+
+    return await this.createGenerationBoxAfterObservedAbsence(input);
+  }
+
+  async createGenerationBoxAfterObservedAbsence(
+    input: BoxGenerationCreateInput,
+  ): Promise<Extract<BoxGenerationCreateResult, { outcome: "created" }>> {
+    const name = companionGenerationBoxName(input);
+    const ttlSeconds = assertBoxTtlSeconds(input.ttlSeconds);
+    const createTtlSeconds = Math.min(ttlSeconds, BOX_UNASSIGNED_CREATE_TTL_SECONDS);
 
     const response = await this.#timed("create_box", async () => await this.#request(
       "/boxes",

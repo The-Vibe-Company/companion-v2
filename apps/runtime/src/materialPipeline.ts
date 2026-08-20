@@ -231,6 +231,9 @@ export function createRuntimeMaterialPipeline(input: {
         mcpCredentials: nativeMobile ? [] : resources.mcpCredentials,
         mcpAccounts: nativeMobile ? [] : resources.mcpAccounts,
         skills,
+        reuseSkills: !nativeMobile
+          && stage.authorization.diskLayoutVersion === 14
+          && stage.authorization.appliedSkillsRevision === stage.targetSkillsRevision,
         hubEnv: nativeMobile
           ? {}
           : {
@@ -246,6 +249,8 @@ export function createRuntimeMaterialPipeline(input: {
         diskLayoutVersion: observed.diskLayoutVersion,
         appliedSettingsRevision: stage.targetSettingsRevision,
         appliedSkillsRevision: nativeMobile ? null : stage.targetSkillsRevision,
+        stagingMode: observed.stagingMode,
+        skillBytesTransferred: observed.skillBytesTransferred,
       };
     },
     async refreshLayout(stage) {

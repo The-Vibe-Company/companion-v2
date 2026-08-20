@@ -127,7 +127,7 @@ describe("production runtime composition", () => {
     } as unknown as CompanionBoxRuntimeV2));
     const storageClose = vi.fn();
     let lifecycleOptions: AsciiBoxMaintenanceClientOptions | undefined;
-    const createOrRecoverGenerationBox = vi.fn(async () => ({
+    const createGenerationBoxAfterObservedAbsence = vi.fn(async () => ({
       outcome: "created" as const,
       boxId: "bx_23456789",
       name: "Companion 11111111-1111-4111-8111-111111111111 g1",
@@ -149,7 +149,7 @@ describe("production runtime composition", () => {
             sourceBoxId: "bx_23456789",
             createdAt: "2026-08-19T00:00:00.000Z",
           }),
-          createOrRecoverGenerationBox,
+          createGenerationBoxAfterObservedAbsence,
         } as unknown as BoxRuntimeLifecycleClient;
       },
       createBoxRuntime,
@@ -221,7 +221,7 @@ describe("production runtime composition", () => {
       signal: new AbortController().signal,
     });
     expect(created).toMatchObject({ outcome: "created", boxId: "bx_23456789" });
-    expect(createOrRecoverGenerationBox).toHaveBeenCalledWith(expect.objectContaining({
+    expect(createGenerationBoxAfterObservedAbsence).toHaveBeenCalledWith(expect.objectContaining({
       from: "companion-l14-aaaaaaaaaaaa",
     }));
     // Provider-call timings flow into the process log as structured info records.

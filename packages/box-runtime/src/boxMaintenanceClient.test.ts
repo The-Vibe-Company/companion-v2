@@ -287,7 +287,7 @@ describe("AsciiBoxMaintenanceClient", () => {
   });
 
   it("requires HTTP 202 and the official accepted-delete envelope", async () => {
-    const fetchMock = vi.fn(async () => json({
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => json({
       ok: true,
       type: "box.deleting",
       operation: operation(),
@@ -433,6 +433,38 @@ describe("AsciiBoxMaintenanceClient", () => {
     });
   });
 
+  it("shares only a simultaneous account listing and never caches it after settlement", async () => {
+    let release!: (response: Response) => void;
+    const first = new Promise<Response>((resolve) => { release = resolve; });
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(async () => await first)
+      .mockResolvedValueOnce(json({
+        ok: true,
+        type: "box.list",
+        boxes: [],
+        pageInfo: { nextCursor: null, hasMore: false },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    const lifecycle = client();
+    const input = {
+      companionId: COMPANION_ID,
+      generation: 14,
+      deadlineAt: Date.now() + 1_000,
+    };
+    const left = lifecycle.findGenerationBoxes(input);
+    const right = lifecycle.findGenerationBoxes(input);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    release(json({
+      ok: true,
+      type: "box.list",
+      boxes: [],
+      pageInfo: { nextCursor: null, hasMore: false },
+    }));
+    await expect(Promise.all([left, right])).resolves.toHaveLength(2);
+    await lifecycle.findGenerationBoxes(input);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("recovers the exact-name canonical and duplicates without issuing create", async () => {
     const fetchMock = vi.fn(async () => json({
       ok: true,
@@ -502,6 +534,31 @@ describe("AsciiBoxMaintenanceClient", () => {
       environment: "prod",
       env: { COMPANION_ID },
     });
+  });
+
+  it("creates after observed absence with exactly one POST and no hidden listing", async () => {
+    const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => json({
+      ok: true,
+      type: "box.created",
+      status: "provisioning",
+      ttlSeconds: 300,
+      box: { id: OTHER_BOX_ID, name: "temporary" },
+    }, 202));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(client().createGenerationBoxAfterObservedAbsence({
+      companionId: COMPANION_ID,
+      generation: 14,
+      ttlSeconds: 21_600,
+      deadlineAt: Date.now() + 1_000,
+    })).resolves.toEqual({
+      outcome: "created",
+      boxId: OTHER_BOX_ID,
+      name: GENERATION_NAME,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("https://box.test/v1/boxes");
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).method).toBe("POST");
   });
 
   it("clones a named snapshot on create when from is supplied", async () => {

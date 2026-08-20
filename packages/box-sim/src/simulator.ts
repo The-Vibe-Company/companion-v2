@@ -798,6 +798,9 @@ export class BoxSimulator {
           daemon: {
             status: record.machine.daemon.status,
             invocationId: record.machine.daemon.invocationId,
+            layoutMarker: record.machine.persistentFiles.get(
+              ".companion/runtime/state/pi-layout.version",
+            )?.toString("utf8").trim() || null,
             rpcReady: record.machine.daemon.rpcReady,
             activeAttemptId: record.machine.daemon.activeAttemptId,
             tailCursor: record.machine.daemon.brokerJournal.at(-1)?.sequence ?? 0,

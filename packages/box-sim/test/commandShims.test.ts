@@ -31,7 +31,10 @@ describe("semantic Box command shims", () => {
       ['bash "$HOME/.companion/bin/ensure-pi-layout.sh"', "install-layout"],
       ['recorded="$(cat "$HOME/.companion/runtime/state/pi-layout.version" 2>/dev/null || true)"\nif [ "$recorded" = \'14:pins:overlay=abc\' ] \\\n  && [ -x "$HOME/.companion/bin/companion-pi-broker.mjs" ]; then\n  printf \'%s\\n\' companion-layout-unchanged\nfi', "probe-layout"],
       ['mkdir -p "$HOME/.companion/pi/extensions"', "mkdir-extensions"],
-      ["state/skill-archives companion-provider-auth-present", "clear-skill-archives"],
+      [
+        'root="$HOME/.companion/runtime"; printf companion-provider-auth-present',
+        "clear-skill-archives",
+      ],
       ["companion-archive-bytes wc -c", "measure-skill-archives"],
       ["cat '.part0' > '.target'; rm -f '.part0'", "join-file-parts"],
       ["skills.next base64 --decode tar --extract", "prepare-skills"],
@@ -48,11 +51,27 @@ describe("semantic Box command shims", () => {
         response: { id: "question-1", type: "extension_ui_response", value: "yes" },
       }), "extension-ui-response"],
       ["companion-pi-journal companion-pi-restarts", "daemon-diagnostics"],
+      [
+        'rm -f "$HOME/.companion/runtime/state/control-bundle-v1.json"',
+        "remove-control-bundle",
+      ],
       ['rm -f "$HOME/.companion/runtime/state/providers.env"', "remove-provider-files"],
       ["Pi daemon is still active after stop", "stop-daemon"],
     ];
     for (const [command, kind] of commands) expect(classifyBoxCommand(command)).toBe(kind);
     expect(classifyBoxCommand("uname -a")).toBe("unsupported");
+  });
+
+  it("removes a stale control bundle before Box archive", async () => {
+    const machine = createBoxSimCommandMachine({ boxId: "bx_23456789", scenario: "normal" });
+    const path = ".companion/runtime/state/control-bundle-v1.json";
+    putBoxFile(machine, path, Buffer.from("secret-bearing-bundle"));
+
+    await expect(executeBoxCommand(
+      machine,
+      'rm -f "$HOME/.companion/runtime/state/control-bundle-v1.json"',
+    )).resolves.toMatchObject({ success: true });
+    expect(machine.persistentFiles.has(path)).toBe(false);
   });
 
   it("prints overlay vs base layout labels from the staged marker", async () => {

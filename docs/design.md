@@ -128,7 +128,8 @@ invocation; takeover repeats those idempotent steps if their final observation w
 ## Dedicated runtime execution
 
 `apps/runtime` sweeps every two seconds, claims with a 30-second lease, renews every ten seconds,
-and defaults to eight concurrent Companions. `/healthz` fails when PostgreSQL, the claim loop, or the
+and defaults to eight concurrent Companions. A completed execution interrupts only the scheduler's
+recovery sleep so a start can hand its newly idle Pi directly to the queued turn. `/healthz` fails when PostgreSQL, the claim loop, or the
 latest sweep is unhealthy.
 
 Work precedence is permanent delete, explicit stop/restart, decision response, active attempt,
@@ -137,7 +138,9 @@ idempotent retry network, `429`, and `5xx` failures up to five times with jitter
 1/2/5/10/30-second backoff. Epoch predicates prevent an expired executor from committing after a
 replacement claims the work, but database fencing never pretends to fence a provider side effect.
 
-Box identity uses the generation-qualified name `Companion <id> g<generation>`. Before create,
+Box identity uses the generation-qualified name `Companion <id> g<generation>`. Known ids are read
+and resumed directly; global discovery is reserved for absence, `404`, and ambiguous-create
+reconciliation. Before create,
 runtime searches every Box-list page for that exact name and adopts one canonical Box. Because the
 public create request cannot set a name or supply an idempotency key, runtime issues one create with
 a five-minute provisional TTL, checkpoints the acknowledged Box id, then applies the name and
@@ -209,6 +212,10 @@ write-only. Runtime decrypts only the selected values after authorization. Durab
 references where possible; transient connector values use the owner-only runtime channel and never
 appear in logs, API responses, audit metadata, or projections. The provider auth file remains on
 Box disk only where Pi must refresh it.
+
+Runtime may reuse the extracted Skills tree only after both the durable selected-Skills revision and
+an on-disk digest of the exact archive checksums match. That digest includes the bundled Companion
+skill, whose deployment checksum changes independently of tenant selections.
 
 Every Companion may also call the Skills Hub API itself, with the same scopes: skills read/write,
 secret reads, and Skill Database read/write. Access is unconditional, so no surface asks anyone to

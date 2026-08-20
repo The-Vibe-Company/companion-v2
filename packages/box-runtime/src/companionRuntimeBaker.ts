@@ -1,5 +1,6 @@
 import { BoxRuntimeAdapterError, type BoxRuntimeLifecycleClient } from "./boxMaintenanceClient";
 import type { CompanionBoxRuntimeV2 } from "./boxCompanionRuntime";
+import type { CompanionRuntimeSkill } from "./companionPiInjection";
 import {
   isCompanionRuntimeImageName,
   type CompanionPiLayoutIdentity,
@@ -48,7 +49,11 @@ export interface CompanionRuntimeImageBaker {
 export function createCompanionRuntimeImageBaker(input: {
   identity: CompanionPiLayoutIdentity;
   lifecycle: BoxRuntimeLifecycleClient;
-  runtime: Pick<CompanionBoxRuntimeV2, "existingBoxStatus" | "refreshPiLayout" | "refreshTtl">;
+  runtime: Pick<
+    CompanionBoxRuntimeV2,
+    "existingBoxStatus" | "refreshPiLayout" | "refreshTtl"
+  > & Partial<Pick<CompanionBoxRuntimeV2, "prepareRuntimeImage">>;
+  bundledSkill?: CompanionRuntimeSkill;
   now?: () => number;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   onAttemptError?: (error: unknown) => void;
@@ -94,6 +99,7 @@ export function createCompanionRuntimeImageBaker(input: {
                 identity: input.identity,
                 lifecycle: input.lifecycle,
                 runtime: input.runtime,
+                ...(input.bundledSkill ? { bundledSkill: input.bundledSkill } : {}),
                 now,
                 sleep,
                 signal,
@@ -131,7 +137,9 @@ export function createCompanionRuntimeImageBaker(input: {
 async function ensureImage(input: {
   identity: CompanionPiLayoutIdentity;
   lifecycle: BoxRuntimeLifecycleClient;
-  runtime: Pick<CompanionBoxRuntimeV2, "existingBoxStatus" | "refreshPiLayout" | "refreshTtl">;
+  runtime: Pick<CompanionBoxRuntimeV2, "existingBoxStatus" | "refreshPiLayout" | "refreshTtl">
+    & Partial<Pick<CompanionBoxRuntimeV2, "prepareRuntimeImage">>;
+  bundledSkill?: CompanionRuntimeSkill;
   now: () => number;
   sleep: (ms: number, signal: AbortSignal) => Promise<void>;
   signal: AbortSignal;
@@ -181,6 +189,16 @@ async function ensureImage(input: {
     });
     await waitBoxReady(input, boxId);
     await input.runtime.refreshPiLayout({ boxId, signal: input.signal });
+    if (input.bundledSkill) {
+      if (!input.runtime.prepareRuntimeImage) {
+        throw new Error("The runtime image warmup adapter is unavailable.");
+      }
+      await input.runtime.prepareRuntimeImage({
+        boxId,
+        bundledSkill: input.bundledSkill,
+        signal: input.signal,
+      });
+    }
     try {
       await input.lifecycle.saveNamedSnapshot({
         boxId,

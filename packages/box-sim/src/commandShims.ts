@@ -8,6 +8,7 @@ export type BoxSimCommandKind =
   | "mkdir-pi-bin"
   | "install-layout"
   | "probe-layout"
+  | "apply-control-bundle"
   | "mkdir-extensions"
   | "clear-skill-archives"
   | "measure-skill-archives"
@@ -18,6 +19,7 @@ export type BoxSimCommandKind =
   | "rpc-command"
   | "extension-ui-response"
   | "daemon-diagnostics"
+  | "remove-control-bundle"
   | "remove-provider-files"
   | "stop-daemon"
   | "prepare-attachments"
@@ -258,6 +260,11 @@ function brokerTailCursor(machine: BoxSimCommandMachine): number {
   return machine.daemon.brokerJournal.at(-1)?.sequence ?? 0;
 }
 
+function simulatedLayoutMarker(machine: BoxSimCommandMachine): string | null {
+  return machine.persistentFiles.get(".companion/runtime/state/pi-layout.version")
+    ?.toString("utf8").trim() || null;
+}
+
 export function appendPiProcessExit(
   machine: BoxSimCommandMachine,
   exit: { code: number | null; signal: string | null } = { code: null, signal: null },
@@ -300,7 +307,15 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
   }
   if (command.includes("companion-pi-warm-ready")) return "warm-daemon-ready";
   if (command.includes("companion-box-runnable")) return "box-runnable";
+  if (
+    command.includes("COMPANION_CONTROL_BUNDLE=")
+    && command.includes("COMPANION_CONTROL_APPLY")
+  ) return "apply-control-bundle";
   if (command.includes("Pi daemon is still active after stop")) return "stop-daemon";
+  if (
+    command.trim()
+    === 'rm -f "$HOME/.companion/runtime/state/control-bundle-v1.json"'
+  ) return "remove-control-bundle";
   if (command.includes('rm -f "$HOME/.companion/runtime/state/providers.env"')) {
     return "remove-provider-files";
   }
@@ -313,7 +328,10 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
   if (command.includes("skills.next") && command.includes("base64 --decode") && command.includes("tar --extract")) {
     return "prepare-skills";
   }
-  if (command.includes("state/skill-archives") && command.includes("companion-provider-auth-present")) {
+  if (
+    command.includes('root="$HOME/.companion/runtime"')
+    && command.includes("companion-provider-auth-present")
+  ) {
     return "clear-skill-archives";
   }
   if (command.includes("companion-outbox-manifest-begin")) return "list-outbox";
@@ -467,7 +485,9 @@ async function startDaemon(machine: BoxSimCommandMachine, restart: boolean): Pro
   if (!restart && machine.daemon.status === "active") {
     // `systemctl start` is idempotent for an already active unit. In particular it does not create
     // a new Pi invocation; configuration changes use the explicit restart path.
-    return ok("active\ncompanion-pi-broker-ready\n");
+    return ok(
+      `active\ncompanion-pi-broker-ready\ncompanion-pi-invocation ${machine.daemon.invocationId}\n`,
+    );
   }
   if (restart) {
     machine.daemon.restartCount += 1;
@@ -492,7 +512,9 @@ async function startDaemon(machine: BoxSimCommandMachine, restart: boolean): Pro
     machine.daemon.stderrLog += "simulated Pi controller failed to start\n";
     return failed("simulated Pi controller failed to start");
   }
-  return ok("active\ncompanion-pi-broker-ready\n");
+  return ok(
+    `active\ncompanion-pi-broker-ready\ncompanion-pi-invocation ${machine.daemon.invocationId}\n`,
+  );
 }
 
 function responseFor(command: Record<string, unknown>, data?: Record<string, unknown>): Record<string, unknown> {
@@ -543,6 +565,7 @@ async function executeBrokerControl(
     case "broker_state":
       return ok(`${JSON.stringify(responseFor(command, {
         invocationId: machine.daemon.invocationId,
+        layoutMarker: simulatedLayoutMarker(machine),
         activeAttemptId: machine.daemon.activeAttemptId,
         tailCursor,
         acknowledgedCursor: machine.daemon.brokerAcknowledgedCursor,
@@ -581,6 +604,7 @@ async function executeBrokerControl(
         : [];
       return ok(`${JSON.stringify(responseFor(command, {
         invocationId: machine.daemon.invocationId,
+        layoutMarker: simulatedLayoutMarker(machine),
         activeAttemptId: machine.daemon.activeAttemptId,
         tailCursor,
         acknowledgedCursor: machine.daemon.brokerAcknowledgedCursor,
@@ -689,11 +713,19 @@ async function executeRpc(
     response = responseFor(brokerCommand, response);
   }
   if (brokerCommand.type === "prompt") {
+    if (brokerCommand.clearOutbox === true) {
+      for (const path of [...machine.persistentFiles.keys()]) {
+        if (path.startsWith("outbox/")) machine.persistentFiles.delete(path);
+      }
+    }
     response = response.success === true
       ? responseFor(brokerCommand, {
           attemptId: brokerCommand.attemptId,
           invocationId: machine.daemon.invocationId,
           piAcknowledged: true,
+          initialCursor: brokerTailCursor(machine),
+          requiredInput: brokerCommand.requiredInput,
+          clearOutbox: true,
         })
       : {
           ...responseFor(brokerCommand),
@@ -802,6 +834,50 @@ function measuredArchives(machine: BoxSimCommandMachine): BoxSimCommandResult {
   return ok(lines.length ? `${lines.join("\n")}\n` : "");
 }
 
+function appliedControlBundle(machine: BoxSimCommandMachine): BoxSimCommandResult {
+  const bundlePath = ".companion/runtime/state/control-bundle-v1.json";
+  const bytes = machine.persistentFiles.get(bundlePath);
+  if (!bytes) return failed("simulated runtime control bundle is missing");
+  try {
+    const manifest = JSON.parse(bytes.toString("utf8")) as {
+      revision?: unknown;
+      files?: Array<{
+        path?: unknown;
+        mode?: unknown;
+        byteSize?: unknown;
+        sha256?: unknown;
+        content?: unknown;
+      }>;
+    };
+    if (manifest.revision !== 1 || !Array.isArray(manifest.files)) {
+      return failed("simulated runtime control manifest is invalid");
+    }
+    const seen = new Set<string>();
+    for (const file of manifest.files) {
+      if (
+        typeof file.path !== "string"
+        || seen.has(file.path)
+        || ![0o600, 0o700].includes(Number(file.mode))
+        || typeof file.content !== "string"
+      ) return failed("simulated runtime control file is invalid");
+      const content = Buffer.from(file.content, "base64");
+      if (
+        content.byteLength !== file.byteSize
+        || sha256(content) !== file.sha256
+      ) return failed("simulated runtime control digest is invalid");
+      seen.add(file.path);
+      machine.persistentFiles.set(normalizeBoxPath(file.path), content);
+    }
+    return ok();
+  } catch {
+    return failed("simulated runtime control bundle is unreadable");
+  } finally {
+    // The production command's EXIT trap removes credentials-bearing bundle bytes on success and
+    // every failure path. Model that property so replay and cleanup assertions remain meaningful.
+    machine.persistentFiles.delete(bundlePath);
+  }
+}
+
 /** Execute one recognized command against virtual state. This function never invokes a shell. */
 export async function executeBoxCommand(
   machine: BoxSimCommandMachine,
@@ -832,13 +908,17 @@ export async function executeBoxCommand(
       return installedLayout(machine);
     case "probe-layout":
       return probedLayout(machine, command);
+    case "apply-control-bundle":
+      return appliedControlBundle(machine);
     case "mkdir-extensions":
       machine.extensionDirectoryCreated = true;
       return ok();
     case "clear-skill-archives": {
-      const prefix = ".companion/runtime/state/skill-archives/";
-      for (const path of machine.persistentFiles.keys()) {
-        if (path.startsWith(prefix)) machine.persistentFiles.delete(path);
+      if (command.includes('rm -rf "$root/state/skill-archives"')) {
+        const prefix = ".companion/runtime/state/skill-archives/";
+        for (const path of machine.persistentFiles.keys()) {
+          if (path.startsWith(prefix)) machine.persistentFiles.delete(path);
+        }
       }
       return ok(machine.persistentFiles.has(".companion/pi/auth.json")
         ? "companion-provider-auth-present\n"
@@ -879,6 +959,9 @@ export async function executeBoxCommand(
       if (stderr) lines.push(`companion-pi-stderr ${stderr.replaceAll("providers.env", "[redacted]")}`);
       return ok(`${lines.join("\n")}\n`);
     }
+    case "remove-control-bundle":
+      machine.persistentFiles.delete(".companion/runtime/state/control-bundle-v1.json");
+      return ok();
     case "remove-provider-files":
       machine.persistentFiles.delete(".companion/runtime/state/providers.env");
       machine.volatileFiles.delete("run/user/1000/companion/providers.env");

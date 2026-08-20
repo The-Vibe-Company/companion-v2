@@ -81,6 +81,7 @@ interface BoxSimState {
     daemon: {
       status: string;
       invocationId: string | null;
+      layoutMarker: string | null;
       activeAttemptId: string | null;
       tailCursor: number;
       acknowledgedCursor: number;
@@ -661,6 +662,7 @@ async function turnDiagnostic(turnId: string): Promise<string> {
       daemon: {
         status: box.daemon.status,
         invocationId: box.daemon.invocationId,
+        layoutMarker: box.daemon.layoutMarker,
         activeAttemptId: box.daemon.activeAttemptId,
         tailCursor: box.daemon.tailCursor,
         acknowledgedCursor: box.daemon.acknowledgedCursor,

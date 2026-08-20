@@ -63,7 +63,12 @@ export interface RuntimeBoxControl {
     deadlineAt?: Date;
     signal: AbortSignal;
   }): Promise<void>;
-  getStatus(input: { boxId: string; signal: AbortSignal }): Promise<{ state: BoxObservedState }>;
+  getStatus(input: {
+    boxId: string;
+    companionId?: string;
+    generation?: bigint;
+    signal: AbortSignal;
+  }): Promise<{ state: BoxObservedState }>;
   setTtl(input: { boxId: string; ttlSeconds: number; signal: AbortSignal }): Promise<void>;
   stopExistingBox(input: { boxId: string; signal: AbortSignal }): Promise<void>;
   resumeExistingBox(input: { boxId: string; signal: AbortSignal }): Promise<void>;
@@ -79,7 +84,7 @@ export interface RuntimeBoxControl {
 }
 
 export type BrokerWriteOutcome =
-  | { outcome: "accepted"; invocationId: string }
+  | { outcome: "accepted"; invocationId: string; initialCursor?: bigint }
   | { outcome: "rejected"; code: string }
   | { outcome: "ambiguous"; code: string };
 
@@ -99,6 +104,8 @@ export interface RuntimePiControl {
   }>;
   brokerState(input: { boxId: string; signal: AbortSignal }): Promise<{
     invocationId: string;
+    layoutMarker: string | null;
+    layoutCurrent: boolean;
     activeAttemptId: string | null;
     tailCursor: bigint;
     acknowledgedCursor: bigint;
@@ -170,6 +177,8 @@ export interface RuntimeResourceStager {
     diskLayoutVersion: 14;
     appliedSettingsRevision: bigint;
     appliedSkillsRevision: number | null;
+    stagingMode?: "refresh" | "skills";
+    skillBytesTransferred?: number;
   }>;
   /**
    * Apply the current Pi layout to a Box that is already running. Overlay-only changes rewrite the

@@ -14,6 +14,48 @@ import {
 } from "./test/fixtures";
 
 describe("runtime lifecycle operations", () => {
+  it("resumes a durable Box by id without account discovery, PATCH, or adapter polling", async () => {
+    const claim = operationClaim();
+    const store = new MemoryRuntimeStore({
+      authorization: operationAuthorization(claim, {
+        boxId: BOX_ID,
+        boxState: "archived",
+        piState: "stopped",
+        piInvocationId: null,
+      }),
+    });
+    const ports = fakePorts(store);
+    let statuses = 0;
+    let resumes = 0;
+    let listings = 0;
+    let settings = 0;
+    const statusInputs: Array<{ companionId?: string; generation?: bigint }> = [];
+    ports.box.getStatus = async (input) => {
+      statusInputs.push(input);
+      return {
+      state: (["archived", "provisioning", "ready"] as const)[Math.min(statuses++, 2)]!,
+      };
+    };
+    ports.box.resumeExistingBox = async () => { resumes += 1; };
+    ports.box.findGenerationBoxes = async () => {
+      listings += 1;
+      throw new Error("known Box must not list");
+    };
+    ports.box.applyGenerationBoxSettings = async () => { settings += 1; };
+
+    const result = await new RuntimeEngine(engineDependencies({ store, ports })).execute(claim);
+
+    expect(result.outcome).toBe("succeeded");
+    expect({ resumes, listings, settings }).toEqual({ resumes: 1, listings: 0, settings: 0 });
+    expect(statuses).toBe(3);
+    expect(statusInputs).toEqual(Array.from({ length: 3 }, () => ({
+      boxId: BOX_ID,
+      companionId: claim.companionId,
+      generation: claim.runtimeGeneration,
+      signal: expect.any(AbortSignal),
+    })));
+  });
+
   it("recycles only Pi when a warm Send already has an invocation", async () => {
     const claim = operationClaim({ checkpoint: "starting_pi", checkpointSequence: 6n });
     const store = new MemoryRuntimeStore({

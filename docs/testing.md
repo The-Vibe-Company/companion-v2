@@ -113,6 +113,8 @@ state, external call count, and user-visible outcome.
 ## Time and health acceptance
 
 - Runtime sweep interval: two seconds; normal claim under five seconds.
+- A completed lifecycle operation wakes the next claim immediately; test the two-second sweep only
+  as recovery.
 - Lease: 30 seconds, renewed every ten seconds; takeover under 45 seconds.
 - Cold start: terminal success or explicit failure under three minutes.
 - Inactivity stall: ten minutes plus one sweep; absolute deadline: two hours plus one sweep.
@@ -123,6 +125,16 @@ image fixture, stops it, wakes it by sending, requires a second reply, and perma
 Missing secrets report `not configured`, never success. Keep the canary separate from merge-blocking
 simulator tests; legacy removal requires seven consecutive green days and no remaining purge-owned
 resources.
+
+The nightly performance probe runs ten disposable
+`create → prompt ACK → stop → resume → prompt ACK → delete` cycles. It reports provider-start and
+Box-ready-to-prompt-ACK P50/P95 separately, provider call counts, staging mode, and transferred Skill
+bytes. Deployment requires P95 ready-to-ACK at or below five seconds for unchanged text
+configuration; pull requests require one cleanup-safe cycle without an absolute latency threshold.
+Fault tests cover every boundary around list, create, resume, bundle upload/apply and pre-execution
+cleanup, activation, durable checkpoint, prompt write, and ACK. Regression coverage also proves
+pre-ACK events remain visible, known Box ids are identity-checked without listing, a stale broker is
+recycled after the disk-marker crash gap, and a bundled-skill checksum change defeats tree reuse.
 
 The Box provider lifecycle job uses only the `COMPANION_BOX_E2E_API_KEY` repository secret. It
 creates a five-minute disposable Box, exercises file reads, metadata, hashing, and execution,

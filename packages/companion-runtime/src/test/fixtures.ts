@@ -399,6 +399,11 @@ export class MemoryRuntimeStore implements RuntimeStore {
     const kind = this.authorization.operationKind;
     if (kind === "start" && current === "resolving_box" && !input.boxId && input.boxState === "absent") {
       nextCheckpoint = "box_absence_observed";
+    } else if (kind === "start" && current === "resolving_box" && input.boxId
+      && (input.boxState === "ready" || input.boxState === "idle" || input.boxState === "running")) {
+      nextCheckpoint = "box_ready_observed";
+    } else if (kind === "start" && current === "resolving_box" && input.boxId) {
+      nextCheckpoint = "box_resolved";
     } else if (kind === "start" && current === "creating_box" && input.boxId) {
       nextCheckpoint = input.boxState === "ready" ? "box_ready_observed" : "box_created";
     } else if ((kind === "start" || kind === "restart_box") && current === "waiting_ready"
@@ -645,6 +650,8 @@ export function fakePorts(store: MemoryRuntimeStore): FakePorts {
     piDaemonStatus: async () => ({ state: "idle", invocationId: PI_INVOCATION_ID }),
     brokerState: async () => ({
       invocationId: PI_INVOCATION_ID,
+      layoutMarker: "layout-current",
+      layoutCurrent: true,
       activeAttemptId: store.authorization.dispatchState === "accepted" ? ATTEMPT_ID : null,
       tailCursor: store.authorization.eventCursor ?? 0n,
       acknowledgedCursor: store.authorization.eventCursor ?? 0n,

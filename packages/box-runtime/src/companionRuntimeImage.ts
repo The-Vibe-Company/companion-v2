@@ -7,7 +7,9 @@ import { COMPANION_PI_BROKER_SOURCE } from "./companionPiBrokerSource";
  * Bump when the daemon wrapper or systemd unit changes without a broker/extension source change.
  * Overlay writes are the cheap in-place path for companions that are already running.
  */
-export const COMPANION_PI_OVERLAY_REVISION = 4;
+export const COMPANION_PI_OVERLAY_REVISION = 5;
+/** Bump when the archive/resume warmup profile changes without changing the runtime layout. */
+export const COMPANION_RUNTIME_BOOT_PROFILE_REVISION = 1;
 
 /** What a Box reports after `ensure-pi-layout.sh`. */
 export type CompanionPiLayoutRefresh = "none" | "overlay" | "base";
@@ -25,6 +27,8 @@ export interface CompanionPiLayoutIdentity {
   packages: readonly string[];
   qmdPackage: string;
   minimumPiVersion: string;
+  companionSkillChecksum: string | null;
+  bootProfileRevision: number;
   overlayRevision: number;
   overlayMarker: string;
   baseMarker: string;
@@ -60,9 +64,13 @@ export function companionPiBaseLayoutMarker(input: {
   packages: readonly string[];
   qmdPackage: string;
   minimumPiVersion: string;
+  companionSkillChecksum?: string;
+  bootProfileRevision?: number;
 }): string {
   return `${input.layoutVersion.toString(10)}:${input.packages.join(",")}`
-    + `:qmd=${input.qmdPackage}:pi>=${input.minimumPiVersion}`;
+    + `:qmd=${input.qmdPackage}:pi>=${input.minimumPiVersion}`
+    + `:skill=${input.companionSkillChecksum ?? "none"}`
+    + `:boot=${(input.bootProfileRevision ?? COMPANION_RUNTIME_BOOT_PROFILE_REVISION).toString(10)}`;
 }
 
 export function companionPiLayoutIdentity(input: {
@@ -71,6 +79,8 @@ export function companionPiLayoutIdentity(input: {
   qmdPackage: string;
   minimumPiVersion: string;
   overlayRevision?: number;
+  companionSkillChecksum?: string;
+  bootProfileRevision?: number;
 }): CompanionPiLayoutIdentity {
   const overlayRevision = input.overlayRevision ?? COMPANION_PI_OVERLAY_REVISION;
   const overlayMarker = companionPiOverlayMarker(overlayRevision);
@@ -81,6 +91,8 @@ export function companionPiLayoutIdentity(input: {
     packages: input.packages,
     qmdPackage: input.qmdPackage,
     minimumPiVersion: input.minimumPiVersion,
+    companionSkillChecksum: input.companionSkillChecksum ?? null,
+    bootProfileRevision: input.bootProfileRevision ?? COMPANION_RUNTIME_BOOT_PROFILE_REVISION,
     overlayRevision,
     overlayMarker,
     baseMarker,

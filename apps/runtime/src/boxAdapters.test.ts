@@ -34,12 +34,16 @@ function capturingLog(): { log: RuntimeProcessLog; records: Record<string, unkno
 }
 
 function lifecycle(overrides: Partial<BoxRuntimeLifecycleClient> = {}): BoxRuntimeLifecycleClient {
+  const createAfterAbsence = overrides.createGenerationBoxAfterObservedAbsence
+    ?? overrides.createOrRecoverGenerationBox
+    ?? vi.fn();
   return {
     listAllBoxes: vi.fn(),
     requestPermanentDeletion: vi.fn(),
     getDeletionOperation: vi.fn(),
     findGenerationBoxes: vi.fn(),
-    createOrRecoverGenerationBox: vi.fn(),
+    createOrRecoverGenerationBox: createAfterAbsence,
+    createGenerationBoxAfterObservedAbsence: createAfterAbsence,
     applyGenerationBoxSettings: vi.fn(),
     deletePermanentlyAndWait: vi.fn(),
     ...overrides,
@@ -48,6 +52,7 @@ function lifecycle(overrides: Partial<BoxRuntimeLifecycleClient> = {}): BoxRunti
 
 function boxRuntime(overrides: Partial<CompanionBoxRuntimeV2> = {}): CompanionBoxRuntimeV2 {
   return {
+    layoutIdentity: () => ({ fullMarker: "layout-current" }),
     ...overrides,
   } as CompanionBoxRuntimeV2;
 }
@@ -101,6 +106,34 @@ describe("runtime Box/Pi port adapters", () => {
       deadlineAt,
       signal,
     }));
+    expect(existingBoxStatus).toHaveBeenCalledWith({
+      boxId: "bx_23456789",
+      signal,
+    });
+  });
+
+  it("proves the durable Box identity with the direct status GET", async () => {
+    const existingBoxStatus = vi.fn(async () => ({
+      boxId: "bx_23456789",
+      state: "archived" as const,
+    }));
+    const control = createRuntimeBoxControl({
+      lifecycle: lifecycle(),
+      runtime: () => boxRuntime({ existingBoxStatus }),
+    });
+
+    await expect(control.getStatus({
+      boxId: "bx_23456789",
+      companionId: "11111111-1111-4111-8111-111111111111",
+      generation: 4n,
+      signal,
+    })).resolves.toEqual({ state: "archived" });
+    expect(existingBoxStatus).toHaveBeenCalledWith({
+      boxId: "bx_23456789",
+      companionId: "11111111-1111-4111-8111-111111111111",
+      runtimeGeneration: 4,
+      signal,
+    });
   });
 
   it("clones the golden runtime image and falls back when that snapshot is gone", async () => {

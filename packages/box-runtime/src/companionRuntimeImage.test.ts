@@ -17,7 +17,7 @@ describe("companion runtime image identity", () => {
     });
 
     expect(identity.baseMarker).toBe(
-      "14:npm:pi-mcp-adapter@2.12.1,npm:pi-web-access@0.24.0:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2",
+      "14:npm:pi-mcp-adapter@2.12.1,npm:pi-web-access@0.24.0:qmd=@tobilu/qmd@2.8.3:pi>=0.84.2:skill=none:boot=1",
     );
     expect(identity.fullMarker).toBe(`${identity.baseMarker}:overlay=${identity.overlayMarker}`);
     expect(identity.imageName).toBe(companionRuntimeImageName(identity.fullMarker, 14));
