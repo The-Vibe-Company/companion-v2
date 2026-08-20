@@ -1,9 +1,14 @@
 import { randomUUID } from "node:crypto";
+import { pathToFileURL } from "node:url";
 
 import {
   AsciiBoxCompanionRuntime,
   AsciiBoxMaintenanceClient,
+  BoxRuntimeAdapterError,
   BoxRuntimeProviderError,
+  type BoxGenerationCreateInput,
+  type BoxGenerationCreateResult,
+  type BoxRuntimeLifecycleClient,
 } from "../packages/box-runtime/src/index";
 
 const BOX_ID_PATTERN = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
@@ -11,6 +16,9 @@ const SAFE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const POLL_INTERVAL_MS = 1_000;
 const REPLY_TIMEOUT_MS = 3 * 60_000;
 const IMAGE_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
+// A missing named snapshot must still exercise the same cold install as production. Pin Pi to the
+// layout-14 fixture rather than letting a fallback float to an untested release.
+const E2E_PI_INSTALL_COMMAND = "npm install --global @earendil-works/pi-coding-agent@0.84.2";
 
 class RuntimeChangeE2EError extends Error {
   readonly code: string;
@@ -47,8 +55,12 @@ function configuration(env: NodeJS.ProcessEnv) {
   ) {
     throw new RuntimeChangeE2EError("invalid_configuration");
   }
+  const runtimeEnv: NodeJS.ProcessEnv = {
+    ...env,
+    COMPANION_BOX_API_KEY: required(env, "COMPANION_BOX_API_KEY"),
+  };
   return {
-    env: { ...env, COMPANION_BOX_API_KEY: required(env, "COMPANION_BOX_API_KEY") },
+    env: runtimeEnv,
     zaiApiKey: required(env, "COMPANION_BOX_E2E_ZAI_API_KEY"),
     image,
     modelId,
@@ -89,6 +101,41 @@ async function phase<T>(name: string, action: () => Promise<T>): Promise<T> {
 
 function pause(milliseconds: number): Promise<void> {
   return new Promise((resolvePause) => setTimeout(resolvePause, milliseconds));
+}
+
+type RuntimeChangeCreateInput = Omit<BoxGenerationCreateInput, "from">;
+type RuntimeChangeCreateClient = Pick<
+  BoxRuntimeLifecycleClient,
+  "createOrRecoverGenerationBox" | "createGenerationBoxAfterObservedAbsence"
+>;
+
+function isConfirmedMissingSnapshot(error: unknown): boolean {
+  return error instanceof BoxRuntimeAdapterError
+    && !error.outcomeUnknown
+    && !error.retryable
+    && error.status < 500
+    && (error.providerCode === "unknown_snapshot" || error.stableCode === "box_not_found");
+}
+
+export async function createRuntimeChangeGenerationBox(input: {
+  lifecycle: RuntimeChangeCreateClient;
+  create: RuntimeChangeCreateInput;
+  image: string | null;
+}): Promise<{
+  box: BoxGenerationCreateResult;
+  source: "base" | "named_snapshot" | "base_fallback";
+}> {
+  try {
+    const box = await input.lifecycle.createOrRecoverGenerationBox({
+      ...input.create,
+      ...(input.image === null ? {} : { from: input.image }),
+    });
+    return { box, source: input.image === null ? "base" : "named_snapshot" };
+  } catch (error) {
+    if (input.image === null || !isConfirmedMissingSnapshot(error)) throw error;
+    const box = await input.lifecycle.createGenerationBoxAfterObservedAbsence(input.create);
+    return { box, source: "base_fallback" };
+  }
 }
 
 async function waitForReadyBox(runtime: AsciiBoxCompanionRuntime, boxId: string): Promise<void> {
@@ -202,7 +249,11 @@ async function main(): Promise<number> {
 
   const providerCalls: string[] = [];
   const recordProviderCall = (sample: { operation: string }) => providerCalls.push(sample.operation);
-  const runtime = new AsciiBoxCompanionRuntime(config.env, { onTiming: recordProviderCall });
+  const runtime = new AsciiBoxCompanionRuntime({
+    ...config.env,
+    COMPANION_PI_INSTALL_COMMAND:
+      config.env.COMPANION_PI_INSTALL_COMMAND?.trim() || E2E_PI_INSTALL_COMMAND,
+  }, { onTiming: recordProviderCall });
   const lifecycle = new AsciiBoxMaintenanceClient(config.env, { onTiming: recordProviderCall });
   const companionId = randomUUID();
   const orgId = randomUUID();
@@ -216,13 +267,24 @@ async function main(): Promise<number> {
   try {
     await phase("create", async () => {
       providerStartAt = Date.now();
-      const created = await lifecycle.createOrRecoverGenerationBox({
-        companionId,
-        generation,
-        ttlSeconds: 300,
-        deadlineAt: Date.now() + 30_000,
-        ...(config.image === null ? {} : { from: config.image }),
+      const creation = await createRuntimeChangeGenerationBox({
+        lifecycle,
+        image: config.image,
+        create: {
+          companionId,
+          generation,
+          ttlSeconds: 300,
+          deadlineAt: Date.now() + 30_000,
+        },
       });
+      const created = creation.box;
+      if (creation.source === "base_fallback") {
+        write({
+          phase: "create_image_fallback",
+          status: "succeeded",
+          code: "unknown_snapshot",
+        });
+      }
       if (!BOX_ID_PATTERN.test(created.boxId)) {
         throw new RuntimeChangeE2EError("invalid_provider_response");
       }
@@ -452,6 +514,9 @@ async function main(): Promise<number> {
   return failed ? 1 : 0;
 }
 
-void main().then((exitCode) => {
-  process.exitCode = exitCode;
-});
+const entrypoint = process.argv[1] ? pathToFileURL(process.argv[1]).href : null;
+if (entrypoint === import.meta.url) {
+  void main().then((exitCode) => {
+    process.exitCode = exitCode;
+  });
+}
