@@ -14,6 +14,7 @@ import {
   EntitlementDeniedError,
 } from "@companion/core";
 import { withTenantContext } from "@companion/db";
+import { captureServerError } from "./sentry";
 
 export interface ApiVariables {
   user: typeof auth.$Infer.Session.user | null;
@@ -242,5 +243,6 @@ export function jsonError(c: Context, error: unknown, status = 400): Response {
   const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"
     ? error.code
     : undefined;
+  if (status >= 500) captureServerError(error);
   return c.json({ ok: false, error: message, ...(code ? { code } : {}) }, status as never);
 }

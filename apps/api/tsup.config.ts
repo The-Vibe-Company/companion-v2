@@ -24,6 +24,7 @@ export default defineConfig({
     "fflate",
     "hono",
     "postgres",
+    "@sentry/node",
     "resend",
     "stripe",
     "tar-stream",
