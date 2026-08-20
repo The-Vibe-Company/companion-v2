@@ -43,7 +43,7 @@ describe("runtime-change Box creation", () => {
     });
   });
 
-  it.each(["unknown_snapshot", "box_not_found"])(
+  it.each(["unknown_snapshot", "box_not_found", null])(
     "falls back exactly once to a base Box for provider code %s",
     async (providerCode) => {
       const findGenerationBoxes = vi.fn(async () => absent);
@@ -51,7 +51,7 @@ describe("runtime-change Box creation", () => {
         stableCode: "box_not_found",
         message: "The named Box snapshot was not found",
         status: 404,
-        providerCode,
+        ...(providerCode === null ? {} : { providerCode }),
         retryable: false,
         outcomeUnknown: false,
       });

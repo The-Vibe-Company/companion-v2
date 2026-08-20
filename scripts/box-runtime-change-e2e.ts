@@ -145,8 +145,7 @@ export async function createRuntimeChangeGenerationBox(input: {
       && !error.outcomeUnknown
       && !error.retryable
       && error.status < 500
-      && error.stableCode === "box_not_found"
-      && (error.providerCode === "unknown_snapshot" || error.providerCode === "box_not_found");
+      && error.stableCode === "box_not_found";
     if (input.image === null || !missingSnapshot) throw error;
     const box = await input.lifecycle.createGenerationBoxAfterObservedAbsence(input.create);
     return { box, source: "base_fallback" };
