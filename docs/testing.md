@@ -188,8 +188,10 @@ archives and resumes the Box, proves those files remain usable, archives it agai
 deletes the exact provider resource in `finally`. Cleanup requires the provider's irrevocable
 deletion operation plus an immediate `404` for that Box; physical data removal may finish later in
 the provider's background operation. It runs only on a daily schedule or manual dispatch, never on
-pull requests. The optional `COMPANION_BOX_E2E_IMAGE` repository variable makes it clone a named runtime
-snapshot; without it, the test uses a base Box and still covers the provider restore/syscall path.
+pull requests. The optional `COMPANION_BOX_E2E_IMAGE` repository variable makes it clone a named
+runtime snapshot. If that snapshot has expired or was deleted, both real-provider probes retry once
+with a base Box; without the variable, they use a base Box directly. The archive/resume probe still
+covers the provider restore/syscall path in either base-Box case.
 
 Every commit pushed to an internal pull request also creates a disposable Box from the configured
 runtime image, falling back once to an empty Box when that named snapshot is missing, then stages
@@ -241,6 +243,13 @@ pnpm build
 git diff --check
 pnpm verify:change
 ```
+
+The anti-slop gate is incremental while the existing codebase is brought into compliance. It lints
+added, copied, modified, renamed, and untracked JavaScript/TypeScript files against their entire
+contents; deletions and agent-tooling directories are ignored. The default comparison base is
+`origin/main`. Override it with `pnpm lint:anti-slop -- --base <ref>`. Touching a legacy source file
+therefore requires resolving all anti-slop findings in that file rather than only findings on the
+changed lines.
 
 `verify:change` exit code 2 means its selected checks passed but the printed database, browser,
 container, or dependency gates remain mandatory. Report exact commands and outcomes; static

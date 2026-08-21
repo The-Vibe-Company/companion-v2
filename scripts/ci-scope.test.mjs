@@ -95,6 +95,13 @@ test("database migrations run every integrated surface", () => {
   assert.equal(result.containers, true);
 });
 
+test("Oxlint configuration changes force every CI lane", () => {
+  const result = classifyFiles(["oxlint.config.ts"]);
+  assert.equal(result.full, true);
+  assert.equal(result.quality, true);
+  assert.equal(result.dependencies, true);
+});
+
 test("Railway changes only request container validation in addition to quality", () => {
   const result = classifyFiles(["deploy/railway/Dockerfile.web"]);
   assert.equal(result.quality, true);
