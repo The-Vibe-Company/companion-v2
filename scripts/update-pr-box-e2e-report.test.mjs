@@ -36,7 +36,7 @@ function jsonResponse(body, status = 200) {
 
 const successfulLog = [
   { phase: "create", status: "succeeded", duration_ms: 522 },
-  { phase: "stage_current_change", status: "succeeded", duration_ms: 28_625 },
+  { phase: "stage_runtime", status: "succeeded", duration_ms: 28_625 },
   { phase: "start_pi", status: "succeeded", duration_ms: 7_485 },
   { phase: "first_message", status: "succeeded", duration_ms: 20_473 },
   { phase: "cleanup", status: "succeeded", duration_ms: 982 },

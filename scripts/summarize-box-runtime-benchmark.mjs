@@ -5,9 +5,18 @@ import { pathToFileURL } from "node:url";
 
 const METRICS = [
   "provider_start",
+  "send_to_prompt_ack",
   "ready_to_prompt_ack",
   "resume_provider_start",
+  "resume_send_to_prompt_ack",
   "resume_ready_to_prompt_ack",
+  "stage_runtime",
+  "start_pi",
+  "broker_preflight",
+  "stop_archive",
+  "resume",
+  "resume_start_pi",
+  "resume_broker_preflight",
 ];
 
 function percentile(values, percentileValue) {
@@ -45,7 +54,43 @@ export function summarizeBoxRuntimeBenchmark(contents, expectedCycles = 10) {
       p95_ms: percentile(values, 0.95),
     }];
   }));
-  return { cycles: completedCycles, metrics };
+  const distribution = (phase, field) => {
+    const values = events.filter((event) => event.phase === phase && event.status === "succeeded")
+      .map((event) => event[field])
+      .filter((value) => Number.isSafeInteger(value) && value >= 0);
+    if (values.length !== expectedCycles) {
+      throw new Error(`diagnostic ${phase}.${field} has ${values.length} samples, expected ${expectedCycles}`);
+    }
+    return {
+      samples: values.length,
+      p50: percentile(values, 0.5),
+      p95: percentile(values, 0.95),
+    };
+  };
+  const modes = (phase) => Object.fromEntries([...new Set(events
+    .filter((event) => event.phase === phase && event.status === "succeeded")
+    .map((event) => event.staging_mode)
+    .filter((value) => value === "refresh" || value === "skills"))]
+    .sort()
+    .map((mode) => [mode, events.filter((event) =>
+      event.phase === phase && event.status === "succeeded" && event.staging_mode === mode).length]));
+  const createModes = modes("staging_stats");
+  const resumeModes = modes("resume_staging_stats");
+  if (Object.values(createModes).reduce((total, count) => total + count, 0) !== expectedCycles
+    || Object.values(resumeModes).reduce((total, count) => total + count, 0) !== expectedCycles) {
+    throw new Error("staging mode diagnostics are incomplete");
+  }
+  return {
+    cycles: completedCycles,
+    metrics,
+    diagnostics: {
+      provider_calls: distribution("provider_call_stats", "provider_call_count"),
+      create_skill_bytes: distribution("staging_stats", "skill_bytes_transferred"),
+      resume_skill_bytes: distribution("resume_staging_stats", "skill_bytes_transferred"),
+      create_staging_modes: createModes,
+      resume_staging_modes: resumeModes,
+    },
+  };
 }
 
 async function main() {

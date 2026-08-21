@@ -50,6 +50,27 @@ describe("companion runtime image identity", () => {
     expect(second.imageName).not.toBe(first.imageName);
   });
 
+  it("isolates disposable research images without changing the disk marker", () => {
+    const common = {
+      layoutVersion: 14,
+      packages: ["npm:pi-mcp-adapter@2.12.1"],
+      qmdPackage: "@tobilu/qmd@2.8.3",
+      minimumPiVersion: "0.84.2",
+    };
+    const baseline = companionPiLayoutIdentity(common);
+    const candidate = companionPiLayoutIdentity({
+      ...common,
+      imageIdentitySalt: "abcdef0123456789",
+    });
+
+    expect(candidate.fullMarker).toBe(baseline.fullMarker);
+    expect(candidate.imageName).not.toBe(baseline.imageName);
+    expect(() => companionPiLayoutIdentity({
+      ...common,
+      imageIdentitySalt: "unsafe salt",
+    })).toThrow(/identity salt/i);
+  });
+
   it("keeps overlay changes off the package marker so a broker bump does not reinstall Pi", () => {
     const packages = ["npm:pi-mcp-adapter@2.12.1"];
     const base = companionPiLayoutIdentity({
