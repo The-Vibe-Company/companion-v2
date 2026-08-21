@@ -128,3 +128,22 @@ test("can replace real provider credentials with controller-owned lease capabili
   assert.equal(Object.values(env).includes("box-real-controller-value"), false);
   assert.equal(Object.values(env).includes("zai-real-controller-value"), false);
 });
+
+test("preserves controller-owned capabilities across nested evaluator environments", () => {
+  const controllerEnv = safeEnvironment({
+    PATH: "/bin",
+    HOME: "/tmp/research",
+    BOX_API_KEY: "box-real-controller-value",
+    ZAI_API_KEY: "zai-real-controller-value",
+  }, {
+    boxApiKey: "box-disposable-proxy-token",
+    zaiApiKey: "research-prompt-ack-only",
+  });
+
+  const evaluatorEnv = safeEnvironment(controllerEnv);
+
+  assert.equal(evaluatorEnv.BOX_API_KEY, "");
+  assert.equal(evaluatorEnv.COMPANION_BOX_API_KEY, "box-disposable-proxy-token");
+  assert.equal(evaluatorEnv.ZAI_API_KEY, "");
+  assert.equal(evaluatorEnv.COMPANION_BOX_E2E_ZAI_API_KEY, "research-prompt-ack-only");
+});
