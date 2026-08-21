@@ -1205,7 +1205,7 @@ describe("Runtime v2 real-process control plane", () => {
     }, 30_000);
     await waitFor("permanent Box deletion", async () => {
       const state = await simulatorState();
-      return state.boxes.length === 0
+      return !boxById(state, box.id)
         && state.deletions.some((operation) =>
           operation.targetId === box.id && operation.status === "completed");
     });
