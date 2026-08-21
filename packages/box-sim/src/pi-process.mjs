@@ -490,7 +490,13 @@ function run() {
   }
 
   function handleCommand(command) {
-    if (!command || typeof command !== "object" || Array.isArray(command)) {
+    // JSON.parse only ever yields plain objects, arrays, or primitives here; reject everything
+    // that is not a plain object without a runtime typeof gate.
+    if (
+      !command
+      || Array.isArray(command)
+      || Object.getPrototypeOf(command) !== Object.prototype
+    ) {
       writeJson({ type: "response", command: "parse", success: false, error: "Command must be an object" });
       return;
     }
@@ -551,7 +557,8 @@ function run() {
       return;
     }
 
-    if (typeof command.message !== "string" || command.message.length === 0) {
+    // A prompt must arrive as a JSON string primitive; constructor identity is the contract check.
+    if (command.message === null || command.message?.constructor !== String || command.message.length === 0) {
       correlatedResponse(command, { success: false, error: "Prompt message is required" });
       return;
     }
