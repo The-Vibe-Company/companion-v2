@@ -1,4 +1,8 @@
-import { COMPANION_PLUGIN_TRIGGER_PROVIDERS, COMPANION_TRIGGER_PROVIDERS } from "@companion/contracts";
+import {
+  COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS,
+  COMPANION_PLUGIN_TRIGGER_PROVIDERS,
+  COMPANION_TRIGGER_PROVIDERS,
+} from "@companion/contracts";
 import { describe, expect, it } from "vitest";
 import {
   COMPANION_PERMISSION_BROKER_EXTENSION_FILE,
@@ -46,6 +50,10 @@ describe("Companion Pi interaction extension", () => {
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("apply after this turn ends");
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("finish the connection in the web UI");
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("const CONFIG_MAX_IDS = 20");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain(
+      `const CONNECT_PROVIDERS = ${JSON.stringify(COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS)} as string[]`,
+    );
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain("conductor");
   });
 
   it("accepts config proposal titles without treating them as questions", () => {

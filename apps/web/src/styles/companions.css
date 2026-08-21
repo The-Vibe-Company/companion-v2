@@ -203,6 +203,20 @@
   color: var(--color-fg);
 }
 
+.companions-plugin-icon--conductor,
+.companions-plugin-dialog--conductor .og-dialog__ic {
+  background: #f5f4f2;
+  border-color: #e3e1dd;
+  color: #111110;
+}
+
+:root[data-theme="dark"] .companions-plugin-icon--conductor,
+:root[data-theme="dark"] .companions-plugin-dialog--conductor .og-dialog__ic {
+  background: var(--color-fg);
+  border-color: var(--color-fg);
+  color: var(--color-canvas);
+}
+
 :root[data-theme="dark"] .companions-plugin-icon--github,
 :root[data-theme="dark"] .companions-plugin-dialog--github .og-dialog__ic {
   background: var(--color-fg);

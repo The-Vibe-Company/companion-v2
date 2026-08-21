@@ -19,6 +19,18 @@ import { Icon } from "../Icon";
 import { Dialog } from "../org/primitives";
 import { PluginMark } from "./PluginMark";
 
+export interface CompanionPluginsApi {
+  deleteCompanionPlugin: typeof deleteCompanionPlugin;
+  saveCompanionPlugin: typeof saveCompanionPlugin;
+  startCompanionPluginOAuth: typeof startCompanionPluginOAuth;
+}
+
+const defaultCompanionPluginsApi: CompanionPluginsApi = {
+  deleteCompanionPlugin,
+  saveCompanionPlugin,
+  startCompanionPluginOAuth,
+};
+
 function providerName(value: string): string {
   return value
     .split("-")
@@ -28,10 +40,12 @@ function providerName(value: string): string {
 
 function AddMcpDialog({
   orgId,
+  api,
   onAdded,
   onClose,
 }: {
   orgId: string;
+  api: CompanionPluginsApi;
   onAdded: (account: CompanionPluginAccount) => void;
   onClose: () => void;
 }) {
@@ -50,7 +64,7 @@ function AddMcpDialog({
     const data = new FormData(form);
     const nextProvider = String(data.get("provider") ?? "").trim().toLocaleLowerCase("en-US");
     const nextLabel = String(data.get("label") ?? "").trim();
-    const nextTransport = (String(data.get("transport") ?? transport) || "http") as "http" | "stdio";
+    const nextTransport = data.get("transport") === "stdio" ? "stdio" : "http";
     const nextEndpoint = String(data.get("endpoint") ?? "").trim();
     const nextArgs = String(data.get("args") ?? "").trim();
     const nextCredentialName = String(data.get("credential_name") ?? "").trim();
@@ -97,7 +111,7 @@ function AddMcpDialog({
         };
 
     try {
-      const account = await saveCompanionPlugin(orgId, input);
+      const account = await api.saveCompanionPlugin(orgId, input);
       onAdded(account);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "This MCP account could not be connected.");
@@ -176,7 +190,7 @@ function AddMcpDialog({
             name="transport"
             value={transport}
             onChange={(event) => {
-              const next = event.target.value as "http" | "stdio";
+              const next = event.target.value === "stdio" ? "stdio" : "http";
               setTransport(next);
               const form = formRef.current;
               if (!form) return;
@@ -245,10 +259,12 @@ function AddMcpDialog({
 /** Connect one product-curated plugin through its brokered OAuth flow. */
 function CatalogConnectDialog({
   orgId,
+  api,
   server,
   onClose,
 }: {
   orgId: string;
+  api: CompanionPluginsApi;
   server: CompanionPluginCatalogEntry;
   onClose: () => void;
 }) {
@@ -270,7 +286,7 @@ function CatalogConnectDialog({
     setError(null);
     let redirecting = false;
     try {
-      const authorizationUrl = await startCompanionPluginOAuth(orgId, {
+      const authorizationUrl = await api.startCompanionPluginOAuth(orgId, {
         server_name: companionPluginOAuthServerNameSchema.parse(server.server_name),
         label: trimmed,
       });
@@ -386,10 +402,12 @@ export function CompanionPlugins({
   orgId,
   initialAccounts,
   onBack,
+  api = defaultCompanionPluginsApi,
 }: {
   orgId: string;
   initialAccounts: CompanionPluginAccount[];
   onBack: () => void;
+  api?: CompanionPluginsApi;
 }) {
   const [accounts, setAccounts] = useState(initialAccounts);
   const [adding, setAdding] = useState(false);
@@ -449,7 +467,7 @@ export function CompanionPlugins({
     setRemoving(account.id);
     setError(null);
     try {
-      await deleteCompanionPlugin(orgId, account.id);
+      await api.deleteCompanionPlugin(orgId, account.id);
       setAccounts((current) => current.filter((item) => item.id !== account.id));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "This MCP account could not be disconnected.");
@@ -498,7 +516,7 @@ export function CompanionPlugins({
           {groups.length === 0 ? (
             <div className="companions-plugin-empty">
               <p>No plugins connected yet.</p>
-              <p>Connect Linear, GitHub, or Notion below, or add a custom MCP server.</p>
+              <p>Connect Linear, GitHub, Notion, or Conductor below, or add a custom MCP server.</p>
             </div>
           ) : (
             <div className="companions-plugin-list">
@@ -548,6 +566,7 @@ export function CompanionPlugins({
       {adding && (
         <AddMcpDialog
           orgId={orgId}
+          api={api}
           onAdded={(account) => {
             setAccounts((current) => [...current, account]);
             setAdding(false);
@@ -559,6 +578,7 @@ export function CompanionPlugins({
       {connecting && (
         <CatalogConnectDialog
           orgId={orgId}
+          api={api}
           server={connecting}
           onClose={() => setConnecting(null)}
         />

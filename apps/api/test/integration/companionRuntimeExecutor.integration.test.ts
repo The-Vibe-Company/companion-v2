@@ -3551,7 +3551,10 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     };
     const connectProposal: CompanionConfigProposal = {
       kind: "config",
-      connect_plugin: { server_name: "github", reason: "Need issues" },
+      connect_plugin: {
+        server_name: "conductor",
+        reason: "Need Conductor workspace access",
+      },
     };
 
     // The module-level handle is optional, and TypeScript does not carry the guard above into a
