@@ -8,6 +8,9 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 const SNAPSHOT_PATTERN = /^companion-l14-[a-f0-9]{12}$/;
 const MAX_PROVIDER_TTL_SECONDS = 2_592_000;
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
+const RUNTIME_ATTESTATION_DEADLINE_MS = 20_000;
+const RUNTIME_ATTESTATION_POLL_MS = 250;
+const RUNTIME_ATTESTATION_COMMAND_SECONDS = 5;
 
 function jsonBody(buffer) {
   if (buffer.length === 0) return null;
@@ -626,51 +629,73 @@ printf 'node_path %s\\n' "$companion_node_bin"
 printf 'pi_uid %s\\n' "$(/usr/bin/stat -Lc '%u' "$companion_pi_bin")"
 printf 'pi_mode %s\\n' "$(/usr/bin/stat -Lc '%a' "$companion_pi_bin")"
 printf 'uid %s\\n' "$(/usr/bin/id -u)"`;
-    const response = await fetch(
-      `${this.#upstreamBase}/boxes/${encodeURIComponent(boxId)}/commands`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.#apiKey}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ command, timeoutSeconds: 15 }),
-      },
-    );
-    if (!response.ok) throw new Error("lease proxy could not capture runtime attestation");
-    const body = await response.json();
-    const lines = String(body?.stdout ?? "").split(/\r?\n/);
-    const hashes = Object.fromEntries(lines
-      .map((line) => /^(pi|node) ([a-f0-9]{64})$/.exec(line))
-      .filter(Boolean)
-      .map((match) => [match[1], match[2]]));
-    const paths = Object.fromEntries(lines
-      .map((line) => /^(pi_path|node_path) (\/[A-Za-z0-9._/@+-]{1,500})$/.exec(line))
-      .filter(Boolean)
-      .map((match) => [match[1], match[2]]));
-    const ownership = Object.fromEntries(lines
-      .map((line) => /^(pi_uid|pi_mode) ([0-9]{1,10})$/.exec(line))
-      .filter(Boolean)
-      .map((match) => [match[1], match[2]]));
-    const uid = /(?:^|\n)uid ([1-9][0-9]{0,9})(?:\n|$)/.exec(String(body?.stdout ?? ""))?.[1];
-    const piMode = ownership.pi_mode;
-    const piUid = ownership.pi_uid;
-    const safePiMode = /^[0-7]{3,4}$/.test(piMode ?? "")
-      && (Number.parseInt(piMode, 8) & 0o022) === 0;
-    if (body?.success !== true || !/^[a-f0-9]{64}$/.test(hashes.pi ?? "")
-      || !/^[a-f0-9]{64}$/.test(hashes.node ?? "")
-      || !paths.pi_path || !paths.node_path || !uid || !safePiMode
-      || (piUid !== "0" && piUid !== uid)) {
-      throw new Error("lease proxy received invalid runtime attestation");
+    const deadline = Date.now() + RUNTIME_ATTESTATION_DEADLINE_MS;
+    for (;;) {
+      await this.#assertLeaseOwner();
+      let body = null;
+      try {
+        const response = await fetch(
+          `${this.#upstreamBase}/boxes/${encodeURIComponent(boxId)}/commands`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${this.#apiKey}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              command,
+              timeoutSeconds: RUNTIME_ATTESTATION_COMMAND_SECONDS,
+            }),
+            signal: AbortSignal.timeout(
+              Math.max(1, Math.min(7_000, deadline - Date.now())),
+            ),
+          },
+        );
+        if (response.ok) body = await response.json().catch(() => null);
+      } catch {
+        body = null;
+      }
+      await this.#assertLeaseOwner();
+      const lines = String(body?.stdout ?? "").split(/\r?\n/);
+      const hashes = Object.fromEntries(lines
+        .map((line) => /^(pi|node) ([a-f0-9]{64})$/.exec(line))
+        .filter(Boolean)
+        .map((match) => [match[1], match[2]]));
+      const paths = Object.fromEntries(lines
+        .map((line) => /^(pi_path|node_path) (\/[A-Za-z0-9._/@+-]{1,500})$/.exec(line))
+        .filter(Boolean)
+        .map((match) => [match[1], match[2]]));
+      const ownership = Object.fromEntries(lines
+        .map((line) => /^(pi_uid|pi_mode) ([0-9]{1,10})$/.exec(line))
+        .filter(Boolean)
+        .map((match) => [match[1], match[2]]));
+      const uid = /(?:^|\n)uid ([1-9][0-9]{0,9})(?:\n|$)/
+        .exec(String(body?.stdout ?? ""))?.[1];
+      const piMode = ownership.pi_mode;
+      const piUid = ownership.pi_uid;
+      const safePiMode = /^[0-7]{3,4}$/.test(piMode ?? "")
+        && (Number.parseInt(piMode, 8) & 0o022) === 0;
+      if (body?.success === true && /^[a-f0-9]{64}$/.test(hashes.pi ?? "")
+        && /^[a-f0-9]{64}$/.test(hashes.node ?? "")
+        && paths.pi_path && paths.node_path && uid && safePiMode
+        && (piUid === "0" || piUid === uid)) {
+        return {
+          ...hashes,
+          piPath: paths.pi_path,
+          nodePath: paths.node_path,
+          piUid,
+          piMode,
+          uid,
+        };
+      }
+      if (body?.success === true) {
+        throw new Error("lease proxy received invalid runtime attestation");
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("lease proxy received invalid runtime attestation");
+      }
+      await new Promise((resolvePause) => setTimeout(resolvePause, RUNTIME_ATTESTATION_POLL_MS));
     }
-    return {
-      ...hashes,
-      piPath: paths.pi_path,
-      nodePath: paths.node_path,
-      piUid,
-      piMode,
-      uid,
-    };
   }
 
   async prove(input) {
