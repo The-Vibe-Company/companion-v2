@@ -18,8 +18,8 @@ const REPLY_TIMEOUT_MS = 3 * 60_000;
 const IMAGE_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const RESEARCH_TAG_PATTERN = /^box-startup-[a-z0-9-]{1,48}$/;
-// A missing named snapshot must still exercise the same cold install as production. Pin Pi to the
-// layout-14 fixture rather than letting a fallback float to an untested release.
+// The provider canary must exercise the same cold install as production when its optional named
+// snapshot disappears. Keep Pi pinned to the layout-14 fixture rather than floating to an untested release.
 const E2E_PI_INSTALL_COMMAND = "npm install --global @earendil-works/pi-coding-agent@0.84.2";
 
 class RuntimeChangeE2EError extends Error {
@@ -115,18 +115,11 @@ function pause(milliseconds: number): Promise<void> {
 }
 
 type RuntimeChangeCreateInput = Omit<BoxGenerationCreateInput, "from">;
+type RuntimeChangeCreationSource = "base" | "named_snapshot" | "base_fallback";
 type RuntimeChangeCreateClient = Pick<
   BoxRuntimeLifecycleClient,
-  "createOrRecoverGenerationBox" | "createGenerationBoxAfterObservedAbsence"
+  "findGenerationBoxes" | "createGenerationBoxAfterObservedAbsence"
 >;
-
-function isConfirmedMissingSnapshot(error: unknown): boolean {
-  return error instanceof BoxRuntimeAdapterError
-    && !error.outcomeUnknown
-    && !error.retryable
-    && error.status < 500
-    && (error.providerCode === "unknown_snapshot" || error.stableCode === "box_not_found");
-}
 
 export async function createRuntimeChangeGenerationBox(input: {
   lifecycle: RuntimeChangeCreateClient;
@@ -134,19 +127,47 @@ export async function createRuntimeChangeGenerationBox(input: {
   image: string | null;
 }): Promise<{
   box: BoxGenerationCreateResult;
-  source: "base" | "named_snapshot" | "base_fallback";
+  source: RuntimeChangeCreationSource;
 }> {
+  const discovered = await input.lifecycle.findGenerationBoxes({
+    companionId: input.create.companionId,
+    generation: input.create.generation,
+    deadlineAt: input.create.deadlineAt,
+    ...(input.create.signal ? { signal: input.create.signal } : {}),
+  });
+  if (discovered.canonical) {
+    return {
+      box: {
+        ...discovered,
+        outcome: "recovered",
+        boxId: discovered.canonical.id,
+      },
+      source: input.image === null ? "base" : "named_snapshot",
+    };
+  }
   try {
-    const box = await input.lifecycle.createOrRecoverGenerationBox({
+    const box = await input.lifecycle.createGenerationBoxAfterObservedAbsence({
       ...input.create,
       ...(input.image === null ? {} : { from: input.image }),
     });
     return { box, source: input.image === null ? "base" : "named_snapshot" };
   } catch (error) {
-    if (input.image === null || !isConfirmedMissingSnapshot(error)) throw error;
+    const missingSnapshot = error instanceof BoxRuntimeAdapterError
+      && !error.outcomeUnknown
+      && !error.retryable
+      && error.status < 500
+      && error.stableCode === "box_not_found";
+    if (input.image === null || !missingSnapshot) throw error;
     const box = await input.lifecycle.createGenerationBoxAfterObservedAbsence(input.create);
     return { box, source: "base_fallback" };
   }
+}
+
+export function shouldExerciseRuntimeChangeResume(
+  source: RuntimeChangeCreationSource,
+  eventName: string | undefined,
+): boolean {
+  return source !== "base_fallback" || eventName === "schedule";
 }
 
 async function waitForReadyBox(runtime: AsciiBoxCompanionRuntime, boxId: string): Promise<void> {
@@ -290,6 +311,7 @@ async function main(): Promise<number> {
   let cleanupError: unknown = null;
   let providerReadyAt: number | null = null;
   let providerStartAt: number | null = null;
+  let creationSource: RuntimeChangeCreationSource = "base";
   const startedAt = Date.now();
   try {
     await phase("create", async () => {
@@ -305,6 +327,7 @@ async function main(): Promise<number> {
         },
       });
       const created = creation.box;
+      creationSource = creation.source;
       if (creation.source === "base_fallback") {
         write({
           phase: "create_image_fallback",
@@ -421,96 +444,99 @@ async function main(): Promise<number> {
       }
     });
 
-    await phase("stop_archive", async () => {
-      if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
-      await runtime.stopPiDaemon({ boxId });
-      await runtime.archiveExistingBox({ boxId });
-      await waitForArchivedBox(runtime, boxId);
-    });
+    if (shouldExerciseRuntimeChangeResume(creationSource, process.env.GITHUB_EVENT_NAME)) {
+      await phase("stop_archive", async () => {
+        if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
+        await runtime.stopPiDaemon({ boxId });
+        await runtime.archiveExistingBox({ boxId });
+        await waitForArchivedBox(runtime, boxId);
+      });
 
-    let resumeReadyAt = 0;
-    const resumeStartedAt = Date.now();
-    await phase("resume", async () => {
-      if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
-      await runtime.resumeExistingBox({ boxId });
-      await waitForReadyBox(runtime, boxId);
-      resumeReadyAt = Date.now();
-      write({
-        phase: "resume_provider_start",
-        status: "succeeded",
-        duration_ms: resumeReadyAt - resumeStartedAt,
+      let resumeReadyAt = 0;
+      const resumeStartedAt = Date.now();
+      await phase("resume", async () => {
+        if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
+        await runtime.resumeExistingBox({ boxId });
+        await waitForReadyBox(runtime, boxId);
+        resumeReadyAt = Date.now();
+        write({
+          phase: "resume_provider_start",
+          status: "succeeded",
+          duration_ms: resumeReadyAt - resumeStartedAt,
+        });
+        stagingLeg = "resume";
+        const refreshed = await runtime.stageExistingBox({
+          companionId,
+          runtimeGeneration: generation,
+          orgId,
+          boxId,
+          clientSurface: "web",
+          providerAuth: { zai: { type: "api_key", key: config.zaiApiKey } },
+          replaceProviderAuth: false,
+          modelId: config.modelId,
+          mcpCredentials: [],
+          mcpAccounts: [],
+          skills: [],
+          reuseSkills: true,
+          instructions: "You are a CI delivery probe. Follow the user request exactly.",
+        });
+        write({
+          phase: "resume_staging_stats",
+          status: "succeeded",
+          staging_mode: refreshed.stagingMode,
+          skill_bytes_transferred: refreshed.skillBytesTransferred,
+        });
       });
-      stagingLeg = "resume";
-      const refreshed = await runtime.stageExistingBox({
-        companionId,
-        runtimeGeneration: generation,
-        orgId,
-        boxId,
-        clientSurface: "web",
-        providerAuth: { zai: { type: "api_key", key: config.zaiApiKey } },
-        replaceProviderAuth: false,
-        modelId: config.modelId,
-        mcpCredentials: [],
-        mcpAccounts: [],
-        skills: [],
-        reuseSkills: true,
-        instructions: "You are a CI delivery probe. Follow the user request exactly.",
-      });
-      write({
-        phase: "resume_staging_stats",
-        status: "succeeded",
-        staging_mode: refreshed.stagingMode,
-        skill_bytes_transferred: refreshed.skillBytesTransferred,
-      });
-    });
 
-    if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
-    await phase("resume_start_pi", async () => {
-      if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
-      await runtime.startPiDaemon({ boxId });
-    });
-    const resumed = await phase("resume_broker_preflight", async () => {
-      if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
-      const state = await runtime.brokerState({ boxId });
-      if (state.activeAttemptId !== null) {
-        throw new RuntimeChangeE2EError("unexpected_active_attempt");
-      }
-      return state;
-    });
-    await phase("resume_message", async () => {
-      if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
-      const attemptId = randomUUID();
-      const marker = `E2E_RESUME_${randomUUID().replaceAll("-", "").toUpperCase()}`;
-      const ackStartedAt = Date.now();
-      const dispatch = await runtime.dispatchPrompt({
-        boxId,
-        attemptId,
-        requestId: `runtime-change-e2e-resume:${attemptId}`,
-        message: `Reply with exactly ${marker} and no other text.`,
+      await phase("resume_start_pi", async () => {
+        if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
+        await runtime.startPiDaemon({ boxId });
       });
-      if (dispatch.outcome !== "accepted" || dispatch.attemptId !== attemptId) {
-        throw new RuntimeChangeE2EError(`dispatch_${dispatch.outcome}`);
-      }
-      write({
-        phase: "resume_prompt_ack",
-        status: "succeeded",
-        duration_ms: Date.now() - ackStartedAt,
-        initial_cursor: dispatch.initialCursor,
+      const resumed = await phase("resume_broker_preflight", async () => {
+        if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
+        const state = await runtime.brokerState({ boxId });
+        if (state.activeAttemptId !== null) {
+          throw new RuntimeChangeE2EError("unexpected_active_attempt");
+        }
+        return state;
       });
-      write({
-        phase: "resume_send_to_prompt_ack",
-        status: "succeeded",
-        duration_ms: Date.now() - resumeStartedAt,
+      await phase("resume_message", async () => {
+        if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
+        const attemptId = randomUUID();
+        const marker = `E2E_RESUME_${randomUUID().replaceAll("-", "").toUpperCase()}`;
+        const ackStartedAt = Date.now();
+        const dispatch = await runtime.dispatchPrompt({
+          boxId,
+          attemptId,
+          requestId: `runtime-change-e2e-resume:${attemptId}`,
+          message: `Reply with exactly ${marker} and no other text.`,
+        });
+        if (dispatch.outcome !== "accepted" || dispatch.attemptId !== attemptId) {
+          throw new RuntimeChangeE2EError(`dispatch_${dispatch.outcome}`);
+        }
+        write({
+          phase: "resume_prompt_ack",
+          status: "succeeded",
+          duration_ms: Date.now() - ackStartedAt,
+          initial_cursor: dispatch.initialCursor,
+        });
+        write({
+          phase: "resume_send_to_prompt_ack",
+          status: "succeeded",
+          duration_ms: Date.now() - resumeStartedAt,
+        });
+        write({
+          phase: "resume_ready_to_prompt_ack",
+          status: "succeeded",
+          duration_ms: Date.now() - resumeReadyAt,
+        });
+        if (!config.promptAckOnly) {
+          await waitForReply({ runtime, boxId, attemptId, marker, cursor: resumed.tailCursor });
+        }
       });
-      write({
-        phase: "resume_ready_to_prompt_ack",
-        status: "succeeded",
-        duration_ms: Date.now() - resumeReadyAt,
-      });
-      if (!config.promptAckOnly) {
-        await waitForReply({ runtime, boxId, attemptId, marker, cursor: resumed.tailCursor });
-      }
-    });
+    } else {
+      write({ phase: "resume_cycle", status: "skipped", code: "cold_fallback" });
+    }
   } catch (error) {
     primaryError = error;
   } finally {
