@@ -24,6 +24,10 @@ import type {
 
 export const BOX_WARM_TTL_SECONDS = 21_600;
 const PROVIDER_POLL_INTERVAL_MS = 1_000;
+// Waiting for a Box to leave provisioning is the one poll where every interval lands directly on
+// the member's send-to-ack latency, and a ready GET is cheap, so this loop polls four times as
+// often as the conservative default used for absence confirmation and archival waits.
+const READY_POLL_INTERVAL_MS = 250;
 const ABSENCE_CONFIRMATION_INTERVAL_MS = 30_000;
 const PROVIDER_CALL_DEADLINE_MS = 30_000;
 const OPERATION_DEADLINE_MS = 10 * 60 * 1_000;
@@ -332,7 +336,7 @@ async function waitForReadyBox(context: OperationContext): Promise<void> {
         action: "restart_box",
       });
     }
-    await context.deps.clock.sleep(PROVIDER_POLL_INTERVAL_MS, context.session.signal);
+    await context.deps.clock.sleep(READY_POLL_INTERVAL_MS, context.session.signal);
   }
 }
 
