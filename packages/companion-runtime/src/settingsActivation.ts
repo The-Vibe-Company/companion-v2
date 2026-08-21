@@ -7,6 +7,7 @@ export interface StagedRuntimeSettings {
   appliedSettingsRevision: bigint;
   appliedSkillsRevision: number | null;
   materialExpiresAt: Date | null;
+  skillsDigest?: string;
 }
 
 interface PiActivationObservation {

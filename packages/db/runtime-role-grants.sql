@@ -235,9 +235,11 @@ BEGIN
     IF NOT FOUND THEN
       RAISE EXCEPTION 'retired companion runtime role % does not exist', retired_runtime_role;
     END IF;
+
     IF retired_attributes.rolcanlogin THEN
       RAISE EXCEPTION 'retired companion runtime role % must already be NOLOGIN', retired_runtime_role;
     END IF;
+
     IF retired_attributes.rolsuper
       OR retired_attributes.rolbypassrls
       OR retired_attributes.rolinherit THEN
@@ -493,6 +495,25 @@ BEGIN
           'public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface)'::regprocedure
         ];
       END IF;
+    END IF;
+
+    -- 0111 separates publication-only Skill updates from dispatch-required revisions.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_runtime_get_skill_update_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'
+    ) IS NOT NULL THEN
+      companion_runtime_functions := companion_runtime_functions || ARRAY[
+        'public.companion_runtime_get_skill_update_material(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'::regprocedure,
+        'public.companion_runtime_commit_skill_update(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer,integer,jsonb,jsonb,text)'::regprocedure,
+        'public.companion_runtime_record_skill_update_error(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer,text,text)'::regprocedure
+      ];
+      companion_api_functions := companion_api_functions || ARRAY[
+        'public.companion_api_require_skill_revision(uuid,uuid)'::regprocedure,
+        'public.companion_api_read_skill_sync(uuid,uuid)'::regprocedure,
+        'public.companion_api_list_skill_sync(uuid)'::regprocedure
+      ];
+      internal_runtime_functions := internal_runtime_functions || ARRAY[
+        'public.companion_runtime_keep_available_skill_revision()'::regprocedure
+      ];
     END IF;
 
     -- 0099 adds the executor's harvest recorder. It is resolved on its own sentinel so a database

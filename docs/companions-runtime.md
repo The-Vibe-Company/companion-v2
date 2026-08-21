@@ -72,7 +72,8 @@ cleanup ownership until the provider side effect is confirmed.
 
 - runtime generation and canonical `box_id`;
 - observed Box state and Pi daemon state;
-- installed disk-layout version and applied settings/skills revision;
+- installed disk-layout version, applied settings/skills revision, immutable Skill refs, and the
+  proved Skills-tree digest;
 - current Pi invocation id and last successful observation;
 - lifecycle-safe deletion/retirement metadata.
 
@@ -335,11 +336,18 @@ and that command still has five minutes so a budget that stops short of the mark
 The member's next message short-circuits on the marker. Staging writes the bounded control-plane
 files as one versioned bundle whose allowlisted paths, modes, sizes, and SHA-256 digests are checked
 before atomic rename. The bundle is deleted on every command exit, explicitly retried for deletion
-when command submission fails, and its absence is a fail-closed precondition of Box archive. If the Skills revision
-already matches, staging also proves an on-disk tree digest over every selected archive checksum,
-including the independently versioned bundled Companion skill. Only then may it refresh
+when command submission fails, and its absence is a fail-closed precondition of Box archive. If the
+required Skills revision is satisfied, staging proves an on-disk tree digest over the checkpointed
+immutable archive checksums, including the bundled Companion skill. A later publication does not
+invalidate that wake path. Only then may it refresh
 credentials/configuration without transferring or rebuilding the Skills tree; otherwise the baked
 Companion archive is copied locally and only additional Skill bytes cross the provider file API.
+
+Publishing a selected Skill advances an available revision, not the minimum dispatch revision.
+Restart Pi, Stop Box, Full Box restart, and settings apply stop Pi before a credential-free,
+Skills-only atomic stage. Stop then archives; restart paths refresh credentials before starting Pi.
+A safe auto-update failure remains pending and the lifecycle continues with the old tree; first
+install and explicit selection changes remain fail-closed.
 
 Runtime commits each supported event projection and its monotonic cursor in one PostgreSQL
 transaction. A supported `agent_settled` or Pi process-exit observation records the terminal
@@ -566,8 +574,9 @@ operator-safe message; Viewer receives a generic unavailable message.
 
 ## Skills, MCP, and provider credentials
 
-Web and mobile-web runtime work stages the currently authorized selected Skills plus the bundled
-Companion skill. Empty selection means no library Skills. Native mobile receives no Skills source.
+Web and mobile-web runtime work uses the checkpointed installed Skill versions plus the bundled
+Companion skill when the required revision is satisfied. Empty selection means no library Skills.
+Native mobile receives no Skills source.
 The control plane never executes package scripts.
 
 Member MCP accounts are selected by id, labeled, envelope-encrypted, and write-only. Runtime decrypts
@@ -659,8 +668,9 @@ slower cadence when stable. There is no SSE and no Box-to-control-plane push age
 
 Desktop remains Owner/Editor-only and never wakes Box. API performs user authorization, then sends a
 short-lived HMAC-authenticated request to a private runtime endpoint. Runtime revalidates access and
-mints the provider desktop URL only when the exact current settings and Skills revisions are already
-staged and every selected personal Skill and MCP account belongs to that actor. A pending restage or
+mints the provider desktop URL only when current settings and the minimum required Skills revision
+are staged and every installed personal Skill and selected MCP account belongs to that actor. A
+publication-only update does not deny desktop; a required restage or
 foreign personal resource denies desktop access, so a warm shared Box cannot bypass creator-only
 privacy. Runtime atomically consumes the signed request id through a narrow `SECURITY DEFINER`
 function; PostgreSQL retains it through the signature window so replay is rejected across replicas

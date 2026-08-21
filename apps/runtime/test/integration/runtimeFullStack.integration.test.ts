@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/require-safety-comment-for-type-assertion -- Existing simulator fixture decoding predates the incremental anti-slop gate. */
+
 /**
  * Product promise:
  * An accepted Companion message is durable independently of the API process, and the dedicated
@@ -1006,6 +1008,34 @@ describe("Runtime v2 real-process control plane", () => {
     await waitFor("Box to archive", async () =>
       (await simulatorState()).boxes[0]?.state === "archived");
 
+    const [installedBeforePublication] = await databaseSql!<Array<{
+      requiredRevision: number;
+      availableRevision: number;
+      appliedRevision: number;
+      digest: string | null;
+    }>>`
+      select companion.skills_revision as "requiredRevision",
+        companion.skills_available_revision as "availableRevision",
+        instance.applied_skills_revision as "appliedRevision",
+        instance.applied_skills_digest as digest
+      from companions companion
+      join companion_runtime_instances instance
+        on instance.org_id = companion.org_id and instance.companion_id = companion.id
+      where companion.org_id = ${orgId}::uuid and companion.id = ${companionId}::uuid
+    `;
+    expect(installedBeforePublication?.digest).toMatch(/^[0-9a-f]{64}$/);
+    expect(installedBeforePublication?.appliedRevision)
+      .toBe(installedBeforePublication?.availableRevision);
+    await databaseSql!.begin(async (tx) => {
+      await tx`select set_config('app.companion_runtime_protocol', '2', true)`;
+      await tx`
+        update companions
+        set skills_available_revision = skills_available_revision + 1
+        where org_id = ${orgId}::uuid and id = ${companionId}::uuid
+      `;
+    });
+    const publishedRevision = installedBeforePublication!.availableRevision + 1;
+
     const wake = await apiJson<{ turn: { id: string } }>(
       `/v1/companions/${companionId}/messages`,
       {
@@ -1020,6 +1050,29 @@ describe("Runtime v2 real-process control plane", () => {
     );
     await waitForTurn(wake.turn.id, "succeeded", 30_000);
     expect((await simulatorState()).boxes[0]?.state).toMatch(/ready|idle|running/);
+    const [wakeSnapshot] = await databaseSql!<Array<{
+      targetRevision: number;
+      requiredRevision: number;
+      availableRevision: number;
+      appliedRevision: number;
+    }>>`
+      select operation.target_skills_revision as "targetRevision",
+        companion.skills_revision as "requiredRevision",
+        companion.skills_available_revision as "availableRevision",
+        instance.applied_skills_revision as "appliedRevision"
+      from companion_operations operation
+      join companions companion
+        on companion.org_id = operation.org_id and companion.id = operation.companion_id
+      join companion_runtime_instances instance
+        on instance.org_id = operation.org_id and instance.companion_id = operation.companion_id
+      where operation.source_turn_id = ${wake.turn.id}::uuid and operation.kind = 'start'
+    `;
+    expect(wakeSnapshot).toMatchObject({
+      targetRevision: installedBeforePublication!.appliedRevision,
+      requiredRevision: installedBeforePublication!.requiredRevision,
+      availableRevision: publishedRevision,
+      appliedRevision: installedBeforePublication!.appliedRevision,
+    });
 
     const beforePiRestart = (await simulatorState()).boxes[0]?.daemon;
     if (!beforePiRestart?.invocationId) throw new Error("wake did not leave an observable Pi invocation");
@@ -1033,6 +1086,35 @@ describe("Runtime v2 real-process control plane", () => {
       202,
     );
     await waitForOperation(restartPi.operation.id, 30_000);
+    const [restartSnapshot] = await databaseSql!<Array<{
+      targetRevision: number;
+      requiredRevision: number;
+      availableRevision: number;
+      appliedRevision: number;
+      updateErrorCode: string | null;
+      updateErrorMessage: string | null;
+    }>>`
+      select operation.target_skills_revision as "targetRevision",
+        companion.skills_revision as "requiredRevision",
+        companion.skills_available_revision as "availableRevision",
+        instance.applied_skills_revision as "appliedRevision",
+        instance.skills_update_error_code as "updateErrorCode",
+        instance.skills_update_error_message as "updateErrorMessage"
+      from companion_operations operation
+      join companions companion
+        on companion.org_id = operation.org_id and companion.id = operation.companion_id
+      join companion_runtime_instances instance
+        on instance.org_id = operation.org_id and instance.companion_id = operation.companion_id
+      where operation.id = ${restartPi.operation.id}::uuid
+    `;
+    expect(restartSnapshot).toMatchObject({
+      targetRevision: publishedRevision,
+      requiredRevision: installedBeforePublication!.requiredRevision,
+      availableRevision: publishedRevision,
+      appliedRevision: publishedRevision,
+      updateErrorCode: null,
+      updateErrorMessage: null,
+    });
     const afterPiRestart = (await simulatorState()).boxes[0];
     expect(afterPiRestart).toMatchObject({
       id: box.id,

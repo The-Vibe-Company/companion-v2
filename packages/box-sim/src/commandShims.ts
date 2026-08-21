@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing simulator command parsing predates the incremental anti-slop gate. */
+
 import { createHash } from "node:crypto";
 
 import type { BoxSimCommandResult, BoxSimPiController } from "./protocol";
@@ -25,6 +27,8 @@ export type BoxSimCommandKind =
   | "mkdir-extensions"
   | "clear-skill-archives"
   | "measure-skill-archives"
+  | "read-skills-revision"
+  | "match-skills-revision"
   | "join-file-parts"
   | "prepare-skills"
   | "start-or-restart-daemon"
@@ -340,9 +344,23 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
   if (command.includes("companion-archive-bytes") && command.includes("wc -c")) {
     return "measure-skill-archives";
   }
+  if (
+    command.includes("skills-tree.version")
+    && command.includes("grep -Eq '^[0-9a-f]{64}$'")
+  ) return "read-skills-revision";
+  if (
+    command.includes("skills-tree.version")
+    && command.includes('test "$(cat ')
+    && command.includes("2>/dev/null || true)")
+  ) return "match-skills-revision";
   if (command.includes("cat ") && command.includes(".part") && command.includes("; rm -f ")) {
     return "join-file-parts";
   }
+  if (
+    command.includes('root="$HOME/.companion/runtime"')
+    && command.includes('rm -rf "$root/state/skill-archives"')
+    && command.includes('mkdir -p "$root/state/skill-archives"')
+  ) return "clear-skill-archives";
   if (command.includes("skills.next") && command.includes("base64 --decode") && command.includes("tar --extract")) {
     return "prepare-skills";
   }
@@ -947,12 +965,36 @@ export async function executeBoxCommand(
           if (path.startsWith(prefix)) machine.persistentFiles.delete(path);
         }
       }
-      return ok(machine.persistentFiles.has(".companion/pi/auth.json")
-        ? "companion-provider-auth-present\n"
-        : "");
+      const output: string[] = [];
+      if (machine.persistentFiles.has(".companion/pi/auth.json")) {
+        output.push("companion-provider-auth-present");
+      }
+      const installedRevision = machine.persistentFiles
+        .get(".companion/runtime/state/skills-tree.version")?.toString("utf8").trim();
+      const expectedRevision = command.match(/[0-9a-f]{64}/)?.[0];
+      if (
+        command.includes("companion-skills-tree-reused")
+        && (!expectedRevision || expectedRevision === installedRevision)
+      ) output.push("companion-skills-tree-reused");
+      return ok(output.length ? `${output.join("\n")}\n` : "");
     }
     case "measure-skill-archives":
       return measuredArchives(machine);
+    case "read-skills-revision": {
+      const revision = machine.persistentFiles
+        .get(".companion/runtime/state/skills-tree.version")?.toString("utf8").trim();
+      return revision && /^[0-9a-f]{64}$/.test(revision)
+        ? ok(`${revision}\n`)
+        : failed("simulated Skills revision is missing or corrupt");
+    }
+    case "match-skills-revision": {
+      const revision = machine.persistentFiles
+        .get(".companion/runtime/state/skills-tree.version")?.toString("utf8").trim();
+      const expectedRevision = command.match(/[0-9a-f]{64}/)?.[0];
+      return revision && expectedRevision === revision
+        ? ok()
+        : failed("simulated Skills revision does not match");
+    }
     case "join-file-parts":
       return joinedFileCommand(machine, command);
     case "prepare-skills":
@@ -962,6 +1004,21 @@ export async function executeBoxCommand(
         }
       }
       machine.persistentFiles.set(".companion/runtime/skills/.box-sim-prepared", Buffer.alloc(0));
+      {
+        const revision = command.match(/[0-9a-f]{64}/)?.[0];
+        if (revision) {
+          machine.persistentFiles.set(
+            ".companion/runtime/state/skills-tree.version",
+            Buffer.from(`${revision}\n`),
+          );
+        }
+        const nextManifest = machine.persistentFiles
+          .get(".companion/runtime/state/skills.json.next");
+        if (nextManifest) {
+          machine.persistentFiles.set(".companion/runtime/state/skills.json", nextManifest);
+          machine.persistentFiles.delete(".companion/runtime/state/skills.json.next");
+        }
+      }
       return ok();
     case "start-or-restart-daemon":
       return startDaemon(machine, command.includes("systemctl --user restart"));

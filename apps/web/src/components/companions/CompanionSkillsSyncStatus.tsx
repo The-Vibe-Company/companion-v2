@@ -31,16 +31,19 @@ export function CompanionSkillsSyncStatus({ companion }: { companion: Companion 
       : "Up to date on the Box";
   } else if (runtime.skills_last_error) {
     status = "warn";
-    label = `Box sync failed: ${runtime.skills_last_error} · retries on next start or save`;
-  } else if (runtime.state === "provisioning") {
+    label = `Box sync failed: ${runtime.skills_last_error} · retries on next Pi stop or restart`;
+  } else if (
+    runtime.latest_operation
+    && ["stop", "restart_pi", "restart_box", "apply_settings"].includes(
+      runtime.latest_operation.kind,
+    )
+    && ["pending", "running"].includes(runtime.latest_operation.status)
+  ) {
     status = "unknown";
     label = "Applying to the Box...";
-  } else if (runtime.state === "running") {
-    status = "warn";
-    label = "Not yet on the Box · reapplies on next start";
   } else {
     status = "unknown";
-    label = "Saved · applies on next wake";
+    label = "Update available · applies on next Pi stop or restart";
   }
 
   return (

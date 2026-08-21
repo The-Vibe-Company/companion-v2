@@ -213,9 +213,11 @@ references where possible; transient connector values use the owner-only runtime
 appear in logs, API responses, audit metadata, or projections. The provider auth file remains on
 Box disk only where Pi must refresh it.
 
-Runtime may reuse the extracted Skills tree only after both the durable selected-Skills revision and
-an on-disk digest of the exact archive checksums match. That digest includes the bundled Companion
-skill, whose deployment checksum changes independently of tenant selections.
+PostgreSQL distinguishes the latest available selected-Skills revision from the minimum revision
+required before dispatch. A publication advances only the available revision, so waking a Box
+reuses its installed immutable version snapshot. Explicit selection and invalidation changes remain
+blocking. User Stop, Restart Pi, Full Box restart, and settings apply stop Pi before atomically
+replacing the tree. A failed publication update preserves the old tree and does not block lifecycle.
 
 Every Companion may also call the Skills Hub API itself, with the same scopes: skills read/write,
 secret reads, and Skill Database read/write. Access is unconditional, so no surface asks anyone to
@@ -294,7 +296,8 @@ attempt. Viewer/list/thread/status reads remain PostgreSQL-only.
 Desktop minting remains an Owner/Editor action that cannot wake Box. The API authorizes the member,
 then calls a private runtime endpoint with a short-lived HMAC request. Runtime revalidates the
 Companion and returns the fresh provider URL only after the current actor owns every selected
-personal resource and the applied settings/Skills revisions exactly match desired state. This gate
+personal resource and applied settings/Skills revisions satisfy required state. A publication-only
+Skills update may remain pending. This gate
 keeps a warm Box unavailable during a cross-actor restage. Each authenticated request id is
 atomically consumed through a narrow `SECURITY DEFINER` function and retained in PostgreSQL until
 its signature window expires, so replicas and restarted processes share one replay boundary;

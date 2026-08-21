@@ -265,12 +265,17 @@ export function CompanionSettings({
   }, [companion.id, deletionActive, lifecycleActive, orgId, pendingRestartTarget]);
 
   const skillsPending = latest.runtime.skills_applied_revision < latest.runtime.skills_revision;
-  // A recorded restage failure will not clear on its own — only the next start or save retries it —
-  // so it stops the poll rather than reading the same answer forever.
+  const skillApplyingOperation = latest.runtime.latest_operation;
+  // A publication alone never starts a fast poll: only a lifecycle that actually stops Pi can
+  // advance this watermark.
   const skillsApplying = skillsPending
     && !deletionActive
     && !latest.runtime.skills_last_error
-    && (latest.runtime.state === "provisioning" || latest.runtime.state === "running");
+    && skillApplyingOperation !== null
+    && ["stop", "restart_pi", "restart_box", "apply_settings"].includes(
+      skillApplyingOperation.kind,
+    )
+    && ["pending", "running"].includes(skillApplyingOperation.status);
   useEffect(() => {
     if (!skillsApplying) return;
     let ticks = 0;
