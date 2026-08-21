@@ -62,6 +62,9 @@ excluded product surface.
 - Public releases pin an exact immutable version and checksum.
 - Desired GitHub mirrors and Skill Database cleanup are idempotent.
 - Frontend work follows root `DESIGN.md`.
+- Every Companion plugin in `COMPANION_PLUGIN_CATALOG` must ship with its provider mark (logo):
+  add the SVG path to `MARK_PATHS` in `apps/web/src/components/companions/PluginMark.tsx` and its
+  tile colors in `companions.css`. The provider union type makes a missing mark a build failure.
 - The API authorizes and persists runtime intent, then returns. It never calls Box or Pi and never
   owns a runtime lease.
 - `apps/runtime` is the sole lifecycle owner. The API and worker have no Box credential; runtime

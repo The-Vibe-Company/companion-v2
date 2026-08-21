@@ -5,6 +5,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import {
   COMPANION_ATTACHMENT_FILENAME_PATTERN,
   COMPANION_ATTACHMENT_MAX_BYTES,
+  COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS,
   COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS,
   COMPANION_OUTPUT_ATTACHMENT_MAX_COUNT,
   COMPANION_ROUTINE_MAX_PER_COMPANION,
@@ -542,7 +543,7 @@ function companionConfigInstructions(includeCatalog: boolean): string {
     "  none. A github trigger also carries a repo and the events to watch (push, pull_request, ...).",
     "  Approval creates it after this turn ends and shows the person a webhook URL to paste into",
     "  the external service; a proposed trigger never fires in the turn that proposed it.",
-    "- request_plugin_connection asks for a Linear, GitHub, or Notion connection that does not exist yet.",
+    `- request_plugin_connection asks for a supported plugin connection (${COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS.join(", ")}) that does not exist yet.`,
     "  The person finishes it in the web UI; propose attaching it on a later turn.",
   ].join("\n");
   if (!includeCatalog) return body;

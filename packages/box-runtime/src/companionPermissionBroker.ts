@@ -495,9 +495,9 @@ export default function companionPermissionBroker(pi: ExtensionAPI) {
     name: "request_plugin_connection",
     label: "Request plugin connection",
     description:
-      "Ask the human to connect a new Linear, GitHub, or Notion plugin. This only proposes; they finish the connection in the web UI. After it is connected, propose attaching it on a later turn.",
+      "Ask the human to connect a supported plugin (${COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS.join(", ")}). This only proposes; they finish the connection in the web UI. After it is connected, propose attaching it on a later turn.",
     parameters: Type.Object({
-      server_name: Type.String({ description: "linear, github, or notion" }),
+      server_name: Type.String({ description: "One of: ${COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS.join(", ")}" }),
       reason: Type.Optional(Type.String({ description: "Why this plugin is needed" })),
     }),
     executionMode: "sequential",

@@ -21,6 +21,7 @@ interface CompanionPluginOAuthServerConfig {
   remoteUrl: string;
   resourceMetadataUrl: string;
   authorizationServer: string;
+  authorizationMetadataUrl?: string;
   scopes: readonly string[];
   allowedOrigins: readonly string[];
   dynamicRegistration: boolean;
@@ -52,6 +53,16 @@ export const COMPANION_PLUGIN_OAUTH_SERVERS = {
     authorizationServer: "https://mcp.notion.com",
     scopes: ["default"],
     allowedOrigins: ["https://mcp.notion.com"],
+    dynamicRegistration: true,
+  },
+  "build.conductor/mcp": {
+    provider: "conductor",
+    remoteUrl: "https://api.conductor.build/mcp",
+    resourceMetadataUrl: "https://api.conductor.build/.well-known/oauth-protected-resource/mcp",
+    authorizationServer: "https://api.conductor.build/mcp",
+    authorizationMetadataUrl: "https://api.conductor.build/.well-known/oauth-authorization-server/mcp",
+    scopes: ["mcp:tools", "offline_access"],
+    allowedOrigins: ["https://api.conductor.build"],
     dynamicRegistration: true,
   },
 } as const satisfies Record<CompanionPluginOAuthServerName, CompanionPluginOAuthServerConfig>;
@@ -257,7 +268,9 @@ export async function beginCompanionPluginOAuth(input: {
     client = githubClient(input.env ?? process.env);
   } else {
     const authorizationMetadata = await oauthJson(
-      `${server.authorizationServer}/.well-known/oauth-authorization-server`,
+      "authorizationMetadataUrl" in server
+        ? server.authorizationMetadataUrl
+        : `${server.authorizationServer}/.well-known/oauth-authorization-server`,
       { method: "GET" },
       fetchImpl,
       discoveryFailure,
