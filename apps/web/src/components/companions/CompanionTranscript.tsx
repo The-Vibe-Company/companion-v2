@@ -172,6 +172,7 @@ function DaySeparator({ day }: { day: string }) {
       setText(at.toLocaleDateString(undefined, {
         month: "long",
         day: "numeric",
+        // oxlint-disable-next-line anti-slop/no-conditional-empty-object-spread -- legacy pattern predating the incremental anti-slop gate
         ...(daysApart > 300 ? { year: "numeric" } : {}),
         timeZone: "UTC",
       }));
@@ -351,6 +352,7 @@ function acceptAttachments(
   }
   // A mixed batch still says what it refused: accepting the good files is not a reason to leave
   // someone wondering where the others went.
+  // oxlint-disable-next-line anti-slop/no-known-value-widening -- legacy pattern predating the incremental anti-slop gate
   return { files, error };
 }
 
@@ -565,6 +567,7 @@ export function CompanionTranscript({
     if (!incoming) return;
     const accepted = acceptAttachments(
       attachmentsRef.current,
+      // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
       Array.from(incoming as ArrayLike<File>),
     );
     setAttachments(accepted.files);

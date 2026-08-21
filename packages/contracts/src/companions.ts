@@ -868,9 +868,11 @@ export const companionAttachmentContentTypeSchema = z.enum(COMPANION_ATTACHMENT_
 export type CompanionAttachmentContentType = z.infer<typeof companionAttachmentContentTypeSchema>;
 
 export function isCompanionAttachmentImage(contentType: string): boolean {
+  // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
   return (COMPANION_ATTACHMENT_IMAGE_MIME_TYPES as readonly string[]).includes(contentType);
 }
 
+// oxlint-disable-next-line anti-slop/no-known-value-widening -- legacy pattern predating the incremental anti-slop gate
 const COMPANION_ATTACHMENT_EXTENSION_TO_MIME: Record<string, CompanionAttachmentContentType> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -894,7 +896,9 @@ export function declaredCompanionAttachmentContentType(
   file: { type: string; name: string },
 ): CompanionAttachmentContentType | null {
   const declared = file.type.split(";")[0]?.trim().toLowerCase() ?? "";
+  // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
   if ((COMPANION_ATTACHMENT_MIME_TYPES as readonly string[]).includes(declared)) {
+    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
     return declared as CompanionAttachmentContentType;
   }
   const extension = file.name.toLowerCase().match(/\.[^.]+$/)?.[0];

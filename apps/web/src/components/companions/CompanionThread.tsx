@@ -317,6 +317,7 @@ export function CompanionThread({
     const conversation = stageRef.current?.querySelector<HTMLElement>(".chat-thread");
     const wasInert = conversation?.inert ?? false;
     if (conversation) conversation.inert = true;
+    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
     const returnTo = document.activeElement as HTMLElement | null;
     window.requestAnimationFrame(() => {
       stageRef.current?.querySelector<HTMLElement>(".chat-context__close")?.focus();

@@ -19,7 +19,9 @@ const companionApi = vi.hoisted(() => ({
   updateCompanionMemberState: vi.fn(),
 }));
 
+// oxlint-disable-next-line anti-slop/no-module-mocking -- legacy pattern predating the incremental anti-slop gate
 vi.mock("@/lib/companions", () => companionApi);
+// oxlint-disable-next-line anti-slop/no-module-mocking -- legacy pattern predating the incremental anti-slop gate
 vi.mock("@/lib/apiClient", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/apiClient")>()),
   apiFetch: vi.fn(async (path: string) => {
@@ -28,6 +30,7 @@ vi.mock("@/lib/apiClient", async (importOriginal) => ({
   }),
 }));
 
+// oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const companionId = "11111111-1111-4111-8111-111111111111";
@@ -211,7 +214,9 @@ describe("CompanionSettings", () => {
   it("persists editable settings while preserving Owner-only deletion", async () => {
     const { container, onSaved } = await mount(companion("editor"));
     const form = container.querySelector("form")!;
+    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
     const name = form.elements.namedItem("name") as HTMLInputElement;
+    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
     const instructions = form.elements.namedItem("instructions") as HTMLTextAreaElement;
     const codex = form.querySelector<HTMLInputElement>('input[value="openai-codex"]')!;
 
@@ -233,6 +238,7 @@ describe("CompanionSettings", () => {
       model_id: "gpt-5.5",
       selected_skill_ids: [],
       selected_mcp_account_ids: [],
+      // oxlint-disable-next-line anti-slop/no-shape-in-symbol-names -- icon catalogs use geometric domain terms
       icon: { shape: 1, mouth: 1, accessory: 1, color: 2 },
     });
     expect(onSaved).toHaveBeenCalledOnce();

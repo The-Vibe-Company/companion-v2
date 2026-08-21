@@ -122,6 +122,7 @@ export function CompanionSettings({
     companion.selected_mcp_account_ids,
   );
   const [icon, setIcon] = useState<CompanionIconValue>({
+    // oxlint-disable-next-line anti-slop/no-shape-in-symbol-names -- icon catalogs use geometric domain terms
     shape: companion.icon?.shape ?? 1,
     mouth: companion.icon?.mouth ?? 1,
     accessory: companion.icon?.accessory ?? 1,
@@ -349,6 +350,7 @@ export function CompanionSettings({
       || selectedSkillIds.some((id, index) => id !== companion.selected_skill_ids[index])
       || selectedMcpAccountIds.length !== companion.selected_mcp_account_ids.length
       || selectedMcpAccountIds.some((id, index) => id !== companion.selected_mcp_account_ids[index])
+      // oxlint-disable-next-line anti-slop/no-shape-in-symbol-names -- icon catalogs use geometric domain terms
       || icon.shape !== (companion.icon?.shape ?? 1)
       || icon.mouth !== (companion.icon?.mouth ?? 1)
       || icon.accessory !== (companion.icon?.accessory ?? 1)
@@ -386,6 +388,7 @@ export function CompanionSettings({
       setName(updated.name);
       setInstructions(updated.persona ?? "");
       setIcon({
+        // oxlint-disable-next-line anti-slop/no-shape-in-symbol-names -- icon catalogs use geometric domain terms
         shape: updated.icon?.shape ?? 1,
         mouth: updated.icon?.mouth ?? 1,
         accessory: updated.icon?.accessory ?? 1,
