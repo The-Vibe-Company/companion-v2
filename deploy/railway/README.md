@@ -237,9 +237,9 @@ purge-capable staged release before deploying a release that removes the legacy 
    stop, wake-on-send, second response, and permanent deletion.
 
 This release already contains the guarded final legacy-removal migration. Do not deploy it until the
-saved purge report is empty, the target environment has seven consecutive green daily real-provider
-canaries, and no P0/P1 runtime incident is open. If an installation has not met those prerequisites,
-keep its currently deployed purge-capable release disabled and postpone this release.
+saved purge report is empty and no P0/P1 runtime incident is open. If an installation has not met
+those prerequisites, keep its currently deployed purge-capable release disabled and postpone this
+release.
 
 ## Health and operations
 
@@ -255,7 +255,7 @@ Do not enable Railway Serverless/App Sleeping for runtime: wake-on-send is a Box
 license to suspend the durable claim loop.
 
 The [Runtime v2 operations runbook](../../docs/runbooks/companions-runtime.md) is authoritative for
-the kill switch, legacy purge, incidents, rollback, and daily canary. In particular:
+the kill switch, legacy purge, incidents, and rollback. In particular:
 
 - an ambiguous prompt dispatch becomes `interrupted`; never replay it automatically;
 - Full Box restart is user-confirmed only and is not incident healing;
@@ -263,7 +263,3 @@ the kill switch, legacy purge, incidents, rollback, and daily canary. In particu
   never starts a legacy executor;
 - provider payloads, raw Pi lines, signed desktop URLs, tokens, and plaintext credentials must not
   be copied into logs, tickets, or durable error fields.
-
-The real-provider canary is a separate scheduled workflow, not a merge gate. Configure its dedicated
-account secrets listed in the runbook; absent configuration must remain a visible non-green
-`not_configured` run.

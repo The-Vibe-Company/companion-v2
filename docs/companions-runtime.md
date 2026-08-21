@@ -229,8 +229,8 @@ name and six-hour TTL. It then lists again, chooses the canonical id, and durabl
 A transport loss around the create POST is irreducibly ambiguous under the provider's current
 public contract. It interrupts the operation explicitly and may leave one unnamed Box which
 auto-archives after the provisional TTL; runtime never guesses its id from account-wide list order
-and never creates a second Box automatically. Operators must keep the real-provider canary and
-orphan inventory enabled until the provider offers a create idempotency key or client-supplied name.
+and never creates a second Box automatically. Operators must keep orphan inventory enabled until
+the provider offers a create idempotency key or client-supplied name.
 An exact-name Box discovered after any acknowledged create is always adopted and permanently
 deleted before retirement.
 
@@ -701,9 +701,9 @@ accounts, Skills, secret rows, organizations, users, billing, and audit history.
 resumable after partial success.
 
 The stacked rollout retained legacy columns solely for deployability and never backfilled them. The
-final migration removes them; its release gate requires seven consecutive green real-provider
-canary days, no open P0/P1 runtime issue, and no resource remaining in the purge report. The
-immutable purge ledger remains owner-readable evidence; its mutating finalizer no longer exists.
+final migration removes them; its release gate requires no open P0/P1 runtime issue and no resource
+remaining in the purge report. The immutable purge ledger remains owner-readable evidence; its
+mutating finalizer no longer exists.
 
 ## Health, observability, and acceptance
 
@@ -723,8 +723,8 @@ Acceptance bounds:
 - inactivity settlement under ten minutes plus one sweep;
 - absolute settlement under two hours plus one sweep.
 
-The deterministic simulator and real-provider canary requirements live in `docs/testing.md`.
-Production cutover, kill-switch, purge, incident, rollback, and canary procedures live in
+The deterministic simulator requirements live in `docs/testing.md`.
+Production cutover, kill-switch, purge, incident, and rollback procedures live in
 `docs/runbooks/companions-runtime.md`.
 
 ### Development-only startup autoresearch

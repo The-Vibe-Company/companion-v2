@@ -332,8 +332,8 @@ billing, and audit rows survive.
 The stacked rollout temporarily retained old runtime columns without backfilling them. The final
 migration removes those columns together with every old executor, watermark, pool, reconciler,
 mutating purge function, and legacy grant. The release process admits that migration only after
-seven green canary days, no open P0/P1 runtime issue, and an empty purge report. The
-provider-operation ledger remains owner-readable cutover evidence.
+confirming there is no open P0/P1 runtime issue and the purge report is empty. The provider-operation
+ledger remains owner-readable cutover evidence.
 
 The feature flag remained disabled between purge and the asynchronous API/web cutover. Once v2 rows
 exist, rollback uses the kill switch rather than a legacy binary; no legacy executor may process
