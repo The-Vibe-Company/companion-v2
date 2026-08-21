@@ -194,14 +194,18 @@ with a base Box; without the variable, they use a base Box directly. The archive
 covers the provider restore/syscall path in either base-Box case.
 
 Every commit pushed to an internal pull request also creates a disposable Box from the configured
-runtime image, then stages the exact checkout's Pi layout and broker with the dedicated z.ai canary
-credential. The job starts Pi, dispatches a unique first message, requires both the correlated
-assistant marker and `agent_settled`, then requests irrevocable deletion in `finally` and confirms
-the Box is no longer readable. Only a same-repository PR authored and triggered by the repository's
-`COMPANION_BOX_E2E_TRUSTED_LOGIN` receives the dedicated canary credentials; forks and other
-contributors skip this real-provider job and retain the mandatory deterministic simulator gates.
-Before deletion the probe expunges persisted provider authentication, and a failed deletion is
-retried and reports only the safe disposable Box id needed for operator cleanup.
+runtime image, falling back once to an empty Box when that named snapshot is missing, then stages
+the exact checkout's Pi layout and broker with the dedicated z.ai canary credential. Ambiguous
+create failures are never replayed. The job starts Pi, dispatches a unique first message, requires
+both the correlated assistant marker and `agent_settled`, then requests irrevocable deletion in
+`finally` and confirms the Box is no longer readable. A non-scheduled cold fallback stops after
+that first correlated reply; the scheduled benchmark retains the full archive/resume cycle and its
+five-second SLO, so a persistently unavailable named image remains visible. Only a same-repository
+PR authored and triggered by the repository's `COMPANION_BOX_E2E_TRUSTED_LOGIN` receives the dedicated canary
+credentials; forks and other contributors skip this real-provider job and retain the mandatory
+deterministic simulator gates. Before deletion the probe expunges persisted provider authentication,
+and a failed deletion is retried and reports only the safe disposable Box id needed for operator
+cleanup.
 
 The real Box/Pi delivery test runs for every commit pushed to an internal pull request. After the
 Box is deleted, CI replaces a marked performance block at the very end of the pull request

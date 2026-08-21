@@ -440,10 +440,19 @@ function InstallGate({
   onDismiss: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const copiedTimerRef = useRef<number | null>(null);
+  const mountedRef = useRef(false);
   const [assistant, setAssistant] = useState<AssistantId>("claude-code");
   const [copied, setCopied] = useState(false);
   const [clipFailed, setClipFailed] = useState(false);
   useModalA11y(ref, onDismiss);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+    };
+  }, []);
 
   const base = apiBase();
   const meta = ASSISTANTS[assistant];
@@ -466,8 +475,13 @@ function InstallGate({
       setClipFailed(true);
       return;
     }
+    if (!mountedRef.current) return;
     setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
+    if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+    copiedTimerRef.current = window.setTimeout(() => {
+      copiedTimerRef.current = null;
+      setCopied(false);
+    }, 1800);
   }, [displayPrompt]);
 
   return (
@@ -590,12 +604,21 @@ export function LocalSkillDrawer({
 }) {
   const meta = STATUS_META[skill.status];
   const ref = useRef<HTMLDivElement>(null);
+  const copiedTimerRef = useRef<number | null>(null);
+  const mountedRef = useRef(false);
   const [copied, setCopied] = useState<CopiedKind | null>(null);
   const [confirm, setConfirm] = useState<"used" | null>(null);
   const [promptMode, setPromptMode] = useState<PromptMode>("default");
   const [clipFailed, setClipFailed] = useState(false);
 
   useModalA11y(ref, onClose);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+    };
+  }, []);
 
   const base = apiBase();
   const isInstalled = skill.status === "installed";
@@ -621,10 +644,15 @@ export function LocalSkillDrawer({
 
   const copyPrompt = useCallback(async (kind: CopiedKind = "prompt", value = prompt) => {
     if (!value || !(await writeClipboard(value))) return;
+    if (!mountedRef.current) return;
     setClipFailed(false);
     setConfirm(null);
     setCopied(kind);
-    setTimeout(() => setCopied(null), 1800);
+    if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+    copiedTimerRef.current = window.setTimeout(() => {
+      copiedTimerRef.current = null;
+      setCopied(null);
+    }, 1800);
   }, [prompt, writeClipboard]);
 
   const copyDefaultPrompt = useCallback(async () => {

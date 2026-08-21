@@ -1,17 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { z } from "zod";
 
 import {
   AsciiBoxCompanionRuntime,
   AsciiBoxMaintenanceClient,
   BoxRuntimeAdapterError,
   BoxRuntimeProviderError,
-  isCompanionRuntimeImageName,
   type BoxGenerationCreateInput,
   type BoxGenerationCreateResult,
   type BoxRuntimeLifecycleClient,
-  type CompanionPiBrokerEventPage,
 } from "../packages/box-runtime/src/index";
 
 const BOX_ID_PATTERN = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
@@ -21,43 +18,9 @@ const REPLY_TIMEOUT_MS = 3 * 60_000;
 const IMAGE_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const RESEARCH_TAG_PATTERN = /^box-startup-[a-z0-9-]{1,48}$/;
-// A missing named snapshot must still exercise the same cold install as production. Pin Pi to the
-// layout-14 fixture rather than letting a fallback float to an untested release.
+// The provider canary must exercise the same cold install as production when its optional named
+// snapshot disappears. Keep Pi pinned to the layout-14 fixture rather than floating to an untested release.
 const E2E_PI_INSTALL_COMMAND = "npm install --global @earendil-works/pi-coding-agent@0.84.2";
-
-interface ReportEvent {
-  phase: string;
-  status: string;
-  duration_ms?: number;
-  total_duration_ms?: number;
-  code?: string;
-  resource_id?: string;
-  resource_kind?: string;
-  operation?: string;
-  staging_mode?: string;
-  skill_bytes_transferred?: number;
-  initial_cursor?: number;
-  provider_call_count?: number;
-  operation_counts?: Record<string, number>;
-  operation_duration_ms?: Record<string, number>;
-  research_tag?: string;
-}
-type BrokerEvent = Extract<
-  CompanionPiBrokerEventPage["events"][number],
-  { kind: "pi_event" }
->["event"];
-const assistantTextBlockSchema = z.object({
-  type: z.literal("text"),
-  text: z.string(),
-}).passthrough();
-const ignoredAssistantBlockSchema = z.object({}).passthrough().transform(() => null);
-const assistantMessageEndSchema = z.object({
-  type: z.literal("message_end"),
-  message: z.object({
-    role: z.literal("assistant"),
-    content: z.array(z.union([assistantTextBlockSchema, ignoredAssistantBlockSchema])),
-  }).passthrough(),
-}).passthrough();
 
 class RuntimeChangeE2EError extends Error {
   readonly code: string;
@@ -116,19 +79,16 @@ function configuration(env: NodeJS.ProcessEnv) {
   };
 }
 
-function errorFromCause(cause: unknown): Error {
-  return cause instanceof Error ? cause : new RuntimeChangeE2EError("runtime_change_e2e_failed");
-}
-
-function safeCode(cause: unknown): string {
-  if (cause instanceof RuntimeChangeE2EError) return cause.code;
-  if (cause instanceof BoxRuntimeProviderError && SAFE_CODE_PATTERN.test(cause.stableCode)) {
-    return cause.stableCode;
+function safeCode(error: unknown): string {
+  if (error instanceof RuntimeChangeE2EError) return error.code;
+  if (error && typeof error === "object" && "stableCode" in error) {
+    const value = String(error.stableCode);
+    if (SAFE_CODE_PATTERN.test(value)) return value;
   }
   return "runtime_change_e2e_failed";
 }
 
-function write(event: ReportEvent): void {
+function write(event: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify(event)}\n`);
 }
 
@@ -155,50 +115,59 @@ function pause(milliseconds: number): Promise<void> {
 }
 
 type RuntimeChangeCreateInput = Omit<BoxGenerationCreateInput, "from">;
+type RuntimeChangeCreationSource = "base" | "named_snapshot" | "base_fallback";
 type RuntimeChangeCreateClient = Pick<
   BoxRuntimeLifecycleClient,
-  | "createOrRecoverGenerationBox"
-  | "createGenerationBoxAfterObservedAbsence"
-  | "listNamedSnapshots"
+  "findGenerationBoxes" | "createGenerationBoxAfterObservedAbsence"
 >;
-interface RuntimeChangeCreation {
-  box: BoxGenerationCreateResult;
-  source: "base" | "named_snapshot" | "replacement_snapshot" | "base_fallback";
-}
-
-function isConfirmedMissingSnapshot(cause: unknown): boolean {
-  return cause instanceof BoxRuntimeAdapterError
-    && !cause.outcomeUnknown
-    && !cause.retryable
-    && cause.status < 500
-    && (cause.providerCode === "unknown_snapshot" || cause.stableCode === "box_not_found");
-}
 
 export async function createRuntimeChangeGenerationBox(input: {
   lifecycle: RuntimeChangeCreateClient;
   create: RuntimeChangeCreateInput;
   image: string | null;
-}): Promise<RuntimeChangeCreation> {
-  const createInput: BoxGenerationCreateInput = { ...input.create };
-  if (input.image !== null) createInput.from = input.image;
-  try {
-    const box = await input.lifecycle.createOrRecoverGenerationBox(createInput);
-    return { box, source: input.image === null ? "base" : "named_snapshot" };
-  } catch (cause) {
-    if (input.image === null || !isConfirmedMissingSnapshot(cause)) throw cause;
-    const snapshots = await input.lifecycle.listNamedSnapshots({
-      deadlineAt: input.create.deadlineAt,
-    });
-    const replacement = snapshots
-      .filter((snapshot) => snapshot.status === "ready"
-        && snapshot.name !== input.image
-        && isCompanionRuntimeImageName(snapshot.name))
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-    const fallbackInput: BoxGenerationCreateInput = { ...input.create };
-    if (replacement !== undefined) fallbackInput.from = replacement.name;
-    const box = await input.lifecycle.createGenerationBoxAfterObservedAbsence(fallbackInput);
-    return { box, source: replacement === undefined ? "base_fallback" : "replacement_snapshot" };
+}): Promise<{
+  box: BoxGenerationCreateResult;
+  source: RuntimeChangeCreationSource;
+}> {
+  const discovered = await input.lifecycle.findGenerationBoxes({
+    companionId: input.create.companionId,
+    generation: input.create.generation,
+    deadlineAt: input.create.deadlineAt,
+    ...(input.create.signal ? { signal: input.create.signal } : {}),
+  });
+  if (discovered.canonical) {
+    return {
+      box: {
+        ...discovered,
+        outcome: "recovered",
+        boxId: discovered.canonical.id,
+      },
+      source: input.image === null ? "base" : "named_snapshot",
+    };
   }
+  try {
+    const box = await input.lifecycle.createGenerationBoxAfterObservedAbsence({
+      ...input.create,
+      ...(input.image === null ? {} : { from: input.image }),
+    });
+    return { box, source: input.image === null ? "base" : "named_snapshot" };
+  } catch (error) {
+    const missingSnapshot = error instanceof BoxRuntimeAdapterError
+      && !error.outcomeUnknown
+      && !error.retryable
+      && error.status < 500
+      && error.stableCode === "box_not_found";
+    if (input.image === null || !missingSnapshot) throw error;
+    const box = await input.lifecycle.createGenerationBoxAfterObservedAbsence(input.create);
+    return { box, source: "base_fallback" };
+  }
+}
+
+export function shouldExerciseRuntimeChangeResume(
+  source: RuntimeChangeCreationSource,
+  eventName: string | undefined,
+): boolean {
+  return source !== "base_fallback" || eventName === "schedule";
 }
 
 async function waitForReadyBox(runtime: AsciiBoxCompanionRuntime, boxId: string): Promise<void> {
@@ -231,26 +200,37 @@ async function requestPermanentDeletionWithRetry(
   lifecycle: AsciiBoxMaintenanceClient,
   boxId: string,
 ): Promise<Awaited<ReturnType<AsciiBoxMaintenanceClient["requestPermanentDeletion"]>>> {
-  let lastError: Error = new RuntimeChangeE2EError("cleanup_failed");
+  let lastError: unknown = new RuntimeChangeE2EError("cleanup_failed");
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
       return await lifecycle.requestPermanentDeletion({
         boxId,
         deadlineAt: Date.now() + 30_000,
       });
-    } catch (cause) {
-      lastError = errorFromCause(cause);
+    } catch (error) {
+      lastError = error;
       if (attempt < 3) await pause(1_000);
     }
   }
   throw lastError;
 }
 
-function assistantText(event: BrokerEvent): string | null {
-  const parsed = assistantMessageEndSchema.safeParse(event);
-  if (!parsed.success) return null;
-  return parsed.data.message.content
-    .flatMap((block) => block === null ? [] : [block.text])
+function assistantText(event: Record<string, unknown>): string | null {
+  if (event.type !== "message_end") return null;
+  const message = event.message;
+  if (!message || typeof message !== "object" || !("role" in message) || message.role !== "assistant") {
+    return null;
+  }
+  if (!("content" in message) || !Array.isArray(message.content)) return null;
+  return message.content
+    .filter((block): block is { type: "text"; text: string } =>
+      Boolean(block)
+      && typeof block === "object"
+      && "type" in block
+      && block.type === "text"
+      && "text" in block
+      && typeof block.text === "string")
+    .map((block) => block.text)
     .join("");
 }
 
@@ -327,10 +307,11 @@ async function main(): Promise<number> {
   const orgId = randomUUID();
   const generation = config.generation;
   let boxId: string | null = null;
-  let primaryError: Error | null = null;
-  let cleanupError: Error | null = null;
+  let primaryError: unknown = null;
+  let cleanupError: unknown = null;
   let providerReadyAt: number | null = null;
   let providerStartAt: number | null = null;
+  let creationSource: RuntimeChangeCreationSource = "base";
   const startedAt = Date.now();
   try {
     await phase("create", async () => {
@@ -346,25 +327,25 @@ async function main(): Promise<number> {
         },
       });
       const created = creation.box;
-      if (creation.source === "base_fallback" || creation.source === "replacement_snapshot") {
+      creationSource = creation.source;
+      if (creation.source === "base_fallback") {
         write({
           phase: "create_image_fallback",
           status: "succeeded",
-          code: creation.source,
+          code: "unknown_snapshot",
         });
       }
       if (!BOX_ID_PATTERN.test(created.boxId)) {
         throw new RuntimeChangeE2EError("invalid_provider_response");
       }
       boxId = created.boxId;
-      const resourceEvent: ReportEvent = {
+      write({
         phase: "resource",
         status: "created",
         resource_kind: "box",
         resource_id: boxId,
-      };
-      if (config.researchTag !== null) resourceEvent.research_tag = config.researchTag;
-      write(resourceEvent);
+        ...(config.researchTag ? { research_tag: config.researchTag } : {}),
+      });
       await lifecycle.applyGenerationBoxSettings({
         boxId,
         companionId,
@@ -463,98 +444,101 @@ async function main(): Promise<number> {
       }
     });
 
-    await phase("stop_archive", async () => {
-      if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
-      await runtime.stopPiDaemon({ boxId });
-      await runtime.archiveExistingBox({ boxId });
-      await waitForArchivedBox(runtime, boxId);
-    });
+    if (shouldExerciseRuntimeChangeResume(creationSource, process.env.GITHUB_EVENT_NAME)) {
+      await phase("stop_archive", async () => {
+        if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
+        await runtime.stopPiDaemon({ boxId });
+        await runtime.archiveExistingBox({ boxId });
+        await waitForArchivedBox(runtime, boxId);
+      });
 
-    let resumeReadyAt = 0;
-    const resumeStartedAt = Date.now();
-    await phase("resume", async () => {
-      if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
-      await runtime.resumeExistingBox({ boxId });
-      await waitForReadyBox(runtime, boxId);
-      resumeReadyAt = Date.now();
-      write({
-        phase: "resume_provider_start",
-        status: "succeeded",
-        duration_ms: resumeReadyAt - resumeStartedAt,
+      let resumeReadyAt = 0;
+      const resumeStartedAt = Date.now();
+      await phase("resume", async () => {
+        if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
+        await runtime.resumeExistingBox({ boxId });
+        await waitForReadyBox(runtime, boxId);
+        resumeReadyAt = Date.now();
+        write({
+          phase: "resume_provider_start",
+          status: "succeeded",
+          duration_ms: resumeReadyAt - resumeStartedAt,
+        });
+        stagingLeg = "resume";
+        const refreshed = await runtime.stageExistingBox({
+          companionId,
+          runtimeGeneration: generation,
+          orgId,
+          boxId,
+          clientSurface: "web",
+          providerAuth: { zai: { type: "api_key", key: config.zaiApiKey } },
+          replaceProviderAuth: false,
+          modelId: config.modelId,
+          mcpCredentials: [],
+          mcpAccounts: [],
+          skills: [],
+          reuseSkills: true,
+          instructions: "You are a CI delivery probe. Follow the user request exactly.",
+        });
+        write({
+          phase: "resume_staging_stats",
+          status: "succeeded",
+          staging_mode: refreshed.stagingMode,
+          skill_bytes_transferred: refreshed.skillBytesTransferred,
+        });
       });
-      stagingLeg = "resume";
-      const refreshed = await runtime.stageExistingBox({
-        companionId,
-        runtimeGeneration: generation,
-        orgId,
-        boxId,
-        clientSurface: "web",
-        providerAuth: { zai: { type: "api_key", key: config.zaiApiKey } },
-        replaceProviderAuth: false,
-        modelId: config.modelId,
-        mcpCredentials: [],
-        mcpAccounts: [],
-        skills: [],
-        reuseSkills: true,
-        instructions: "You are a CI delivery probe. Follow the user request exactly.",
-      });
-      write({
-        phase: "resume_staging_stats",
-        status: "succeeded",
-        staging_mode: refreshed.stagingMode,
-        skill_bytes_transferred: refreshed.skillBytesTransferred,
-      });
-    });
 
-    if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
-    await phase("resume_start_pi", async () => {
-      if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
-      await runtime.startPiDaemon({ boxId });
-    });
-    const resumed = await phase("resume_broker_preflight", async () => {
-      if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
-      const state = await runtime.brokerState({ boxId });
-      if (state.activeAttemptId !== null) {
-        throw new RuntimeChangeE2EError("unexpected_active_attempt");
-      }
-      return state;
-    });
-    await phase("resume_message", async () => {
-      if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
-      const attemptId = randomUUID();
-      const marker = `E2E_RESUME_${randomUUID().replaceAll("-", "").toUpperCase()}`;
-      const ackStartedAt = Date.now();
-      const dispatch = await runtime.dispatchPrompt({
-        boxId,
-        attemptId,
-        requestId: `runtime-change-e2e-resume:${attemptId}`,
-        message: `Reply with exactly ${marker} and no other text.`,
+      await phase("resume_start_pi", async () => {
+        if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
+        await runtime.startPiDaemon({ boxId });
       });
-      if (dispatch.outcome !== "accepted" || dispatch.attemptId !== attemptId) {
-        throw new RuntimeChangeE2EError(`dispatch_${dispatch.outcome}`);
-      }
-      write({
-        phase: "resume_prompt_ack",
-        status: "succeeded",
-        duration_ms: Date.now() - ackStartedAt,
-        initial_cursor: dispatch.initialCursor,
+      const resumed = await phase("resume_broker_preflight", async () => {
+        if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
+        const state = await runtime.brokerState({ boxId });
+        if (state.activeAttemptId !== null) {
+          throw new RuntimeChangeE2EError("unexpected_active_attempt");
+        }
+        return state;
       });
-      write({
-        phase: "resume_send_to_prompt_ack",
-        status: "succeeded",
-        duration_ms: Date.now() - resumeStartedAt,
+      await phase("resume_message", async () => {
+        if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
+        const attemptId = randomUUID();
+        const marker = `E2E_RESUME_${randomUUID().replaceAll("-", "").toUpperCase()}`;
+        const ackStartedAt = Date.now();
+        const dispatch = await runtime.dispatchPrompt({
+          boxId,
+          attemptId,
+          requestId: `runtime-change-e2e-resume:${attemptId}`,
+          message: `Reply with exactly ${marker} and no other text.`,
+        });
+        if (dispatch.outcome !== "accepted" || dispatch.attemptId !== attemptId) {
+          throw new RuntimeChangeE2EError(`dispatch_${dispatch.outcome}`);
+        }
+        write({
+          phase: "resume_prompt_ack",
+          status: "succeeded",
+          duration_ms: Date.now() - ackStartedAt,
+          initial_cursor: dispatch.initialCursor,
+        });
+        write({
+          phase: "resume_send_to_prompt_ack",
+          status: "succeeded",
+          duration_ms: Date.now() - resumeStartedAt,
+        });
+        write({
+          phase: "resume_ready_to_prompt_ack",
+          status: "succeeded",
+          duration_ms: Date.now() - resumeReadyAt,
+        });
+        if (!config.promptAckOnly) {
+          await waitForReply({ runtime, boxId, attemptId, marker, cursor: resumed.tailCursor });
+        }
       });
-      write({
-        phase: "resume_ready_to_prompt_ack",
-        status: "succeeded",
-        duration_ms: Date.now() - resumeReadyAt,
-      });
-      if (!config.promptAckOnly) {
-        await waitForReply({ runtime, boxId, attemptId, marker, cursor: resumed.tailCursor });
-      }
-    });
-  } catch (cause) {
-    primaryError = errorFromCause(cause);
+    } else {
+      write({ phase: "resume_cycle", status: "skipped", code: "cold_fallback" });
+    }
+  } catch (error) {
+    primaryError = error;
   } finally {
     const cleanupStartedAt = Date.now();
     try {
@@ -569,11 +553,11 @@ async function main(): Promise<number> {
         let deletion;
         try {
           deletion = await requestPermanentDeletionWithRetry(lifecycle, boxId);
-        } catch (cause) {
+        } catch (error) {
           if (!credentialsCleared) {
             throw new RuntimeChangeE2EError("credentials_and_delete_cleanup_failed");
           }
-          throw cause;
+          throw error;
         }
         if (deletion.outcome !== "absent" && deletion.operation.targetId !== boxId) {
           throw new RuntimeChangeE2EError("invalid_provider_response");
@@ -581,22 +565,21 @@ async function main(): Promise<number> {
         try {
           await runtime.existingBoxStatus({ boxId });
           throw new RuntimeChangeE2EError("box_still_visible_after_delete");
-        } catch (cause) {
-          if (!(cause instanceof BoxRuntimeProviderError) || cause.status !== 404) throw cause;
+        } catch (error) {
+          if (!(error instanceof BoxRuntimeProviderError) || error.status !== 404) throw error;
         }
       }
-    } catch (cause) {
-      cleanupError = errorFromCause(cause);
+    } catch (error) {
+      cleanupError = error;
     }
-    const cleanupEvent: ReportEvent = {
+    write({
       phase: "cleanup",
       status: cleanupError === null ? "succeeded" : "failed",
       duration_ms: Date.now() - cleanupStartedAt,
-    };
-    if (cleanupError !== null) cleanupEvent.code = safeCode(cleanupError);
-    if (cleanupError !== null && boxId !== null) cleanupEvent.resource_id = boxId;
-    if (config.researchTag !== null) cleanupEvent.research_tag = config.researchTag;
-    write(cleanupEvent);
+      ...(cleanupError === null ? {} : { code: safeCode(cleanupError) }),
+      ...(cleanupError === null || boxId === null ? {} : { resource_id: boxId }),
+      ...(config.researchTag ? { research_tag: config.researchTag } : {}),
+    });
   }
 
   const failed = primaryError !== null || cleanupError !== null;
@@ -619,18 +602,17 @@ async function main(): Promise<number> {
       ]),
     ),
   });
-  const resultEvent: ReportEvent = {
+  write({
     phase: "runtime_change_e2e",
     status: failed ? "failed" : "succeeded",
     total_duration_ms: Date.now() - startedAt,
-  };
-  if (failed) resultEvent.code = primaryError ? safeCode(primaryError) : "cleanup_failed";
-  write(resultEvent);
+    ...(failed ? { code: primaryError ? safeCode(primaryError) : "cleanup_failed" } : {}),
+  });
   return failed ? 1 : 0;
 }
 
-const entryPath = process.argv[1];
-if (entryPath !== undefined && import.meta.url === pathToFileURL(entryPath).href) {
+const entrypoint = process.argv[1] ? pathToFileURL(process.argv[1]).href : null;
+if (entrypoint === import.meta.url) {
   void main().then((exitCode) => {
     process.exitCode = exitCode;
   });
