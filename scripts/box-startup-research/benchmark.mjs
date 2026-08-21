@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { appendFile, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -92,7 +91,7 @@ const PROVIDER_OPERATIONS = new Set([
 ]);
 const BOX_ID_PATTERN = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
 const SNAPSHOT_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
-const CREDENTIAL_SHAPE = /(?:authorization\s*[:=]\s*bearer\s+[A-Za-z0-9._-]{16,}|(?:api[_-]?key|token|secret|password)\s*[:=]\s*["'][^"']{16,})/i;
+const CREDENTIAL_MATERIAL_PATTERN = /(?:authorization\s*[:=]\s*bearer\s+[A-Za-z0-9._-]{16,}|(?:api[_-]?key|token|secret|password)\s*[:=]\s*["'][^"']{16,})/i;
 
 function option(name) {
   const index = process.argv.indexOf(name);
@@ -105,11 +104,25 @@ function requiredOption(name) {
   return value;
 }
 
+function stringValue(value) {
+  if (value === null || value === undefined) return null;
+  try {
+    const candidate = String(value);
+    return candidate === value ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+function recordValue(value) {
+  return value !== null && !Array.isArray(value) && Object(value) === value;
+}
+
 export function evaluatorRuntimeEnvironment(source = process.env) {
   const env = {};
   for (const name of ESSENTIAL_ENVIRONMENT_NAMES) {
-    const value = source[name];
-    if (typeof value === "string" && value.length > 0) env[name] = value;
+    const value = stringValue(source[name]);
+    if (value !== null && value.length > 0) env[name] = value;
   }
   return env;
 }
@@ -127,45 +140,45 @@ export function cleanupEnvironment(source = process.env) {
 }
 
 export function safeEnvironment(source = process.env, options = {}) {
-  const boxKey = options.boxApiKey ?? source.BOX_API_KEY?.trim()
-    ?? source.COMPANION_BOX_API_KEY?.trim();
-  const zaiKey = options.zaiApiKey ?? source.ZAI_API_KEY?.trim()
-    ?? source.COMPANION_BOX_E2E_ZAI_API_KEY?.trim();
+  const boxKey = options.boxApiKey ?? (source.BOX_API_KEY?.trim()
+    || source.COMPANION_BOX_API_KEY?.trim());
+  const zaiKey = options.zaiApiKey ?? (source.ZAI_API_KEY?.trim()
+    || source.COMPANION_BOX_E2E_ZAI_API_KEY?.trim());
   if (!boxKey || !zaiKey) throw new Error("research evaluator credentials are not configured");
-  return {
-    ...evaluatorRuntimeEnvironment(source),
-    ...(typeof options.home === "string" ? {
-      HOME: options.home,
-      XDG_CACHE_HOME: resolve(options.home, ".cache"),
-      XDG_CONFIG_HOME: resolve(options.home, ".config"),
-      XDG_DATA_HOME: resolve(options.home, ".local/share"),
-    } : {}),
-    ...(typeof options.tempDirectory === "string" ? {
-      TMPDIR: options.tempDirectory,
-      TMP: options.tempDirectory,
-      TEMP: options.tempDirectory,
-    } : {}),
-    BOX_API_KEY: "",
-    COMPANION_BOX_API_KEY: boxKey,
-    ZAI_API_KEY: "",
-    COMPANION_BOX_E2E_ZAI_API_KEY: zaiKey,
-    COMPANION_BOX_E2E_PROMPT_ACK_ONLY: "1",
-    ...(typeof options.boxApiBase === "string" ? {
-      COMPANION_BOX_API_BASE: options.boxApiBase,
-    } : {}),
-    ...(typeof options.leaseTokenHash === "string" ? {
-      BOX_STARTUP_RESEARCH_LEASE_TOKEN_HASH: options.leaseTokenHash,
-    } : {}),
-    ...(typeof options.evaluatorChecksum === "string" ? {
-      BOX_STARTUP_RESEARCH_EVALUATOR_CHECKSUM: options.evaluatorChecksum,
-    } : {}),
-    ...(typeof options.logDirectory === "string" ? {
-      BOX_STARTUP_RESEARCH_LOG_DIRECTORY: options.logDirectory,
-    } : {}),
-    ...(typeof options.snapshotName === "string" ? {
-      BOX_STARTUP_RESEARCH_SNAPSHOT_NAME: options.snapshotName,
-    } : {}),
-  };
+  const env = evaluatorRuntimeEnvironment(source);
+  const home = stringValue(options.home);
+  if (home !== null) {
+    env.HOME = home;
+    env.XDG_CACHE_HOME = resolve(home, ".cache");
+    env.XDG_CONFIG_HOME = resolve(home, ".config");
+    env.XDG_DATA_HOME = resolve(home, ".local/share");
+  }
+  const tempDirectory = stringValue(options.tempDirectory);
+  if (tempDirectory !== null) {
+    env.TMPDIR = tempDirectory;
+    env.TMP = tempDirectory;
+    env.TEMP = tempDirectory;
+  }
+  env.BOX_API_KEY = "";
+  env.COMPANION_BOX_API_KEY = boxKey;
+  env.ZAI_API_KEY = "";
+  env.COMPANION_BOX_E2E_ZAI_API_KEY = zaiKey;
+  env.COMPANION_BOX_E2E_PROMPT_ACK_ONLY = "1";
+  const boxApiBase = stringValue(options.boxApiBase);
+  if (boxApiBase !== null) env.COMPANION_BOX_API_BASE = boxApiBase;
+  const leaseTokenHashValue = stringValue(options.leaseTokenHash);
+  if (leaseTokenHashValue !== null) {
+    env.BOX_STARTUP_RESEARCH_LEASE_TOKEN_HASH = leaseTokenHashValue;
+  }
+  const evaluatorChecksumValue = stringValue(options.evaluatorChecksum);
+  if (evaluatorChecksumValue !== null) {
+    env.BOX_STARTUP_RESEARCH_EVALUATOR_CHECKSUM = evaluatorChecksumValue;
+  }
+  const logDirectory = stringValue(options.logDirectory);
+  if (logDirectory !== null) env.BOX_STARTUP_RESEARCH_LOG_DIRECTORY = logDirectory;
+  const snapshotName = stringValue(options.snapshotName);
+  if (snapshotName !== null) env.BOX_STARTUP_RESEARCH_SNAPSHOT_NAME = snapshotName;
+  return env;
 }
 
 async function run(command, args, options = {}) {
@@ -198,7 +211,7 @@ async function run(command, args, options = {}) {
 
 export function assertSafeEvaluatorOutput(value, env = process.env) {
   assertNoCredentialMaterial(value, env);
-  if (CREDENTIAL_SHAPE.test(value)) {
+  if (CREDENTIAL_MATERIAL_PATTERN.test(value)) {
     throw new Error("evaluator output contains credential-shaped material");
   }
 }
@@ -214,7 +227,7 @@ function jsonEvents(contents) {
   return contents.split(/\r?\n/).flatMap((line) => {
     try {
       const value = JSON.parse(line);
-      return value && typeof value === "object" && !Array.isArray(value) ? [value] : [];
+      return recordValue(value) ? [value] : [];
     } catch {
       return [];
     }
@@ -299,8 +312,9 @@ export function sanitizeCycleEvents(events, resourcePrefixValue) {
       continue;
     }
     if (event.phase === "resource" && event.status === "created") {
-      if (event.resource_kind !== "box" || typeof event.resource_id !== "string"
-        || !BOX_ID_PATTERN.test(event.resource_id) || event.research_tag !== resourcePrefixValue) {
+      const resourceId = stringValue(event.resource_id);
+      if (event.resource_kind !== "box" || resourceId === null
+        || !BOX_ID_PATTERN.test(resourceId) || event.research_tag !== resourcePrefixValue) {
         throw new Error("evaluator created a resource outside the lease");
       }
       resources += 1;
@@ -308,7 +322,7 @@ export function sanitizeCycleEvents(events, resourcePrefixValue) {
         phase: "resource",
         status: "created",
         resource_kind: "box",
-        resource_id: event.resource_id,
+        resource_id: resourceId,
         research_tag: resourcePrefixValue,
       });
       continue;
@@ -509,8 +523,8 @@ export async function runLeasedBenchmark(raw = {}) {
     benchmark,
     cleanup: cleanupLedger,
     bakeDurationMs,
-    ...(snapshotSizeBytes === undefined ? {} : { snapshotSizeBytes }),
   };
+  if (snapshotSizeBytes !== undefined) result.snapshotSizeBytes = snapshotSizeBytes;
   process.stdout.write(`${RESULT_SENTINEL}${JSON.stringify(result)}\n`);
   return result;
 }
