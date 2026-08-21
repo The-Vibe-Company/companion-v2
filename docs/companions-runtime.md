@@ -722,8 +722,12 @@ credentials explicitly shadowed; the controller evaluates their validated commit
 disposable worktrees and treats no agent chat message as benchmark or cleanup evidence. Those
 worktrees run as an unprivileged OS identity with an isolated home and receive a random local proxy
 token rather than the provider credential. The proxy permits
-only the exact deterministic Box/snapshot lease, observes real provider-ready states and correlated
-broker prompt ACKs, and proves deletion directly before promotion. Before accepting an ACK it
+only the exact deterministic Box/snapshot lease, exposes one newest ready layout-14 parent
+read-only for the baker, fails closed without an eligible parent, and requires later Boxes to clone
+the deterministic target. Explicit non-2xx creates may retry with the same source; fetch failures or
+invalid 2xx observations make the create ambiguous and block the lease. It observes real
+provider-ready states and correlated broker prompt ACKs, and proves deletion directly before
+promotion. Before accepting an ACK it
 byte-attests the generated broker, Node and Pi against hashes it captured from the pristine baker
 Box before permitting candidate writes, the live systemd main process, and that process's ownership
 of the broker socket. `gpt-5.6-sol` audits and
