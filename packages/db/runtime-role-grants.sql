@@ -66,7 +66,8 @@ DECLARE
     'companion_legacy_purge_runs',
     'companion_legacy_purge_targets',
     'companion_message_attachments',
-    'companion_routines'
+    'companion_routines',
+    'companion_triggers'
   ];
   api_capability_managed_tables regclass[] := ARRAY[
     'public.companions'::regclass,
@@ -446,10 +447,24 @@ BEGIN
       ];
 
       -- 0098 changed companion_api_enqueue_turn's parameter list and added the attachment surface.
-      -- 0105 added optional routine origin columns with defaults. Name whichever signature this
-      -- database actually has: historical-migration replays and a migration-first deploy must both
-      -- stay fail-closed rather than error on a cast to a function that does not exist yet.
+      -- 0105 added optional routine origin columns with defaults, and 0110 added the optional
+      -- trigger origin pair. Name whichever signature this database actually has:
+      -- historical-migration replays and a migration-first deploy must both stay fail-closed
+      -- rather than error on a cast to a function that does not exist yet.
       IF pg_catalog.to_regprocedure(
+        'public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface,jsonb,uuid,text,uuid,text)'
+      ) IS NOT NULL THEN
+        companion_api_functions := companion_api_functions || ARRAY[
+          'public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface,jsonb,uuid,text,uuid,text)'::regprocedure,
+          'public.companion_api_read_attachment(uuid,uuid,uuid)'::regprocedure
+        ];
+        internal_runtime_functions := internal_runtime_functions || ARRAY[
+          'public.companion_api_assert_message_attachments(uuid,uuid,jsonb)'::regprocedure,
+          'public.companion_api_message_attachment_intent(jsonb)'::regprocedure,
+          'public.companion_api_stored_attachment_intent(uuid,uuid,text)'::regprocedure,
+          'public.companion_enqueue_attachment_object_deletion()'::regprocedure
+        ];
+      ELSIF pg_catalog.to_regprocedure(
         'public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface,jsonb,uuid,text)'
       ) IS NOT NULL THEN
         companion_api_functions := companion_api_functions || ARRAY[
@@ -587,6 +602,33 @@ BEGIN
     ) IS NOT NULL THEN
       companion_api_functions := companion_api_functions || ARRAY[
         'public.companion_api_answer_routine_decision(uuid,uuid,text,text,uuid,timestamp with time zone)'::regprocedure
+      ];
+    END IF;
+    -- 0110 adds webhook-fired Companion triggers. They are API-only: the webhook fires
+    -- synchronously in the API request through the Owner-impersonating enqueue, so the worker
+    -- receives no trigger capability at all.
+    IF pg_catalog.to_regprocedure(
+      'public.companion_api_list_triggers(uuid,uuid)'
+    ) IS NOT NULL THEN
+      companion_api_functions := companion_api_functions || ARRAY[
+        'public.companion_api_list_triggers(uuid,uuid)'::regprocedure,
+        'public.companion_api_create_trigger(uuid,uuid,uuid,text,text,text,text,boolean)'::regprocedure,
+        'public.companion_api_update_trigger(uuid,uuid,uuid,text,text,text,boolean)'::regprocedure,
+        'public.companion_api_rotate_trigger_secret(uuid,uuid,uuid,text)'::regprocedure,
+        'public.companion_api_delete_trigger(uuid,uuid,uuid)'::regprocedure,
+        'public.companion_webhook_get_trigger(uuid)'::regprocedure,
+        'public.companion_api_fire_trigger(uuid,uuid,uuid,text)'::regprocedure,
+        'public.companion_api_fail_trigger_fire(uuid,uuid,text,text)'::regprocedure
+      ];
+      internal_runtime_functions := internal_runtime_functions || ARRAY[
+        'public.companion_api_trigger_json(uuid,uuid,uuid,boolean)'::regprocedure
+      ];
+    END IF;
+    IF pg_catalog.to_regprocedure(
+      'public.companion_api_answer_trigger_decision(uuid,uuid,text,text,uuid,text)'
+    ) IS NOT NULL THEN
+      companion_api_functions := companion_api_functions || ARRAY[
+        'public.companion_api_answer_trigger_decision(uuid,uuid,text,text,uuid,text)'::regprocedure
       ];
     END IF;
     -- A migration owner can carry arbitrary ALTER DEFAULT PRIVILEGES grants installed by an

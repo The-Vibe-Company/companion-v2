@@ -57,6 +57,7 @@ function entry(overrides: Partial<CompanionTranscriptEntry> = {}): CompanionTran
     content: "Two services timed out.",
     reasoning: null,
     routine: null,
+    trigger: null,
     turn_id: null,
     queued: false,
     author_id: null,

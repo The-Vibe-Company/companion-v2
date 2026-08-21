@@ -782,8 +782,22 @@
     {
       "idx": 111,
       "version": "7",
+      "when": 1789578400000,
+      "tag": "0111_companion_triggers",
+      "breakpoints": true
+    },
+    {
+      "idx": 112,
+      "version": "7",
       "when": 1789664800000,
-      "tag": "0111_defer_skill_updates_to_pi_stop",
+      "tag": "0112_companion_answer_trigger_decision",
+      "breakpoints": true
+    },
+    {
+      "idx": 113,
+      "version": "7",
+      "when": 1789751200000,
+      "tag": "0113_defer_skill_updates_to_pi_stop",
       "breakpoints": true
     }
   ]

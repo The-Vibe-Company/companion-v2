@@ -160,6 +160,7 @@ function controlPlane(options: {
       return json({ companion: settled });
     }
     if (url.includes("/routines")) return json({ routines: [] });
+    if (url.includes("/triggers")) return json({ triggers: [] });
     if (url.includes("/thread")) {
       if (method === "GET") threadReads.push(url);
       return json({ thread: emptyThread });

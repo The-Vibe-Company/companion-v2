@@ -8,6 +8,7 @@ import {
   COMPANION_ROUTINE_MAX_PER_COMPANION,
   COMPANION_ROUTINE_MIN_INTERVAL_MS,
   COMPANION_TOOL_RUN_TIMEOUT_MS,
+  COMPANION_TRIGGER_MAX_PER_COMPANION,
 } from "@companion/contracts";
 import type {
   CompanionClientSurface,
@@ -47,6 +48,21 @@ import {
   type CompanionPiLayoutRefresh,
 } from "./companionRuntimeImage";
 import type { BoxProviderCallOperation, BoxProviderCallTiming } from "./boxMaintenanceClient";
+
+export type CompanionRuntimeStagePhase =
+  | "identity_probe"
+  | "layout"
+  | "interaction_extension"
+  | "resource_preflight"
+  | "control_bundle"
+  | "skill_transfer"
+  | "skill_apply";
+
+export interface CompanionRuntimeStageTiming {
+  phase: CompanionRuntimeStagePhase;
+  durationMs: number;
+  ok: boolean;
+}
 
 /** Credential-free snapshot Pi reads before proposing settings. Omitted on native_mobile. */
 export type CompanionConfigCatalog = {
@@ -459,6 +475,9 @@ function companionCapabilityInstructions(includeHub: boolean): string {
     "  as an ordinary turn. The person sees a Routine header, not the scheduled prompt as if they typed it.",
     `  At most ${COMPANION_ROUTINE_MAX_PER_COMPANION} per Companion, at least ${instructionClock(COMPANION_ROUTINE_MIN_INTERVAL_MS)} apart.`,
     "  You cannot create one yourself.",
+    "- Triggers: a named prompt an external webhook fires. The person pastes a URL into a service they",
+    "  control, and each event arrives here as an ordinary turn with a Trigger header and a bounded,",
+    `  untrusted copy of the event payload. At most ${COMPANION_TRIGGER_MAX_PER_COMPANION} per Companion. You cannot create one yourself.`,
   ];
   if (includeHub) {
     lines.push(
@@ -490,6 +509,9 @@ function companionConfigInstructions(includeCatalog: boolean): string {
     "  is never active in the turn that proposed it.",
     "- propose_routine proposes a named schedule — a prompt, a cron expression, and an IANA timezone.",
     "  Approval creates it after this turn ends, so a proposed routine never fires in the turn that proposed it.",
+    "- propose_trigger proposes a named webhook trigger — a prompt and a provider (linear, github, or",
+    "  custom). Approval creates it after this turn ends and shows the person a webhook URL to paste into",
+    "  the external service; a proposed trigger never fires in the turn that proposed it.",
     "- request_plugin_connection asks for a Linear, GitHub, or Notion connection that does not exist yet.",
     "  The person finishes it in the web UI; propose attaching it on a later turn.",
   ].join("\n");
@@ -583,8 +605,8 @@ export function parseOutboxManifest(stdout: string): CompanionOutboxEntry[] {
  *
  * `native_mobile` stages no skills, MCP accounts, hub env, or config catalog, so that surface omits
  * the Skills / Plugins / Skills-Hub bullets and the catalog pointer. ask_user / propose_config /
- * propose_routine stay: the interaction extension is staged for every surface, and routines fire as
- * ordinary turns on every surface.
+ * propose_routine / propose_trigger stay: the interaction extension is staged for every surface, and
+ * routines and triggers fire as ordinary turns on every surface.
  */
 export function composedInstructions(
   persona?: string | null,
@@ -1666,7 +1688,9 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
   readonly #piPackages: readonly string[];
   readonly #qmdPackage: string;
   readonly #onTiming: ((sample: BoxProviderCallTiming) => void) | undefined;
+  readonly #onStageTiming: ((sample: CompanionRuntimeStageTiming) => void) | undefined;
   readonly #companionSkillChecksum: string | undefined;
+  readonly #imageIdentitySalt: string | undefined;
   /**
    * The current staging call's budget. Private file/command helpers share it so cancellation covers
    * the whole layout transaction without leaking into a later adapter call.
@@ -1677,7 +1701,10 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     env: NodeJS.ProcessEnv = process.env,
     options?: {
       onTiming?: (sample: BoxProviderCallTiming) => void;
+      onStageTiming?: (sample: CompanionRuntimeStageTiming) => void;
       companionSkillChecksum?: string;
+      /** Isolates disposable research snapshots without changing the production disk marker. */
+      imageIdentitySalt?: string;
     },
   ) {
     const apiKey = env.COMPANION_BOX_API_KEY?.trim();
@@ -1703,7 +1730,9 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
     this.#piPackages = resolvePiPackages(env);
     this.#qmdPackage = validPackageSpec(QMD_PACKAGE, "QMD_PACKAGE");
     this.#onTiming = options?.onTiming;
+    this.#onStageTiming = options?.onStageTiming;
     this.#companionSkillChecksum = options?.companionSkillChecksum;
+    this.#imageIdentitySalt = options?.imageIdentitySalt;
   }
 
   layoutIdentity() {
@@ -1715,7 +1744,20 @@ export class AsciiBoxCompanionRuntime implements CompanionBoxRuntimeV2 {
       ...(this.#companionSkillChecksum
         ? { companionSkillChecksum: this.#companionSkillChecksum }
         : {}),
+      ...(this.#imageIdentitySalt ? { imageIdentitySalt: this.#imageIdentitySalt } : {}),
     });
+  }
+
+  async #stageTimed<T>(phase: CompanionRuntimeStagePhase, action: () => Promise<T>): Promise<T> {
+    const startedAt = Date.now();
+    try {
+      const result = await action();
+      this.#onStageTiming?.({ phase, durationMs: Date.now() - startedAt, ok: true });
+      return result;
+    } catch (error) {
+      this.#onStageTiming?.({ phase, durationMs: Date.now() - startedAt, ok: false });
+      throw error;
+    }
   }
 
   /**
@@ -2531,7 +2573,7 @@ fi`,
       + (bundledArchivePath && bakedBundledArchivePath
         ? ` if [ -s "$HOME/${bakedBundledArchivePath}" ]; then cp "$HOME/${bakedBundledArchivePath}" "$HOME/${bundledArchivePath}"; printf '%s\\n' companion-bundled-skill-reused; fi;`
         : "");
-    const cleared = await this.#command(
+    const cleared = await this.#stageTimed("resource_preflight", async () => await this.#command(
       input.boxId,
       `set -e; root="$HOME/.companion/runtime";`
       + (input.preserveSkills
@@ -2540,7 +2582,7 @@ fi`,
         ? ` if [ "$(cat "$HOME/${SKILLS_TREE_REVISION_PATH}" 2>/dev/null || true)" = ${shellQuote(skillsTreeRevision)} ]; then printf '%s\\n' ${SKILLS_TREE_REUSED_MARKER}; else${prepareSkillArchives} fi;`
         : prepareSkillArchives)
       + ` if [ -f "$HOME/.companion/pi/auth.json" ]; then printf '%s\\n' ${shellQuote(PROVIDER_AUTH_PRESENT_MARKER)}; fi`,
-    );
+    ));
     if (!cleared.success) {
       throw new BoxRuntimeProviderError(
         `Pi resource staging failed${commandFailureDetail(cleared)}`,
@@ -2618,7 +2660,8 @@ fi`,
       });
     }
     try {
-      await this.#applyControlBundle(input.boxId, controlFiles);
+      await this.#stageTimed("control_bundle", async () =>
+        await this.#applyControlBundle(input.boxId, controlFiles));
       if (input.mcpCredentials.some((credential) => credential.env_key === "GITHUB_TOKEN")) {
         const gitHelper = await this.#command(input.boxId, companionGitCredentialHelperInstallCommand());
         if (!gitHelper.success) {
@@ -2642,22 +2685,24 @@ fi`,
       // Independent immutable archives can land in parallel. Keep the bound deliberately low so a
       // large skill selection cannot monopolize the provider's command/file quota; #writeFile keeps
       // its multipart path for archives over the provider limit.
-      let nextUpload = 0;
-      await Promise.all(Array.from(
-        { length: Math.min(3, uploads.length) },
-        async () => {
-          for (;;) {
-            const upload = uploads[nextUpload++];
-            if (!upload) return;
-            await this.#writeFile(input.boxId, upload.path, upload.content);
-            skillBytesTransferred += upload.byteLength;
-          }
-        },
-      ));
-      await this.#repairShortStagedArchives(input.boxId, staged);
+      await this.#stageTimed("skill_transfer", async () => {
+        let nextUpload = 0;
+        await Promise.all(Array.from(
+          { length: Math.min(3, uploads.length) },
+          async () => {
+            for (;;) {
+              const upload = uploads[nextUpload++];
+              if (!upload) return;
+              await this.#writeFile(input.boxId, upload.path, upload.content);
+              skillBytesTransferred += upload.byteLength;
+            }
+          },
+        ));
+        await this.#repairShortStagedArchives(input.boxId, staged);
+      });
       const prepared = reuseSkills
         ? null
-        : await this.#command(
+        : await this.#stageTimed("skill_apply", async () => await this.#command(
           input.boxId,
         // One archive that will not decode or extract has to name itself. `tar` reports a failed
         // member over three lines and ends on `Error is not recoverable`, which is the one line a
@@ -2665,7 +2710,7 @@ fi`,
         // it was working on after tar has finished complaining.
         `set -euo pipefail; root="$HOME/.companion/runtime"; rm -rf "$root/skills.next"; mkdir -p "$root/skills.next"; shopt -s nullglob; for archive in "$root/state/skill-archives"/*.tar.gz.b64; do slug="$(basename "$archive" .tar.gz.b64)"; mkdir -p "$root/skills.next/$slug"; if ! base64 --decode "$archive" | tar --extract --gzip --file=- --directory="$root/skills.next/$slug" --no-same-owner --no-same-permissions; then echo "skill package $slug did not extract" >&2; exit 1; fi; done; rm -rf "$root/skills.prev"; if [ -d "$root/skills" ]; then mv "$root/skills" "$root/skills.prev"; fi; mv "$root/skills.next" "$root/skills"; rm -rf "$root/skills.prev" "$root/state/skill-archives"; printf '%s\\n' ${shellQuote(skillsTreeRevision)} > "$HOME/${SKILLS_TREE_REVISION_PATH}.next"; mv "$HOME/${SKILLS_TREE_REVISION_PATH}.next" "$HOME/${SKILLS_TREE_REVISION_PATH}"`,
           180,
-        );
+        ));
       // Production read this failure as the bare sentence, which named the step and nothing else: the
       // same wake could have died decoding a staged archive, extracting one, or swapping the tree in,
       // and every one of those is a different fault. The failing line travels with it for the same
@@ -3032,16 +3077,23 @@ exit 1`,
     companionBoxName(input.companionId, input.runtimeGeneration);
     this.#stagingSignal = input.signal;
     try {
-      const box = await this.#get(input.boxId, input.signal);
-      if (!isCompanionOwnBox(box, input.companionId, input.runtimeGeneration)) {
-        throw new BoxRuntimeProviderError("The durable Box identity does not match this Companion", 409);
+      const box = await this.#stageTimed("identity_probe", async () => {
+        const observed = await this.#get(input.boxId, input.signal);
+        if (!isCompanionOwnBox(observed, input.companionId, input.runtimeGeneration)) {
+          throw new BoxRuntimeProviderError("The durable Box identity does not match this Companion", 409);
+        }
+        if (!READY_STATES.has(observed.state)) {
+          throw new BoxRuntimeProviderError("Box must be resumed before staging runtime resources", 409);
+        }
+        await this.#assertBoxRunnable(observed);
+        return observed;
+      });
+      const layoutApplied = await this.#stageTimed("layout", async () =>
+        await this.#ensurePiLayout(box.id));
+      if (layoutApplied !== "none") {
+        await this.#stageTimed("interaction_extension", async () =>
+          await this.#stageCompanionInteractionExtension(box.id));
       }
-      if (!READY_STATES.has(box.state)) {
-        throw new BoxRuntimeProviderError("Box must be resumed before staging runtime resources", 409);
-      }
-      await this.#assertBoxRunnable(box);
-      const layoutApplied = await this.#ensurePiLayout(box.id);
-      if (layoutApplied !== "none") await this.#stageCompanionInteractionExtension(box.id);
       const staged = await this.#injectPiResources({
         boxId: box.id,
         clientSurface: input.clientSurface,

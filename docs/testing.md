@@ -142,6 +142,52 @@ cleanup, activation, durable checkpoint, prompt write, and ACK. Regression cover
 pre-ACK events remain visible, known Box ids are identity-checked without listing, a stale broker is
 recycled after the disk-marker crash gap, and a bundled-skill checksum change defeats tree reuse.
 
+The development-only startup autoresearch harness is launched explicitly with:
+
+```bash
+pnpm research:box-startup -- --overnight
+```
+
+It requires a clean checkout exactly at `origin/main`, Conductor CLI authentication, and Box/z.ai
+research credentials in `BOX_API_KEY` and `ZAI_API_KEY` (the existing E2E variable names are also
+accepted). The 72-cycle maximum is six baseline cycles, 36 quick candidate cycles, 20 finalist
+cycles, and ten Sol-integration cycles. Three Luna workspaces explore concurrently, but provider
+concurrency is one. A lease is not released until Box `404` and named-snapshot absence prove cleanup;
+timeout recovery derives all disposable identities from run/candidate/phase/cycle and the controller
+cleans them directly before the campaign can continue. Failed proof persists `blocked-cleanup` and
+the active lease, so `--resume` retries cleanup before any provider work.
+
+The evaluator checksum is fixed at campaign creation and rechecked in every controller-owned
+candidate checkout before Box contact. The controller binds results to the exact run, candidate,
+phase, tree, prefix, and cycle count; candidate messages cannot attest benchmark or cleanup output.
+Candidate checkouts run under a separate unprivileged OS identity with an isolated home and receive
+a random loopback proxy token, never the real Box or model credentials.
+The proxy allowlists the exact deterministic Box and snapshot identities, records provider-ready and
+correlated broker prompt-ACK timestamps, rejects reported metrics that outrun that evidence, and
+checks provider `404` directly after cleanup. Before allowing candidate commands or file writes, it
+captures Node and Pi digests directly from the pristine ready baker Box. Its prompt probe requires
+the live systemd main process to run the byte-pinned generated broker with those exact executables
+and to own the exact Unix socket before and after the ACK. The captured command UID must be non-root;
+the proxy rejects the campaign before candidate writes if that trust assumption changes. A pipe-bound kernel advisory lock rejects a concurrent
+controller for the same run and releases automatically when a crashed controller closes its pipe.
+Campaign state, Conductor links, the lease journal, cleanup proofs, and
+deduplicated metrics JSONL live under `.context/autoresearch/box-startup/<run-id>/`;
+`--resume <run-id>` reconciles exact workspace names and deterministic message ids rather than creating a
+second experiment. A bake Box receives its own deterministic generation identity, so crash cleanup
+can find both the snapshot and the otherwise-temporary baker.
+
+The quick score is the worse creation/resume median ready-to-ACK. Promotion requires at least a
+one-second or ten-percent gain, bounded per-leg/provider regressions, unchanged protected tests, and
+complete cleanup. Final promotion uses nearest-rank P95 and requires both creation and resume at or
+below five seconds. Stop/archive latency is recorded separately so experiments may deliberately
+move safe deterministic work out of wake, but it must remain within the lifecycle deadline. Unit
+tests use a fake Conductor client and cover idempotent messages, workspace reconciliation, invalid
+responses, contract rejection, path/secret policy, credential shadowing, controller-owned result
+binding, lease serialization, timeout cleanup, required Box `404`, and resume checkpoints without
+contacting Conductor or Box. Secondary distributions include send-to-ACK,
+Pi/socket activation, broker preflight, provider calls, Skill bytes, staging modes, bake duration,
+snapshot size, and Stop/archive latency.
+
 The Box provider lifecycle job uses only the `COMPANION_BOX_E2E_API_KEY` repository secret. It
 creates a five-minute disposable Box, exercises file reads, metadata, hashing, and execution,
 archives and resumes the Box, proves those files remain usable, archives it again, and permanently

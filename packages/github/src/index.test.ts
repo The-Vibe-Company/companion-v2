@@ -297,7 +297,8 @@ describe("deterministic repository renderer", () => {
     expect(renderedFrontmatter).toMatchObject({ ok: true, data: { name: "wrapped" } });
     expect(first.readmeBlock.toString()).toContain(COMPANION_README_START);
     expect(first.readmeBlock.toString()).toContain("Wrapped &lt;Skill&gt;");
-    expect(first.readmeBlock.toString()).toContain("https://companion.acme.test/s/share%2Fwrapped");
+    expect(first.readmeBlock.toString()).toContain('href="./skills/wrapped/SKILL.md"');
+    expect(first.readmeBlock.toString()).not.toContain("/s/");
     expect(first.readmeBlock.toString()).toContain("companion-wordmark-dark.png");
     expect(JSON.parse(first.manifest.toString())).toEqual({
       schema: 1, skills: [{ slug: "wrapped", version: "1.2.3", checksum: packed.checksum }],

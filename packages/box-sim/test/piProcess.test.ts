@@ -261,6 +261,32 @@ describe("PiProcessController", () => {
     });
   });
 
+  it("blocks propose_trigger until the matching confirm response arrives", async () => {
+    const harness = await controllerHarness("propose_trigger");
+    await acceptedPrompt(harness.controller, "trigger-prompt");
+    const request = await waitForEvent(harness.events, "extension_ui_request");
+    expect(request).toMatchObject({
+      id: "ui-sim-1",
+      method: "confirm",
+      title: "companion:trigger:ci-failed",
+    });
+    expect(JSON.parse(String(request.message))).toMatchObject({
+      proposal: { kind: "trigger", name: "ci-failed", provider: "github" },
+    });
+    expect(harness.events.some((event) => eventType(event) === "agent_settled")).toBe(false);
+
+    await harness.controller.respondExtensionUi({
+      type: "extension_ui_response",
+      id: request.id,
+      confirmed: true,
+    });
+    await waitForEvent(harness.events, "agent_settled");
+    expect(findEvent(objectEvents(harness.events), "tool_execution_end")).toMatchObject({
+      toolName: "propose_trigger",
+      isError: false,
+    });
+  });
+
   it.each([
     ["retry", ["auto_retry_start", "auto_retry_end", "agent_settled"]],
     ["errors", ["message_end", "agent_end", "agent_settled"]],

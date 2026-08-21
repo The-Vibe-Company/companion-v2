@@ -179,8 +179,8 @@ Layout 14 installs a small Node broker under systemd between runtime commands an
 
 Staging writes a composed operating brief to `~/.companion/runtime/state/instructions.txt` and Pi
 receives it as `--append-system-prompt`. The brief describes the runtime contract Pi is held to —
-the thread, the durable disk, turn bounds, tools, routines, and the ask/propose surface — not how
-to speak.
+the thread, the durable disk, turn bounds, tools, routines, triggers, and the ask/propose surface —
+not how to speak.
 The owner's persona remains one operator-authored line rather than a system prompt, and it is
 appended last so it has the final word on voice.
 
@@ -280,6 +280,15 @@ New explicit recovery actions are:
 - `POST /v1/companions/:id/turns/:turnId/cancel` to stop an active turn, dequeue a follow-up, or
   release an interrupted turn.
 
+`POST /v1/hooks/triggers/:triggerId/:secret` fires a webhook-fired Companion trigger — the
+event-driven sibling of a routine. Like the Stripe webhook it is registered before session
+middleware, gated on the feature flag, and capped at 1 MB; the URL secret is compared with
+`timingSafeEqual`, and there is deliberately no per-provider HMAC because the sources are services
+the user controls. The route only persists an ordinary turn as the immutable Companion Owner
+through `companion_api_fire_trigger` and never contacts Box or Pi. A delivery id derived from
+provider headers, or from the body hash, collapses redeliveries to one turn; disabled, throttled,
+and pileup fires are skipped without enqueuing.
+
 The web retains polling: three seconds while activity is present, slower when settled. There is no
 SSE or Box push agent. “Companion is replying…” derives only from an acknowledged, non-terminal
 attempt. Viewer/list/thread/status reads remain PostgreSQL-only.
@@ -326,7 +335,8 @@ them.
 No generic Projects or skill runs, multi-Bot coordination, group Bot chat, handoffs, proactive jobs,
 voice, file library, file versioning, artifact surface outside a thread, second harness, second Box
 provider, Box pool, generic provider marketplace, container catalog, deployment manager, or AI app
-builder. Bounded chat files and scheduled Companion routines are in scope.
+builder. Bounded chat files, scheduled Companion routines, and webhook-fired Companion triggers are
+in scope.
 No SSE, Box-to-control-plane push agent, detached API executor, automatic Full Box recovery,
 automatic ambiguous-prompt replay, or global learned model-capability table.
 
@@ -338,3 +348,24 @@ worker, and runtime use separate database credentials and least-privilege grants
 must start the same four-process topology with the deterministic Box/Pi simulator where applicable.
 The as-built operational sequence, including the owner-only gate transition and rollback boundary,
 is documented in `docs/runbooks/companions-runtime.md`.
+
+## Internal Box startup research
+
+Box/Pi startup experiments are development tooling, not a Companion product surface. The
+operator-launched `pnpm research:box-startup -- --overnight` command uses Conductor Cloud to create
+isolated Luna candidate workspaces, then evaluates each validated commit from a controller-owned
+disposable checkout under one serialized real-provider lease. A clean Sol workspace integrates only
+measured compatible gains. Candidate workspaces have provider credentials explicitly shadowed. The
+evaluator checkout runs under a separate unprivileged OS identity and receives only a short-lived
+local proxy capability scoped to the campaign's exact Box and snapshot identities; the controller
+retains the real provider credential and independently
+proves provider readiness, byte-attested broker prompt acceptance, and resource absence. It never runs from API, worker, web, or the
+hosted Companion runtime, and adds no product orchestration feature.
+
+The research evaluator and existing tests are immutable to candidate workspaces. Candidates may
+challenge lifecycle ordering, including moving credential-free, revision-bound Skill preparation
+to the Stop/archive path. Creation must remain correct without a preceding Stop, a sleeping
+settings/Skill change must invalidate prepared state, and credentials must be expunged before every
+snapshot. Disposable images are salted by the candidate Git tree and every Box/snapshot is deleted
+and provider-absence proven before another lease is granted. A failed proof keeps the lease durably
+blocked for controller-owned recovery on resume.

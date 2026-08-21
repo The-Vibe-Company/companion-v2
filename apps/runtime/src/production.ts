@@ -179,6 +179,19 @@ export async function buildProductionRuntimeService(
           ok: sample.ok,
         });
       },
+      onStageTiming: (sample: {
+        phase: string;
+        durationMs: number;
+        ok: boolean;
+      }) => {
+        log.info({
+          ts: new Date().toISOString(),
+          event: "runtime.box.staging_phase",
+          phase: sample.phase,
+          durationMs: sample.durationMs,
+          ok: sample.ok,
+        });
+      },
       companionSkillChecksum: bundledSkill.checksum,
     };
     const freshRuntime = (): CompanionBoxRuntimeV2 => factories.createBoxRuntime(

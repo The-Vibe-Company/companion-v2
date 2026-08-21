@@ -206,6 +206,7 @@ function controlPlane(options: { piAcceptsOnWake: boolean; holdSend?: boolean })
         attachments: [],
         reasoning: null,
         routine: null,
+        trigger: null,
         turn_id: null,
         queued: false,
         created_at: new Date().toISOString(),
@@ -237,6 +238,7 @@ function controlPlane(options: { piAcceptsOnWake: boolean; holdSend?: boolean })
     attachments: [],
           reasoning: null,
           routine: null,
+          trigger: null,
           turn_id: null,
           queued: false,
           created_at: new Date().toISOString(),
@@ -251,6 +253,7 @@ function controlPlane(options: { piAcceptsOnWake: boolean; holdSend?: boolean })
       });
     }
     if (url.includes("/routines")) return json({ routines: [] });
+    if (url.includes("/triggers")) return json({ triggers: [] });
     if (url.includes("/runtime")) {
       return json({ companion: companion() });
     }

@@ -313,6 +313,7 @@ function decodeMaterial(row: Record<string, unknown>): RuntimeWorkMaterial {
     && requestKind !== "confirmation"
     && requestKind !== "config_proposal"
     && requestKind !== "routine_proposal"
+    && requestKind !== "trigger_proposal"
   ) {
     throw new RuntimeStoreContractError();
   }

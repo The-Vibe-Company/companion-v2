@@ -1,9 +1,14 @@
 import { randomUUID } from "node:crypto";
+import { pathToFileURL } from "node:url";
 
 import {
   AsciiBoxCompanionRuntime,
   AsciiBoxMaintenanceClient,
+  BoxRuntimeAdapterError,
   BoxRuntimeProviderError,
+  type BoxGenerationCreateInput,
+  type BoxGenerationCreateResult,
+  type BoxRuntimeLifecycleClient,
 } from "../packages/box-runtime/src/index";
 
 const BOX_ID_PATTERN = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
@@ -11,6 +16,11 @@ const SAFE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const POLL_INTERVAL_MS = 1_000;
 const REPLY_TIMEOUT_MS = 3 * 60_000;
 const IMAGE_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const RESEARCH_TAG_PATTERN = /^box-startup-[a-z0-9-]{1,48}$/;
+// A missing named snapshot must still exercise the same cold install as production. Pin Pi to the
+// layout-14 fixture rather than letting a fallback float to an untested release.
+const E2E_PI_INSTALL_COMMAND = "npm install --global @earendil-works/pi-coding-agent@0.84.2";
 
 class RuntimeChangeE2EError extends Error {
   readonly code: string;
@@ -40,18 +50,31 @@ function positiveInteger(raw: string | undefined, fallback: number): number {
 function configuration(env: NodeJS.ProcessEnv) {
   const image = env.COMPANION_BOX_E2E_IMAGE?.trim() || null;
   const modelId = env.COMPANION_BOX_E2E_MODEL_ID?.trim() || "glm-5.3";
+  const companionId = env.COMPANION_BOX_E2E_COMPANION_ID?.trim() || randomUUID();
+  const researchTag = env.COMPANION_BOX_E2E_RESEARCH_TAG?.trim() || null;
+  const promptAckOnly = env.COMPANION_BOX_E2E_PROMPT_ACK_ONLY === "1";
   if (
     (image !== null && !IMAGE_PATTERN.test(image))
+    || !UUID_PATTERN.test(companionId)
+    || (researchTag !== null && !RESEARCH_TAG_PATTERN.test(researchTag))
+    || (promptAckOnly && researchTag === null)
     || modelId.length > 200
     || /[\r\n\0]/.test(modelId)
   ) {
     throw new RuntimeChangeE2EError("invalid_configuration");
   }
+  const runtimeEnv: NodeJS.ProcessEnv = {
+    ...env,
+    COMPANION_BOX_API_KEY: required(env, "COMPANION_BOX_API_KEY"),
+  };
   return {
-    env: { ...env, COMPANION_BOX_API_KEY: required(env, "COMPANION_BOX_API_KEY") },
+    env: runtimeEnv,
     zaiApiKey: required(env, "COMPANION_BOX_E2E_ZAI_API_KEY"),
     image,
     modelId,
+    companionId,
+    researchTag,
+    promptAckOnly,
     generation: positiveInteger(env.COMPANION_BOX_E2E_GENERATION, 1),
   };
 }
@@ -89,6 +112,41 @@ async function phase<T>(name: string, action: () => Promise<T>): Promise<T> {
 
 function pause(milliseconds: number): Promise<void> {
   return new Promise((resolvePause) => setTimeout(resolvePause, milliseconds));
+}
+
+type RuntimeChangeCreateInput = Omit<BoxGenerationCreateInput, "from">;
+type RuntimeChangeCreateClient = Pick<
+  BoxRuntimeLifecycleClient,
+  "createOrRecoverGenerationBox" | "createGenerationBoxAfterObservedAbsence"
+>;
+
+function isConfirmedMissingSnapshot(error: unknown): boolean {
+  return error instanceof BoxRuntimeAdapterError
+    && !error.outcomeUnknown
+    && !error.retryable
+    && error.status < 500
+    && (error.providerCode === "unknown_snapshot" || error.stableCode === "box_not_found");
+}
+
+export async function createRuntimeChangeGenerationBox(input: {
+  lifecycle: RuntimeChangeCreateClient;
+  create: RuntimeChangeCreateInput;
+  image: string | null;
+}): Promise<{
+  box: BoxGenerationCreateResult;
+  source: "base" | "named_snapshot" | "base_fallback";
+}> {
+  try {
+    const box = await input.lifecycle.createOrRecoverGenerationBox({
+      ...input.create,
+      ...(input.image === null ? {} : { from: input.image }),
+    });
+    return { box, source: input.image === null ? "base" : "named_snapshot" };
+  } catch (error) {
+    if (input.image === null || !isConfirmedMissingSnapshot(error)) throw error;
+    const box = await input.lifecycle.createGenerationBoxAfterObservedAbsence(input.create);
+    return { box, source: "base_fallback" };
+  }
 }
 
 async function waitForReadyBox(runtime: AsciiBoxCompanionRuntime, boxId: string): Promise<void> {
@@ -200,11 +258,31 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const providerCalls: string[] = [];
-  const recordProviderCall = (sample: { operation: string }) => providerCalls.push(sample.operation);
-  const runtime = new AsciiBoxCompanionRuntime(config.env, { onTiming: recordProviderCall });
+  const providerCalls: Array<{ operation: string; durationMs: number; ok: boolean }> = [];
+  let stagingLeg: "create" | "resume" = "create";
+  const recordProviderCall = (sample: { operation: string; durationMs: number; ok: boolean }) => {
+    providerCalls.push(sample);
+    write({
+      phase: "provider_call",
+      status: sample.ok ? "succeeded" : "failed",
+      operation: sample.operation,
+      duration_ms: sample.durationMs,
+    });
+  };
+  const runtime = new AsciiBoxCompanionRuntime({
+    ...config.env,
+    COMPANION_PI_INSTALL_COMMAND:
+      config.env.COMPANION_PI_INSTALL_COMMAND?.trim() || E2E_PI_INSTALL_COMMAND,
+  }, {
+    onTiming: recordProviderCall,
+    onStageTiming: (sample) => write({
+      phase: `${stagingLeg}_stage_${sample.phase}`,
+      status: sample.ok ? "succeeded" : "failed",
+      duration_ms: sample.durationMs,
+    }),
+  });
   const lifecycle = new AsciiBoxMaintenanceClient(config.env, { onTiming: recordProviderCall });
-  const companionId = randomUUID();
+  const companionId = config.companionId;
   const orgId = randomUUID();
   const generation = config.generation;
   let boxId: string | null = null;
@@ -216,17 +294,35 @@ async function main(): Promise<number> {
   try {
     await phase("create", async () => {
       providerStartAt = Date.now();
-      const created = await lifecycle.createOrRecoverGenerationBox({
-        companionId,
-        generation,
-        ttlSeconds: 300,
-        deadlineAt: Date.now() + 30_000,
-        ...(config.image === null ? {} : { from: config.image }),
+      const creation = await createRuntimeChangeGenerationBox({
+        lifecycle,
+        image: config.image,
+        create: {
+          companionId,
+          generation,
+          ttlSeconds: 300,
+          deadlineAt: Date.now() + 30_000,
+        },
       });
+      const created = creation.box;
+      if (creation.source === "base_fallback") {
+        write({
+          phase: "create_image_fallback",
+          status: "succeeded",
+          code: "unknown_snapshot",
+        });
+      }
       if (!BOX_ID_PATTERN.test(created.boxId)) {
         throw new RuntimeChangeE2EError("invalid_provider_response");
       }
       boxId = created.boxId;
+      write({
+        phase: "resource",
+        status: "created",
+        resource_kind: "box",
+        resource_id: boxId,
+        ...(config.researchTag ? { research_tag: config.researchTag } : {}),
+      });
       await lifecycle.applyGenerationBoxSettings({
         boxId,
         companionId,
@@ -236,7 +332,7 @@ async function main(): Promise<number> {
       });
     });
 
-    const staged = await phase("stage_current_change", async () => {
+    const staged = await phase("stage_runtime", async () => {
       if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
       await waitForReadyBox(runtime, boxId);
       providerReadyAt = Date.now();
@@ -269,9 +365,12 @@ async function main(): Promise<number> {
       skill_bytes_transferred: staged.skillBytesTransferred,
     });
 
-    const initial = await phase("start_pi", async () => {
+    await phase("start_pi", async () => {
       if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
       await runtime.startPiDaemon({ boxId });
+    });
+    const initial = await phase("broker_preflight", async () => {
+      if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
       const state = await runtime.brokerState({ boxId });
       if (state.activeAttemptId !== null) {
         throw new RuntimeChangeE2EError("unexpected_active_attempt");
@@ -299,6 +398,11 @@ async function main(): Promise<number> {
         duration_ms: Date.now() - promptAckStartedAt,
         initial_cursor: dispatch.initialCursor,
       });
+      write({
+        phase: "send_to_prompt_ack",
+        status: "succeeded",
+        duration_ms: Date.now() - startedAt,
+      });
       if (providerReadyAt !== null) {
         write({
           phase: "ready_to_prompt_ack",
@@ -306,13 +410,15 @@ async function main(): Promise<number> {
           duration_ms: Date.now() - providerReadyAt,
         });
       }
-      await waitForReply({
-        runtime,
-        boxId,
-        attemptId,
-        marker,
-        cursor: initial.tailCursor,
-      });
+      if (!config.promptAckOnly) {
+        await waitForReply({
+          runtime,
+          boxId,
+          attemptId,
+          marker,
+          cursor: initial.tailCursor,
+        });
+      }
     });
 
     await phase("stop_archive", async () => {
@@ -334,6 +440,7 @@ async function main(): Promise<number> {
         status: "succeeded",
         duration_ms: resumeReadyAt - resumeStartedAt,
       });
+      stagingLeg = "resume";
       const refreshed = await runtime.stageExistingBox({
         companionId,
         runtimeGeneration: generation,
@@ -355,11 +462,21 @@ async function main(): Promise<number> {
         staging_mode: refreshed.stagingMode,
         skill_bytes_transferred: refreshed.skillBytesTransferred,
       });
-      await runtime.startPiDaemon({ boxId });
     });
 
     if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
-    const resumed = await runtime.brokerState({ boxId });
+    await phase("resume_start_pi", async () => {
+      if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
+      await runtime.startPiDaemon({ boxId });
+    });
+    const resumed = await phase("resume_broker_preflight", async () => {
+      if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
+      const state = await runtime.brokerState({ boxId });
+      if (state.activeAttemptId !== null) {
+        throw new RuntimeChangeE2EError("unexpected_active_attempt");
+      }
+      return state;
+    });
     await phase("resume_message", async () => {
       if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
       const attemptId = randomUUID();
@@ -381,11 +498,18 @@ async function main(): Promise<number> {
         initial_cursor: dispatch.initialCursor,
       });
       write({
+        phase: "resume_send_to_prompt_ack",
+        status: "succeeded",
+        duration_ms: Date.now() - resumeStartedAt,
+      });
+      write({
         phase: "resume_ready_to_prompt_ack",
         status: "succeeded",
         duration_ms: Date.now() - resumeReadyAt,
       });
-      await waitForReply({ runtime, boxId, attemptId, marker, cursor: resumed.tailCursor });
+      if (!config.promptAckOnly) {
+        await waitForReply({ runtime, boxId, attemptId, marker, cursor: resumed.tailCursor });
+      }
     });
   } catch (error) {
     primaryError = error;
@@ -428,6 +552,7 @@ async function main(): Promise<number> {
       duration_ms: Date.now() - cleanupStartedAt,
       ...(cleanupError === null ? {} : { code: safeCode(cleanupError) }),
       ...(cleanupError === null || boxId === null ? {} : { resource_id: boxId }),
+      ...(config.researchTag ? { research_tag: config.researchTag } : {}),
     });
   }
 
@@ -437,9 +562,17 @@ async function main(): Promise<number> {
     status: "succeeded",
     provider_call_count: providerCalls.length,
     operation_counts: Object.fromEntries(
-      [...new Set(providerCalls)].sort().map((operation) => [
+      [...new Set(providerCalls.map((sample) => sample.operation))].sort().map((operation) => [
         operation,
-        providerCalls.filter((candidate) => candidate === operation).length,
+        providerCalls.filter((candidate) => candidate.operation === operation).length,
+      ]),
+    ),
+    operation_duration_ms: Object.fromEntries(
+      [...new Set(providerCalls.map((sample) => sample.operation))].sort().map((operation) => [
+        operation,
+        providerCalls
+          .filter((candidate) => candidate.operation === operation)
+          .reduce((total, candidate) => total + candidate.durationMs, 0),
       ]),
     ),
   });
@@ -452,6 +585,9 @@ async function main(): Promise<number> {
   return failed ? 1 : 0;
 }
 
-void main().then((exitCode) => {
-  process.exitCode = exitCode;
-});
+const entrypoint = process.argv[1] ? pathToFileURL(process.argv[1]).href : null;
+if (entrypoint === import.meta.url) {
+  void main().then((exitCode) => {
+    process.exitCode = exitCode;
+  });
+}

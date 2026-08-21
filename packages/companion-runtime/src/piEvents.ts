@@ -3,9 +3,11 @@ import {
   companionConfigProposalMessageSchema,
   companionRoutineProposalMessageSchema,
   companionToolRunKind,
+  companionTriggerProposalMessageSchema,
   type CompanionConfigProposal,
   type CompanionRoutineProposal,
   type CompanionToolRunKind,
+  type CompanionTriggerProposal,
 } from "@companion/contracts";
 import {
   genericRuntimeVisibleTextRedactor,
@@ -109,12 +111,12 @@ export type RuntimePiProjection =
     type: "decision";
     entry_key: string;
     request_key: string;
-    request_kind: "question" | "confirmation" | "config_proposal" | "routine_proposal";
+    request_kind: "question" | "confirmation" | "config_proposal" | "routine_proposal" | "trigger_proposal";
     content: string;
-    proposal?: CompanionConfigProposal | CompanionRoutineProposal;
+    proposal?: CompanionConfigProposal | CompanionRoutineProposal | CompanionTriggerProposal;
     decision: {
       request_id: string;
-      kind: "shell" | "file" | "question" | "config" | "routine";
+      kind: "shell" | "file" | "question" | "config" | "routine" | "trigger";
       name: string;
       title: string;
       detail: string | null;
@@ -124,7 +126,7 @@ export type RuntimePiProjection =
       decided_by_name: null;
       decided_at: null;
       expires_at: string;
-      proposal: CompanionConfigProposal | CompanionRoutineProposal | null;
+      proposal: CompanionConfigProposal | CompanionRoutineProposal | CompanionTriggerProposal | null;
     };
     expires_at: string;
   }
@@ -256,7 +258,7 @@ export function validatePiJournalRead(input: {
   return { events, nextCursor, acknowledgedCursor, hasMore: page.hasMore };
 }
 
-const DECISION_TITLE = /^companion:(shell|file|question|config|routine):([A-Za-z0-9._-]{1,120})$/;
+const DECISION_TITLE = /^companion:(shell|file|question|config|routine|trigger):([A-Za-z0-9._-]{1,120})$/;
 const MAX_ASSISTANT = 100_000;
 const MAX_REASONING = 16_000;
 const MAX_REASONING_BYTES = 48_000;
@@ -618,6 +620,26 @@ function parseRoutineProposalMessage(
   return envelope.data;
 }
 
+function parseTriggerProposalMessage(
+  message: unknown,
+  redact: RuntimeVisibleTextRedactor,
+): { summary: string; proposal: CompanionTriggerProposal } | null {
+  if (typeof message !== "string") return null;
+  const raw = message.trim();
+  if (!raw || redact(raw) !== raw) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const envelope = companionTriggerProposalMessageSchema.safeParse(parsed);
+  if (!envelope.success) return null;
+  const serialized = JSON.stringify(envelope.data);
+  if (redact(serialized) !== serialized) return null;
+  return envelope.data;
+}
+
 function parseConfigProposalMessage(
   message: unknown,
   redact: RuntimeVisibleTextRedactor,
@@ -650,19 +672,22 @@ function decisionProjection(
   const title = typeof event.title === "string" ? event.title.trim() : "";
   const parsed = DECISION_TITLE.exec(title);
   if (!requestKey || !parsed) return null;
-  const decisionKind = parsed[1] as "shell" | "file" | "question" | "config" | "routine";
+  const decisionKind = parsed[1] as "shell" | "file" | "question" | "config" | "routine" | "trigger";
   const requestKind = decisionKind === "question"
     ? "question"
     : decisionKind === "config"
       ? "config_proposal"
       : decisionKind === "routine"
         ? "routine_proposal"
-        : "confirmation";
+        : decisionKind === "trigger"
+          ? "trigger_proposal"
+          : "confirmation";
   if (
     (requestKind === "question" && method !== "input" && method !== "editor")
     || (requestKind === "confirmation" && method !== "confirm" && method !== "select")
     || (requestKind === "config_proposal" && method !== "confirm")
     || (requestKind === "routine_proposal" && method !== "confirm")
+    || (requestKind === "trigger_proposal" && method !== "confirm")
   ) return null;
   const configMessage = requestKind === "config_proposal"
     ? parseConfigProposalMessage(event.message, redact)
@@ -670,9 +695,13 @@ function decisionProjection(
   const routineMessage = requestKind === "routine_proposal"
     ? parseRoutineProposalMessage(event.message, redact)
     : null;
+  const triggerMessage = requestKind === "trigger_proposal"
+    ? parseTriggerProposalMessage(event.message, redact)
+    : null;
   if (requestKind === "config_proposal" && !configMessage) return null;
   if (requestKind === "routine_proposal" && !routineMessage) return null;
-  const proposalMessage = configMessage ?? routineMessage;
+  if (requestKind === "trigger_proposal" && !triggerMessage) return null;
+  const proposalMessage = configMessage ?? routineMessage ?? triggerMessage;
   const detailSource = requestKind === "question"
     ? event.placeholder
     : proposalMessage

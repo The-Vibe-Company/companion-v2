@@ -165,6 +165,62 @@ describe("Skills Hub runtime-role grants", () => {
     expect(apiGrantLoop).not.toContain("companion_runtime_role");
   });
 
+  it("keeps trigger state private and grants the trigger surface to the API role alone", async () => {
+    const sql = await readFile(await resolveRuntimeRoleGrantsFile(), "utf8");
+    // The trigger table joins the private runtime set: no application role reads it directly.
+    expect(sql).toContain("'companion_triggers'");
+
+    // 0110 re-created companion_api_enqueue_turn with the optional trigger-origin pair, which
+    // dropped its grant. The script must detect the 10-argument signature first and keep the
+    // 8- and 6-argument fallbacks for databases stopped before 0110.
+    const tenArgEnqueue =
+      "public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface,jsonb,uuid,text,uuid,text)";
+    expect(sql).toContain(`IF pg_catalog.to_regprocedure(\n        '${tenArgEnqueue}'\n      ) IS NOT NULL THEN`);
+    expect(sql).toContain(`'${tenArgEnqueue}'::regprocedure`);
+    const tenArgBranch = sql.indexOf(`'${tenArgEnqueue}'`);
+    const eightArgBranch = sql.indexOf(
+      "'public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface,jsonb,uuid,text)'",
+    );
+    const sixArgBranch = sql.indexOf(
+      "'public.companion_api_enqueue_turn(uuid,uuid,uuid,text,public.companion_client_surface,jsonb)'",
+    );
+    expect(tenArgBranch).toBeGreaterThan(-1);
+    expect(eightArgBranch).toBeGreaterThan(tenArgBranch);
+    expect(sixArgBranch).toBeGreaterThan(eightArgBranch);
+
+    // The trigger sentinel block mirrors the routine one: CRUD, webhook lookup, fire, and failure
+    // bookkeeping to the API role; the JSON projection stays internal.
+    const sentinel = sql.indexOf("'public.companion_api_list_triggers(uuid,uuid)'");
+    expect(sentinel).toBeGreaterThan(-1);
+    const triggerBlock = sql.slice(
+      sentinel,
+      sql.indexOf("-- A migration owner can carry arbitrary", sentinel),
+    );
+    for (const signature of [
+      "companion_api_list_triggers(uuid,uuid)",
+      "companion_api_create_trigger(uuid,uuid,uuid,text,text,text,text,boolean)",
+      "companion_api_update_trigger(uuid,uuid,uuid,text,text,text,boolean)",
+      "companion_api_rotate_trigger_secret(uuid,uuid,uuid,text)",
+      "companion_api_delete_trigger(uuid,uuid,uuid)",
+      "companion_webhook_get_trigger(uuid)",
+      "companion_api_fire_trigger(uuid,uuid,uuid,text)",
+      "companion_api_fail_trigger_fire(uuid,uuid,text,text)",
+      "companion_api_answer_trigger_decision(uuid,uuid,text,text,uuid,text)",
+    ]) {
+      expect(triggerBlock).toContain(`'public.${signature}'::regprocedure`);
+    }
+    expect(triggerBlock).toContain(
+      "internal_runtime_functions := internal_runtime_functions || ARRAY[\n        'public.companion_api_trigger_json(uuid,uuid,uuid,boolean)'::regprocedure\n      ];",
+    );
+    // The answer function resolves on its own sentinel, like the routine decision one.
+    expect(triggerBlock).toContain(
+      "'public.companion_api_answer_trigger_decision(uuid,uuid,text,text,uuid,text)'\n    ) IS NOT NULL THEN",
+    );
+    // Triggers fire synchronously in the API request: the worker receives nothing here.
+    expect(triggerBlock).not.toContain("worker_functions");
+    expect(triggerBlock).not.toContain("companion_runtime_functions :=");
+  });
+
   it("keeps capability-managed Companion aggregates read-only for API and hidden from worker", async () => {
     const sql = await readFile(await resolveRuntimeRoleGrantsFile(), "utf8");
     const capabilityTables = [
