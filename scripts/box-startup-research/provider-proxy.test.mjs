@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import test from "node:test";
 
@@ -346,6 +347,8 @@ test("limits a benchmark to its leased provider resources and independently prov
       && command.includes("'/usr/bin/node' <<'COMPANION_RESEARCH_BROKER_CLIENT'")
       && command.includes("NODE_|LD_|DYLD_")
       && command.includes("companion_node_search_safe")
+      && command.includes("companion_pi_child_ready=false")
+      && command.includes("/usr/bin/seq 1 40")
       && command.includes("/proc/$companion_child/exe")
       && command.includes(`sha256sum "$broker_script"`)
       && command.includes("/proc/$companion_main_pid/environ")
@@ -354,6 +357,21 @@ test("limits a benchmark to its leased provider resources and independently prov
       && command.includes("1".repeat(64))
       && command.includes("2".repeat(64))
       && command.includes("COMPANION_RESEARCH_BROKER_CLIENT")));
+    const pollStart = upstream.commands[0].indexOf("companion_pi_child_ready=false");
+    const pollEnd = upstream.commands[0].indexOf("companion_attest_broker", pollStart);
+    assert.ok(pollStart >= 0 && pollEnd > pollStart);
+    const missingMainPidPoll = upstream.commands[0]
+      .slice(pollStart, pollEnd)
+      .replaceAll("\0", "\\0")
+      .replace(
+        '$(/usr/bin/systemctl --user show companion-pi-daemon.service -p MainPID --value 2>/dev/null || true)',
+        '$(printf 0)',
+      )
+      .replace('$(/usr/bin/seq 1 40)', '$(printf 1)')
+      .replace('\n[ "$companion_pi_child_ready" = true ]\n', '\nprintf poll-reached\n');
+    assert.equal(execFileSync("/bin/bash", ["-c", `set -euo pipefail\n${missingMainPidPoll}`], {
+      encoding: "utf8",
+    }).trim(), "poll-reached");
     assert.ok(upstream.authorizations.every((value) => value === `Bearer ${REAL_KEY}`));
   } finally {
     await lease.proxy.close();

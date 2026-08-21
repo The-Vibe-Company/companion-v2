@@ -99,7 +99,7 @@ interface BoxSimState {
       scenario: string;
     };
   }>;
-  deletions: Array<{ targetId: string; status: string }>;
+  deletions: Array<{ id: string; targetId: string; status: string }>;
   requests: Array<{ surface: string; method: string; path: string }>;
 }
 
@@ -1140,6 +1140,10 @@ describe("Runtime v2 real-process control plane", () => {
     });
     expect(afterPiRestart?.daemon.invocationId).not.toBe(beforePiRestart.invocationId);
 
+    await boxControl("/defaults", {
+      method: "PUT",
+      body: JSON.stringify({ deletePolls: 100 }),
+    });
     const deletion = await apiJson<{ operation: { id: string } }>(
       `/v1/companions/${companionId}`,
       {
@@ -1148,6 +1152,44 @@ describe("Runtime v2 real-process control plane", () => {
       },
       202,
     );
+    const acceptedDeletion = await waitFor("accepted Box deletion to be deferred", async () => {
+      const state = await simulatorState();
+      const providerDeletion = state.deletions.find((operation) => operation.targetId === box.id);
+      const deleteRequests = state.requests.filter((request) =>
+        request.surface === "box" && request.method === "DELETE"
+          && request.path === `/boxes/${box.id}`);
+      const polls = state.requests.filter((request) =>
+        request.surface === "box" && request.method === "GET"
+          && request.path.startsWith("/deletion-operations/"));
+      if (!providerDeletion || deleteRequests.length !== 1 || polls.length < 1) return false;
+      const [durable] = await databaseSql!<Array<{
+        status: string;
+        providerOperationId: string | null;
+        leaseToken: string | null;
+      }>>`
+        select operation.status::text, operation.provider_operation_id as "providerOperationId",
+          lease.claim_token::text as "leaseToken"
+        from companion_operations operation
+        join companion_runtime_leases lease
+          on lease.org_id = operation.org_id and lease.companion_id = operation.companion_id
+        where operation.id = ${deletion.operation.id}::uuid
+      `;
+      return durable?.status === "pending"
+          && durable.providerOperationId === providerDeletion.id
+          && durable.leaseToken === null
+        ? providerDeletion
+        : false;
+    }, 30_000);
+
+    // A different runtime takes over the same accepted provider operation. Completion is injected
+    // only after the first runtime has released its slot; no executor is allowed to replay DELETE.
+    await stopProcess(runtimeProcess, "SIGKILL");
+    runtimeProcess = startRuntime(randomUUID());
+    await waitForHttp(`${runtimeBase}/healthz`, runtimeProcess);
+    await boxControl(`/deletion-operations/${acceptedDeletion.id}`, {
+      method: "PUT",
+      body: JSON.stringify({ status: "completed" }),
+    });
     await waitFor("delete settlement audit", async () => {
       const [audit] = await databaseSql!<Array<{ operationId: string | null }>>`
         select metadata ->> 'operation_id' as "operationId"
@@ -1171,6 +1213,10 @@ describe("Runtime v2 real-process control plane", () => {
       select count(*)::int as count from companions where id = ${companionId}::uuid
     `;
     expect(root?.count).toBe(0);
+    const finalProviderState = await simulatorState();
+    expect(finalProviderState.requests.filter((request) =>
+      request.surface === "box" && request.method === "DELETE"
+        && request.path === `/boxes/${box.id}`)).toHaveLength(1);
     assertProcessAlive(workerProcess);
   }, 180_000);
 });

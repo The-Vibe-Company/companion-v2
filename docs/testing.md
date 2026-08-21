@@ -108,6 +108,10 @@ Run API + worker + runtime + web + migrated PostgreSQL + Box/Pi simulator and pr
 - a vision model reads the checked-in image fixture and a text-only model fails explicitly;
 - stop then send, explicit Pi restart, explicit Full Box restart, and deletion during a queue obey
   precedence;
+- accepted permanent deletion sends `DELETE` exactly once, performs one operation GET per claim,
+  leaves no runtime slot occupied during 5/15/30/60-second PostgreSQL backoff, survives runtime
+  takeover with the same provider operation id, and removes the aggregate once on `completed` or
+  provider `404` without an Owner clicking Retry;
 - missing prompt ACK yields `interrupted`, blocks later turns, and Retry/Cancel each release it by
   their documented path;
 - Viewer, list, thread, and cross-tenant requests produce zero Box calls.
@@ -115,6 +119,11 @@ Run API + worker + runtime + web + migrated PostgreSQL + Box/Pi simulator and pr
 Inject failure before and after create, Box ready, Pi ready, prompt write, ACK, event projection,
 turn settlement, provider stop, and permanent delete. Every scenario must assert final database
 state, external call count, and user-visible outcome.
+
+Real-PostgreSQL deletion coverage must additionally prove the defer-and-release CAS is atomic, a
+stale fence cannot defer, the pre-migration claim signature returns no work, the versioned signature
+does, only the runtime role can invoke the defer function, and migration backfill selects only the
+newest eligible failed delete with a retained provider operation id.
 
 ## Time and health acceptance
 

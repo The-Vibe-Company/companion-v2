@@ -28,14 +28,12 @@ export interface RetryableProviderError {
   status?: number;
 }
 
-function retryable(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  const candidate = error as RetryableProviderError;
-  if (candidate.retryable === true) return true;
-  return candidate.status === 408
-    || candidate.status === 425
-    || candidate.status === 429
-    || (typeof candidate.status === "number" && candidate.status >= 500);
+export function isRetryableProviderError(error: RetryableProviderError): boolean {
+  if (error.retryable === true) return true;
+  return error.status === 408
+    || error.status === 425
+    || error.status === 429
+    || (error.status !== undefined && error.status >= 500);
 }
 
 function jittered(base: number, sample: number): number {
@@ -82,7 +80,10 @@ export async function retryIdempotentLifecycle<T>(input: {
       return await input.operation(input.signal);
     } catch (error) {
       lastError = error;
-      if (!retryable(error) || attempt === RUNTIME_RETRY_DELAYS_MS.length) throw error;
+      if (!isRetryableProviderError(Object(error))
+        || attempt === RUNTIME_RETRY_DELAYS_MS.length) {
+        throw error;
+      }
     }
   }
   throw lastError;

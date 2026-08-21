@@ -8,6 +8,7 @@ const EVALUATOR_FILES = [
   "scripts/summarize-box-runtime-benchmark.mjs",
   "scripts/box-startup-research/benchmark.mjs",
   "scripts/box-startup-research/bake-image.ts",
+  "scripts/box-startup-research/baker-cleanup.mjs",
   "scripts/box-startup-research/cleanup.ts",
   "scripts/box-startup-research/contracts.mjs",
   "scripts/box-startup-research/controller.mjs",
