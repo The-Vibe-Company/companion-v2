@@ -135,11 +135,11 @@ companion_attest_broker() {
   test -n "$companion_pi_path"
   test "$(/usr/bin/readlink -f "$companion_pi_bin")" = '${runtimeHashes.piPath}'
   test "$(/usr/bin/basename "$companion_pi_bin")" = pi
-  test "$(/usr/bin/stat -Lc '%u' "$companion_pi_bin")" = 0
+  test "$(/usr/bin/stat -Lc '%u' "$companion_pi_bin")" = '${runtimeHashes.piUid}'
   test "$(/usr/bin/sha256sum "$companion_pi_bin" | /usr/bin/cut -d' ' -f1)" = '${runtimeHashes.pi}'
   companion_pi_mode="$(/usr/bin/stat -Lc '%a' "$companion_pi_bin")"
+  test "$companion_pi_mode" = '${runtimeHashes.piMode}'
   test $((8#$companion_pi_mode & 0022)) -eq 0
-  case "$(/usr/bin/readlink -f "$companion_pi_bin")" in "$HOME"/*) return 1 ;; esac
   companion_pi_child=false
   companion_node_search_safe=false
   IFS=: read -ra companion_path_entries <<< "$companion_pi_path"
@@ -613,8 +613,9 @@ export class BoxLeaseProxy {
 
   async #captureRuntimeHashes(boxId) {
     const command = `set -euo pipefail
+companion_pi_lookup="$(command -v pi)"
 export PATH=/usr/local/bin:/usr/bin:/bin
-companion_pi_bin="$(/usr/bin/readlink -f "$(command -v pi)")"
+companion_pi_bin="$(/usr/bin/readlink -f "$companion_pi_lookup")"
 companion_node_bin="$(/usr/bin/readlink -f "$(command -v node)")"
 test -n "$companion_pi_bin"
 test -n "$companion_node_bin"
@@ -622,6 +623,8 @@ printf 'pi %s\\n' "$(/usr/bin/sha256sum "$companion_pi_bin" | /usr/bin/cut -d' '
 printf 'node %s\\n' "$(/usr/bin/sha256sum "$companion_node_bin" | /usr/bin/cut -d' ' -f1)"
 printf 'pi_path %s\\n' "$companion_pi_bin"
 printf 'node_path %s\\n' "$companion_node_bin"
+printf 'pi_uid %s\\n' "$(/usr/bin/stat -Lc '%u' "$companion_pi_bin")"
+printf 'pi_mode %s\\n' "$(/usr/bin/stat -Lc '%a' "$companion_pi_bin")"
 printf 'uid %s\\n' "$(/usr/bin/id -u)"`;
     const response = await fetch(
       `${this.#upstreamBase}/boxes/${encodeURIComponent(boxId)}/commands`,
@@ -642,19 +645,30 @@ printf 'uid %s\\n' "$(/usr/bin/id -u)"`;
       .filter(Boolean)
       .map((match) => [match[1], match[2]]));
     const paths = Object.fromEntries(lines
-      .map((line) => /^(pi_path|node_path) (\/[A-Za-z0-9._/-]{1,500})$/.exec(line))
+      .map((line) => /^(pi_path|node_path) (\/[A-Za-z0-9._/@+-]{1,500})$/.exec(line))
+      .filter(Boolean)
+      .map((match) => [match[1], match[2]]));
+    const ownership = Object.fromEntries(lines
+      .map((line) => /^(pi_uid|pi_mode) ([0-9]{1,10})$/.exec(line))
       .filter(Boolean)
       .map((match) => [match[1], match[2]]));
     const uid = /(?:^|\n)uid ([1-9][0-9]{0,9})(?:\n|$)/.exec(String(body?.stdout ?? ""))?.[1];
+    const piMode = ownership.pi_mode;
+    const piUid = ownership.pi_uid;
+    const safePiMode = /^[0-7]{3,4}$/.test(piMode ?? "")
+      && (Number.parseInt(piMode, 8) & 0o022) === 0;
     if (body?.success !== true || !/^[a-f0-9]{64}$/.test(hashes.pi ?? "")
       || !/^[a-f0-9]{64}$/.test(hashes.node ?? "")
-      || !paths.pi_path || !paths.node_path || !uid) {
+      || !paths.pi_path || !paths.node_path || !uid || !safePiMode
+      || (piUid !== "0" && piUid !== uid)) {
       throw new Error("lease proxy received invalid runtime attestation");
     }
     return {
       ...hashes,
       piPath: paths.pi_path,
       nodePath: paths.node_path,
+      piUid,
+      piMode,
       uid,
     };
   }

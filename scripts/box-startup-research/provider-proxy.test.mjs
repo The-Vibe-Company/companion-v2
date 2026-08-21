@@ -155,7 +155,7 @@ async function fakeProvider(input = {}) {
           ok: true,
           type: "command.completed",
           success: true,
-          stdout: `pi ${"1".repeat(64)}\nnode ${"2".repeat(64)}\npi_path /usr/bin/pi\nnode_path /usr/bin/node\nuid ${input.uid ?? 1000}\n`,
+          stdout: `pi ${"1".repeat(64)}\nnode ${"2".repeat(64)}\npi_path ${input.piPath ?? "/usr/bin/pi"}\nnode_path /usr/bin/node\npi_uid ${input.piUid ?? 0}\npi_mode ${input.piMode ?? 755}\nuid ${input.uid ?? 1000}\n`,
           stderr: "",
         });
       }
@@ -759,6 +759,41 @@ test("rejects a root Box command boundary before candidate writes", async () => 
       body: JSON.stringify({ ttlSeconds: 900, noEnv: true, from: PARENT_SNAPSHOT_NAME }),
     })).status, 202);
     assert.equal((await call(`/boxes/${BAKER_BOX_ID}`)).status, 403);
+  } finally {
+    await lease.proxy.close();
+    await upstream.close();
+  }
+});
+
+test("pins an image-owned Pi launcher before candidate writes", async () => {
+  const upstream = await fakeProvider({
+    piPath: "/home/user/.nvm/versions/node/v24.18.1/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+    piUid: 1000,
+    piMode: 755,
+    uid: 1000,
+  });
+  const lease = await createBoxLeaseProxy({
+    apiKey: REAL_KEY,
+    upstreamBase: upstream.baseUrl,
+    companionIds: [BAKER_COMPANION_ID, COMPANION_ID],
+    snapshotName: SNAPSHOT_NAME,
+    brokerSha256: "f".repeat(64),
+  });
+  const call = async (path, options = {}) => await fetch(`${lease.baseUrl}${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${lease.apiKey}`,
+      "content-type": "application/json",
+      ...options.headers,
+    },
+  });
+  try {
+    assert.equal((await call("/named-snapshots")).status, 200);
+    assert.equal((await call("/boxes", {
+      method: "POST",
+      body: JSON.stringify({ ttlSeconds: 900, noEnv: true, from: PARENT_SNAPSHOT_NAME }),
+    })).status, 202);
+    assert.equal((await call(`/boxes/${BAKER_BOX_ID}`)).status, 200);
   } finally {
     await lease.proxy.close();
     await upstream.close();
