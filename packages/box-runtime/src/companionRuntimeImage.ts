@@ -37,6 +37,8 @@ export interface CompanionPiLayoutIdentity {
   imageName: string;
 }
 
+const IMAGE_IDENTITY_SALT_PATTERN = /^[a-f0-9]{12,64}$/;
+
 /**
  * Named ascii.dev snapshots are `^[a-z0-9][a-z0-9-]{0,62}$` and capped at ten per account.
  * The content hash lives in the name so GET tells us whether this pin set is already baked.
@@ -78,13 +80,22 @@ export function companionPiLayoutIdentity(input: {
   overlayRevision?: number;
   companionSkillChecksum?: string;
   bootProfileRevision?: number;
+  /** Development-only salt used to isolate disposable research snapshots. */
+  imageIdentitySalt?: string;
 }): CompanionPiLayoutIdentity {
+  if (
+    input.imageIdentitySalt !== undefined
+    && !IMAGE_IDENTITY_SALT_PATTERN.test(input.imageIdentitySalt)
+  ) {
+    throw new TypeError("Runtime image identity salt must be a lowercase hexadecimal digest.");
+  }
   const overlayRevision = input.overlayRevision ?? COMPANION_PI_OVERLAY_REVISION;
   const overlayMarker = companionPiOverlayMarker(overlayRevision);
   const baseMarker = companionPiBaseLayoutMarker(input);
   const fullMarker = `${baseMarker}:overlay=${overlayMarker}`;
   const imageMarker = `${fullMarker}:skill=${input.companionSkillChecksum ?? "none"}`
-    + `:boot=${(input.bootProfileRevision ?? COMPANION_RUNTIME_BOOT_PROFILE_REVISION).toString(10)}`;
+    + `:boot=${(input.bootProfileRevision ?? COMPANION_RUNTIME_BOOT_PROFILE_REVISION).toString(10)}`
+    + (input.imageIdentitySalt ? `:research=${input.imageIdentitySalt}` : "");
   return {
     layoutVersion: input.layoutVersion,
     packages: input.packages,

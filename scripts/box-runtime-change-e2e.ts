@@ -16,9 +16,10 @@ const SAFE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const POLL_INTERVAL_MS = 1_000;
 const REPLY_TIMEOUT_MS = 3 * 60_000;
 const IMAGE_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
-// The provider canary must be able to exercise the same cold path as an operator-configured runtime
-// when its optional snapshot disappears. Keep this pinned to the Pi version baked into the current
-// deterministic runtime fixture rather than letting a fallback install float to an untested release.
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const RESEARCH_TAG_PATTERN = /^box-startup-[a-z0-9-]{1,48}$/;
+// The provider canary must exercise the same cold install as production when its optional named
+// snapshot disappears. Keep Pi pinned to the layout-14 fixture rather than floating to an untested release.
 const E2E_PI_INSTALL_COMMAND = "npm install --global @earendil-works/pi-coding-agent@0.84.2";
 
 class RuntimeChangeE2EError extends Error {
@@ -49,8 +50,14 @@ function positiveInteger(raw: string | undefined, fallback: number): number {
 function configuration(env: NodeJS.ProcessEnv) {
   const image = env.COMPANION_BOX_E2E_IMAGE?.trim() || null;
   const modelId = env.COMPANION_BOX_E2E_MODEL_ID?.trim() || "glm-5.3";
+  const companionId = env.COMPANION_BOX_E2E_COMPANION_ID?.trim() || randomUUID();
+  const researchTag = env.COMPANION_BOX_E2E_RESEARCH_TAG?.trim() || null;
+  const promptAckOnly = env.COMPANION_BOX_E2E_PROMPT_ACK_ONLY === "1";
   if (
     (image !== null && !IMAGE_PATTERN.test(image))
+    || !UUID_PATTERN.test(companionId)
+    || (researchTag !== null && !RESEARCH_TAG_PATTERN.test(researchTag))
+    || (promptAckOnly && researchTag === null)
     || modelId.length > 200
     || /[\r\n\0]/.test(modelId)
   ) {
@@ -65,6 +72,9 @@ function configuration(env: NodeJS.ProcessEnv) {
     zaiApiKey: required(env, "COMPANION_BOX_E2E_ZAI_API_KEY"),
     image,
     modelId,
+    companionId,
+    researchTag,
+    promptAckOnly,
     generation: positiveInteger(env.COMPANION_BOX_E2E_GENERATION, 1),
   };
 }
@@ -269,15 +279,31 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const providerCalls: string[] = [];
-  const recordProviderCall = (sample: { operation: string }) => providerCalls.push(sample.operation);
+  const providerCalls: Array<{ operation: string; durationMs: number; ok: boolean }> = [];
+  let stagingLeg: "create" | "resume" = "create";
+  const recordProviderCall = (sample: { operation: string; durationMs: number; ok: boolean }) => {
+    providerCalls.push(sample);
+    write({
+      phase: "provider_call",
+      status: sample.ok ? "succeeded" : "failed",
+      operation: sample.operation,
+      duration_ms: sample.durationMs,
+    });
+  };
   const runtime = new AsciiBoxCompanionRuntime({
     ...config.env,
     COMPANION_PI_INSTALL_COMMAND:
       config.env.COMPANION_PI_INSTALL_COMMAND?.trim() || E2E_PI_INSTALL_COMMAND,
-  }, { onTiming: recordProviderCall });
+  }, {
+    onTiming: recordProviderCall,
+    onStageTiming: (sample) => write({
+      phase: `${stagingLeg}_stage_${sample.phase}`,
+      status: sample.ok ? "succeeded" : "failed",
+      duration_ms: sample.durationMs,
+    }),
+  });
   const lifecycle = new AsciiBoxMaintenanceClient(config.env, { onTiming: recordProviderCall });
-  const companionId = randomUUID();
+  const companionId = config.companionId;
   const orgId = randomUUID();
   const generation = config.generation;
   let boxId: string | null = null;
@@ -313,6 +339,13 @@ async function main(): Promise<number> {
         throw new RuntimeChangeE2EError("invalid_provider_response");
       }
       boxId = created.boxId;
+      write({
+        phase: "resource",
+        status: "created",
+        resource_kind: "box",
+        resource_id: boxId,
+        ...(config.researchTag ? { research_tag: config.researchTag } : {}),
+      });
       await lifecycle.applyGenerationBoxSettings({
         boxId,
         companionId,
@@ -322,7 +355,7 @@ async function main(): Promise<number> {
       });
     });
 
-    const staged = await phase("stage_current_change", async () => {
+    const staged = await phase("stage_runtime", async () => {
       if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
       await waitForReadyBox(runtime, boxId);
       providerReadyAt = Date.now();
@@ -355,9 +388,12 @@ async function main(): Promise<number> {
       skill_bytes_transferred: staged.skillBytesTransferred,
     });
 
-    const initial = await phase("start_pi", async () => {
+    await phase("start_pi", async () => {
       if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
       await runtime.startPiDaemon({ boxId });
+    });
+    const initial = await phase("broker_preflight", async () => {
+      if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
       const state = await runtime.brokerState({ boxId });
       if (state.activeAttemptId !== null) {
         throw new RuntimeChangeE2EError("unexpected_active_attempt");
@@ -385,6 +421,11 @@ async function main(): Promise<number> {
         duration_ms: Date.now() - promptAckStartedAt,
         initial_cursor: dispatch.initialCursor,
       });
+      write({
+        phase: "send_to_prompt_ack",
+        status: "succeeded",
+        duration_ms: Date.now() - startedAt,
+      });
       if (providerReadyAt !== null) {
         write({
           phase: "ready_to_prompt_ack",
@@ -392,13 +433,15 @@ async function main(): Promise<number> {
           duration_ms: Date.now() - providerReadyAt,
         });
       }
-      await waitForReply({
-        runtime,
-        boxId,
-        attemptId,
-        marker,
-        cursor: initial.tailCursor,
-      });
+      if (!config.promptAckOnly) {
+        await waitForReply({
+          runtime,
+          boxId,
+          attemptId,
+          marker,
+          cursor: initial.tailCursor,
+        });
+      }
     });
 
     if (shouldExerciseRuntimeChangeResume(creationSource, process.env.GITHUB_EVENT_NAME)) {
@@ -421,6 +464,7 @@ async function main(): Promise<number> {
           status: "succeeded",
           duration_ms: resumeReadyAt - resumeStartedAt,
         });
+        stagingLeg = "resume";
         const refreshed = await runtime.stageExistingBox({
           companionId,
           runtimeGeneration: generation,
@@ -442,11 +486,20 @@ async function main(): Promise<number> {
           staging_mode: refreshed.stagingMode,
           skill_bytes_transferred: refreshed.skillBytesTransferred,
         });
-        await runtime.startPiDaemon({ boxId });
       });
 
-      if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
-      const resumed = await runtime.brokerState({ boxId });
+      await phase("resume_start_pi", async () => {
+        if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
+        await runtime.startPiDaemon({ boxId });
+      });
+      const resumed = await phase("resume_broker_preflight", async () => {
+        if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
+        const state = await runtime.brokerState({ boxId });
+        if (state.activeAttemptId !== null) {
+          throw new RuntimeChangeE2EError("unexpected_active_attempt");
+        }
+        return state;
+      });
       await phase("resume_message", async () => {
         if (boxId === null) throw new RuntimeChangeE2EError("box_id_unavailable");
         const attemptId = randomUUID();
@@ -468,11 +521,18 @@ async function main(): Promise<number> {
           initial_cursor: dispatch.initialCursor,
         });
         write({
+          phase: "resume_send_to_prompt_ack",
+          status: "succeeded",
+          duration_ms: Date.now() - resumeStartedAt,
+        });
+        write({
           phase: "resume_ready_to_prompt_ack",
           status: "succeeded",
           duration_ms: Date.now() - resumeReadyAt,
         });
-        await waitForReply({ runtime, boxId, attemptId, marker, cursor: resumed.tailCursor });
+        if (!config.promptAckOnly) {
+          await waitForReply({ runtime, boxId, attemptId, marker, cursor: resumed.tailCursor });
+        }
       });
     } else {
       write({ phase: "resume_cycle", status: "skipped", code: "cold_fallback" });
@@ -518,6 +578,7 @@ async function main(): Promise<number> {
       duration_ms: Date.now() - cleanupStartedAt,
       ...(cleanupError === null ? {} : { code: safeCode(cleanupError) }),
       ...(cleanupError === null || boxId === null ? {} : { resource_id: boxId }),
+      ...(config.researchTag ? { research_tag: config.researchTag } : {}),
     });
   }
 
@@ -527,9 +588,17 @@ async function main(): Promise<number> {
     status: "succeeded",
     provider_call_count: providerCalls.length,
     operation_counts: Object.fromEntries(
-      [...new Set(providerCalls)].sort().map((operation) => [
+      [...new Set(providerCalls.map((sample) => sample.operation))].sort().map((operation) => [
         operation,
-        providerCalls.filter((candidate) => candidate === operation).length,
+        providerCalls.filter((candidate) => candidate.operation === operation).length,
+      ]),
+    ),
+    operation_duration_ms: Object.fromEntries(
+      [...new Set(providerCalls.map((sample) => sample.operation))].sort().map((operation) => [
+        operation,
+        providerCalls
+          .filter((candidate) => candidate.operation === operation)
+          .reduce((total, candidate) => total + candidate.durationMs, 0),
       ]),
     ),
   });
