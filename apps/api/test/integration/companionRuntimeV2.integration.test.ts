@@ -98,7 +98,7 @@ const runtimeHelperFunctionSignatures = [
   "public.companion_api_assign_attempt_retry_id()",
 ] as const;
 const companionApiFunctionSignatures = [
-  "public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid,smallint,smallint,smallint,smallint)",
+  "public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)",
   "public.companion_api_update_companion(uuid,uuid,jsonb)",
   "public.companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)",
   "public.companion_api_update_member_state(uuid,uuid,boolean,boolean,boolean)",

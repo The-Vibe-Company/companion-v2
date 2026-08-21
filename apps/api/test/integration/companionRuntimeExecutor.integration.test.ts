@@ -810,12 +810,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           false,
           '[]'::jsonb,
           null::uuid
-,
-          1::smallint,
-          1::smallint,
-          1::smallint,
-          2::smallint
-        
+        )
       `,
     });
     if (!created) throw new Error("failed to create the initial-provider fixture");
@@ -985,11 +980,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           select companion_id::text as "companionId"
           from public.companion_api_create_companion(
             ${ids.orgA}::uuid, 'Capability-only fixture', ${null}::text,
-            ${null}::text, ${null}::text, '[]'::jsonb, false, '[]'::jsonb, ${null}::uuid,
-            1::smallint,
-            1::smallint,
-            1::smallint,
-            2::smallint
+            ${null}::text, ${null}::text, '[]'::jsonb, false, '[]'::jsonb, ${null}::uuid
           )
         `,
       });
@@ -1051,11 +1042,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         from public.companion_api_create_companion(
           ${ids.orgA}::uuid, 'Attachment fixture', null,
           ${null}::text, ${null}::text, ${tx.json([])}::jsonb,
-          false, ${tx.json([])}::jsonb,
-          1::smallint,
-          1::smallint,
-          1::smallint,
-          2::smallint
+          false, ${tx.json([])}::jsonb
         )
       `,
     });
@@ -1401,11 +1388,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           from public.companion_api_create_companion(
             ${ids.orgA}::uuid, 'API capability fixture', 'Initial persona',
             ${null}::text, ${null}::text, ${tx.json([ids.skill])}::jsonb,
-            false, ${tx.json([ids.mcpAccount])}::jsonb,
-            1::smallint,
-            1::smallint,
-            1::smallint,
-            2::smallint
+            false, ${tx.json([ids.mcpAccount])}::jsonb
           )
         `,
       });
@@ -1442,11 +1425,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           from public.companion_api_create_companion(
             ${ids.orgA}::uuid, 'API capability copy', 'Initial persona',
             ${null}::text, ${null}::text, '[]'::jsonb,
-            false, '[]'::jsonb, ${companionId}::uuid,
-            1::smallint,
-            1::smallint,
-            1::smallint,
-            2::smallint
+            false, '[]'::jsonb, ${companionId}::uuid
           )
         `,
       });
@@ -1933,11 +1912,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           select companion_id::text as "companionId"
           from public.companion_api_create_companion(
             ${ids.orgA}::uuid, 'Warm send fixture', null, null, null,
-            '[]'::jsonb, false, '[]'::jsonb,
-            1::smallint,
-            1::smallint,
-            1::smallint,
-            2::smallint
+            '[]'::jsonb, false, '[]'::jsonb
           )
         `,
       });
@@ -2037,11 +2012,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           select companion_id::text as "companionId"
           from public.companion_api_create_companion(
             ${ids.orgA}::uuid, 'Legacy claimer quarantine', null, null, null,
-            '[]'::jsonb, false, '[]'::jsonb,
-            1::smallint,
-            1::smallint,
-            1::smallint,
-            2::smallint
+            '[]'::jsonb, false, '[]'::jsonb
           )
         `,
       });
@@ -2169,11 +2140,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           select companion_id::text as "companionId"
           from public.companion_api_create_companion(
             ${ids.orgA}::uuid, 'Legacy operation takeover', null, null, null,
-            '[]'::jsonb, false, '[]'::jsonb,
-            1::smallint,
-            1::smallint,
-            1::smallint,
-            2::smallint
+            '[]'::jsonb, false, '[]'::jsonb
           )
         `,
       });
@@ -2239,11 +2206,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           select companion_id::text as "companionId"
           from public.companion_api_create_companion(
             ${ids.orgA}::uuid, 'Legacy settings takeover', null, null, null,
-            '[]'::jsonb, false, '[]'::jsonb,
-            1::smallint,
-            1::smallint,
-            1::smallint,
-            2::smallint
+            '[]'::jsonb, false, '[]'::jsonb
           )
         `,
       });
@@ -2304,11 +2267,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             select companion_id::text as "companionId"
             from public.companion_api_create_companion(
               ${ids.orgA}::uuid, ${`Material ${variant.name}`}, null, null, null,
-              '[]'::jsonb, false, '[]'::jsonb,
-              1::smallint,
-              1::smallint,
-              1::smallint,
-              2::smallint
+              '[]'::jsonb, false, '[]'::jsonb
             )
           `,
         });
@@ -2380,11 +2339,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           select companion_id::text as "companionId"
           from public.companion_api_create_companion(
             ${ids.orgA}::uuid, 'Queued material expiry', null, null, null,
-            '[]'::jsonb, false, '[]'::jsonb,
-            1::smallint,
-            1::smallint,
-            1::smallint,
-            2::smallint
+            '[]'::jsonb, false, '[]'::jsonb
           )
         `,
       });
@@ -2454,11 +2409,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           select companion_id::text as "companionId"
           from public.companion_api_create_companion(
             ${ids.orgA}::uuid, ${`Mixed runtime ${from} to ${to}`}, null, null, null,
-            '[]'::jsonb, false, '[]'::jsonb,
-            1::smallint,
-            1::smallint,
-            1::smallint,
-            2::smallint
+            '[]'::jsonb, false, '[]'::jsonb
           )
         `,
       });
@@ -2528,11 +2479,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           select companion_id::text as "companionId"
           from public.companion_api_create_companion(
             ${ids.orgA}::uuid, 'Material activation proof', null, null, null,
-            '[]'::jsonb, false, '[]'::jsonb,
-            1::smallint,
-            1::smallint,
-            1::smallint,
-            2::smallint
+            '[]'::jsonb, false, '[]'::jsonb
           )
         `,
       });
@@ -2618,11 +2565,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           select companion_id::text as "companionId"
           from public.companion_api_create_companion(
             ${ids.orgA}::uuid, 'Settings material takeover', null, null, null,
-            '[]'::jsonb, false, '[]'::jsonb,
-            1::smallint,
-            1::smallint,
-            1::smallint,
-            2::smallint
+            '[]'::jsonb, false, '[]'::jsonb
           )
         `,
       });
@@ -2705,11 +2648,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           select companion_id::text as "companionId"
           from public.companion_api_create_companion(
             ${ids.orgA}::uuid, 'Settings material functions', null, null, null,
-            '[]'::jsonb, false, '[]'::jsonb,
-            1::smallint,
-            1::smallint,
-            1::smallint,
-            2::smallint
+            '[]'::jsonb, false, '[]'::jsonb
           )
         `,
       });
@@ -2788,11 +2727,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           select companion_id::text as "companionId"
           from public.companion_api_create_companion(
             ${ids.orgA}::uuid, 'Stale warm send fixture', null, null, null,
-            '[]'::jsonb, false, '[]'::jsonb,
-            1::smallint,
-            1::smallint,
-            1::smallint,
-            2::smallint
+            '[]'::jsonb, false, '[]'::jsonb
           )
         `,
       });
@@ -2849,11 +2784,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           select companion_id::text as "companionId"
           from public.companion_api_create_companion(
             ${ids.orgA}::uuid, 'Concurrent enqueue fixture', null, null, null,
-            '[]'::jsonb, false, '[]'::jsonb,
-            1::smallint,
-            1::smallint,
-            1::smallint,
-            2::smallint
+            '[]'::jsonb, false, '[]'::jsonb
           )
         `,
       });
@@ -2928,11 +2859,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           select companion_id::text as "companionId"
           from public.companion_api_create_companion(
             ${ids.orgA}::uuid, 'Retry handoff fixture', null, null, null,
-            '[]'::jsonb, false, '[]'::jsonb,
-            1::smallint,
-            1::smallint,
-            1::smallint,
-            2::smallint
+            '[]'::jsonb, false, '[]'::jsonb
           )
         `,
       });
@@ -3234,11 +3161,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           from public.companion_api_create_companion(
             ${ids.orgA}::uuid, 'Deferred personal Skill fixture', null,
             ${providerId}, 'fixture-model',
-            ${tx.json([ids.skill])}::jsonb, false, '[]'::jsonb,
-            1::smallint,
-            1::smallint,
-            1::smallint,
-            2::smallint
+            ${tx.json([ids.skill])}::jsonb, false, '[]'::jsonb
           )
         `,
       });
@@ -3871,12 +3794,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             ${ids.orgA}::uuid, 'Hub access fixture', null::text,
             null::text, null::text, '[]'::jsonb,
             true, '[]'::jsonb, null::uuid
-,
-            1::smallint,
-            1::smallint,
-            1::smallint,
-            2::smallint
-          
+          )
         `,
       });
       companionId = created?.companionId ?? "";
