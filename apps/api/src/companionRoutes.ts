@@ -74,6 +74,8 @@ import {
   readCompanionThreadV2,
   retryCompanionTurnV2,
   rotateCompanionTriggerSecretV2,
+  registerCompanionTriggerWebhookV2,
+  unregisterCompanionTriggerWebhookV2,
   setCompanionWorkspaceShareV2,
   setCompanionProviderV2,
   triggerFireMessageId,
@@ -89,6 +91,7 @@ import {
   pollOpenAICodexProviderOAuth,
   saveCompanionProvider,
   saveCompanionPlugin,
+  saveCompanionPluginTriggerKey,
   saveCompanionOAuthPlugin,
   setDefaultCompanionProvider,
 } from "@companion/core";
@@ -675,6 +678,27 @@ export function registerCompanionRoutes(
     }
   });
 
+  app.post("/v1/companion-plugins/trigger-key", async (c) => {
+    try {
+      const body = z.object({
+        provider: z.literal("linear"),
+        credential: z.string().min(1).max(256),
+      }).parse(await c.req.json());
+      await tenant(c, ({ actor, orgId, database }) =>
+        saveCompanionPluginTriggerKey({
+          actor,
+          orgId,
+          provider: body.provider,
+          credential: body.credential,
+          masterKey: loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY),
+          database,
+        }));
+      return c.json({ stored: true });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
   app.post("/v1/companion-plugins/oauth/start", async (c) => {
     try {
       const body = companionPluginOAuthStartInputSchema.parse(await c.req.json());
@@ -1012,6 +1036,7 @@ export function registerCompanionRoutes(
           name: body.name,
           prompt: body.prompt,
           provider: body.provider,
+          target: body.target ?? null,
           enabled: body.enabled,
           database,
           webhookBaseUrl: companionWebhookBaseUrl(env),
@@ -1035,6 +1060,7 @@ export function registerCompanionRoutes(
           name: body.name,
           prompt: body.prompt,
           provider: body.provider,
+          target: body.target === undefined ? undefined : body.target ?? null,
           enabled: body.enabled,
           database,
           webhookBaseUrl: companionWebhookBaseUrl(env),
@@ -1070,6 +1096,46 @@ export function registerCompanionRoutes(
           webhookBaseUrl: companionWebhookBaseUrl(env),
         }));
       return c.json({ trigger });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.post("/v1/companions/:id/triggers/:triggerId/registration", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const triggerId = companionIdSchema.parse(c.req.param("triggerId"));
+      // On-demand provider-side wiring, decided by the Companion or an Owner/Editor — approval of
+      // the trigger itself never registers anything, and this never wakes Box or Pi.
+      await tenant(c, ({ orgId, database }) =>
+        registerCompanionTriggerWebhookV2({
+          orgId,
+          companionId,
+          triggerId,
+          webhookBaseUrl: companionWebhookBaseUrl(env),
+          masterKey: loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY),
+          database,
+        }));
+      return c.json({ registered: true });
+    } catch (error) {
+      return routeError(c, error);
+    }
+  });
+
+  app.delete("/v1/companions/:id/triggers/:triggerId/registration", async (c) => {
+    try {
+      const companionId = companionIdSchema.parse(c.req.param("id"));
+      const triggerId = companionIdSchema.parse(c.req.param("triggerId"));
+      await tenant(c, ({ orgId, database }) =>
+        unregisterCompanionTriggerWebhookV2({
+          orgId,
+          companionId,
+          triggerId,
+          webhookBaseUrl: companionWebhookBaseUrl(env),
+          masterKey: loadSecretsMasterKey(env.COMPANION_SECRETS_MASTER_KEY),
+          database,
+        }));
+      return c.body(null, 204);
     } catch (error) {
       return routeError(c, error);
     }

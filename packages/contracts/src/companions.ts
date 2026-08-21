@@ -214,6 +214,12 @@ export const COMPANION_TRIGGER_PROVIDERS = ["linear", "github", "custom"] as con
 export const companionTriggerProviderSchema = z.enum(COMPANION_TRIGGER_PROVIDERS);
 export type CompanionTriggerProvider = z.infer<typeof companionTriggerProviderSchema>;
 
+/**
+ * Trigger providers that are plugin-backed: proposing or creating a trigger with one of these
+ * providers requires the matching MCP plugin attached to the Companion. `custom` needs no plugin.
+ */
+export const COMPANION_PLUGIN_TRIGGER_PROVIDERS = ["linear", "github"] as const;
+
 
 /**
  * The newest chat line on a Companion's thread, projected onto reads so a conversation list can say
@@ -627,12 +633,57 @@ export const companionTriggerPromptSchema = z.string().trim().min(1).max(
   COMPANION_TRIGGER_PROMPT_MAX_CHARACTERS,
 );
 
+/** Bounded provider-side wiring a trigger may carry. Only GitHub is wired in v1. */
+export const COMPANION_TRIGGER_MAX_EVENTS = 30;
+
+export const companionTriggerTargetSchema = z.object({
+  /** GitHub repository as "owner/repo". Required for github triggers, forbidden elsewhere. */
+  repo: z.string().trim().max(200).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/).optional(),
+  /**
+   * Provider webhook event names; "*" subscribes to every GitHub event. The provider has the final
+   * word: an unknown name fails the registration, never the trigger.
+   */
+  events: z.array(z.string().trim().regex(/^\*$|^[a-z_]{1,64}$/))
+    .min(1)
+    .max(COMPANION_TRIGGER_MAX_EVENTS)
+    .optional(),
+}).strict();
+export type CompanionTriggerTarget = z.infer<typeof companionTriggerTargetSchema>;
+
+/**
+ * Validate a target against its trigger's provider: github needs a repo and at least one event;
+ * every other provider carries no target yet (the URL is pasted into the service by hand).
+ */
+export function parseCompanionTriggerTarget(
+  provider: CompanionTriggerProvider,
+  target: CompanionTriggerTarget | null | undefined,
+): CompanionTriggerTarget | null {
+  const normalized = target ?? null;
+  if (provider === "github") {
+    if (!normalized?.repo || !normalized.events?.length) {
+      throw new Error("a github trigger requires a target repo and at least one event");
+    }
+    return normalized;
+  }
+  if (normalized && (normalized.repo || normalized.events)) {
+    throw new Error(`a ${provider} trigger does not support a target yet`);
+  }
+  return null;
+}
+
 export const companionTriggerSchema = z.object({
   id: z.string().uuid(),
   companion_id: z.string().uuid(),
   name: companionTriggerNameSchema,
   prompt: companionTriggerPromptSchema,
   provider: companionTriggerProviderSchema,
+  /**
+   * Provider-side wiring the Companion may register on demand — for GitHub, the repository and the
+   * webhook events to subscribe. Null means "URL only": the person pastes it into the service.
+   */
+  target: z.lazy(() => companionTriggerTargetSchema).nullable().default(null),
+  /** Whether the provider-side webhook is wired: manual means the URL was pasted by hand. */
+  registration_status: z.enum(["manual", "registered", "failed"]).default("manual"),
   enabled: z.boolean(),
   /** Full URL an external service posts to. Null for Viewers, who never see the secret. */
   webhook_url: z.string().url().nullable(),
@@ -651,6 +702,7 @@ export const companionTriggerDraftSchema = z.object({
   name: companionTriggerNameSchema,
   prompt: companionTriggerPromptSchema,
   provider: companionTriggerProviderSchema,
+  target: z.lazy(() => companionTriggerTargetSchema).nullable().optional(),
   enabled: z.boolean().default(true),
 }).strict();
 export type CompanionTriggerDraft = z.infer<typeof companionTriggerDraftSchema>;
@@ -672,7 +724,23 @@ export const companionTriggerProposalSchema = z.object({
   name: companionTriggerNameSchema,
   prompt: companionTriggerPromptSchema,
   provider: companionTriggerProviderSchema,
+  target: z.lazy(() => companionTriggerTargetSchema).optional(),
 }).strict().superRefine((proposal, context) => {
+  // Approval creates the trigger in one SQL call, so a partial github target would dead-end the
+  // pending decision: require the full target here, before the card is ever shown.
+  if (proposal.provider === "github") {
+    if (!proposal.target?.repo || !proposal.target.events?.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "a github trigger proposal requires a target repo and at least one event",
+      });
+    }
+  } else if (proposal.target) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `a ${proposal.provider} trigger proposal does not support a target yet`,
+    });
+  }
   if (utf8ByteLength(JSON.stringify(proposal)) > COMPANION_CONFIG_PROPOSAL_MAX_BYTES) {
     context.addIssue({
       code: z.ZodIssueCode.custom,

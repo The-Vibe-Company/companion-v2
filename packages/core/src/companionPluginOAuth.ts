@@ -28,7 +28,7 @@ export const COMPANION_PLUGIN_OAUTH_SERVERS = {
     remoteUrl: "https://api.githubcopilot.com/mcp/",
     resourceMetadataUrl: "https://api.githubcopilot.com/.well-known/oauth-protected-resource/mcp/",
     authorizationServer: "https://github.com/login/oauth",
-    scopes: ["repo", "read:org", "read:user", "user:email"],
+    scopes: ["repo", "read:org", "read:user", "user:email", "admin:repo_hook"],
     allowedOrigins: ["https://api.githubcopilot.com", "https://github.com"],
     dynamicRegistration: false,
   },
