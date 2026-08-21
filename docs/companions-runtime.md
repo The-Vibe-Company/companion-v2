@@ -409,8 +409,14 @@ the approver's authority after the current turn.
 
 A `companion:trigger:<name>` confirmation with a strict JSON `{summary, proposal}` body projects as
 `request_kind = trigger_proposal`. Pi emits these through the staged `propose_trigger` tool. The
-payload is name, prompt, and provider (`linear`, `github`, or `custom`); a redacted or malformed
-message is counted as unknown. Owner/Editor approval runs `companion_api_answer_trigger_decision`,
+payload is name, prompt, and provider (`linear`, `github`, or `custom`), plus a github-only target
+(`repo`, `events`) when Pi already knows what to watch; a redacted or malformed
+message is counted as unknown. Plugin-backed providers are gated: a `linear` or `github` trigger
+requires the matching plugin attached to the Companion, enforced both by the staged extension —
+which reads the attached plugins out of `config-catalog.json` and fails closed when it is unreadable
+— and fail-closed in `companion_api_create_trigger`/`companion_api_update_trigger`, so an approved
+proposal whose plugin was detached mid-turn still cannot create a trigger. Owner/Editor approval
+runs `companion_api_answer_trigger_decision`,
 which creates the trigger — with a fresh server-side id and secret — under the approver's authority
 after the current turn; the person then copies the webhook URL from the Triggers panel. Pi never
 creates a trigger itself, and a proposed trigger never fires in the turn that proposed it.
@@ -453,7 +459,25 @@ durable in PostgreSQL but lost in that round trip, and every fire would then los
 
 A trigger is the event-driven sibling of a routine: a named prompt that an external webhook fires,
 at most ten per Companion. The provider (`linear`, `github`, or `custom`) is a display label and a
-delivery-id hint, not an auth scheme. The inbound endpoint is
+delivery-id hint, not an auth scheme. A trigger is one of the things a plugin is for, not just an
+MCP server: `linear` and `github` triggers require the matching plugin attached to the Companion
+(an account of that provider named by `selected_mcp_account_ids`), so attaching the Linear plugin is
+what lets Pi propose a wake-on-new-ticket trigger; `custom` needs no plugin. A github trigger also
+carries a target — `repo` plus the webhook `events` to subscribe (`push`, `pull_request`, …, or
+`*`); no other provider accepts a target yet, and Notion never will: it has no outbound webhooks,
+so Companion neither proposes nor registers one.
+
+Registering the webhook at the provider is an on-demand capability, not an approval side effect.
+After a trigger exists, Owner/Editor (including the Companion through its staged authority) may
+call `POST /v1/companions/:id/triggers/:triggerId/registration`, which wires the current URL into
+the provider — for GitHub, creating the repository hook with our URL secret as the HMAC secret and
+storing the remote hook id. Provider rejection is recorded as `registration_status = failed` with a
+sanitized error rather than thrown away; `DELETE …/registration` removes the remote hook and
+returns the row to `manual`. Changing a trigger's target or provider invalidates any registration.
+Linear registration uses a second credential — a Linear API key stored with
+`POST /v1/companion-plugins/trigger-key`, envelope-encrypted and never returned by any read — and
+creates the subscription over Linear's GraphQL API; without that key the endpoint says so plainly.
+The inbound endpoint is
 `POST /v1/hooks/triggers/:triggerId/:secret`, registered before session middleware like the Stripe
 webhook, gated on the Companions flag, with a 1 MB body limit. The secret is a server-generated
 64-hex credential compared with `timingSafeEqual` and follows the share-token precedent: plaintext
@@ -479,6 +503,17 @@ theirs: the thread shows a `Trigger: <name>` header instead of the composed prom
 conversation-list preview is masked the same way, and a message never carries both a routine and a
 trigger origin. Viewer sees trigger rows without the webhook URL; only Owner/Editor may see, copy,
 or rotate it.
+
+## Plugin skills
+
+Each curated plugin ships a product-owned skill — `plugin-github`, `plugin-linear` — staged into
+the Box's skills tree whenever the matching plugin is attached to the Companion, and removed when
+it is detached. The skill documents exactly what this runtime stages for that plugin: the MCP
+tools, GitHub commits as the connected account, and the on-demand trigger-registration capability
+with its provider-specific rules (GitHub targets name a repo and events; Linear registration needs
+the stored API key; Notion has no webhooks). They restage on every wake so a rebuilt tree regains
+them, which makes them a staging artifact rather than workspace content: they are never listed in
+the config catalog and Pi cannot propose attaching or detaching them.
 
 ## Attachments
 

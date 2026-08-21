@@ -1,4 +1,4 @@
-import { COMPANION_TRIGGER_PROVIDERS } from "@companion/contracts";
+import { COMPANION_PLUGIN_TRIGGER_PROVIDERS, COMPANION_TRIGGER_PROVIDERS } from "@companion/contracts";
 import { describe, expect, it } from "vitest";
 import {
   COMPANION_PERMISSION_BROKER_EXTENSION_FILE,
@@ -89,6 +89,27 @@ describe("Companion Pi interaction extension", () => {
       .toContain("the person pastes its webhook URL into the external service");
     expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
       .toContain("User denied or timed out. No trigger was created.");
+    // A github proposal may carry a repo/events target; other providers must not.
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
+      .toContain('provider === "github"');
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
+      .toContain("do not take a repo or events yet");
+  });
+
+  it("gates plugin-backed trigger providers on the attached plugin from the config catalog", () => {
+    // The plugin-backed provider list is interpolated from the contract constant, never hardcoded.
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE).toContain(
+      `const PLUGIN_TRIGGER_PROVIDERS = ${JSON.stringify(COMPANION_PLUGIN_TRIGGER_PROVIDERS)} as string[]`,
+    );
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
+      .toContain("function hasAttachedPlugin(provider: string): boolean");
+    // The gate reads the staged config catalog and fails closed when it is unreadable.
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
+      .toContain("plugin.provider === provider && plugin.selected === true");
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE.indexOf("hasAttachedPlugin(provider)"))
+      .toBeGreaterThan(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE.indexOf('name: "propose_trigger"'));
+    expect(COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE)
+      .toContain("triggers require the");
   });
 
   it("classifies shell runs with the control plane's own catalog, priority order included", () => {

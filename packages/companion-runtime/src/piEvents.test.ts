@@ -10,6 +10,16 @@ import {
 import { createRuntimeVisibleTextRedactor } from "./projectionRedaction";
 import { ATTEMPT_ID, PI_INVOCATION_ID } from "./test/fixtures";
 
+// The snapshot serializer renders bigints as decimal text without a runtime typeof gate. The
+// named JSON-value contract keeps the BigInt branch dispatching through the prototype without a
+// cast or an `unknown` boundary.
+type SnapshotValue = string | number | boolean | null | bigint | SnapshotValue[] | { [key: string]: SnapshotValue };
+function bigintAwareReplacer(_key: string, value: SnapshotValue): SnapshotValue {
+  return Object.prototype.toString.call(value) === "[object BigInt]"
+    ? BigInt.prototype.toString.call(value)
+    : value;
+}
+
 describe("Pi journal validation and projection", () => {
   it("counts unknown events, projects process exit, and never treats it as settlement", () => {
     const page = validatePiJournalRead({
@@ -47,8 +57,7 @@ describe("Pi journal validation and projection", () => {
     expect(classified.projections).toEqual([
       { sequence: 2n, type: "process_exit", code: 137, signal: "SIGKILL" },
     ]);
-    expect(JSON.stringify(classified.projections, (_key, value) =>
-      typeof value === "bigint" ? value.toString() : value)).not.toContain("must not be projected");
+    expect(JSON.stringify(classified.projections, bigintAwareReplacer)).not.toContain("must not be projected");
   });
 
   it("requires exact attempt and invocation correlation", () => {
@@ -301,8 +310,7 @@ describe("Pi journal validation and projection", () => {
       new Date("2026-08-16T12:00:00.000Z"),
       createRuntimeVisibleTextRedactor([opaqueSecret]),
     );
-    const serialized = JSON.stringify(classified.projections, (_key, value) =>
-      typeof value === "bigint" ? value.toString() : value);
+    const serialized = JSON.stringify(classified.projections, bigintAwareReplacer);
     const tools = classified.projections.filter((projection) => projection.type === "tool");
 
     expect(serialized).not.toContain(opaqueSecret);
@@ -351,8 +359,7 @@ describe("Pi journal validation and projection", () => {
     });
 
     const classified = classifyPiJournalPage(page);
-    const serialized = JSON.stringify(classified.projections, (_key, value) =>
-      typeof value === "bigint" ? value.toString() : value);
+    const serialized = JSON.stringify(classified.projections, bigintAwareReplacer);
     expect(serialized).toContain("Authorization [redacted]");
     expect(serialized).toContain("Cookie [redacted]");
     expect(serialized).not.toContain("dXNlcj");
@@ -419,8 +426,7 @@ describe("Pi journal validation and projection", () => {
       new Date(),
       createRuntimeVisibleTextRedactor(["credential", "redacted"]),
     );
-    const serialized = JSON.stringify(classified.projections, (_key, value) =>
-      typeof value === "bigint" ? value.toString() : value);
+    const serialized = JSON.stringify(classified.projections, bigintAwareReplacer);
     expect(serialized).not.toContain("credential");
     expect(serialized).not.toContain("redacted");
   });
@@ -452,7 +458,7 @@ describe("Pi journal validation and projection", () => {
 
     const serialized = JSON.stringify(
       classifyPiJournalPage(page).projections,
-      (_key, value) => typeof value === "bigint" ? value.toString() : value,
+      bigintAwareReplacer,
     );
     expect(serialized).not.toContain("plain-opaque");
     expect(serialized).toContain("[redacted]");
@@ -691,8 +697,7 @@ describe("Pi journal validation and projection", () => {
         }),
       }),
     ]);
-    const serialized = JSON.stringify(classified.projections, (_key, value) =>
-      typeof value === "bigint" ? value.toString() : value);
+    const serialized = JSON.stringify(classified.projections, bigintAwareReplacer);
     expect(serialized).not.toContain(secret);
     expect(serialized).not.toContain("can_write_skills");
   });
@@ -802,8 +807,7 @@ describe("Pi journal validation and projection", () => {
         }),
       }),
     ]);
-    const serialized = JSON.stringify(classified.projections, (_key, value) =>
-      typeof value === "bigint" ? value.toString() : value);
+    const serialized = JSON.stringify(classified.projections, bigintAwareReplacer);
     expect(serialized).not.toContain(secret);
   });
 
@@ -813,6 +817,7 @@ describe("Pi journal validation and projection", () => {
       name: "ci-failed",
       prompt: "Investigate the failing build.",
       provider: "github" as const,
+      target: { repo: "acme/ci", events: ["push"] },
     };
     const summary = "Fire ci-failed on github webhook events";
     const now = new Date("2026-08-19T12:00:00.000Z");
@@ -911,16 +916,19 @@ describe("Pi journal validation and projection", () => {
         }),
       }),
     ]);
-    const serialized = JSON.stringify(classified.projections, (_key, value) =>
-      typeof value === "bigint" ? value.toString() : value);
+    const serialized = JSON.stringify(classified.projections, bigintAwareReplacer);
     expect(serialized).not.toContain(secret);
   });
 });
 
+type JsonFixture = string | number | boolean | null | { [key: string]: JsonFixture } | JsonFixture[];
+
 describe("delegated subagent runs", () => {
   const secret = "mF9xOpaqueCredentialValue";
 
-  function classify(events: Array<Record<string, unknown>>) {
+  // The fixture events are exactly the pi_event payloads these projections consume; the wrapper
+  // fields the journal validator expects are added by classify itself.
+  function classify(events: JsonFixture[]) {
     const page = validatePiJournalRead({
       value: {
         events: events.map((event, index) => ({
@@ -1144,8 +1152,7 @@ describe("delegated subagent runs", () => {
       new Date("2026-08-19T12:00:00.000Z"),
       createRuntimeVisibleTextRedactor([long]),
     );
-    const serialized = JSON.stringify(classified.projections, (_key, value) =>
-      typeof value === "bigint" ? value.toString() : value);
+    const serialized = JSON.stringify(classified.projections, bigintAwareReplacer);
 
     // The agent name is cut at 120 characters. Cutting before redacting would leave the first 120
     // characters of the credential in the title, matching nothing the redactor could remove.
@@ -1168,8 +1175,7 @@ describe("delegated subagent runs", () => {
       },
     ]);
     const tools = classified.projections.filter((projection) => projection.type === "tool");
-    const serialized = JSON.stringify(classified.projections, (_key, value) =>
-      typeof value === "bigint" ? value.toString() : value);
+    const serialized = JSON.stringify(classified.projections, bigintAwareReplacer);
 
     expect(serialized).not.toContain(secret);
     expect(tools[0]?.tool.title.length).toBeLessThanOrEqual(300);
@@ -1258,8 +1264,7 @@ describe("delegated subagent runs", () => {
       { type: "tool_execution_end", toolCallId: "call-1", toolName: "bash" },
     ]);
     const tools = classified.projections.filter((projection) => projection.type === "tool");
-    const serialized = JSON.stringify(classified.projections, (_key, value) =>
-      typeof value === "bigint" ? value.toString() : value);
+    const serialized = JSON.stringify(classified.projections, bigintAwareReplacer);
 
     expect(serialized).not.toContain(secret);
     expect(serialized).not.toContain("Read the changelog");

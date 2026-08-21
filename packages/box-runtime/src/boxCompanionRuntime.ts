@@ -26,6 +26,7 @@ import {
   COMPANION_PERMISSION_BROKER_EXTENSION_FILE,
   COMPANION_PERMISSION_BROKER_EXTENSION_SOURCE,
 } from "./companionPermissionBroker";
+import { COMPANION_PLUGIN_SKILLS } from "./companionPluginSkills";
 import {
   buildMcpAdapterInjection,
   companionGitCredentialHelperInstallCommand,
@@ -509,6 +510,8 @@ function companionCapabilityInstructions(includeHub: boolean): string {
       "- Skills: the skill packages selected for you are already installed and loaded. You do not install",
       "  them to use them.",
       "- Plugins: connected MCP servers appear as tools prefixed `mcp`. What is connected is what you have.",
+      "  An attached plugin also stages its own skill (for example `plugin-github` or `plugin-linear`)",
+      "  documenting that provider's tools, commits, and trigger wiring — read it before using the plugin.",
       "- The Skills Hub: your workspace's skill library, its secrets, and its hosted skill databases are",
       "  reachable over an authenticated API. You can publish and update skills, read secrets, and read and",
       "  write skill-database state. The bundled `companion` skill documents every operation — read it",
@@ -535,7 +538,9 @@ function companionConfigInstructions(includeCatalog: boolean): string {
     "- propose_routine proposes a named schedule — a prompt, a cron expression, and an IANA timezone.",
     "  Approval creates it after this turn ends, so a proposed routine never fires in the turn that proposed it.",
     "- propose_trigger proposes a named webhook trigger — a prompt and a provider (linear, github, or",
-    "  custom). Approval creates it after this turn ends and shows the person a webhook URL to paste into",
+    "  custom). linear and github triggers require the matching plugin attached to you; custom needs",
+    "  none. A github trigger also carries a repo and the events to watch (push, pull_request, ...).",
+    "  Approval creates it after this turn ends and shows the person a webhook URL to paste into",
     "  the external service; a proposed trigger never fires in the turn that proposed it.",
     "- request_plugin_connection asks for a Linear, GitHub, or Notion connection that does not exist yet.",
     "  The person finishes it in the web UI; propose attaching it on a later turn.",
@@ -2787,6 +2792,35 @@ fi`,
         throw new BoxRuntimeProviderError(
           `Pi resources failed to prepare${commandFailureDetail(prepared)}`,
           502,
+        );
+      }
+      // Per-plugin skills ride on top of the archive-built tree. They are restaged every wake so a
+      // rebuilt tree regains them and a detached plugin loses them; reuse keeps them on disk, which
+      // makes the rewrite a no-op write of identical content.
+      const attachedPluginProviders = new Set(
+        (input.configCatalog?.plugins ?? [])
+          .filter((plugin) => plugin.selected)
+          .map((plugin) => plugin.provider),
+      );
+      const stagedPluginSkills = COMPANION_PLUGIN_SKILLS.filter((skill) =>
+        attachedPluginProviders.has(skill.provider)
+      );
+      const stalePluginSkillSlugs = COMPANION_PLUGIN_SKILLS
+        .filter((skill) => !attachedPluginProviders.has(skill.provider))
+        .map((skill) => skill.slug);
+      if (stalePluginSkillSlugs.length > 0) {
+        await this.#command(
+          input.boxId,
+          `set -e; ${stalePluginSkillSlugs.map((slug) =>
+            `rm -rf "$HOME/.companion/runtime/skills/${JSON.stringify(slug).slice(1, -1)}"`
+          ).join("; ")}`,
+        );
+      }
+      for (const skill of stagedPluginSkills) {
+        await this.#writeFile(
+          input.boxId,
+          `.companion/runtime/skills/${skill.slug}/SKILL.md`,
+          `${skill.content}\n`,
         );
       }
       return {
