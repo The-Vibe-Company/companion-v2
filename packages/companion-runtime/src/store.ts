@@ -122,6 +122,7 @@ export interface RuntimeStore {
     envelope: McpOauthEnvelope;
   }): Promise<McpOauthCasResult | null>;
   settle(fence: LeaseFence, input: RuntimeSettlementInput): Promise<boolean>;
+  deferDelete(fence: LeaseFence): Promise<boolean>;
   release(fence: LeaseFence): Promise<boolean>;
 }
 
@@ -192,7 +193,7 @@ async function mapped<T>(operation: () => Promise<T>, mutating = false): Promise
   }
 }
 
-function one(rows: Record<string, unknown>[], name: string): Record<string, unknown> {
+function one(rows: Record<string, unknown>[], _name: string): Record<string, unknown> {
   if (rows.length !== 1 || !rows[0]) throw new RuntimeStoreContractError();
   return rows[0];
 }
@@ -623,7 +624,7 @@ export class PostgresRuntimeStore implements RuntimeStore {
       const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
         SELECT ${CLAIM_COLUMNS}
         FROM public.companion_runtime_claim_work(
-          $1::text, $2::integer, $3::integer, $4::bigint, 1::integer
+          $1::text, $2::integer, $3::integer, $4::bigint, 1::integer, 1::integer
         )
       `, [input.executorId, input.limit, input.leaseSeconds, input.gateEpoch.toString()]);
       return rows.map(decodeRuntimeClaimRow);
@@ -1080,6 +1081,18 @@ export class PostgresRuntimeStore implements RuntimeStore {
         ) AS released
       `, fenceParameters(fence));
       return booleanResult(rows, "released");
+    }, true);
+  }
+
+  async deferDelete(fence: LeaseFence): Promise<boolean> {
+    return await mapped(async () => {
+      const rows = await this.sql.unsafe<Record<string, unknown>[]>(`
+        SELECT public.companion_runtime_defer_delete(
+          $1::uuid, $2::uuid, $3::uuid, $4::bigint, $5::bigint,
+          $6::text, $7::public.companion_runtime_work_kind, $8::uuid
+        ) AS deferred
+      `, fenceParameters(fence));
+      return booleanResult(rows, "deferred");
     }, true);
   }
 }

@@ -324,15 +324,17 @@ describe("narrow AsciiBoxCompanionRuntime", () => {
       skills: [],
     });
 
-    expect(timings).toEqual([
-      { phase: "identity_probe", ok: true },
-      { phase: "layout", ok: true },
-      { phase: "interaction_extension", ok: true },
-      { phase: "resource_preflight", ok: true },
-      { phase: "control_bundle", ok: true },
-      { phase: "skill_transfer", ok: true },
-      { phase: "skill_apply", ok: true },
+    // The control bundle and the Skill transfer overlap, so only the phase set is deterministic.
+    expect(timings.map((timing) => timing.phase).sort()).toEqual([
+      "control_bundle",
+      "identity_probe",
+      "interaction_extension",
+      "layout",
+      "resource_preflight",
+      "skill_apply",
+      "skill_transfer",
     ]);
+    expect(timings.every((timing) => timing.ok)).toBe(true);
   });
 
   it("cleans the secret-bearing control bundle and fails after two rejected applies", async () => {
@@ -904,6 +906,9 @@ describe("default Pi packages on the Box disk", () => {
         // SAFETY: This test controls the request body emitted by the Box runtime command transport.
         const body = JSON.parse(String(init?.body)) as { command: string };
         commands.push(body.command);
+        if (body.command.includes("companion-box-runnable")) {
+          return response(commandResult("companion-box-runnable\n"));
+        }
         if (body.command.includes("pi-layout.version")) return response(commandResult(`${layoutMarker}\n`));
         return response(commandResult("companion-box-runnable\n"));
       }
@@ -935,6 +940,61 @@ describe("default Pi packages on the Box disk", () => {
       ".companion/runtime/state/skill-archives/companion.tar.gz.b64",
     );
     expect(commands.some((command) => command.includes("skills-tree.version.next"))).toBe(true);
+  });
+
+  it("preserves the installed Skills snapshot and reports its digest on a preserve-skills wake", async () => {
+    const stagedPaths: string[] = [];
+    const commands: string[] = [];
+    const installedDigest = "a".repeat(64);
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        return response({ box: box("ready") });
+      }
+      if (url.endsWith("/files") && method === "PUT") {
+        // SAFETY: This test controls the request body emitted by the Box runtime file transport.
+        stagedPaths.push((JSON.parse(String(init?.body)) as { path: string }).path);
+        return response({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        // SAFETY: This test controls the request body emitted by the Box runtime command transport.
+        const body = JSON.parse(String(init?.body)) as { command: string };
+        commands.push(body.command);
+        if (body.command.includes("companion-box-runnable")) {
+          return response(commandResult(
+            `companion-box-runnable\n${installedDigest}\ncompanion-skills-tree-reused\n`,
+          ));
+        }
+        return response(commandResult("companion-box-runnable\n"));
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+
+    const staged = await runtimeClient().stageExistingBox({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      runtimeGeneration: 1,
+      orgId: "22222222-2222-4222-8222-222222222222",
+      boxId: "bx_23456789",
+      clientSurface: "web",
+      providerAuth: { provider: { token: "ephemeral-test-token" } },
+      replaceProviderAuth: true,
+      modelId: "glm-4.6",
+      mcpCredentials: [],
+      mcpAccounts: [],
+      skills: [{
+        slug: "companion",
+        version: "1.0.0",
+        checksum: `sha256:${"3".repeat(64)}`,
+        archive: Buffer.from("unused-preserved-skill"),
+      }],
+      preserveSkills: true,
+    });
+
+    expect(staged).toMatchObject({ stagingMode: "refresh", skillsDigest: installedDigest });
+    expect(stagedPaths.some((path) => path.includes("skill-archives"))).toBe(false);
+    expect(stagedPaths.some((path) => path.endsWith("skills.json"))).toBe(false);
+    expect(commands.some((command) => command.includes("skills-tree.version.next"))).toBe(false);
   });
 
   it("checkpoints an already-installed Skill-only tree without staging credentials or archives", async () => {

@@ -19,6 +19,7 @@ const CONTROL_BUNDLE_FILE_LIMIT_BYTES = 4 * 1024 * 1024;
 
 export type BoxSimCommandKind =
   | "box-runnable"
+  | "staging-probe"
   | "warm-daemon-ready"
   | "mkdir-pi-bin"
   | "install-layout"
@@ -323,6 +324,11 @@ export function classifyBoxCommand(command: string): BoxSimCommandKind {
     return "daemon-state";
   }
   if (command.includes("companion-pi-warm-ready")) return "warm-daemon-ready";
+  if (
+    command.includes("companion-box-runnable")
+    && command.includes("pi-layout.version")
+    && command.includes("companion-provider-auth-present")
+  ) return "staging-probe";
   if (command.includes("companion-box-runnable")) return "box-runnable";
   if (
     command.includes("COMPANION_CONTROL_BUNDLE=")
@@ -431,6 +437,55 @@ function probedLayout(machine: BoxSimCommandMachine, command: string): BoxSimCom
     return ok("companion-layout-unchanged\n");
   }
   return ok();
+}
+
+function clearStagedSkillArchives(machine: BoxSimCommandMachine): void {
+  const prefix = ".companion/runtime/state/skill-archives/";
+  for (const path of [...machine.persistentFiles.keys()]) {
+    if (path.startsWith(prefix)) machine.persistentFiles.delete(path);
+  }
+}
+
+function stagingProbe(machine: BoxSimCommandMachine, command: string): BoxSimCommandResult {
+  const output = ["companion-box-runnable"];
+  if (probedLayout(machine, command).stdout.includes("companion-layout-unchanged")) {
+    output.push("companion-layout-unchanged");
+  }
+
+  const installedRevision = machine.persistentFiles
+    .get(".companion/runtime/state/skills-tree.version")?.toString("utf8").trim();
+  if (command.includes("companion-skills-snapshot-corrupt")) {
+    if (!installedRevision || !/^[0-9a-f]{64}$/.test(installedRevision)) {
+      output.push("companion-skills-snapshot-corrupt");
+      return failed("", 1, `${output.join("\n")}\n`);
+    }
+    output.push(installedRevision);
+    clearStagedSkillArchives(machine);
+    output.push("companion-skills-tree-reused");
+  } else {
+    const expectedRevision = /skills-tree\.version[\s\S]*?" = '([0-9a-f]{64})' \]; then/
+      .exec(command)?.[1];
+    if (expectedRevision && expectedRevision === installedRevision) {
+      output.push("companion-skills-tree-reused");
+    } else {
+      clearStagedSkillArchives(machine);
+      const bakedCopy = /if \[ -s "\$HOME\/([^"]+)" \]; then cp "\$HOME\/([^"]+)" "\$HOME\/([^"]+)";/.exec(command);
+      const source = bakedCopy?.[1] && bakedCopy[1] === bakedCopy[2]
+        ? bakedCopy[1]
+        : undefined;
+      const destination = bakedCopy?.[3];
+      const bakedArchive = source ? machine.persistentFiles.get(normalizeBoxPath(source)) : undefined;
+      if (bakedArchive && destination) {
+        machine.persistentFiles.set(normalizeBoxPath(destination), Buffer.from(bakedArchive));
+        output.push("companion-bundled-skill-reused");
+      }
+    }
+  }
+
+  if (machine.persistentFiles.has(".companion/pi/auth.json")) {
+    output.push("companion-provider-auth-present");
+  }
+  return ok(`${output.join("\n")}\n`);
 }
 
 function writeSimulatedLayoutFiles(machine: BoxSimCommandMachine, expected?: string): void {
@@ -941,6 +996,8 @@ export async function executeBoxCommand(
   switch (classifyBoxCommand(command)) {
     case "box-runnable":
       return ok("companion-box-runnable\n");
+    case "staging-probe":
+      return stagingProbe(machine, command);
     case "warm-daemon-ready": {
       const warm = machine.daemon.status === "active"
         && machine.daemon.rpcReady
@@ -960,10 +1017,7 @@ export async function executeBoxCommand(
       return ok();
     case "clear-skill-archives": {
       if (command.includes('rm -rf "$root/state/skill-archives"')) {
-        const prefix = ".companion/runtime/state/skill-archives/";
-        for (const path of machine.persistentFiles.keys()) {
-          if (path.startsWith(prefix)) machine.persistentFiles.delete(path);
-        }
+        clearStagedSkillArchives(machine);
       }
       const output: string[] = [];
       if (machine.persistentFiles.has(".companion/pi/auth.json")) {

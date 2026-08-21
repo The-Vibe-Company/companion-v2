@@ -148,6 +148,15 @@ six-hour TTL through an idempotent PATCH. An ambiguous create is interrupted and
 After naming, runtime lists again and permanently deletes duplicates. Permanent deletion is provider
 operation tracking, not stop/archive.
 
+Once Box accepts permanent deletion, runtime never sends that `DELETE` again. Each claim performs
+one `GET /deletion-operations/{id}` after reauthorization. `completed` or provider `404` proves
+absence and permits atomic removal of the Companion aggregate; `pending`, `processing`, `blocked`,
+or an explicitly retryable GET failure atomically returns the same operation to `pending`, releases
+its lease, and schedules another claim after 5, 15, 30, then at most 60 seconds based on the durable
+attempt count. Invalid responses and non-retryable errors retain the normal expurgated terminal
+failure. The protocol-versioned claim entrypoint prevents an older runtime from claiming these rows
+during a rolling deploy.
+
 After a prompt may have been written, loss of acknowledgement is ambiguous: the attempt becomes
 `interrupted`, no automatic replay occurs, and later turns remain blocked. A proven negative ACK may
 be retried. Retry warns that an earlier external effect may have succeeded; Cancel explicitly

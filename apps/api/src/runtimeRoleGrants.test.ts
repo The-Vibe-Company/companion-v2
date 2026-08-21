@@ -92,6 +92,15 @@ describe("Skills Hub runtime-role grants", () => {
     expect(sql).toContain(
       "companion_runtime_claim_work(text,integer,integer,bigint,integer)",
     );
+    expect(sql).toContain(
+      "companion_runtime_claim_work(text,integer,integer,bigint,integer,integer)",
+    );
+    expect(sql).toContain(
+      "companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)",
+    );
+    expect(sql).toContain(
+      "'public.companion_runtime_claim_work_without_delete_resume_guard(text,integer,integer,bigint,integer)'::regprocedure",
+    );
     expect(sql).toContain("pg_catalog.aclexplode(");
     expect(sql).toContain("acl.grantee <> protected_proc.proowner");
     expect(sql).toContain("defaults.defaclobjtype = 'f'");

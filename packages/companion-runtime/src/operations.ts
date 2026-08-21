@@ -11,7 +11,11 @@ import type {
   GenerationBoxDiscovery,
   RuntimeEngineDependencies,
 } from "./ports";
-import { retryIdempotentLifecycle, type IdempotentLifecycleCall } from "./retry";
+import {
+  isRetryableProviderError,
+  retryIdempotentLifecycle,
+  type IdempotentLifecycleCall,
+} from "./retry";
 import {
   activateRuntimeSettings,
   type StagedRuntimeSettings,
@@ -24,6 +28,10 @@ import type {
 
 export const BOX_WARM_TTL_SECONDS = 21_600;
 const PROVIDER_POLL_INTERVAL_MS = 1_000;
+// Waiting for a Box to leave provisioning is the one poll where every interval lands directly on
+// the member's send-to-ack latency, and a ready GET is cheap, so this loop polls four times as
+// often as the conservative default used for absence confirmation and archival waits.
+const READY_POLL_INTERVAL_MS = 250;
 const ABSENCE_CONFIRMATION_INTERVAL_MS = 30_000;
 const PROVIDER_CALL_DEADLINE_MS = 30_000;
 const OPERATION_DEADLINE_MS = 10 * 60 * 1_000;
@@ -332,7 +340,7 @@ async function waitForReadyBox(context: OperationContext): Promise<void> {
         action: "restart_box",
       });
     }
-    await context.deps.clock.sleep(PROVIDER_POLL_INTERVAL_MS, context.session.signal);
+    await context.deps.clock.sleep(READY_POLL_INTERVAL_MS, context.session.signal);
   }
 }
 
@@ -984,11 +992,6 @@ async function handleDelete(context: OperationContext): Promise<RuntimeWorkDispo
         });
         break;
       case "waiting_deleted": {
-        requirePollingBudget(
-          context,
-          "box_delete_deadline_exceeded",
-          "Permanent Box deletion did not finish before its deadline.",
-        );
         const boxId = requiredBoxId(context.session);
         const operationId = authorization.providerOperationId;
         if (!operationId) {
@@ -1000,18 +1003,23 @@ async function handleDelete(context: OperationContext): Promise<RuntimeWorkDispo
         }
         let poll;
         try {
-          poll = await lifecycle(context, "poll_delete", async ({ signal }) =>
+          // An accepted delete is resumed one provider read at a time. PostgreSQL schedules the
+          // next claim, so no runtime slot remains occupied and the DELETE is never replayed.
+          poll = await context.session.external(async (signal) =>
             await context.deps.box.pollPermanentDeletion({ boxId, operationId, signal }));
         } catch (error) {
-          if (!isProviderNotFound(error)) throw error;
-          poll = { status: "completed" } as const;
+          if (isProviderNotFound(error)) {
+            poll = { status: "completed" } as const;
+          } else if (isRetryableProviderError(Object(error))) {
+            return { kind: "defer_delete" };
+          } else {
+            throw error;
+          }
         }
         if (poll.status === "completed") {
           await observe(context, { boxState: "absent" });
         } else {
-          // pending, processing, and blocked are all in-progress. Official Box docs poll until
-          // `completed`; blocked has no completedAt, so treating it as terminal aborted deletes.
-          await context.deps.clock.sleep(PROVIDER_POLL_INTERVAL_MS, context.session.signal);
+          return { kind: "defer_delete" };
         }
         break;
       }

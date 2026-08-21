@@ -803,8 +803,15 @@
     {
       "idx": 114,
       "version": "7",
-      "when": 1789751200001,
-      "tag": "0114_companion_icons",
+      "when": 1789837600000,
+      "tag": "0114_companion_delete_resume",
+      "breakpoints": true
+    },
+    {
+      "idx": 115,
+      "version": "7",
+      "when": 1789837600001,
+      "tag": "0115_companion_icons",
       "breakpoints": true
     }
   ]
