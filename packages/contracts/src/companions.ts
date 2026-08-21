@@ -177,6 +177,39 @@ export type CompanionProvidersResponse = z.infer<typeof companionProvidersRespon
 
 export const companionPersonaSchema = z.string().trim().max(280);
 
+/**
+ * Cosmetic Companion icon (THE-382). Four small indexes into fixed client-side catalogs: a blob
+ * shape, a mouth, an accessory, and a color. Purely presentational — never sent to Pi, never part
+ * of an operation snapshot — so changing it must not wake or restart anything.
+ */
+/* oxlint-disable anti-slop/no-shape-in-symbol-names -- Icon catalogs are literally geometric shapes; "shape" is the domain term here. */
+export const COMPANION_ICON_SHAPE_COUNT = 8;
+export const COMPANION_ICON_MOUTH_COUNT = 5;
+export const COMPANION_ICON_ACCESSORY_COUNT = 7;
+export const COMPANION_ICON_COLOR_COUNT = 11;
+
+const companionIconIndex = (max: number) => z.number().int().min(0).max(max - 1);
+
+export const companionIconSchema = z.object({
+  shape: companionIconIndex(COMPANION_ICON_SHAPE_COUNT),
+  mouth: companionIconIndex(COMPANION_ICON_MOUTH_COUNT),
+  accessory: companionIconIndex(COMPANION_ICON_ACCESSORY_COUNT),
+  color: companionIconIndex(COMPANION_ICON_COLOR_COUNT),
+}).strict();
+export type CompanionIcon = z.infer<typeof companionIconSchema>;
+
+export const companionIconPatchSchema = z.object({
+  shape: companionIconIndex(COMPANION_ICON_SHAPE_COUNT).optional(),
+  mouth: companionIconIndex(COMPANION_ICON_MOUTH_COUNT).optional(),
+  accessory: companionIconIndex(COMPANION_ICON_ACCESSORY_COUNT).optional(),
+  color: companionIconIndex(COMPANION_ICON_COLOR_COUNT).optional(),
+}).strict().refine(
+  (icon) => icon.shape !== undefined || icon.mouth !== undefined
+    || icon.accessory !== undefined || icon.color !== undefined,
+  { message: "at least one icon field is required" },
+);
+export type CompanionIconPatch = z.infer<typeof companionIconPatchSchema>;
+
 /** Exact Skills Hub skill ids a Companion may stage onto its Box. Empty = no library skills. */
 export const companionSelectedSkillIdsSchema = z.array(z.string().uuid()).max(100);
 
@@ -265,6 +298,11 @@ export const companionSchema = z.object({
   name: z.string(),
   /** One short line describing what this Companion is for; shown under the name in the list. */
   persona: z.string().nullable(),
+  /**
+   * Cosmetic blob icon shown wherever the Companion appears; never interpreted by the runtime.
+   * Optional on reads so pre-THE-382 clients keep parsing; every current writer projects it.
+   */
+  icon: companionIconSchema.optional(),
   /** Null only for legacy rows created before a provider was selected. */
   model_id: companionModelIdSchema.nullable(),
   /**
@@ -1213,6 +1251,7 @@ export const createCompanionInputSchema = z.object({
   model_id: companionModelIdSchema.optional(),
   selected_skill_ids: companionSelectedSkillIdsSchema.optional(),
   selected_mcp_account_ids: companionSelectedMcpAccountIdsSchema.optional(),
+  icon: companionIconPatchSchema.optional(),
 }).strict();
 export type CreateCompanionInput = z.infer<typeof createCompanionInputSchema>;
 
@@ -1237,6 +1276,7 @@ export const updateCompanionInputSchema = z.object({
   model_id: companionModelIdSchema.optional(),
   selected_skill_ids: companionSelectedSkillIdsSchema.optional(),
   selected_mcp_account_ids: companionSelectedMcpAccountIdsSchema.optional(),
+  icon: companionIconPatchSchema.optional(),
 }).strict().refine(
   (input) =>
     input.name !== undefined
@@ -1244,7 +1284,8 @@ export const updateCompanionInputSchema = z.object({
     || input.provider_id !== undefined
     || input.model_id !== undefined
     || input.selected_skill_ids !== undefined
-    || input.selected_mcp_account_ids !== undefined,
+    || input.selected_mcp_account_ids !== undefined
+    || input.icon !== undefined,
   "At least one Companion setting is required",
 );
 export type UpdateCompanionInput = z.infer<typeof updateCompanionInputSchema>;

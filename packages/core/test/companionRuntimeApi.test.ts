@@ -12,6 +12,7 @@ const companion: Companion = {
   id: "11111111-1111-4111-8111-111111111111",
   name: "Research",
   persona: null,
+  icon: { shape: 1, mouth: 1, accessory: 1, color: 2 },
   model_id: "model-1",
   selected_skill_ids: [],
   can_write_skills: true,

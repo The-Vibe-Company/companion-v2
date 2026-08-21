@@ -417,10 +417,10 @@ BEGIN
     -- 0092 gives only the API login the durable intent/read surface. The worker and dedicated
     -- executor never receive these functions, and helpers remain migration-owner-only.
     IF pg_catalog.to_regprocedure(
-      'public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)'
+      'public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid,smallint,smallint,smallint,smallint)'
     ) IS NOT NULL THEN
       companion_api_functions := ARRAY[
-        'public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)'::regprocedure,
+        'public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid,smallint,smallint,smallint,smallint)'::regprocedure,
         'public.companion_api_update_companion(uuid,uuid,jsonb)'::regprocedure,
         'public.companion_api_set_initial_provider(uuid,uuid,text,text)'::regprocedure,
         'public.companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)'::regprocedure,

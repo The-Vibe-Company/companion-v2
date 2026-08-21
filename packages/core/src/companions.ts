@@ -286,6 +286,12 @@ function toCompanion(
     id: row.id,
     name: row.name,
     persona: row.persona,
+    icon: {
+      shape: row.iconShape,
+      mouth: row.iconMouth,
+      accessory: row.iconAccessory,
+      color: row.iconColor,
+    },
     model_id: modelId ?? null,
     selected_skill_ids: Array.isArray(row.selectedSkillIds) ? row.selectedSkillIds : [],
     can_write_skills: row.canWriteSkills === true,

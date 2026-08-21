@@ -64,6 +64,7 @@ import { RelativeTime } from "./RelativeTime";
 import { CompanionProvidersDialog } from "./CompanionProvidersDialog";
 import { CompanionPlugins } from "./CompanionPlugins";
 import { CompanionSettings } from "./CompanionSettings";
+import { CompanionIcon } from "./CompanionIcon";
 import type { CompanionContextSkill } from "./CompanionContext";
 import { CompanionThread } from "./CompanionThread";
 import { NewCompanionDialog } from "./NewCompanionDialog";
@@ -1549,7 +1550,7 @@ export function CompanionsApp({
                       onClick={() => openCompanion(companion)}
                     >
                       <span className="companions-avatar" aria-hidden="true">
-                        {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
+                        <CompanionIcon icon={companion.icon} size={24} />
                         {companion.unread ? <i className="companions-unread" /> : null}
                       </span>
                       <span className="companions-row__text">
@@ -1616,7 +1617,7 @@ export function CompanionsApp({
                       <div className="companions-row companions-row--hidden" key={companion.id}>
                         <div className="companions-row__main companions-row__main--static">
                           <span className="companions-avatar" aria-hidden="true">
-                            {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
+                            <CompanionIcon icon={companion.icon} size={24} />
                           </span>
                           <span className="companions-row__text">
                             <strong>{companion.name}</strong>

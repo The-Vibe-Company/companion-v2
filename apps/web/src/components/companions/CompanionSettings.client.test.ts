@@ -233,6 +233,7 @@ describe("CompanionSettings", () => {
       model_id: "gpt-5.5",
       selected_skill_ids: [],
       selected_mcp_account_ids: [],
+      icon: { shape: 1, mouth: 1, accessory: 1, color: 2 },
     });
     expect(onSaved).toHaveBeenCalledOnce();
     expect(container.textContent).toContain("Settings saved.");

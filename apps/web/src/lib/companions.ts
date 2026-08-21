@@ -72,6 +72,7 @@ export async function createCompanion(
     model_id: string;
     selected_skill_ids?: string[];
     selected_mcp_account_ids?: string[];
+    icon?: { shape?: number; mouth?: number; accessory?: number; color?: number };
   },
 ): Promise<Companion> {
   const result = await apiFetch<{ companion: Companion }>("/v1/companions", {

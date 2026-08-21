@@ -25,6 +25,7 @@ import {
 import { CompanionSkillPicker } from "./CompanionSkillPicker";
 import { CompanionPluginPicker } from "./CompanionPluginPicker";
 import { CompanionSkillsSyncStatus } from "./CompanionSkillsSyncStatus";
+import { CompanionIconPicker, type CompanionIconValue } from "./CompanionIconPicker";
 
 /** How often to re-read the control-plane row while a skill apply is in flight on an awake Box. */
 const SKILLS_SYNC_POLL_MS = 3_000;
@@ -120,6 +121,12 @@ export function CompanionSettings({
   const [selectedMcpAccountIds, setSelectedMcpAccountIds] = useState(
     companion.selected_mcp_account_ids,
   );
+  const [icon, setIcon] = useState<CompanionIconValue>({
+    shape: companion.icon?.shape ?? 1,
+    mouth: companion.icon?.mouth ?? 1,
+    accessory: companion.icon?.accessory ?? 1,
+    color: companion.icon?.color ?? 2,
+  });
   const [busy, setBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [confirmingBoxRestart, setConfirmingBoxRestart] = useState(false);
@@ -341,7 +348,11 @@ export function CompanionSettings({
       || selectedSkillIds.length !== companion.selected_skill_ids.length
       || selectedSkillIds.some((id, index) => id !== companion.selected_skill_ids[index])
       || selectedMcpAccountIds.length !== companion.selected_mcp_account_ids.length
-      || selectedMcpAccountIds.some((id, index) => id !== companion.selected_mcp_account_ids[index]),
+      || selectedMcpAccountIds.some((id, index) => id !== companion.selected_mcp_account_ids[index])
+      || icon.shape !== (companion.icon?.shape ?? 1)
+      || icon.mouth !== (companion.icon?.mouth ?? 1)
+      || icon.accessory !== (companion.icon?.accessory ?? 1)
+      || icon.color !== (companion.icon?.color ?? 2),
     [
       companion,
       instructions,
@@ -367,12 +378,19 @@ export function CompanionSettings({
         model_id: modelId,
         selected_skill_ids: selectedSkillIds,
         selected_mcp_account_ids: selectedMcpAccountIds,
+        icon,
       });
       onSaved(updated);
       syncReadRef.current += 1;
       setLatest(updated);
       setName(updated.name);
       setInstructions(updated.persona ?? "");
+      setIcon({
+        shape: updated.icon?.shape ?? 1,
+        mouth: updated.icon?.mouth ?? 1,
+        accessory: updated.icon?.accessory ?? 1,
+        color: updated.icon?.color ?? 2,
+      });
       const updatedProviderId = updated.runtime.provider_ids[0] ?? "";
       setProviderId(updatedProviderId);
       setModelId(providerSelectedModel(providers, updatedProviderId, updated.model_id));
@@ -489,6 +507,18 @@ export function CompanionSettings({
           <p className="companions-settings__hint" id="companion-instructions-hint">
             Applied after the active turn settles and before the next turn starts.
           </p>
+
+          {canEdit && (
+            <>
+              <CompanionIconPicker
+                value={icon}
+                onChange={(next) => {
+                  setIcon(next);
+                  setSaved(false);
+                }}
+              />
+            </>
+          )}
 
           <CompanionProviderModelPicker
             providers={providers}

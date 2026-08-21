@@ -306,6 +306,9 @@ export async function createCompanionV2(input: {
   modelId?: string;
   selectedSkillIds?: string[];
   selectedMcpAccountIds?: string[];
+  /* Icon field names mirror the contracts catalog; "shape" is the domain term. */
+  // oxlint-disable-next-line anti-slop/no-shape-in-symbol-names
+  icon?: { shape?: number; mouth?: number; accessory?: number; color?: number };
   sourceCompanionId?: string;
   database: Db;
 }): Promise<Companion> {
@@ -334,6 +337,8 @@ export async function createCompanionV2(input: {
   }
   // Skills Hub access is unconditional, and the legacy flag is pinned true to match the token the
   // Box receives. Nobody chooses this per Companion any more.
+  // Icon catalogs are geometric; "shape" is the domain term.
+  /* oxlint-disable anti-slop/no-shape-in-symbol-names */
   const result = await input.database.execute(sql`
     select * from public.companion_api_create_companion(
       ${input.orgId}::uuid,
@@ -344,9 +349,14 @@ export async function createCompanionV2(input: {
       ${JSON.stringify(input.selectedSkillIds ?? [])}::jsonb,
       true::boolean,
       ${JSON.stringify(input.selectedMcpAccountIds ?? [])}::jsonb,
-      ${input.sourceCompanionId ?? null}::uuid
+      ${input.sourceCompanionId ?? null}::uuid,
+      ${input.icon?.shape ?? 1}::smallint,
+      ${input.icon?.mouth ?? 1}::smallint,
+      ${input.icon?.accessory ?? 1}::smallint,
+      ${input.icon?.color ?? 2}::smallint
     )
   `);
+  /* oxlint-enable anti-slop/no-shape-in-symbol-names */
   const [created] = rows<{ companion_id: string }>(result);
   if (!created) throw new Error("failed to create Companion runtime projection");
   return getCompanionV2({ ...input, companionId: created.companion_id });
@@ -464,6 +474,7 @@ export async function duplicateCompanionV2(input: {
     modelId: source.model_id,
     selectedSkillIds: source.selected_skill_ids,
     selectedMcpAccountIds: source.selected_mcp_account_ids,
+    icon: source.icon,
     sourceCompanionId: source.id,
     database: input.database,
   });
