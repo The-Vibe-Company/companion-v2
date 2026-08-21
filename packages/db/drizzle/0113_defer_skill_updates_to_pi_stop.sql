@@ -49,12 +49,73 @@ ALTER TABLE public.companion_operations
   ADD COLUMN skill_update_selected_skill_ids jsonb,
   ADD COLUMN skill_update_refs jsonb;
 --> statement-breakpoint
+ALTER TABLE public.companion_operations
+  DISABLE TRIGGER companion_operations_snapshot_immutable,
+  DROP CONSTRAINT companion_operations_target_revision_check,
+  DROP CONSTRAINT companion_operations_resource_snapshot_check;
+--> statement-breakpoint
+-- Stop operations created before this migration intentionally carried no Skill snapshot or target
+-- revision. Capture the current desired tree for any such durable work before tightening the row
+-- constraints. A later runtime claim still reauthorizes every referenced Skill for the original
+-- actor, so a revoked personal Skill cannot be installed merely because it was backfilled here.
+UPDATE public.companion_operations operation
+SET target_skills_revision = companion.skills_available_revision,
+    skill_update_selected_skill_ids = companion.selected_skill_ids,
+    skill_update_refs = COALESCE((
+      SELECT jsonb_agg(jsonb_build_object(
+        'skill_id', skill.id,
+        'current_version_id', skill.current_version_id
+      ) ORDER BY skill.id)
+      FROM public.skills skill
+      WHERE skill.org_id = operation.org_id
+        AND EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements_text(companion.selected_skill_ids) selected(skill_id)
+          WHERE selected.skill_id = skill.id::text
+        )
+    ), '[]'::jsonb)
+FROM public.companions companion
+WHERE operation.kind = 'stop'
+  AND companion.org_id = operation.org_id
+  AND companion.id = operation.companion_id;
+--> statement-breakpoint
 UPDATE public.companion_operations
 SET skill_update_selected_skill_ids = selected_skill_ids,
-    skill_update_refs = skill_refs,
-    selected_skill_ids = CASE WHEN kind = 'stop' THEN NULL ELSE selected_skill_ids END,
-    skill_refs = CASE WHEN kind = 'stop' THEN NULL ELSE skill_refs END
-WHERE kind IN ('stop', 'restart_pi', 'restart_box', 'apply_settings');
+    skill_update_refs = skill_refs
+WHERE kind IN ('restart_pi', 'restart_box', 'apply_settings');
+--> statement-breakpoint
+CREATE OR REPLACE FUNCTION public.companion_runtime_reject_operation_snapshot_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $$
+BEGIN
+  IF OLD.runtime_generation IS DISTINCT FROM NEW.runtime_generation
+     OR OLD.target_settings_revision IS DISTINCT FROM NEW.target_settings_revision
+     OR OLD.target_skills_revision IS DISTINCT FROM NEW.target_skills_revision
+     OR OLD.client_surface IS DISTINCT FROM NEW.client_surface
+     OR OLD.model_id IS DISTINCT FROM NEW.model_id
+     OR OLD.persona IS DISTINCT FROM NEW.persona
+     OR OLD.can_write_skills IS DISTINCT FROM NEW.can_write_skills
+     OR OLD.provider_ids IS DISTINCT FROM NEW.provider_ids
+     OR OLD.selected_skill_ids IS DISTINCT FROM NEW.selected_skill_ids
+     OR OLD.skill_refs IS DISTINCT FROM NEW.skill_refs
+     OR OLD.skill_update_selected_skill_ids IS DISTINCT FROM NEW.skill_update_selected_skill_ids
+     OR OLD.skill_update_refs IS DISTINCT FROM NEW.skill_update_refs
+     OR OLD.selected_mcp_account_ids IS DISTINCT FROM NEW.selected_mcp_account_ids THEN
+    RAISE EXCEPTION 'operation resource snapshot is immutable' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END
+$$;
+--> statement-breakpoint
+DROP TRIGGER companion_operations_snapshot_immutable ON public.companion_operations;
+CREATE TRIGGER companion_operations_snapshot_immutable
+  BEFORE UPDATE OF runtime_generation, target_settings_revision, target_skills_revision,
+    client_surface, model_id, persona, can_write_skills, provider_ids, selected_skill_ids,
+    skill_refs, skill_update_selected_skill_ids, skill_update_refs, selected_mcp_account_ids
+  ON public.companion_operations
+  FOR EACH ROW EXECUTE FUNCTION public.companion_runtime_reject_operation_snapshot_change();
 --> statement-breakpoint
 
 CREATE FUNCTION public.companion_runtime_keep_available_skill_revision()
@@ -505,7 +566,6 @@ ALTER TABLE public.companion_operations
       'provider_delete_requested', 'waiting_deleted', 'provider_deleted', 'box_absent', 'completed'
     ) AND checkpoint_sequence >= 0 AND attempt_count >= 0
   ),
-  DROP CONSTRAINT companion_operations_target_revision_check,
   ADD CONSTRAINT companion_operations_target_revision_check CHECK (
     (target_settings_revision IS NULL OR target_settings_revision >= 1)
     AND (target_skills_revision IS NULL OR target_skills_revision >= 1)
@@ -516,7 +576,6 @@ ALTER TABLE public.companion_operations
       OR (kind = 'delete' AND target_settings_revision IS NULL AND target_skills_revision IS NULL)
     )
   ),
-  DROP CONSTRAINT companion_operations_resource_snapshot_check,
   ADD CONSTRAINT companion_operations_resource_snapshot_check CHECK (
     (kind = 'start'
       AND client_surface IS NOT NULL
