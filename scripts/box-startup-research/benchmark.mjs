@@ -76,6 +76,7 @@ const DURATION_PHASES = new Set([
   "resume_stage_skill_transfer",
   "resume_stage_skill_apply",
 ]);
+const FAILURE_PHASES = new Set([...DURATION_PHASES, "create", "first_message", "resume_message"]);
 const PROVIDER_OPERATIONS = new Set([
   "list_boxes",
   "create_box",
@@ -91,7 +92,12 @@ const PROVIDER_OPERATIONS = new Set([
 ]);
 const BOX_ID_PATTERN = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
 const SNAPSHOT_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
+const SAFE_CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const CREDENTIAL_MATERIAL_PATTERN = /(?:authorization\s*[:=]\s*bearer\s+[A-Za-z0-9._-]{16,}|(?:api[_-]?key|token|secret|password)\s*[:=]\s*["'][^"']{16,})/i;
+// The provider can report a named snapshot as ready before its disk is usable as a creation
+// source. Give that immutable snapshot a bounded propagation window before the first measured
+// cycle; otherwise a benchmark can fail at create even though the bake and cleanup both succeed.
+export const SNAPSHOT_PROPAGATION_DELAY_MS = 60_000;
 
 function option(name) {
   const index = process.argv.indexOf(name);
@@ -234,6 +240,10 @@ function jsonEvents(contents) {
   });
 }
 
+function pause(milliseconds) {
+  return new Promise((resolvePause) => setTimeout(resolvePause, milliseconds));
+}
+
 function nonNegativeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
@@ -342,6 +352,60 @@ export function sanitizeCycleEvents(events, resourcePrefixValue) {
   }
   if (resources !== 1 || cleanups !== 1 || terminals !== 1) {
     throw new Error("evaluator cycle did not prove one leased resource and cleanup");
+  }
+  return safe;
+}
+
+export function sanitizeFailedCycleEvents(events, resourcePrefixValue) {
+  const safe = [];
+  let resources = 0;
+  let cleanups = 0;
+  let terminals = 0;
+  for (const event of events) {
+    if (FAILURE_PHASES.has(event.phase) && event.status === "failed") {
+      const durationMs = nonNegativeInteger(event.duration_ms);
+      const code = stringValue(event.code);
+      if (durationMs === null || code === null || !SAFE_CODE_PATTERN.test(code)) {
+        throw new Error("evaluator returned an invalid failure event");
+      }
+      safe.push({ phase: event.phase, status: "failed", duration_ms: durationMs, code });
+      continue;
+    }
+    if (event.phase === "resource" && event.status === "created") {
+      const resourceId = stringValue(event.resource_id);
+      if (event.resource_kind !== "box" || resourceId === null
+        || !BOX_ID_PATTERN.test(resourceId) || event.research_tag !== resourcePrefixValue) {
+        throw new Error("evaluator created a resource outside the lease");
+      }
+      resources += 1;
+      safe.push({
+        phase: "resource",
+        status: "created",
+        resource_kind: "box",
+        resource_id: resourceId,
+        research_tag: resourcePrefixValue,
+      });
+      continue;
+    }
+    if (event.phase === "cleanup" && event.status === "succeeded") {
+      if (event.research_tag !== resourcePrefixValue) {
+        throw new Error("evaluator cleanup is outside the lease");
+      }
+      cleanups += 1;
+      safe.push({ phase: "cleanup", status: "succeeded", research_tag: resourcePrefixValue });
+      continue;
+    }
+    if (event.phase === "runtime_change_e2e" && event.status === "failed") {
+      const code = stringValue(event.code);
+      if (code === null || !SAFE_CODE_PATTERN.test(code)) {
+        throw new Error("evaluator returned an invalid terminal failure");
+      }
+      terminals += 1;
+      safe.push({ phase: "runtime_change_e2e", status: "failed", code });
+    }
+  }
+  if (resources > 1 || cleanups !== 1 || terminals !== 1) {
+    throw new Error("failed evaluator cycle did not prove bounded cleanup");
   }
   return safe;
 }
@@ -483,6 +547,8 @@ export async function runLeasedBenchmark(raw = {}) {
     }
     await appendStructuredEvents(logPath, [imageEvent]);
 
+    await pause(SNAPSHOT_PROPAGATION_DELAY_MS);
+
     for (let index = 0; index < lease.cycles; index += 1) {
       if (Date.now() >= expiresAt) throw new Error("benchmark lease expired during execution");
       const cycle = await run("pnpm", ["e2e:box-runtime-change"], {
@@ -495,7 +561,15 @@ export async function runLeasedBenchmark(raw = {}) {
         },
         label: `benchmark cycle ${index + 1}`,
       });
-      const events = sanitizeCycleEvents(checkedOutput(cycle, env), lease.resourcePrefix);
+      assertSafeEvaluatorOutput(cycle.stdout, env);
+      assertSafeEvaluatorOutput(cycle.stderr, env);
+      const rawEvents = jsonEvents(cycle.stdout);
+      if (cycle.code !== 0) {
+        const failedEvents = sanitizeFailedCycleEvents(rawEvents, lease.resourcePrefix);
+        await appendStructuredEvents(logPath, failedEvents);
+        throw new Error(`${cycle.label} failed`);
+      }
+      const events = sanitizeCycleEvents(rawEvents, lease.resourcePrefix);
       const contents = `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
       cycleContents += contents;
       await appendStructuredEvents(logPath, events);

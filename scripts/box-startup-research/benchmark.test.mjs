@@ -5,6 +5,8 @@ import {
   assertSafeEvaluatorOutput,
   safeEnvironment,
   sanitizeCycleEvents,
+  sanitizeFailedCycleEvents,
+  SNAPSHOT_PROPAGATION_DELAY_MS,
   validateLeaseGrant,
 } from "./benchmark.mjs";
 import { leaseTokenHash, resourcePrefix } from "./contracts.mjs";
@@ -62,6 +64,27 @@ test("preserves allowlisted staging and provider timings without arbitrary field
     operation: "write_file",
     duration_ms: 8,
   });
+});
+
+test("waits for freshly-ready snapshots to propagate before measured cycles", () => {
+  assert.equal(SNAPSHOT_PROPAGATION_DELAY_MS, 60_000);
+});
+
+test("records only bounded, cleanup-proven evaluator failures", () => {
+  const events = sanitizeFailedCycleEvents([
+    { phase: "create", status: "failed", duration_ms: 12, code: "box_not_ready", payload: "drop" },
+    { phase: "cleanup", status: "succeeded", research_tag: "box-startup-0123456789abcdef" },
+    { phase: "runtime_change_e2e", status: "failed", code: "box_not_ready", secret: "drop" },
+  ], "box-startup-0123456789abcdef");
+  assert.deepEqual(events, [
+    { phase: "create", status: "failed", duration_ms: 12, code: "box_not_ready" },
+    { phase: "cleanup", status: "succeeded", research_tag: "box-startup-0123456789abcdef" },
+    { phase: "runtime_change_e2e", status: "failed", code: "box_not_ready" },
+  ]);
+  assert.throws(() => sanitizeFailedCycleEvents([
+    { phase: "cleanup", status: "failed", research_tag: "box-startup-0123456789abcdef" },
+    { phase: "runtime_change_e2e", status: "failed", code: "cleanup_failed" },
+  ], "box-startup-0123456789abcdef"), /bounded cleanup/);
 });
 
 test("rejects a benchmark without a grant or with a bad token", () => {
