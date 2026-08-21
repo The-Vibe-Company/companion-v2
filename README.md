@@ -147,4 +147,9 @@ pnpm verify:change
 APP_URL=http://127.0.0.1:3000 pnpm browser:smoke
 ```
 
+`pnpm lint` runs anti-slop before the existing workspace lint. Anti-slop is intentionally
+incremental: it compares the worktree with the merge base of `origin/main` and requires every
+changed JavaScript or TypeScript file to satisfy the full rule set, including unchanged lines in
+that file. Use `pnpm lint:anti-slop -- --base <ref>` when the target branch differs.
+
 License: MIT.

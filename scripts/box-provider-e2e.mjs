@@ -74,7 +74,7 @@ function safeErrorCode(error) {
 function boxState(body, expectedId) {
   const id = body?.box?.id;
   const state = body?.box?.state;
-  if (id !== expectedId || typeof state !== "string") {
+  if (id !== expectedId || state?.constructor !== String) {
     throw new BoxProviderE2EError("invalid_provider_response");
   }
   return state;
@@ -84,19 +84,20 @@ function createClient(config, fetchImpl) {
   async function request(path, options = {}) {
     let response;
     try {
+      const headers = {
+        Authorization: `Bearer ${config.apiKey}`,
+        accept: "application/json",
+        ...options.headers,
+      };
+      if (options.body !== undefined) headers["content-type"] = "application/json";
       response = await fetchImpl(`${config.apiBase}${path}`, {
         method: options.method ?? "GET",
-        headers: {
-          Authorization: `Bearer ${config.apiKey}`,
-          accept: "application/json",
-          ...(options.body === undefined ? {} : { "content-type": "application/json" }),
-          ...options.headers,
-        },
+        headers,
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
         signal: AbortSignal.timeout(config.requestTimeoutMs),
       });
     } catch (error) {
-      const timedOut = error && typeof error === "object" && error.name === "TimeoutError";
+      const timedOut = error instanceof DOMException && error.name === "TimeoutError";
       throw new BoxProviderE2EError(timedOut ? "request_timeout" : "network_error");
     }
 
@@ -273,17 +274,29 @@ export async function runBoxProviderE2E(config, dependencies = {}) {
   let primaryError = null;
   let cleanupError = null;
   let cleanup = "not_needed";
+  let source = config.image === null ? "base" : "named_snapshot";
 
   try {
     boxId = await runPhase("create", logger, now, async () => {
-      const result = await client.request("/boxes", {
-        method: "POST",
-        body: {
+      const create = async (image) => {
+        const body = {
           ttlSeconds: 300,
           noEnv: true,
-          ...(config.image === null ? {} : { from: config.image }),
-        },
-      });
+        };
+        if (image !== null) body.from = image;
+        return await client.request("/boxes", { method: "POST", body });
+      };
+      let result;
+      try {
+        result = await create(config.image);
+      } catch (error) {
+        const staleImage = config.image !== null
+          && error instanceof BoxProviderE2EError
+          && error.code === "http_404";
+        if (!staleImage) throw error;
+        source = "base_fallback";
+        result = await create(null);
+      }
       const id = result.body?.box?.id;
       if (result.status !== 202 || !BOX_ID_PATTERN.test(id ?? "")) {
         throw new BoxProviderE2EError("invalid_provider_response");
@@ -339,12 +352,13 @@ export async function runBoxProviderE2E(config, dependencies = {}) {
         cleanupError = error;
         cleanup = "failed";
       }
-      logger({
+      const cleanupEvent = {
         phase: "cleanup",
         status: cleanup,
         duration_ms: Math.max(0, now() - cleanupStartedAt),
-        ...(cleanupError === null ? {} : { code: safeErrorCode(cleanupError) }),
-      });
+      };
+      if (cleanupError !== null) cleanupEvent.code = safeErrorCode(cleanupError);
+      logger(cleanupEvent);
     }
   }
 
@@ -352,11 +366,11 @@ export async function runBoxProviderE2E(config, dependencies = {}) {
   const report = {
     phase: "box_provider_e2e",
     status: failed ? "failed" : "succeeded",
-    ...(failed ? { code: primaryError ? safeErrorCode(primaryError) : "cleanup_failed" } : {}),
-    source: config.image === null ? "base" : "named_snapshot",
+    source,
     total_duration_ms: Math.max(0, now() - startedAt),
     cleanup,
   };
+  if (failed) report.code = primaryError ? safeErrorCode(primaryError) : "cleanup_failed";
   logger(report);
   return report;
 }

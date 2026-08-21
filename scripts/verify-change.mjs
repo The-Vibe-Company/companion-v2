@@ -3,6 +3,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { isAntiSlopCandidatePath } from "./anti-slop-targets.mjs";
 import { classifyFiles } from "./ci-scope.mjs";
 
 export const DEFERRED_GATES_EXIT_CODE = 2;
@@ -17,6 +18,7 @@ const HYGIENE_TESTS = [
   "scripts/ci-scope.test.mjs",
   "scripts/ci-playwright-policy.test.mjs",
   "scripts/ci-gate.test.mjs",
+  "scripts/lint-anti-slop.test.mjs",
   "scripts/verify-change.test.mjs",
   "scripts/box-startup-research/contracts.test.mjs",
   "scripts/box-startup-research/benchmark.test.mjs",
@@ -31,14 +33,14 @@ function splitNullTerminated(output) {
   return output.toString("utf8").split("\0").filter(Boolean);
 }
 
-function changedPathsFromNameStatus(output) {
+export function changedPathsFromNameStatus(output, { includeCopySources = true } = {}) {
   const fields = splitNullTerminated(output);
   const paths = [];
   for (let index = 0; index < fields.length; ) {
     const status = fields[index++];
     const firstPath = fields[index++];
     if (!status || !firstPath) throw new Error("git returned an invalid name-status diff");
-    paths.push(firstPath);
+    if (!status.startsWith("C") || includeCopySources) paths.push(firstPath);
     if (status.startsWith("R") || status.startsWith("C")) {
       const secondPath = fields[index++];
       if (!secondPath) throw new Error("git returned an incomplete rename or copy record");
@@ -56,7 +58,10 @@ function assertSafeRef(ref) {
   if (!ref || ref.startsWith("-")) throw new Error(`invalid base ref: ${ref || "(empty)"}`);
 }
 
-export function collectChangedFiles(baseRef = "origin/main", { cwd = process.cwd(), exec = execFileSync } = {}) {
+export function collectChangedFiles(
+  baseRef = "origin/main",
+  { cwd = process.cwd(), exec = execFileSync, includeCopySources = true } = {},
+) {
   assertSafeRef(baseRef);
   try {
     gitOutput(["rev-parse", "--verify", "--quiet", "--end-of-options", `${baseRef}^{commit}`], { cwd, exec });
@@ -89,6 +94,7 @@ export function collectChangedFiles(baseRef = "origin/main", { cwd = process.cwd
       exec,
       encoding: null,
     }),
+    { includeCopySources },
   );
   const untracked = splitNullTerminated(
     gitOutput(["ls-files", "--others", "--exclude-standard", "-z", "--"], {
@@ -169,7 +175,7 @@ function deferredGate(id, command, note) {
   return { id, command, note };
 }
 
-export function createVerificationPlan(files, { workspaces = [], env = process.env } = {}) {
+export function createVerificationPlan(files, { workspaces = [], env = process.env, baseRef = "origin/main" } = {}) {
   const scope = classifyFiles(files);
   const workspaceNames = affectedWorkspaceNames(files, scope, workspaces);
   const filters = turboFilters(workspaceNames);
@@ -178,6 +184,12 @@ export function createVerificationPlan(files, { workspaces = [], env = process.e
 
   if (files.length > 0) {
     fastSteps.push(step("hygiene", "node", ["--test", ...HYGIENE_TESTS]));
+  }
+  if (files.some(isAntiSlopCandidatePath)) {
+    fastSteps.push(
+      step("anti-slop-tests", "pnpm", ["test:anti-slop"]),
+      step("anti-slop", "pnpm", ["lint:anti-slop", "--", "--base", baseRef]),
+    );
   }
   if (files.some(requiresDevStackCheck)) {
     fastSteps.push(step("dev-stack", "bash", ["scripts/dev-stack-check.sh"]));
@@ -355,7 +367,7 @@ export function main(argv = process.argv.slice(2), { cwd = process.cwd() } = {})
     }
     const files = collectChangedFiles(options.base, { cwd });
     const workspaces = readWorkspaces({ cwd });
-    const plan = createVerificationPlan(files, { workspaces });
+    const plan = createVerificationPlan(files, { workspaces, baseRef: options.base });
     printPlan(plan);
     if (options.planOnly) {
       console.log("[verify-change] PLAN ONLY — no checks were executed.");

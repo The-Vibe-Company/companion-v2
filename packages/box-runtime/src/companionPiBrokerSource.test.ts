@@ -27,13 +27,7 @@ const directories: string[] = [];
 const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
-  await Promise.all(processes.splice(0).map(async (child) => {
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    await new Promise<void>((resolve) => {
-      if (child.exitCode !== null || child.signalCode !== null) resolve();
-      else child.once("close", () => resolve());
-    });
-  }));
+  await Promise.all(processes.splice(0).map(stopBrokerProcess));
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
@@ -393,6 +387,19 @@ function waitForExit(child: ChildProcessWithoutNullStreams): Promise<{
   return new Promise((resolve) => {
     child.once("close", (code, signal) => resolve({ code, signal }));
   });
+}
+
+async function stopBrokerProcess(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  // Let the broker's SIGTERM handler terminate and await its Pi child before removing the shared
+  // temp directory. SIGKILL bypasses that handler and lets Pi race rmSync with late file writes.
+  child.kill("SIGTERM");
+  try {
+    await waitForExitWithin(child, 3_000);
+  } catch {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await waitForExit(child);
+  }
 }
 
 async function waitForExitWithin(

@@ -61,6 +61,9 @@ function mockProvider(options = {}) {
     assert.equal(headers.get("authorization"), `Bearer ${API_KEY}`);
 
     if (url.pathname === "/api/box/v1/boxes" && method === "POST") {
+      if (options.missingImage && body.from) {
+        return jsonResponse({ code: "unknown_snapshot" }, 404);
+      }
       return jsonResponse({
         ok: true,
         type: "box.created",
@@ -178,6 +181,27 @@ test("uses the configured named snapshot without exposing its name in reports", 
   assert.equal(report.status, "succeeded");
   assert.equal(report.source, "named_snapshot");
   assert.equal(provider.calls[0].body.from, image);
+  assert.equal(JSON.stringify(events).includes(image), false);
+});
+
+test("retries without a configured snapshot that the provider no longer has", async () => {
+  const provider = mockProvider({ missingImage: true });
+  const events = [];
+  const image = "companion-l14-deadbeef";
+  const report = await runBoxProviderE2E(config({ image }), {
+    fetch: provider.fetch,
+    logger: (event) => events.push(event),
+    randomUUID: () => "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    ...fakeClock(),
+  });
+
+  assert.equal(report.status, "succeeded");
+  assert.equal(report.source, "base_fallback");
+  const creates = provider.calls.filter((call) =>
+    call.url.pathname === "/api/box/v1/boxes" && call.method === "POST");
+  assert.equal(creates.length, 2);
+  assert.equal(creates[0].body.from, image);
+  assert.equal(creates[1].body.from, undefined);
   assert.equal(JSON.stringify(events).includes(image), false);
 });
 

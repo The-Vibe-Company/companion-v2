@@ -75,7 +75,7 @@ jobs:
           fetch-depth: 0
 
       - name: Test CI scope classifier and local verifier
-        run: node --test scripts/agent-browser-box-center.test.mjs scripts/box-provider-e2e.test.mjs scripts/companion-runtime-canary.test.mjs scripts/companions-env-defaults.test.mjs scripts/railway-config.test.mjs scripts/ci-scope.test.mjs scripts/ci-playwright-policy.test.mjs scripts/ci-gate.test.mjs scripts/update-pr-box-e2e-report.test.mjs scripts/verify-change.test.mjs
+        run: node --test scripts/agent-browser-box-center.test.mjs scripts/box-provider-e2e.test.mjs scripts/companion-runtime-canary.test.mjs scripts/companions-env-defaults.test.mjs scripts/railway-config.test.mjs scripts/ci-scope.test.mjs scripts/ci-playwright-policy.test.mjs scripts/ci-gate.test.mjs scripts/lint-anti-slop.test.mjs scripts/update-pr-box-e2e-report.test.mjs scripts/verify-change.test.mjs
 
       - name: Validate GitHub Actions workflows
         run: >-
@@ -197,6 +197,15 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Test anti-slop integration
+        run: pnpm test:anti-slop
+
+      - name: Run anti-slop on changed files
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push'
+        env:
+          ANTI_SLOP_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: pnpm lint:anti-slop -- --base "$ANTI_SLOP_BASE_SHA"
 
       - name: Run affected quality checks
         if: github.event_name == 'pull_request' && needs.scope.outputs.full != 'true'
@@ -620,6 +629,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Test anti-slop on Node 20
+        run: pnpm test:anti-slop
 
       - name: Verify Node 20 compatibility
         run: pnpm exec turbo run lint typecheck test build --continue=dependencies-successful --output-logs=errors-only
