@@ -48,6 +48,12 @@ simulator; lifecycle commands must never execute against the CI host.
 
 ## Runtime test layers
 
+Skill synchronization coverage distinguishes publication-only available revisions from required
+selection revisions. PostgreSQL tests prove wake and desktop accept `applied >= required` while a
+publication is pending. Simulator and fault-injection tests cover `stop Pi -> update Skills ->
+start/archive`, safe auto-update failure, first install, corrupt digest, historical version refs,
+and takeover around the installed-tree checkpoint.
+
 ### Deterministic Box and Pi simulator
 
 - Fake the Box HTTP contract for create, paginated list, state, resume, stop/archive, permanent

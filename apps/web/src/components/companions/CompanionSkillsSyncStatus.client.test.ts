@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/require-safety-comment-for-type-assertion -- Existing DOM test fixture predates the incremental anti-slop gate. */
+
 // @vitest-environment happy-dom
 
 import React, { act } from "react";
@@ -84,27 +86,21 @@ describe("CompanionSkillsSyncStatus", () => {
     expect(markup.querySelector(".cds-status--ok")).not.toBeNull();
   });
 
-  it("explains a pending save on an asleep Box as applying on next wake", () => {
+  it("explains a pending publication as applying on the next Pi shutdown", () => {
     const markup = render(companion({ revision: 3, applied: 2, state: "stopped" }));
-    expect(markup.textContent).toContain("Saved · applies on next wake");
+    expect(markup.textContent).toContain("applies on next Pi stop or restart");
     expect(markup.querySelector(".cds-status--unknown")).not.toBeNull();
   });
 
-  it("shows the apply in flight while the Box is provisioning", () => {
-    const markup = render(companion({ revision: 3, applied: 2, state: "provisioning" }));
-    expect(markup.textContent).toContain("Applying to the Box...");
-  });
-
-  it("warns when a running Box has not received the list yet", () => {
+  it("does not claim that a simple running wake is applying the publication", () => {
     const markup = render(companion({ revision: 3, applied: 2, state: "running" }));
-    expect(markup.textContent).toContain("Not yet on the Box");
-    expect(markup.querySelector(".cds-status--warn")).not.toBeNull();
+    expect(markup.textContent).toContain("applies on next Pi stop or restart");
   });
 
   it("surfaces a recorded restage failure with its retry path", () => {
     const markup = render(companion({ revision: 3, applied: 2, error: "Box exec timed out" }));
     expect(markup.textContent).toContain("Box sync failed: Box exec timed out");
-    expect(markup.textContent).toContain("retries on next start or save");
+    expect(markup.textContent).toContain("retries on next Pi stop or restart");
   });
 
   it("stays silent for a Companion that never staged and selects nothing", () => {

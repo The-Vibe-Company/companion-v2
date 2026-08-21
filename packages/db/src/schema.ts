@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-shape-in-symbol-names, anti-slop/no-unsafe-dictionary-type -- Existing Drizzle schema symbols predate the incremental anti-slop gate. */
+
 import {
   type AnyPgColumn,
   bigint,
@@ -440,9 +442,14 @@ export const companions = pgTable(
     selectedMcpAccountIds: jsonb("selected_mcp_account_ids").$type<string[]>().notNull().default([]),
     providerIds: jsonb("provider_ids").$type<string[]>().notNull().default([]),
     /**
-     * Monotonic desired skill-set revision; the Runtime v2 instance carries the applied revision.
+     * Minimum Skill selection revision required before dispatch. Publications do not advance it.
      */
     skillsRevision: integer("skills_revision").notNull().default(1),
+    /**
+     * Latest selected-Skill content revision available for the next user-initiated Pi stop/recycle.
+     * Publications advance this without making an already-installed tree ineligible for dispatch.
+     */
+    skillsAvailableRevision: integer("skills_available_revision").notNull().default(1),
     createdAt: now(),
     updatedAt: updatedAt(),
   },
@@ -461,7 +468,7 @@ export const companions = pgTable(
     ),
     skillsRevisionBounds: check(
       "companions_skills_revision_check",
-      sql`${t.skillsRevision} >= 1`,
+      sql`${t.skillsRevision} >= 1 and ${t.skillsAvailableRevision} >= ${t.skillsRevision}`,
     ),
   }),
 );
@@ -708,6 +715,14 @@ export const companionRuntimeInstances = pgTable(
     desiredSettingsRevision: bigint("desired_settings_revision", { mode: "number" }).notNull().default(1),
     appliedSettingsRevision: bigint("applied_settings_revision", { mode: "number" }).notNull().default(0),
     appliedSkillsRevision: integer("applied_skills_revision").notNull().default(0),
+    appliedSelectedSkillIds: jsonb("applied_selected_skill_ids").$type<string[]>().notNull().default([]),
+    appliedSkillRefs: jsonb("applied_skill_refs")
+      .$type<Array<{ skill_id: string; current_version_id: string | null }>>()
+      .notNull()
+      .default([]),
+    appliedSkillsDigest: text("applied_skills_digest"),
+    skillsUpdateErrorCode: text("skills_update_error_code"),
+    skillsUpdateErrorMessage: text("skills_update_error_message"),
     appliedClientSurface: companionClientSurfaceEnum("applied_client_surface"),
     materialClientSurface: companionClientSurfaceEnum("material_client_surface"),
     materialPiInvocationId: text("material_pi_invocation_id"),
@@ -776,7 +791,7 @@ export const companionRuntimeInstances = pgTable(
     generationCheck: check("companion_runtime_instances_generation_check", sql`${t.generation} between 1 and 2147483647`),
     boxIdCheck: check("companion_runtime_instances_box_id_check", sql`${t.boxId} is null or ${t.boxId} ~ '^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$'`),
     invocationCheck: check("companion_runtime_instances_pi_invocation_check", sql`${t.piInvocationId} is null or (char_length(${t.piInvocationId}) between 1 and 200 and ${t.piInvocationId} !~ E'[\\n\\r]')`),
-    revisionCheck: check("companion_runtime_instances_revision_check", sql`${t.diskLayoutVersion} >= 0 and ${t.desiredSettingsRevision} >= 1 and ${t.appliedSettingsRevision} >= 0 and ${t.appliedSettingsRevision} <= ${t.desiredSettingsRevision} and ${t.appliedSkillsRevision} >= 0 and ((${t.appliedSettingsRevision} = 0) = (${t.appliedClientSurface} is null)) and ${t.nextTurnSequence} >= 1 and ${t.nextOperationSequence} >= 1 and ${t.lastWriteEpoch} >= 0`),
+    revisionCheck: check("companion_runtime_instances_revision_check", sql`${t.diskLayoutVersion} >= 0 and ${t.desiredSettingsRevision} >= 1 and ${t.appliedSettingsRevision} >= 0 and ${t.appliedSettingsRevision} <= ${t.desiredSettingsRevision} and ${t.appliedSkillsRevision} >= 0 and ((${t.appliedSettingsRevision} = 0) = (${t.appliedClientSurface} is null)) and jsonb_typeof(${t.appliedSelectedSkillIds}) = 'array' and jsonb_typeof(${t.appliedSkillRefs}) = 'array' and (${t.appliedSkillsDigest} is null or ${t.appliedSkillsDigest} ~ '^[0-9a-f]{64}$') and ((${t.skillsUpdateErrorCode} is null) = (${t.skillsUpdateErrorMessage} is null)) and (${t.skillsUpdateErrorCode} is null or ${t.skillsUpdateErrorCode} ~ '^[a-z][a-z0-9_]{0,63}$') and (${t.skillsUpdateErrorMessage} is null or (char_length(${t.skillsUpdateErrorMessage}) <= 500 and ${t.skillsUpdateErrorMessage} !~ E'[\\n\\r]')) and ${t.nextTurnSequence} >= 1 and ${t.nextOperationSequence} >= 1 and ${t.lastWriteEpoch} >= 0`),
     materialSnapshotCheck: check("companion_runtime_instances_material_snapshot_check", sql`
       ((${t.materialClientSurface} is null) = (${t.materialPiInvocationId} is null))
       and (${t.materialClientSurface} is not null or ${t.materialExpiresAt} is null)
@@ -989,6 +1004,8 @@ export const companionOperations = pgTable(
     providerIds: jsonb("provider_ids").$type<string[]>(),
     selectedSkillIds: jsonb("selected_skill_ids").$type<string[]>(),
     skillRefs: jsonb("skill_refs").$type<Array<{ skill_id: string; current_version_id: string | null }>>(),
+    skillUpdateSelectedSkillIds: jsonb("skill_update_selected_skill_ids").$type<string[]>(),
+    skillUpdateRefs: jsonb("skill_update_refs").$type<Array<{ skill_id: string; current_version_id: string | null }>>(),
     selectedMcpAccountIds: jsonb("selected_mcp_account_ids").$type<string[]>(),
     materialStagedAt: timestamp("material_staged_at", { withTimezone: true }),
     materialExpiresAt: timestamp("material_expires_at", { withTimezone: true }),
@@ -1013,9 +1030,9 @@ export const companionOperations = pgTable(
     queueSequenceCheck: check("companion_operations_queue_sequence_check", sql`${t.queueSequence} >= 1 and ${t.turnQueueCutoff} >= 0`),
     actorCheck: check("companion_operations_actor_check", sql`char_length(${t.actorId}) between 1 and 200 and ${t.actorId} !~ E'[\\n\\r]'`),
     runtimeCheck: check("companion_operations_runtime_check", sql`${t.runtimeGeneration} between 1 and 2147483647 and (${t.claimEpoch} is null or ${t.claimEpoch} >= 1)`),
-    checkpointCheck: check("companion_operations_checkpoint_check", sql`${t.checkpoint} in ('pending','resolving_box','box_resolved','box_absence_observed','creating_box','box_created','waiting_ready','box_ready_observed','installing_layout','starting_pi','pi_observed','pi_ready','stopping_pi','provider_stop_requested','waiting_archived','box_archived','restarting_pi','restarting_box','applying_settings','settings_applied','provider_delete_requested','waiting_deleted','provider_deleted','box_absent','completed') and ${t.checkpointSequence} >= 0 and ${t.attemptCount} >= 0`),
-    targetRevisionCheck: check("companion_operations_target_revision_check", sql`(${t.targetSettingsRevision} is null or ${t.targetSettingsRevision} >= 1) and (${t.targetSkillsRevision} is null or ${t.targetSkillsRevision} >= 1) and ((${t.kind} in ('start','restart_pi','restart_box','apply_settings') and ${t.targetSettingsRevision} is not null and ${t.targetSkillsRevision} is not null) or (${t.kind} not in ('start','restart_pi','restart_box','apply_settings') and ${t.targetSettingsRevision} is null and ${t.targetSkillsRevision} is null))`),
-    resourceSnapshotCheck: check("companion_operations_resource_snapshot_check", sql`((${t.kind} in ('start','restart_pi','restart_box','apply_settings') and ${t.clientSurface} is not null and (${t.modelId} is null or (char_length(${t.modelId}) between 1 and 200 and ${t.modelId} !~ E'[\n\r]')) and (${t.persona} is null or char_length(${t.persona}) <= 280) and ${t.canWriteSkills} is not null and jsonb_typeof(${t.providerIds}) = 'array' and jsonb_typeof(${t.selectedSkillIds}) = 'array' and jsonb_typeof(${t.skillRefs}) = 'array' and jsonb_typeof(${t.selectedMcpAccountIds}) = 'array') or (${t.kind} not in ('start','restart_pi','restart_box','apply_settings') and ${t.clientSurface} is null and ${t.modelId} is null and ${t.persona} is null and ${t.canWriteSkills} is null and ${t.providerIds} is null and ${t.selectedSkillIds} is null and ${t.skillRefs} is null and ${t.selectedMcpAccountIds} is null))`),
+    checkpointCheck: check("companion_operations_checkpoint_check", sql`${t.checkpoint} in ('pending','resolving_box','box_resolved','box_absence_observed','creating_box','box_created','waiting_ready','box_ready_observed','installing_layout','starting_pi','pi_observed','pi_ready','stopping_pi','skills_updated','provider_stop_requested','waiting_archived','box_archived','restarting_pi','restarting_box','applying_settings','settings_applied','provider_delete_requested','waiting_deleted','provider_deleted','box_absent','completed') and ${t.checkpointSequence} >= 0 and ${t.attemptCount} >= 0`),
+    targetRevisionCheck: check("companion_operations_target_revision_check", sql`(${t.targetSettingsRevision} is null or ${t.targetSettingsRevision} >= 1) and (${t.targetSkillsRevision} is null or ${t.targetSkillsRevision} >= 1) and ((${t.kind} in ('start','restart_pi','restart_box','apply_settings') and ${t.targetSettingsRevision} is not null and ${t.targetSkillsRevision} is not null) or (${t.kind} = 'stop' and ${t.targetSettingsRevision} is null and ${t.targetSkillsRevision} is not null) or (${t.kind} = 'delete' and ${t.targetSettingsRevision} is null and ${t.targetSkillsRevision} is null))`),
+    resourceSnapshotCheck: check("companion_operations_resource_snapshot_check", sql`((${t.kind} = 'start' and ${t.clientSurface} is not null and (${t.modelId} is null or (char_length(${t.modelId}) between 1 and 200 and ${t.modelId} !~ E'[\n\r]')) and (${t.persona} is null or char_length(${t.persona}) <= 280) and ${t.canWriteSkills} is not null and jsonb_typeof(${t.providerIds}) = 'array' and jsonb_typeof(${t.selectedSkillIds}) = 'array' and jsonb_typeof(${t.skillRefs}) = 'array' and ${t.skillUpdateSelectedSkillIds} is null and ${t.skillUpdateRefs} is null and jsonb_typeof(${t.selectedMcpAccountIds}) = 'array') or (${t.kind} in ('restart_pi','restart_box','apply_settings') and ${t.clientSurface} is not null and (${t.modelId} is null or (char_length(${t.modelId}) between 1 and 200 and ${t.modelId} !~ E'[\n\r]')) and (${t.persona} is null or char_length(${t.persona}) <= 280) and ${t.canWriteSkills} is not null and jsonb_typeof(${t.providerIds}) = 'array' and jsonb_typeof(${t.selectedSkillIds}) = 'array' and jsonb_typeof(${t.skillRefs}) = 'array' and jsonb_typeof(${t.skillUpdateSelectedSkillIds}) = 'array' and jsonb_typeof(${t.skillUpdateRefs}) = 'array' and jsonb_typeof(${t.selectedMcpAccountIds}) = 'array') or (${t.kind} = 'stop' and ${t.clientSurface} is null and ${t.modelId} is null and ${t.persona} is null and ${t.canWriteSkills} is null and ${t.providerIds} is null and ${t.selectedSkillIds} is null and ${t.skillRefs} is null and jsonb_typeof(${t.skillUpdateSelectedSkillIds}) = 'array' and jsonb_typeof(${t.skillUpdateRefs}) = 'array' and ${t.selectedMcpAccountIds} is null) or (${t.kind} = 'delete' and ${t.clientSurface} is null and ${t.modelId} is null and ${t.persona} is null and ${t.canWriteSkills} is null and ${t.providerIds} is null and ${t.selectedSkillIds} is null and ${t.skillRefs} is null and ${t.skillUpdateSelectedSkillIds} is null and ${t.skillUpdateRefs} is null and ${t.selectedMcpAccountIds} is null))`),
     materialSnapshotCheck: check("companion_operations_material_snapshot_check", sql`
       (${t.materialStagedAt} is not null or ${t.materialExpiresAt} is null)
       and (${t.materialStagedAt} is null

@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing Box transport fixtures predate the incremental anti-slop gate. */
+
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -820,11 +822,13 @@ describe("default Pi packages on the Box disk", () => {
         return response({ box: box("ready") });
       }
       if (url.endsWith("/files") && method === "PUT") {
+        // SAFETY: This test controls the request body emitted by the Box runtime file transport.
         const body = JSON.parse(String(init?.body)) as { path: string };
         stagedPaths.push(body.path);
         return response({ ok: true });
       }
       if (url.endsWith("/commands") && method === "POST") {
+        // SAFETY: This test controls the request body emitted by the Box runtime command transport.
         const body = JSON.parse(String(init?.body)) as { command: string };
         commands.push(body.command);
         if (body.command.includes("pi-layout.version")) return response(commandResult(`${layoutMarker}\n`));
@@ -858,6 +862,63 @@ describe("default Pi packages on the Box disk", () => {
       ".companion/runtime/state/skill-archives/companion.tar.gz.b64",
     );
     expect(commands.some((command) => command.includes("skills-tree.version.next"))).toBe(true);
+  });
+
+  it("checkpoints an already-installed Skill-only tree without staging credentials or archives", async () => {
+    const stagedPaths: string[] = [];
+    const commands: string[] = [];
+    const runtime = runtimeClient();
+    const skill = {
+      slug: "companion",
+      version: "1.0.0",
+      checksum: `sha256:${"2".repeat(64)}`,
+      archive: Buffer.from("already-installed-companion-skill"),
+    };
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        return response({ box: box("ready") });
+      }
+      if (url.endsWith("/files") && method === "PUT") {
+        // SAFETY: This test controls the request body emitted by the Box runtime file transport.
+        const body = JSON.parse(String(init?.body)) as { path: string };
+        stagedPaths.push(body.path);
+        return response({ ok: true });
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        // SAFETY: This test controls the request body emitted by the Box runtime command transport.
+        const body = JSON.parse(String(init?.body)) as { command: string };
+        commands.push(body.command);
+        if (body.command.includes("companion-box-runnable")) {
+          return response(commandResult("companion-box-runnable\n"));
+        }
+        if (body.command.includes('test "$(cat ')) return response(commandResult());
+      }
+      throw new Error(`unexpected Box request: ${method} ${url}`);
+    }));
+
+    const staged = await runtime.stageSkillTree({
+      companionId: "11111111-1111-4111-8111-111111111111",
+      runtimeGeneration: 1,
+      boxId: "bx_23456789",
+      skills: [skill],
+    });
+
+    expect(staged).toMatchObject({
+      boxId: "bx_23456789",
+      skillBytesTransferred: 0,
+      skillsDigest: createHash("sha256")
+        .update(JSON.stringify([{
+          slug: skill.slug,
+          version: skill.version,
+          checksum: skill.checksum,
+        }]))
+        .digest("hex"),
+    });
+    expect(stagedPaths).toEqual([".companion/runtime/state/skills.json"]);
+    expect(commands.some((command) => command.includes("skill-archives"))).toBe(false);
+    expect(stagedPaths.some((path) => /provider|credential|mcp|hub/i.test(path))).toBe(false);
   });
 
   it("installs the pinned default set beside the adapter, and qmd without being able to fail", async () => {

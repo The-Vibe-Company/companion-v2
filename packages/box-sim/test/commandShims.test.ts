@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-unsafe-dictionary-type, anti-slop/require-safety-comment-for-type-assertion -- Existing simulator fixtures predate the incremental anti-slop gate. */
+
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
@@ -37,6 +39,10 @@ describe("semantic Box command shims", () => {
         "clear-skill-archives",
       ],
       ["companion-archive-bytes wc -c", "measure-skill-archives"],
+      [
+        `test "$(cat "$HOME/.companion/runtime/state/skills-tree.version" 2>/dev/null || true)" = '${"a".repeat(64)}'`,
+        "match-skills-revision",
+      ],
       ["cat '.part0' > '.target'; rm -f '.part0'", "join-file-parts"],
       ["skills.next base64 --decode tar --extract", "prepare-skills"],
       ["staged_credential_file=x; systemctl --user daemon-reload", "start-or-restart-daemon"],

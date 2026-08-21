@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-unknown-parameters -- Existing material boundary predates the incremental anti-slop gate. */
+
 import { createHash, randomUUID } from "node:crypto";
 import { COMPANION_SKILL_KEY, companionSkillDir } from "@companion/companion-skill";
 import { getCompanionSkillPackage } from "@companion/companion-skill/package";
@@ -215,13 +217,19 @@ export function createRuntimeMaterialPipeline(input: {
       if (generation === null || modelId === null) {
         throw new RuntimeMaterialError("runtime_material_invalid");
       }
+      const materialForStage = stage.preserveInstalledSkills
+        ? { ...stage.material, skillMaterial: [] }
+        : stage.material;
+      const authorizationForStage = stage.preserveInstalledSkills
+        ? { ...stage.authorization, skillRefs: [] }
+        : stage.authorization;
       assertRuntimeMaterialSnapshot({
-        material: stage.material,
-        authorization: stage.authorization,
+        material: materialForStage,
+        authorization: authorizationForStage,
       });
       const resources = await resolveRuntimeResources({
         orgId: stage.orgId,
-        material: stage.material,
+        material: materialForStage,
         masterKey: input.masterKey,
         loadSkillArchive: input.loadSkillArchive,
         resolveOauth: async (oauth) => {
@@ -256,8 +264,8 @@ export function createRuntimeMaterialPipeline(input: {
       // S3 reads and OAuth work above are asynchronous. Recheck the immutable ref tuples at the
       // final side-effect boundary so no local mutation can cross into Box unnoticed.
       assertRuntimeMaterialSnapshot({
-        material: stage.material,
-        authorization: stage.authorization,
+        material: materialForStage,
+        authorization: authorizationForStage,
       });
       const observed = await input.runtime().stageExistingBox({
         orgId: stage.orgId,
@@ -272,8 +280,9 @@ export function createRuntimeMaterialPipeline(input: {
         mcpCredentials: nativeMobile ? [] : resources.mcpCredentials,
         mcpAccounts: nativeMobile ? [] : resources.mcpAccounts,
         skills,
+        preserveSkills: stage.preserveInstalledSkills === true,
         reuseSkills: !nativeMobile
-          && stage.authorization.diskLayoutVersion === 14
+          && stage.preserveInstalledSkills !== true
           && stage.authorization.appliedSkillsRevision === stage.targetSkillsRevision,
         hubEnv: nativeMobile
           ? {}
@@ -291,10 +300,46 @@ export function createRuntimeMaterialPipeline(input: {
       return {
         diskLayoutVersion: observed.diskLayoutVersion,
         appliedSettingsRevision: stage.targetSettingsRevision,
-        appliedSkillsRevision: nativeMobile ? null : stage.targetSkillsRevision,
+        appliedSkillsRevision: nativeMobile
+          ? null
+          : stage.preserveInstalledSkills
+            ? stage.authorization.appliedSkillsRevision
+            : stage.targetSkillsRevision,
         stagingMode: observed.stagingMode,
         skillBytesTransferred: observed.skillBytesTransferred,
+        skillsDigest: observed.skillsDigest,
         materialExpiresAt,
+      };
+    },
+    async stageSkillTree(stage) {
+      const generation = stage.authorization.runtimeGeneration;
+      if (generation === null) throw new RuntimeMaterialError("runtime_material_invalid");
+      const resources = await resolveRuntimeResources({
+        orgId: stage.orgId,
+        material: {
+          providerMaterial: [],
+          skillMaterial: stage.material.skillMaterial,
+          mcpMaterial: [],
+        },
+        masterKey: input.masterKey,
+        loadSkillArchive: input.loadSkillArchive,
+        signal: stage.signal,
+        now,
+      });
+      const observed = await input.runtime().stageSkillTree({
+        companionId: stage.companionId,
+        runtimeGeneration: generationNumber(generation),
+        boxId: stage.boxId,
+        skills: [
+          input.bundledSkill,
+          ...resources.skills.filter((skill) => skill.slug !== COMPANION_SKILL_KEY),
+        ],
+        signal: stage.signal,
+      });
+      return {
+        appliedSkillsRevision: stage.material.targetSkillsRevision,
+        skillsDigest: observed.skillsDigest,
+        skillBytesTransferred: observed.skillBytesTransferred,
       };
     },
     async refreshLayout(stage) {

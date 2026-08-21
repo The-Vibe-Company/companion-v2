@@ -1,3 +1,5 @@
+/* oxlint-disable anti-slop/no-known-value-widening, anti-slop/no-unsafe-dictionary-type -- Existing API fixtures predate the incremental anti-slop gate. */
+
 import { describe, expect, it } from "vitest";
 
 import type { Companion } from "@companion/contracts";
@@ -59,6 +61,8 @@ function runtime(
     desired_settings_revision: 1,
     applied_settings_revision: 0,
     applied_skills_revision: 0,
+    skills_available_revision: 3,
+    skills_update_error_message: null,
     retirement_state: "active",
     last_error_code: null,
     last_error_message: null,
