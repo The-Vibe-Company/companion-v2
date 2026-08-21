@@ -156,8 +156,12 @@ candidate checkout before Box contact. The controller binds results to the exact
 phase, tree, prefix, and cycle count; candidate messages cannot attest benchmark or cleanup output.
 Candidate checkouts run under a separate unprivileged OS identity with an isolated home and receive
 a random loopback proxy token, never the real Box or model credentials.
-The proxy allowlists the exact deterministic Box and snapshot identities, records provider-ready and
-correlated broker prompt-ACK timestamps, rejects reported metrics that outrun that evidence, and
+The proxy allowlists the exact deterministic Box and snapshot identities. Its snapshot list exposes
+the target (when present) plus one newest ready layout-14 parent read-only for the baker; it fails
+closed when no eligible parent exists and requires the baker clone that parent before later Boxes
+clone the target. An explicit non-2xx create response permits a same-source retry; a fetch failure
+or invalid 2xx observation makes the create ambiguous and blocks the lease. It records provider-ready
+and correlated broker prompt-ACK timestamps, rejects reported metrics that outrun that evidence, and
 checks provider `404` directly after cleanup. Before allowing candidate commands or file writes, it
 captures Node and Pi digests directly from the pristine ready baker Box. Its prompt probe requires
 the live systemd main process to run the byte-pinned generated broker with those exact executables

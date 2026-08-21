@@ -356,7 +356,11 @@ measured compatible gains. Candidate workspaces have provider credentials explic
 evaluator checkout runs under a separate unprivileged OS identity and receives only a short-lived
 local proxy capability scoped to the campaign's exact Box and snapshot identities; the controller
 retains the real provider credential and independently
-proves provider readiness, byte-attested broker prompt acceptance, and resource absence. It never runs from API, worker, web, or the
+proves provider readiness, byte-attested broker prompt acceptance, and resource absence. The proxy
+exposes one newest ready layout-14 parent read-only for the baker, fails closed without an eligible
+parent, and requires later Boxes to clone the deterministic target. Explicit non-2xx creates may retry
+with the same source; fetch failures or invalid 2xx observations make the create ambiguous and block
+the lease. It never runs from API, worker, web, or the
 hosted Companion runtime, and adds no product orchestration feature.
 
 The research evaluator and existing tests are immutable to candidate workspaces. Candidates may
