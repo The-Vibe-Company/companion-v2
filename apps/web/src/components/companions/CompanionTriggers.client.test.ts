@@ -4,24 +4,19 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { CompanionTrigger } from "@companion/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CompanionTriggers, type CompanionTriggersApi } from "./CompanionTriggers";
 
-const companionsApi = vi.hoisted(() => ({
-  createCompanionTrigger: vi.fn(),
-  deleteCompanionTrigger: vi.fn(),
-  updateCompanionTrigger: vi.fn(),
-  rotateCompanionTriggerSecret: vi.fn(),
-}));
+const companionsApi = {
+  createCompanionTrigger: vi.fn<CompanionTriggersApi["createCompanionTrigger"]>(),
+  deleteCompanionTrigger: vi.fn<CompanionTriggersApi["deleteCompanionTrigger"]>(),
+  updateCompanionTrigger: vi.fn<CompanionTriggersApi["updateCompanionTrigger"]>(),
+  rotateCompanionTriggerSecret: vi.fn<CompanionTriggersApi["rotateCompanionTriggerSecret"]>(),
+} satisfies CompanionTriggersApi;
 
-// oxlint-disable-next-line anti-slop/no-module-mocking -- legacy pattern predating the incremental anti-slop gate
-vi.mock("@/lib/companions", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/companions")>()),
-  ...companionsApi,
-}));
-
-const { CompanionTriggers } = await import("./CompanionTriggers");
-
-// oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
+  configurable: true,
+  value: true,
+});
 
 const companionId = "11111111-1111-4111-8111-111111111111";
 const triggerId = "22222222-2222-4222-8222-222222222222";
@@ -34,9 +29,9 @@ function trigger(overrides: Partial<CompanionTrigger> = {}): CompanionTrigger {
     name: "CI failed",
     prompt: "Summarize the failure.",
     provider: "github",
-    enabled: true,
     target: null,
     registration_status: "manual",
+    enabled: true,
     webhook_url: "http://127.0.0.1:3000/v1/hooks/triggers/22222222-2222-4222-8222-222222222222/abc123",
     last_fired_at: null,
     last_error_code: null,
@@ -65,15 +60,45 @@ async function mount(input: {
       triggers: input.triggers ?? [],
       canEdit: input.canEdit ?? true,
       onChange: input.onChange ?? (() => undefined),
+      api: companionsApi,
     }));
   });
   return container;
 }
 
 function buttonNamed(container: HTMLElement, name: string): HTMLButtonElement | undefined {
-  // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
   return [...container.querySelectorAll("button")]
-    .find((button) => button.textContent === name) as HTMLButtonElement | undefined;
+    .find((button) => button.textContent === name);
+}
+
+function requireButton(container: ParentNode, selector: string): HTMLButtonElement {
+  const button = container.querySelector(selector);
+  if (!(button instanceof HTMLButtonElement)) throw new Error(`Missing button: ${selector}`);
+  return button;
+}
+
+function requireNamedButton(container: HTMLElement, name: string): HTMLButtonElement {
+  const button = buttonNamed(container, name);
+  if (!button) throw new Error(`Missing button: ${name}`);
+  return button;
+}
+
+function requireInput(container: ParentNode): HTMLInputElement {
+  const input = container.querySelector("input");
+  if (!(input instanceof HTMLInputElement)) throw new Error("Missing input");
+  return input;
+}
+
+function requireTextArea(container: ParentNode): HTMLTextAreaElement {
+  const textarea = container.querySelector("textarea");
+  if (!(textarea instanceof HTMLTextAreaElement)) throw new Error("Missing textarea");
+  return textarea;
+}
+
+function requireSelect(container: ParentNode): HTMLSelectElement {
+  const select = container.querySelector("select");
+  if (!(select instanceof HTMLSelectElement)) throw new Error("Missing select");
+  return select;
 }
 
 function setControlled(
@@ -131,10 +156,9 @@ describe("Companion triggers panel", () => {
     const onChange = vi.fn();
     const container = await mount({ triggers: [trigger()], onChange });
 
-    const toggle = buttonNamed(container, "On");
-    expect(toggle).toBeDefined();
+    const toggle = requireNamedButton(container, "On");
     await act(async () => {
-      toggle!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      toggle.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
 
     expect(companionsApi.updateCompanionTrigger).toHaveBeenCalledWith(
@@ -151,10 +175,9 @@ describe("Companion triggers panel", () => {
     const onChange = vi.fn();
     const container = await mount({ triggers: [trigger()], onChange });
 
-    const remove = buttonNamed(container, "Delete");
-    expect(remove).toBeDefined();
+    const remove = requireNamedButton(container, "Delete");
     await act(async () => {
-      remove!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      remove.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
 
     expect(companionsApi.deleteCompanionTrigger).toHaveBeenCalledWith(
@@ -171,25 +194,20 @@ describe("Companion triggers panel", () => {
     const onChange = vi.fn();
     const container = await mount({ onChange });
 
-    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
-    const add = container.querySelector("[aria-label='Add a trigger']") as HTMLButtonElement;
+    const add = requireButton(container, "[aria-label='Add a trigger']");
     await act(async () => {
       add.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
 
-    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
-    setControlled(container.querySelector("input") as HTMLInputElement, "Deploy finished");
-    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
-    setControlled(container.querySelector("textarea") as HTMLTextAreaElement, "Report the deploy.");
-    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- legacy pattern predating the incremental anti-slop gate
-    setControlled(container.querySelector("select") as HTMLSelectElement, "custom");
+    setControlled(requireInput(container), "Deploy finished");
+    setControlled(requireTextArea(container), "Report the deploy.");
+    setControlled(requireSelect(container), "custom");
     await act(async () => {});
 
-    const create = buttonNamed(container, "Create");
-    expect(create).toBeDefined();
-    expect(create!.disabled).toBe(false);
+    const create = requireNamedButton(container, "Create");
+    expect(create.disabled).toBe(false);
     await act(async () => {
-      create!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      create.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
 
     expect(companionsApi.createCompanionTrigger).toHaveBeenCalledWith(
@@ -209,10 +227,9 @@ describe("Companion triggers panel", () => {
   it("copies the webhook URL and confirms briefly", async () => {
     const container = await mount({ triggers: [trigger()] });
 
-    const copy = buttonNamed(container, "Copy URL");
-    expect(copy).toBeDefined();
+    const copy = requireNamedButton(container, "Copy URL");
     await act(async () => {
-      copy!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      copy.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
 
     expect(window.navigator.clipboard.writeText).toHaveBeenCalledWith(trigger().webhook_url);
@@ -227,19 +244,17 @@ describe("Companion triggers panel", () => {
     const onChange = vi.fn();
     const container = await mount({ triggers: [trigger()], onChange });
 
-    const rotate = buttonNamed(container, "Rotate secret");
-    expect(rotate).toBeDefined();
+    const rotate = requireNamedButton(container, "Rotate secret");
     await act(async () => {
-      rotate!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      rotate.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
 
     // The first click only arms the confirmation: rotating silently breaks the external service
     // still posting to the old URL, so nothing is rotated yet.
     expect(companionsApi.rotateCompanionTriggerSecret).not.toHaveBeenCalled();
-    const confirm = buttonNamed(container, "Confirm rotate");
-    expect(confirm).toBeDefined();
+    const confirm = requireNamedButton(container, "Confirm rotate");
     await act(async () => {
-      confirm!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      confirm.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
 
     expect(companionsApi.rotateCompanionTriggerSecret).toHaveBeenCalledWith(

@@ -6,13 +6,20 @@ import {
   refreshCompanionPluginOAuth,
 } from "../src/companionPluginOAuth";
 
-function jsonResponse(value: unknown, status = 200): Response {
+function jsonResponse<T>(value: T, status = 200): Response {
   return Response.json(value, { status });
+}
+
+function formBody(init: RequestInit | undefined): URLSearchParams {
+  if (!(init?.body instanceof URLSearchParams)) {
+    throw new Error("expected a URL-encoded OAuth request body");
+  }
+  return init.body;
 }
 
 describe("Companion plugin OAuth broker", () => {
   it("discovers Linear, dynamically registers the callback, and builds a PKCE authorization URL", async () => {
-    const fetchImpl = vi.fn()
+    const fetchImpl = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse({
         resource: "https://mcp.linear.app/mcp",
         authorization_servers: ["https://mcp.linear.app"],
@@ -31,7 +38,7 @@ describe("Companion plugin OAuth broker", () => {
       serverName: "app.linear/linear",
       redirectUri: "https://companion.example/v1/companion-plugins/oauth/callback",
       state: "signed-state",
-      fetchImpl: fetchImpl as unknown as typeof fetch,
+      fetchImpl,
     });
 
     const authorization = new URL(started.authorizationUrl);
@@ -51,9 +58,45 @@ describe("Companion plugin OAuth broker", () => {
     });
   });
 
+  it("discovers Conductor from its path-qualified issuer metadata", async () => {
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({
+        resource: "https://api.conductor.build/mcp",
+        authorization_servers: ["https://api.conductor.build/mcp"],
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        authorization_endpoint: "https://api.conductor.build/mcp/oauth/authorize",
+        token_endpoint: "https://api.conductor.build/mcp/oauth/token",
+        registration_endpoint: "https://api.conductor.build/mcp/oauth/register",
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        client_id: "conductor-client",
+        token_endpoint_auth_method: "none",
+      }));
+
+    const started = await beginCompanionPluginOAuth({
+      serverName: "build.conductor/mcp",
+      redirectUri: "https://companion.example/v1/companion-plugins/oauth/callback",
+      state: "signed-state",
+      fetchImpl,
+    });
+
+    expect(fetchImpl.mock.calls.map((call) => call[0])).toEqual([
+      "https://api.conductor.build/.well-known/oauth-protected-resource/mcp",
+      "https://api.conductor.build/.well-known/oauth-authorization-server/mcp",
+      "https://api.conductor.build/mcp/oauth/register",
+    ]);
+    const authorization = new URL(started.authorizationUrl);
+    expect(authorization.origin + authorization.pathname).toBe(
+      "https://api.conductor.build/mcp/oauth/authorize",
+    );
+    expect(authorization.searchParams.get("scope")).toBe("mcp:tools offline_access");
+    expect(authorization.searchParams.get("resource")).toBe("https://api.conductor.build/mcp");
+  });
+
   it("exchanges and refreshes tokens without exposing provider response bodies", async () => {
-    const exchangeFetch = vi.fn(async (_url, init) => {
-      const body = init?.body as URLSearchParams;
+    const exchangeFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = formBody(init);
       expect(body.get("code")).toBe("authorization-code");
       expect(body.get("code_verifier")).toBe("pkce-verifier");
       expect(body.get("resource")).toBe("https://mcp.linear.app/mcp");
@@ -63,7 +106,7 @@ describe("Companion plugin OAuth broker", () => {
         expires_in: 60,
         token_type: "bearer",
       });
-    }) as unknown as typeof fetch;
+    });
     const credential = await completeCompanionPluginOAuth({
       flow: {
         serverName: "app.linear/linear",
@@ -86,11 +129,11 @@ describe("Companion plugin OAuth broker", () => {
       refreshToken: "refresh-one",
     });
 
-    const refreshFetch = vi.fn(async (_url, init) => {
-      const body = init?.body as URLSearchParams;
+    const refreshFetch = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = formBody(init);
       expect(body.get("refresh_token")).toBe("refresh-one");
       return jsonResponse({ access_token: "access-two", expires_in: 3600 });
-    }) as unknown as typeof fetch;
+    });
     await expect(refreshCompanionPluginOAuth({
       credential,
       fetchImpl: refreshFetch,
@@ -99,11 +142,11 @@ describe("Companion plugin OAuth broker", () => {
       refreshToken: "refresh-one",
     });
 
-    const rotatingFetch = vi.fn(async () => jsonResponse({
+    const rotatingFetch = vi.fn<typeof fetch>(async () => jsonResponse({
       access_token: "access-three",
       refresh_token: "refresh-two",
       expires_in: 3600,
-    })) as unknown as typeof fetch;
+    }));
     await expect(refreshCompanionPluginOAuth({
       credential,
       fetchImpl: rotatingFetch,
@@ -112,9 +155,9 @@ describe("Companion plugin OAuth broker", () => {
       refreshToken: "refresh-two",
     });
 
-    const failedFetch = vi.fn(async () =>
+    const failedFetch = vi.fn<typeof fetch>(async () =>
       jsonResponse({ error: "invalid_grant", error_description: "secret provider detail" }, 400)
-    ) as unknown as typeof fetch;
+    );
     await expect(refreshCompanionPluginOAuth({
       credential,
       fetchImpl: failedFetch,
@@ -123,10 +166,10 @@ describe("Companion plugin OAuth broker", () => {
       message: expect.not.stringContaining("secret provider detail"),
     }));
 
-    const malformedSuccess = vi.fn(async () => jsonResponse({
+    const malformedSuccess = vi.fn<typeof fetch>(async () => jsonResponse({
       refresh_token: "provider-secret-that-must-not-leak",
       expires_in: 3600,
-    })) as unknown as typeof fetch;
+    }));
     await expect(refreshCompanionPluginOAuth({
       credential,
       fetchImpl: malformedSuccess,
@@ -139,10 +182,10 @@ describe("Companion plugin OAuth broker", () => {
   });
 
   it("rejects discovery metadata that moves the resource off the curated remote", async () => {
-    const fetchImpl = vi.fn(async () => jsonResponse({
+    const fetchImpl = vi.fn<typeof fetch>(async () => jsonResponse({
       resource: "https://mcp.linear.app/other-resource",
       authorization_servers: ["https://mcp.linear.app"],
-    })) as unknown as typeof fetch;
+    }));
 
     await expect(beginCompanionPluginOAuth({
       serverName: "app.linear/linear",
@@ -153,10 +196,10 @@ describe("Companion plugin OAuth broker", () => {
   });
 
   it("requires deployment-owned GitHub OAuth App credentials", async () => {
-    const fetchImpl = vi.fn(async () => jsonResponse({
+    const fetchImpl = vi.fn<typeof fetch>(async () => jsonResponse({
       resource: "https://api.githubcopilot.com/mcp/",
       authorization_servers: ["https://github.com/login/oauth"],
-    })) as unknown as typeof fetch;
+    }));
 
     await expect(beginCompanionPluginOAuth({
       serverName: "io.github.github/github-mcp-server",
@@ -175,10 +218,10 @@ describe("Companion plugin OAuth broker", () => {
   });
 
   it("uses GitHub's configured OAuth App without persisting its shared secret or sending resource", async () => {
-    const discoveryFetch = vi.fn(async () => jsonResponse({
+    const discoveryFetch = vi.fn<typeof fetch>(async () => jsonResponse({
       resource: "https://api.githubcopilot.com/mcp/",
       authorization_servers: ["https://github.com/login/oauth"],
-    })) as unknown as typeof fetch;
+    }));
     const started = await beginCompanionPluginOAuth({
       serverName: "io.github.github/github-mcp-server",
       redirectUri: "https://companion.example/callback",
@@ -191,11 +234,11 @@ describe("Companion plugin OAuth broker", () => {
     });
     expect(new URL(started.authorizationUrl).searchParams.has("resource")).toBe(false);
 
-    const exchangeFetch = vi.fn(async (url, init) => {
+    const exchangeFetch = vi.fn<typeof fetch>(async (url, init) => {
       if (String(url) === "https://api.github.com/user") {
         return jsonResponse({ login: "stan", name: "Stan Girard", email: null });
       }
-      const body = init?.body as URLSearchParams;
+      const body = formBody(init);
       expect(body.has("resource")).toBe(false);
       expect(body.get("client_secret")).toBe("github-client-secret");
       return jsonResponse({
@@ -203,7 +246,7 @@ describe("Companion plugin OAuth broker", () => {
         refresh_token: "github-refresh",
         expires_in: 60,
       });
-    }) as unknown as typeof fetch;
+    });
     const credential = await completeCompanionPluginOAuth({
       flow: started.flow,
       code: "github-code",
@@ -222,15 +265,15 @@ describe("Companion plugin OAuth broker", () => {
     });
     expect(JSON.stringify(credential)).not.toContain("github-client-secret");
 
-    const refreshFetch = vi.fn(async (url, init) => {
+    const refreshFetch = vi.fn<typeof fetch>(async (url, init) => {
       if (String(url) === "https://api.github.com/user") {
         return jsonResponse({ login: "stan", name: "Stan Girard", email: null });
       }
-      const body = init?.body as URLSearchParams;
+      const body = formBody(init);
       expect(body.has("resource")).toBe(false);
       expect(body.get("client_secret")).toBe("github-client-secret");
       return jsonResponse({ access_token: "github-access-two" });
-    }) as unknown as typeof fetch;
+    });
     await expect(refreshCompanionPluginOAuth({
       credential,
       env: {
@@ -247,11 +290,11 @@ describe("Companion plugin OAuth broker", () => {
       },
     });
 
-    const missingConfigFetch = vi.fn();
+    const missingConfigFetch = vi.fn<typeof fetch>();
     await expect(refreshCompanionPluginOAuth({
       credential,
       env: {},
-      fetchImpl: missingConfigFetch as unknown as typeof fetch,
+      fetchImpl: missingConfigFetch,
     })).rejects.toEqual(expect.objectContaining({
       code: "oauth_refresh_failed",
       stableCode: "mcp_oauth_refresh_failed",
@@ -261,7 +304,7 @@ describe("Companion plugin OAuth broker", () => {
   });
 
   it("keeps a GitHub grant when the profile lookup fails", async () => {
-    const fetchImpl = vi.fn(async (url) => {
+    const fetchImpl = vi.fn<typeof fetch>(async (url) => {
       if (String(url).includes("oauth-protected-resource")) {
         return jsonResponse({
           resource: "https://api.githubcopilot.com/mcp/",
@@ -274,7 +317,7 @@ describe("Companion plugin OAuth broker", () => {
         refresh_token: "github-refresh",
         expires_in: 60,
       });
-    }) as unknown as typeof fetch;
+    });
     const started = await beginCompanionPluginOAuth({
       serverName: "io.github.github/github-mcp-server",
       redirectUri: "https://companion.example/callback",

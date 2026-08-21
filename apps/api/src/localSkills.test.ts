@@ -48,7 +48,7 @@ describe("companion skill package + row", () => {
     const pkg = await getCompanionSkillPackage();
     expect(pkg.key).toBe("companion");
     expect(pkg.checksum).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(pkg.version).toBe("1.83.0");
+    expect(pkg.version).toBe("1.84.0");
     expect(pkg.sizeBytes).toBeGreaterThan(0);
     expect(pkg.integrity.packageChecksum).toBe(pkg.checksum);
     expect(pkg.integrity.files["SKILL.md"]).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -134,6 +134,11 @@ describe("companion skill package + row", () => {
     const manifest = JSON.parse(await readFile(join(companionSkillDir(), "companion.json"), "utf8")) as {
       metadata?: { changelog?: Array<{ version?: string; changes?: string[] }> };
     };
+    const triggerRegistrationChanges = manifest.metadata?.changelog
+      ?.find((entry) => entry.version === "1.82.0")
+      ?.changes?.join("\n") ?? "";
+    expect(triggerRegistrationChanges).toContain("propose_trigger");
+    expect(triggerRegistrationChanges).toContain("webhook-URL handoff");
     const routineChanges = manifest.metadata?.changelog
       ?.find((entry) => entry.version === "1.78.0")
       ?.changes?.join("\n") ?? "";

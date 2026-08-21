@@ -6,7 +6,7 @@ import {
 } from "../src/companionPluginCatalog";
 
 describe("Companion plugin catalog contracts", () => {
-  it("ships exactly the product-owned Linear, GitHub, and Notion catalog", () => {
+  it("ships exactly the product-owned Linear, GitHub, Notion, and Conductor catalog", () => {
     expect(COMPANION_PLUGIN_CATALOG.map((entry) => ({
       server_name: entry.server_name,
       provider: entry.provider,
@@ -19,6 +19,11 @@ describe("Companion plugin catalog contracts", () => {
         title: "GitHub",
       },
       { server_name: "com.notion/mcp", provider: "notion", title: "Notion" },
+      {
+        server_name: "build.conductor/mcp",
+        provider: "conductor",
+        title: "Conductor",
+      },
     ]);
   });
 

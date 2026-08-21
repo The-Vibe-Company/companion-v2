@@ -4,25 +4,19 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { CompanionPluginAccount } from "@companion/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CompanionPlugins } from "./CompanionPlugins";
+import { CompanionPlugins, type CompanionPluginsApi } from "./CompanionPlugins";
 
-const {
-  deleteCompanionPlugin,
-  saveCompanionPlugin,
-  startCompanionPluginOAuth,
-} = vi.hoisted(() => ({
-  deleteCompanionPlugin: vi.fn(),
-  saveCompanionPlugin: vi.fn(),
-  startCompanionPluginOAuth: vi.fn(),
-}));
+const api = {
+  deleteCompanionPlugin: vi.fn<CompanionPluginsApi["deleteCompanionPlugin"]>(),
+  saveCompanionPlugin: vi.fn<CompanionPluginsApi["saveCompanionPlugin"]>(),
+  startCompanionPluginOAuth: vi.fn<CompanionPluginsApi["startCompanionPluginOAuth"]>(),
+} satisfies CompanionPluginsApi;
+const { deleteCompanionPlugin, saveCompanionPlugin, startCompanionPluginOAuth } = api;
 
-vi.mock("@/lib/companions", () => ({
-  deleteCompanionPlugin,
-  saveCompanionPlugin,
-  startCompanionPluginOAuth,
-}));
-
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
+  configurable: true,
+  value: true,
+});
 
 const account: CompanionPluginAccount = {
   id: "44444444-4444-4444-8444-444444444444",
@@ -53,6 +47,7 @@ async function mount(initialAccounts: CompanionPluginAccount[] = []) {
       orgId: "org-1",
       initialAccounts,
       onBack: () => {},
+      api,
     }));
   });
   await flush();
@@ -63,6 +58,24 @@ function setValue(form: HTMLFormElement, name: string, value: string) {
   const input = form.elements.namedItem(name);
   if (!(input instanceof HTMLInputElement)) throw new Error(`Missing ${name} input`);
   input.value = value;
+}
+
+function requireForm(container: ParentNode, selector: string): HTMLFormElement {
+  const form = container.querySelector(selector);
+  if (!(form instanceof HTMLFormElement)) throw new Error(`Missing form: ${selector}`);
+  return form;
+}
+
+function requireInput(container: ParentNode, selector: string): HTMLInputElement {
+  const input = container.querySelector(selector);
+  if (!(input instanceof HTMLInputElement)) throw new Error(`Missing input: ${selector}`);
+  return input;
+}
+
+function requireButton(container: ParentNode, selector: string): HTMLButtonElement {
+  const button = container.querySelector(selector);
+  if (!(button instanceof HTMLButtonElement)) throw new Error(`Missing button: ${selector}`);
+  return button;
 }
 
 function setControlled(input: HTMLInputElement, value: string) {
@@ -76,7 +89,7 @@ async function openAndSubmit(container: HTMLElement) {
     .find((button) => button.textContent?.includes("Add custom MCP"));
   await act(async () => add?.click());
 
-  const form = container.querySelector("#companion-plugin-create") as HTMLFormElement;
+  const form = requireForm(container, "#companion-plugin-create");
   setValue(form, "provider", "linear");
   setValue(form, "label", "work");
   setValue(form, "endpoint", "https://mcp.example.test/linear");
@@ -121,9 +134,7 @@ describe("CompanionPlugins", () => {
 
     expect(container.querySelector('[role="alert"]')?.textContent)
       .toBe("Request timed out. Try connecting again.");
-    const submit = container.querySelector(
-      'button[form="companion-plugin-create"]',
-    ) as HTMLButtonElement;
+    const submit = requireButton(container, 'button[form="companion-plugin-create"]');
     expect(submit?.textContent).toContain("Connect MCP");
     expect(submit.disabled).toBe(false);
   });
@@ -142,7 +153,7 @@ describe("CompanionPlugins", () => {
     expect(container.textContent).toContain("No plugins connected yet.");
     expect(container.querySelector(".companions-plugin-empty")).not.toBeNull();
     expect(container.textContent).toContain(
-      "Connect Linear, GitHub, or Notion below, or add a custom MCP server.",
+      "Connect Linear, GitHub, Notion, or Conductor below, or add a custom MCP server.",
     );
     expect(container.textContent).toContain("Available plugins");
     expect(container.textContent).toContain("Linear");
@@ -151,18 +162,20 @@ describe("CompanionPlugins", () => {
     expect(container.textContent).toContain("Notion");
     expect(container.textContent).not.toContain("Browse the registry");
     expect(container.querySelector('input[type="search"]')).toBeNull();
-    expect(container.querySelectorAll(".companions-catalog-card")).toHaveLength(3);
+    expect(container.textContent).toContain("Conductor");
+    expect(container.querySelectorAll(".companions-catalog-card")).toHaveLength(4);
     expect(container.querySelector('[data-plugin-mark="linear"]')).not.toBeNull();
     expect(container.querySelector('[data-plugin-mark="github"]')).not.toBeNull();
     expect(container.querySelector('[data-plugin-mark="notion"]')).not.toBeNull();
+    expect(container.querySelector('[data-plugin-mark="conductor"]')).not.toBeNull();
 
     const connectButton = Array.from(
       container.querySelectorAll<HTMLButtonElement>(".companions-catalog-card button"),
     ).find((button) => button.textContent === "Connect");
     await act(async () => connectButton?.click());
 
-    const dialog = container.querySelector("#companion-catalog-connect") as HTMLFormElement;
-    const label = dialog.querySelector("input") as HTMLInputElement;
+    const dialog = requireForm(container, "#companion-catalog-connect");
+    const label = requireInput(dialog, "input");
     expect(container.querySelector(".companions-plugin-dialog--linear")).not.toBeNull();
     expect(container.querySelector(".og-dialog__ic svg")).not.toBeNull();
     expect(dialog.querySelector('input[type="password"]')).toBeNull();
@@ -190,7 +203,7 @@ describe("CompanionPlugins", () => {
     expect(container.querySelector(".companions-plugin-row [data-plugin-mark=\"linear\"]")).not.toBeNull();
     expect(container.textContent).toContain("1 account");
     expect(Array.from(container.querySelectorAll(".companions-catalog-card button"), (button) => button.textContent))
-      .toEqual(["Add account", "Connect", "Connect"]);
+      .toEqual(["Add account", "Connect", "Connect", "Connect"]);
     expect(window.location.search).toBe("?view=plugins");
   });
 
@@ -207,41 +220,35 @@ describe("CompanionPlugins", () => {
   it("reports an OAuth start failure and restores the submit action", async () => {
     startCompanionPluginOAuth.mockRejectedValue(new Error("OAuth service is unavailable."));
     const container = await mount();
-    const connectButton = container.querySelector<HTMLButtonElement>(
-      ".companions-catalog-card button",
-    );
-    await act(async () => connectButton?.click());
-    const form = container.querySelector("#companion-catalog-connect") as HTMLFormElement;
-    await act(async () => setControlled(form.querySelector("input")!, "work"));
+    const connectButton = requireButton(container, ".companions-catalog-card button");
+    await act(async () => connectButton.click());
+    const form = requireForm(container, "#companion-catalog-connect");
+    await act(async () => setControlled(requireInput(form, "input"), "work"));
     await act(async () => {
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
 
     expect(container.querySelector('[role="alert"]')?.textContent)
       .toBe("OAuth service is unavailable.");
-    expect((container.querySelector(
-      'button[form="companion-catalog-connect"]',
-    ) as HTMLButtonElement).disabled).toBe(false);
+    expect(requireButton(container, 'button[form="companion-catalog-connect"]').disabled)
+      .toBe(false);
   });
 
   it("starts only one OAuth flow while the first request is pending", async () => {
     startCompanionPluginOAuth.mockReturnValue(new Promise(() => undefined));
     const container = await mount();
-    const connectButton = container.querySelector<HTMLButtonElement>(
-      ".companions-catalog-card button",
-    );
-    await act(async () => connectButton?.click());
-    const form = container.querySelector("#companion-catalog-connect") as HTMLFormElement;
-    await act(async () => setControlled(form.querySelector("input")!, "work"));
+    const connectButton = requireButton(container, ".companions-catalog-card button");
+    await act(async () => connectButton.click());
+    const form = requireForm(container, "#companion-catalog-connect");
+    await act(async () => setControlled(requireInput(form, "input"), "work"));
     await act(async () => {
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
 
     expect(startCompanionPluginOAuth).toHaveBeenCalledTimes(1);
-    expect((container.querySelector(
-      'button[form="companion-catalog-connect"]',
-    ) as HTMLButtonElement).disabled).toBe(true);
+    expect(requireButton(container, 'button[form="companion-catalog-connect"]').disabled)
+      .toBe(true);
   });
 
   it("disconnects an existing labeled account without changing the catalog", async () => {
@@ -258,12 +265,12 @@ describe("CompanionPlugins", () => {
     expect(container.querySelector(
       'button[aria-label="Disconnect Linear work"]',
     )).toBeNull();
-    expect(container.querySelectorAll(".companions-catalog-card")).toHaveLength(3);
+    expect(container.querySelectorAll(".companions-catalog-card")).toHaveLength(4);
     expect(container.textContent).not.toContain("1 account");
     expect(Array.from(
       container.querySelectorAll(".companions-catalog-card button"),
       (button) => button.textContent,
-    )).toEqual(["Connect", "Connect", "Connect"]);
+    )).toEqual(["Connect", "Connect", "Connect", "Connect"]);
   });
 
   it("explains a duplicate-label callback and removes the error parameter", async () => {

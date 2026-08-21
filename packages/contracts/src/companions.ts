@@ -507,6 +507,7 @@ export const COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS = [
   "linear",
   "github",
   "notion",
+  "conductor",
 ] as const;
 export const companionConfigProposalConnectProviderSchema = z.enum(
   COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS,

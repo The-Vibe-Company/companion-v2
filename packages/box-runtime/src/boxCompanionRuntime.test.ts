@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   COMPANION_EXEC_TOOL_RUN_TIMEOUT_MS,
+  COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS,
   COMPANION_ROUTINE_MAX_PER_COMPANION,
   COMPANION_ROUTINE_MIN_INTERVAL_MS,
   COMPANION_TOOL_RUN_TIMEOUT_MS,
@@ -1256,6 +1257,7 @@ describe("staged Companion instructions", () => {
     expect(text).toContain(
       `At most ${COMPANION_TRIGGER_MAX_PER_COMPANION} per Companion. You cannot create one yourself.`,
     );
+    expect(text).toContain(COMPANION_CONFIG_PROPOSAL_CONNECT_PROVIDERS.join(", "));
   });
 
   it("does not tell Pi that memory is wiped or that tool runs are invisible", () => {
