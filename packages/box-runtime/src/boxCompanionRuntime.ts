@@ -163,6 +163,10 @@ const PI_DAEMON_ACTIVE_TIMEOUT_MS = 180_000;
  */
 const PI_RPC_ACCEPT_TIMEOUT_SECONDS = 8;
 const RUNTIME_IMAGE_PLAYBOOK_READY = "companion-runtime-playbook-ready";
+const RUNTIME_IMAGE_ARCHIVE_TIMEOUT_MULTIPLIER = 3;
+const RUNTIME_IMAGE_PLAYBOOK_PROBES = 300;
+const RUNTIME_IMAGE_WARMUP_COMMAND_TIMEOUT_SECONDS = 45;
+const RUNTIME_IMAGE_PLAYBOOK_UNSTABLE = "Runtime image playbook did not stabilize";
 const RUNTIME_IMAGE_BOXIGNORE = [
   ".companion/runtime/logs/",
   ".companion/runtime/state/skill-archives/",
@@ -2954,7 +2958,8 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     await this.#writeFile(input.boxId, bakedSkillPath, input.bundledSkill.archive.toString("base64"));
 
     await this.#archiveBox({ boxId: input.boxId, signal: input.signal });
-    const archiveDeadline = Date.now() + this.#readyTimeoutMs;
+    const archiveDeadline = Date.now()
+      + this.#readyTimeoutMs * RUNTIME_IMAGE_ARCHIVE_TIMEOUT_MULTIPLIER;
     for (;;) {
       const archived = await this.#get(input.boxId, input.signal);
       if (archived.state === "archived") break;
@@ -2966,9 +2971,7 @@ rm -f "/run/user/$(id -u)/companion/providers.env" \
     await this.#resume(input.boxId, input.signal);
     await this.#waitReady(input.boxId, input.signal);
 
-    const warmed = await this.#command(
-      input.boxId,
-      `set -euo pipefail
+    const warmupCommand = `set -euo pipefail
 test -s "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}"
 test -s "$HOME/${bakedSkillPath}"
 node --check "$HOME/${COMPANION_PI_BROKER_SCRIPT_PATH}" >/dev/null
@@ -2976,7 +2979,7 @@ pi --version >/dev/null
 playbook="$HOME/.ascii/playbook.json"
 previous=""
 stable=0
-for companion_playbook_probe in $(seq 1 100); do
+for companion_playbook_probe in $(seq 1 ${RUNTIME_IMAGE_PLAYBOOK_PROBES}); do
   if [ -s "$playbook" ]; then
     current="$(sha256sum "$playbook" | cut -c1-64)"
     if [ "$current" = "$previous" ]; then stable=$((stable + 1)); else stable=0; fi
@@ -2985,13 +2988,35 @@ for companion_playbook_probe in $(seq 1 100); do
   fi
   sleep 0.1
 done
-echo 'Runtime image playbook did not stabilize' >&2
-exit 1`,
-      30,
-      input.signal,
-    );
-    if (!warmed.success || !warmed.stdout.includes(RUNTIME_IMAGE_PLAYBOOK_READY)) {
-      throw new BoxRuntimeProviderError("Runtime image playbook warmup failed", 502);
+echo '${RUNTIME_IMAGE_PLAYBOOK_UNSTABLE}' >&2
+exit 1`;
+    const warmupDeadline = Date.now() + this.#readyTimeoutMs;
+    for (;;) {
+      try {
+        const warmed = await this.#command(
+          input.boxId,
+          warmupCommand,
+          RUNTIME_IMAGE_WARMUP_COMMAND_TIMEOUT_SECONDS,
+          input.signal,
+        );
+        // The provider can lag its exit bookkeeping after archive/resume and report exit 1 even
+        // though this fixed command reached its final success marker. The marker is emitted only
+        // after every prerequisite and the playbook stability check have passed.
+        if (warmed.stdout.includes(RUNTIME_IMAGE_PLAYBOOK_READY)) return;
+        if (!warmed.success && Date.now() < warmupDeadline) {
+          await this.#pause(input.signal);
+          continue;
+        }
+        throw new BoxRuntimeProviderError(
+          `Runtime image playbook warmup failed${commandFailureDetail(warmed)}`,
+          502,
+        );
+      } catch (error) {
+        if (!(error instanceof BoxRuntimeProviderError)
+          || error.status !== 409
+          || Date.now() >= warmupDeadline) throw error;
+        await this.#pause(input.signal);
+      }
     }
   }
 
