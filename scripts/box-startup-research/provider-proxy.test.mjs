@@ -79,6 +79,7 @@ async function fakeProvider(input = {}) {
   let createdBoxes = 0;
   let snapshotListCalls = 0;
   let snapshotDeleted = true;
+  let attestationRequests = 0;
   const authorizations = [];
   const commands = [];
   const createBodies = [];
@@ -151,6 +152,8 @@ async function fakeProvider(input = {}) {
       if (boxIds.some((id) => url.pathname === `/boxes/${id}/commands`)
         && request.method === "POST" && requestBody.command.includes("companion_pi_bin")
         && !requestBody.command.includes("COMPANION_RESEARCH_BROKER_CLIENT")) {
+        const outcome = input.attestationResponses?.[attestationRequests++];
+        if (outcome) return json(outcome.status, outcome.body);
         return json(200, {
           ok: true,
           type: "command.completed",
@@ -230,6 +233,7 @@ async function fakeProvider(input = {}) {
     authorizations,
     commands,
     createBodies,
+    attestationRequests: () => attestationRequests,
     close: async () => await new Promise((resolve, reject) =>
       server.close((error) => error ? reject(error) : resolve())),
   };
@@ -794,6 +798,46 @@ test("pins an image-owned Pi launcher before candidate writes", async () => {
       body: JSON.stringify({ ttlSeconds: 900, noEnv: true, from: PARENT_SNAPSHOT_NAME }),
     })).status, 202);
     assert.equal((await call(`/boxes/${BAKER_BOX_ID}`)).status, 200);
+  } finally {
+    await lease.proxy.close();
+    await upstream.close();
+  }
+});
+
+test("retries read-only runtime attestation while a ready Box command service catches up", async () => {
+  const upstream = await fakeProvider({
+    attestationResponses: [
+      { status: 409, body: { code: "box_not_ready" } },
+      { status: 200, body: { success: false, stdout: "", stderr: "" } },
+    ],
+    piPath: "/home/user/.nvm/versions/node/v24.18.1/bin/pi",
+    piUid: 1000,
+    piMode: 755,
+    uid: 1000,
+  });
+  const lease = await createBoxLeaseProxy({
+    apiKey: REAL_KEY,
+    upstreamBase: upstream.baseUrl,
+    companionIds: [BAKER_COMPANION_ID, COMPANION_ID],
+    snapshotName: SNAPSHOT_NAME,
+    brokerSha256: "f".repeat(64),
+  });
+  const call = async (path, options = {}) => await fetch(`${lease.baseUrl}${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${lease.apiKey}`,
+      "content-type": "application/json",
+      ...options.headers,
+    },
+  });
+  try {
+    assert.equal((await call("/named-snapshots")).status, 200);
+    assert.equal((await call("/boxes", {
+      method: "POST",
+      body: JSON.stringify({ ttlSeconds: 900, noEnv: true, from: PARENT_SNAPSHOT_NAME }),
+    })).status, 202);
+    assert.equal((await call(`/boxes/${BAKER_BOX_ID}`)).status, 200);
+    assert.equal(upstream.attestationRequests(), 3);
   } finally {
     await lease.proxy.close();
     await upstream.close();
