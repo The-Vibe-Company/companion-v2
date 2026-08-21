@@ -279,6 +279,7 @@ export class MemoryRuntimeStore implements RuntimeStore {
   observations: RuntimeObservationInput[] = [];
   projected: RuntimePiProjection[][] = [];
   releases = 0;
+  deferredDeletes = 0;
   disables = 0;
   renewReturnsNull = false;
   renewals = 0;
@@ -638,6 +639,11 @@ export class MemoryRuntimeStore implements RuntimeStore {
 
   async release(): Promise<boolean> {
     this.releases += 1;
+    return true;
+  }
+
+  async deferDelete(): Promise<boolean> {
+    this.deferredDeletes += 1;
     return true;
   }
 }

@@ -236,11 +236,15 @@ deleted before retirement.
 
 Known-idempotent lifecycle calls retry network failures, `429`, and `5xx` responses up to five times
 with jittered backoff of 1, 2, 5, 10, and 30 seconds. A provider operation id is retained whenever
-the API returns one. A provider-blocked permanent delete is transient (usually an in-flight snapshot
-save on the same Box): runtime keeps polling the retained deletion operation until the bounded
-operation deadline, and only a still-blocked deadline fails the operation — as retryable
-`box_delete_deadline_exceeded`, so an Owner/Editor retry finishes a delete the provider typically completed
-moments later.
+the API returns one. Accepted permanent deletion is not bounded by the ordinary ten-minute lifecycle
+deadline and never replays `DELETE`. At `waiting_deleted`, a claim reauthorizes and performs exactly
+one GET for the retained operation id. `completed` or `404` confirms absence; `pending`, `processing`,
+`blocked`, or an explicitly retryable GET failure uses a fenced SQL CAS to keep the operation
+pending, release the lease, and set `available_at` with durable 5/15/30/60-second backoff. No runtime
+slot sleeps between these observations. Invalid payloads and non-retryable failures keep the usual
+expurgated terminal error. Migration 0114 requeues the newest eligible historical failed delete per
+Companion only when an accepted operation id survives, and quarantines the previous claim signature
+throughout the rolling deploy.
 
 Stop snapshots/archives the Box. A later send queues wake after stop reaches a safe archive
 checkpoint; it does not race Pi start against an in-flight archive. Restart Pi keeps the Box and

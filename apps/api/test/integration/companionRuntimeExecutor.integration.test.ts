@@ -307,7 +307,7 @@ async function claimWork(): Promise<Claim> {
       runtime_generation::text as "runtimeGeneration"
     from public.companion_runtime_claim_work(${executorId}, 1, 30, (
       select gate_epoch from public.companion_runtime_gate_status()
-    ), 1)
+    ), 1, 1)
   `);
   if (!rows[0]) throw new Error("expected one Runtime v2 claim");
   return rows[0];
@@ -542,7 +542,8 @@ describe("Companion runtime executor PostgreSQL surface", () => {
             'public.companion_runtime_authorize_desktop(uuid,uuid,text)',
             'public.companion_runtime_consume_desktop_request(text,bigint,integer)',
             'public.companion_runtime_project_event_batch(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,jsonb,bigint,timestamp with time zone,integer,integer,integer)',
-            'public.companion_runtime_record_attempt_outputs(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,jsonb,timestamp with time zone)'
+            'public.companion_runtime_record_attempt_outputs(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,jsonb,timestamp with time zone)',
+            'public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)'
           ]) protected(signature)
           where has_function_privilege(${runtimeRole}, protected.signature, 'EXECUTE')
         ) as "callableFunctions",
@@ -550,15 +551,17 @@ describe("Companion runtime executor PostgreSQL surface", () => {
           ${runtimeRole}, 'public.companion_runtime_guard_duplicate_cleanup()', 'EXECUTE'
         ) as "helperCallable"
     `;
-    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 13, helperCallable: false });
+    expect(acl).toEqual({ privateTableReads: 0, callableFunctions: 14, helperCallable: false });
     await expect(asRuntime((tx) => tx`select * from companion_turn_attempts`))
       .rejects.toThrow(/permission denied/i);
 
-    const materialSignatures = [
+    const runtimeOnlySignatures = [
       "public.companion_runtime_record_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,public.companion_client_surface,timestamp with time zone)",
       "public.companion_runtime_publish_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text)",
+      "public.companion_runtime_claim_work(text,integer,integer,bigint,integer,integer)",
+      "public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)",
     ];
-    const materialAcl = await sql<Array<{
+    const runtimeOnlyAcl = await sql<Array<{
       signature: string;
       api: boolean;
       worker: boolean;
@@ -568,10 +571,10 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         has_function_privilege(${apiRole}, signature, 'EXECUTE') as api,
         has_function_privilege(${workerRole}, signature, 'EXECUTE') as worker,
         has_function_privilege(${runtimeRole}, signature, 'EXECUTE') as runtime
-      from unnest(${materialSignatures}::text[]) signatures(signature)
+      from unnest(${runtimeOnlySignatures}::text[]) signatures(signature)
       order by signature
     `;
-    expect(materialAcl.every((entry) => entry.runtime && !entry.api && !entry.worker)).toBe(true);
+    expect(runtimeOnlyAcl.every((entry) => entry.runtime && !entry.api && !entry.worker)).toBe(true);
 
     await expect(asRuntime(async (tx) => {
       await verifyRuntimeDatabaseRole(tx as unknown as Pick<Sql, "unsafe">, runtimeRole);
@@ -1998,7 +2001,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
     }
   });
 
-  it("quarantines pre-0110 claimers while the material-aware executor can claim the work", async () => {
+  it("quarantines old claimers while the delete-resume-aware executor can claim the work", async () => {
     if (!sql) throw new Error("runtime executor database is not initialized");
     let companionId = "";
     try {
@@ -2019,7 +2022,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
         select work_id::text as "workId"
         from public.companion_runtime_claim_work(${executorId}, 1, 30, (
           select gate_epoch from public.companion_runtime_gate_status()
-        ))
+        ), 1)
       `);
       expect(legacyClaims).toEqual([]);
       const [unclaimed] = await sql<Array<{ workKind: string | null; workId: string | null }>>`
@@ -2033,6 +2036,96 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       await release(versionedClaim);
     } finally {
       if (companionId) await removeCompanion(companionId);
+    }
+  });
+
+  it("atomically defers an accepted delete with fenced PostgreSQL backoff", async () => {
+    if (!sql) throw new Error("runtime executor database is not initialized");
+    const fixture = await createCompanion({ boxReady: true });
+    const operationId = randomUUID();
+    const providerOperationId = `delete-operation-${suffix}`;
+    try {
+      await sql`delete from companion_turn_attempts where id = ${fixture.attemptId}::uuid`;
+      await sql`
+        update companion_turns set status = 'cancelled', settled_at = now(),
+          inactivity_deadline_at = null, absolute_deadline_at = null
+        where id = ${fixture.turnId}::uuid
+      `;
+      await sql`
+        insert into companion_operations(
+          id, org_id, companion_id, request_id, kind, trigger, actor_id,
+          runtime_generation, checkpoint, provider_operation_id, started_at
+        ) values (
+          ${operationId}::uuid, ${ids.orgA}::uuid, ${fixture.companionId}::uuid,
+          ${randomUUID()}::uuid, 'delete', 'user', ${ids.ownerA}, 1,
+          'waiting_deleted', ${providerOperationId}, now() - interval '1 hour'
+        )
+      `;
+
+      const expectedDelays = [5, 15, 30, 60];
+      let staleClaim: Claim | null = null;
+      for (const expectedDelay of expectedDelays) {
+        await sql`
+          update companion_operations set available_at = now()
+          where id = ${operationId}::uuid
+        `;
+        const claim = await claimWork();
+        expect(claim).toMatchObject({
+          companionId: fixture.companionId,
+          workKind: "operation",
+          workId: operationId,
+          checkpoint: "waiting_deleted",
+        });
+        const before = Date.now();
+        const [result] = await asRuntime((tx) => tx<Array<{ deferred: boolean }>>`
+          select public.companion_runtime_defer_delete(
+            ${claim.orgId}::uuid, ${claim.companionId}::uuid, ${claim.claimToken}::uuid,
+            ${claim.claimEpoch}::bigint, ${claim.gateEpoch}::bigint, ${executorId},
+            'operation', ${claim.workId}::uuid
+          ) as deferred
+        `);
+        const after = Date.now();
+        expect(result?.deferred).toBe(true);
+        const [durable] = await sql<Array<{
+          status: string;
+          attemptCount: number;
+          availableAt: Date;
+          providerOperationId: string | null;
+          settledAt: Date | null;
+          claimToken: string | null;
+        }>>`
+          select operation.status::text, operation.attempt_count as "attemptCount",
+            operation.available_at as "availableAt",
+            operation.provider_operation_id as "providerOperationId",
+            operation.settled_at as "settledAt", lease.claim_token::text as "claimToken"
+          from companion_operations operation
+          join companion_runtime_leases lease
+            on lease.org_id = operation.org_id and lease.companion_id = operation.companion_id
+          where operation.id = ${operationId}::uuid
+        `;
+        expect(durable).toMatchObject({
+          status: "pending",
+          providerOperationId,
+          settledAt: null,
+          claimToken: null,
+        });
+        expect(durable?.attemptCount).toBe(expectedDelays.indexOf(expectedDelay) + 1);
+        expect(durable!.availableAt.getTime()).toBeGreaterThanOrEqual(before + expectedDelay * 1_000);
+        expect(durable!.availableAt.getTime()).toBeLessThanOrEqual(after + expectedDelay * 1_000 + 250);
+        staleClaim ??= claim;
+      }
+
+      const [stale] = await asRuntime((tx) => tx<Array<{ deferred: boolean }>>`
+        select public.companion_runtime_defer_delete(
+          ${staleClaim!.orgId}::uuid, ${staleClaim!.companionId}::uuid,
+          ${staleClaim!.claimToken}::uuid, ${staleClaim!.claimEpoch}::bigint,
+          ${staleClaim!.gateEpoch}::bigint, ${executorId}, 'operation',
+          ${staleClaim!.workId}::uuid
+        ) as deferred
+      `);
+      expect(stale?.deferred).toBe(false);
+    } finally {
+      await removeCompanion(fixture.companionId);
     }
   });
 

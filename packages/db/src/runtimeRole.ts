@@ -37,6 +37,7 @@ WITH runtime_role AS (
     ('public.companion_runtime_disable(bigint,text)'),
     ('public.companion_runtime_claim_work(text,integer,integer,bigint)'),
     ('public.companion_runtime_claim_work(text,integer,integer,bigint,integer)'),
+    ('public.companion_runtime_claim_work(text,integer,integer,bigint,integer,integer)'),
     ('public.companion_runtime_renew_and_authorize(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,integer)'),
     ('public.companion_runtime_checkpoint(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,text,text,uuid,text,bigint,timestamp with time zone,integer,integer,integer)'),
     ('public.companion_runtime_observe_instance(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,bigint,bigint,text,public.companion_box_observed_state,public.companion_pi_observed_state,text,integer,bigint,integer,timestamp with time zone)'),
@@ -55,6 +56,7 @@ WITH runtime_role AS (
     ('public.companion_runtime_publish_material_snapshot(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text)'),
     ('public.companion_runtime_settle(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,text,text,text,public.companion_runtime_error_action)'),
     ('public.companion_runtime_release_lease(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)'),
+    ('public.companion_runtime_defer_delete(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid)'),
     ('public.companion_runtime_authorize_desktop(uuid,uuid,text)'),
     ('public.companion_runtime_consume_desktop_request(text,bigint,integer)'),
     ('public.companion_runtime_record_attempt_outputs(uuid,uuid,uuid,bigint,bigint,text,public.companion_runtime_work_kind,uuid,jsonb,timestamp with time zone)')
