@@ -587,7 +587,7 @@ describe("Companion runtime executor PostgreSQL surface", () => {
       .rejects.toBeInstanceOf(RuntimeDatabaseRoleError);
 
     const apiSignatures = [
-      "public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)",
+      "public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid,smallint,smallint,smallint,smallint)",
       "public.companion_api_update_companion(uuid,uuid,jsonb)",
       "public.companion_api_set_initial_provider(uuid,uuid,text,text)",
       "public.companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)",

@@ -11,6 +11,11 @@ import {
 } from "./CompanionProviderModelPicker";
 import { CompanionSkillPicker } from "./CompanionSkillPicker";
 import { CompanionPluginPicker } from "./CompanionPluginPicker";
+import {
+  CompanionIconPicker,
+  randomIcon,
+  type CompanionIconValue,
+} from "./CompanionIconPicker";
 
 /**
  * Creation asks for name, persona, provider/model, which Skills Hub packages this Companion may
@@ -41,6 +46,7 @@ export function NewCompanionDialog({
   const [modelId, setModelId] = useState(providerDefaultModel(providers, initialProviderId));
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [selectedMcpAccountIds, setSelectedMcpAccountIds] = useState<string[]>([]);
+  const [icon, setIcon] = useState<CompanionIconValue>(randomIcon);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -65,6 +71,7 @@ export function NewCompanionDialog({
         model_id: modelId,
         selected_skill_ids: selectedSkillIds,
         selected_mcp_account_ids: selectedMcpAccountIds,
+        icon,
       }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Companion could not be created.");
@@ -127,6 +134,7 @@ export function NewCompanionDialog({
         <p className="companions-new-form__hint" id="companion-persona-hint">
           One line, shown under the name in the list.
         </p>
+        <CompanionIconPicker value={icon} onChange={setIcon} />
         {connected ? (
           <CompanionProviderModelPicker
             providers={providers}

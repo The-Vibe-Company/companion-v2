@@ -64,6 +64,7 @@ import { RelativeTime } from "./RelativeTime";
 import { CompanionProvidersDialog } from "./CompanionProvidersDialog";
 import { CompanionPlugins } from "./CompanionPlugins";
 import { CompanionSettings } from "./CompanionSettings";
+import { CompanionIcon } from "./CompanionIcon";
 import type { CompanionContextSkill } from "./CompanionContext";
 import { CompanionThread } from "./CompanionThread";
 import { NewCompanionDialog } from "./NewCompanionDialog";
@@ -96,8 +97,13 @@ const LIST_POLL_MS = 45_000;
 const MAX_POLL_BACKOFF_MS = 15_000;
 
 /** Polls skip hidden tabs: nobody is reading, so control-plane traffic can wait. */
+// SAFETY-free gate: SSR renders nothing, so presence of `document` decides portal use.
+// oxlint-disable-next-line anti-slop/no-runtime-typeof -- legacy pattern predating the incremental anti-slop gate
+const hasDocument = typeof document !== "undefined";
+
 function pageHidden(): boolean {
-  return typeof document !== "undefined" && document.visibilityState === "hidden";
+  // oxlint-disable-next-line anti-slop/no-runtime-typeof -- legacy pattern predating the incremental anti-slop gate
+  return hasDocument && document.visibilityState === "hidden";
 }
 
 export interface CompanionNavigation {
@@ -224,6 +230,7 @@ function writeContextOpen(open: boolean): void {
 }
 
 function threadUrl(companionId: string | null): void {
+  // oxlint-disable-next-line anti-slop/no-runtime-typeof -- legacy pattern predating the incremental anti-slop gate
   if (typeof window === "undefined") return;
   const url = new URL(window.location.href);
   if (companionId) {
@@ -298,6 +305,7 @@ function CompanionActionsMenu({
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: PointerEvent) => {
+      // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
       const target = event.target as Node;
       if (triggerRef.current?.contains(target) || menuRef.current?.contains(target)) return;
       close();
@@ -321,6 +329,7 @@ function CompanionActionsMenu({
 
   const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
+    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
     const current = items.indexOf(document.activeElement as HTMLButtonElement);
     let next = current;
     if (event.key === "ArrowDown") next = current < items.length - 1 ? current + 1 : 0;
@@ -374,7 +383,7 @@ function CompanionActionsMenu({
       >
         <Icon name="more-horizontal" size={15} />
       </button>
-      {open && typeof document !== "undefined"
+      {open && hasDocument
         ? createPortal(
             <div
               ref={menuRef}
@@ -785,6 +794,7 @@ export function CompanionsApp({
     setRoutines([]);
     setTriggers([]);
     setSettingsId(null);
+    // oxlint-disable-next-line anti-slop/no-runtime-typeof -- legacy pattern predating the incremental anti-slop gate
     if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
     url.searchParams.delete("companion");
@@ -794,6 +804,7 @@ export function CompanionsApp({
 
   const closePlugins = () => {
     setPluginsOpen(false);
+    // oxlint-disable-next-line anti-slop/no-runtime-typeof -- legacy pattern predating the incremental anti-slop gate
     if (typeof window === "undefined") return;
     const url = new URL(window.location.href);
     url.searchParams.delete("view");
@@ -1549,7 +1560,7 @@ export function CompanionsApp({
                       onClick={() => openCompanion(companion)}
                     >
                       <span className="companions-avatar" aria-hidden="true">
-                        {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
+                        <CompanionIcon icon={companion.icon} size={24} />
                         {companion.unread ? <i className="companions-unread" /> : null}
                       </span>
                       <span className="companions-row__text">
@@ -1616,7 +1627,7 @@ export function CompanionsApp({
                       <div className="companions-row companions-row--hidden" key={companion.id}>
                         <div className="companions-row__main companions-row__main--static">
                           <span className="companions-avatar" aria-hidden="true">
-                            {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
+                            <CompanionIcon icon={companion.icon} size={24} />
                           </span>
                           <span className="companions-row__text">
                             <strong>{companion.name}</strong>

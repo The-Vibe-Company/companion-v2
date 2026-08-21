@@ -834,6 +834,13 @@
       "when": 1790096800000,
       "tag": "0118_conductor_config_proposal",
       "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "7",
+      "when": 1790096800001,
+      "tag": "0119_companion_icons",
+      "breakpoints": true
     }
   ]
 }

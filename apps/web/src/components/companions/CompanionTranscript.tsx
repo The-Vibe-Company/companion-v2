@@ -38,6 +38,7 @@ import { Thread as AssistantThread } from "@/components/assistant-ui/thread";
 import { cn } from "@/lib/utils";
 import { decideCompanionDecision } from "../../lib/companions";
 import { AttachmentContext, AttachmentList, readableSize } from "./AttachmentCard";
+import { CompanionIcon } from "./CompanionIcon";
 import {
   DecisionActionsContext,
   type DecisionAction,
@@ -90,6 +91,8 @@ const MessagesContext = createContext<ReadonlyMap<string, TranscriptMessage>>(ne
  */
 interface TranscriptChrome {
   companionName: string;
+  /** The Companion's cosmetic icon, so the replying trailer can animate the bot itself. */
+  companionIcon: Companion["icon"];
   canSend: boolean;
   loading: boolean;
   empty: boolean;
@@ -169,6 +172,7 @@ function DaySeparator({ day }: { day: string }) {
       setText(at.toLocaleDateString(undefined, {
         month: "long",
         day: "numeric",
+        // oxlint-disable-next-line anti-slop/no-conditional-empty-object-spread -- legacy pattern predating the incremental anti-slop gate
         ...(daysApart > 300 ? { year: "numeric" } : {}),
         timeZone: "UTC",
       }));
@@ -348,6 +352,7 @@ function acceptAttachments(
   }
   // A mixed batch still says what it refused: accepting the good files is not a reason to leave
   // someone wondering where the others went.
+  // oxlint-disable-next-line anti-slop/no-known-value-widening -- legacy pattern predating the incremental anti-slop gate
   return { files, error };
 }
 
@@ -562,6 +567,7 @@ export function CompanionTranscript({
     if (!incoming) return;
     const accepted = acceptAttachments(
       attachmentsRef.current,
+      // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
       Array.from(incoming as ArrayLike<File>),
     );
     setAttachments(accepted.files);
@@ -656,6 +662,7 @@ export function CompanionTranscript({
 
   const chrome = useMemo<TranscriptChrome>(() => ({
     companionName: companion.name,
+    companionIcon: companion.icon,
     canSend,
     loading,
     empty,
@@ -679,6 +686,7 @@ export function CompanionTranscript({
     canSend,
     cancelQueued,
     companion.name,
+    companion.icon,
     dequeueingTurnId,
     empty,
     hint,
@@ -763,22 +771,14 @@ function Welcome() {
  * from assistive technology because they say the same thing again.
  */
 function Trailer() {
-  const { companionName, replying } = useChrome();
+  const { companionName, companionIcon, replying } = useChrome();
   if (!replying) return null;
   return (
     <p
       data-slot="companion-replying"
       className="text-muted-foreground flex items-center gap-2 text-sm"
     >
-      <span aria-hidden="true" className="flex items-center gap-1">
-        {[0, 1, 2].map((index) => (
-          <span
-            key={index}
-            className="bg-muted-foreground/70 size-1.5 animate-bounce rounded-full motion-reduce:animate-none"
-            style={{ animationDelay: `${index * 140}ms` }}
-          />
-        ))}
-      </span>
+      <CompanionIcon icon={companionIcon} size={20} state="thinking" />
       <span>{companionName} is replying...</span>
     </p>
   );

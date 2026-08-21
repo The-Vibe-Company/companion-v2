@@ -87,6 +87,13 @@ rather than failing the observation.
 This projection is not a lease and cannot authorize work. List, thread, ordinary status, and Viewer
 reads consume it without contacting Box.
 
+### Companion icon
+
+`companions` carries four cosmetic smallint indexes (`icon_shape`, `icon_mouth`, `icon_accessory`,
+`icon_color`) into fixed client-side catalogs. They are presentation only: the update path accepts
+them without bumping a settings revision or checkpointing the Box, so an icon save never wakes or
+restarts anything, and they never appear in an operation snapshot or reach Pi.
+
 ### Turn
 
 `companion_turns` stores one logical user request:

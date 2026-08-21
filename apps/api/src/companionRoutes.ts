@@ -501,6 +501,7 @@ export function registerCompanionRoutes(
           modelId: body.model_id,
           selectedSkillIds: body.selected_skill_ids,
           selectedMcpAccountIds: body.selected_mcp_account_ids,
+          icon: body.icon,
           database,
         }));
       return c.json({ companion }, 201);
@@ -952,6 +953,7 @@ export function registerCompanionRoutes(
       if (body.selected_mcp_account_ids !== undefined) {
         patch.selected_mcp_account_ids = body.selected_mcp_account_ids;
       }
+      if (body.icon !== undefined) patch.icon = body.icon;
       const companion = await tenant(c, ({ actor, orgId, database }) =>
         updateCompanionV2({ actor, orgId, companionId, patch, database }));
       return c.json({ companion });

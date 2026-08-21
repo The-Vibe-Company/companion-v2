@@ -51,6 +51,7 @@ DECLARE
   protected_table regclass;
   protected_sequence regclass;
   protected_type regtype;
+  companion_api_create_function regprocedure;
   active_roles text[] := ARRAY[api_role, worker_role, companion_runtime_role];
   private_runtime_table_names text[] := ARRAY[
     'companion_runtime_control',
@@ -416,11 +417,17 @@ BEGIN
 
     -- 0092 gives only the API login the durable intent/read surface. The worker and dedicated
     -- executor never receive these functions, and helpers remain migration-owner-only.
-    IF pg_catalog.to_regprocedure(
-      'public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)'
-    ) IS NOT NULL THEN
+    companion_api_create_function := COALESCE(
+      pg_catalog.to_regprocedure(
+        'public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid,smallint,smallint,smallint,smallint)'
+      ),
+      pg_catalog.to_regprocedure(
+        'public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)'
+      )
+    );
+    IF companion_api_create_function IS NOT NULL THEN
       companion_api_functions := ARRAY[
-        'public.companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)'::regprocedure,
+        companion_api_create_function,
         'public.companion_api_update_companion(uuid,uuid,jsonb)'::regprocedure,
         'public.companion_api_set_initial_provider(uuid,uuid,text,text)'::regprocedure,
         'public.companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)'::regprocedure,

@@ -5,7 +5,6 @@ import type {
   CompanionPluginAccount,
   CompanionPluginOAuthStartInput,
   CompanionPluginOAuthStartResponse,
-  CompanionPluginsResponse,
   CompanionProviderConnection,
   CompanionProviderOAuthStartResponse,
   CompanionProvidersResponse,
@@ -72,6 +71,8 @@ export async function createCompanion(
     model_id: string;
     selected_skill_ids?: string[];
     selected_mcp_account_ids?: string[];
+    // oxlint-disable-next-line anti-slop/no-shape-in-symbol-names -- icon catalogs use geometric domain terms
+    icon?: { shape?: number; mouth?: number; accessory?: number; color?: number };
   },
 ): Promise<Companion> {
   const result = await apiFetch<{ companion: Companion }>("/v1/companions", {

@@ -302,6 +302,12 @@ The web retains polling: three seconds while activity is present, slower when se
 SSE or Box push agent. “Companion is replying…” derives only from an acknowledged, non-terminal
 attempt. Viewer/list/thread/status reads remain PostgreSQL-only.
 
+Each Companion carries a cosmetic blob icon — four smallint indexes (`icon_shape`, `icon_mouth`,
+`icon_accessory`, `icon_color`) into fixed client-side catalogs rendered as inline SVG. Create and
+update accept them; the update path treats them as cosmetic only, so an icon save never bumps a
+settings revision or contacts Box. The web animates the icon from the same durable signal as
+“Companion is replying…”, never from lifecycle guesses.
+
 Desktop minting remains an Owner/Editor action that cannot wake Box. The API authorizes the member,
 then calls a private runtime endpoint with a short-lived HMAC request. Runtime revalidates the
 Companion and returns the fresh provider URL only after the current actor owns every selected

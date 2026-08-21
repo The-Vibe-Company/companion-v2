@@ -14,6 +14,8 @@ import { Icon } from "../Icon";
 import { CompanionContext, type CompanionContextSkill } from "./CompanionContext";
 import { CompanionTranscript } from "./CompanionTranscript";
 import { companionBoxStatusLabel, companionStatus } from "./status";
+import { CompanionIcon } from "./CompanionIcon";
+import { replyExpected } from "./transcript";
 import { useVisualViewportPin } from "./useVisualViewportPin";
 
 /**
@@ -246,6 +248,9 @@ export function CompanionThread({
   const stageRef = useRef<HTMLDivElement>(null);
   const [overlay, setOverlay] = useState(false);
   const status = companionStatus(companion.runtime.state);
+  // "Companion is replying…" is only ever the durable ACKed projection, so the icon animates on
+  // exactly the same signal instead of guessing from lifecycle state.
+  const thinking = replyExpected(thread);
   const canSend = thread ? thread.can_send : companion.access !== "viewer";
   const awake = companion.runtime.state === "running";
   const boxLabel = companionBoxStatusLabel(companion.runtime.state);
@@ -312,6 +317,7 @@ export function CompanionThread({
     const conversation = stageRef.current?.querySelector<HTMLElement>(".chat-thread");
     const wasInert = conversation?.inert ?? false;
     if (conversation) conversation.inert = true;
+    // oxlint-disable-next-line anti-slop/require-safety-comment-for-type-assertion -- invariant checked by the surrounding validation
     const returnTo = document.activeElement as HTMLElement | null;
     window.requestAnimationFrame(() => {
       stageRef.current?.querySelector<HTMLElement>(".chat-context__close")?.focus();
@@ -333,7 +339,7 @@ export function CompanionThread({
           <Icon name="arrow-left" size={16} />
         </button>
         <span className="companions-avatar chat-avatar" aria-hidden="true">
-          {companion.name.trim().slice(0, 1).toLocaleUpperCase("en-US") || "C"}
+          <CompanionIcon icon={companion.icon} size={24} state={thinking ? "thinking" : "idle"} />
         </span>
         <div className="chat-identity">
           <h1 ref={headingRef} tabIndex={-1}>{companion.name}</h1>

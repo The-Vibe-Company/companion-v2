@@ -123,8 +123,15 @@ describe("Skills Hub runtime-role grants", () => {
       sql.indexOf("companion_api_functions := ARRAY["),
       sql.indexOf("-- A migration owner can carry arbitrary", sql.indexOf("companion_api_functions := ARRAY[")),
     );
-    for (const signature of [
+    expect(sql).toContain("companion_api_create_function regprocedure");
+    expect(sql).toContain(
+      "companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid,smallint,smallint,smallint,smallint)",
+    );
+    expect(sql).toContain(
       "companion_api_create_companion(uuid,text,text,text,text,jsonb,boolean,jsonb,uuid)",
+    );
+    expect(apiBlock).toContain("companion_api_create_function,");
+    for (const signature of [
       "companion_api_update_companion(uuid,uuid,jsonb)",
       "companion_api_set_initial_provider(uuid,uuid,text,text)",
       "companion_api_set_workspace_access(uuid,uuid,public.companion_share_role)",

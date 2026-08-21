@@ -12,6 +12,7 @@ import {
   pgEnum,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   unique,
@@ -422,6 +423,14 @@ export const companions = pgTable(
     name: text("name").notNull(),
     /** One short operator-authored line describing the Companion; never a system prompt. */
     persona: text("persona"),
+    /**
+     * Cosmetic icon indexes (THE-382) into fixed client-side catalogs. Purely presentational:
+     * changing them never bumps a settings revision and never contacts Box or Pi.
+     */
+    iconShape: smallint("icon_shape").notNull().default(1),
+    iconMouth: smallint("icon_mouth").notNull().default(1),
+    iconAccessory: smallint("icon_accessory").notNull().default(1),
+    iconColor: smallint("icon_color").notNull().default(2),
     /** Pi model id selected from the provider's pinned Companion catalog. */
     modelId: text("model_id"),
     /**
@@ -469,6 +478,22 @@ export const companions = pgTable(
     skillsRevisionBounds: check(
       "companions_skills_revision_check",
       sql`${t.skillsRevision} >= 1 and ${t.skillsAvailableRevision} >= ${t.skillsRevision}`,
+    ),
+    iconShapeBounds: check(
+      "companions_icon_shape_check",
+      sql`${t.iconShape} between 0 and 7`,
+    ),
+    iconMouthBounds: check(
+      "companions_icon_mouth_check",
+      sql`${t.iconMouth} between 0 and 4`,
+    ),
+    iconAccessoryBounds: check(
+      "companions_icon_accessory_check",
+      sql`${t.iconAccessory} between 0 and 6`,
+    ),
+    iconColorBounds: check(
+      "companions_icon_color_check",
+      sql`${t.iconColor} between 0 and 10`,
     ),
   }),
 );
