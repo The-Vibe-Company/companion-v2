@@ -208,6 +208,7 @@ export interface BoxNamedSnapshot {
   createdAt: string;
   error?: string;
   snapshotId?: string;
+  sizeBytes?: number;
 }
 
 export interface BoxEphemeralCreateInput extends BoxDeadlineControl {
@@ -515,6 +516,7 @@ function namedSnapshotFromParsed(snapshot: z.infer<typeof namedSnapshotSchema>):
     createdAt: snapshot.createdAt,
     ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
     ...(snapshot.snapshotId === undefined ? {} : { snapshotId: snapshot.snapshotId }),
+    ...(snapshot.sizeBytes === undefined ? {} : { sizeBytes: snapshot.sizeBytes }),
   };
 }
 
