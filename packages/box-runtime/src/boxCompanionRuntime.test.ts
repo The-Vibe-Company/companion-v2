@@ -679,6 +679,79 @@ describe("provider Box lifecycle states", () => {
     expect(observedBoxStateFromProvider("error")).toBe("error");
   });
 
+  it("allows a slow bake archive and retries one transient command race after resume", async () => {
+    const now = vi.spyOn(Date, "now");
+    let currentTime = 0;
+    now.mockImplementation(() => currentTime);
+    let archivePolls = 0;
+    let warmupCommands = 0;
+    const requests: Array<{ method: string; url: string; body: unknown }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
+      const url = String(rawUrl);
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as unknown : null;
+      requests.push({ method, url, body });
+      if (url.endsWith("/files") && method === "PUT") return response({ ok: true });
+      if (url.endsWith("/stop") && method === "POST") {
+        return response({ box: box("archiving") });
+      }
+      if (url.endsWith("/boxes/bx_23456789") && method === "GET") {
+        archivePolls += 1;
+        if (archivePolls <= 2) {
+          currentTime += 60;
+          return response({ box: box("archiving") });
+        }
+        return response({ box: box(archivePolls === 3 ? "archived" : "ready") });
+      }
+      if (url.endsWith("/resume") && method === "POST") {
+        return response({ box: box("ready") }, 202);
+      }
+      if (url.endsWith("/commands") && method === "POST") {
+        warmupCommands += 1;
+        if (warmupCommands === 1) {
+          return response({ message: "Box command service is still starting" }, 409);
+        }
+        if (warmupCommands === 2) {
+          return response({
+            success: false,
+            exitCode: 1,
+            stdout: "",
+            stderr: "Node.js v24.18.1\n",
+          });
+        }
+        return response({
+          success: false,
+          exitCode: 1,
+          stdout: "companion-runtime-playbook-ready\n",
+          stderr: "",
+        });
+      }
+      throw new Error(`unexpected request ${method} ${url}`);
+    }));
+    const bundledSkill = {
+      slug: "companion-runtime",
+      version: "1.0.0",
+      checksum: "a".repeat(64),
+      archive: Buffer.from("skill"),
+    };
+    const runtime = new AsciiBoxCompanionRuntime({
+      COMPANION_BOX_API_KEY: "box_test",
+      COMPANION_BOX_POLL_INTERVAL_MS: "1",
+      COMPANION_BOX_READY_TIMEOUT_MS: "100",
+    }, { companionSkillChecksum: bundledSkill.checksum });
+
+    await expect(runtime.prepareRuntimeImage({
+      boxId: "bx_23456789",
+      bundledSkill,
+    })).resolves.toBeUndefined();
+
+    expect(archivePolls).toBe(4);
+    expect(warmupCommands).toBe(3);
+    const warmup = requests.find((request) => request.url.endsWith("/commands"))?.body;
+    expect(warmup).toMatchObject({ timeoutSeconds: 45 });
+    expect(String((warmup as { command?: string } | undefined)?.command)).toContain("seq 1 300");
+  });
+
   it("reads live GET box.info and resume box.resuming envelopes", async () => {
     vi.stubGlobal("fetch", vi.fn(async (rawUrl: string | URL | Request, init?: RequestInit) => {
       const url = String(rawUrl);
