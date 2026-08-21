@@ -1,7 +1,20 @@
 import { createHash, randomBytes } from "node:crypto";
+import { z } from "zod";
 import type { CompanionPluginOAuthServerName } from "@companion/contracts";
 
 const OAUTH_TIMEOUT_MS = 10_000;
+
+/** One decoded JSON value from an OAuth provider response; parsed at the fetch boundary. */
+export type CompanionPluginOAuthJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | CompanionPluginOAuthJsonValue[]
+  | { [key: string]: CompanionPluginOAuthJsonValue };
+
+const jsonStringSchema = z.string();
+const jsonObjectSchema = z.record(z.unknown());
 
 interface CompanionPluginOAuthServerConfig {
   provider: string;
@@ -108,16 +121,24 @@ export class CompanionPluginOAuthError extends Error {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+function isRecord<T>(value: T): value is T & Record<string, CompanionPluginOAuthJsonValue> {
+  return Boolean(value) && jsonObjectSchema.safeParse(value).success;
 }
 
-function requiredString(value: unknown, error: CompanionPluginOAuthError): string {
-  if (typeof value !== "string" || !value.trim()) throw error;
-  return value.trim();
+function requiredString(
+  value: CompanionPluginOAuthJsonValue | undefined,
+  error: CompanionPluginOAuthError,
+): string {
+  const parsed = jsonStringSchema.safeParse(value);
+  if (!parsed.success || !parsed.data.trim()) throw error;
+  return parsed.data.trim();
 }
 
-function allowedUrl(value: unknown, origins: readonly string[], error: CompanionPluginOAuthError): string {
+function allowedUrl(
+  value: CompanionPluginOAuthJsonValue | undefined,
+  origins: readonly string[],
+  error: CompanionPluginOAuthError,
+): string {
   const raw = requiredString(value, error);
   let url: URL;
   try {
@@ -137,7 +158,7 @@ async function oauthJson(
   fetchImpl: typeof fetch,
   failure: CompanionPluginOAuthError,
   signal?: AbortSignal,
-): Promise<Record<string, unknown>> {
+): Promise<Record<string, CompanionPluginOAuthJsonValue>> {
   let response: Response;
   try {
     response = await fetchImpl(url, {
@@ -156,10 +177,11 @@ async function oauthJson(
     throw failure;
   }
   if (!response.ok) throw failure;
-  const value = await response.json().catch((error: unknown) => {
-    if (signal?.aborted) throw signal.reason ?? error;
+  // SAFETY: a parsed JSON body is always a JSON value; null is the transport-failure fallback.
+  const value = await response.json().catch((cause: unknown) => {
+    if (signal?.aborted) throw signal.reason ?? cause;
     return null;
-  });
+  }) as CompanionPluginOAuthJsonValue;
   if (signal?.aborted) throw signal.reason ?? failure;
   if (!isRecord(value)) throw failure;
   return value;
@@ -202,6 +224,7 @@ export async function beginCompanionPluginOAuth(input: {
       "oauth_not_supported",
     );
   }
+  // SAFETY: the `in` check above proved serverName is a key of COMPANION_PLUGIN_OAUTH_SERVERS.
   const serverName = input.serverName as CompanionPluginOAuthServerName;
   const server = COMPANION_PLUGIN_OAUTH_SERVERS[serverName];
   const fetchImpl = input.fetchImpl ?? fetch;
@@ -275,8 +298,9 @@ export async function beginCompanionPluginOAuth(input: {
       registrationFailure,
     );
     const clientId = requiredString(registered.client_id, registrationFailure);
-    const clientSecret = typeof registered.client_secret === "string" && registered.client_secret
-      ? registered.client_secret
+    const clientSecretParsed = jsonStringSchema.safeParse(registered.client_secret);
+    const clientSecret = clientSecretParsed.success && clientSecretParsed.data
+      ? clientSecretParsed.data
       : null;
     const reportedMethod = registered.token_endpoint_auth_method;
     const tokenEndpointAuthMethod =
@@ -313,10 +337,14 @@ export async function beginCompanionPluginOAuth(input: {
   return { authorizationUrl: authorizationUrl.toString(), flow };
 }
 
+interface ClientAuthenticationHeaders {
+  authorization?: string;
+}
+
 function clientAuthentication(
   client: CompanionPluginOAuthClient,
   body: URLSearchParams,
-): Record<string, string> {
+): ClientAuthenticationHeaders {
   body.set("client_id", client.clientId);
   if (!client.clientSecret || client.tokenEndpointAuthMethod === "none") return {};
   if (client.tokenEndpointAuthMethod === "client_secret_basic") {
@@ -329,28 +357,30 @@ function clientAuthentication(
 }
 
 function parseTokens(
-  raw: Record<string, unknown>,
+  raw: Record<string, CompanionPluginOAuthJsonValue>,
   failure: CompanionPluginOAuthError,
   previousRefreshToken: string | null = null,
 ): CompanionPluginOAuthTokens {
   const accessToken = requiredString(raw.access_token, failure);
   if (/[\r\n\0]/.test(accessToken)) throw failure;
-  const tokenType = typeof raw.token_type === "string" ? raw.token_type : "Bearer";
+  const tokenTypeParsed = jsonStringSchema.safeParse(raw.token_type);
+  const tokenType = tokenTypeParsed.success ? tokenTypeParsed.data : "Bearer";
   if (tokenType.toLocaleLowerCase("en-US") !== "bearer") throw failure;
-  const refreshToken = typeof raw.refresh_token === "string" && raw.refresh_token
-    ? raw.refresh_token
+  const refreshTokenParsed = jsonStringSchema.safeParse(raw.refresh_token);
+  const refreshToken = refreshTokenParsed.success && refreshTokenParsed.data
+    ? refreshTokenParsed.data
     : previousRefreshToken;
   if (refreshToken && /[\r\n\0]/.test(refreshToken)) throw failure;
-  const expiresIn = typeof raw.expires_in === "number" && Number.isFinite(raw.expires_in)
-    ? Math.max(0, raw.expires_in)
-    : null;
+  const expiresInParsed = z.number().safeParse(raw.expires_in);
+  const expiresIn = expiresInParsed.success ? Math.max(0, expiresInParsed.data) : null;
   return {
     accessToken,
     refreshToken,
     accessExpiresAt: expiresIn === null
       ? null
       : new Date(Date.now() + expiresIn * 1000).toISOString(),
-    scope: typeof raw.scope === "string" ? raw.scope : null,
+    // SAFETY: safeParse above proved raw.scope is a string.
+    scope: jsonStringSchema.safeParse(raw.scope).success ? raw.scope as string : null,
     tokenType: "Bearer",
   };
 }
@@ -397,7 +427,7 @@ export async function completeCompanionPluginOAuth(input: {
       fetchImpl: input.fetchImpl,
     }) ?? undefined
     : undefined;
-  return {
+  const credential: CompanionPluginStoredOAuthCredential = {
     kind: "oauth",
     version: 1,
     ...tokens,
@@ -408,8 +438,9 @@ export async function completeCompanionPluginOAuth(input: {
     client: github
       ? { ...input.flow.client, clientSecret: null }
       : input.flow.client,
-    ...(githubIdentity ? { githubIdentity } : {}),
   };
+  if (githubIdentity) credential.githubIdentity = githubIdentity;
+  return credential;
 }
 
 /** Refresh one stored OAuth grant. The old refresh token survives providers that rotate only access. */
@@ -464,30 +495,37 @@ export async function refreshCompanionPluginOAuth(input: {
       signal: input.signal,
     }) ?? input.credential.githubIdentity
     : input.credential.githubIdentity;
-  return {
+  const refreshed: CompanionPluginStoredOAuthCredential = {
     ...input.credential,
     ...tokens,
-    ...(githubIdentity ? { githubIdentity } : {}),
   };
+  if (githubIdentity) refreshed.githubIdentity = githubIdentity;
+  return refreshed;
 }
 
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/;
 
-export function parseCompanionPluginGithubIdentity(
-  value: unknown,
+export function parseCompanionPluginGithubIdentity<T>(
+  value: T,
 ): CompanionPluginGithubIdentity | undefined {
   if (value === undefined || value === null) return undefined;
-  if (!isRecord(value) || typeof value.login !== "string" || !GITHUB_LOGIN.test(value.login)) {
+  if (!isRecord(value)) {
     throw new Error("invalid GitHub identity");
   }
-  const name = typeof value.name === "string" ? gitIdentityLine(value.name, 200) : null;
-  const email = typeof value.email === "string" ? gitIdentityLine(value.email, 200) : null;
+  const loginParsed = jsonStringSchema.safeParse(value.login);
+  if (!loginParsed.success || !GITHUB_LOGIN.test(loginParsed.data)) {
+    throw new Error("invalid GitHub identity");
+  }
+  const nameParsed = jsonStringSchema.safeParse(value.name);
+  const name = nameParsed.success ? gitIdentityLine(nameParsed.data, 200) : null;
+  const emailParsed = jsonStringSchema.safeParse(value.email);
+  const email = emailParsed.success ? gitIdentityLine(emailParsed.data, 200) : null;
   if (!email || !email.includes("@") || email.includes(" ")) {
     throw new Error("invalid GitHub identity");
   }
   return {
-    login: value.login,
-    name: name ?? value.login,
+    login: loginParsed.data,
+    name: name ?? loginParsed.data,
     email,
   };
 }
@@ -523,12 +561,16 @@ export async function githubUserIdentity(input: {
       },
     });
     if (!response.ok) return null;
-    const raw = await response.json().catch(() => null);
-    if (!isRecord(raw) || typeof raw.login !== "string" || !GITHUB_LOGIN.test(raw.login)) {
+    // SAFETY: a parsed JSON body is always a JSON value; null is the transport-failure fallback.
+    const raw = await response.json().catch(() => null) as CompanionPluginOAuthJsonValue;
+    if (!isRecord(raw)) return null;
+    const loginParsed = jsonStringSchema.safeParse(raw.login);
+    if (!loginParsed.success || !GITHUB_LOGIN.test(loginParsed.data)) {
       return null;
     }
-    const login = raw.login;
-    const name = typeof raw.name === "string" ? gitIdentityLine(raw.name, 200) : null;
+    const login = loginParsed.data;
+    const nameParsed = jsonStringSchema.safeParse(raw.name);
+    const name = nameParsed.success ? gitIdentityLine(nameParsed.data, 200) : null;
     return {
       login,
       name: name ?? login,

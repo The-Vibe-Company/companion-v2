@@ -38,6 +38,7 @@ export function parseCompanionDecisionTitle(title: string): {
 } | null {
   const match = COMPANION_DECISION_TITLE_PATTERN.exec(title.trim());
   if (!match) return null;
+  // SAFETY: the regex has exactly one capturing group per alternative, so match[1] is always one of the listed kinds.
   return {
     kind: match[1] as "shell" | "file" | "question" | "config" | "routine" | "trigger",
     name: match[2]!,

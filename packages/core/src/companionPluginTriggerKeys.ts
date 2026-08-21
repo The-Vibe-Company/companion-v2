@@ -96,9 +96,10 @@ export async function getCompanionPluginTriggerKeyEnvelope(input: {
       ${input.provider}
     ) as key
   `);
+  // SAFETY: database.execute resolves to an iterable of rows; the RPC above returns exactly one key column.
   const [row] = Array.from(result as Iterable<{ key: unknown }>);
-  if (!row?.key || typeof row.key !== "object") return null;
-  return zodParsePluginTriggerKey(row.key);
+  const parsed = pluginTriggerKeySchema.safeParse(row?.key);
+  return parsed.success ? parsed.data : null;
 }
 
 const pluginTriggerKeySchema = z.object({
@@ -112,7 +113,3 @@ const pluginTriggerKeySchema = z.object({
   wrap_auth_tag: z.string(),
   key_id: z.string(),
 });
-
-function zodParsePluginTriggerKey(value: unknown): PluginTriggerKeyEnvelope {
-  return pluginTriggerKeySchema.parse(value);
-}

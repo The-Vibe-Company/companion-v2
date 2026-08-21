@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, sql as drizzleSql } from "drizzle-orm";
+import { z } from "zod";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CompanionTriggerNotFoundError,
@@ -47,19 +48,27 @@ function webhookSecretOf(trigger: { id: string; webhook_url: string | null }): s
   return secret;
 }
 
+const databaseErrorNodeSchema = z.object({
+  code: z.string().optional(),
+  cause: z.unknown(),
+}).passthrough();
+
 /** Drizzle nests the postgres.js SQLSTATE on `cause`; read the first code in the chain. */
-function sqlState(error: unknown): string | null {
+function sqlState(cause: unknown): string | null {
   const seen = new Set<unknown>();
-  let current: unknown = error;
-  while (current && typeof current === "object" && !seen.has(current)) {
+  let current: unknown = cause;
+  while (current !== null && !seen.has(current)) {
+    const node = databaseErrorNodeSchema.safeParse(current);
+    if (!node.success) break;
     seen.add(current);
-    if ("code" in current && typeof (current as { code?: unknown }).code === "string") {
-      return (current as { code: string }).code;
-    }
-    current = "cause" in current ? (current as { cause?: unknown }).cause : null;
+    if (node.data.code !== undefined) return node.data.code;
+    current = "cause" in node.data ? node.data.cause : null;
   }
   return null;
 }
+
+// SAFETY: the fake fetch helpers below only return Response objects, the sole part of `fetch` the trigger services use.
+const asFetch = (fn: (...args: Parameters<typeof fetch>) => Promise<Response>): typeof fetch => fn;
 
 async function expectSqlState(work: Promise<unknown>, code: string): Promise<void> {
   let observed: string | null = null;
@@ -284,6 +293,7 @@ describe("Companion triggers over the real database", () => {
           ${fixture.orgA}::uuid, ${companionId}::uuid
         ) as triggers
       `));
+      // SAFETY: the RPC above returns one row whose triggers column holds the trigger JSON list.
       const [row] = Array.from(result as Iterable<{ triggers: Array<{ secret: string | null }> }>);
       return row!.triggers;
     };
@@ -715,7 +725,7 @@ describe("Companion triggers over the real database", () => {
       ));
 
     // A rejected registration persists its failure instead of silently staying manual.
-    const failingFetch = (async () => new Response("{}", { status: 422 })) as unknown as typeof fetch;
+    const failingFetch = asFetch(async () => new Response("{}", { status: 422 }));
     await expect(asActor(fixture.owner, (database) => registerCompanionTriggerWebhookV2({
       orgId: fixture.orgA,
       companionId,
@@ -731,10 +741,10 @@ describe("Companion triggers over the real database", () => {
 
     // A successful registration stores the remote hook id and never touches the secret.
     const requests: Array<{ url: string; init: RequestInit }> = [];
-    const okFetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    const okFetch = asFetch(async (url, init) => {
       requests.push({ url: String(url), init: init ?? {} });
       return new Response(JSON.stringify({ id: 424242 }), { status: 201 });
-    }) as unknown as typeof fetch;
+    });
     await asActor(fixture.owner, (database) => registerCompanionTriggerWebhookV2({
       orgId: fixture.orgA,
       companionId,
@@ -763,10 +773,10 @@ describe("Companion triggers over the real database", () => {
 
     // Unregistering removes the remote hook and returns the row to manual.
     const deleteRequests: string[] = [];
-    const deleteFetch = (async (url: string | URL | Request) => {
+    const deleteFetch = asFetch(async (url) => {
       deleteRequests.push(String(url));
       return new Response(null, { status: 204 });
-    }) as unknown as typeof fetch;
+    });
     await asActor(fixture.owner, (database) => unregisterCompanionTriggerWebhookV2({
       orgId: fixture.orgA,
       companionId,
@@ -852,12 +862,12 @@ describe("Companion triggers over the real database", () => {
       database,
     }));
     const requests: Array<{ url: string; init: RequestInit }> = [];
-    const okFetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    const okFetch = asFetch(async (url, init) => {
       requests.push({ url: String(url), init: init ?? {} });
       return new Response(JSON.stringify({
         data: { webhookSubscriptionCreate: { success: true, webhookSubscription: { id: "linear-hook-1" } } },
       }), { status: 200 });
-    }) as unknown as typeof fetch;
+    });
     const outcome = await asActor(fixture.owner, (database) => registerCompanionTriggerWebhookV2({
       orgId: fixture.orgA,
       companionId,
@@ -876,17 +886,18 @@ describe("Companion triggers over the real database", () => {
       triggerId: trigger.id,
       database: integrationDb,
     }))!.secret);
+    // SAFETY: this request's headers were built by registerLinearTriggerWebhook as a plain string record.
     expect((requests[0]!.init.headers as Record<string, string>).authorization)
       .toBe("lin_api_integration_key");
 
     // Unregistering removes the remote subscription and returns the row to manual.
     const deleteRequests: Array<{ url: string; init: RequestInit }> = [];
-    const deleteFetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    const deleteFetch = asFetch(async (url, init) => {
       deleteRequests.push({ url: String(url), init: init ?? {} });
       return new Response(JSON.stringify({
         data: { webhookSubscriptionDelete: { success: true } },
       }), { status: 200 });
-    }) as unknown as typeof fetch;
+    });
     await asActor(fixture.owner, (database) => unregisterCompanionTriggerWebhookV2({
       orgId: fixture.orgA,
       companionId,

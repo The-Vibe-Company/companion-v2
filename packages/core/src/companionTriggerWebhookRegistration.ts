@@ -69,11 +69,25 @@ async function loadRegistrationTrigger(input: {
       ${input.webhookBaseUrl.replace(/\/+$/, "")}
     ) as trigger
   `);
+  // SAFETY: database.execute resolves to an iterable of rows; the RPC above returns exactly one trigger column.
   const [row] = Array.from(result as Iterable<{ trigger: unknown }>);
-  if (!row?.trigger || typeof row.trigger !== "object") {
+  const parsed = registrationTriggerSchema.safeParse(row?.trigger);
+  if (!parsed.success) {
     throw new CompanionTriggerRegistrationError("trigger_not_found", "companion trigger not found");
   }
-  return registrationTriggerSchema.parse(row.trigger);
+  return parsed.data;
+}
+
+interface AttachedGithubQueryRow {
+  id: unknown;
+  credential_generation: unknown;
+  ciphertext: unknown;
+  iv: unknown;
+  auth_tag: unknown;
+  wrapped_dek: unknown;
+  wrap_iv: unknown;
+  wrap_auth_tag: unknown;
+  key_id: unknown;
 }
 
 interface AttachedGithubAccount {
@@ -109,7 +123,8 @@ async function loadAttachedGithubAccount(input: {
     order by account.updated_at desc
     limit 1
   `);
-  const [row] = Array.from(result as Iterable<Record<string, unknown>>);
+  // SAFETY: database.execute resolves to an iterable of rows; this query selects exactly the AttachedGithubQueryRow columns above.
+  const [row] = Array.from(result as Iterable<AttachedGithubQueryRow>);
   if (!row) {
     throw new CompanionTriggerRegistrationError(
       "plugin_not_attached",

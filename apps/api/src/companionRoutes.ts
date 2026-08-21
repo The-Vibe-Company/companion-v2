@@ -228,6 +228,7 @@ function verifyCompanionPluginOAuthState(
   if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
     throw new Error("invalid OAuth state");
   }
+  // SAFETY: the state cookie was produced by encodeCompanionPluginOAuthState below, so its JSON decodes to CompanionPluginOAuthState.
   const parsed = JSON.parse(
     Buffer.from(encoded, "base64url").toString("utf8"),
   ) as CompanionPluginOAuthState;
@@ -263,6 +264,7 @@ function decodeCompanionPluginOAuthFlow(input: {
   value: string;
   masterKey: Buffer;
 }): { label: string; flow: Awaited<ReturnType<typeof beginCompanionPluginOAuth>>["flow"] } {
+  // SAFETY: the cookie value was produced by encodeCompanionPluginOAuthFlow, so its JSON decodes to OpaqueCiphertext.
   const encrypted = JSON.parse(
     Buffer.from(input.value, "base64url").toString("utf8"),
   ) as OpaqueCiphertext;
@@ -272,6 +274,7 @@ function decodeCompanionPluginOAuthFlow(input: {
     subjectId: input.nonce,
     ...encrypted,
   }, input.masterKey);
+  // SAFETY: the plaintext was encrypted by encodeCompanionPluginOAuthFlow, so it decodes to the label+flow shape.
   return JSON.parse(plaintext) as {
     label: string;
     flow: Awaited<ReturnType<typeof beginCompanionPluginOAuth>>["flow"];
@@ -303,16 +306,19 @@ function encodeCompanionProviderOAuthFlow(input: {
     .toString("base64url");
 }
 
-function decodeCompanionProviderOAuthFlow(input: {
-  value: string;
-  masterKey: Buffer;
-}): {
+interface DecodedCompanionProviderOAuthFlow {
   orgId: string;
   userId: string;
   flow:
     | ReturnType<typeof beginAnthropicProviderOAuth>["flow"]
     | Awaited<ReturnType<typeof beginOpenAICodexProviderOAuth>>["flow"];
-} {
+}
+
+function decodeCompanionProviderOAuthFlow(input: {
+  value: string;
+  masterKey: Buffer;
+}): DecodedCompanionProviderOAuthFlow {
+  // SAFETY: the cookie was produced by encodeCompanionProviderOAuthFlow, so its JSON decodes to CompanionProviderOAuthCookie.
   const cookie = JSON.parse(
     Buffer.from(input.value, "base64url").toString("utf8"),
   ) as CompanionProviderOAuthCookie;
@@ -322,12 +328,8 @@ function decodeCompanionProviderOAuthFlow(input: {
     subjectId: cookie.nonce,
     ...cookie.encrypted,
   }, input.masterKey);
-  const pending = JSON.parse(plaintext) as {
-    userId: string;
-    flow:
-      | ReturnType<typeof beginAnthropicProviderOAuth>["flow"]
-      | Awaited<ReturnType<typeof beginOpenAICodexProviderOAuth>>["flow"];
-  };
+  // SAFETY: the plaintext was encrypted by encodeCompanionProviderOAuthFlow, so it decodes to the userId+flow shape.
+  const pending = JSON.parse(plaintext) as Omit<DecodedCompanionProviderOAuthFlow, "orgId">;
   if (!pending.userId || !pending.flow || pending.flow.expiresAt < Date.now()) {
     throw new CompanionProviderOAuthError("oauth_expired", "Provider sign-in expired. Start again.");
   }
@@ -341,17 +343,36 @@ class CompanionAccessForbiddenError extends Error {
   }
 }
 
-function databaseErrorCode(error: unknown): string | null {
+const databaseErrorNodeSchema = z.object({
+  code: z.string().optional(),
+  cause: z.unknown(),
+}).passthrough();
+
+/** The AWS SDK stamps `$metadata` on every error it produces; nothing else in these routes does. */
+const storageFailureSchema = z.object({ "$metadata": z.unknown() }).passthrough()
+  .refine((value) => "$metadata" in value);
+
+interface CreatedCompanionAttachmentKey {
+  key: string;
+  etag?: string;
+}
+
+type DeleteStorageObjectInput = Parameters<typeof deleteStorageObject>[0];
+
+function databaseErrorCode(cause: unknown): string | null {
   const seen = new Set<unknown>();
-  let current = error;
-  while (current && typeof current === "object" && !seen.has(current)) {
+  let current: unknown = cause;
+  while (current !== null && !seen.has(current)) {
+    const node = databaseErrorNodeSchema.safeParse(current);
+    if (!node.success) break;
     seen.add(current);
-    if ("code" in current && typeof current.code === "string") return current.code;
-    current = "cause" in current ? current.cause : null;
+    if (node.data.code !== undefined) return node.data.code;
+    current = "cause" in node.data ? node.data.cause : null;
   }
   return null;
 }
-function errorStatus(error: unknown): number {
+function errorStatus(cause: unknown): number {
+  const error = cause;
   const databaseCode = databaseErrorCode(error);
   if (databaseCode === "42501") return 403;
   if (databaseCode === "P0002" || databaseCode === "02000") return 404;
@@ -393,16 +414,17 @@ function errorStatus(error: unknown): number {
   return 400;
 }
 
-function routeError(c: Context, error: unknown): Response {
-  if (error instanceof CompanionProviderError) {
+function routeError(c: Context, cause: unknown): Response {
+  if (cause instanceof CompanionProviderError) {
+    // SAFETY: errorStatus only returns literal HTTP status codes accepted by Hono's status type.
     return c.json({
       ok: false,
-      error: error.message,
-      code: error.code,
-      provider_id: error.providerId,
-    }, errorStatus(error) as never);
+      error: cause.message,
+      code: cause.code,
+      provider_id: cause.providerId,
+    }, errorStatus(cause) as never);
   }
-  return jsonError(c, error, errorStatus(error));
+  return jsonError(c, cause, errorStatus(cause));
 }
 
 /**
@@ -416,14 +438,14 @@ const COMPANION_MESSAGE_UPLOAD_LIMIT_BYTES = 64 * 1024 * 1024;
  * The AWS SDK stamps `$metadata` on every error it produces, which is what distinguishes it from a
  * `ZodError`, a domain error, or a database error.
  */
-function isStorageFailure(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "$metadata" in error;
+function isStorageFailure(cause: unknown): boolean {
+  return storageFailureSchema.safeParse(cause).success;
 }
 
 /** One text field of a multipart send, or null when the part is absent or is a file. */
 function formField(form: FormData, name: string): string | undefined {
-  const value = form.get(name);
-  return typeof value === "string" ? value : undefined;
+  const parsed = z.string().safeParse(form.get(name));
+  return parsed.success ? parsed.data : undefined;
 }
 
 export function registerCompanionRoutes(
@@ -920,7 +942,8 @@ export function registerCompanionRoutes(
     try {
       const companionId = companionIdSchema.parse(c.req.param("id"));
       const body = updateCompanionInputSchema.parse(await c.req.json());
-      const patch: Record<string, unknown> = {};
+      type CompanionUpdatePatch = Partial<z.infer<typeof updateCompanionInputSchema>>;
+      const patch: CompanionUpdatePatch = {};
       if (body.name !== undefined) patch.name = body.name;
       if (body.persona !== undefined) patch.persona = body.persona;
       if (body.provider_id !== undefined) patch.provider_id = body.provider_id;
@@ -1259,12 +1282,9 @@ export function registerCompanionRoutes(
           body = sendCompanionMessageInputSchema.parse({
             content: formField(form, "content") ?? "",
             client_message_id: formField(form, "client_message_id"),
-            ...(formField(form, "client_surface")
-              ? { client_surface: formField(form, "client_surface") }
-              : {}),
+            client_surface: formField(form, "client_surface"),
           });
-          const files = form.getAll("file")
-            .filter((part): part is Exclude<typeof part, string> => typeof part !== "string");
+          const files = form.getAll("file").filter((part) => part instanceof File);
           if (files.length > COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT) {
             throw new Error(
               `a message carries at most ${COMPANION_MESSAGE_ATTACHMENT_MAX_COUNT} attachments`,
@@ -1307,7 +1327,9 @@ export function registerCompanionRoutes(
               // Remember the exact version this request wrote. If a concurrent request for the same
               // client_message_id adopts this key and commits a row for it, the delete below no
               // longer matches and is refused rather than stranding that row.
-              createdKeys.push({ key, ...(etag ? { etag } : {}) });
+              const created: CreatedCompanionAttachmentKey = { key };
+              if (etag) created.etag = etag;
+              createdKeys.push(created);
             } catch (error) {
               // The object already exists. Because the key is the digest of these exact bytes, it
               // holds the same content -- almost always this request's own replay, whose turn is
@@ -1357,10 +1379,11 @@ export function registerCompanionRoutes(
         // header -- a replay conflict is never cleaned up at all: that error means a turn with this
         // client_message_id is already accepted, and these are its files.
         if (databaseErrorCode(error) !== "23505") {
-          await Promise.allSettled(createdKeys.map((created) => deleteStorageObject({
-            key: created.key,
-            ...(created.etag ? { ifMatch: created.etag } : {}),
-          })));
+          await Promise.allSettled(createdKeys.map((created) => {
+            const options: DeleteStorageObjectInput = { key: created.key };
+            if (created.etag) options.ifMatch = created.etag;
+            return deleteStorageObject(options);
+          }));
         }
         // An object-storage failure names the bucket, and a connection failure names the internal
         // endpoint. Neither belongs in a reply to a member, so a storage fault answers with a fixed

@@ -898,10 +898,11 @@ export const companionAttachmentContentTypeSchema = z.enum(COMPANION_ATTACHMENT_
 export type CompanionAttachmentContentType = z.infer<typeof companionAttachmentContentTypeSchema>;
 
 export function isCompanionAttachmentImage(contentType: string): boolean {
+  // SAFETY: every member of the const MIME tuple is a string; this cast only widens it for includes().
   return (COMPANION_ATTACHMENT_IMAGE_MIME_TYPES as readonly string[]).includes(contentType);
 }
 
-const COMPANION_ATTACHMENT_EXTENSION_TO_MIME: Record<string, CompanionAttachmentContentType> = {
+const COMPANION_ATTACHMENT_EXTENSION_TO_MIME = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -913,7 +914,7 @@ const COMPANION_ATTACHMENT_EXTENSION_TO_MIME: Record<string, CompanionAttachment
   ".md": "text/markdown",
   ".markdown": "text/markdown",
   ".json": "application/json",
-};
+} satisfies Record<string, CompanionAttachmentContentType>;
 
 /**
  * The type a client claims for one part, used only to refuse an obviously unsupported file before its
@@ -924,12 +925,17 @@ export function declaredCompanionAttachmentContentType(
   file: { type: string; name: string },
 ): CompanionAttachmentContentType | null {
   const declared = file.type.split(";")[0]?.trim().toLowerCase() ?? "";
+  // SAFETY: every member of the const MIME tuple is a string; this cast only widens it for includes().
   if ((COMPANION_ATTACHMENT_MIME_TYPES as readonly string[]).includes(declared)) {
+    // SAFETY: includes() above confirmed `declared` is one of the MIME tuple members.
     return declared as CompanionAttachmentContentType;
   }
   const extension = file.name.toLowerCase().match(/\.[^.]+$/)?.[0];
   if (extension && extension in COMPANION_ATTACHMENT_EXTENSION_TO_MIME) {
-    return COMPANION_ATTACHMENT_EXTENSION_TO_MIME[extension]!;
+    // SAFETY: the `in` check above guarantees extension is one of this table's literal keys.
+    return COMPANION_ATTACHMENT_EXTENSION_TO_MIME[
+      extension as keyof typeof COMPANION_ATTACHMENT_EXTENSION_TO_MIME
+    ]!;
   }
   return null;
 }
